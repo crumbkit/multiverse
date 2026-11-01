@@ -1,0 +1,7 @@
+# The exact Rust version that builds and checks multiverse (BASE-26).
+# Dependabot proposes each new version, and only a pull request of its own
+# moves it. The MSRV is the workspace `rust-version` in Cargo.toml (LIB-4).
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

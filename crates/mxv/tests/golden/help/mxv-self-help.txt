@@ -1,0 +1,28 @@
+Review mxv's own use
+
+Usage: mxv self [OPTIONS] <COMMAND>
+
+Commands:
+  usage    Report the patterns in mxv's usage log where callers waste effort
+  figures  Work with the figures of each command in mxv's usage log
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Next: mxv self <COMMAND> -h

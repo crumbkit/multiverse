@@ -1,0 +1,12 @@
+Work with the figures of each command in mxv's usage log
+
+Usage: mxv self figures [OPTIONS] <COMMAND>
+
+Commands:
+  list  List the figures of each command in mxv's usage log
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv self figures --help` describes them.
+Next: mxv self figures <COMMAND> -h

@@ -1,0 +1,15 @@
+List the JSON documents that mxv prints, with a description of each
+
+Usage: mxv schemas list [OPTIONS]
+
+Options:
+      --limit <N>  Print at most this many rows [default: 25]
+      --all        Print every row
+  -h, --help       Print help (see more with '--help')
+
+Examples:
+  mxv schemas list
+
+Effects: read-only, closed-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv schemas list --help` describes them.
+Next: mxv schemas list --help explains each column.

@@ -1,0 +1,15 @@
+[package]
+name = "multiverse"
+description = "Task workspaces that span several git repositories, with one worktree per repository"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["workspace", "git", "worktree"]
+categories = ["development-tools"]
+include = ["src/**/*.rs", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+
+[lints]
+workspace = true

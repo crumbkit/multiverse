@@ -1,0 +1,41 @@
+List a branch of mxv's commands with their arguments, examples and columns
+
+Usage: mxv commands list [OPTIONS] [PATH]...
+
+Arguments:
+  [PATH]...
+          The names of the commands below the root that lead to the branch, such as `books list`
+
+Options:
+      --limit <N>
+          Print at most this many rows
+          
+          [default: 25]
+
+      --all
+          Print every row
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv commands list
+          List every command
+
+Columns:
+  path   The command line that runs the command, such as `shelf books list`.
+  about  The command's one-line description, or its full description when it has no one-line description.
+
+Effects: read-only, closed-world.

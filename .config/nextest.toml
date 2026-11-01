@@ -1,0 +1,7 @@
+# A failed test is never retried, because a retry hides a flaky test
+# (BASE-20). Every test runs after a failure, so one CI run reports every
+# failing test.
+
+[profile.default]
+fail-fast = false
+retries = 0

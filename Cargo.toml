@@ -1,0 +1,95 @@
+[workspace]
+resolver = "3"
+members = ["crates/multiverse", "crates/mxv"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/crumbkit/multiverse"
+
+[workspace.dependencies]
+# clap parses the `mxv` command line. The workspace entry enables only
+# `std`, and mxv enables the user-facing features it needs. Cargo turns on a
+# feature for every crate in a build when any one crate asks for it, so each
+# crate enables only the features its own code needs.
+clap = { version = "4.6.7", default-features = false, features = ["std"] }
+
+# crumbkit holds the command-line conventions of the `mxv` command (the cli
+# profile of the Rust standards): `parse` and `finish`, documents, failures
+# with codes and next steps, and the help guide. The workspace entry enables
+# no feature, and mxv enables the ones it uses.
+crumbkit = { version = "0.1.0", default-features = false }
+
+# crumbkit-usage keeps the `mxv` command's local usage log and adds
+# `self usage` and `self figures list` (CLI-7).
+crumbkit-usage = "0.1.0"
+
+# crumbkit-test checks the `mxv` command against crumbkit's conventions
+# (CLI-6). Only tests use it.
+crumbkit-test = "0.1.0"
+
+# snapbox runs the built `mxv` binary in the end-to-end tests. Only tests
+# use it.
+snapbox = { version = "1.2.2", default-features = false }
+
+# serde_json reads the usage log lines that the end-to-end tests compare.
+# Only tests use it.
+serde_json = { version = "1.0.151", default-features = false }
+
+# tempfile gives each end-to-end test its own state directory, which it
+# removes when the test ends. Only tests use it.
+tempfile = { version = "3.27.0", default-features = false }
+
+# The lint table is lints/base.toml and lints/library.toml of the Rust
+# standards (BASE-1, LIB-2, LIB-3). A build with CARGO_BUILD_WARNINGS=deny
+# fails on any warning, and every package inherits the table through
+# `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "forbid"                 # BASE-3
+unreachable_pub = "warn"               # BASE-8
+missing_debug_implementations = "warn"
+missing_docs = "deny"                  # LIB-2
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny" # LIB-2
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+allow_attributes = "deny"                # BASE-2
+allow_attributes_without_reason = "deny" # BASE-2
+unwrap_used = "deny"                     # BASE-4
+expect_used = "deny"                     # BASE-4
+panic = "deny"                           # BASE-4
+todo = "deny"                            # BASE-4
+unimplemented = "deny"                   # BASE-4
+dbg_macro = "deny"                       # BASE-4
+unreachable = "deny"                     # BASE-4
+indexing_slicing = "deny"                # BASE-4
+cast_possible_truncation = "deny"        # BASE-12
+cast_sign_loss = "deny"                  # BASE-12
+cast_possible_wrap = "deny"              # BASE-12
+cast_precision_loss = "deny"             # BASE-12
+cast_lossless = "deny"                   # BASE-12
+disallowed_methods = "deny"              # BASE-5, BASE-6, BASE-7, BASE-11
+disallowed_types = "deny"                # BASE-5
+disallowed_macros = "deny"               # BASE-7
+print_stdout = "deny"                    # BASE-5
+print_stderr = "deny"                    # BASE-5
+mod_module_files = "deny"                # BASE-9
+too_many_lines = "deny"                  # BASE-10
+wildcard_imports = "deny"                # BASE-13
+enum_glob_use = "deny"                   # BASE-13
+ref_option = "deny"                      # BASE-14
+needless_for_each = "deny"               # BASE-15
+fn_params_excessive_bools = "deny"       # BASE-16
+missing_errors_doc = "deny"              # LIB-2
+missing_panics_doc = "deny"              # LIB-2
+must_use_candidate = "deny"              # LIB-3
+
+# Arithmetic overflow panics in release builds too (BASE-27). The map's
+# release-profile decision records why the other settings keep Cargo's
+# defaults.
+[profile.release]
+overflow-checks = true

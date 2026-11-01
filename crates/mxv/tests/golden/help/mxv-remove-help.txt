@@ -1,0 +1,34 @@
+Delete a live or archived workspace
+
+Usage: mxv remove [OPTIONS]
+
+Options:
+      --dry-run
+          Report what the command would change, and change nothing
+
+      --yes
+          Proceed without asking for confirmation
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv remove --dry-run
+          Print what removing would delete
+
+Effects: destructive, not idempotent, closed-world.

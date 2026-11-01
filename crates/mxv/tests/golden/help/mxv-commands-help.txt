@@ -1,0 +1,27 @@
+Explore mxv's commands
+
+Usage: mxv commands [OPTIONS] <COMMAND>
+
+Commands:
+  list  List a branch of mxv's commands with their arguments, examples and columns
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Next: mxv commands <COMMAND> -h

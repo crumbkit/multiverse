@@ -1,0 +1,14 @@
+Rebuild an archived workspace at its archived commits
+
+Usage: mxv restore [OPTIONS]
+
+Options:
+      --dry-run  Report what the command would change, and change nothing
+      --yes      Proceed without asking for confirmation
+  -h, --help     Print help (see more with '--help')
+
+Examples:
+  mxv restore --dry-run
+
+Effects: additive, not idempotent, open-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv restore --help` describes them.

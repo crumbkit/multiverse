@@ -1,0 +1,39 @@
+Report the patterns in mxv's usage log where callers waste effort
+
+Usage: mxv self usage [OPTIONS]
+
+Options:
+      --since <DURATION>
+          How far back to read the usage log, such as 12h, 7d or 2w
+          
+          [default: 7d]
+
+      --log <FILE>
+          Read this usage log instead of the tool's own
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv self usage
+          Report the findings of the last 7 days
+
+Columns:
+  finding     What the pattern is.
+  runs        The runs that show the pattern.
+  command     The command path below the tool's name, such as `books show`, or the tool's name for its root command.
+  suggestion  What the pattern suggests, or the figure that raised it.
+
+Effects: read-only, closed-world.

@@ -1,0 +1,16 @@
+Create, archive and restore task workspaces that span several git repositories
+
+Usage: mxv [OPTIONS] <COMMAND>
+
+Work in a workspace:     new, list, show, cd, run
+Put a workspace away:    archive, restore, remove
+Explore the commands:    commands, schemas
+Review how mxv is used:  self
+
+Options:
+  -h, --help     Print help (see more with '--help')
+  -V, --version  Print version
+
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv --help` describes them.
+Topics: exit-codes. `mxv help <TOPIC>` prints one.
+Next: mxv <COMMAND> -h

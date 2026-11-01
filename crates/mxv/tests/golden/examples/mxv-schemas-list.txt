@@ -1,0 +1,7 @@
+ID                        KIND    FORM      DESCRIPTION
+mxv/failure/v1            output  document  The document that a command prints on standard output when it fails with --json.
+mxv/commands-list/v1      output  document  One branch of the tool's commands with their arguments, examples and columns.
+mxv/schemas-list/v1       output  document  The JSON documents that the tool prints, with a description of each.
+mxv/schemas-show/v1       output  document  The JSON Schema of each document id given.
+mxv/self-usage/v1         output  document  The patterns in the usage log where callers waste effort, and a summary of the runs read.
+mxv/self-figures-list/v1  output  document  The figures of each command in the usage log, and a summary of the runs read.

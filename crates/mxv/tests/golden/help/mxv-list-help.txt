@@ -1,0 +1,36 @@
+List the live workspaces
+
+Usage: mxv list [OPTIONS]
+
+Options:
+      --limit <N>
+          Print at most this many rows, up to 100
+          
+          [default: 25]
+
+      --all
+          Print every row
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv list
+          List the first page of live workspaces
+
+Effects: read-only, closed-world.

@@ -1,0 +1,59 @@
+List the figures of each command in mxv's usage log
+
+Usage: mxv self figures list [OPTIONS]
+
+Options:
+      --since <DURATION>
+          How far back to read the usage log, such as 12h, 7d or 2w
+          
+          [default: 7d]
+
+      --log <FILE>
+          Read this usage log instead of the tool's own
+
+      --limit <N>
+          Print at most this many rows
+          
+          [default: 25]
+
+      --all
+          Print every row
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv self figures list
+          Print the figures of each command over the last 7 days
+
+Columns:
+  command        The command path below the tool's name, such as `books show`, or the tool's name for its root command.
+  runs           The runs that did not print a help page.
+  help_pages     The runs that printed the command's help page.
+  help_before    The help pages that each run's session read since its last run that printed no help page, summed over the runs.
+  failed         The runs that failed.
+  p95_out_bytes  The 95th percentile of the bytes that the runs wrote to standard output, or null when no run printed a result.
+
+Columns that --long adds:
+  refused     The runs whose command line was refused.
+  p95_ms      The 95th percentile of the runs' wall time in milliseconds, or null when every run printed help.
+  typed_full  The runs that typed `--full`.
+  typed_all   The runs that typed `--all`.
+  typed_long  The runs that typed `--long`.
+
+Effects: read-only, closed-world.

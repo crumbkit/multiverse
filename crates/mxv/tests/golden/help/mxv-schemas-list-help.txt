@@ -1,0 +1,45 @@
+List the JSON documents that mxv prints, with a description of each
+
+Usage: mxv schemas list [OPTIONS]
+
+Options:
+      --limit <N>
+          Print at most this many rows
+          
+          [default: 25]
+
+      --all
+          Print every row
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv schemas list
+          List every document that mxv prints
+
+Columns:
+  id           The document's id, such as `shelf/books-list/v1`, which `schemas show` takes.
+  kind         output when a command prints the document with its schema id, unwrapped when a command prints it without the envelope that holds its schema id, and file when it is a file format that users write and no command prints.
+  form         stream when a command prints the document as a stream, one document on each line as each row arrives, and document when a command prints it once or it is a file format.
+  description  What the document holds, in one line.
+
+Columns that --long adds:
+  commands  The command lines that print the document. It is empty for the failure document, which every command prints when it fails with --json, and for a file format.
+
+Effects: read-only, closed-world.

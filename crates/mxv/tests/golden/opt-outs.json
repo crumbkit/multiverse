@@ -1,0 +1,171 @@
+{
+  "schema": "mxv/opt-outs/v1",
+  "data": [
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv new",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv list",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv show",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv cd",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv run",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv archive",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv restore",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv remove",
+      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv self usage",
+      "reason": "The output names the day the report starts, which changes every day, and tests/usage.rs checks the usage log instead.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv self figures list",
+      "reason": "The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "guide/document",
+      "applies_to": "mxv new",
+      "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
+      "costs": [
+        "Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.",
+        "An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "guide/document",
+      "applies_to": "mxv archive",
+      "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
+      "costs": [
+        "Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.",
+        "An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "guide/document",
+      "applies_to": "mxv restore",
+      "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
+      "costs": [
+        "Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.",
+        "An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "guide/document",
+      "applies_to": "mxv remove",
+      "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
+      "costs": [
+        "Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.",
+        "An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "effects/yes",
+      "applies_to": "mxv run",
+      "reason": "run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "twins/no-twin",
+      "applies_to": "mxv new",
+      "reason": "Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.",
+      "costs": [
+        "No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason."
+      ],
+      "budget": null
+    }
+  ],
+  "customisations": [
+    {
+      "declaration": "root-verbs",
+      "applies_to": "mxv new, mxv list, mxv show, mxv cd, mxv run, mxv archive, mxv restore, mxv remove",
+      "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
+      "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
+    }
+  ]
+}

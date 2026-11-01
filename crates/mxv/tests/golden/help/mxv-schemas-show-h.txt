@@ -1,0 +1,16 @@
+Print the JSON Schema of each document
+
+Usage: mxv schemas show [OPTIONS] <ID>...
+
+Arguments:
+  <ID>...  The ids of the documents that `schemas list` lists, separated by spaces
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv schemas show mxv/schemas-list/v1
+
+Effects: read-only, closed-world.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv schemas show --help` describes them.
+Next: mxv schemas show --help explains each column.

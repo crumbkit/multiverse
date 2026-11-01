@@ -1,0 +1,15 @@
+Report the patterns in mxv's usage log where callers waste effort
+
+Usage: mxv self usage [OPTIONS]
+
+Options:
+      --since <DURATION>  How far back to read the usage log, such as 12h, 7d or 2w [default: 7d]
+      --log <FILE>        Read this usage log instead of the tool's own
+  -h, --help              Print help (see more with '--help')
+
+Examples:
+  mxv self usage
+
+Effects: read-only, closed-world.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv self usage --help` describes them.
+Next: mxv self usage --help explains each column.

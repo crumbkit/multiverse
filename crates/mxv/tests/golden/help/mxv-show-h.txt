@@ -1,0 +1,15 @@
+Show live workspaces by name, in the order given
+
+Usage: mxv show [OPTIONS] <NAME>...
+
+Arguments:
+  <NAME>...  The names of the workspaces to show, separated by spaces
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv show reading-list
+
+Effects: read-only, closed-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv show --help` describes them.
