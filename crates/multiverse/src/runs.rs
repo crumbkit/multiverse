@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
 use crate::docker;
 use crate::error::Error;
-use crate::manifest::{Manifest, Process, Unit};
+use crate::manifest::{LogPattern, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
 use crate::process::{self, Launch, Launched};
@@ -191,21 +191,37 @@ pub enum UpOutcome {
         /// The last lines of its log.
         tail: Vec<String>,
     },
-    /// A process ran past its readiness timeout without accepting a
-    /// connection on its readiness port, so `up` stopped it.
+    /// A process ran past its readiness timeout before its readiness check
+    /// passed, so `up` stopped it.
     NotReady {
         /// The process.
         process: String,
-        /// The readiness port's name.
-        port: String,
-        /// The host port.
-        number: u16,
+        /// What `up` waited for.
+        waited: Waited,
         /// The timeout it missed.
         timeout: Duration,
         /// Its log file.
         log: PathBuf,
         /// The last lines of its log.
         tail: Vec<String>,
+    },
+}
+
+/// What a readiness check that did not pass waited for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Waited {
+    /// A connection to a port.
+    Port {
+        /// The readiness port's name.
+        port: String,
+        /// The host port.
+        number: u16,
+    },
+    /// A log line that matches a pattern.
+    Log {
+        /// The pattern.
+        pattern: String,
     },
 }
 
@@ -232,7 +248,7 @@ pub struct Unstoppable {
 
 /// How a wait for readiness ended.
 enum Readiness {
-    /// The port accepted a connection.
+    /// The port accepted a connection, or a log line matched.
     Ready,
     /// The process ended, with how the shell ended.
     Ended(process::Ended),
@@ -681,10 +697,16 @@ impl Runs {
         remove_if_present(&exit_file)?;
         let log = self.log(name, process);
         store::rotate_log(&log, &self.file(name, process, "log.1"))?;
+        // The log readiness check reads the log from its start, which after
+        // the rotation holds only what this run of the process writes.
+        let mut watch = match declared.ready.as_ref().map(|ready| &ready.check) {
+            Some(ReadyCheck::Log(pattern)) => Some((Follower::new_log(&log)?, pattern)),
+            _ => None,
+        };
         let env: Vec<(String, String)> = declared
             .env
             .iter()
-            .map(|(variable, value)| (variable.clone(), value.clone()))
+            .map(|(variable, value)| (variable.clone(), value.render(&workspace.ports)))
             .chain(
                 ports
                     .iter()
@@ -704,10 +726,19 @@ impl Runs {
             return Err(error);
         }
         let (number, timeout) = match &declared.ready {
-            Some(ready) => (workspace.ports.get(&ready.port).copied(), ready.timeout),
+            Some(ready) => (
+                match &ready.check {
+                    ReadyCheck::Port(port) => workspace.ports.get(port).copied(),
+                    ReadyCheck::Log(_) => None,
+                },
+                ready.timeout,
+            ),
             None => (None, START_GRACE),
         };
-        match wait_ready(&mut launched, number, timeout) {
+        let watch = watch
+            .as_mut()
+            .map(|(follower, pattern)| (follower, *pattern));
+        match wait_ready(&mut launched, number, watch, timeout)? {
             Readiness::Ready => Ok(None),
             Readiness::Ended(shell) => {
                 // The shell is reaped. Its group keeps its id only while a
@@ -732,14 +763,21 @@ impl Runs {
                 let Some(ready) = &declared.ready else {
                     return Ok(None);
                 };
-                let number = number.unwrap_or_default();
                 launched.kill();
                 let _ = fs::remove_file(self.file(name, process, "json"));
                 let _ = fs::remove_file(&exit_file);
+                let waited = match &ready.check {
+                    ReadyCheck::Port(port) => Waited::Port {
+                        port: port.clone(),
+                        number: number.unwrap_or_default(),
+                    },
+                    ReadyCheck::Log(pattern) => Waited::Log {
+                        pattern: pattern.as_str().to_owned(),
+                    },
+                };
                 Ok(Some(UpOutcome::NotReady {
                     process: process.to_owned(),
-                    port: ready.port.clone(),
-                    number,
+                    waited,
                     timeout: ready.timeout,
                     tail: tail(&log, TAIL_LINES),
                     log,
@@ -973,37 +1011,52 @@ impl Runs {
     }
 }
 
-/// Returns the host ports that `declared` receives in `workspace`, by
-/// variable name. A port that the workspace does not hold yet is left out.
+/// Returns the host ports that `declared` receives in `workspace`: those
+/// of its `ports` by variable name, and those that its `env` values name
+/// by their placeholder, such as `{port.api}`. A port that the workspace
+/// does not hold yet is left out.
 fn received(workspace: &Workspace, declared: &Process) -> BTreeMap<String, u16> {
+    let placeholders = declared
+        .env
+        .values()
+        .flat_map(|value| value.ports())
+        .map(|port| (format!("{{port.{port}}}"), port));
     declared
         .ports
         .iter()
-        .filter_map(|(variable, port)| {
-            workspace
-                .ports
-                .get(port)
-                .map(|number| (variable.clone(), *number))
-        })
+        .map(|(variable, port)| (variable.clone(), port.as_str()))
+        .chain(placeholders)
+        .filter_map(|(key, port)| workspace.ports.get(port).map(|number| (key, *number)))
         .collect()
 }
 
-/// Waits until `launched` accepts a connection on `port`, ends, or runs
-/// past `timeout`. Without a port it waits for `timeout` and returns
-/// [`Readiness::TimedOut`] when the process still runs. Neither the process
-/// nor the port gives an event to wait on, so the wait polls them every
-/// [`POLL_INTERVAL`].
-fn wait_ready(launched: &mut Launched, port: Option<u16>, timeout: Duration) -> Readiness {
+/// Waits until `launched` accepts a connection on `port`, writes a log
+/// line that `watch`'s pattern matches, ends, or runs past `timeout`.
+/// Without a port or a pattern it waits for `timeout` and returns
+/// [`Readiness::TimedOut`] when the process still runs. Neither the process,
+/// the port nor the log gives an event to wait on, so the wait polls them
+/// every [`POLL_INTERVAL`].
+fn wait_ready(
+    launched: &mut Launched,
+    port: Option<u16>,
+    mut watch: Option<(&mut Follower, &LogPattern)>,
+    timeout: Duration,
+) -> Result<Readiness, Error> {
     let deadline = Instant::now() + timeout;
     loop {
+        if let Some((follower, pattern)) = watch.as_mut()
+            && follower.lines()?.iter().any(|line| pattern.is_match(line))
+        {
+            return Ok(Readiness::Ready);
+        }
         if let Some(ended) = launched.ended() {
-            return Readiness::Ended(ended);
+            return Ok(Readiness::Ended(ended));
         }
         if port.is_some_and(ports::accepts) {
-            return Readiness::Ready;
+            return Ok(Readiness::Ready);
         }
         if Instant::now() >= deadline {
-            return Readiness::TimedOut;
+            return Ok(Readiness::TimedOut);
         }
         pause(POLL_INTERVAL);
     }
@@ -1184,6 +1237,26 @@ pub struct Follower {
 }
 
 impl Follower {
+    /// Creates the log at `path` when it does not exist, and opens it at
+    /// its start, for a process that `up` is about to start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when the log cannot be created, and
+    /// [`Error::StateUnreadable`] when it cannot be opened.
+    pub(crate) fn new_log(path: &Path) -> Result<Self, Error> {
+        drop(store::append_file(path)?);
+        let file = File::open(path).map_err(|source| Error::StateUnreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            partial: Vec::new(),
+        })
+    }
+
     /// Opens the log at `path` at its end, or returns `None` when it does
     /// not exist.
     ///

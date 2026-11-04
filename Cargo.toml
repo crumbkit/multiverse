@@ -48,6 +48,11 @@ etcetera = { version = "0.11.0", default-features = false }
 # the features its own code needs.
 toml = { version = "1.2.0", default-features = false }
 
+# regex matches the log lines of a process against the pattern of its
+# `ready = { log = "..." }` check. Its default features hold Unicode
+# classes and the search optimisations, and `std` is all it needs besides.
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode", "perf"] }
+
 # rustix sends signals to the process groups of an app's processes and
 # checks whether a group still exists, without unsafe code. Only the
 # `process` feature is used.

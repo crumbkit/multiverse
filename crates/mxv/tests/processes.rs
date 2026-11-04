@@ -1039,3 +1039,56 @@ fn up_in_text_prints_the_last_lines_of_the_log_of_a_process_that_exited_before_i
         .unwrap_or_else(|| panic!("{errors}"));
     assert!(compiling < error, "{errors}");
 }
+
+#[test]
+fn an_env_value_receives_the_host_port_that_its_placeholder_names() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "ports = [\"api\"]\n[processes.client]\nargv = [\"sh\", \"-c\", \"echo url=$API_URL; exec sleep 60\"]\nenv = { API_URL = \"http://127.0.0.1:{port.api}/v1?q={{x}}\" }\nready = { log = \"^url=\", timeout_seconds = 20 }\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let port = setup.port("triage", "api");
+    let (_, logs) = setup.text(&["logs", "-w", "triage", "client"]);
+    assert_eq!(logs, format!("url=http://127.0.0.1:{port}/v1?q={{x}}\n"));
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(
+        row(&status, "client")["ports"][0],
+        format!("{{port.api}}={port}"),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_worker_with_a_log_readiness_check_is_ready_once_it_writes_a_matching_line() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.worker]\nargv = [\"sh\", \"-c\", \"echo starting; sleep 1; echo worker ready on jobs; exec sleep 60\"]\nready = { log = \"^worker ready\", timeout_seconds = 20 }\n\n[processes.after]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\ndepends_on = [\"worker\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, logs) = setup.text(&["logs", "-w", "triage", "worker"]);
+    assert_eq!(logs, "starting\nworker ready on jobs\n");
+    assert_eq!(row(&document, "after")["state"], "running");
+}
+
+#[test]
+fn a_worker_that_writes_no_matching_log_line_fails_up_as_not_ready_with_the_pattern() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.worker]\nargv = [\"sh\", \"-c\", \"echo starting; exec sleep 60\"]\nready = { log = \"^worker ready\", timeout_seconds = 1 }\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::process::not_ready");
+    assert_eq!(document["fields"]["pattern"], "^worker ready");
+    assert_eq!(document["fields"]["port"], Value::Null);
+    assert_eq!(document["fields"]["tail"][0], "starting");
+    assert_eq!(
+        setup.states("triage"),
+        [("worker".to_owned(), "stopped".to_owned())]
+    );
+}

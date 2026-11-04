@@ -22,6 +22,8 @@ wait-timeout = { workspace = true }
 # the spans that name a bad key's line.
 toml = { workspace = true, features = ["std", "parse", "serde"] }
 rustix = { workspace = true }
+# `ready = { log = "..." }` compiles its pattern with regex.
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

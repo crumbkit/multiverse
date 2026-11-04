@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem};
+use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem, Waited};
 
 use crate::failures::remove_volumes_line;
 
@@ -124,10 +124,8 @@ pub(crate) enum RunFailure {
         workspace: String,
         /// The process.
         process: String,
-        /// The readiness port's name.
-        port: String,
-        /// The host port.
-        number: u16,
+        /// What `up` waited for.
+        waited: Box<Waited>,
         /// The timeout in seconds.
         seconds: u64,
         /// Its log.
@@ -313,20 +311,30 @@ impl Failure for RunFailure {
             Self::NotReady {
                 workspace,
                 process,
-                port,
-                number,
+                waited,
                 seconds,
                 log,
                 tail,
-            } => vec![
-                Field::new("workspace", workspace),
-                Field::new("process", process),
-                Field::new("port", port),
-                Field::new("number", *number),
-                Field::new("timeout_seconds", *seconds),
-                Field::new("log", shown(log)),
-                Field::new("tail", FieldValue::list(tail.lines.iter())),
-            ],
+            } => {
+                let mut fields = vec![
+                    Field::new("workspace", workspace),
+                    Field::new("process", process),
+                ];
+                match &**waited {
+                    Waited::Port { port, number } => {
+                        fields.push(Field::new("port", port));
+                        fields.push(Field::new("number", *number));
+                    }
+                    Waited::Log { pattern } => fields.push(Field::new("pattern", pattern)),
+                    _ => {}
+                }
+                fields.extend([
+                    Field::new("timeout_seconds", *seconds),
+                    Field::new("log", shown(log)),
+                    Field::new("tail", FieldValue::list(tail.lines.iter())),
+                ]);
+                fields
+            }
             Self::Unstoppable { process, pid } => {
                 vec![Field::new("process", process), Field::new("pid", *pid)]
             }
@@ -420,14 +428,23 @@ impl fmt::Display for RunFailure {
             },
             Self::NotReady {
                 process,
-                port,
-                number,
+                waited,
                 seconds,
                 ..
-            } => write!(
-                formatter,
-                "the process {process} did not accept a connection on {port} (port {number}) within {seconds} seconds, so mxv stopped it"
-            ),
+            } => match &**waited {
+                Waited::Log { pattern } => write!(
+                    formatter,
+                    "the process {process} wrote no log line that matches `{pattern}` within {seconds} seconds, so mxv stopped it"
+                ),
+                Waited::Port { port, number } => write!(
+                    formatter,
+                    "the process {process} did not accept a connection on {port} (port {number}) within {seconds} seconds, so mxv stopped it"
+                ),
+                _ => write!(
+                    formatter,
+                    "the process {process} was not ready within {seconds} seconds, so mxv stopped it"
+                ),
+            },
             Self::Unstoppable { process, pid } => write!(
                 formatter,
                 "the process group {pid} of {process} still runs after SIGKILL"

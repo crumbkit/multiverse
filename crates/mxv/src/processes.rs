@@ -241,16 +241,14 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
         .into()),
         UpOutcome::NotReady {
             process,
-            port,
-            number,
+            waited,
             timeout,
             log,
             tail,
         } => Err(RunFailure::NotReady {
             workspace,
             process,
-            port,
-            number,
+            waited: Box::new(waited),
             seconds: timeout.as_secs(),
             log: log.into_boxed_path(),
             tail: LogTail::new(tail),

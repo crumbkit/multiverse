@@ -110,7 +110,8 @@ ready = { timeout_seconds = 120 }            # optional; port defaults to listen
 
 [processes.worker]
 argv = ["cargo", "run", "--bin", "worker"]
-ports = { API_PORT = "api" }
+env = { API_URL = "http://127.0.0.1:{port.api}" }   # {port.<name>} is a host port
+ready = { log = "^worker ready", timeout_seconds = 300 }   # ready on a matching log line
 depends_on = ["api"]                         # optional: start after these are ready
 
 [processes.web]
@@ -130,14 +131,20 @@ The schema has these keys, and any other key fails with
 | `ports` | The port names, each 1 to 64 letters, digits, `-` and `_`. |
 | `processes.<name>.argv` | The program and its arguments, as separate strings. It is required and not empty. |
 | `processes.<name>.cwd` | The starting directory, relative to the repository root, which defaults to `.`. It may not leave the repository, also through a symbolic link. |
-| `processes.<name>.env` | Variables that the process receives on top of mxv's own environment. |
+| `processes.<name>.env` | Variables that the process receives on top of mxv's own environment. A value may name a host port as `{port.<name>}`, where the name is a port of `ports`, and writes a literal brace as `{{` or `}}`. Any other brace, or a placeholder of an undeclared port, fails with `mxv::manifest::invalid` and the value's line. `status` lists such a port as `{port.api}=<number>`. |
 | `processes.<name>.ports` | Variables that receive a host port, each naming a port of `ports`. |
-| `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives. A port has at most one listener. |
-| `processes.<name>.ready` | `port` and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives. The process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. |
+| `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
+| `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
 | `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
 
 A listener without a `ready` table is ready when its listen port accepts a
-connection within 60 seconds. A process with neither counts as started once
+connection within 60 seconds. A process that listens on no port, such as a
+worker that reads a queue, can still tell `up` when it is ready: give it
+`ready = { log = "<pattern>" }` and have it print a line that the pattern
+matches once it has connected to what it needs. The line must end with a
+line break. When no line matches within the timeout, `up` stops the
+process and fails with `mxv::process::not_ready`, whose `pattern` field
+holds the pattern in place of `port` and `number`. A process with neither counts as started once
 it has run for half a second; when it exits sooner, `up` fails with
 `mxv::process::exited`.
 
@@ -180,7 +187,7 @@ depends_on = ["dynamodb", "localstack"]
 | `containers.<name>.env` | Variables that the container receives. |
 | `containers.<name>.ports` | The TCP ports that mxv publishes: each key is a container port from 1 to 65535, and each value names a port of `ports`. A container that publishes a port is that port's listener, and a port has at most one listener, process or container. |
 | `containers.<name>.volumes` | Named volumes: each key names a volume, and each value is the absolute path it mounts at inside the container. mxv mounts no directory of the host. |
-| `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. |
+| `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. A container's readiness check waits only for a port, so `log` is invalid here, and a container's `env` values hold no port placeholders. |
 | `containers.<name>.depends_on` | Processes or containers that start, and are ready, before this one. |
 
 Processes and containers share one set of names, and either may depend on
