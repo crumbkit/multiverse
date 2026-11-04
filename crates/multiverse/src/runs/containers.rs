@@ -407,9 +407,36 @@ impl Runs {
             }
             Ok(inspected)
         });
-        if let Err(error) = started {
-            let _ = self.remove_container(&workspace.name, scope, name);
-            return Err(error);
+        match started {
+            Ok(docker::Up::Started) => {}
+            Ok(docker::Up::PortAllocated(number)) => {
+                // docker publishes the port for a container that the port
+                // check before `compose up` could not see, such as one
+                // that is created and not started.
+                let _ = self.remove_container(&workspace.name, scope, name);
+                let published = declared
+                    .ports
+                    .iter()
+                    .find(|published| {
+                        number.is_none() || workspace.ports.get(&published.port).copied() == number
+                    })
+                    .or_else(|| declared.ports.first());
+                let port = published
+                    .map(|published| published.port.clone())
+                    .unwrap_or_default();
+                return Ok(Some(UpOutcome::PortTaken {
+                    number: number
+                        .or_else(|| workspace.ports.get(&port).copied())
+                        .unwrap_or_default(),
+                    process: name.to_owned(),
+                    port,
+                    holders: Vec::new(),
+                }));
+            }
+            Err(error) => {
+                let _ = self.remove_container(&workspace.name, scope, name);
+                return Err(error);
+            }
         }
         let Some(inspected) = recorded? else {
             return Ok(Some(self.exited(&workspace.name, name, None)));
@@ -509,8 +536,7 @@ impl Runs {
 
     /// Stops and removes the recorded container `container` of `scope`,
     /// records its anonymous volumes, which stay until `mxv remove
-    /// --delete-volumes`, and deletes its record. When no container of the
-    /// workspace has a record left, it removes the project's network.
+    /// --delete-volumes`, and deletes its record.
     pub(super) fn remove_container(
         &self,
         name: &WorkspaceName,
@@ -522,11 +548,7 @@ impl Runs {
         {
             self.record_volumes(name, anonymous)?;
         }
-        self.forget_container(name, container)?;
-        if self.existing_containers(name)?.is_empty() {
-            docker::remove_network(scope)?;
-        }
-        Ok(())
+        self.forget_container(name, container)
     }
 
     /// Deletes the record and the follower record of the container
@@ -536,21 +558,46 @@ impl Runs {
         remove_if_present(&self.file(name, container, "follower"))
     }
 
-    /// Removes the recorded containers of the workspace `name` and its
-    /// project's network, for `forget`. A workspace without a compose file
-    /// has never started a container, so this runs no docker command for
-    /// it.
+    /// Removes the recorded containers of the workspace `name`, for
+    /// `forget`. A workspace without container records runs no docker
+    /// command.
     pub(super) fn remove_project(&self, name: &WorkspaceName) -> Result<(), Error> {
-        if !self.workspace_dir(name).join(COMPOSE_FILE).exists() {
+        let containers = self.existing_containers(name)?;
+        if containers.is_empty() {
             return Ok(());
         }
         let Some(scope) = self.scope(name)? else {
             return Ok(());
         };
-        for container in self.existing_containers(name)? {
+        for container in containers {
             self.remove_container(name, &scope, &container)?;
         }
-        docker::remove_network(&scope)
+        Ok(())
+    }
+
+    /// Reports whether the log of the container `container` may still
+    /// grow, for `mxv logs -f`: its follower runs, or the container runs
+    /// and this call starts a new follower, such as after the old one was
+    /// killed. Another command that holds the workspace's lock may start
+    /// the follower instead, so the container still counts as writing.
+    pub(super) fn container_writing(
+        &self,
+        name: &WorkspaceName,
+        container: &str,
+    ) -> Result<bool, Error> {
+        if self.follower_alive(name, container)? {
+            return Ok(true);
+        }
+        let Some((scope, inspected)) = self.inspect_recorded(name, container)? else {
+            return Ok(false);
+        };
+        if inspected.state != ContainerState::Running {
+            return Ok(false);
+        }
+        if let Ok(_lock) = store::lock(&self.workspace_dir(name).join(".lock"), Duration::ZERO) {
+            self.follow_logs(&scope, container, &inspected, true)?;
+        }
+        Ok(true)
     }
 
     /// Reports whether the log follower of the container `container` runs.

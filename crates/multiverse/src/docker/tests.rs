@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
-use crate::docker::{ContainerState, Scope, compose_env, compose_file, message};
+use crate::docker::{
+    ContainerState, Scope, UpFailure, compose_env, compose_file, message, up_failure,
+};
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 
@@ -92,6 +94,7 @@ env = { TOKEN = "other" }
                 "cache": {
                     "image": "busybox:1.37.0",
                     "container_name": "mxv-01234567-reading-list.cache",
+                    "network_mode": "bridge",
                     "labels": labels("mxv.container", "cache"),
                     "environment": {"TOKEN": "${MXV_ENV_0_0:-}"},
                     "ports": [],
@@ -100,6 +103,7 @@ env = { TOKEN = "other" }
                 "dynamodb": {
                     "image": "amazon/dynamodb-local:2.5.4",
                     "container_name": "mxv-01234567-reading-list.dynamodb",
+                    "network_mode": "bridge",
                     "labels": labels("mxv.container", "dynamodb"),
                     "command": ["sh", "-c", "echo $$HOME"],
                     "environment": {
@@ -116,7 +120,6 @@ env = { TOKEN = "other" }
                     "labels": labels("mxv.volume", "data"),
                 },
             },
-            "networks": {"default": {"labels": labels("mxv.network", "default")}},
         })
     );
     assert!(!file.to_string().contains("s3cret"));
@@ -140,10 +143,6 @@ fn a_workspace_name_with_an_underscore_or_a_dot_gives_a_project_name_that_compos
     assert_eq!(scope("release.2").project(), "mxv-01234567-release_d2");
     assert_eq!(scope("release_d2").project(), "mxv-01234567-release__d2");
     assert_eq!(scope("a_b").project(), "mxv-01234567-a__b");
-    assert_eq!(
-        scope("reading-list").network_name(),
-        "mxv-01234567-reading-list_default"
-    );
 }
 
 #[test]
@@ -193,4 +192,29 @@ fn the_message_of_a_failed_docker_command_is_its_first_docker_or_error_line() {
     );
     assert_eq!(message("first\nlast\n\n"), "last");
     assert_eq!(message(""), "");
+}
+
+#[test]
+fn a_compose_up_that_finds_its_host_port_allocated_names_the_port() {
+    assert_eq!(
+        up_failure(
+            "Container mxv-01234567-a.web  Starting\nError response from daemon: driver failed programming external connectivity on endpoint mxv-01234567-a.web (abc): Bind for 127.0.0.1:31005 failed: port is already allocated\n"
+        ),
+        UpFailure::PortAllocated(Some(31005))
+    );
+    assert_eq!(
+        up_failure("Error response from daemon: port is already allocated\n"),
+        UpFailure::PortAllocated(None)
+    );
+}
+
+#[test]
+fn a_compose_up_that_finds_no_free_address_pool_says_so() {
+    assert_eq!(
+        up_failure(
+            "Error response from daemon: all predefined address pools have been fully subnetted\n"
+        ),
+        UpFailure::NoAddressPool
+    );
+    assert_eq!(up_failure("Error manifest unknown\n"), UpFailure::Other);
 }

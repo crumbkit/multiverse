@@ -10,6 +10,8 @@
 
 #[path = "support/git.rs"]
 mod support;
+#[path = "support/ports.rs"]
+mod test_ports;
 
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -22,6 +24,7 @@ use snapbox::cmd::Command;
 use tempfile::TempDir;
 
 use crate::support::{GIT_ENV, PATH, repository};
+use crate::test_ports::PortBlock;
 
 /// The image of the tests, pinned by its tag.
 const IMAGE: &str = "busybox:1.37.0";
@@ -98,32 +101,25 @@ struct Setup {
     dir: TempDir,
     /// The workspace's name.
     name: String,
+    /// The block of host ports that the state directory allocates from.
+    ports: PortBlock,
 }
 
 impl Setup {
-    /// Creates the workspace `name` with `manifest` as its `mxv.toml`.
-    fn new(name: &str, manifest: &str) -> Self {
-        Self::in_range(name, manifest, [31000, 31999])
-    }
-
     /// Creates the workspace `name` with `manifest` as its `mxv.toml`, in
-    /// a state directory that allocates host ports from `range`.
-    fn in_range(name: &str, manifest: &str, range: [u16; 2]) -> Self {
+    /// a state directory that allocates host ports from a block that no
+    /// other running test, in this checkout or another, uses.
+    fn new(name: &str, manifest: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         repository(&dir.path().canonicalize().unwrap());
         let setup = Self {
             dir,
             name: name.to_owned(),
+            ports: PortBlock::claim(),
         };
-        // The tests of other files allocate from the default range at the
-        // same time, each with records of its own, so these tests take
-        // ports from a range that no other test uses.
         let config = setup.root().join("config/mxv/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
-        write(
-            &config,
-            &format!("ports_range = [{}, {}]\n", range[0], range[1]),
-        );
+        write(&config, &setup.ports.config_line());
         let (exit, document) = setup.json(&["new", name, "--repo", "app"]);
         assert_eq!(exit, 0, "{document}");
         write(&setup.checkout().join("mxv.toml"), manifest);
@@ -551,8 +547,8 @@ fn two_state_directories_with_one_workspace_name_never_touch_each_others_contain
     if !docker_runs("two_state_directories_with_one_workspace_name") {
         return;
     }
-    let first = Setup::in_range("mxvtest-twin", &web(), [31000, 31499]);
-    let second = Setup::in_range("mxvtest-twin", &web(), [31500, 31999]);
+    let first = Setup::new("mxvtest-twin", &web());
+    let second = Setup::new("mxvtest-twin", &web());
     for setup in [&first, &second] {
         let (exit, document) = setup.json(&["up", "-w", "mxvtest-twin"]);
         assert_eq!(exit, 0, "{document}");
@@ -890,7 +886,23 @@ fn up_runs_the_containers_as_one_compose_project_whose_file_names_the_variables_
         file.file_name()
             .is_some_and(|name| name.to_string_lossy().contains("compose"))
     }));
-    assert_eq!(setup.networks(), [format!("{}_default", setup.project())]);
+    assert!(setup.networks().is_empty(), "{:?}", setup.networks());
+    let (_, mode) = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.HostConfig.NetworkMode}}",
+        &setup.docker_name("web"),
+    ]);
+    assert_eq!(mode, "bridge");
+    let (_, other) = docker(&[
+        "network",
+        "ls",
+        "--quiet",
+        "--filter",
+        &format!("name={}", setup.project()),
+    ]);
+    assert!(other.is_empty(), "compose made a network: {other}");
     assert_eq!(setup.volumes(), [setup.docker_name("srv")]);
 }
 
@@ -948,4 +960,120 @@ fn up_with_containers_fails_as_compose_missing_when_docker_has_no_compose() {
         document["code"], "mxv::docker::compose_missing",
         "{document}"
     );
+}
+
+#[test]
+fn remove_delete_volumes_leaves_a_recorded_volume_that_is_neither_named_by_mxv_nor_anonymous() {
+    if !docker_runs("remove_delete_volumes_leaves_a_recorded_volume") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-plain-volume", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-plain-volume"]);
+    assert_eq!(exit, 0, "{document}");
+    setup.json(&["down", "-w", "mxvtest-plain-volume"]);
+    let foreign = Foreign {
+        kind: "volume",
+        name: format!("mxvtest-plain-{}", std::process::id()),
+    };
+    let (created, _) = docker(&["volume", "create", &foreign.name]);
+    assert!(created);
+    let record = setup
+        .root()
+        .join("state/mxv/runs/mxvtest-plain-volume/.volumes");
+    let mut volumes: Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    volumes["volumes"]
+        .as_array_mut()
+        .unwrap()
+        .push(Value::String(foreign.name.clone()));
+    write(&record, &volumes.to_string());
+
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-plain-volume",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        document["data"]["volumes"],
+        serde_json::json!([setup.docker_name("srv")]),
+        "{document}"
+    );
+    let (exists, _) = docker(&["volume", "inspect", &foreign.name]);
+    assert!(exists, "mxv deleted a volume that is not anonymous");
+}
+
+#[test]
+fn logs_follow_gives_a_running_container_its_follower_back() {
+    if !docker_runs("logs_follow_gives_a_running_container_its_follower_back") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-follow", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-follow"]);
+    assert_eq!(exit, 0, "{document}");
+    let record = setup
+        .root()
+        .join("state/mxv/runs/mxvtest-follow/web.follower");
+    let follower = || -> u64 {
+        let text = fs::read_to_string(&record).unwrap_or_default();
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|record| record["pid"].as_u64())
+            .unwrap_or_default()
+    };
+    // `logs -f` runs until the test stops it, so the test spawns it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv logs -f in the background and stops it"
+    )]
+    let mut logs = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
+    logs.args(["logs", "-w", "mxvtest-follow", "web", "-f"])
+        .current_dir(setup.root())
+        .env_clear()
+        .env("PATH", PATH)
+        .envs(GIT_ENV.iter().copied())
+        .env("HOME", setup.root())
+        .env("XDG_CONFIG_HOME", setup.root().join("config"))
+        .env("XDG_STATE_HOME", setup.root().join("state"))
+        .env("MXV_ROOT", setup.root().join("workspaces"))
+        .env("DOCKER_CONFIG", docker_config())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv logs -f in the background and stops it"
+    )]
+    let mut child = logs.spawn().unwrap();
+    // `logs -f` runs for a while before the follower ends, so the follower
+    // ends while it follows the log.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(1) {
+        std::thread::yield_now();
+    }
+    let old = follower();
+    let killed = Command::new("kill")
+        .args(["-KILL", &format!("-{old}")])
+        .env("PATH", PATH)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(killed);
+    let deadline = Instant::now() + MOST_WAIT;
+    let mut restarted = false;
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!("logs -f ended with {status} while the container runs");
+        }
+        let new = follower();
+        if new != 0 && new != old {
+            restarted = true;
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(restarted, "logs -f did not start a new follower");
 }

@@ -19,18 +19,24 @@
 //! `docker compose` process, so the values exist only in that process's
 //! environment and in the container.
 //!
-//! The container of the service `<name>` is named `<project>.<name>`, its
-//! named volume `<volume>` is `<project>.<volume>`, and Compose names the
-//! project's network `<project>_default`. Neither the project nor a
-//! manifest name holds a `.`, so the part after the `.` is always the
-//! container or volume. Every container, volume and network carries three
+//! The container of the service `<name>` is named `<project>.<name>`, and
+//! its named volume `<volume>` is `<project>.<volume>`. Neither the project
+//! nor a manifest name holds a `.`, so the part after the `.` is always the
+//! container or volume. Every container and named volume carries three
 //! labels: `mxv.store=<id>`, `mxv.workspace=<name>`, and
-//! `mxv.container=<name>`, `mxv.volume=<name>` or `mxv.network=default`.
-//! Compose adds labels of its own.
+//! `mxv.container=<name>` or `mxv.volume=<name>`. Compose adds labels of
+//! its own.
+//!
+//! Every container runs on docker's default bridge network, with
+//! `network_mode: bridge`, so Compose creates no network for the project.
+//! A docker daemon has a limited number of address pools for networks, and
+//! one network per workspace would use them up. Containers reach each other
+//! and the host's processes through their published ports on 127.0.0.1;
+//! there is no name resolution between the services.
 //!
 //! mxv records the id of each container it started and the name of each
-//! volume. Before it stops, removes, adopts or reuses a container, volume
-//! or network, it reads the object's labels, and it fails with
+//! volume. Before it stops, removes, adopts or reuses a container or
+//! volume, it reads the object's labels, and it fails with
 //! [`Error::DockerForeign`] when they do not name this store, workspace and
 //! object. mxv never touches such an object.
 //!
@@ -81,11 +87,9 @@ pub const CONTAINER_LABEL: &str = "mxv.container";
 /// The label that names a volume's name in the manifest.
 pub const VOLUME_LABEL: &str = "mxv.volume";
 
-/// The label that names a project's network, whose value is `default`.
-pub const NETWORK_LABEL: &str = "mxv.network";
-
-/// The compose name of the project's one network.
-const NETWORK: &str = "default";
+/// The label that docker gives the anonymous volumes of an image's
+/// `VOLUME` paths.
+const ANONYMOUS_LABEL: &str = "com.docker.volume.anonymous";
 
 /// The number of digits of the store id that project names hold.
 const SHORT_ID: usize = 8;
@@ -96,7 +100,7 @@ const SHORT_ID: usize = 8;
 const PROBE_WAIT: Duration = Duration::from_millis(300);
 
 /// One workspace of one store: its compose project and the labels and
-/// names of its containers, volumes and network.
+/// names of its containers and volumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
     /// The store id.
@@ -152,12 +156,6 @@ impl Scope {
     #[must_use]
     pub fn volume_name(&self, volume: &str) -> String {
         format!("{}{volume}", self.prefix())
-    }
-
-    /// Returns the name of the project's network, which Compose gives it.
-    #[must_use]
-    pub fn network_name(&self) -> String {
-        format!("{}_{NETWORK}", self.project())
     }
 
     /// Returns the labels of the scope's object `object` under `label`.
@@ -261,7 +259,6 @@ impl Finished {
                 "No such volume",
                 "no such volume",
                 "No such object",
-                "No such network",
                 "not found",
             ]
             .iter()
@@ -559,6 +556,10 @@ pub(crate) fn compose_file(
             "container_name".to_owned(),
             Value::String(scope.container_name(name)),
         );
+        definition.insert(
+            "network_mode".to_owned(),
+            Value::String("bridge".to_owned()),
+        );
         definition.insert("labels".to_owned(), scope.labels(CONTAINER_LABEL, name));
         if let Some(command) = &container.command {
             definition.insert(
@@ -574,9 +575,6 @@ pub(crate) fn compose_file(
     json!({
         "services": services,
         "volumes": volumes,
-        "networks": {
-            NETWORK: {"labels": scope.labels(NETWORK_LABEL, NETWORK)},
-        },
     })
 }
 
@@ -621,10 +619,15 @@ pub(crate) fn check_volume(scope: &Scope, volume: &str) -> Result<(), Error> {
 /// Reports whether the volume `name` exists and is the scope's: `None`
 /// when it does not exist, `Some(true)` when it is a named volume of the
 /// scope with its labels or an anonymous volume, which carries no name of
-/// the scope, and `Some(false)` for a volume with a name of the scope and
-/// other labels.
+/// the scope and docker's [`ANONYMOUS_LABEL`], and `Some(false)` for any
+/// other volume.
 fn volume_owned(scope: &Scope, name: &str) -> Result<Option<bool>, Error> {
-    let format = labels_format(".Labels", VOLUME_LABEL);
+    let format = match name.strip_prefix(&scope.prefix()) {
+        Some(_) => labels_format(".Labels", VOLUME_LABEL),
+        None => format!(
+            "{{{{range $key, $value := .Labels}}}}{{{{if eq $key \"{ANONYMOUS_LABEL}\"}}}}anonymous{{{{end}}}}{{{{end}}}}"
+        ),
+    };
     let finished = quick(
         ["volume", "inspect", "--format", &format, "--", name],
         "volume inspect",
@@ -635,7 +638,7 @@ fn volume_owned(scope: &Scope, name: &str) -> Result<Option<bool>, Error> {
     let labels = finished.checked("volume inspect", None)?;
     let owned = match name.strip_prefix(&scope.prefix()) {
         Some(volume) => scope.owns(labels.trim_end_matches('\n'), volume),
-        None => true,
+        None => labels.trim() == "anonymous",
     };
     Ok(Some(owned))
 }
@@ -650,6 +653,46 @@ pub(crate) fn volume_exists(scope: &Scope, name: &str) -> Result<bool, Error> {
     Ok(volume_owned(scope, name)? == Some(true))
 }
 
+/// Why a `docker compose up` failed, as its standard error tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpFailure {
+    /// docker already publishes the host port, which it names when it
+    /// can, for another container.
+    PortAllocated(Option<u16>),
+    /// docker has no free address pool for a network.
+    NoAddressPool,
+    /// Any other failure.
+    Other,
+}
+
+/// Returns why the `docker compose up` whose standard error is `stderr`
+/// failed.
+pub(crate) fn up_failure(stderr: &str) -> UpFailure {
+    if stderr.contains("port is already allocated") {
+        let port = stderr
+            .split("Bind for ")
+            .nth(1)
+            .and_then(|rest| rest.split(" failed").next())
+            .and_then(|address| address.rsplit_once(':'))
+            .and_then(|(_, port)| port.parse().ok());
+        UpFailure::PortAllocated(port)
+    } else if stderr.contains("all predefined address pools have been fully subnetted") {
+        UpFailure::NoAddressPool
+    } else {
+        UpFailure::Other
+    }
+}
+
+/// What a `docker compose up` that did not fail as an error did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Up {
+    /// The container started.
+    Started,
+    /// docker already publishes the host port, which it names when it
+    /// can, for another container.
+    PortAllocated(Option<u16>),
+}
+
 /// Starts the service `name` of the compose file `file` with `docker
 /// compose up`, with the variables `env` that [`compose_env`] returned.
 /// The project directory is `dir`, which holds no other file that Compose
@@ -659,7 +702,8 @@ pub(crate) fn volume_exists(scope: &Scope, name: &str) -> Result<bool, Error> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] when a container with the name of the service lacks the scope's labels, the
+/// Returns [`Error::DockerForeign`] when a container with the name of the
+/// service lacks the scope's labels, [`Error::DockerNoAddressPool`], the
 /// errors of [`check`], and [`Error::DockerFailed`] when docker cannot
 /// pull the image or start the container.
 pub(crate) fn compose_up(
@@ -668,7 +712,7 @@ pub(crate) fn compose_up(
     file: &Path,
     name: &str,
     env: &[(String, String)],
-) -> Result<(), Error> {
+) -> Result<Up, Error> {
     let project = scope.project();
     let args: [&OsStr; 13] = [
         "compose".as_ref(),
@@ -686,13 +730,24 @@ pub(crate) fn compose_up(
         name.as_ref(),
     ];
     let finished = run(args, env, "compose up", PULL_DEADLINE)?;
-    if !finished.status.success() && finished.stderr.contains("Conflict") {
+    if finished.status.success() {
+        return Ok(Up::Started);
+    }
+    if finished.stderr.contains("Conflict") {
         // Another program created a container with the name after mxv
         // removed its own, so the name is foreign.
         inspect(scope, name, &scope.container_name(name))?;
     }
-    finished.checked("compose up", Some(name))?;
-    Ok(())
+    match up_failure(&finished.stderr) {
+        UpFailure::PortAllocated(port) => Ok(Up::PortAllocated(port)),
+        UpFailure::NoAddressPool => Err(Error::DockerNoAddressPool {
+            message: message(&finished.stderr),
+        }),
+        UpFailure::Other => {
+            finished.checked("compose up", Some(name))?;
+            Ok(Up::Started)
+        }
+    }
 }
 
 /// Stops the container `container` of `scope` that `target`, its id or its
@@ -727,38 +782,6 @@ pub(crate) fn remove(
         removed.checked("rm", Some(container))?;
     }
     Ok(Some(inspected.anonymous))
-}
-
-/// Removes the network of `scope` after it checked its labels. A network
-/// that does not exist, or that a container still uses, stays.
-///
-/// # Errors
-///
-/// Returns [`Error::DockerForeign`] for a network with the name and other
-/// labels, the errors of [`check`], and [`Error::DockerFailed`].
-pub(crate) fn remove_network(scope: &Scope) -> Result<(), Error> {
-    let name = scope.network_name();
-    let format = labels_format(".Labels", NETWORK_LABEL);
-    let inspected = quick(
-        ["network", "inspect", "--format", &format, "--", &name],
-        "network inspect",
-    )?;
-    if inspected.missing() {
-        return Ok(());
-    }
-    let labels = inspected.checked("network inspect", None)?;
-    if !scope.owns(labels.trim_end_matches('\n'), NETWORK) {
-        return Err(Error::DockerForeign {
-            kind: "network",
-            name,
-        });
-    }
-    let removed = quick(["network", "rm", "--", &name], "network rm")?;
-    if removed.missing() || removed.stderr.contains("active endpoints") {
-        return Ok(());
-    }
-    removed.checked("network rm", None)?;
-    Ok(())
 }
 
 /// Deletes the volumes `names` of `scope`, after it checked the labels of

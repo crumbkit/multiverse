@@ -147,6 +147,12 @@ pub enum Error {
         /// The line of docker's standard error that says what failed.
         message: String,
     },
+    /// docker has no free address pool for a network, so it cannot
+    /// connect a container.
+    DockerNoAddressPool {
+        /// The line of docker's standard error that says what failed.
+        message: String,
+    },
     /// The `docker` program runs, and its daemon does not answer.
     DockerUnavailable {
         /// The line of docker's standard error that says what failed.
@@ -162,11 +168,11 @@ pub enum Error {
         /// The line of docker's standard error that says what failed.
         message: String,
     },
-    /// A docker container, volume or network has a name of mxv's, or is
-    /// one that mxv recorded, and its labels do not name this store,
-    /// workspace and object, so mxv leaves it alone.
+    /// A docker container or volume has a name of mxv's, or is one that
+    /// mxv recorded, and its labels do not name this store, workspace and
+    /// object, so mxv leaves it alone.
     DockerForeign {
-        /// `container`, `volume` or `network`.
+        /// `container` or `volume`.
         kind: &'static str,
         /// The object's docker name.
         name: String,
@@ -272,6 +278,13 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Self::DockerNoAddressPool { message } => {
+                formatter.write_str("docker has no free address pool for a container's network")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
             Self::DockerUnavailable { message } => {
                 formatter.write_str("the docker daemon does not answer")?;
                 if !message.is_empty() {
@@ -324,6 +337,7 @@ impl std::error::Error for Error {
             | Self::Busy { .. }
             | Self::DockerUnavailable { .. }
             | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
             | Self::DockerFailed { .. }
             | Self::DockerForeign { .. } => None,
         }

@@ -439,7 +439,7 @@ impl Runs {
     /// Returns the errors of [`Runs::status`].
     pub fn writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
         if self.record(name, process)?.is_none() {
-            return self.follower_alive(name, process);
+            return self.container_writing(name, process);
         }
         Ok(
             matches!(self.state(name, process)?, ProcessState::Running { .. })

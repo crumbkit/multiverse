@@ -205,18 +205,30 @@ directory's first container starts. The project of a workspace is
 `mxv-<id8>-<workspace>`, where `<id8>` is the first 8 digits of the store
 id. A project name allows only lowercase letters, digits, `-` and `_`, so
 the workspace's `_` is written `__` and its `.` is written `_d`. Each
-container is named `<project>.<name>`, each named volume
-`<project>.<volume>`, and the project's network `<project>_default`. mxv
-labels each container, volume and network with `mxv.store=<id>`,
-`mxv.workspace=<workspace>`, and `mxv.container=<name>`,
-`mxv.volume=<volume>` or `mxv.network=default`, beside the labels that
-Compose adds. mxv publishes each port on 127.0.0.1 only.
+container is named `<project>.<name>` and each named volume
+`<project>.<volume>`. mxv labels each container and named volume with
+`mxv.store=<id>`, `mxv.workspace=<workspace>`, and `mxv.container=<name>`
+or `mxv.volume=<volume>`, beside the labels that Compose adds. mxv
+publishes each port on 127.0.0.1 only.
+
+Every container runs on docker's default bridge network
+(`network_mode: bridge`), and mxv creates no network. A docker daemon
+hands each network an address range from a limited set of pools, and a
+network for each workspace would use them up. Containers therefore have
+no names for each other: a container reaches another container, or a
+process on the host, through that one's published port on the host's
+127.0.0.1. When docker has no free
+address pool even for the default bridge, `up` fails with
+`mxv::docker::address_pools_exhausted`, whose hint says how to free or
+add pools.
 
 The run records say which docker objects belong to a workspace:
 `<container>.container` holds the id of the container that `up` started,
 and `.volumes` names the named volumes of its containers and the anonymous
 volumes of their images. Before it stops, removes, adopts or reuses a
-container, volume or network, mxv reads the object's labels. When they do
+container or volume, mxv reads the object's labels. It deletes a
+recorded volume without a name of the workspace only when docker's
+`com.docker.volume.anonymous` label marks it as an anonymous volume. When they do
 not name this store, workspace and object, mxv leaves the object alone and
 fails with `mxv::docker::foreign_object`, whose fields name the object's
 kind and name. Because the records name the containers, `status` and
@@ -242,14 +254,15 @@ never run a container.
   with `mxv::process::exited` and its exit code; when it misses its
   timeout, or a step after `docker compose up` fails, `up` removes it. A
   failed `up` removes the containers it started before the failure, as it
-  stops processes.
+  stops processes. When docker reports that a published host port is
+  already allocated, such as to a container that docker created and did
+  not start, `up` removes the new container and fails with
+  `mxv::port::taken`.
 - `mxv down` stops each recorded container with `docker stop`, which sends
   SIGTERM and then SIGKILL after 10 seconds, removes it and deletes its
   record. Its named volumes and the anonymous volumes of its image stay,
   with their data, and mxv adds the anonymous volumes to `.volumes`, so
-  `mxv remove --delete-volumes` deletes them with the named ones. Once no
-  container of the workspace has a record, `down` removes the project's
-  network.
+  `mxv remove --delete-volumes` deletes them with the named ones.
 - `mxv status` reports a container's state as docker reports it, with
   `kind` set to `container` and `pid` null: `running`, `exited`, or
   `created` for a container that docker created and did not start. An
@@ -261,7 +274,8 @@ never run a container.
   follower's process id. The follower ends when the container stops, so
   when docker restarts a container outside mxv, the next `up` or `status`
   starts a new follower from the container's latest start. `logs -f` ends
-  once the follower has ended. Each `up` moves the previous log to
+  once the follower has ended and the container no longer runs; while the
+  container runs, `logs -f` starts a new follower when the old one ends. Each `up` moves the previous log to
   `<container>.log.1`, as for a process.
 
 When a workspace needs docker and no `docker` program is on `PATH`, its
