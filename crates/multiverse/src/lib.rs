@@ -47,9 +47,9 @@ pub use crate::record::{
     AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
 };
 pub use crate::runs::{
-    DownOutcome, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES,
-    ProcessState, ProcessStatus, RUN_VERSION, Runs, START_GRACE, STOP_GRACE, TAIL_LINES,
-    Unstoppable, UpOutcome, Waited, tail,
+    DownOutcome, EXIT_FILE_WAIT, ExitReason, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES,
+    MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessState, ProcessStatus, RUN_VERSION, Runs, START_GRACE,
+    STOP_GRACE, TAIL_LINES, Unstoppable, UpOutcome, Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::workspaces::{

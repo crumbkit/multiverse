@@ -719,6 +719,7 @@ const fn container_state(state: ContainerState) -> ProcessState {
         ContainerState::Exited(code) => ProcessState::Exited {
             code: Some(code),
             signal: None,
+            reason: None,
         },
     }
 }

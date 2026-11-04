@@ -442,6 +442,44 @@ fn status_reports_a_process_that_crashed_as_exited_with_its_code() {
 }
 
 #[test]
+fn status_reports_a_process_whose_group_sigkill_ended_as_exited_with_an_unknown_code_and_a_reason()
+{
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.sleeper]\nargv = [\"sh\", \"-c\", \"sleep 60\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    let group = row(&status, "sleeper")["pid"].as_u64().unwrap();
+    assert_ne!(group, 0);
+    let killed = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(killed.status.success(), "{killed:?}");
+    for () in waiting() {
+        let (exit, status) = setup.json(&["status", "-w", "triage"]);
+        let sleeper = row(&status, "sleeper");
+        if sleeper["state"] == "exited" {
+            assert_eq!(sleeper["code"], Value::Null, "{sleeper}");
+            assert_eq!(sleeper["signal"], Value::Null, "{sleeper}");
+            assert!(
+                sleeper["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("SIGKILL")),
+                "{sleeper}"
+            );
+            assert_eq!(exit, 1, "{status}");
+            return;
+        }
+    }
+    panic!("the process group did not end");
+}
+
+#[test]
 fn a_workspace_keeps_its_ports_across_ups_and_show_lists_them() {
     let setup = Setup::new();
     setup.workspace("triage", &server_and_worker());

@@ -522,7 +522,10 @@ pub(crate) fn group_exists(pid: u32) -> bool {
 }
 
 /// Returns the exit code that the script wrote to `exit_file`, or `None`
-/// when the file does not exist or holds no code.
+/// when the file does not exist or the script has not finished writing it.
+/// The script's redirection creates the file empty before `printf` writes
+/// the code and its line feed, so only a file that ends in a line feed is
+/// written. A written file that holds no number gives `Some(None)`.
 pub(crate) fn exit_code(exit_file: &Path) -> Option<Option<i32>> {
     let mut text = String::new();
     File::open(exit_file)
@@ -530,5 +533,5 @@ pub(crate) fn exit_code(exit_file: &Path) -> Option<Option<i32>> {
         .take(64)
         .read_to_string(&mut text)
         .ok()?;
-    Some(text.trim().parse().ok())
+    text.ends_with('\n').then(|| text.trim().parse().ok())
 }

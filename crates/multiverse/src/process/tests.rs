@@ -102,6 +102,20 @@ fn a_signal_to_the_group_stops_the_process_and_its_children() {
 }
 
 #[test]
+fn an_exit_file_without_its_line_feed_holds_no_code_yet() {
+    let dir = tempfile::tempdir().unwrap();
+    let exit_file = dir.path().join("test.exit");
+    for partial in ["", "7"] {
+        crate::testing::write(&exit_file, partial);
+        assert_eq!(exit_code(&exit_file), None, "{partial:?}");
+    }
+    crate::testing::write(&exit_file, "7\n");
+    assert_eq!(exit_code(&exit_file), Some(Some(7)));
+    crate::testing::write(&exit_file, "x\n");
+    assert_eq!(exit_code(&exit_file), Some(None));
+}
+
+#[test]
 fn the_start_time_of_a_process_id_that_no_process_has_is_none() {
     assert_eq!(start_time(i32::MAX as u32 - 7).unwrap(), None);
 }

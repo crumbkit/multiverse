@@ -97,6 +97,37 @@ pub(super) struct RunRecord {
     pub(super) ports: BTreeMap<String, u16>,
 }
 
+/// How long `status` waits for the exit file of a process whose group is
+/// gone. The shell writes the file just before it exits, so a status that
+/// reads in between finds the group gone and the file not yet written.
+pub const EXIT_FILE_WAIT: Duration = Duration::from_millis(200);
+
+/// The interval at which `status` reads an exit file that it waits for.
+const EXIT_FILE_POLL: Duration = Duration::from_millis(20);
+
+/// Why mxv does not know the exit code of a process that exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExitReason {
+    /// The process group is gone and the shell that runs the process wrote
+    /// no exit file within [`EXIT_FILE_WAIT`]. Something, such as SIGKILL
+    /// or a restart of the machine, ended the shell before it could write
+    /// the file.
+    NoExitFile,
+}
+
+impl ExitReason {
+    /// Returns the reason as a sentence that a row prints.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::NoExitFile => {
+                "the process group ended without writing its exit code, so something such as SIGKILL ended its shell"
+            }
+        }
+    }
+}
+
 /// The state of one process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessState {
@@ -116,6 +147,9 @@ pub enum ProcessState {
         /// records a program that a signal ended as code 128 plus the
         /// signal's number, so a code from 129 to 192 reads as that signal.
         signal: Option<i32>,
+        /// Why mxv does not know the exit code, or `None` when it knows it
+        /// or a signal ended the process.
+        reason: Option<ExitReason>,
     },
     /// docker created the container and has not started it, such as when
     /// `docker compose up` stopped between creating and starting it.
@@ -400,9 +434,22 @@ impl Runs {
                 pid: Some(record.pid),
             });
         }
-        // The shell writes the exit file before it exits, so a process that
-        // ended between the two reads above has its code by now.
-        Ok(exited(process::exit_code(&exit_file).flatten()))
+        // The shell writes the exit file just before it exits, so a status
+        // that reads between the two finds the group gone and no code yet.
+        let deadline = Instant::now() + EXIT_FILE_WAIT;
+        loop {
+            if let Some(code) = process::exit_code(&exit_file) {
+                return Ok(exited(code));
+            }
+            if Instant::now() >= deadline {
+                return Ok(ProcessState::Exited {
+                    code: None,
+                    signal: None,
+                    reason: Some(ExitReason::NoExitFile),
+                });
+            }
+            pause(EXIT_FILE_POLL);
+        }
     }
 
     /// Returns the processes of `workspace` and their states: the
@@ -1130,7 +1177,11 @@ fn wait_gone(pid: u32, timeout: Duration) -> bool {
 /// signal ended the program.
 fn exited(code: Option<i32>) -> ProcessState {
     let (code, signal) = code_and_signal(code);
-    ProcessState::Exited { code, signal }
+    ProcessState::Exited {
+        code,
+        signal,
+        reason: None,
+    }
 }
 
 /// Returns the exit code and the signal of a program whose shell recorded

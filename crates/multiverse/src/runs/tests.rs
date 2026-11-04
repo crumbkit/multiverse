@@ -9,7 +9,9 @@ use std::time::Duration;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
-use crate::runs::{DownOutcome, Follower, ProcessState, Runs, UpOutcome, tail};
+use crate::runs::{
+    DownOutcome, EXIT_FILE_WAIT, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail,
+};
 use crate::store::{Created, Store};
 
 /// A temporary directory with a store, run files and a checkout.
@@ -229,7 +231,83 @@ fn a_run_record_whose_process_id_now_names_another_process_reads_as_exited() {
         statuses[0].state,
         ProcessState::Exited {
             code: None,
-            signal: None
+            signal: None,
+            reason: Some(ExitReason::NoExitFile),
+        }
+    );
+}
+
+/// Writes the run record of the process `a` of `workspace`, naming this
+/// test's own process, with the start time `started`, and returns the run
+/// directory.
+fn record_this_process(setup: &Setup, workspace: &Workspace, started: &str) -> PathBuf {
+    let dir = setup.runs().workspace_dir(&workspace.name);
+    fs::create_dir_all(&dir).unwrap();
+    let record = serde_json::json!({
+        "version": 1,
+        "pid": std::process::id(),
+        "started": started,
+        "ports": {},
+    });
+    write(dir.join("a.json"), record.to_string());
+    dir
+}
+
+#[test]
+fn a_running_process_whose_exit_file_the_shell_has_opened_but_not_written_reads_as_running() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let started = crate::process::start_time(std::process::id())
+        .unwrap()
+        .unwrap();
+    let dir = record_this_process(&setup, &workspace, &started);
+    // `printf ... > file` creates the file empty before it writes the code.
+    write(dir.join("a.exit"), "");
+    let statuses = setup.runs().status(&workspace, None).unwrap();
+    assert_eq!(
+        statuses[0].state,
+        ProcessState::Running {
+            pid: Some(std::process::id())
+        }
+    );
+}
+
+#[test]
+fn status_waits_for_an_exit_file_that_the_shell_writes_after_its_group_is_gone() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let dir = record_this_process(&setup, &workspace, "Thu Jan  1 00:00:00 1970");
+    let exit_file = dir.join("a.exit");
+    let writer = std::thread::spawn(move || {
+        crate::clock::pause(Duration::from_millis(60));
+        write(exit_file, "7\n");
+    });
+    let statuses = setup.runs().status(&workspace, None).unwrap();
+    writer.join().unwrap();
+    assert_eq!(
+        statuses[0].state,
+        ProcessState::Exited {
+            code: Some(7),
+            signal: None,
+            reason: None,
+        }
+    );
+}
+
+#[test]
+fn status_reports_an_unknown_code_with_a_reason_once_the_exit_file_stays_missing() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    record_this_process(&setup, &workspace, "Thu Jan  1 00:00:00 1970");
+    let began = std::time::Instant::now();
+    let statuses = setup.runs().status(&workspace, None).unwrap();
+    assert!(began.elapsed() >= EXIT_FILE_WAIT, "{:?}", began.elapsed());
+    assert_eq!(
+        statuses[0].state,
+        ProcessState::Exited {
+            code: None,
+            signal: None,
+            reason: Some(ExitReason::NoExitFile),
         }
     );
 }

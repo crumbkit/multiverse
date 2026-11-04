@@ -509,6 +509,11 @@ pub(crate) struct ProcessRow {
     /// The number of the signal that ended an exited process, such as 15
     /// for SIGTERM, or null.
     signal: Option<i32>,
+    /// Why mxv does not know the exit code of an exited process, or null
+    /// when it knows the code or the signal. A process group that ended
+    /// before its shell wrote the exit file, such as one that SIGKILL
+    /// ended, has a reason.
+    reason: Option<String>,
     /// Whether the process group of an exited process still has a member,
     /// such as a child it started in the background, which `mxv down`
     /// stops. It is null while the process runs.
@@ -552,6 +557,7 @@ impl Row for ProcessRow {
         "pid",
         "code",
         "signal",
+        "reason",
         "group_alive",
         "ports",
     ];
@@ -567,11 +573,15 @@ impl Row for ProcessRow {
 
 impl From<&ProcessStatus> for ProcessRow {
     fn from(status: &ProcessStatus) -> Self {
-        let (state, pid, code, signal) = match status.state {
-            ProcessState::Running { pid } => (StateName::Running, pid, None, None),
-            ProcessState::Exited { code, signal } => (StateName::Exited, None, code, signal),
-            ProcessState::Created => (StateName::Created, None, None, None),
-            ProcessState::Stopped => (StateName::Stopped, None, None, None),
+        let (state, pid, code, signal, reason) = match status.state {
+            ProcessState::Running { pid } => (StateName::Running, pid, None, None, None),
+            ProcessState::Exited {
+                code,
+                signal,
+                reason,
+            } => (StateName::Exited, None, code, signal, reason),
+            ProcessState::Created => (StateName::Created, None, None, None, None),
+            ProcessState::Stopped => (StateName::Stopped, None, None, None, None),
         };
         Self {
             name: status.name.clone(),
@@ -583,6 +593,7 @@ impl From<&ProcessStatus> for ProcessRow {
             pid,
             code,
             signal,
+            reason: reason.map(|reason| reason.describe().to_owned()),
             group_alive: status.group_alive,
             ports: status
                 .ports

@@ -367,7 +367,11 @@ mxv keeps the run files of each workspace's processes in
 and its start time, `<process>.log`, `<process>.log.1`, and
 `<process>.exit`, which holds the exit code once the process ends. Each
 process runs under `/bin/sh`, which waits for it and writes that code, so a
-crash is reported without a long-running mxv.
+crash is reported without a long-running mxv. The shell writes the file just
+before it exits, so when `status` finds the process group gone and no exit
+file, it waits up to 200 ms for the file. A shell that something such as
+SIGKILL ended writes no file, and `status` then reports the process as
+exited with a null code and signal and a `reason` that says so.
 
 Each `up` of a process moves its previous log to `<process>.log.1`, which
 replaces the log before it, so a process keeps at most two logs. No mxv
