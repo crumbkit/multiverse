@@ -328,7 +328,7 @@ impl Supervisor<'_> {
                 AfterExit::Leave(_) if unresolved => {
                     return Some(KeeperExit::EnvironmentUnresolved);
                 }
-                AfterExit::Leave(exit) => return Some(exit),
+                AfterExit::Leave(ended) => return Some(ended.into()),
                 AfterExit::Restart { backoff, resolve } => (backoff, resolve),
             };
             if let Some(ran) = ran.take() {

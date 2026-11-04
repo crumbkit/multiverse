@@ -7,7 +7,6 @@
 
 use std::time::{Duration, SystemTime};
 
-use crate::engine::keeper::KeeperExit;
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits};
 
 #[cfg(test)]
@@ -25,8 +24,18 @@ pub(crate) enum AfterExit {
         /// Whether the restart resolves the environment again.
         resolve: Resolve,
     },
-    /// The keeper leaves the app ended and exits so.
-    Leave(KeeperExit),
+    /// The process stays ended, with the outcome given.
+    Leave(Ended),
+}
+
+/// How a process that stays ended ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ended {
+    /// The process exited with status 0.
+    Completed,
+    /// The process exited with a status other than 0 or a signal ended it,
+    /// or a fresh environment for its restart could not be resolved.
+    Failed,
 }
 
 /// Returns what the keeper does after its app ended, `failed` or not, when
@@ -34,9 +43,9 @@ pub(crate) enum AfterExit {
 /// failed attempt to resolve the environment counts as a failed run.
 pub(crate) fn after_exit(restart: &Restart, failed: bool, restarts: u32) -> AfterExit {
     let leave = AfterExit::Leave(if failed {
-        KeeperExit::Failed
+        Ended::Failed
     } else {
-        KeeperExit::Completed
+        Ended::Completed
     });
     let limits: &RestartLimits = match restart {
         Restart::No => return leave,
