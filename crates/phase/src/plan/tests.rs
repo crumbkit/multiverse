@@ -373,6 +373,34 @@ fn a_plan_refuses_a_log_probe_with_an_empty_pattern() {
 }
 
 #[test]
+fn a_plan_refuses_a_log_probe_whose_pattern_is_not_a_regular_expression() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("ready (".to_owned())));
+
+    let ProcessProblem::BadLogPattern { reason } = process_problem(api) else {
+        panic!("the plan was refused for another reason");
+    };
+    assert!(!reason.is_empty());
+    assert!(!reason.contains('\n'), "{reason}");
+}
+
+#[test]
+fn a_plan_read_from_json_refuses_a_log_probe_whose_pattern_is_not_a_regular_expression() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("ready".to_owned())));
+    let mut json = serde_json::to_value(plan(vec![api]).unwrap()).unwrap();
+    json["apps"][0]["processes"][0]["ready"]["check"]["log"]["pattern"] = "ready (".into();
+
+    let refused = serde_json::from_value::<Plan>(json).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("its log probe's pattern is not a regular expression"),
+        "{refused}"
+    );
+}
+
+#[test]
 fn a_plan_refuses_a_published_port_on_a_host_process() {
     let mut api = host_app("api");
     api.processes[0]

@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use super::probe::ProbeCheck;
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, ProcessKind, ProcessPlan, RunnerKind};
+use crate::engine::probe::{BadLogPattern, LogPattern};
 use crate::name::{AppName, PortName, ProcessName};
 use crate::source::Source;
 
@@ -172,7 +173,7 @@ pub enum ProcessProblem {
     #[non_exhaustive]
     BadVariableName(String),
     /// The ready timeout is zero or longer than
-    /// [`MOST_READY_TIMEOUT`](super::MOST_READY_TIMEOUT).
+    /// [`MOST_READY_TIMEOUT`].
     ReadyTimeoutOutOfRange,
     /// The process, or its probe, names a port its app does not have.
     #[non_exhaustive]
@@ -189,6 +190,12 @@ pub enum ProcessProblem {
     HttpPathWithoutSlash,
     /// The log probe's pattern is empty.
     EmptyLogPattern,
+    /// The log probe's pattern is not a regular expression.
+    #[non_exhaustive]
+    BadLogPattern {
+        /// The regular expression compiler's one-line reason.
+        reason: String,
+    },
     /// The command probe's command is empty.
     EmptyProbeCommand,
     /// The probe's period or timeout is zero.
@@ -366,6 +373,10 @@ impl fmt::Display for ProcessProblem {
                 formatter.write_str("its http probe's path does not start with `/`")
             }
             Self::EmptyLogPattern => formatter.write_str("its log probe's pattern is empty"),
+            Self::BadLogPattern { reason } => write!(
+                formatter,
+                "its log probe's pattern is not a regular expression: {reason}"
+            ),
             Self::EmptyProbeCommand => formatter.write_str("its probe's command is empty"),
             Self::ZeroProbeTime => formatter.write_str("its probe's period or timeout is zero"),
             Self::OneshotWithProbe => formatter.write_str("it is a oneshot with a probe"),
@@ -701,11 +712,12 @@ fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
         ProbeCheck::Tcp { port } if !app.ports.contains_key(port) => {
             Err(ProcessProblem::UnknownPort(port.clone()))
         }
-        ProbeCheck::Log { pattern } if pattern.is_empty() => Err(ProcessProblem::EmptyLogPattern),
+        ProbeCheck::Log { pattern } => match LogPattern::new(pattern) {
+            Ok(_) => Ok(()),
+            Err(BadLogPattern::Empty) => Err(ProcessProblem::EmptyLogPattern),
+            Err(BadLogPattern::Invalid(reason)) => Err(ProcessProblem::BadLogPattern { reason }),
+        },
         ProbeCheck::Command { run } if run.is_empty() => Err(ProcessProblem::EmptyProbeCommand),
-        ProbeCheck::Http { .. }
-        | ProbeCheck::Tcp { .. }
-        | ProbeCheck::Log { .. }
-        | ProbeCheck::Command { .. } => Ok(()),
+        ProbeCheck::Http { .. } | ProbeCheck::Tcp { .. } | ProbeCheck::Command { .. } => Ok(()),
     }
 }

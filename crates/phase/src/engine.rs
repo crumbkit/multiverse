@@ -12,5 +12,5 @@ pub mod keeper;
         reason = "the host and container runners wait for readiness through `probe` when `up` lands"
     )
 )]
-mod probe;
+pub(crate) mod probe;
 mod restart;
