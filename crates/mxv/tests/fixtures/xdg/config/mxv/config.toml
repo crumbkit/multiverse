@@ -1,0 +1,3 @@
+# The examples put workspaces under a fixed root, so their output does not
+# depend on the temporary XDG_DATA_HOME of each run.
+root = "/home/agent/mxv"

@@ -14,9 +14,12 @@
 //! record of the workspace `reading-list`. That record names directories
 //! under `/home/agent`, which do not exist, so the examples of `show`, `cd`
 //! and `remove` read a record whose checkout is already gone. `MXV_ROOT` is
-//! unset and the config file is absent, so `new` uses the default root
-//! `$XDG_DATA_HOME/mxv/workspaces`. `new` runs as a dry run, so the
-//! examples fetch nothing.
+//! unset, and the fixture's config file sets `root = "/home/agent/mxv"`, so
+//! the examples of `new` and `show` print a root whose length is the same on
+//! every machine. The default root under the temporary `XDG_DATA_HOME`
+//! would change the width of the table's columns, because crumbkit-test
+//! measures them before it replaces that path with its placeholder. `new`
+//! runs as a dry run, so the examples fetch nothing.
 //!
 //! `run`, `archive` and `restore` are declared before they are built. Each
 //! one fails with `mxv::command::unbuilt`, so its examples cannot run and a
@@ -137,7 +140,7 @@ const BUDGETS: Budgets = Budgets::new();
 const PATH_BUDGETS: PathBudgets<'_> = PathBudgets::new("tests/golden/examples");
 /// The variables of every run: a `PATH` that finds git, and git without
 /// the person's configuration. `MXV_ROOT` is unset, so the workspace root
-/// is the default one under the fresh `XDG_DATA_HOME` of each run.
+/// comes from the config file of `tests/fixtures/xdg`.
 const ENV: &[(&str, &str)] = &[
     ("PATH", support::PATH),
     ("GIT_CONFIG_GLOBAL", "/dev/null"),
