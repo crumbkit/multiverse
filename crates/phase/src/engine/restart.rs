@@ -2,8 +2,8 @@
 //! policy: whether a process that ended starts again, the backoff before it
 //! does, which doubles up to a longest wait and starts again after a healthy
 //! run, and whether the restart resolves the environment again as its
-//! [`Resolve`] says. These are pure decisions, which the keeper's supervisor
-//! carries out.
+//! [`Resolve`] says. These are pure decisions, which whatever supervises
+//! the process carries out.
 
 use std::time::{Duration, SystemTime};
 
@@ -12,14 +12,15 @@ use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits};
 #[cfg(test)]
 mod tests;
 
-/// What the keeper does after its app ended by itself.
+/// What happens to a process after it ended by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AfterExit {
-    /// The keeper waits `delay`, then restarts the app, unless `resolve`
-    /// says the restart needs a fresh environment.
+    /// The process starts again after a wait that [`backoff_delay`] takes
+    /// from `backoff`, and with a fresh environment first when `resolve`
+    /// says so.
     Restart {
-        /// The policy's backoff, from which the supervisor takes the wait
-        /// before the restart.
+        /// The policy's backoff, from which the wait before the restart is
+        /// taken.
         backoff: Backoff,
         /// Whether the restart resolves the environment again.
         resolve: Resolve,
@@ -38,9 +39,9 @@ pub(crate) enum Ended {
     Failed,
 }
 
-/// Returns what the keeper does after its app ended, `failed` or not, when
-/// the app has been restarted `restarts` times already under `restart`. A
-/// failed attempt to resolve the environment counts as a failed run.
+/// Returns what happens to a process that ended, `failed` or not, when it
+/// has been restarted `restarts` times already under `restart`. A failed
+/// attempt to resolve the environment counts as a failed run.
 pub(crate) fn after_exit(restart: &Restart, failed: bool, restarts: u32) -> AfterExit {
     let leave = AfterExit::Leave(if failed {
         Ended::Failed
