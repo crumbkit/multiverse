@@ -303,20 +303,33 @@ impl RunStore {
     }
 
     /// Syncs the records directory, so a rename or a removal in it
-    /// survives a power loss.
+    /// survives a power loss. Some file systems cannot sync a directory and
+    /// fail with EINVAL or ENOTSUP, and there the sync is skipped, because
+    /// the rename itself has succeeded.
     ///
     /// # Errors
     ///
     /// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
-    /// opened or synced.
+    /// opened or synced for another reason.
     fn sync_dir(&self) -> Result<(), PhaseError> {
-        File::open(&self.dir)
-            .and_then(|handle| handle.sync_all())
-            .map_err(|source| PhaseError::StateUnwritable {
+        let synced = File::open(&self.dir).and_then(|handle| handle.sync_all());
+        match synced {
+            Ok(()) => Ok(()),
+            Err(error) if cannot_sync_directory(&error) => Ok(()),
+            Err(source) => Err(PhaseError::StateUnwritable {
                 path: self.dir.clone(),
                 source,
-            })
+            }),
+        }
     }
+}
+
+/// Reports whether `error` is how a file system that cannot sync a
+/// directory refuses it: EINVAL or ENOTSUP.
+fn cannot_sync_directory(error: &io::Error) -> bool {
+    let code = error.raw_os_error();
+    code == Some(rustix::io::Errno::INVAL.raw_os_error())
+        || code == Some(rustix::io::Errno::NOTSUP.raw_os_error())
 }
 
 /// Returns the `O_NOFOLLOW` flag, so the store never writes through a
@@ -470,6 +483,12 @@ impl<'s> Journal<'s> {
     }
 
     /// Writes `record` and keeps it as the record on disk.
+    ///
+    /// When the write fails after its rename, because the directory sync
+    /// failed, the file already holds `record` while `self.record` keeps
+    /// the previous record. The caller treats the error as fatal to the
+    /// operation and drops the journal, and the next journal reads the
+    /// file again, so the stale copy in memory is never written back.
     fn commit(&mut self, record: RunRecord) -> Result<(), PhaseError> {
         self.store.write(&record, &self.lock)?;
         self.record = Some(record);

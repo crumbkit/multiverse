@@ -466,12 +466,35 @@ fn a_process_recorded_in_an_earlier_boot_is_gone_even_when_its_pid_and_start_mat
 }
 
 #[test]
+fn a_process_recorded_without_a_boot_id_on_a_system_that_has_one_is_unknown() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_host(&store, host_at(200, 2));
+    let processes = FakeProcesses {
+        boot_id: Some("this-boot".to_owned()),
+        ..FakeProcesses::default().with(200, Start::At(2), Some(Signal::TERM))
+    };
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unknown);
+    assert!(processes.signals.borrow().is_empty());
+    assert_eq!(
+        store.read(&workspace()).unwrap().unwrap().state(&server()),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
 fn sweep_kills_the_members_of_a_group_whose_leader_has_already_ended() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut leader = Spawned::shell_lines("sleep 30 & echo $!; echo ready", 2);
     let orphan: u32 = leader.lines[0].parse().unwrap();
-    let ended = host_at(leader.pid(), 0);
+    let ended = HostProcess {
+        boot_id: System.boot_id().unwrap(),
+        ..host_at(leader.pid(), 0)
+    };
     leader.wait_for_exit();
     assert!(alive(orphan));
     record_host(&store, ended);
