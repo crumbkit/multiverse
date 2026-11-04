@@ -103,16 +103,26 @@ phase reads each of its tables from one place:
   `[needs.*]` describe one app, and come from that app's repository. For an
   app you are editing, phase reads the `mxv.toml` in its checkout. For an
   app run from a release, phase reads the `mxv.toml` of the repository at
-  the release's tag. A workspace manifest cannot replace them, so the
-  permissions phase compares against your grants are always the ones the
-  app's publisher wrote.
+  the release's tag.
 - `[service.*]` describes the workspace's shared services, and comes from
   the workspace's manifest. A repository's `mxv.toml` can declare services
   only while it is the workspace's sole manifest, which is the case for a
   workspace with one checkout and no manifest of its own.
 
-Each table has one source, so nothing is merged. phase rejects a workspace
-manifest that contains an app's tables, and names the file and table.
+A workspace manifest can also declare an app, for a repository that has no
+`mxv.toml` of its own, such as someone else's repository or one you cannot
+commit to. It names the checkout the app runs from and holds the same
+tables. You can also make a workspace manifest replace a repository's own
+app tables by setting `local = true` on that app; otherwise a repository's
+`mxv.toml` wins wherever one exists, and phase rejects a workspace manifest
+that declares the same app without `local = true`, naming the file and app.
+
+You are the publisher of an app that a workspace manifest declares. phase
+shows its permissions for your approval when it first runs and whenever
+they grow, exactly as for any other app. Such an app always runs from its
+checkout, because it has no publisher's release to verify.
+
+Each app's tables come from one file, so nothing is merged.
 
 ```toml
 [app]
