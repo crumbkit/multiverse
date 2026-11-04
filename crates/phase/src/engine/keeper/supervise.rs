@@ -19,14 +19,14 @@ use rustix::process::Signal;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::clock::{POLL_INTERVAL, now, pause, wall_now};
 use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
 use crate::engine::keeper::policy::{
     AfterExit, after_exit, backoff_delay, needs_environment, streak_after_run,
 };
-use crate::engine::keeper::recorder::Recorder;
+use crate::engine::keeper::recorder::{RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::apply_sandbox;
-use crate::engine::keeper::spec::{Handshake, KeeperSpec, read_spec, write_handshake};
+use crate::engine::keeper::spec::{Handshake, KeeperSpec, StartedApp, read_spec, write_handshake};
 use crate::engine::keeper::{EXIT_RECORD_WAIT, KeeperArgs, KeeperExit, RESOLVE_WAIT};
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::plan::restart::StopSignal;
@@ -52,21 +52,28 @@ pub(crate) fn run(
 ) -> KeeperExit {
     // A new session leaves the group and the terminal of the engine that
     // started the keeper, so a hangup or Ctrl-C there never reaches it.
-    // The engine starts the keeper as no group's leader, so it succeeds;
-    // a keeper started by hand from a shell already leads its own group
-    // and keeps the shell's session.
-    let session = rustix::process::setsid();
-    keep(args, source, input, output, session.is_ok())
+    // The engine starts the keeper as no group's leader, so it succeeds.
+    // A keeper that already leads a group, such as one started by hand
+    // from a shell, cannot lead a new session, and refuses to run.
+    if let Err(error) = rustix::process::setsid() {
+        write_handshake(
+            output,
+            &Handshake::Refused(format!(
+                "the keeper cannot start a session of its own: {error}"
+            )),
+        );
+        return KeeperExit::BadInput;
+    }
+    keep(args, source, input, output)
 }
 
 /// Runs the keeper in the session it has, which a test can call within its
-/// own process. `own_session` says whether the keeper leads a new session.
+/// own process.
 pub(crate) fn keep(
     args: &KeeperArgs,
     source: &dyn EnvironmentSource,
     input: impl Read,
     output: impl Write,
-    own_session: bool,
 ) -> KeeperExit {
     let spec = match read_spec(input) {
         Ok(spec) => spec,
@@ -77,15 +84,11 @@ pub(crate) fn keep(
     };
     let diagnostics = Diagnostics::open(&diagnostic_log(&spec.log, args.app(), args.process()));
     diagnostics.note(&format!(
-        "keeper {} started for {}/{} in {}",
+        "keeper {} started for {}/{} in group {}",
         std::process::id(),
         args.app(),
         args.process(),
-        if own_session {
-            "a session of its own"
-        } else {
-            "its caller's session"
-        }
+        keeper_group()
     ));
     let exit = start_and_supervise(args, source, &spec, &diagnostics, output);
     diagnostics.note(&format!("keeper exits with {exit:?} ({})", exit.code()));
@@ -129,8 +132,23 @@ fn start_and_supervise(
         diagnostics,
     };
     let exit = supervisor.supervise(output);
-    recorder.finish(EXIT_RECORD_WAIT);
+    // A stop request usually comes from a `down`, which holds the lifecycle
+    // lock and records the stop itself, so the keeper waits only briefly.
+    // Otherwise nothing else records how the app ended.
+    recorder.finish(if exit == KeeperExit::Stopped {
+        EXIT_RECORD_WAIT
+    } else {
+        RECORD_LOCK_WAIT
+    });
     exit
+}
+
+/// Returns the keeper's process group.
+fn keeper_group() -> u32 {
+    rustix::process::getpgrp()
+        .as_raw_nonzero()
+        .get()
+        .unsigned_abs()
 }
 
 /// Starts the thread that turns the keeper's `TERM` and `INT` into stop
@@ -152,15 +170,6 @@ fn watch_signals(sender: Sender<Event>) -> std::io::Result<()> {
 struct App {
     /// The process as the run record names it. It leads its own group.
     host: HostProcess,
-}
-
-/// How the wait before a restart ended.
-enum Resumed {
-    /// The keeper restarts the app with this environment, or with the one
-    /// it holds when it is `None`.
-    Restart(Option<Box<dyn AppliedEnvironment>>),
-    /// The keeper leaves the app ended and exits so.
-    Exit(KeeperExit),
 }
 
 /// One keeper's supervision of its app.
@@ -208,26 +217,42 @@ impl Supervisor<'_> {
             expires_at: self.spec.expires_at(),
             fresh: None,
         };
+        let mut previous: Option<HostProcess> = None;
         loop {
+            if output.is_none() && self.stop_waiting() {
+                self.diagnostics
+                    .note("a stop request came before the restart");
+                return KeeperExit::Stopped;
+            }
             let app = match self.start(runs.fresh.as_deref()) {
                 Ok(app) => app,
                 Err(reason) => {
                     self.diagnostics.note(&reason);
                     if let Some(output) = output.take() {
                         write_handshake(output, &Handshake::Unstartable(reason));
+                        return KeeperExit::Unstartable;
                     }
-                    self.recorder.stopped();
-                    return KeeperExit::Unstartable;
+                    // A restart that cannot start is a failed run.
+                    if let Some(exit) = self.resume(&mut runs, true, Duration::ZERO) {
+                        return exit;
+                    }
+                    continue;
                 }
             };
             self.diagnostics
                 .note(&format!("the app started as process {}", app.host.pid));
             if let Some(output) = output.take() {
                 self.recorder.started(app.host.clone());
-                write_handshake(output, &Handshake::Started(app.host.clone()));
-            } else {
-                self.recorder.restarted(app.host.clone(), runs.restarts);
+                let started = StartedApp {
+                    keeper_group: keeper_group(),
+                    app: app.host.clone(),
+                };
+                write_handshake(output, &Handshake::Started(started));
+            } else if let Some(previous) = previous.take() {
+                self.recorder
+                    .restarted(app.host.clone(), previous, runs.restarts);
             }
+            previous = Some(app.host.clone());
             let began = now();
             let status = match self.next_event() {
                 Event::Stop => return self.stop(&app),
@@ -237,16 +262,18 @@ impl Supervisor<'_> {
                 Some(status) => format!("the app ended with {status}"),
                 None => "the app ended with an unreadable status".to_owned(),
             });
-            self.recorder.stopping();
+            self.recorder.stopping(app.host.clone());
             if !self.end_group(&app, false) {
+                self.diagnostics
+                    .note("the app's group was still there after KILL");
                 return KeeperExit::Unstoppable;
             }
-            self.recorder.stopped();
+            self.recorder.stopped(app.host.clone());
             let failed = !status.is_some_and(|status| status.success());
-            match self.resume(&mut runs, failed, now().saturating_duration_since(began)) {
-                Resumed::Restart(Some(fresh)) => runs.fresh = Some(fresh),
-                Resumed::Restart(None) => {}
-                Resumed::Exit(exit) => return exit,
+            if let Some(exit) =
+                self.resume(&mut runs, failed, now().saturating_duration_since(began))
+            {
+                return exit;
             }
         }
     }
@@ -254,17 +281,19 @@ impl Supervisor<'_> {
     /// Decides what follows a run of the app that lasted `ran` and
     /// `failed` or not: it waits each backoff, resolves a fresh
     /// environment when the policy asks for one, and tries again after a
-    /// backoff when resolving fails, until the policy's most restarts.
-    fn resume(&self, runs: &mut Runs, failed: bool, ran: Duration) -> Resumed {
+    /// backoff when resolving fails, until the policy's most restarts. It
+    /// returns how the keeper exits, or `None` when it restarts the app,
+    /// and then holds any fresh environment in `runs`.
+    fn resume(&self, runs: &mut Runs, failed: bool, ran: Duration) -> Option<KeeperExit> {
         let mut failed = failed;
         let mut unresolved = false;
         let mut ran = Some(ran);
         loop {
             let (backoff, resolve) = match after_exit(&self.spec.restart, failed, runs.restarts) {
                 AfterExit::Leave(_) if unresolved => {
-                    return Resumed::Exit(KeeperExit::EnvironmentUnresolved);
+                    return Some(KeeperExit::EnvironmentUnresolved);
                 }
-                AfterExit::Leave(exit) => return Resumed::Exit(exit),
+                AfterExit::Leave(exit) => return Some(exit),
                 AfterExit::Restart { backoff, resolve } => (backoff, resolve),
             };
             if let Some(ran) = ran.take() {
@@ -281,20 +310,28 @@ impl Supervisor<'_> {
             if self.stop_requested_within(now() + delay) {
                 self.diagnostics
                     .note("a stop request came during the backoff");
-                return Resumed::Exit(KeeperExit::Stopped);
+                return Some(KeeperExit::Stopped);
             }
-            if !needs_environment(resolve, SystemTime::now(), runs.expires_at) {
-                return Resumed::Restart(None);
+            if !needs_environment(resolve, wall_now(), runs.expires_at) {
+                return None;
             }
-            match self
-                .source
-                .resolve(self.args.app(), self.args.process(), now() + RESOLVE_WAIT)
-            {
+            let resolved =
+                self.source
+                    .resolve(self.args.app(), self.args.process(), now() + RESOLVE_WAIT);
+            // Resolving can take long, and a stop request meanwhile waits
+            // on the channel until the keeper looks.
+            if self.stop_waiting() {
+                self.diagnostics
+                    .note("a stop request came while the keeper resolved the environment");
+                return Some(KeeperExit::Stopped);
+            }
+            match resolved {
                 Ok(fresh) => {
                     self.diagnostics
                         .note("the keeper resolved a fresh environment for the restart");
                     runs.expires_at = fresh.expires_at();
-                    return Resumed::Restart(Some(fresh));
+                    runs.fresh = Some(fresh);
+                    return None;
                 }
                 Err(error) => {
                     self.diagnostics.note(&format!(
@@ -309,9 +346,8 @@ impl Supervisor<'_> {
 
     /// Starts the app in a group of its own, with the log as its standard
     /// output and standard error, and a thread that waits for it to end.
-    /// With `fresh`, the app receives only the inherited variables and
-    /// `fresh`. Otherwise it inherits the keeper's environment, which holds
-    /// the same inherited variables and the environment resolved first.
+    /// The app receives only the inherited variables and either `fresh` or
+    /// the environment resolved first, which the keeper holds as its own.
     fn start(&self, fresh: Option<&dyn AppliedEnvironment>) -> Result<App, String> {
         let (program, arguments) = self
             .spec
@@ -332,10 +368,23 @@ impl Supervisor<'_> {
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr)
-            .process_group(0);
-        if let Some(fresh) = fresh {
-            command.env_clear().envs(&self.spec.inherited);
-            fresh.apply(&mut command);
+            .process_group(0)
+            .env_clear()
+            .envs(&self.spec.inherited);
+        match fresh {
+            Some(fresh) => fresh.apply(&mut command),
+            None => {
+                for name in &self.spec.resolved {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "the keeper passes on the resolved values that the engine gave it in its own environment"
+                    )]
+                    let value = std::env::var_os(name);
+                    if let Some(value) = value {
+                        command.env(name, value);
+                    }
+                }
+            }
         }
         apply_sandbox(&mut command);
         #[expect(
@@ -386,13 +435,13 @@ impl Supervisor<'_> {
     fn stop(&self, app: &App) -> KeeperExit {
         self.diagnostics
             .note("a stop request came, and the keeper stops the app");
-        self.recorder.stopping();
+        self.recorder.stopping(app.host.clone());
         if !self.end_group(app, true) {
             self.diagnostics
                 .note("the app's group was still there after KILL");
             return KeeperExit::Unstoppable;
         }
-        self.recorder.stopped();
+        self.recorder.stopped(app.host.clone());
         KeeperExit::Stopped
     }
 
@@ -433,6 +482,18 @@ impl Supervisor<'_> {
                 Ok(Event::Ended(_)) => return true,
                 Ok(Event::Stop) => {}
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    }
+
+    /// Reports whether a stop request is waiting, while no app runs,
+    /// without waiting for one.
+    fn stop_waiting(&self) -> bool {
+        loop {
+            match self.events.try_recv() {
+                Ok(Event::Stop) | Err(mpsc::TryRecvError::Disconnected) => return true,
+                Ok(Event::Ended(_)) => {}
+                Err(mpsc::TryRecvError::Empty) => return false,
             }
         }
     }

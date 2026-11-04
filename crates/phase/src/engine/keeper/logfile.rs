@@ -13,7 +13,9 @@ use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
+
+use crate::clock::wall_now;
 
 use crate::name::{AppName, ProcessName};
 
@@ -73,7 +75,7 @@ impl Diagnostics {
         let Some(file) = &self.file else {
             return;
         };
-        let millis = SystemTime::now()
+        let millis = wall_now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_millis());
         let line = format!("{millis} {text}\n");

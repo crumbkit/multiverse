@@ -2,7 +2,7 @@
 //! standard input, and the handshake line, which the keeper writes to its
 //! standard output. Neither holds an environment value.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -48,9 +48,43 @@ pub(crate) struct KeeperSpec {
     /// counts toward the policy's most restarts.
     pub(crate) restarts: u32,
     /// The variables that the keeper and its app inherit from the caller,
-    /// `PATH` and `HOME`, which are never secret. The keeper sets them on
-    /// the app beside a freshly resolved environment.
+    /// which are only ever `PATH` and `HOME` and are never secret. The
+    /// keeper sets them on the app on every start.
     pub(crate) inherited: BTreeMap<String, String>,
+    /// The names of the variables of the environment that the engine
+    /// resolved and gave the keeper, which the keeper passes on to the
+    /// app's first start. The spawn side fills them in.
+    #[serde(default)]
+    pub(crate) resolved: BTreeSet<String>,
+}
+
+/// The only variables that a keeper and its app inherit from the caller.
+pub(crate) const INHERITED: [&str; 2] = ["PATH", "HOME"];
+
+/// The specification names an inherited variable other than `PATH` and
+/// `HOME`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NotInherited(pub(crate) String);
+
+impl std::fmt::Display for NotInherited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the inherited variable {} is neither PATH nor HOME",
+            self.0
+        )
+    }
+}
+
+/// Returns the first name of `inherited` other than `PATH` and `HOME`.
+fn check_inherited(inherited: &BTreeMap<String, String>) -> Result<(), NotInherited> {
+    match inherited
+        .keys()
+        .find(|name| !INHERITED.contains(&name.as_str()))
+    {
+        Some(name) => Err(NotInherited(name.clone())),
+        None => Ok(()),
+    }
 }
 
 #[cfg_attr(
@@ -83,6 +117,7 @@ impl KeeperSpec {
             expires_at_ms: None,
             restarts: 0,
             inherited: BTreeMap::new(),
+            resolved: BTreeSet::new(),
         }
     }
 
@@ -99,9 +134,18 @@ impl KeeperSpec {
 
     /// Returns this specification with `inherited` as the variables that
     /// the keeper and its app inherit from the caller.
-    pub(crate) fn inheriting(mut self, inherited: BTreeMap<String, String>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotInherited`] when `inherited` names a variable other
+    /// than `PATH` and `HOME`.
+    pub(crate) fn inheriting(
+        mut self,
+        inherited: BTreeMap<String, String>,
+    ) -> Result<Self, NotInherited> {
+        check_inherited(&inherited)?;
         self.inherited = inherited;
-        self
+        Ok(self)
     }
 
     /// Returns this specification counting `restarts` earlier restarts.
@@ -140,6 +184,7 @@ pub(crate) fn read_spec(input: impl Read) -> Result<KeeperSpec, String> {
     if spec.run.is_empty() {
         return Err("the specification's command is empty".to_owned());
     }
+    check_inherited(&spec.inherited).map_err(|error| error.to_string())?;
     Ok(spec)
 }
 
@@ -152,12 +197,23 @@ pub(crate) const HANDSHAKE_PREFIX: &str = "phase-keeper/v1 ";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Handshake {
-    /// The app started as this process.
-    Started(HostProcess),
+    /// The app started.
+    Started(StartedApp),
     /// The keeper could not start the app, for this reason.
     Unstartable(String),
     /// The keeper's specification could not be read, for this reason.
     Refused(String),
+}
+
+/// A keeper whose app started: the keeper's own process group, and the
+/// app's process.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StartedApp {
+    /// The keeper's process group, which the engine records.
+    pub(crate) keeper_group: u32,
+    /// The app's process.
+    pub(crate) app: HostProcess,
 }
 
 /// Writes `handshake` to `output` as one line. A failed write is ignored,

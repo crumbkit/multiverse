@@ -1,6 +1,12 @@
 //! The keeper's writer of the run record, a thread of its own that writes
 //! each change of the app's state through the journal, so that waiting
 //! for the workspace's lifecycle lock never blocks supervision.
+//!
+//! The writer writes a change after the keeper has acted, so the record
+//! can lag the app. A change applies only while the record still names the
+//! keeper's own app: a `down` or another `up` that recorded a process of
+//! its own meanwhile keeps its entry, and the writer notes the skipped
+//! change in the diagnostic log.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -16,20 +22,50 @@ use crate::record::store::{Journal, RunStore};
 /// change. An `up` holds the lock while it builds and starts apps, and the
 /// engine records the first start itself, so a dropped change is a later
 /// one.
-const RECORD_LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const RECORD_LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// A change of the app's state.
 #[derive(Clone, Debug)]
 enum Note {
-    /// The app started as this process.
+    /// The app started as this process. It applies when the entry names
+    /// no process or this one.
     Started(HostProcess),
-    /// The keeper restarted the app as this process, after this many
-    /// restarts in all.
-    Restarted(HostProcess, u32),
-    /// The keeper is about to stop the app's group.
-    Stopping,
-    /// The app's group is gone.
-    Stopped,
+    /// The keeper restarted the app as the first process, after the
+    /// second, after this many restarts in all. It applies when the entry
+    /// names either process.
+    Restarted(HostProcess, HostProcess, u32),
+    /// The keeper is about to stop the group of this process. It applies
+    /// when the entry names this process.
+    Stopping(HostProcess),
+    /// The group of this process is gone. It applies when the entry names
+    /// this process.
+    Stopped(HostProcess),
+}
+
+impl Note {
+    /// Reports whether the note applies to an entry that names `recorded`.
+    fn applies_to(&self, recorded: Option<&HostProcess>) -> bool {
+        match (self, recorded) {
+            (Self::Started(_), None) => true,
+            (Self::Started(host) | Self::Stopping(host) | Self::Stopped(host), Some(recorded)) => {
+                host == recorded
+            }
+            (Self::Restarted(host, previous, _), Some(recorded)) => {
+                host == recorded || previous == recorded
+            }
+            (Self::Restarted(..) | Self::Stopping(_) | Self::Stopped(_), None) => false,
+        }
+    }
+
+    /// Describes the change for the diagnostic log.
+    fn describe(&self) -> String {
+        match self {
+            Self::Started(host) => format!("the start of process {}", host.pid),
+            Self::Restarted(host, _, _) => format!("the restart as process {}", host.pid),
+            Self::Stopping(host) => format!("the stopping of process {}", host.pid),
+            Self::Stopped(host) => format!("the stop of process {}", host.pid),
+        }
+    }
 }
 
 /// The handle of the writer thread.
@@ -64,20 +100,20 @@ impl Recorder {
         let _ = self.notes.send(Note::Started(host));
     }
 
-    /// Records that the keeper restarted the app as `host`, after
-    /// `restarts` restarts in all.
-    pub(crate) fn restarted(&self, host: HostProcess, restarts: u32) {
-        let _ = self.notes.send(Note::Restarted(host, restarts));
+    /// Records that the keeper restarted the app as `host` after
+    /// `previous`, after `restarts` restarts in all.
+    pub(crate) fn restarted(&self, host: HostProcess, previous: HostProcess, restarts: u32) {
+        let _ = self.notes.send(Note::Restarted(host, previous, restarts));
     }
 
-    /// Records that the keeper is about to stop the app's group.
-    pub(crate) fn stopping(&self) {
-        let _ = self.notes.send(Note::Stopping);
+    /// Records that the keeper is about to stop the group of `host`.
+    pub(crate) fn stopping(&self, host: HostProcess) {
+        let _ = self.notes.send(Note::Stopping(host));
     }
 
-    /// Records that the app's group is gone.
-    pub(crate) fn stopped(&self) {
-        let _ = self.notes.send(Note::Stopped);
+    /// Records that the group of `host` is gone.
+    pub(crate) fn stopped(&self, host: HostProcess) {
+        let _ = self.notes.send(Note::Stopped(host));
     }
 
     /// Waits at most `wait` for the writer to write every change.
@@ -110,11 +146,20 @@ fn write(
     };
     let mut note = Some(first);
     while let Some(current) = note {
+        note = queue.try_recv().ok();
+        let recorded = recorded_host(&journal, key);
+        if !current.applies_to(recorded.as_ref()) {
+            diagnostics.note(&format!(
+                "the run record names another process, so the keeper skips {}",
+                current.describe()
+            ));
+            continue;
+        }
         let written = match current {
             Note::Started(host) => journal.started(key, Started::Host(host)),
-            Note::Restarted(host, restarts) => journal.restarted(key, host, restarts),
-            Note::Stopping => journal.stopping(key),
-            Note::Stopped => journal.stopped(key),
+            Note::Restarted(host, _, restarts) => journal.restarted(key, host, restarts),
+            Note::Stopping(_) => journal.stopping(key),
+            Note::Stopped(_) => journal.stopped(key),
         };
         if let Err(error) = written {
             diagnostics.note(&format!(
@@ -122,6 +167,20 @@ fn write(
                 error.code()
             ));
         }
-        note = queue.try_recv().ok();
     }
+}
+
+/// Returns the process that the record's entry of `key` names, or `None`
+/// when it names none or the record has no such entry.
+fn recorded_host(journal: &Journal<'_>, key: &ObjectKey) -> Option<HostProcess> {
+    let ObjectKey::Process(app, process) = key else {
+        return None;
+    };
+    journal
+        .record()?
+        .processes
+        .iter()
+        .find(|entry| &entry.app == app && &entry.process == process)?
+        .host
+        .clone()
 }

@@ -32,14 +32,24 @@
 //!   output once its app has started or failed to start. Its standard error
 //!   is appended to its diagnostic log, `<log dir>/<app>.<process>.keeper.log`,
 //!   which the `logfile` module describes. The engine reads at most
-//!   [`MOST_HANDSHAKE_BYTES`] bytes before the deadline it is given, and
-//!   kills the keeper and its group when the deadline passes.
+//!   [`MOST_HANDSHAKE_BYTES`] bytes before the deadline it is given. The
+//!   handshake names the app's process and the keeper's group. When the
+//!   deadline passes or the handshake cannot be read, the keeper may
+//!   already have started the app, so the engine sends the keeper `TERM`,
+//!   which makes it stop the app, waits the app's grace and kill wait, and
+//!   then kills the keeper and its group.
 //! - End: the keeper's first action is `setsid`, so it leads a session and
-//!   a group of its own. It outlives the engine that started it, and a
-//!   hangup or a Ctrl-C at the engine's terminal does not reach it. It ends when it receives `TERM` or `INT`, or when its app
-//!   ends and the policy does not restart it. The engine reaps it when it
-//!   ends before the handshake. Otherwise the engine leaves it running, and
-//!   the operating system reaps it once the engine exits.
+//!   a group of its own. A keeper that cannot start a session refuses its
+//!   specification and exits with [`KeeperExit::BadInput`]. It outlives
+//!   the engine that started it, and a hangup or a Ctrl-C at the engine's
+//!   terminal does not reach it. It ends when it receives `TERM` or `INT`,
+//!   or when its app ends and the policy does not restart it. Only the
+//!   first stop request counts, and a later one while the keeper stops the
+//!   app changes nothing. A stop request during a backoff or while the
+//!   keeper resolves an environment ends the keeper without a restart. The
+//!   engine reaps the keeper when it ends before the handshake. Otherwise
+//!   the engine leaves it running, and the operating system reaps it once
+//!   the engine exits.
 //!
 //! # Starting the app process (PROC-2)
 //!
@@ -47,12 +57,14 @@
 //!   `PATH` of the keeper's environment. The plan's author supplies it,
 //!   and the engine has replaced `{program}` with the app's program.
 //! - Arguments: the rest of the command, each a separate value.
-//! - Environment: only `PATH`, `HOME` and the resolved environment. At the
-//!   first start the app inherits the keeper's environment, which holds
-//!   exactly those. After the keeper resolves a fresh environment for a
-//!   restart, the app receives `PATH` and `HOME` from the specification and
-//!   the fresh environment. The sandbox will later give the app its own
-//!   `TMPDIR`.
+//! - Environment: only `PATH`, `HOME` and the resolved environment. The
+//!   keeper clears the app's environment on every start and sets `PATH`
+//!   and `HOME` from the specification. It then sets either the fresh
+//!   environment it resolved for a restart, or the values of the names
+//!   that the specification lists as resolved, which the keeper holds in
+//!   its own environment. The specification refuses any inherited variable
+//!   other than `PATH` and `HOME`. The sandbox will later give the app its
+//!   own `TMPDIR`.
 //! - Streams and deadline: standard input is empty. Standard output and
 //!   standard error are the app's log file, opened with `O_APPEND`, which
 //!   the app holds as its own descriptors. The keeper never reads the
@@ -91,9 +103,18 @@
 //! writes these through the run record's journal, which takes the
 //! workspace's lifecycle lock, so an `up` or `down` that holds the lock
 //! never blocks supervision. The engine also records the first start from
-//! the handshake, while it holds the lock. When the keeper exits, it waits
-//! at most [`EXIT_RECORD_WAIT`] for its last writes, because the operation
-//! that stops it holds the lock and records the stop itself.
+//! the handshake, while it holds the lock. A change applies only while the
+//! record's entry names the keeper's own app, so a process that another
+//! operation recorded meanwhile keeps its entry, and the keeper notes the
+//! skipped change in its diagnostic log. When the keeper exits after a stop
+//! request, it waits at most [`EXIT_RECORD_WAIT`] for its last writes,
+//! because the operation that stops it holds the lock and records the stop
+//! itself. After any other end, nothing else records it, so the keeper
+//! waits as long as the writer waits for the lock.
+//!
+//! A restart that cannot start the app counts as a failed run under the
+//! backoff. Only a failure of the first start makes the keeper exit with
+//! [`KeeperExit::Unstartable`].
 //!
 //! [`AppliedEnvironment::apply`]: crate::AppliedEnvironment::apply
 //! [`Restart`]: crate::Restart

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use rustix::process::Signal;
 
-use crate::clock::now;
+use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
 use crate::engine::keeper::args::{APP, PROCESS, STATE_DIR, WORKSPACE};
@@ -86,9 +86,12 @@ impl Kept {
 /// # Errors
 ///
 /// Returns [`PhaseError::KeeperUnstartable`] when the keeper cannot start,
-/// refuses its specification, or gives no handshake before the deadline,
-/// and [`PhaseError::ProcessUnstartable`] when the keeper reports that the
-/// app cannot start. In each case the keeper is killed and reaped.
+/// refuses its specification, or gives no readable handshake before the
+/// deadline, and [`PhaseError::ProcessUnstartable`] when the keeper reports
+/// that the app cannot start. In each case the keeper is gone and reaped.
+/// A keeper whose handshake is missing or unreadable may have started the
+/// app, so it first receives `TERM`, which makes it stop the app, and
+/// `KILL` only after the app's grace and kill wait.
 pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
     let args = launch.args;
     let keeper_failed = |reason: String| PhaseError::KeeperUnstartable {
@@ -96,7 +99,9 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
         process: args.process().clone(),
         reason,
     };
-    let spec = serde_json::to_vec(launch.spec)
+    let mut spec = launch.spec.clone();
+    spec.resolved = launch.environment.names();
+    let spec = serde_json::to_vec(&spec)
         .map_err(|error| keeper_failed(format!("the specification cannot be written: {error}")))?;
     let diagnostics = diagnostic_log(&launch.spec.log, args.app(), args.process());
     let stderr = open_append(&diagnostics).map_err(|error| {
@@ -131,8 +136,6 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
         let _ = sender.send(read_handshake(stdout));
     });
     let handshake = receiver.recv_timeout(launch.deadline.saturating_duration_since(now()));
-    // A keeper calls `setsid` before it reads its specification, so by its
-    // handshake it leads a group whose id is its pid.
     let keeper = match (started, boot_id) {
         (Ok(Start::At(started_at_us)), Ok(boot_id)) => HostProcess {
             pid,
@@ -141,14 +144,21 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
             boot_id,
         },
         _ => {
-            kill(&mut child);
+            end(&mut child, launch.spec);
             return Err(keeper_failed(format!(
                 "the start time of the keeper {pid} is unreadable"
             )));
         }
     };
     match handshake {
-        Ok(Ok(Some(Handshake::Started(app)))) => Ok(Kept { keeper, app, child }),
+        Ok(Ok(Some(Handshake::Started(started)))) => Ok(Kept {
+            keeper: HostProcess {
+                group: started.keeper_group,
+                ..keeper
+            },
+            app: started.app,
+            child,
+        }),
         Ok(Ok(Some(Handshake::Unstartable(reason)))) => {
             kill(&mut child);
             Err(PhaseError::ProcessUnstartable {
@@ -170,13 +180,13 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
             )))
         }
         Ok(Err(error)) => {
-            kill(&mut child);
+            end(&mut child, launch.spec);
             Err(keeper_failed(format!(
                 "the keeper's handshake cannot be read: {error}"
             )))
         }
         Err(_) => {
-            kill(&mut child);
+            end(&mut child, launch.spec);
             Err(keeper_failed(
                 "the keeper gave no handshake before the deadline".to_owned(),
             ))
@@ -204,6 +214,30 @@ fn keeper_command(launch: &Launch<'_>, stderr: Stdio) -> Command {
         .stderr(stderr);
     launch.environment.apply(&mut command);
     command
+}
+
+/// Ends a keeper that may have started its app: it sends the keeper `TERM`,
+/// waits the app's grace and kill wait for the keeper to stop the app and
+/// exit, and then kills the keeper.
+#[expect(
+    clippy::disallowed_types,
+    reason = "crates/phase/src/engine/keeper/spawn.rs holds the keeper it started (PROC-1)"
+)]
+fn end(child: &mut std::process::Child, spec: &KeeperSpec) {
+    if let Some(keeper) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process(keeper, Signal::TERM);
+    }
+    let deadline = now() + spec.stop.grace + spec.kill_wait;
+    while now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            break;
+        }
+        pause(POLL_INTERVAL);
+    }
+    kill(child);
 }
 
 /// Sends `KILL` to the keeper and to its group, reaps it, and describes

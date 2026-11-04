@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io::{BufRead as _, BufReader, Read as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write};
 use std::num::NonZeroU32;
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use rustix::process::Signal;
 use tempfile::TempDir;
 
 use super::spawn::{command_line, read_handshake};
-use super::spec::{Handshake, write_handshake};
+use super::spec::{Handshake, NotInherited, read_spec, write_handshake};
 use super::supervise::keep;
 use super::{
     BadKeeperArgs, KeeperArgs, KeeperCommand, KeeperExit, KeeperSpec, Kept, Launch, run, spawn,
@@ -52,14 +52,19 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
     let keeper_args = KeeperArgs::parse(args.into_iter().skip(at + 1)).unwrap();
     #[expect(
         clippy::disallowed_methods,
-        reason = "the test binary runs as a keeper, which reads its specification from standard input and writes its handshake to standard output"
+        reason = "the test binary runs as a keeper, which writes its handshake to standard output"
     )]
-    let exit = run(
-        &keeper_args,
-        &Source,
-        std::io::stdin().lock(),
-        std::io::stdout(),
-    );
+    let stdout = std::io::stdout();
+    let output: Box<dyn Write> = if keeper_args.process().as_str() == "slow-handshake" {
+        Box::new(Slow(stdout))
+    } else {
+        Box::new(stdout)
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test binary runs as a keeper, which reads its specification from standard input"
+    )]
+    let exit = run(&keeper_args, &Source, std::io::stdin().lock(), output);
     #[expect(
         clippy::disallowed_methods,
         reason = "the test binary runs as a keeper, whose exit status the engine reads"
@@ -93,8 +98,28 @@ fn the_test_binary_starts_a_keeper_when_it_is_started_as_a_spawner() {
     let _ = std::io::stdin().read_to_end(&mut Vec::new());
 }
 
+/// How long the keepers of the processes `slow-handshake` and
+/// `slow-resolve` take over their handshake and their resolving.
+const SLOW: Duration = Duration::from_secs(2);
+
+/// An output that pauses for [`SLOW`] before each write, as a keeper whose
+/// handshake comes late.
+struct Slow<W>(W);
+
+impl<W: Write> Write for Slow<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        pause(SLOW);
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// The environment source of the keepers that tests start. It resolves
-/// `GREETING=fresh`, and fails for the process `unresolvable`.
+/// `GREETING=fresh`, fails for the process `unresolvable`, and takes
+/// [`SLOW`] for the process `slow-resolve`.
 struct Source;
 
 impl EnvironmentSource for Source {
@@ -104,6 +129,9 @@ impl EnvironmentSource for Source {
         process: &ProcessName,
         _deadline: Instant,
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        if process.as_str() == "slow-resolve" {
+            pause(SLOW);
+        }
         if process.as_str() == "unresolvable" {
             return Err(EnvironmentError::new(
                 "GREETING".to_owned(),
@@ -223,6 +251,7 @@ impl Fixture {
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
             ("HOME".to_owned(), self.dir.display().to_string()),
         ]))
+        .unwrap()
     }
 
     /// Starts a keeper of `spec` from this test binary, with
@@ -238,6 +267,18 @@ impl Fixture {
         spec: &KeeperSpec,
         environment: &dyn AppliedEnvironment,
     ) -> Result<Running, PhaseError> {
+        self.start_by(spec, environment, now() + PATIENCE)
+    }
+
+    /// Starts a keeper of `spec` from this test binary, with
+    /// `environment` as the resolved environment, which must start the app
+    /// by `deadline`.
+    fn start_by(
+        &self,
+        spec: &KeeperSpec,
+        environment: &dyn AppliedEnvironment,
+        deadline: Instant,
+    ) -> Result<Running, PhaseError> {
         let command = KeeperCommand::new(
             std::env::current_exe().unwrap(),
             ["--exact", "--nocapture", "--", ENTRY, "keep"]
@@ -250,7 +291,7 @@ impl Fixture {
             args: &self.args(),
             spec,
             environment,
-            deadline: now() + PATIENCE,
+            deadline,
         })
         .map(|kept| Running { kept })
     }
@@ -428,7 +469,6 @@ fn a_keeper_refuses_a_specification_it_cannot_read() {
         &Source,
         b"{\"schema\": \"phase/keeper/v9\"}".as_slice(),
         &mut output,
-        false,
     );
 
     assert_eq!(exit, KeeperExit::BadInput);
@@ -651,7 +691,7 @@ fn a_keeper_notes_its_start_restarts_and_exit_in_its_diagnostic_log_without_a_va
     let diagnostics = fixture.diagnostics_text();
     for expected in [
         "keeper ",
-        "in a session of its own",
+        "in group ",
         "the app started as process",
         "the app ended with exit status: 1",
         "restart 1 follows in 10 ms",
@@ -738,4 +778,132 @@ fn an_app_receives_only_path_home_and_its_resolved_environment() {
         fixture.log_text(),
         "path=/usr/bin:/bin tmp=unset manifest=unset greeting=hello\n"
     );
+}
+
+/// Reports whether a process with the id `pid` exists.
+fn exists(pid: u32) -> bool {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    rustix::process::test_kill_process(pid).is_ok()
+}
+
+#[test]
+fn a_keeper_whose_handshake_misses_the_deadline_is_unstartable_and_leaves_no_app_behind() {
+    let fixture = Fixture::of("slow-handshake");
+    let spec = fixture.spec("echo $$; exec sleep 30", Restart::No, Stop::default());
+
+    let error = fixture
+        .start_by(
+            &spec,
+            &Fixed(vec![("GREETING", "hello")]),
+            now() + Duration::from_millis(500),
+        )
+        .err()
+        .unwrap();
+
+    assert_eq!(error.code(), "phase::keeper::unstartable");
+    eventually("the app's pid in its log", || {
+        fixture.log_text().ends_with('\n')
+    });
+    let pid: u32 = fixture.log_text().trim().parse().unwrap();
+    eventually("the end of the app", || !exists(pid));
+}
+
+#[test]
+fn a_stop_request_while_the_keeper_resolves_an_environment_leaves_the_app_stopped() {
+    let fixture = Fixture::of("slow-resolve");
+    let restart = Restart::on_failure(limits(Some(3), Duration::from_millis(10), Resolve::Always));
+    let spec = fixture.spec("echo run; exit 1", restart, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the keeper's note of the restart", || {
+        fixture.diagnostics_text().contains("restart 1 follows")
+    });
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(fixture.log_text(), "run\n");
+}
+
+#[test]
+fn a_stop_request_during_a_backoff_leaves_the_app_stopped() {
+    let fixture = Fixture::new();
+    let long = Duration::from_secs(20);
+    let restart = Restart::on_failure(RestartLimits {
+        max: NonZeroU32::new(3),
+        backoff: Backoff::new(long, long).unwrap(),
+        resolve: Resolve::Never,
+    });
+    let spec = fixture.spec("echo run; exit 1", restart, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the keeper's note of the restart", || {
+        fixture.diagnostics_text().contains("restart 1 follows")
+    });
+    let asked = Instant::now();
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert!(asked.elapsed() < long);
+    assert_eq!(fixture.log_text(), "run\n");
+}
+
+#[test]
+fn a_keeper_leaves_a_record_entry_that_names_another_process_unchanged() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+    let app_process = running.kept.app.clone();
+    eventually("the keeper's record of the app", || {
+        fixture.recorded() == Some((EntryState::Running, Some(app_process.clone()), 0))
+    });
+    let other = HostProcess {
+        pid: 2,
+        started_at_us: 1,
+        group: 2,
+        boot_id: None,
+    };
+    let store = RunStore::new(&fixture.dir);
+    let key = ObjectKey::Process(app("api"), process("server"));
+    Journal::open(&store, &workspace(), PATIENCE)
+        .unwrap()
+        .restarted(&key, other.clone(), 7)
+        .unwrap();
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(
+        fixture.recorded(),
+        Some((EntryState::Running, Some(other), 7))
+    );
+    assert!(
+        fixture
+            .diagnostics_text()
+            .contains("the run record names another process, so the keeper skips")
+    );
+}
+
+#[test]
+fn a_specification_that_inherits_a_variable_other_than_path_and_home_is_refused() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec("true", Restart::No, Stop::default());
+    spec.inherited
+        .insert("TMPDIR".to_owned(), "/tmp".to_owned());
+    let bytes = serde_json::to_vec(&spec).unwrap();
+
+    let refused = read_spec(bytes.as_slice()).unwrap_err();
+
+    assert!(refused.contains("TMPDIR"), "{refused}");
+}
+
+#[test]
+fn a_specification_cannot_be_made_to_inherit_a_variable_other_than_path_and_home() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("true", Restart::No, Stop::default());
+
+    let refused = spec
+        .inheriting(BTreeMap::from([("TMPDIR".to_owned(), "/tmp".to_owned())]))
+        .unwrap_err();
+
+    assert_eq!(refused, NotInherited("TMPDIR".to_owned()));
 }

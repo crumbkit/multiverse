@@ -267,6 +267,20 @@ never blocks supervision. It notes its start, restarts, resolve failures,
 record-write failures and exit in `<log dir>/<app>.<process>.keeper.log`,
 which never holds a value and also receives its standard error.
 
+The keeper's record notes are written asynchronously, after the keeper has
+acted, so the record can lag the process. The write-ahead writes are the
+engine's own, which it makes under the lifecycle lock before it acts. A
+crash between the keeper's action and its note still leaves the record
+naming the running pid, which `phase sweep` checks. A keeper's note applies
+only while the record names the keeper's own process, so it never
+overwrites a process that another operation recorded meanwhile.
+
+When the keeper's handshake misses the deadline or cannot be read, the
+engine sends the keeper `TERM`, so it stops any process it started, waits
+the process's grace and kill wait, and then kills the keeper's group. A
+stop request during a backoff or while the keeper resolves an environment
+ends the keeper without a restart.
+
 When a restart needs a fresh environment, the keeper resolves it through
 the `EnvironmentSource` that the program linking phase passes to it, and
 applies it to the restarted process. When resolving fails, the keeper
