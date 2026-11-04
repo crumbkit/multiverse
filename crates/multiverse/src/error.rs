@@ -135,6 +135,24 @@ pub enum Error {
         /// Which range was searched.
         source: io::Error,
     },
+    /// The manifest declares containers, and no `docker` program is on
+    /// `PATH`.
+    DockerMissing {
+        /// Why the program could not start.
+        source: io::Error,
+    },
+    /// The `docker` program runs, and its daemon does not answer.
+    DockerUnavailable {
+        /// The last line that docker printed to standard error.
+        message: String,
+    },
+    /// A docker command failed or missed its deadline.
+    DockerFailed {
+        /// The docker command, such as `run`.
+        operation: &'static str,
+        /// The last line that docker printed to standard error.
+        message: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -226,6 +244,23 @@ impl fmt::Display for Error {
             Self::NoFreePort { source } => {
                 write!(formatter, "cannot find a free port: {source}")
             }
+            Self::DockerMissing { .. } => {
+                formatter.write_str("the manifest declares containers, and docker is not installed")
+            }
+            Self::DockerUnavailable { message } => {
+                formatter.write_str("the docker daemon does not answer")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
+            Self::DockerFailed { operation, message } => {
+                write!(formatter, "docker {operation} failed")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -238,7 +273,8 @@ impl std::error::Error for Error {
             | Self::Unwritable { source, .. }
             | Self::ProcessUnstartable { source, .. }
             | Self::NoFreePort { source }
-            | Self::Inaccessible { source, .. } => Some(source),
+            | Self::Inaccessible { source, .. }
+            | Self::DockerMissing { source } => Some(source),
             Self::CorruptRecord { source, .. } => Some(source),
             Self::RepositoryNotFound { .. }
             | Self::NoOrigin { .. }
@@ -249,7 +285,9 @@ impl std::error::Error for Error {
             | Self::MismatchedRecord { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
-            | Self::Busy { .. } => None,
+            | Self::Busy { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. } => None,
         }
     }
 }

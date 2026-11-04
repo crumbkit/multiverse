@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::manifest::{DEFAULT_READY_TIMEOUT, Manifest, ManifestError, ManifestProblem};
+use crate::manifest::{
+    DEFAULT_READY_TIMEOUT, Manifest, ManifestError, ManifestProblem, Published, Unit,
+};
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
     Manifest::parse(text, Path::new("/repo/mxv.toml"))
@@ -100,7 +102,7 @@ fn an_unknown_key_of_a_readiness_check_fails_and_names_the_key_and_its_line() {
 
 #[test]
 fn each_reserved_section_fails_with_its_name_and_line() {
-    for section in ["containers", "secrets", "actions"] {
+    for section in ["secrets", "actions"] {
         let (line, problem) = problem(&format!("ports = []\n\n[{section}.db]\nimage = \"x\"\n"));
         assert_eq!(line, Some(3), "{section}");
         assert_eq!(
@@ -301,4 +303,240 @@ fn a_cwd_that_leaves_the_repository_through_a_symbolic_link_fails_on_read() {
         matches!(&error.problem, ManifestProblem::Invalid { message } if message.contains("symbolic link")),
         "{error:?}"
     );
+}
+
+const WITH_CONTAINERS: &str = r#"
+ports = ["api", "dynamodb", "localstack"]
+
+[containers.dynamodb]
+image = "amazon/dynamodb-local:2.5.4"
+command = ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+ports = { 8000 = "dynamodb" }
+volumes = { data = "/data" }
+
+[containers.localstack]
+image = "localstack/localstack:4.0.3"
+env = { SERVICES = "s3,sqs" }
+ports = { 4566 = "localstack" }
+ready = { timeout_seconds = 90 }
+
+[processes.api]
+argv = ["cargo", "run", "--bin", "api"]
+ports = { PORT = "api", DYNAMODB_PORT = "dynamodb", LOCALSTACK_PORT = "localstack" }
+listen = "api"
+depends_on = ["dynamodb", "localstack"]
+"#;
+
+fn container_problem(body: &str) -> (Option<usize>, ManifestProblem) {
+    problem(&format!(
+        "ports = [\"db\", \"other\"]\n\n[containers.db]\n{body}"
+    ))
+}
+
+fn invalid_message(body: &str) -> String {
+    match container_problem(body).1 {
+        ManifestProblem::Invalid { message } => message,
+        other => panic!("expected an invalid manifest, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_manifest_of_containers_and_a_process_parses_with_the_containers_defaults() {
+    let manifest = parse(WITH_CONTAINERS).unwrap();
+    let dynamodb = &manifest.containers["dynamodb"];
+    assert_eq!(dynamodb.image, "amazon/dynamodb-local:2.5.4");
+    assert_eq!(dynamodb.command.as_ref().unwrap()[0], "-jar");
+    assert_eq!(
+        dynamodb.ports,
+        [Published {
+            container: 8000,
+            port: "dynamodb".to_owned()
+        }]
+    );
+    assert_eq!(dynamodb.volumes["data"], "/data");
+    let ready = dynamodb.ready.as_ref().unwrap();
+    assert_eq!(ready.port, "dynamodb");
+    assert_eq!(ready.timeout, DEFAULT_READY_TIMEOUT);
+    let localstack = &manifest.containers["localstack"];
+    assert!(localstack.command.is_none());
+    assert_eq!(localstack.env["SERVICES"], "s3,sqs");
+    assert_eq!(
+        localstack.ready.as_ref().unwrap().timeout,
+        Duration::from_secs(90)
+    );
+}
+
+#[test]
+fn the_start_order_puts_the_containers_that_a_process_depends_on_first() {
+    let manifest = parse(WITH_CONTAINERS).unwrap();
+    assert_eq!(
+        manifest.start_order(&["api".to_owned()]).unwrap(),
+        ["dynamodb", "localstack", "api"]
+    );
+    assert_eq!(
+        manifest.unit("dynamodb"),
+        Some(Unit::Container(&manifest.containers["dynamodb"]))
+    );
+    assert_eq!(
+        manifest.unit("api"),
+        Some(Unit::Process(&manifest.processes["api"]))
+    );
+    assert_eq!(manifest.unit("search"), None);
+}
+
+#[test]
+fn a_container_may_depend_on_a_process() {
+    let manifest = parse(
+        "ports = [\"db\"]\n\n[processes.seed]\nargv = [\"true\"]\n\n[containers.db]\nimage = \"busybox:1.37.0\"\nports = { 80 = \"db\" }\ndepends_on = [\"seed\"]\n",
+    )
+    .unwrap();
+    assert_eq!(manifest.start_order(&[]).unwrap(), ["seed", "db"]);
+}
+
+#[test]
+fn an_image_without_a_tag_or_with_the_latest_tag_fails_as_unpinned() {
+    for image in ["busybox", "busybox:latest", "localhost:5000/busybox"] {
+        let message = invalid_message(&format!("image = \"{image}\"\n"));
+        assert!(message.contains("pin"), "{image}: {message}");
+    }
+}
+
+#[test]
+fn an_image_pinned_by_digest_or_by_a_registry_and_tag_parses() {
+    for image in [
+        "busybox@sha256:2919d0172f7524b2d8df9e50066a682669e6d170ac0f6a49676d54358fe970b5",
+        "localhost:5000/team/busybox:1.37.0",
+    ] {
+        let text = format!("[containers.db]\nimage = \"{image}\"\n");
+        assert_eq!(parse(&text).unwrap().containers["db"].image, image);
+    }
+}
+
+#[test]
+fn an_image_that_starts_with_a_dash_fails_as_invalid() {
+    let message = invalid_message("image = \"--privileged:1\"\n");
+    assert!(message.contains("image"), "{message}");
+}
+
+#[test]
+fn a_container_without_an_image_fails_as_invalid() {
+    let (line, problem) = container_problem("ports = { 80 = \"db\" }\n");
+    assert_eq!(line, Some(3));
+    assert!(matches!(problem, ManifestProblem::Invalid { .. }));
+}
+
+#[test]
+fn a_container_port_that_is_not_a_number_from_1_to_65535_fails_with_its_line() {
+    for key in ["0", "65536", "http"] {
+        let (line, problem) = container_problem(&format!(
+            "image = \"busybox:1.37.0\"\nports = {{ {key} = \"db\" }}\n"
+        ));
+        assert_eq!(line, Some(5), "{key}");
+        assert!(matches!(problem, ManifestProblem::Invalid { .. }), "{key}");
+    }
+}
+
+#[test]
+fn a_container_that_publishes_an_undeclared_port_fails_with_its_line() {
+    let (line, _) = container_problem("image = \"busybox:1.37.0\"\nports = { 80 = \"nope\" }\n");
+    assert_eq!(line, Some(5));
+}
+
+#[test]
+fn a_port_that_a_container_publishes_and_a_process_listens_on_fails_as_two_listeners() {
+    let message = match problem(
+        "ports = [\"db\"]\n\n[containers.db]\nimage = \"busybox:1.37.0\"\nports = { 80 = \"db\" }\n\n[processes.api]\nargv = [\"true\"]\nports = { PORT = \"db\" }\nlisten = \"db\"\n",
+    )
+    .1
+    {
+        ManifestProblem::Invalid { message } => message,
+        other => panic!("{other:?}"),
+    };
+    assert!(message.contains("at most one listener"), "{message}");
+}
+
+#[test]
+fn a_container_and_a_process_with_one_name_fail_as_invalid() {
+    let message = match problem(
+        "[containers.db]\nimage = \"busybox:1.37.0\"\n\n[processes.db]\nargv = [\"true\"]\n",
+    )
+    .1
+    {
+        ManifestProblem::Invalid { message } => message,
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        message.contains("both a process and a container"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_volume_path_that_is_not_absolute_or_holds_a_colon_fails_as_invalid() {
+    for path in ["data", "/data:ro", "/data,x"] {
+        let message = invalid_message(&format!(
+            "image = \"busybox:1.37.0\"\nvolumes = {{ data = \"{path}\" }}\n"
+        ));
+        assert!(message.contains("volume"), "{path}: {message}");
+    }
+}
+
+#[test]
+fn a_volume_name_with_a_slash_fails_as_invalid() {
+    let message =
+        invalid_message("image = \"busybox:1.37.0\"\nvolumes = { \"a/b\" = \"/data\" }\n");
+    assert!(message.contains("volume"), "{message}");
+}
+
+#[test]
+fn a_ready_table_of_a_container_that_publishes_two_ports_must_name_one() {
+    let message = invalid_message(
+        "image = \"busybox:1.37.0\"\nports = { 80 = \"db\", 81 = \"other\" }\nready = { timeout_seconds = 5 }\n",
+    );
+    assert!(message.contains("ready"), "{message}");
+    let manifest = parse(
+        "ports = [\"db\", \"other\"]\n\n[containers.db]\nimage = \"busybox:1.37.0\"\nports = { 80 = \"db\", 81 = \"other\" }\nready = { port = \"other\" }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.containers["db"].ready.as_ref().unwrap().port,
+        "other"
+    );
+}
+
+#[test]
+fn a_container_ready_port_that_it_does_not_publish_fails() {
+    let message = invalid_message(
+        "image = \"busybox:1.37.0\"\nports = { 80 = \"db\" }\nready = { port = \"other\" }\n",
+    );
+    assert!(message.contains("publish"), "{message}");
+}
+
+#[test]
+fn a_container_that_publishes_no_port_has_no_readiness_check() {
+    let manifest = parse("[containers.db]\nimage = \"busybox:1.37.0\"\n").unwrap();
+    assert!(manifest.containers["db"].ready.is_none());
+}
+
+#[test]
+fn an_unknown_key_of_a_container_fails_and_names_the_key() {
+    let (_, problem) = container_problem("image = \"busybox:1.37.0\"\nbinds = []\n");
+    assert_eq!(
+        problem,
+        ManifestProblem::UnknownKey {
+            key: "binds".to_owned()
+        }
+    );
+}
+
+#[test]
+fn a_container_name_or_a_volume_name_with_a_dot_fails_as_invalid() {
+    let (_, problem) = problem("[containers.\"db.x\"]\nimage = \"busybox:1.37.0\"\n");
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
+    );
+    let message =
+        invalid_message("image = \"busybox:1.37.0\"\nvolumes = { \"data.x\" = \"/data\" }\n");
+    assert!(message.contains("volume"), "{message}");
 }

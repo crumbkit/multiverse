@@ -89,8 +89,9 @@ exits with 1.
 ## Running an app
 
 A repository declares its app in `mxv.toml` at its root. `mxv up` starts
-the processes it declares in each workspace of that repository, in the
-background, and returns once each is ready. No mxv process stays running.
+the processes and containers it declares in each workspace of that
+repository, in the background, and returns once each is ready. No mxv
+process stays running.
 
 ```toml
 version = 1                                  # optional; a higher version fails
@@ -140,9 +141,93 @@ connection within 60 seconds. A process with neither counts as started once
 it has run for half a second; when it exits sooner, `up` fails with
 `mxv::process::exited`.
 
-The sections `containers`, `secrets` and `actions` are reserved for later
-versions and fail with `mxv::manifest::reserved`. A manifest larger than
-64 KiB fails with `mxv::manifest::invalid`.
+The sections `secrets` and `actions` are reserved for later versions and
+fail with `mxv::manifest::reserved`. A manifest larger than 64 KiB fails
+with `mxv::manifest::invalid`.
+
+### Containers
+
+A manifest may declare containers beside its processes. mxv runs them with
+the `docker` program on `PATH`. This manifest runs DynamoDB Local and
+LocalStack for an `api` process:
+
+```toml
+ports = ["api", "dynamodb", "localstack"]
+
+[containers.dynamodb]
+image = "amazon/dynamodb-local:2.5.4"        # pinned by a tag or a digest
+command = ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+ports = { 8000 = "dynamodb" }                # container port = port name
+volumes = { data = "/data" }                 # volume name = mount path
+
+[containers.localstack]
+image = "localstack/localstack:4.0.3"
+env = { SERVICES = "s3,sqs" }
+ports = { 4566 = "localstack" }
+ready = { timeout_seconds = 120 }
+
+[processes.api]
+argv = ["cargo", "run", "--bin", "api"]
+ports = { PORT = "api", DYNAMODB_PORT = "dynamodb", LOCALSTACK_PORT = "localstack" }
+listen = "api"
+depends_on = ["dynamodb", "localstack"]
+```
+
+| Key | Meaning |
+| --- | --- |
+| `containers.<name>.image` | The image. It is required, and it must be pinned by a tag other than `latest` or by a digest. |
+| `containers.<name>.command` | Arguments that replace the image's command. It is optional. |
+| `containers.<name>.env` | Variables that the container receives. |
+| `containers.<name>.ports` | The TCP ports that mxv publishes: each key is a container port from 1 to 65535, and each value names a port of `ports`. A container that publishes a port is that port's listener, and a port has at most one listener, process or container. |
+| `containers.<name>.volumes` | Named volumes: each key names a volume, and each value is the absolute path it mounts at inside the container. mxv mounts no directory of the host. |
+| `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. |
+| `containers.<name>.depends_on` | Processes or containers that start, and are ready, before this one. |
+
+Processes and containers share one set of names, and either may depend on
+the other. A process receives a container's host port through its own
+`ports`, as `api` receives `DYNAMODB_PORT` above.
+
+mxv names each container `mxv-<workspace>.<name>` and each volume
+`mxv-<workspace>.<volume>`, and labels both with `mxv.workspace=<workspace>`.
+A container also carries `mxv.container=<name>`. A container or volume name
+never holds `.`, so the last `.` separates it from the workspace's name, and
+two workspaces never share a container or a volume. mxv publishes each port
+on 127.0.0.1 only.
+
+- `mxv up` checks that docker answers, then that each published port is
+  free, removes a stopped container of the same name, creates the missing
+  volumes and runs the container detached. Docker pulls the image when it
+  is missing. `docker run` has a deadline of 10 minutes for the pull, and
+  each other docker command one of 30 seconds. A container with a readiness
+  port is ready when that port answers. Docker's port proxy accepts a
+  connection before anything in the container listens and then closes it,
+  so mxv counts the port as answering only when a connection stays open for
+  0.3 seconds or the container sends data. A container without a readiness
+  port is ready once it has run for half a second. When the container stops
+  first, `up` fails with `mxv::process::exited` and its exit code; when it
+  misses its timeout, `up` removes it and fails with
+  `mxv::process::not_ready`.
+- `mxv down` stops each container with `docker stop`, which sends SIGTERM
+  and then SIGKILL after 10 seconds, and removes it with its anonymous
+  volumes. Its named volumes stay, with their data.
+- `mxv status` reports a container's state as docker reports it, with
+  `kind` set to `container` and `pid` null. Docker reports a container that
+  a signal ended as code 128 plus the signal's number, which `status` reads
+  as it does for a process.
+- `mxv logs` reads `<container>.log`, which a detached `docker logs
+  --follow` appends to while the container exists, so the log stays after
+  `down` removes the container. Each `up` moves the previous log to
+  `<container>.log.1`, as for a process.
+
+When the manifest declares containers and no `docker` program is on `PATH`,
+`up` fails with `mxv::docker::not_found`. When docker's daemon does not
+answer, it fails with `mxv::docker::unavailable`. A docker command that
+fails, such as a `docker run` whose image cannot be pulled, fails with
+`mxv::docker::failed` and docker's last line of error output. A manifest
+without containers never runs docker. `mxv status` and `mxv logs` of a workspace
+whose manifest declares containers fail with the same codes. `mxv down`
+still stops the workspace's processes, because a container cannot run
+while docker is missing or its daemon is down.
 
 Each process verb works on the workspace that `-w/--workspace` names, or on
 the one that holds the current directory when it names none. Its positional
@@ -236,8 +321,17 @@ lock when its command ends, so a crashed mxv leaves no lock behind.
 are all on its base, removes the workspace directory and `AGENTS.md`, and
 deletes the record. It refuses, and changes nothing, in these cases:
 
-- The workspace's processes run. The refusal is `mxv::workspace::running`,
-  and `--force` stops the processes before it removes the workspace.
+- The workspace's processes or containers run. The refusal is
+  `mxv::workspace::running`, and `--force` stops them before it removes
+  the workspace.
+- The workspace has docker volumes. A volume may hold the only copy of a
+  database, and docker cannot tell cheaply whether a volume holds data, so
+  mxv treats every volume as holding data. The refusal is
+  `mxv::workspace::volumes`, which lists the volumes, and
+  `--delete-volumes` deletes them after the workspace is removed. `--force`
+  does not delete volumes. mxv also removes the workspace's stopped
+  containers. When docker's daemon does not answer, mxv cannot list the
+  volumes, so the removal goes ahead and leaves them in docker.
 - A checkout has uncommitted changes or untracked files. The refusal is
   `mxv::workspace::dirty`, and `--force` discards the changes.
 - A checkout holds ignored files outside the disposable set, such as

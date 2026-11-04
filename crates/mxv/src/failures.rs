@@ -72,6 +72,14 @@ pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
 /// `mxv up` that still waits for a process to be ready.
 pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
+/// The code of a manifest that declares containers on a machine without a
+/// `docker` program on `PATH`.
+pub const DOCKER_NOT_FOUND: Code = Code::new("mxv", "docker", "not_found");
+/// The code of a docker daemon that does not answer.
+pub const DOCKER_UNAVAILABLE: Code = Code::new("mxv", "docker", "unavailable");
+/// The code of a docker command that failed or missed its deadline, such as
+/// a `docker run` whose image cannot be pulled.
+pub const DOCKER_FAILED: Code = Code::new("mxv", "docker", "failed");
 /// The code of an environment in which mxv finds no home directory, so it
 /// has no directory for the records, the config file or the default root.
 pub const ENVIRONMENT_NO_DIRECTORY: Code = Code::new("mxv", "environment", "no_directory");
@@ -240,6 +248,9 @@ pub(crate) const CODES: &[&Code] = &[
     &PROCESS_TABLE_UNREADABLE,
     &PORT_EXHAUSTED,
     &WORKSPACE_BUSY,
+    &DOCKER_NOT_FOUND,
+    &DOCKER_UNAVAILABLE,
+    &DOCKER_FAILED,
 ];
 
 /// Returns `path` as text for a field or a hint.
@@ -332,6 +343,9 @@ impl Failure for MxvFailure {
                 Error::NoFreePort { .. } => &PORT_EXHAUSTED,
                 Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
+                Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
+                Error::DockerUnavailable { .. } => &DOCKER_UNAVAILABLE,
+                Error::DockerFailed { .. } => &DOCKER_FAILED,
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
                 // mxv gives it a code of its own.
@@ -538,6 +552,15 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::Busy { .. } => hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a process to be ready, and run the command again",
         ),
+        Error::DockerMissing { .. } => hint(
+            "install docker and put it on PATH, or remove the containers from mxv.toml, and run the command again",
+        ),
+        Error::DockerUnavailable { .. } => hint(
+            "start the docker daemon, such as by opening Docker Desktop, and run the command again",
+        ),
+        Error::DockerFailed { operation, .. } => hint(format!(
+            "read docker's message, fix what `docker {operation}` reports, such as an image name that cannot be pulled, and run the command again"
+        )),
         _ => hint("run the command again"),
     }
 }
@@ -583,6 +606,11 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("version", *version),
         ],
         Error::ProcessUnstartable { process, .. } => vec![Field::new("process", process)],
+        Error::DockerUnavailable { message } => vec![Field::new("message", message)],
+        Error::DockerFailed { operation, message } => vec![
+            Field::new("operation", *operation),
+            Field::new("message", message),
+        ],
         _ => Vec::new(),
     }
 }

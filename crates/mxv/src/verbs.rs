@@ -166,12 +166,23 @@ pub(crate) fn remove(
     // Running processes stop the removal unless it is forced, and a forced
     // removal stops them after the person confirms.
     let mut running = Vec::new();
+    let mut volumes = Vec::new();
     if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
         running = processes::running(environment, &workspace)?;
         if !running.is_empty() && !args.force {
             return Err(RunFailure::Running {
                 workspace: name.to_string(),
                 processes: running,
+            }
+            .into());
+        }
+        // A volume may hold the only copy of a database, so removing it
+        // needs its own flag, and `--force` alone keeps the workspace.
+        volumes = processes::volumes(environment, &name)?;
+        if !volumes.is_empty() && !args.delete_volumes {
+            return Err(RunFailure::Volumes {
+                workspace: name.to_string(),
+                volumes,
             }
             .into());
         }
@@ -200,6 +211,7 @@ pub(crate) fn remove(
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
         RemovalOutcome::Done(removed) => {
             processes::forget(environment, &name)?;
+            processes::delete_volumes(environment, &volumes)?;
             Ok(Prose::new(RemovalResult::new(&removed, false)))
         }
         RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {

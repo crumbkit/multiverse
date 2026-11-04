@@ -661,10 +661,10 @@ fn an_unknown_key_in_the_manifest_fails_with_the_key_and_its_line() {
 #[test]
 fn a_reserved_section_in_the_manifest_fails_with_the_reserved_code() {
     let setup = Setup::new();
-    setup.workspace("triage", "[containers.db]\nimage = \"postgres\"\n");
+    setup.workspace("triage", "[secrets.db]\nsource = \"file\"\n");
     let (_, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(document["code"], "mxv::manifest::reserved");
-    assert_eq!(document["fields"]["section"], "containers");
+    assert_eq!(document["fields"]["section"], "secrets");
 }
 
 #[test]

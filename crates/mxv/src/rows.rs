@@ -6,7 +6,7 @@ use std::fmt;
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
-    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, ProcessState, ProcessStatus, Removal,
+    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Kind, ProcessState, ProcessStatus, Removal,
     Workspace,
 };
 use schemars::JsonSchema;
@@ -462,17 +462,19 @@ fn commits(count: u32) -> String {
     }
 }
 
-/// One process of a workspace, as `up`, `down`, `restart` and `status`
-/// print it.
+/// One process or container of a workspace, as `up`, `down`, `restart`
+/// and `status` print it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ProcessRow {
-    /// The process's name in the manifest.
+    /// The process's or container's name in the manifest.
     name: String,
+    /// `process` or `container`.
+    kind: KindName,
     /// `running`, `exited` when it ended on its own or something other
     /// than `mxv down` stopped it, or `stopped`.
     state: StateName,
-    /// The process id, which is also its process group's id, while it
-    /// runs.
+    /// The process id, which is also its process group's id, while a
+    /// process runs, and null for a container.
     pid: Option<u32>,
     /// The exit code of an exited process, or null when a signal ended it
     /// or it has not exited.
@@ -484,10 +486,21 @@ pub(crate) struct ProcessRow {
     /// such as a child it started in the background, which `mxv down`
     /// stops.
     group_alive: bool,
-    /// The ports that the process receives, as `VARIABLE=port`.
+    /// The ports that a process receives, as `VARIABLE=port`, or that a
+    /// container publishes, as `port-name=port`.
     ports: Vec<String>,
     /// The process's log file, which `mxv logs` prints.
     log: String,
+}
+
+/// Whether a row is a process or a container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum KindName {
+    /// A process that mxv starts on the host.
+    Process,
+    /// A container that mxv runs with docker.
+    Container,
 }
 
 /// The state of a process, as a row prints it.
@@ -505,6 +518,7 @@ pub(crate) enum StateName {
 impl Row for ProcessRow {
     const COLUMNS: &'static [&'static str] = &[
         "name",
+        "kind",
         "state",
         "pid",
         "code",
@@ -525,12 +539,16 @@ impl Row for ProcessRow {
 impl From<&ProcessStatus> for ProcessRow {
     fn from(status: &ProcessStatus) -> Self {
         let (state, pid, code, signal) = match status.state {
-            ProcessState::Running { pid } => (StateName::Running, Some(pid), None, None),
+            ProcessState::Running { pid } => (StateName::Running, pid, None, None),
             ProcessState::Exited { code, signal } => (StateName::Exited, None, code, signal),
             ProcessState::Stopped => (StateName::Stopped, None, None, None),
         };
         Self {
             name: status.name.clone(),
+            kind: match status.kind {
+                Kind::Process => KindName::Process,
+                Kind::Container => KindName::Container,
+            },
             state,
             pid,
             code,

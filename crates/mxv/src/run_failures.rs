@@ -13,6 +13,8 @@ use multiverse::{MANIFEST_FILE, ManifestError, ManifestProblem};
 pub const WORKSPACE_NOT_CURRENT: Code = Code::new("mxv", "workspace", "not_current");
 /// The code of a removal that running processes stop.
 pub const WORKSPACE_RUNNING: Code = Code::new("mxv", "workspace", "running");
+/// The code of a removal that the workspace's docker volumes stop.
+pub const WORKSPACE_VOLUMES: Code = Code::new("mxv", "workspace", "volumes");
 /// The code of a checkout without an `mxv.toml`.
 pub const MANIFEST_NOT_FOUND: Code = Code::new("mxv", "manifest", "not_found");
 /// The code of a manifest key that the schema does not declare.
@@ -42,6 +44,7 @@ pub const PORT_NOT_FOUND: Code = Code::new("mxv", "port", "not_found");
 pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_NOT_CURRENT,
     &WORKSPACE_RUNNING,
+    &WORKSPACE_VOLUMES,
     &MANIFEST_NOT_FOUND,
     &MANIFEST_UNKNOWN_KEY,
     &MANIFEST_NEWER,
@@ -144,6 +147,14 @@ pub(crate) enum RunFailure {
         /// The running processes.
         processes: Vec<String>,
     },
+    /// The workspace has docker volumes, which may hold data, so `remove`
+    /// keeps the workspace unless `--delete-volumes` allows deleting them.
+    Volumes {
+        /// The workspace's name.
+        workspace: String,
+        /// The volumes.
+        volumes: Vec<String>,
+    },
 }
 
 /// Returns `path` as text for a field or a hint.
@@ -161,6 +172,7 @@ impl Failure for RunFailure {
         match self {
             Self::NotCurrent => &WORKSPACE_NOT_CURRENT,
             Self::Running { .. } => &WORKSPACE_RUNNING,
+            Self::Volumes { .. } => &WORKSPACE_VOLUMES,
             Self::ManifestMissing { .. } => &MANIFEST_NOT_FOUND,
             Self::Manifest(error) => match error.problem {
                 ManifestProblem::UnknownKey { .. } => &MANIFEST_UNKNOWN_KEY,
@@ -187,6 +199,9 @@ impl Failure for RunFailure {
             Self::Running { workspace, .. } => {
                 Recovery::Run(Call::new(&["down"]).value("workspace", workspace))
             }
+            Self::Volumes { workspace, .. } => hint(format!(
+                "copy out any data you need from the volumes, then run `mxv remove --delete-volumes {workspace}`, which deletes them"
+            )),
             Self::ManifestMissing { checkout } => hint(format!(
                 "write an {MANIFEST_FILE} that declares the app's processes at the root of {}",
                 shown(checkout)
@@ -257,6 +272,10 @@ impl Failure for RunFailure {
             } => vec![
                 Field::new("workspace", workspace),
                 Field::new("processes", FieldValue::list(processes.iter())),
+            ],
+            Self::Volumes { workspace, volumes } => vec![
+                Field::new("workspace", workspace),
+                Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
             Self::ManifestMissing { checkout } => {
                 vec![Field::new("path", shown(&checkout.join(MANIFEST_FILE)))]
@@ -352,6 +371,11 @@ impl fmt::Display for RunFailure {
                 formatter,
                 "the workspace {workspace} has running processes: {}",
                 processes.join(", ")
+            ),
+            Self::Volumes { workspace, volumes } => write!(
+                formatter,
+                "the workspace {workspace} has docker volumes, which may hold data: {}",
+                volumes.join(", ")
             ),
             Self::ManifestMissing { checkout } => write!(
                 formatter,

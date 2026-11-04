@@ -13,6 +13,12 @@
 //! process that started at another time, has exited without a code.
 //! `mxv down` deletes the run record and the exit file and keeps both
 //! logs; `mxv remove` deletes the whole directory.
+//!
+//! A container of the manifest has no run record: docker holds its state,
+//! and mxv finds it by its labels, as the `docker` module describes. Its
+//! log is `<container>.log` too, which a detached `docker logs --follow`
+//! appends to while the container exists, so the log outlives the
+//! container that `mxv down` removes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -25,14 +31,16 @@ use rustix::process::Signal;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
+use crate::docker;
 use crate::error::Error;
-use crate::manifest::{Manifest, Process};
+use crate::manifest::{Manifest, Process, Unit};
 use crate::name::WorkspaceName;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
 use crate::process::{self, Launch, Launched};
 use crate::record::Workspace;
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
+mod containers;
 #[cfg(test)]
 mod tests;
 
@@ -88,10 +96,11 @@ struct RunRecord {
 /// The state of one process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessState {
-    /// The process runs.
+    /// The process or container runs.
     Running {
-        /// Its process id, which is also its process group's id.
-        pid: u32,
+        /// The process id of a process, which is also its process group's
+        /// id, or `None` for a container.
+        pid: Option<u32>,
     },
     /// The process ended on its own, or something other than `mxv down`
     /// stopped it.
@@ -107,12 +116,23 @@ pub enum ProcessState {
     Stopped,
 }
 
-/// One process of a workspace and its state.
+/// Whether a name of the manifest is a process or a container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A process that mxv starts on the host.
+    Process,
+    /// A container that mxv runs with docker.
+    Container,
+}
+
+/// One process or container of a workspace and its state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProcessStatus {
-    /// The process's name.
+    /// The process's or container's name.
     pub name: String,
+    /// Whether it is a process or a container.
+    pub kind: Kind,
     /// Its state.
     pub state: ProcessState,
     /// The host ports it receives, by variable name.
@@ -364,7 +384,9 @@ impl Runs {
             return Ok(exited(code));
         }
         if process::start_time(record.pid)?.as_deref() == Some(record.started.as_str()) {
-            return Ok(ProcessState::Running { pid: record.pid });
+            return Ok(ProcessState::Running {
+                pid: Some(record.pid),
+            });
         }
         // The shell writes the exit file before it exits, so a process that
         // ended between the two reads above has its code by now.
@@ -386,11 +408,12 @@ impl Runs {
         workspace: &Workspace,
         manifest: Option<&Manifest>,
     ) -> Result<Vec<ProcessStatus>, Error> {
-        let names = self.known(workspace, manifest)?;
+        let containers = self.containers(workspace, manifest);
+        let names = self.known(workspace, manifest, &containers)?;
         self.cap_logs(&workspace.name, &names)?;
         names
             .iter()
-            .map(|process| self.process_status(workspace, manifest, process))
+            .map(|process| self.unit_status(workspace, manifest, &containers, process))
             .collect()
     }
 
@@ -409,6 +432,21 @@ impl Runs {
         Ok(())
     }
 
+    /// Returns the status of the process or container `name`.
+    fn unit_status(
+        &self,
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+        containers: &BTreeSet<String>,
+        name: &str,
+    ) -> Result<ProcessStatus, Error> {
+        if containers.contains(name) {
+            self.container_status(workspace, manifest, name)
+        } else {
+            self.process_status(workspace, manifest, name)
+        }
+    }
+
     /// Reports whether `process` of the workspace `name` runs, or has left
     /// a process group with members behind, so its log may still grow.
     ///
@@ -416,13 +454,18 @@ impl Runs {
     ///
     /// Returns the errors of [`Runs::status`].
     pub fn writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+        if self.record(name, process)?.is_none() {
+            return Ok(Self::container_runs(name, process));
+        }
         Ok(
             matches!(self.state(name, process)?, ProcessState::Running { .. })
                 || self.group_lives(name, process)?,
         )
     }
 
-    /// Returns the names of the processes of `workspace` that run.
+    /// Returns the names of the processes and containers of `workspace`
+    /// that run: the processes in name order, then the containers in name
+    /// order.
     ///
     /// # Errors
     ///
@@ -438,6 +481,7 @@ impl Runs {
                 running.push(process);
             }
         }
+        running.extend(Self::running_containers(&workspace.name));
         Ok(running)
     }
 
@@ -451,19 +495,25 @@ impl Runs {
         }
     }
 
-    /// Returns the manifest's processes in start order, then the other
-    /// processes that run records name.
+    /// Returns the manifest's processes and containers in start order,
+    /// then the other processes that run records name and the other
+    /// `containers`.
     fn known(
         &self,
         workspace: &Workspace,
         manifest: Option<&Manifest>,
+        containers: &BTreeSet<String>,
     ) -> Result<Vec<String>, Error> {
         let mut names = manifest
             .and_then(|manifest| manifest.start_order(&[]).ok())
             .unwrap_or_default();
-        for process in self.recorded(&workspace.name)? {
-            if !names.contains(&process) {
-                names.push(process);
+        for name in self
+            .recorded(&workspace.name)?
+            .into_iter()
+            .chain(containers.iter().cloned())
+        {
+            if !names.contains(&name) {
+                names.push(name);
             }
         }
         Ok(names)
@@ -488,6 +538,7 @@ impl Runs {
             && self.group_lives(&workspace.name, process)?;
         Ok(ProcessStatus {
             name: process.to_owned(),
+            kind: Kind::Process,
             state,
             ports,
             log: self.log(&workspace.name, process),
@@ -534,19 +585,34 @@ impl Runs {
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
         };
         self.cap_logs(&workspace.name, &order)?;
+        if order
+            .iter()
+            .any(|name| manifest.containers.contains_key(name))
+        {
+            docker::check()?;
+        }
         self.assign_ports(store, workspace, manifest, &BTreeSet::new())?;
         let mut started = Vec::new();
         for process in &order {
-            let Some(declared) = manifest.processes.get(process) else {
-                return Ok(UpOutcome::UnknownProcess(process.clone()));
+            let started_one = match manifest.unit(process) {
+                None => return Ok(UpOutcome::UnknownProcess(process.clone())),
+                Some(Unit::Container(declared)) => {
+                    if Self::container_runs(&workspace.name, process) {
+                        continue;
+                    }
+                    self.start_container(workspace, checkout, process, declared)
+                }
+                Some(Unit::Process(declared)) => {
+                    if matches!(
+                        self.state(&workspace.name, process)?,
+                        ProcessState::Running { .. }
+                    ) {
+                        continue;
+                    }
+                    self.start(workspace, checkout, process, declared)
+                }
             };
-            if matches!(
-                self.state(&workspace.name, process)?,
-                ProcessState::Running { .. }
-            ) {
-                continue;
-            }
-            match self.start(workspace, checkout, process, declared) {
+            match started_one {
                 Ok(None) => started.push(process),
                 Ok(Some(outcome)) => {
                     self.roll_back(&workspace.name, &started);
@@ -558,9 +624,10 @@ impl Runs {
                 }
             }
         }
+        let containers: BTreeSet<String> = manifest.containers.keys().cloned().collect();
         let mut statuses = Vec::new();
         for process in &order {
-            statuses.push(self.process_status(workspace, Some(manifest), process)?);
+            statuses.push(self.unit_status(workspace, Some(manifest), &containers, process)?);
         }
         Ok(UpOutcome::Up(statuses))
     }
@@ -571,6 +638,10 @@ impl Runs {
     /// because the caller reports the failure that stopped `up`.
     fn roll_back(&self, name: &WorkspaceName, started: &[&String]) {
         for process in started.iter().rev() {
+            if self.record(name, process).ok().flatten().is_none() {
+                let _ = docker::remove(&docker::container_name(name, process), self.grace);
+                continue;
+            }
             if let Ok(Some(record)) = self.record(name, process) {
                 self.stop_group(record.pid);
             }
@@ -725,13 +796,14 @@ impl Runs {
         manifest: Option<&Manifest>,
         names: &[String],
     ) -> Result<DownOutcome, Error> {
-        let known = self.known(workspace, manifest)?;
+        let containers = self.existing_containers(&workspace.name, manifest);
+        let known = self.known(workspace, manifest, &containers)?;
         self.cap_logs(&workspace.name, &known)?;
         let recorded = self.recorded(&workspace.name)?;
         let targets: Vec<&String> = if names.is_empty() {
             known
                 .iter()
-                .filter(|process| recorded.contains(process))
+                .filter(|process| recorded.contains(process) || containers.contains(*process))
                 .collect()
         } else {
             if let Some(unknown) = names.iter().find(|name| !known.contains(name)) {
@@ -747,6 +819,24 @@ impl Runs {
             // A record whose pid now names another process's group is
             // stale: its group is gone, so `down` drops the record and
             // signals nothing.
+            let is_container = manifest
+                .is_some_and(|manifest| manifest.containers.contains_key(process))
+                || (!recorded.contains(process) && containers.contains(process));
+            if is_container {
+                if containers.contains(process) {
+                    docker::remove(
+                        &docker::container_name(&workspace.name, process),
+                        self.grace,
+                    )?;
+                }
+                results.push(Ok(self.container_status_of(
+                    workspace,
+                    manifest,
+                    process,
+                    ProcessState::Stopped,
+                )));
+                continue;
+            }
             if let Some(record) = self.record(&workspace.name, process)?
                 && owns_group(&record)?
                 && !self.stop_group(record.pid)
@@ -871,13 +961,19 @@ impl Runs {
         Ok(Ok(()))
     }
 
-    /// Deletes every run file and log of the workspace `name`. Deleting
-    /// files that do not exist succeeds.
+    /// Removes the stopped containers of the workspace `name`, and deletes
+    /// every run file and log of it. Deleting files that do not exist
+    /// succeeds. The workspace's volumes stay; [`Runs::delete_volumes`]
+    /// deletes them.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unwritable`] when the directory cannot be deleted.
+    /// Returns the docker errors of [`Runs::down`], and
+    /// [`Error::Unwritable`] when the directory cannot be deleted.
     pub fn forget(&self, name: &WorkspaceName) -> Result<(), Error> {
+        for container in docker::listed(name) {
+            docker::remove(&docker::container_name(name, &container), self.grace)?;
+        }
         let dir = self.workspace_dir(name);
         match fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),

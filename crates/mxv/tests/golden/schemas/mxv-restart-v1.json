@@ -45,8 +45,23 @@
     "data"
   ],
   "$defs": {
+    "KindName": {
+      "description": "Whether a row is a process or a container.",
+      "oneOf": [
+        {
+          "description": "A process that mxv starts on the host.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "A container that mxv runs with docker.",
+          "type": "string",
+          "const": "container"
+        }
+      ]
+    },
     "ProcessRow": {
-      "description": "One process of a workspace, as `up`, `down`, `restart` and `status`\nprint it.",
+      "description": "One process or container of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
       "type": "object",
       "properties": {
         "code": {
@@ -61,16 +76,20 @@
           "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
           "type": "boolean"
         },
+        "kind": {
+          "description": "`process` or `container`.",
+          "$ref": "#/$defs/KindName"
+        },
         "log": {
           "description": "The process's log file, which `mxv logs` prints.",
           "type": "string"
         },
         "name": {
-          "description": "The process's name in the manifest.",
+          "description": "The process's or container's name in the manifest.",
           "type": "string"
         },
         "pid": {
-          "description": "The process id, which is also its process group's id, while it\nruns.",
+          "description": "The process id, which is also its process group's id, while a\nprocess runs, and null for a container.",
           "type": [
             "integer",
             "null"
@@ -79,7 +98,7 @@
           "minimum": 0
         },
         "ports": {
-          "description": "The ports that the process receives, as `VARIABLE=port`.",
+          "description": "The ports that a process receives, as `VARIABLE=port`, or that a\ncontainer publishes, as `port-name=port`.",
           "type": "array",
           "items": {
             "type": "string"
@@ -100,6 +119,7 @@
       },
       "required": [
         "name",
+        "kind",
         "state",
         "pid",
         "code",

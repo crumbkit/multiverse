@@ -501,7 +501,25 @@ pub(crate) fn stop_all(
     stop_every(&context, &lock, None)
 }
 
-/// Deletes the run files and logs of the workspace `name`.
+/// Removes the stopped containers of the workspace `name` and deletes its
+/// run files and logs.
 pub(crate) fn forget(environment: &Environment, name: &WorkspaceName) -> Result<(), MxvFailure> {
     Ok(Runs::new(environment.runs()?).forget(name)?)
+}
+
+/// Returns the docker volumes of the workspace `name`, for the refusal of
+/// `mxv remove`.
+pub(crate) fn volumes(
+    environment: &Environment,
+    name: &WorkspaceName,
+) -> Result<Vec<String>, MxvFailure> {
+    Ok(Runs::new(environment.runs()?).volumes(name))
+}
+
+/// Deletes the docker volumes `volumes`, for `mxv remove --delete-volumes`.
+pub(crate) fn delete_volumes(
+    environment: &Environment,
+    volumes: &[String],
+) -> Result<(), MxvFailure> {
+    Ok(Runs::new(environment.runs()?).delete_volumes(volumes)?)
 }

@@ -167,13 +167,14 @@ mxv up -w reading-list web
 
 ### Columns
 
-- `name`: The process's name in the manifest.
+- `name`: The process's or container's name in the manifest.
+- `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
-- `pid`: The process id, which is also its process group's id, while it runs.
+- `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
 - `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
-- `ports`: The ports that the process receives, as `VARIABLE=port`.
+- `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
 
@@ -202,13 +203,14 @@ mxv down -w reading-list
 
 ### Columns
 
-- `name`: The process's name in the manifest.
+- `name`: The process's or container's name in the manifest.
+- `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
-- `pid`: The process id, which is also its process group's id, while it runs.
+- `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
 - `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
-- `ports`: The ports that the process receives, as `VARIABLE=port`.
+- `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
 
@@ -237,13 +239,14 @@ mxv restart -w reading-list web
 
 ### Columns
 
-- `name`: The process's name in the manifest.
+- `name`: The process's or container's name in the manifest.
+- `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
-- `pid`: The process id, which is also its process group's id, while it runs.
+- `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
 - `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
-- `ports`: The ports that the process receives, as `VARIABLE=port`.
+- `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
 
@@ -271,13 +274,14 @@ mxv status -w reading-list
 
 ### Columns
 
-- `name`: The process's name in the manifest.
+- `name`: The process's or container's name in the manifest.
+- `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
-- `pid`: The process id, which is also its process group's id, while it runs.
+- `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
 - `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
-- `ports`: The ports that the process receives, as `VARIABLE=port`.
+- `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
 
@@ -359,7 +363,8 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 ### Arguments
 
 - `<NAME>`: The name of the workspace to remove. Required.
-- `--force`: Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes; an unmerged branch is still kept
+- `--force`: Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+- `--delete-volumes`: Delete the workspace's docker volumes and the data in them
 - `--delete-unmerged`: Delete branches with unmerged commits, and commits on a detached HEAD
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
