@@ -647,3 +647,74 @@ fn the_env_values_of_processes_and_containers_print_as_redacted_and_render_for_t
         "hunter2-secret"
     );
 }
+
+#[test]
+fn a_manifest_declares_disposable_paths_and_directories_to_clone_as_globs() {
+    let manifest = parse(
+        r#"
+disposable = ["web/test-results/", "coverage/"]
+clone_on_new = ["node_modules/", "web/.venv/"]
+"#,
+    )
+    .unwrap();
+    let disposable: Vec<&str> = manifest
+        .disposable
+        .iter()
+        .map(|glob| glob.as_str())
+        .collect();
+    assert_eq!(disposable, ["web/test-results/", "coverage/"]);
+    let cloned: Vec<&str> = manifest
+        .clone_on_new
+        .iter()
+        .map(|glob| glob.as_str())
+        .collect();
+    assert_eq!(cloned, ["node_modules/", "web/.venv/"]);
+}
+
+#[test]
+fn a_manifest_without_globs_declares_no_disposable_paths_and_no_directories_to_clone() {
+    let manifest = parse("").unwrap();
+    assert!(manifest.disposable.is_empty());
+    assert!(manifest.clone_on_new.is_empty());
+}
+
+#[test]
+fn an_absolute_disposable_glob_fails_as_invalid_with_its_line() {
+    let (line, problem) =
+        problem("ports = []\ndisposable = [\n  \"web/\",\n  \"/tmp/cache/\",\n]\n");
+    assert_eq!(line, Some(4));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(message.contains("/tmp/cache/"), "{message}");
+    assert!(message.contains("absolute"), "{message}");
+}
+
+#[test]
+fn a_disposable_glob_that_leaves_the_repository_fails_as_invalid_with_its_line() {
+    let (line, problem) = problem("disposable = [\"../other/target/\"]\n");
+    assert_eq!(line, Some(1));
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn a_clone_glob_that_names_target_fails_as_invalid_with_its_line() {
+    let (line, problem) = problem("\nclone_on_new = [\"target/\"]\n");
+    assert_eq!(line, Some(2));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(message.contains("target"), "{message}");
+}
+
+#[test]
+fn a_clone_glob_that_leaves_the_repository_fails_as_invalid() {
+    let (_, problem) = problem("clone_on_new = [\"../node_modules/\"]\n");
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
+    );
+}

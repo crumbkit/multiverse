@@ -21,6 +21,9 @@ Put a workspace away
   restore   Rebuild an archived workspace at its archived commits
   remove    Remove a workspace's checkouts, its merged branches, its directory and its record
 
+Free disk space
+  clean     Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+
 Explore the commands
   commands  Explore mxv's commands
   schemas   Explore the JSON documents that mxv prints

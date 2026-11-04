@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::backend::{Backend, Changes, Listed, Repository};
+use crate::disposable::PathGlob;
 use crate::error::Error;
 use crate::git::Git;
 use crate::name::WorkspaceName;
@@ -729,6 +730,9 @@ impl Backend for Scripted {
     fn changes(&self, checkout: &Path) -> Result<Changes, Error> {
         Git.changes(checkout)
     }
+    fn tracks(&self, checkout: &Path, path: &str) -> Result<bool, Error> {
+        Git.tracks(checkout, path)
+    }
     fn remove_checkout(
         &self,
         repository: &Path,
@@ -971,4 +975,72 @@ fn a_file_written_after_the_plan_stops_the_removal() {
         "{outcome:?}"
     );
     assert!(workspace.checkouts[0].path.join("notes.md").exists());
+}
+
+#[test]
+fn an_ignored_directory_that_the_manifest_declares_disposable_does_not_stop_the_removal() {
+    let setup = setup();
+    write(
+        setup.fixture.clone.join(".git/info/exclude"),
+        "test-results/\nmxv.toml\n",
+    );
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    write(
+        checkout.join("mxv.toml"),
+        "disposable = [\"web/test-results/\"]\n",
+    );
+    fs::create_dir_all(checkout.join("web/test-results")).unwrap();
+    write(checkout.join("web/test-results/report.html"), "<p>ok</p>");
+    let plan = setup
+        .workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap();
+    let RemovalPlan::IgnoredFiles { paths, .. } = plan else {
+        panic!("{plan:?}");
+    };
+    // The manifest itself is an ignored file here, and still stops the
+    // removal, which shows that only the glob's paths became disposable.
+    assert_eq!(paths, ["app: mxv.toml"]);
+}
+
+#[test]
+fn an_ignored_directory_that_the_person_declares_disposable_does_not_stop_the_removal() {
+    let mut setup = setup();
+    write(setup.fixture.clone.join(".git/info/exclude"), ".venv/\n");
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    fs::create_dir_all(checkout.join("tools/.venv/bin")).unwrap();
+    write(checkout.join("tools/.venv/bin/python"), "");
+    setup.workspaces = setup
+        .workspaces
+        .with_disposable(vec![PathGlob::parse(".venv/").unwrap()]);
+    let removal = ready(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.disposable, ["app: tools/.venv/"]);
+    done(setup.workspaces.remove(removal).unwrap());
+    assert!(!workspace.path.exists());
+}
+
+#[test]
+fn a_declared_glob_never_makes_a_directory_with_a_tracked_file_disposable() {
+    let mut setup = setup();
+    write(setup.fixture.clone.join(".git/info/exclude"), "*.log\n");
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    fs::create_dir_all(checkout.join("docs")).unwrap();
+    write(checkout.join("docs/README"), "tracked");
+    git(checkout, &["add", "docs/README"]);
+    commit(checkout, 1);
+    write(checkout.join("docs/build.log"), "log");
+    setup.workspaces = setup
+        .workspaces
+        .with_disposable(vec![PathGlob::parse("docs/").unwrap()]);
+    let plan = setup
+        .workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap();
+    let RemovalPlan::IgnoredFiles { paths, .. } = plan else {
+        panic!("{plan:?}");
+    };
+    assert_eq!(paths, ["app: docs/build.log"]);
 }

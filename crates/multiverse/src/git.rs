@@ -458,6 +458,20 @@ impl Backend for Git {
         Ok(changes)
     }
 
+    fn tracks(&self, checkout: &Path, path: &str) -> Result<bool, Error> {
+        // `:(literal)` keeps git from reading the path's `*` or `?` as a
+        // pattern, so the listing names the path itself.
+        let pathspec = format!(":(literal){path}");
+        let listed = run(
+            checkout,
+            ["ls-files", "-z", "--cached", "--", pathspec.as_str()],
+            "ls-files",
+            LOCAL_DEADLINE,
+        )?
+        .ok("ls-files", checkout)?;
+        Ok(!listed.is_empty())
+    }
+
     fn remove_checkout(
         &self,
         repository: &Path,

@@ -2,14 +2,16 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use crumbkit::commands::{COMMANDS_LIST, CommandsList};
 use crumbkit::help::{Effects, Example, Goal, Group, Guide, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, ViewFlags, Yes};
 use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
 
+use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
+use crate::units::parse_age;
 use crate::verbs::{CD, LIST, NEW, REMOVE, SHOW};
 
 /// Create, archive and restore task workspaces that span several git
@@ -37,7 +39,7 @@ pub const GUIDE: Guide = Guide::new()
     .root_verbs(
         &[
             "new", "list", "show", "cd", "up", "down", "restart", "status", "logs", "archive",
-            "restore", "remove",
+            "restore", "remove", "clean",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
     )
@@ -50,6 +52,7 @@ pub const GUIDE: Guide = Guide::new()
                 &["up", "down", "restart", "status", "logs", "ports"],
             ),
             Goal::new("Put a workspace away", &["archive", "restore", "remove"]),
+            Goal::new("Free disk space", &["clean"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
         ],
@@ -139,6 +142,13 @@ pub const GUIDE: Guide = Guide::new()
             )])
             .effects(Effects::destructive())
             .document(REMOVE),
+        Leaf::new(&["clean"])
+            .examples(&[Example::new(
+                &["--all", "--dry-run"],
+                "Print what cleaning every idle workspace would delete",
+            )])
+            .effects(Effects::destructive().idempotent().per_item())
+            .document(CLEAN),
         Leaf::new(&["commands", "list"])
             .examples(&[Example::new(&[], "List every command")])
             .effects(Effects::read_only())
@@ -199,6 +209,10 @@ pub(crate) enum Verb {
     // lines and `commands list` name only `remove`.
     #[command(alias = "rm")]
     Remove(RemoveArgs),
+    /// Delete the disposable directories, such as target/ and node_modules/, of idle workspaces.
+    ///
+    /// A workspace is idle when none of its processes or containers run and no file of its checkout outside the disposable directories, and no commit or staged change, is newer than the idle age. The disposable directories are the ignored directories named target, node_modules, dist, build and .cache, and the paths that the globs `disposable` of the checkout's mxv.toml and of the config file match while git reports them as ignored. The command deletes nothing else: no tracked file, no git data and no other ignored file. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
+    Clean(CleanArgs),
     /// Manage the host ports that a workspace holds.
     Ports {
         /// What to do with the ports.
@@ -304,6 +318,10 @@ pub(crate) struct NewArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) repo: PathBuf,
 
+    /// Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
+    #[arg(long)]
+    pub(crate) no_clone: bool,
+
     /// Print the workspace that the command would create, and create nothing.
     #[command(flatten)]
     pub(crate) dry_run: DryRun,
@@ -349,6 +367,43 @@ pub(crate) struct ListArgs {
     /// How many workspaces to print.
     #[command(flatten)]
     pub(crate) page: Page<25, 100>,
+
+    /// Measure each workspace's size on disk and its disposable size, which reads every file of every workspace on the page
+    #[arg(long)]
+    pub(crate) sizes: bool,
+}
+
+/// The arguments of `mxv clean`.
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .args(["names", "all", "over_limit"])
+))]
+pub(crate) struct CleanArgs {
+    /// The names of the workspaces to clean, separated by spaces
+    #[arg(value_name = "NAME", num_args = 1..=100)]
+    pub(crate) names: Vec<String>,
+
+    /// Clean every idle workspace
+    #[arg(long, conflicts_with_all = ["names", "over_limit"])]
+    pub(crate) all: bool,
+
+    /// Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max_disposable
+    #[arg(long, conflicts_with = "names")]
+    pub(crate) over_limit: bool,
+
+    /// How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean_idle, or else 7d
+    #[arg(long, value_name = "AGE", value_parser = parse_age)]
+    pub(crate) idle: Option<std::time::Duration>,
+
+    /// Print what the command would delete, and delete nothing.
+    #[command(flatten)]
+    pub(crate) dry_run: DryRun,
+
+    /// Delete without asking.
+    #[command(flatten)]
+    pub(crate) yes: Yes,
 }
 
 /// The arguments of `mxv show`.

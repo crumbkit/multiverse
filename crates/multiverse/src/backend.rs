@@ -144,6 +144,15 @@ pub trait Backend {
     /// Returns the failure of the status command.
     fn changes(&self, checkout: &Path) -> Result<Changes, Error>;
 
+    /// Reports whether the repository tracks `path`, a path relative to
+    /// `checkout` such as `target/`, or any file below it. A path that
+    /// holds a tracked file is never disposable.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn tracks(&self, checkout: &Path, path: &str) -> Result<bool, Error>;
+
     /// Removes the checkout at `checkout` from the repository and deletes
     /// its directory. With `force`, it also deletes uncommitted and
     /// untracked changes.

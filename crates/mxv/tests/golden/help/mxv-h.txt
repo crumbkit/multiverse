@@ -5,6 +5,7 @@ Usage: mxv [OPTIONS] <COMMAND>
 Work in a workspace:     new, list, show, cd
 Run a workspace's app:   up, down, restart, status, logs, ports
 Put a workspace away:    archive, restore, remove
+Free disk space:         clean
 Explore the commands:    commands, schemas
 Review how mxv is used:  self
 

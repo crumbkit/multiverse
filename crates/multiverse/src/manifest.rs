@@ -12,6 +12,8 @@
 //!
 //! ```toml
 //! ports = ["api", "web", "dynamodb"]
+//! disposable = ["web/test-results/"]
+//! clone_on_new = ["node_modules/"]
 //!
 //! [containers.dynamodb]
 //! image = "amazon/dynamodb-local:2.5.4"
@@ -56,6 +58,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use toml::Spanned;
 
+use crate::disposable::{BadGlob, PathGlob};
 use crate::name::is_unit_name;
 use crate::redacted::Redacted;
 
@@ -95,6 +98,17 @@ pub struct Manifest {
     pub processes: BTreeMap<String, Process>,
     /// The containers, by name. No container has the name of a process.
     pub containers: BTreeMap<String, Container>,
+    /// The globs of the repository's own disposable paths, such as
+    /// `web/test-results/`, which extend the built-in [`DISPOSABLE`] set.
+    /// A path that a glob matches is disposable only while git reports it
+    /// as ignored.
+    ///
+    /// [`DISPOSABLE`]: crate::DISPOSABLE
+    pub disposable: Vec<PathGlob>,
+    /// The globs of the ignored directories, such as `node_modules/`, that
+    /// `mxv new` clones from the repository into a new checkout, on top of
+    /// the ones that the config file names.
+    pub clone_on_new: Vec<PathGlob>,
 }
 
 /// One process or container of a manifest.
@@ -446,6 +460,12 @@ struct RawManifest {
     /// The containers.
     #[serde(default)]
     containers: BTreeMap<Spanned<String>, RawContainer>,
+    /// The globs of the repository's disposable paths.
+    #[serde(default)]
+    disposable: Vec<Spanned<String>>,
+    /// The globs of the ignored directories that a new workspace clones.
+    #[serde(default)]
+    clone_on_new: Vec<Spanned<String>>,
     /// Reserved for secrets.
     secrets: Option<Spanned<IgnoredAny>>,
     /// Reserved for actions.
@@ -771,10 +791,25 @@ impl Manifest {
             }
             containers.insert(name.get_ref().clone(), container);
         }
+        let globs =
+            |raw: &[Spanned<String>], parse: fn(&str) -> Result<PathGlob, BadGlob>, key: &str| {
+                raw.iter()
+                    .map(|glob| {
+                        parse(glob.get_ref()).map_err(|reason| {
+                            errors.invalid(
+                                &glob.span(),
+                                format!("the {key} glob {:?} is refused: {reason}", glob.get_ref()),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            };
         let manifest = Self {
             ports,
             processes,
             containers,
+            disposable: globs(&raw.disposable, PathGlob::parse, "disposable")?,
+            clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
         };
         if let Some(name) = manifest.cycle() {
             let span = raw

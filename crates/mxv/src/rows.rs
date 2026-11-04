@@ -6,14 +6,15 @@ use std::fmt;
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
-    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Kind, ProcessState, ProcessStatus, Removal,
-    Workspace,
+    Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, Fate, Kind, ProcessState,
+    ProcessStatus, Removal, Workspace,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::environment::{Root, RootSource};
 use crate::failures::remove_line;
+use crate::units::Size;
 
 /// One workspace, as `list` prints it.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -38,6 +39,14 @@ pub(crate) struct WorkspaceRow {
     /// The host port that the workspace holds for each named port of its
     /// manifest, which the first `mxv up` allocates.
     ports: BTreeMap<String, u16>,
+    /// The bytes that the workspace's directory takes on disk, with each
+    /// file that has several hard links counted once and no symbolic link
+    /// followed, or null when `--sizes` was not given.
+    size: Option<Size>,
+    /// The bytes that the workspace's disposable directories take on disk,
+    /// such as `target/` and `node_modules/`, which `mxv clean` deletes, or
+    /// null when `--sizes` was not given.
+    disposable: Option<Size>,
 }
 
 /// One workspace and the workspace root that the run used, as `new` and
@@ -118,7 +127,15 @@ pub(crate) struct CheckoutRow {
 }
 
 impl Row for WorkspaceRow {
-    const COLUMNS: &'static [&'static str] = &["name", "branch", "path", "ports", "problem"];
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "branch",
+        "path",
+        "size",
+        "disposable",
+        "ports",
+        "problem",
+    ];
     const PROBLEM: Option<&'static str> = Some("problem");
     const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
     // A person copies the name into the next command.
@@ -156,6 +173,8 @@ impl From<&Workspace> for WorkspaceRow {
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
             ports: workspace.ports.clone(),
+            size: None,
+            disposable: None,
         }
     }
 }
@@ -182,6 +201,113 @@ impl WorkspaceRow {
             checkouts: Vec::new(),
             problem: error.to_string(),
             ports: BTreeMap::new(),
+            size: None,
+            disposable: None,
+        }
+    }
+
+    /// Returns the row with the sizes of `usage`.
+    pub(crate) const fn with_usage(mut self, usage: &DiskUsage) -> Self {
+        self.size = Some(Size(usage.bytes));
+        self.disposable = Some(Size(usage.disposable_bytes));
+        self
+    }
+}
+
+/// One workspace, the workspace root that the run used and its sizes, as
+/// `show` prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ShowRow {
+    /// The workspace and the root.
+    #[serde(flatten)]
+    placed: PlacedRow,
+    /// The bytes that the workspace's directory takes on disk, with each
+    /// file that has several hard links counted once and no symbolic link
+    /// followed.
+    size: Size,
+    /// The bytes that the workspace's disposable directories take on disk,
+    /// such as `target/` and `node_modules/`, which `mxv clean` deletes.
+    disposable: Size,
+    /// Each disposable path, with its checkout's name in front, such as
+    /// `app: target/`.
+    disposable_paths: Vec<String>,
+}
+
+impl Row for ShowRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "branch",
+        "path",
+        "root",
+        "root_source",
+        "size",
+        "disposable",
+        "ports",
+    ];
+    const LONG_COLUMNS: &'static [&'static str] = &["repositories", "disposable_paths"];
+    // A person copies the name into the next command.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
+}
+
+impl ShowRow {
+    /// Returns the row of `workspace` with `root`, the root that the run
+    /// used, and the sizes of `usage`.
+    pub(crate) fn new(workspace: &Workspace, root: &Root, usage: &DiskUsage) -> Self {
+        Self {
+            placed: PlacedRow::new(workspace, root),
+            size: Size(usage.bytes),
+            disposable: Size(usage.disposable_bytes),
+            disposable_paths: usage
+                .disposable
+                .iter()
+                .map(|found| format!("{}: {}", found.checkout, found.path))
+                .collect(),
+        }
+    }
+}
+
+/// The workspace that `new` created, or would create on a dry run, and the
+/// ignored directories that it cloned into the checkout.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct NewRow {
+    /// The workspace and the root.
+    #[serde(flatten)]
+    placed: PlacedRow,
+    /// Each ignored directory of the repository that `new` cloned into the
+    /// checkout, or would clone on a dry run, with the checkout's name in
+    /// front, such as `app: web/node_modules/`. A clone shares its disk
+    /// with the repository's copy until a file in either changes.
+    cloned: Vec<String>,
+    /// Why `new` cloned fewer directories than the globs name, such as a
+    /// file system that cannot clone, or null. `new` never copies the
+    /// directories in full.
+    clone_warning: Option<String>,
+}
+
+impl Row for NewRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "branch",
+        "path",
+        "root",
+        "root_source",
+        "ports",
+        "cloned",
+        "clone_warning",
+    ];
+    const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
+    // A person copies the name into the next command.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
+}
+
+impl NewRow {
+    /// Returns the row of `workspace` with `root`, the root that the run
+    /// used, and the directories that `cloned` names.
+    pub(crate) fn new(workspace: &Workspace, root: &Root, cloned: Cloned) -> Self {
+        Self {
+            placed: PlacedRow::new(workspace, root),
+            cloned: cloned.paths,
+            clone_warning: cloned.warning,
         }
     }
 }

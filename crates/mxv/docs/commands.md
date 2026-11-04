@@ -20,6 +20,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
+- [`mxv clean`](#mxv-clean): Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces
 - [`mxv ports`](#mxv-ports): Manage the host ports that a workspace holds
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
@@ -43,6 +44,7 @@ The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it i
 
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
 - `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
+- `--no-clone`: Clone none of the repository's ignored directories, such as node\_modules/, into the new checkout
 - `--dry-run`: Report what the command would change, and change nothing
 
 ### Examples
@@ -61,6 +63,8 @@ mxv new triage --repo app --dry-run
 - `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
 - `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+- `cloned`: Each ignored directory of the repository that `new` cloned into the checkout, or would clone on a dry run, with the checkout's name in front, such as `app: web/node_modules/`. A clone shares its disk with the repository's copy until a file in either changes.
+- `clone_warning`: Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
 
 ### Columns that `--long` adds
 
@@ -76,6 +80,7 @@ List the workspaces
 
 - `--limit <N>`: Print at most this many rows, up to 100. Default: `25`.
 - `--all`: Print every row
+- `--sizes`: Measure each workspace's size on disk and its disposable size, which reads every file of every workspace on the page
 
 ### Examples
 
@@ -90,6 +95,8 @@ mxv list
 - `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
 - `branch`: The branch that the workspace's checkouts were created on.
 - `path`: The workspace's directory, which `mxv cd` prints.
+- `size`: The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed, or null when `--sizes` was not given.
+- `disposable`: The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes, or null when `--sizes` was not given.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
@@ -122,11 +129,14 @@ mxv show reading-list
 - `path`: The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
 - `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
 - `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+- `size`: The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed.
+- `disposable`: The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 
 ### Columns that `--long` adds
 
 - `repositories`: The top-level directory of each repository that the workspace checks out.
+- `disposable_paths`: Each disposable path, with its checkout's name in front, such as `app: target/`.
 
 Effects: read-only, closed-world.
 
@@ -382,6 +392,46 @@ mxv remove reading-list --dry-run
 ```
 
 Effects: destructive, not idempotent, closed-world.
+
+## `mxv clean`
+
+Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces.
+
+A workspace is idle when none of its processes or containers run and no file of its checkout outside the disposable directories, and no commit or staged change, is newer than the idle age. The disposable directories are the ignored directories named target, node\_modules, dist, build and .cache, and the paths that the globs `disposable` of the checkout's mxv.toml and of the config file match while git reports them as ignored. The command deletes nothing else: no tracked file, no git data and no other ignored file. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
+
+### Arguments
+
+- `<NAME>`: The names of the workspaces to clean, separated by spaces. Required, or give one of `--all` and `--over-limit` in its place. Takes more than one value.
+- `--all`: Clean every idle workspace. Required, or give one of `<NAME>` and `--over-limit` in its place.
+- `--over-limit`: Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max\_disposable. Required, or give one of `<NAME>` and `--all` in its place.
+- `--idle <AGE>`: How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean\_idle, or else 7d
+- `--dry-run`: Report what the command would change, and change nothing
+- `--yes`: Proceed without asking for confirmation
+
+### Examples
+
+Print what cleaning every idle workspace would delete.
+
+```sh
+mxv clean --all --dry-run
+```
+
+### Columns
+
+- `name`: The workspace's name.
+- `state`: `cleaned` when the run deleted the workspace's disposable directories, `would_clean` on a dry run, or `kept`.
+- `freed`: The bytes that the deleted directories took on disk, or would free on a dry run, which is 0 for a workspace that the run kept.
+- `disposable`: The bytes that the workspace's disposable directories took on disk before the run.
+- `modified`: When a file of the workspace's checkouts outside the disposable directories, or a commit or staged change, last changed, or null when none exists.
+- `reason`: Why the run kept the workspace's disposable directories, or null.
+
+### Columns that `--long` adds
+
+- `paths`: Each disposable path that the run deleted, or would delete, with its checkout's name in front, such as `app: target/`.
+
+Effects: destructive, idempotent, closed-world.
+
+Writes: reports each item and exits 1 when any item fails.
 
 ## `mxv ports`
 

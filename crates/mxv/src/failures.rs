@@ -104,6 +104,9 @@ pub const ENVIRONMENT_RELATIVE_ROOT: Code = Code::new("mxv", "environment", "rel
 pub const CONFIG_INVALID: Code = Code::new("mxv", "config", "invalid");
 /// The code of a config file that is there but cannot be read.
 pub const CONFIG_UNREADABLE: Code = Code::new("mxv", "config", "unreadable");
+/// The code of `mxv clean --over-limit` when the config file sets no
+/// `max_disposable`.
+pub const CONFIG_NO_LIMIT: Code = Code::new("mxv", "config", "no_limit");
 
 /// A failure of a workspace verb.
 #[derive(Debug)]
@@ -218,6 +221,12 @@ pub(crate) enum MxvFailure {
         /// The error of the read.
         source: std::io::Error,
     },
+    /// `mxv clean --over-limit` ran, and the config file sets no
+    /// `max_disposable`.
+    NoLimit {
+        /// The config file.
+        path: PathBuf,
+    },
     /// A technical failure of the multiverse library.
     Library(Error),
 }
@@ -258,6 +267,7 @@ pub(crate) const CODES: &[&Code] = &[
     &ENVIRONMENT_RELATIVE_ROOT,
     &CONFIG_INVALID,
     &CONFIG_UNREADABLE,
+    &CONFIG_NO_LIMIT,
     &PROCESS_UNSTARTABLE,
     &PROCESS_TABLE_UNREADABLE,
     &PROCESS_UNSUPPORTED_OS,
@@ -274,6 +284,14 @@ pub(crate) const CODES: &[&Code] = &[
 /// Returns `path` as text for a field or a hint.
 fn shown(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// Returns the keys that the config file may set, as a hint names them.
+fn settings() -> String {
+    let (last, rest) = crate::config::SETTINGS
+        .split_last()
+        .map_or(("", &[][..]), |(last, rest)| (*last, rest));
+    format!("{} and {last}", rest.join(", "))
 }
 
 /// Returns the hint `text` as a recovery.
@@ -354,6 +372,7 @@ impl Failure for MxvFailure {
             Self::RelativeRoot { .. } => &ENVIRONMENT_RELATIVE_ROOT,
             Self::BadConfig { .. } => &CONFIG_INVALID,
             Self::ConfigUnreadable { .. } => &CONFIG_UNREADABLE,
+            Self::NoLimit { .. } => &CONFIG_NO_LIMIT,
             Self::Library(error) => match error {
                 Error::RepositoryNotFound { .. } => &REPOSITORY_NOT_FOUND,
                 Error::NoOrigin { .. } => &REPOSITORY_NO_ORIGIN,
@@ -441,14 +460,16 @@ impl Failure for MxvFailure {
             ),
             Self::BadConfig { path, line, .. } => hint(match line {
                 Some(line) => format!(
-                    "fix line {line} of {}, which may set only `root = \"<ABSOLUTE PATH>\"`",
-                    shown(path)
+                    "fix line {line} of {}, which may set only {}",
+                    shown(path),
+                    settings()
                 ),
-                None => format!(
-                    "fix {}, which may set only `root = \"<ABSOLUTE PATH>\"`",
-                    shown(path)
-                ),
+                None => format!("fix {}, which may set only {}", shown(path), settings()),
             }),
+            Self::NoLimit { path } => hint(format!(
+                "set `max_disposable = \"50GiB\"` in {}, or name the workspaces to clean, or pass `--all`",
+                shown(path)
+            )),
             Self::ConfigUnreadable { path, .. } => hint(format!(
                 "make {} a readable file, or remove it",
                 shown(path)
@@ -522,7 +543,9 @@ impl Failure for MxvFailure {
                 }
                 fields
             }
-            Self::ConfigUnreadable { path, .. } => vec![Field::new("path", shown(path))],
+            Self::ConfigUnreadable { path, .. } | Self::NoLimit { path } => {
+                vec![Field::new("path", shown(path))]
+            }
             Self::Library(error) => library_fields(error),
         }
     }
@@ -753,6 +776,11 @@ impl fmt::Display for MxvFailure {
                 "mxv cannot read the config file {}: {source}",
                 shown(path)
             ),
+            Self::NoLimit { path } => write!(
+                formatter,
+                "--over-limit needs a limit, and the config file {} sets no `max_disposable`",
+                shown(path)
+            ),
             Self::Library(error) => error.fmt(formatter),
         }
     }
@@ -776,6 +804,7 @@ impl std::error::Error for MxvFailure {
             | Self::Locked { .. }
             | Self::NoHome
             | Self::RelativeRoot { .. }
+            | Self::NoLimit { .. }
             | Self::BadConfig { .. } => None,
         }
     }

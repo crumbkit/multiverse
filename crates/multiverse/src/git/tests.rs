@@ -361,3 +361,19 @@ fn an_origin_with_branches_but_no_default_branch_has_no_default_branch() {
     let error = Git.base(&fixture.clone).unwrap_err();
     assert!(matches!(error, Error::NoDefaultBranch { .. }), "{error:?}");
 }
+
+#[test]
+fn a_path_tracks_a_file_only_when_the_repository_tracks_that_file_or_one_below_it() {
+    let fixture = fixture();
+    write(fixture.clone.join(".git/info/exclude"), "dist/\ntarget/\n");
+    fs::create_dir_all(fixture.clone.join("dist")).unwrap();
+    write(fixture.clone.join("dist/kept.txt"), "tracked");
+    git(&fixture.clone, &["add", "--force", "dist/kept.txt"]);
+    fs::create_dir_all(fixture.clone.join("target")).unwrap();
+    write(fixture.clone.join("target/out"), "built");
+    write(fixture.clone.join("a*b"), "a file whose name holds a star");
+    assert!(Git.tracks(&fixture.clone, "dist/").unwrap());
+    assert!(Git.tracks(&fixture.clone, "dist/kept.txt").unwrap());
+    assert!(!Git.tracks(&fixture.clone, "target/").unwrap());
+    assert!(!Git.tracks(&fixture.clone, "*").unwrap());
+}

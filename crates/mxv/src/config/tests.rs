@@ -110,3 +110,75 @@ fn a_root_with_a_nul_character_is_refused_with_its_line() {
     assert_eq!(line, Some(2));
     assert!(reason.contains("NUL"), "{reason}");
 }
+
+#[test]
+fn the_file_declares_disposable_globs_and_directories_to_clone() {
+    let config = parsed(
+        "disposable = [\"web/test-results/\", \".venv/\"]\nclone_on_new = [\"node_modules/\", \"web/.yarn/\"]\n",
+    )
+    .unwrap();
+    let disposable: Vec<&str> = config.disposable.iter().map(|glob| glob.as_str()).collect();
+    assert_eq!(disposable, ["web/test-results/", ".venv/"]);
+    let clone_on_new = config.clone_on_new.unwrap();
+    let cloned: Vec<&str> = clone_on_new.iter().map(|glob| glob.as_str()).collect();
+    assert_eq!(cloned, ["node_modules/", "web/.yarn/"]);
+}
+
+#[test]
+fn an_empty_clone_list_clones_nothing_and_a_missing_one_keeps_the_default() {
+    assert_eq!(
+        parsed("clone_on_new = []\n").unwrap().clone_on_new,
+        Some(Vec::new())
+    );
+    assert_eq!(parsed("").unwrap().clone_on_new, None);
+}
+
+#[test]
+fn an_absolute_disposable_glob_is_refused_with_the_line_of_the_glob() {
+    let (line, reason) = invalid("disposable = [\n  \"web/\",\n  \"/var/cache/\",\n]\n");
+    assert_eq!(line, Some(3));
+    assert!(reason.contains("/var/cache/"), "{reason}");
+    assert!(reason.contains("absolute"), "{reason}");
+}
+
+#[test]
+fn a_disposable_glob_with_a_parent_component_is_refused_with_its_line() {
+    let (line, reason) = invalid("\ndisposable = [\"web/../../x/\"]\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains(".."), "{reason}");
+}
+
+#[test]
+fn a_clone_glob_that_names_target_is_refused_with_its_line() {
+    let (line, reason) = invalid("clone_on_new = [\"target/\"]\n");
+    assert_eq!(line, Some(1));
+    assert!(reason.contains("target"), "{reason}");
+}
+
+#[test]
+fn a_disposable_list_that_is_not_an_array_of_strings_is_refused() {
+    let (line, _) = invalid("disposable = \"target/\"\n");
+    assert_eq!(line, Some(1));
+    let (line, _) = invalid("disposable = [1]\n");
+    assert_eq!(line, Some(1));
+}
+
+#[test]
+fn the_idle_age_and_the_disposable_limit_read_their_units() {
+    let config = parsed("clean_idle = \"3d\"\nmax_disposable = \"50GiB\"\n").unwrap();
+    assert_eq!(
+        config.clean_idle,
+        Some(std::time::Duration::from_secs(3 * 24 * 60 * 60))
+    );
+    assert_eq!(config.max_disposable, Some(50 * 1024 * 1024 * 1024));
+}
+
+#[test]
+fn an_idle_age_or_a_limit_without_a_unit_is_refused_with_its_line() {
+    let (line, reason) = invalid("clean_idle = \"7\"\n");
+    assert_eq!(line, Some(1));
+    assert!(reason.contains("clean_idle"), "{reason}");
+    let (line, reason) = invalid("\nmax_disposable = 50\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("max_disposable"), "{reason}");
+}

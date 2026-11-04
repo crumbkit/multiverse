@@ -1,0 +1,22 @@
+Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+
+Usage: mxv clean [OPTIONS] <NAME|--all|--over-limit>
+
+Arguments:
+  [NAME]...  The names of the workspaces to clean, separated by spaces
+
+Options:
+      --all         Clean every idle workspace
+      --over-limit  Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max_disposable
+      --idle <AGE>  How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean_idle, or else 7d
+      --dry-run     Report what the command would change, and change nothing
+      --yes         Proceed without asking for confirmation
+  -h, --help        Print help (see more with '--help')
+
+Examples:
+  mxv clean --all --dry-run
+
+Effects: destructive, idempotent, closed-world.
+Writes: reports each item and exits 1 when any item fails.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv clean --help` describes them.
+Next: mxv clean --help explains each column.

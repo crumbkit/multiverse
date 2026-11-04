@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/show/v1",
-  "description": "The workspaces with the given names, and a failure for each name that no workspace has.",
+  "description": "The workspaces with the given names and their sizes on disk, and a failure for each name that no workspace has.",
   "type": "object",
   "properties": {
     "data": {
       "description": "The rows for the ids that worked, in the order the caller gave the ids.",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/PlacedRow"
+        "$ref": "#/$defs/ShowRow"
       }
     },
     "dry_run": {
@@ -446,8 +446,28 @@
         "commit"
       ]
     },
-    "PlacedRow": {
-      "description": "One workspace and the workspace root that the run used, as `new` and\n`show` print it.",
+    "RootSource": {
+      "description": "Where the workspace root came from.",
+      "oneOf": [
+        {
+          "description": "The `MXV_ROOT` environment variable named it.",
+          "type": "string",
+          "const": "env"
+        },
+        {
+          "description": "The config file's `root` named it.",
+          "type": "string",
+          "const": "config"
+        },
+        {
+          "description": "Neither named one, so it is `$XDG_DATA_HOME/mxv/workspaces`.",
+          "type": "string",
+          "const": "default"
+        }
+      ]
+    },
+    "ShowRow": {
+      "description": "One workspace, the workspace root that the run used and its sizes, as\n`show` prints it.",
       "type": "object",
       "properties": {
         "branch": {
@@ -459,6 +479,19 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/CheckoutRow"
+          }
+        },
+        "disposable": {
+          "description": "The bytes that the workspace's disposable directories take on disk,\nsuch as `target/` and `node_modules/`, which `mxv clean` deletes.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "disposable_paths": {
+          "description": "Each disposable path, with its checkout's name in front, such as\n`app: target/`.",
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
         "name": {
@@ -493,6 +526,12 @@
         "root_source": {
           "description": "Where the root came from: `env` for `MXV_ROOT`, `config` for the\nconfig file's `root`, or `default` for\n`$XDG_DATA_HOME/mxv/workspaces`.",
           "$ref": "#/$defs/RootSource"
+        },
+        "size": {
+          "description": "The bytes that the workspace's directory takes on disk, with each\nfile that has several hard links counted once and no symbolic link\nfollowed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "required": [
@@ -501,27 +540,9 @@
         "path",
         "root",
         "root_source",
-        "ports"
-      ]
-    },
-    "RootSource": {
-      "description": "Where the workspace root came from.",
-      "oneOf": [
-        {
-          "description": "The `MXV_ROOT` environment variable named it.",
-          "type": "string",
-          "const": "env"
-        },
-        {
-          "description": "The config file's `root` named it.",
-          "type": "string",
-          "const": "config"
-        },
-        {
-          "description": "Neither named one, so it is `$XDG_DATA_HOME/mxv/workspaces`.",
-          "type": "string",
-          "const": "default"
-        }
+        "ports",
+        "size",
+        "disposable"
       ]
     }
   }

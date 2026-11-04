@@ -5,7 +5,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::backend::{Backend, INITIALIZING};
+use crate::disposable::{DisposableSet, PathGlob};
 use crate::error::Error;
+use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, agents_text};
 use crate::store::{self, Created, Records, Store};
@@ -34,9 +36,13 @@ pub enum Mode {
 #[derive(Debug)]
 pub struct Workspaces<B> {
     /// The store of workspace records.
-    store: Store,
+    pub(crate) store: Store,
     /// The backend that makes and removes checkouts.
-    backend: B,
+    pub(crate) backend: B,
+    /// The globs of disposable paths that the person declares, which
+    /// extend the built-in [`DISPOSABLE`] set and each repository's own
+    /// globs in every checkout.
+    pub(crate) disposable: Vec<PathGlob>,
 }
 
 /// The outcome of [`Workspaces::create`].
@@ -144,10 +150,11 @@ pub struct Allow {
 /// because a build or an install makes them again. An ignored path is
 /// disposable when git reports it as a whole ignored directory, with a
 /// trailing `/`, whose own name is one of these, such as `target/` or
-/// `web/node_modules/`. Every other ignored path stops a removal unless the
-/// caller allows discarding changes, including `.env`, an ignored file named
-/// `build`, and an ignored file inside a tracked `dist/` directory, such as
-/// `tools/dist/prod.secret`.
+/// `web/node_modules/`, or when a glob of the repository's manifest or of
+/// [`Workspaces::with_disposable`] matches it. Every other ignored path
+/// stops a removal unless the caller allows discarding changes, including
+/// `.env`, an ignored file named `build`, and an ignored file inside a
+/// tracked `dist/` directory, such as `tools/dist/prod.secret`.
 pub const DISPOSABLE: &[&str] = &["target", "node_modules", "dist", "build", ".cache"];
 
 /// Reports whether `fresh`, a new plan of the removal that the caller
@@ -165,14 +172,6 @@ fn loses_more(fresh: &Removal, confirmed: &Removal) -> bool {
             .discarded
             .iter()
             .any(|path| !confirmed.discarded.contains(path))
-}
-
-/// Reports whether `path`, as `git status` prints an ignored path, is in
-/// [`DISPOSABLE`].
-fn disposable(path: &str) -> bool {
-    path.strip_suffix('/')
-        .and_then(|directory| directory.rsplit('/').next())
-        .is_some_and(|name| DISPOSABLE.contains(&name))
 }
 
 /// What removing a workspace does, or did.
@@ -271,7 +270,7 @@ pub enum RemovalPlan {
 
 /// Whether something is at `path`, without following a symbolic link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Entry {
+pub(crate) enum Entry {
     /// Nothing is at the path.
     Absent,
     /// A symbolic link is at the path.
@@ -288,7 +287,7 @@ impl Entry {
     /// Returns [`Error::Inaccessible`] when mxv cannot tell, such as when a
     /// parent directory cannot be searched, so nothing treats the path as
     /// present or absent by guess.
-    fn at(path: &Path) -> Result<Self, Error> {
+    pub(crate) fn at(path: &Path) -> Result<Self, Error> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() => Ok(Self::Link),
             Ok(_) => Ok(Self::Present),
@@ -337,7 +336,35 @@ impl<B: Backend> Workspaces<B> {
     /// checkouts made by `backend`.
     #[must_use]
     pub const fn new(store: Store, backend: B) -> Self {
-        Self { store, backend }
+        Self {
+            store,
+            backend,
+            disposable: Vec::new(),
+        }
+    }
+
+    /// Returns the workspaces with `globs`, the globs of disposable paths
+    /// that the person declares, added to the built-in [`DISPOSABLE`] set
+    /// and to each repository's own globs.
+    #[must_use]
+    pub fn with_disposable(mut self, globs: Vec<PathGlob>) -> Self {
+        self.disposable = globs;
+        self
+    }
+
+    /// Returns the disposable set of `checkout`: the built-in
+    /// [`DISPOSABLE`] directories, the globs that the checkout's own
+    /// `mxv.toml` declares, and the person's globs. A manifest that cannot
+    /// be read adds no globs, so fewer paths are disposable.
+    pub(crate) fn disposable_set(&self, checkout: &Checkout) -> DisposableSet {
+        let declared = Manifest::read(&checkout.path)
+            .ok()
+            .flatten()
+            .map(|manifest| manifest.disposable)
+            .unwrap_or_default();
+        DisposableSet::built_in()
+            .with(&declared)
+            .with(&self.disposable)
     }
 
     /// Returns every workspace, in name order, and a problem for each
@@ -597,10 +624,11 @@ impl<B: Backend> Workspaces<B> {
             }
             let stray = if entry == Entry::Present {
                 let found = self.backend.changes(&checkout.path)?;
+                let set = self.disposable_set(checkout);
                 let named = |item: &String| format!("{}: {item}", checkout.name);
                 changes.extend(found.changed.iter().map(named));
                 for path in &found.ignored {
-                    if disposable(path) {
+                    if set.matches(path) {
                         disposables.push(named(path));
                     } else {
                         ignored.push(named(path));

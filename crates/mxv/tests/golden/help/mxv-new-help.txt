@@ -12,6 +12,9 @@ Options:
       --repo <PATH>
           The git repository to check out, or any directory inside it
 
+      --no-clone
+          Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
+
       --dry-run
           Report what the command would change, and change nothing
 
@@ -38,12 +41,14 @@ Examples:
           Print the workspace that a checkout of the repository app would get
 
 Columns:
-  name         The workspace's name, which is also the name of its directory and of its checkouts' branch.
-  branch       The branch that the workspace's checkouts were created on.
-  path         The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
-  root         The workspace root that the run used, in which `new` creates a workspace's directory.
-  root_source  Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
-  ports        The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+  name           The workspace's name, which is also the name of its directory and of its checkouts' branch.
+  branch         The branch that the workspace's checkouts were created on.
+  path           The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
+  root           The workspace root that the run used, in which `new` creates a workspace's directory.
+  root_source    Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+  ports          The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+  cloned         Each ignored directory of the repository that `new` cloned into the checkout, or would clone on a dry run, with the checkout's name in front, such as `app: web/node_modules/`. A clone shares its disk with the repository's copy until a file in either changes.
+  clone_warning  Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
 
 Columns that --long adds:
   repositories  The top-level directory of each repository that the workspace checks out.

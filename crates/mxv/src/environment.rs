@@ -10,7 +10,7 @@ use multiverse::DEFAULT_PORT_RANGE;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::config;
+use crate::config::{self, Config};
 use crate::failures::MxvFailure;
 
 #[cfg(test)]
@@ -163,6 +163,12 @@ impl Environment {
     /// Returns the path of the config file, `$XDG_CONFIG_HOME/mxv/config.toml`.
     pub(crate) fn config_file(&self) -> Result<PathBuf, MxvFailure> {
         Ok(self.bases()?.config.join("mxv").join("config.toml"))
+    }
+
+    /// Returns the settings of the config file, or the defaults when there
+    /// is no config file.
+    pub(crate) fn config(&self) -> Result<Config, MxvFailure> {
+        config::read(&self.config_file()?, &self.bases()?.home)
     }
 
     /// Returns the host ports that `mxv up` allocates from: the config

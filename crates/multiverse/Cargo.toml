@@ -26,9 +26,11 @@ rustix = { workspace = true }
 regex = { workspace = true }
 
 # macOS reads a process's start time and a process group's sockets with
-# libproc's calls, which libc declares.
+# libproc's calls, which libc declares, and clones a new checkout's ignored
+# directories with clonefile(2) through reflink-copy.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
+reflink-copy = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

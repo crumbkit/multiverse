@@ -59,6 +59,13 @@ regex = { version = "1.13.1", default-features = false, features = ["std", "unic
 # calls them. It needs no features beyond `std`.
 libc = { version = "0.2.191", default-features = false, features = ["std"] }
 
+# reflink-copy clones a directory tree with clonefile(2) on macOS, which
+# shares the blocks of a new checkout's `node_modules/` with the source
+# clone's, without unsafe code in mxv. It has no default features, and mxv
+# turns on none. It fails where the file system cannot clone, and never
+# copies in full.
+reflink-copy = { version = "0.1.32", default-features = false }
+
 # rustix sends signals to the process groups of an app's processes and
 # checks whether a group still exists, without unsafe code. Only the
 # `process` feature is used.

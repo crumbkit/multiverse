@@ -7,11 +7,12 @@
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
 //!
-//! `new`, `list`, `show`, `cd`, `remove` and the process verbs `up`,
+//! `new`, `list`, `show`, `cd`, `remove`, `clean` and the process verbs `up`,
 //! `down`, `restart`, `status` and `logs` are built. `archive` and
 //! `restore` are declared and fail with `mxv::command::unbuilt` until the
 //! pull request that builds each one.
 
+mod clean;
 mod cli;
 mod config;
 mod environment;
@@ -22,6 +23,7 @@ mod run_failures;
 #[cfg(test)]
 mod testing;
 mod unbuilt;
+mod units;
 mod verbs;
 
 use std::ffi::OsString;
@@ -40,12 +42,12 @@ pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
 #[doc(hidden)]
 pub use crate::failures::{
     BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CONFIG_INVALID,
-    CONFIG_UNREADABLE, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
-    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, PATH_INACCESSIBLE, RECORD_CORRUPT,
-    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME,
-    WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_NOT_FOUND,
+    CONFIG_NO_LIMIT, CONFIG_UNREADABLE, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
+    ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT,
+    PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
+    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
 };
 #[doc(hidden)]
 pub use crate::failures::{
@@ -116,6 +118,12 @@ where
         Verb::Remove(args) => {
             let result = verbs::remove(&mut output, environment, &args);
             return crumbkit::finish(output, verbs::REMOVE, result);
+        }
+        // `clean` reads `--dry-run` and asks for confirmation through
+        // `&mut output`, so it runs before `finish`.
+        Verb::Clean(args) => {
+            let result = clean::clean(&mut output, environment, &args);
+            return crumbkit::finish(output, clean::CLEAN, result);
         }
         Verb::Up(args) => {
             return crumbkit::finish(output, processes::UP, processes::up(environment, &args));

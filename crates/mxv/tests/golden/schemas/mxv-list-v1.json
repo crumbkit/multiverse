@@ -116,6 +116,15 @@
             "$ref": "#/$defs/CheckoutRow"
           }
         },
+        "disposable": {
+          "description": "The bytes that the workspace's disposable directories take on disk,\nsuch as `target/` and `node_modules/`, which `mxv clean` deletes, or\nnull when `--sizes` was not given.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "name": {
           "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
           "type": "string"
@@ -144,6 +153,15 @@
           "items": {
             "type": "string"
           }
+        },
+        "size": {
+          "description": "The bytes that the workspace's directory takes on disk, with each\nfile that has several hard links counted once and no symbolic link\nfollowed, or null when `--sizes` was not given.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "required": [
@@ -151,7 +169,9 @@
         "branch",
         "path",
         "problem",
-        "ports"
+        "ports",
+        "size",
+        "disposable"
       ]
     }
   }

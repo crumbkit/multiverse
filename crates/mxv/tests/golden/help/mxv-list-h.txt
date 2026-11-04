@@ -5,6 +5,7 @@ Usage: mxv list [OPTIONS]
 Options:
       --limit <N>  Print at most this many rows, up to 100 [default: 25]
       --all        Print every row
+      --sizes      Measure each workspace's size on disk and its disposable size, which reads every file of every workspace on the page
   -h, --help       Print help (see more with '--help')
 
 Examples:

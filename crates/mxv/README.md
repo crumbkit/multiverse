@@ -39,11 +39,15 @@ workspace. mxv takes the first of these that is set:
 3. `$XDG_DATA_HOME/mxv/workspaces`, which is `~/.local/share/mxv/workspaces`
    when `XDG_DATA_HOME` is unset, empty or relative.
 
-The config file holds two optional settings:
+The config file holds these optional settings:
 
 ```toml
 root = "~/work"
 ports_range = [20000, 29999]
+disposable = ["coverage/"]          # more disposable globs for every repository
+clone_on_new = ["node_modules/"]    # the ignored directories that `mxv new` clones
+clean_idle = "7d"                   # the idle age that `mxv clean` waits for
+max_disposable = "50GiB"            # the limit that `mxv clean --over-limit` cleans down to
 ```
 
 `root` is a string that holds an absolute path, or a path that starts with
@@ -57,6 +61,9 @@ privileged, and ports from 32768 up belong to the ephemeral ranges of Linux
 and macOS, from which outgoing connections take their local ports. When
 every port of the range is held by a workspace or taken, `mxv up` fails
 with `mxv::port::exhausted`; a wider range fixes it.
+
+[Disk space](#disk-space) describes `disposable`, `clone_on_new`,
+`clean_idle` and `max_disposable`.
 
 mxv reads the file strictly. Any other key, a value of another type, a
 relative path or text that is not TOML fails with `mxv::config::invalid`,
@@ -136,6 +143,8 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
 | `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
+| `disposable` | Globs of more disposable paths of this repository, such as `["web/test-results/"]`. [Disk space](#disk-space) describes them. |
+| `clone_on_new` | Globs of more ignored directories that `mxv new` clones from this repository, such as `["web/.venv/"]`. |
 
 A listener without a `ready` table is ready when its listen port accepts a
 connection within 60 seconds. A process that listens on no port, such as a
@@ -430,9 +439,12 @@ deletes the record. It refuses, and changes nothing, in these cases:
   paths, and `--force` deletes them. The disposable set is each directory
   that git reports as ignored as a whole and whose own name is `target`,
   `node_modules`, `dist`, `build` or `.cache`, such as `target/` or
-  `web/node_modules/`, because a build makes those again. mxv deletes them
-  without asking and lists them in `disposable`. An ignored file is never
-  disposable, even inside a tracked `dist/` directory.
+  `web/node_modules/`, because a build makes those again. The repository's
+  `mxv.toml` and the config file can add globs to the set, as
+  [Disk space](#disk-space) describes. mxv deletes the disposable paths
+  without asking and lists them in `disposable`. A tracked file is never
+  disposable, and neither is an ignored file inside a directory that holds
+  tracked files, such as an ignored file in a tracked `dist/` directory.
 - A checkout's `HEAD` holds commits that no branch, tag or remote branch
   holds, such as commits on a detached `HEAD`. The refusal is
   `mxv::checkout::unreachable_commits`, and `--delete-unmerged` deletes the
@@ -474,6 +486,118 @@ commit while mxv waited, stays, and the result reports `kept_moved`.
 mxv refuses with `mxv::checkout::unowned` when the workspace directory or a
 checkout directory is a symbolic link, or when git does not list a checkout
 directory as a worktree of its repository.
+
+## Disk space
+
+Build output, such as Rust's `target/` and Node's `node_modules/`, takes
+most of a workspace's disk. mxv measures it, deletes it from idle
+workspaces, and lets a new workspace share `node_modules/` with its
+repository.
+
+### Sizes
+
+`mxv show` prints each workspace's `size`, the bytes its directory takes on
+disk, and `disposable`, the bytes its disposable paths take. `--full` adds
+`disposable_paths`, each disposable path with its checkout's name and its
+size. A size counts the blocks the file system allocated, so a sparse file
+counts only what it holds. A file with several hard links counts once, and
+mxv never follows a symbolic link. A copy-on-write clone counts in full,
+although it shares its blocks with its source until either changes, so the
+sizes of the workspaces can add up to more than the disk holds.
+
+`mxv list` prints the sizes only with `--sizes`. Measuring reads the
+metadata of every file of a workspace, which takes seconds for a checkout
+with a large `node_modules/` or `target/`, and `list` must stay fast for the
+completions and scripts that call it. `--sizes` measures only the
+workspaces on the page that `--limit` prints. `show` always measures,
+because it prints one workspace.
+
+### Disposable paths
+
+The disposable set is the built-in directories that
+[Removing a workspace](#removing-a-workspace) names, together with the globs
+that the repository's `mxv.toml` and the config file declare in
+`disposable`. The globs from both add to the built-in set, and a glob from
+either applies to every checkout of that repository. A path is disposable
+only while `git status` reports it as ignored and a glob matches it, so a
+tracked file is never disposable.
+
+A glob is a path relative to the repository's root, written as `git status`
+prints it:
+
+- A glob that ends with `/`, such as `coverage/`, matches only a directory.
+- A glob with no other `/`, such as `coverage/` or `*.log`, matches that
+  name at any depth. Any other glob, such as `web/test-results/`, starts at
+  the repository's root.
+- `*` matches any characters inside one path component, `?` matches one
+  character, and a component that is `**` matches any number of components.
+
+A glob matches a whole path that `git status` reports. git reports an
+ignored directory as a whole only when it holds no tracked file, so a glob
+never matches the ignored files inside a directory that holds tracked files.
+A glob that is empty, starts with `/`, or holds a `..`, `.` or empty
+component fails with `mxv::manifest::invalid` in `mxv.toml`, or with
+`mxv::config::invalid` in the config file, and the failure names the glob's
+line. When a repository's `mxv.toml` is invalid, `remove` and `clean` use
+the built-in set and the config file's globs for it.
+
+### Cleaning idle workspaces
+
+`mxv clean <workspace>...` deletes the disposable paths of the named
+workspaces that are idle, and `mxv clean --all` does so for every workspace.
+It deletes nothing else. A workspace is idle when none of its processes or
+containers run, and no file of its checkouts outside the disposable paths
+and `.git` has changed for the idle age. A commit, a staged change and a
+checkout of another branch count as changes. The idle age is `--idle`, such
+as `--idle 3d`, or else the config file's `clean_idle`, or else 7 days. An
+age is a whole number followed by `w`, `d`, `h`, `m` or `s`.
+
+`clean` prints a row for each workspace it considered: `cleaned` with the
+bytes it freed in `freed`, or `kept` with the reason in `reason`, such as a
+running process or a recent change. A dry run prints `would_clean` and
+deletes nothing. The note after the rows gives the total freed. `clean`
+asks before it deletes, and `--yes` answers for a script. Before it deletes
+a path, `clean` checks again that git reports the path as ignored, that it
+is not tracked and that it is not a symbolic link, so a path that changed
+while mxv waited stays. A workspace whose paths cannot be deleted fails
+alone, and `clean` goes on with the next one.
+
+`mxv clean --over-limit` reads `max_disposable` from the config file, a
+size such as `"50GiB"` or `"40GB"`. It adds up the disposable bytes of every
+workspace, and when the total exceeds the limit, it cleans idle workspaces,
+the one unchanged longest first, until the total is within the limit. When
+the config file sets no `max_disposable`, it fails with
+`mxv::config::no_limit`. `--over-limit` is meant for a cron job or a git
+hook, such as this daily crontab line:
+
+```sh
+17 3 * * * mxv clean --over-limit --yes
+```
+
+`clean` measures every workspace it considers, so a run takes as long as
+`show` takes for each of them.
+
+### Cloning `node_modules/`
+
+`mxv new` clones each ignored directory of the repository that a
+`clone_on_new` glob matches into the new checkout, with a copy-on-write
+clone. The clone shares its blocks with the repository's directory until
+either copy of a file changes, so a new workspace starts with installed
+packages and costs almost no disk at first. The config file's
+`clone_on_new` replaces the default, `["node_modules/"]`, and the
+repository's `mxv.toml` adds globs to it. `clone_on_new = []` in the config
+file turns off the default. `--no-clone` clones nothing for one `new`.
+
+mxv never clones `target/`, because a build of the checkout's own sources
+writes it, and a `clone_on_new` glob that names `target` fails as invalid.
+mxv clones only a directory that `git status` reports as ignored as a
+whole, that is not a symbolic link, and whose place in the checkout is
+empty. `new` prints the cloned directories in `cloned`.
+
+Cloning needs APFS on macOS. When the file system cannot clone, such as
+HFS+ or a workspace root on another volume, `new` clones nothing, copies
+nothing, and prints why in `clone_warning`. On Linux, `new` always prints
+that warning for now. The workspace is created either way.
 
 ## Environment
 
