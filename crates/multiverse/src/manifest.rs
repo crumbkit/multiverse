@@ -47,7 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -109,6 +109,10 @@ pub struct Manifest {
     /// `mxv new` clones from the repository into a new checkout, on top of
     /// the ones that the config file names.
     pub clone_on_new: Vec<PathGlob>,
+    /// One sentence for each top-level table that mxv ignores although
+    /// its name is close to one of mxv's own, such as `[proceses.web]`,
+    /// or is phase's `[process.*]`, with the file and line in front.
+    pub warnings: Vec<String>,
 }
 
 /// One process or container of a manifest.
@@ -445,9 +449,24 @@ impl fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
-/// The manifest as TOML holds it, with the spans that errors cite.
+/// The top-level keys that mxv reads. [`Manifest::parse`] leaves any other
+/// top-level table to the tools that read it.
+const OWN_KEYS: &[&str] = &[
+    "version",
+    "ports",
+    "processes",
+    "containers",
+    "disposable",
+    "clone_on_new",
+    "secrets",
+    "actions",
+];
+
+/// The manifest as TOML holds it, with the spans that errors cite. It
+/// declares no `deny_unknown_fields`, because another tool's top-level
+/// table may share the file; [`check_top_level`] refuses every other
+/// unknown top-level key.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawManifest {
     /// The manifest's version.
     version: Option<Spanned<u64>>,
@@ -577,6 +596,109 @@ impl Errors<'_> {
     }
 }
 
+/// The top-level tables of phase, which reads the same `mxv.toml`. mxv
+/// never warns about them, except `process`, which phase uses for what
+/// mxv calls `processes`.
+const PHASE_TABLES: &[&str] = &[
+    "app",
+    "release",
+    "build",
+    "process",
+    "permissions",
+    "needs",
+    "service",
+];
+
+/// Checks that `text` is valid TOML and that each top-level key that mxv
+/// does not read holds a table or an array of tables, such as the `[app]`,
+/// `[service.web]` or `[[release]]` of another tool that shares the file,
+/// which mxv leaves alone. Any other unknown top-level key fails with
+/// [`ManifestProblem::UnknownKey`].
+///
+/// It returns a warning for each such table whose name is close to one of
+/// mxv's own, which [`near_miss`] decides, and for phase's `[process.*]`,
+/// so a misspelt table never silently declares nothing.
+fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<Vec<String>, ManifestError> {
+    let table = toml::de::DeTable::parse(text).map_err(|error| errors.of_toml(&error))?;
+    let mut warnings = Vec::new();
+    for (key, value) in table.get_ref() {
+        let name = key.get_ref().as_ref();
+        if OWN_KEYS.contains(&name) {
+            continue;
+        }
+        let tables = match value.get_ref() {
+            toml::de::DeValue::Table(_) => true,
+            toml::de::DeValue::Array(items) => {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|item| matches!(item.get_ref(), toml::de::DeValue::Table(_)))
+            }
+            _ => false,
+        };
+        if !tables {
+            return Err(errors.at(
+                Some(&key.span()),
+                ManifestProblem::UnknownKey {
+                    key: name.to_owned(),
+                },
+            ));
+        }
+        let place = format!("{}:{}", errors.path.display(), errors.line(&key.span()));
+        if name == "process" {
+            warnings.push(format!(
+                "{place}: mxv ignores the table `[process.*]`, which is phase's, and runs only the processes of `[processes.*]`"
+            ));
+        } else if !PHASE_TABLES.contains(&name)
+            && let Some(meant) = near_miss(name)
+        {
+            warnings.push(format!(
+                "{place}: mxv ignores the table `[{name}]`, whose name is close to mxv's `{meant}`, and reads nothing from it"
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
+/// Returns the key of mxv's own that `name` is likely a misspelling of:
+/// one that differs from `name` only in case, or by a trailing `s`, or by
+/// at most two inserted, deleted or replaced characters.
+fn near_miss(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    OWN_KEYS.iter().copied().find(|own| {
+        lower == *own
+            || format!("{lower}s") == *own
+            || lower == format!("{own}s")
+            || edit_distance(&lower, own) <= 2
+    })
+}
+
+/// Returns the number of characters that must be inserted, deleted or
+/// replaced to turn `from` into `to`.
+fn edit_distance(from: &str, to: &str) -> usize {
+    let to: Vec<char> = to.chars().collect();
+    // `previous` holds the distances from the characters of `from` read so
+    // far to each prefix of `to`.
+    let mut previous: Vec<usize> = (0..=to.len()).collect();
+    for (row, left) in from.chars().enumerate() {
+        let mut current = vec![row.saturating_add(1)];
+        for (pair, right) in previous.windows(2).zip(&to) {
+            let [diagonal, above] = pair else {
+                continue;
+            };
+            let beside = current.last().copied().unwrap_or(usize::MAX);
+            current.push(
+                diagonal
+                    .saturating_add(usize::from(left != *right))
+                    .min(above.saturating_add(1))
+                    .min(beside.saturating_add(1)),
+            );
+        }
+        previous = current;
+    }
+    previous.last().copied().unwrap_or_default()
+}
+
 /// Returns the key of serde's message about an unknown field, such as
 /// ``unknown field `command`, expected one of ...``.
 fn unknown_field(message: &str) -> Option<String> {
@@ -623,7 +745,55 @@ impl Manifest {
     /// Returns a [`ManifestError`] when the file cannot be read, is larger
     /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
     pub fn read(checkout: &Path) -> Result<Option<Self>, ManifestError> {
-        let path = checkout.join(MANIFEST_FILE);
+        Self::read_file(&checkout.join(MANIFEST_FILE), checkout)
+    }
+
+    /// Returns the manifest at `path`, whose paths are relative to
+    /// `checkout`, or `None` when no file is at `path`. It reads the
+    /// workspace manifest above a checkout as [`Manifest::read`] reads the
+    /// checkout's own.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestError`] when the file cannot be read, is larger
+    /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
+    pub fn read_file(path: &Path, checkout: &Path) -> Result<Option<Self>, ManifestError> {
+        let Some(text) = Self::read_text(path)? else {
+            return Ok(None);
+        };
+        let manifest = Self::parse(&text, path)?;
+        manifest.check_cwds(checkout, path)?;
+        Ok(Some(manifest))
+    }
+
+    /// Returns the text of the manifest at `path`, after checking that it
+    /// parses, as [`Manifest::read_text`] does, for a file that the person
+    /// named, which must exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Manifest::read_text`], and a
+    /// [`ManifestProblem::Unreadable`] when no file is at `path`.
+    pub fn read_named(path: &Path) -> Result<String, ManifestError> {
+        Self::read_text(path)?.ok_or_else(|| ManifestError {
+            path: path.to_path_buf(),
+            line: None,
+            problem: ManifestProblem::Unreadable {
+                message: "no file is at this path".to_owned(),
+            },
+        })
+    }
+
+    /// Returns the text of the manifest at `path`, after checking that it
+    /// parses, or `None` when no file is at `path`. `mxv new` copies a
+    /// file it reads this way into a new workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestError`] when the file cannot be read, is larger
+    /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
+    pub fn read_text(path: &Path) -> Result<Option<String>, ManifestError> {
+        let path = path.to_path_buf();
         let unreadable = |error: io::Error| ManifestError {
             path: path.clone(),
             line: None,
@@ -633,7 +803,23 @@ impl Manifest {
         };
         let file = match File::open(&path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A symbolic link that leads nowhere is a file that cannot be
+            // read, so the next manifest never takes its place.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::read_link(&path) {
+                Ok(target) => {
+                    return Err(ManifestError {
+                        path,
+                        line: None,
+                        problem: ManifestProblem::Unreadable {
+                            message: format!(
+                                "it is a symbolic link to {}, which does not exist",
+                                target.display()
+                            ),
+                        },
+                    });
+                }
+                Err(_) => return Ok(None),
+            },
             Err(error) => return Err(unreadable(error)),
         };
         let mut text = String::new();
@@ -649,9 +835,8 @@ impl Manifest {
                 },
             });
         }
-        let manifest = Self::parse(&text, &path)?;
-        manifest.check_cwds(checkout, &path)?;
-        Ok(Some(manifest))
+        Self::parse(&text, &path)?;
+        Ok(Some(text))
     }
 
     /// Checks that each process's `cwd` that exists in `checkout` stays
@@ -689,6 +874,7 @@ impl Manifest {
     /// problem it finds.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ManifestError> {
         let errors = Errors { path, text };
+        let warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         if let Some(version) = &raw.version {
             match *version.get_ref() {
@@ -823,6 +1009,7 @@ impl Manifest {
             containers,
             disposable: globs(&raw.disposable, PathGlob::parse_directory, "disposable")?,
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
+            warnings,
         };
         if let Some(name) = manifest.cycle() {
             let span = raw

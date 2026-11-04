@@ -2,18 +2,21 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
     Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource, Fate, Kind,
-    ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
+    MANIFEST_FILE, Manifest, ManifestSource, ProcessState, ProcessStatus, Removal, Workspace,
+    WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::environment::{Root, RootSource};
 use crate::failures::remove_line;
+use crate::run_failures::RunFailure;
 use crate::units::Size;
 
 /// One workspace, as `list` prints it.
@@ -34,6 +37,14 @@ pub(crate) struct WorkspaceRow {
     /// repository, which mxv made before clones. Null in a row whose record
     /// mxv cannot read.
     kind: Option<KindRow>,
+    /// Which manifest the workspace's commands read: `workspace` for the
+    /// workspace manifest above the checkout, `repository` for the
+    /// checkout's own `mxv.toml`, or `none` for a bare workspace. Null in a
+    /// row whose record mxv cannot read.
+    manifest: Option<ManifestRow>,
+    /// The path of the manifest that the workspace's commands read, or
+    /// null when they read none.
+    manifest_path: Option<String>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
     /// Why mxv cannot read the workspace's record, such as a record that
@@ -81,11 +92,50 @@ pub(crate) struct PlacedRow {
     /// `.git` of its own, or `worktree` for a git worktree of the
     /// repository, which mxv made before clones.
     kind: KindRow,
+    /// Which manifest the workspace's commands read: `workspace` for the
+    /// workspace manifest above the checkout, `repository` for the
+    /// checkout's own `mxv.toml`, or `none` for a bare workspace.
+    manifest: ManifestRow,
+    /// The path of the manifest that the workspace's commands read, or
+    /// null when they read none.
+    manifest_path: Option<String>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
     /// The host port that the workspace holds for each named port of its
     /// manifest, which the first `mxv up` allocates.
     ports: BTreeMap<String, u16>,
+}
+
+/// Which manifest a workspace's commands read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ManifestRow {
+    /// The workspace manifest, `<workspace>/mxv.toml`, above the checkout.
+    Workspace,
+    /// The checkout's own `mxv.toml`.
+    Repository,
+    /// Neither file, so the workspace is bare.
+    None,
+}
+
+impl From<ManifestSource> for ManifestRow {
+    fn from(source: ManifestSource) -> Self {
+        match source {
+            ManifestSource::Workspace => Self::Workspace,
+            ManifestSource::Repository => Self::Repository,
+            ManifestSource::None => Self::None,
+        }
+    }
+}
+
+impl fmt::Display for ManifestRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Workspace => "workspace",
+            Self::Repository => "repository",
+            Self::None => "none",
+        })
+    }
 }
 
 /// How a workspace's checkouts are made.
@@ -111,7 +161,8 @@ impl From<WorkspaceKind> for KindRow {
 impl Row for PlacedRow {
     const COLUMNS: &'static [&'static str] =
         &["name", "branch", "path", "root", "root_source", "ports"];
-    const LONG_COLUMNS: &'static [&'static str] = &["kind", "repositories"];
+    const LONG_COLUMNS: &'static [&'static str] =
+        &["kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -129,6 +180,8 @@ impl PlacedRow {
             root_source: root.source,
             repositories: row.repositories,
             kind: workspace.kind.into(),
+            manifest: row.manifest.unwrap_or(ManifestRow::None),
+            manifest_path: row.manifest_path,
             checkouts: row.checkouts,
             ports: row.ports,
         }
@@ -170,7 +223,8 @@ impl Row for WorkspaceRow {
         "problem",
     ];
     const PROBLEM: Option<&'static str> = Some("problem");
-    const LONG_COLUMNS: &'static [&'static str] = &["kind", "repositories"];
+    const LONG_COLUMNS: &'static [&'static str] =
+        &["kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -195,6 +249,7 @@ impl From<&Checkout> for CheckoutRow {
 
 impl From<&Workspace> for WorkspaceRow {
     fn from(workspace: &Workspace) -> Self {
+        let inputs = workspace.manifest_inputs();
         Self {
             name: workspace.name.to_string(),
             branch: workspace.checkouts.first().map_or_else(
@@ -208,6 +263,8 @@ impl From<&Workspace> for WorkspaceRow {
                 .map(|checkout| checkout.source.display().to_string())
                 .collect(),
             kind: Some(workspace.kind.into()),
+            manifest: Some(inputs.source().into()),
+            manifest_path: inputs.chosen().map(|path| path.display().to_string()),
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
             ports: workspace.ports.clone(),
@@ -237,6 +294,8 @@ impl WorkspaceRow {
             path: String::new(),
             repositories: Vec::new(),
             kind: None,
+            manifest: None,
+            manifest_path: None,
             checkouts: Vec::new(),
             problem: error.to_string(),
             ports: BTreeMap::new(),
@@ -279,7 +338,9 @@ pub(crate) struct ShowRow {
     /// the reason, such as a directory that holds a `.git` entry.
     kept_paths: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
-    /// `mxv.toml` declares, such as an invalid manifest, or null.
+    /// `mxv.toml` declares, such as an invalid manifest, or why its paths
+    /// wait for a confirmation, and each table of the manifest that mxv
+    /// ignores although its name is close to one of mxv's own, or null.
     warnings: Option<String>,
 }
 
@@ -307,6 +368,9 @@ pub(crate) enum SourceRow {
     BuiltIn,
     /// A glob of the person's config file.
     Config,
+    /// A glob of the workspace manifest, which the person wrote for the
+    /// workspace.
+    Workspace,
     /// A glob of the repository's own `mxv.toml`, and nothing else.
     Manifest,
 }
@@ -316,6 +380,7 @@ impl From<DisposableSource> for SourceRow {
         match source {
             DisposableSource::BuiltIn => Self::BuiltIn,
             DisposableSource::Config => Self::Config,
+            DisposableSource::Workspace => Self::Workspace,
             // A source that a later library adds counts as the least
             // trusted one.
             _ => Self::Manifest,
@@ -335,8 +400,14 @@ impl Row for ShowRow {
         "ports",
         "warnings",
     ];
-    const LONG_COLUMNS: &'static [&'static str] =
-        &["kind", "repositories", "disposable_paths", "kept_paths"];
+    const LONG_COLUMNS: &'static [&'static str] = &[
+        "kind",
+        "manifest",
+        "manifest_path",
+        "repositories",
+        "disposable_paths",
+        "kept_paths",
+    ];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -367,6 +438,14 @@ impl ShowRow {
             warnings: joined(&usage.warnings),
         }
     }
+
+    /// Returns the row with `warnings` after the warnings it holds.
+    pub(crate) fn with_warnings(mut self, warnings: &[String]) -> Self {
+        let mut all: Vec<String> = self.warnings.into_iter().collect();
+        all.extend_from_slice(warnings);
+        self.warnings = joined(&all);
+        self
+    }
 }
 
 /// The workspace that `new` created, or would create on a dry run, and the
@@ -385,6 +464,15 @@ pub(crate) struct NewRow {
     /// file system that cannot clone, or null. `new` never copies the
     /// directories in full.
     clone_warning: Option<String>,
+    /// The file that `new` copied into the workspace manifest: the
+    /// `--manifest` file, or the template whose `[template]` table lists
+    /// the repository's origin, or null when it copied none.
+    manifest_from: Option<String>,
+    /// The sentences, joined with `; `, for each template that `new`
+    /// skipped because it cannot use it, and for each table of the copied
+    /// manifest that mxv ignores although its name is close to one of
+    /// mxv's own, or null.
+    warnings: Option<String>,
 }
 
 impl Row for NewRow {
@@ -397,8 +485,11 @@ impl Row for NewRow {
         "ports",
         "cloned",
         "clone_warning",
+        "manifest",
+        "manifest_from",
+        "warnings",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["kind", "repositories"];
+    const LONG_COLUMNS: &'static [&'static str] = &["kind", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -406,12 +497,42 @@ impl Row for NewRow {
 impl NewRow {
     /// Returns the row of `workspace` with `root`, the root that the run
     /// used, and the directories that `cloned` names.
-    pub(crate) fn new(workspace: &Workspace, root: &Root, cloned: Cloned) -> Self {
+    ///
+    /// `copied` is the file that `new` copied into the workspace manifest,
+    /// if any. A dry run writes no file, so the row then names the manifest
+    /// that the workspace would read: the workspace manifest when `new`
+    /// would copy one, or else the repository's `mxv.toml` when the
+    /// repository has one.
+    pub(crate) fn new(
+        workspace: &Workspace,
+        root: &Root,
+        cloned: Cloned,
+        copied: Option<&Path>,
+    ) -> Self {
+        let mut placed = PlacedRow::new(workspace, root);
+        if copied.is_some() {
+            placed.manifest = ManifestRow::Workspace;
+            placed.manifest_path = Some(workspace.manifest_file().display().to_string());
+        } else if placed.manifest == ManifestRow::None
+            && let Some(checkout) = workspace.manifest_checkout()
+            && checkout.source.join(MANIFEST_FILE).is_file()
+        {
+            placed.manifest = ManifestRow::Repository;
+            placed.manifest_path = Some(checkout.path.join(MANIFEST_FILE).display().to_string());
+        }
         Self {
-            placed: PlacedRow::new(workspace, root),
+            placed,
             cloned: cloned.paths,
             clone_warning: cloned.warning,
+            manifest_from: copied.map(|path| path.display().to_string()),
+            warnings: None,
         }
+    }
+
+    /// Returns the row with `warnings`.
+    pub(crate) fn with_warnings(mut self, warnings: &[String]) -> Self {
+        self.warnings = joined(warnings);
+        self
     }
 }
 
@@ -450,8 +571,12 @@ pub(crate) struct RemovalResult {
     /// confirmed them at the prompt or passed `--force`.
     manifest_paths: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
-    /// `mxv.toml` declares, such as an invalid manifest.
+    /// `mxv.toml` declares, such as an invalid manifest, or why its paths
+    /// wait for a confirmation.
     warnings: Vec<String>,
+    /// The workspace manifest that the removal deletes, which a person may
+    /// have edited by hand, or null when the workspace has none.
+    manifest_deleted: Option<String>,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -582,6 +707,10 @@ impl RemovalResult {
             volumes: Vec::new(),
             manifest_paths: removal.manifest.clone(),
             warnings: removal.warnings.clone(),
+            manifest_deleted: removal
+                .workspace_manifest
+                .as_ref()
+                .map(|path| path.display().to_string()),
             planned,
         }
     }
@@ -630,6 +759,9 @@ impl fmt::Display for RemovalResult {
         }
         for container in &self.containers {
             writeln!(formatter, "mxv {removes} the docker container {container}.")?;
+        }
+        if let Some(path) = &self.manifest_deleted {
+            writeln!(formatter, "mxv {deletes} the workspace manifest {path}.")?;
         }
         for volume in &self.volumes {
             writeln!(
@@ -930,33 +1062,77 @@ fn unmerged(count: Option<u32>) -> String {
     }
 }
 
-/// What `mxv status` says above its rows: whether the manifest parsed.
+/// What `mxv status` says above its rows: which manifest the workspace
+/// reads, whether it could be read, and its warnings.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct StatusSummary {
-    /// The manifest's error when it does not parse, in which case the rows
-    /// come from the run records alone, or null.
+    /// Which manifest the workspace's commands read: `workspace` for the
+    /// workspace manifest above the checkout, `repository` for the
+    /// checkout's own `mxv.toml`, or `none` for a bare workspace.
+    manifest: ManifestRow,
+    /// The path of the manifest that the workspace's commands read, or
+    /// null when they read none.
+    manifest_path: Option<String>,
+    /// The manifest's error when it cannot be read or does not parse, in
+    /// which case the rows come from the run records alone, or null.
     manifest_error: Option<String>,
+    /// The code of `manifest_error`, such as `mxv::manifest::unreadable`
+    /// for a symbolic link that leads nowhere, which `mxv up` fails with,
+    /// or null.
+    manifest_error_code: Option<String>,
+    /// One sentence for each table of the manifest that mxv ignores
+    /// although its name is close to one of mxv's own, such as
+    /// `[proceses.web]`.
+    warnings: Vec<String>,
 }
 
 impl StatusSummary {
-    /// Returns the summary of a status whose manifest failed with `error`,
-    /// or parsed or is missing when `error` is `None`.
-    pub(crate) const fn new(manifest_error: Option<String>) -> Self {
-        Self { manifest_error }
+    /// Returns the summary of a status of `workspace`, whose manifest is
+    /// `manifest`, or failed with `error`.
+    pub(crate) fn new(
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+        error: Option<&RunFailure>,
+    ) -> Self {
+        let inputs = workspace.manifest_inputs();
+        Self {
+            manifest: inputs.source().into(),
+            manifest_path: inputs.chosen().map(|path| path.display().to_string()),
+            manifest_error: error.map(ToString::to_string),
+            manifest_error_code: error.map(|error| {
+                let code = crumbkit::Failure::code(error);
+                format!("{}::{}::{}", code.component(), code.area(), code.reason())
+            }),
+            warnings: manifest
+                .map(|manifest| manifest.warnings.clone())
+                .unwrap_or_default(),
+        }
     }
 }
 
-/// Prints one line when the manifest does not parse, and nothing
-/// otherwise.
+/// Prints which manifest the workspace reads, one more line when the
+/// manifest cannot be read or does not parse, and a line for each warning.
 impl fmt::Display for StatusSummary {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.manifest_error {
-            Some(error) => write!(
-                formatter,
-                "The manifest does not parse, so the processes come from the run records: {error}"
-            ),
-            None => Ok(()),
+        match (&self.manifest, &self.manifest_path) {
+            (ManifestRow::Workspace, Some(path)) => {
+                write!(formatter, "The manifest is the workspace manifest {path}.")?;
+            }
+            (ManifestRow::Repository, Some(path)) => {
+                write!(formatter, "The manifest is the repository's {path}.")?;
+            }
+            _ => formatter.write_str("The workspace has no manifest.")?,
         }
+        if let Some(error) = &self.manifest_error {
+            write!(
+                formatter,
+                "\nThe manifest cannot be used, so the processes come from the run records: {error}"
+            )?;
+        }
+        for warning in &self.warnings {
+            write!(formatter, "\nWarning: {warning}.")?;
+        }
+        Ok(())
     }
 }
 

@@ -124,6 +124,26 @@
         }
       ]
     },
+    "ManifestRow": {
+      "description": "Which manifest a workspace's commands read.",
+      "oneOf": [
+        {
+          "description": "The workspace manifest, `<workspace>/mxv.toml`, above the checkout.",
+          "type": "string",
+          "const": "workspace"
+        },
+        {
+          "description": "The checkout's own `mxv.toml`.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "Neither file, so the workspace is bare.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
     "WorkspaceRow": {
       "description": "One workspace, as `list` prints it.",
       "type": "object",
@@ -157,6 +177,24 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "manifest": {
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, or `none` for a bare workspace. Null in a\nrow whose record mxv cannot read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestRow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest_path": {
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "name": {

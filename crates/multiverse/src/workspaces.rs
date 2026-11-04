@@ -9,11 +9,12 @@ use crate::backend::{Backend, INITIALIZING};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
 use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
-use crate::manifest::Manifest;
+use crate::lookup::ManifestSource;
 use crate::mirror::Origin;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind, agents_text};
 use crate::store::{self, Created, Records, Store};
+use crate::template::Found as FoundTemplate;
 
 #[cfg(test)]
 mod clone_tests;
@@ -238,8 +239,13 @@ pub struct Removal {
     /// person confirms them or allows discarding changes.
     pub manifest: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
-    /// `mxv.toml` declares, such as an invalid manifest.
+    /// `mxv.toml` declares, such as an invalid manifest, or why its paths
+    /// wait for a confirmation.
     pub warnings: Vec<String>,
+    /// The workspace manifest, [`Workspace::manifest_file`], which the
+    /// removal deletes, or `None` when the workspace has none. A person may
+    /// have edited it by hand, so the removal names it.
+    pub workspace_manifest: Option<PathBuf>,
 }
 
 /// The outcome of [`Workspaces::remove`].
@@ -463,6 +469,8 @@ struct Made {
     branches: Vec<String>,
     /// Whether the run wrote `AGENTS.md`.
     agents: bool,
+    /// Whether the run wrote the workspace manifest.
+    manifest: bool,
     /// The number of checkouts, in the record's order, whose clone the run
     /// started, which may have left a directory behind.
     clones: usize,
@@ -527,30 +535,54 @@ impl<B: Backend> Workspaces<B> {
         self
     }
 
-    /// Returns the disposable set of `checkout`: the built-in
-    /// [`DISPOSABLE`] directories, the globs that the checkout's own
-    /// `mxv.toml` declares, and the person's globs. A manifest that cannot
-    /// be read adds no globs, so fewer paths are disposable, and the
-    /// returned warning says so.
-    pub(crate) fn disposable_set(&self, checkout: &Checkout) -> (DisposableSet, Option<String>) {
-        let (declared, warning) = match Manifest::read(&checkout.path) {
+    /// Returns the disposable set of `checkout` of `workspace`: the
+    /// built-in [`DISPOSABLE`] directories, the globs of the one manifest
+    /// that the checkout reads, and the person's globs. The manifest is
+    /// the workspace manifest when it exists, whose globs count as the
+    /// person's own ([`DisposableSource::Workspace`]), or else the
+    /// checkout's `mxv.toml`, whose globs only it declares
+    /// ([`DisposableSource::Manifest`]). A manifest that cannot be read
+    /// adds no globs, so fewer paths are disposable, and the returned
+    /// warning says so.
+    pub(crate) fn disposable_set(
+        &self,
+        workspace: &Workspace,
+        checkout: &Checkout,
+    ) -> (DisposableSet, Option<String>) {
+        let inputs = workspace.manifest_inputs_for(Some(checkout));
+        // Only a workspace manifest that no repository can have written
+        // counts like the config file. One that is a link counts like the
+        // repository's own, whose paths wait for a confirmation.
+        let linked = inputs.source() == ManifestSource::Workspace && !workspace.manifest_trusted();
+        let source = if inputs.source() == ManifestSource::Workspace && !linked {
+            DisposableSource::Workspace
+        } else {
+            DisposableSource::Manifest
+        };
+        let (declared, warning) = match workspace.manifest_for(Some(checkout)) {
             Ok(manifest) => (
                 manifest
                     .map(|manifest| manifest.disposable)
                     .unwrap_or_default(),
-                None,
+                linked.then(|| {
+                    format!(
+                        "the workspace manifest {} is a symbolic link or a hard link of another file, so mxv deletes the paths it declares disposable only after a confirmation, as it does for a repository's mxv.toml",
+                        workspace.manifest_file().display()
+                    )
+                }),
             ),
             Err(error) => (
                 Vec::new(),
                 Some(format!(
-                    "the mxv.toml of the checkout {} is invalid, so mxv uses only the built-in disposable set and the config file's globs there: {error}",
+                    "the manifest {} of the checkout {} is invalid, so mxv uses only the built-in disposable set and the config file's globs there: {error}",
+                    error.path.display(),
                     checkout.name
                 )),
             ),
         };
         (
             DisposableSet::built_in()
-                .with(&declared, DisposableSource::Manifest)
+                .with(&declared, source)
                 .with(&self.disposable, DisposableSource::Config),
             warning,
         )
@@ -611,6 +643,91 @@ impl<B: Backend> Workspaces<B> {
         repository: &Path,
         mode: Mode,
     ) -> Result<NewOutcome, Error> {
+        self.create_with_manifest(root, name, repository, mode, None)
+    }
+
+    /// Returns the template in `templates` for the origin of the
+    /// repository at `repository`, as [`find_template`] describes, and the
+    /// templates it skipped. `root` is the root of the workspaces, under
+    /// which no template may lie.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryNotFound`] or [`Error::NoOrigin`] for a
+    /// path that is not a repository with an `origin`, and the errors of
+    /// [`find_template`].
+    ///
+    /// [`find_template`]: crate::find_template
+    pub fn template(
+        &self,
+        templates: &Path,
+        repository: &Path,
+        root: &Path,
+    ) -> Result<FoundTemplate, Error> {
+        let repository = self.backend.repository(repository)?;
+        let url = self.backend.origin_url(&repository.root)?;
+        crate::template::find(templates, &url, &repository.root, root)
+    }
+
+    /// Checks that `path`, a file that the person names to copy as a
+    /// workspace manifest, is the person's own. A workspace manifest's
+    /// `disposable` globs are deleted without asking, so mxv refuses a file
+    /// that a repository or an agent could have written: one that lies,
+    /// once symbolic links are resolved, under `root`, the root of the
+    /// workspaces, or inside a git work tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ManifestUntrusted`] for such a file, and the errors
+    /// of git other than [`Error::RepositoryNotFound`] and
+    /// [`Error::NoOrigin`].
+    pub fn check_manifest_source(&self, path: &Path, root: &Path) -> Result<(), Error> {
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let untrusted = |reason: String| Error::ManifestUntrusted {
+            path: path.to_path_buf(),
+            reason,
+        };
+        if resolved.starts_with(&root) {
+            return Err(untrusted(format!(
+                "it lies under the root of the workspaces {}",
+                root.display()
+            )));
+        }
+        let Some(dir) = resolved.parent() else {
+            return Ok(());
+        };
+        match self.backend.repository(dir) {
+            Ok(repository) => Err(untrusted(format!(
+                "it lies inside the git work tree {}",
+                repository.root.display()
+            ))),
+            Err(Error::NoOrigin { repository }) => Err(untrusted(format!(
+                "it lies inside the git work tree {}",
+                repository.display()
+            ))),
+            Err(Error::RepositoryNotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Creates the workspace as [`Workspaces::create`] does, and writes
+    /// `manifest`, when it is given, as the workspace manifest
+    /// [`Workspace::manifest_file`], beside `AGENTS.md`. A failure after
+    /// the manifest was written deletes it with the rest of the workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Workspaces::create`], and
+    /// [`Error::Unwritable`] when the manifest cannot be written.
+    pub fn create_with_manifest(
+        &self,
+        root: &Path,
+        name: &WorkspaceName,
+        repository: &Path,
+        mode: Mode,
+        manifest: Option<&str>,
+    ) -> Result<NewOutcome, Error> {
         if let Some(existing) = self.store.read(name)? {
             return Ok(NewOutcome::NameTaken(existing));
         }
@@ -633,7 +750,7 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         if let Some(mirrors) = &self.mirrors {
-            return self.create_clone(root, name, &repository, path, mirrors, mode);
+            return self.create_clone(root, name, &repository, mirrors, mode, manifest);
         }
         if mode == Mode::Change {
             self.backend.fetch(&repository.root)?;
@@ -657,7 +774,7 @@ impl<B: Backend> Workspaces<B> {
             ));
         }
         let mut made = Made::default();
-        match self.make(root, &mut workspace, &mut made) {
+        match self.make(root, &mut workspace, manifest, &mut made) {
             Ok(Making::Done) => Ok(NewOutcome::Created(workspace)),
             Ok(Making::BranchTaken { repository, branch }) => {
                 self.undo(&workspace, &made);
@@ -677,10 +794,11 @@ impl<B: Backend> Workspaces<B> {
         root: &Path,
         name: &WorkspaceName,
         repository: &crate::backend::Repository,
-        path: PathBuf,
         mirrors: &Path,
         mode: Mode,
+        manifest: Option<&str>,
     ) -> Result<NewOutcome, Error> {
+        let path = root.join(name.as_str());
         let url = self.backend.origin_url(&repository.root)?;
         let origin = Origin::parse(&url, &repository.root).ok_or_else(|| Error::NoOrigin {
             repository: repository.root.clone(),
@@ -705,7 +823,7 @@ impl<B: Backend> Workspaces<B> {
             ));
         }
         let mut made = Made::default();
-        match self.make_clones(root, &mut workspace, &origin.url, &mut made) {
+        match self.make_clones(root, &mut workspace, &origin.url, manifest, &mut made) {
             Ok(()) => Ok(NewOutcome::Created(workspace)),
             Err(error) => {
                 self.undo(&workspace, &made);
@@ -723,6 +841,7 @@ impl<B: Backend> Workspaces<B> {
         root: &Path,
         workspace: &mut Workspace,
         url: &str,
+        manifest: Option<&str>,
         made: &mut Made,
     ) -> Result<(), Error> {
         let unwritable = |path: &Path| {
@@ -771,6 +890,7 @@ impl<B: Backend> Workspaces<B> {
         }
         made.agents = true;
         store::replace_file(&workspace.agents_file(), agents_text(workspace).as_bytes())?;
+        write_manifest(workspace, manifest, made)?;
         self.store.update(workspace)?;
         Ok(())
     }
@@ -828,6 +948,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         root: &Path,
         workspace: &mut Workspace,
+        manifest: Option<&str>,
         made: &mut Made,
     ) -> Result<Making, Error> {
         let unwritable = |path: &Path| {
@@ -855,6 +976,7 @@ impl<B: Backend> Workspaces<B> {
         }
         made.agents = true;
         store::replace_file(&workspace.agents_file(), agents_text(workspace).as_bytes())?;
+        write_manifest(workspace, manifest, made)?;
         self.store.update(workspace)?;
         Ok(Making::Done)
     }
@@ -893,6 +1015,12 @@ impl<B: Backend> Workspaces<B> {
                 .backend
                 .delete_branch_at(&checkout.source, &checkout.branch, start)
                 .is_ok();
+        }
+        if made.manifest {
+            clean &= match fs::remove_file(workspace.manifest_file()) {
+                Ok(()) => true,
+                Err(error) => error.kind() == io::ErrorKind::NotFound,
+            };
         }
         if made.agents {
             let agents = workspace.agents_file();
@@ -950,7 +1078,7 @@ impl<B: Backend> Workspaces<B> {
         let mut sorted = Sorted::default();
         for checkout in &workspace.checkouts {
             if workspace.kind == WorkspaceKind::Clone {
-                match self.plan_clone(checkout, allow, &mut sorted)? {
+                match self.plan_clone(&workspace, checkout, allow, &mut sorted)? {
                     Ok(planned) => checkouts.push(planned),
                     Err(refusal) => return Ok(refusal.plan(workspace)),
                 }
@@ -988,7 +1116,7 @@ impl<B: Backend> Workspaces<B> {
                 unlock = true;
             }
             let stray = if entry == Entry::Present {
-                self.sort(checkout, &mut sorted)?;
+                self.sort(&workspace, checkout, &mut sorted)?;
                 self.backend.stray_commits(&checkout.path, "HEAD")?
             } else {
                 // The directory is gone, but until a prune the repository
@@ -1061,6 +1189,8 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         changes.append(&mut ignored);
+        let workspace_manifest =
+            Some(workspace.manifest_file()).filter(|path| fs::symlink_metadata(path).is_ok());
         Ok(RemovalPlan::Ready(Removal {
             workspace,
             checkouts,
@@ -1070,6 +1200,7 @@ impl<B: Backend> Workspaces<B> {
             discarded: changes,
             manifest,
             warnings,
+            workspace_manifest,
         }))
     }
 
@@ -1077,9 +1208,14 @@ impl<B: Backend> Workspaces<B> {
     /// exists, and adds each to `sorted`: a change, a disposable path, a
     /// path that only the manifest makes disposable, or another ignored
     /// path.
-    fn sort(&self, checkout: &Checkout, sorted: &mut Sorted) -> Result<(), Error> {
+    fn sort(
+        &self,
+        workspace: &Workspace,
+        checkout: &Checkout,
+        sorted: &mut Sorted,
+    ) -> Result<(), Error> {
         let found = self.backend.changes(&checkout.path)?;
-        let (set, warning) = self.disposable_set(checkout);
+        let (set, warning) = self.disposable_set(workspace, checkout);
         sorted.warnings.extend(warning);
         let named = |item: &String| format!("{}: {item}", checkout.name);
         sorted.changes.extend(found.changed.iter().map(named));
@@ -1113,6 +1249,7 @@ impl<B: Backend> Workspaces<B> {
     /// a directory of its own is not the workspace's clone.
     fn plan_clone(
         &self,
+        workspace: &Workspace,
         checkout: &Checkout,
         allow: Allow,
         sorted: &mut Sorted,
@@ -1142,7 +1279,7 @@ impl<B: Backend> Workspaces<B> {
         if !allow.delete_unmerged {
             self.backend.refresh_origin(&checkout.path)?;
         }
-        self.sort(checkout, sorted)?;
+        self.sort(workspace, checkout, sorted)?;
         let stashes = self.backend.stashes(&checkout.path)?;
         if !stashes.is_empty() && !allow.discard_changes {
             return refused(CloneRefusal::Stashed {
@@ -1251,6 +1388,19 @@ impl<B: Backend> Workspaces<B> {
                 };
             }
         }
+        let manifest = removal.workspace.manifest_file();
+        match fs::remove_file(&manifest) {
+            Ok(()) => removal.workspace_manifest = Some(manifest),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                removal.workspace_manifest = None;
+            }
+            Err(source) => {
+                return Err(Error::Unwritable {
+                    path: manifest,
+                    source,
+                });
+            }
+        }
         let agents = removal.workspace.agents_file();
         match fs::remove_file(&agents) {
             Ok(()) => {}
@@ -1282,4 +1432,18 @@ impl<B: Backend> Workspaces<B> {
 /// practice, and saturates when it is.
 fn count(items: &[String]) -> u32 {
     u32::try_from(items.len()).unwrap_or(u32::MAX)
+}
+
+/// Writes `manifest`, when it is given, as the workspace manifest of
+/// `workspace`, and notes in `made` that the run wrote it.
+fn write_manifest(
+    workspace: &Workspace,
+    manifest: Option<&str>,
+    made: &mut Made,
+) -> Result<(), Error> {
+    if let Some(text) = manifest {
+        made.manifest = true;
+        store::replace_file(&workspace.manifest_file(), text.as_bytes())?;
+    }
+    Ok(())
 }

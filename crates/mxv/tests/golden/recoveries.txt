@@ -120,6 +120,9 @@ mxv remove stashed --dry-run
 codes that no start provokes:
   mxv::mirror::locked: Only a mirror whose lock another mxv command holds for longer than mxv waits provokes it, which is longer than the check waits for a run; the library's workspace tests provoke it with a short wait.
   mxv::mirror::fetch_failed: Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.
+  mxv::template::invalid: Only a malformed template in the config directory's templates provokes it, and the check's fixture has no templates; tests/workspaces.rs provokes it with a template that lists the repository's origin and holds a key after its [template] header.
+  mxv::manifest::untrusted: Only a `--manifest` file inside a git work tree or under the workspaces' root provokes it, and the check's command lines name no manifest file; tests/workspaces.rs provokes it with the repository's own mxv.toml.
+  mxv::template::ambiguous: Only two templates that list the repository's origin provoke it, and the check's fixture has no templates; tests/workspaces.rs provokes it with two such templates.
   mxv::checkout::origin_unreachable: Only a clone whose origin cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.
   mxv::workspace::changed: Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.
   mxv::path::inaccessible: Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.

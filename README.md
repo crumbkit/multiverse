@@ -33,7 +33,7 @@ mxv remove reading-list                 # remove it, and its branch when merged
 Workspaces live in `~/.local/share/mxv/workspaces` by default. `MXV_ROOT`,
 or `root = "~/work"` in `~/.config/mxv/config.toml`, moves the root for new
 workspaces. [crates/mxv/README.md](crates/mxv/README.md) describes the layout
-of a workspace, the root and its config file, the `mxv.toml` manifest, where
+of a workspace, the root and its config file, the `mxv.toml` manifest and the workspace manifest that can stand in for it, where
 mxv keeps its records, how mxv measures and frees disk space, and the
 variables it reads.
 

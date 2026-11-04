@@ -1213,3 +1213,105 @@ fn up_fails_with_foreign_listener_when_another_program_answers_on_the_listen_por
         [("server".to_owned(), "stopped".to_owned())]
     );
 }
+
+#[test]
+fn up_starts_the_processes_of_the_workspace_manifest_and_never_the_checkouts() {
+    let setup = Setup::new();
+    let file = setup.root().join("triage.toml");
+    write(
+        &file,
+        &format!("{}\n[app]\nname = \"triage\"\n", server_and_worker()),
+    );
+    let (exit, document) = setup.json(&[
+        "new",
+        "triage",
+        "--repo",
+        "app",
+        "--manifest",
+        file.to_str().unwrap(),
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let checkout = setup.root().join("workspaces/triage/app");
+    write(
+        &checkout.join("mxv.toml"),
+        "[processes.other]\nargv = [\"sleep\", \"30\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let names: Vec<&str> = document["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["server", "worker"]);
+}
+
+#[test]
+fn up_warns_about_a_misspelt_table_and_a_manifest_that_declares_nothing() {
+    let setup = Setup::new();
+    setup.workspace("triage", "[proceses.web]\nargv = [\"true\"]\n");
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{errors}");
+    assert!(
+        errors.contains(
+            "mxv ignores the table `[proceses]`, whose name is close to mxv's `processes`"
+        ),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("declares no processes and no containers, so mxv started nothing"),
+        "{errors}"
+    );
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    let warnings = status["summary"]["warnings"].to_string();
+    assert!(warnings.contains("[proceses]"), "{status}");
+}
+
+#[test]
+fn up_warns_that_phases_process_table_is_not_mxvs() {
+    let setup = Setup::new();
+    setup.workspace("triage", "[process.web]\nargv = [\"true\"]\n");
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{errors}");
+    assert!(
+        errors.contains("mxv ignores the table `[process.*]`, which is phase's, and runs only the processes of `[processes.*]`"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn a_dangling_link_at_the_workspace_manifest_is_unreadable_and_named() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &server_and_worker());
+    let link = checkout.parent().unwrap().join("mxv.toml");
+    std::os::unix::fs::symlink(setup.root().join("gone.toml"), &link).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::unreadable", "{document}");
+    assert!(document.to_string().contains("gone.toml"), "{document}");
+    assert!(!document.to_string().contains("neither"), "{document}");
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    assert_eq!(
+        status["summary"]["manifest_error_code"], "mxv::manifest::unreadable",
+        "{status}"
+    );
+    assert!(
+        status["summary"]["manifest_error"]
+            .as_str()
+            .unwrap()
+            .contains("gone.toml"),
+        "{status}"
+    );
+    let (exit, shown) = setup.json(&["show", "triage"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert!(
+        shown["data"][0]["warnings"]
+            .as_str()
+            .unwrap()
+            .contains("gone.toml"),
+        "{shown}"
+    );
+}

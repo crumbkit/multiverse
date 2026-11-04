@@ -695,3 +695,182 @@ fn a_held_mirror_lock_is_announced_once_before_waiting() {
     assert!(matches!(error, Error::MirrorBusy { .. }), "{error:?}");
     assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
 }
+
+fn created_with_manifest(setup: &Setup, text: &str, manifest: &str) -> Workspace {
+    match setup
+        .workspaces
+        .create_with_manifest(
+            &setup.root,
+            &name(text),
+            &setup.fixture.clone,
+            Mode::Change,
+            Some(manifest),
+        )
+        .unwrap()
+    {
+        NewOutcome::Created(workspace) => workspace,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_workspace_created_with_a_manifest_holds_it_above_the_checkout() {
+    let setup = setup();
+    let workspace = created_with_manifest(&setup, "reading-list", "ports = [\"web\"]\n");
+    assert_eq!(workspace.manifest_file(), workspace.path.join("mxv.toml"));
+    assert_eq!(
+        fs::read_to_string(workspace.manifest_file()).unwrap(),
+        "ports = [\"web\"]\n"
+    );
+    assert_eq!(workspace.manifest().unwrap().unwrap().ports, ["web"]);
+}
+
+#[test]
+fn a_failed_creation_deletes_the_manifest_it_wrote_with_the_rest() {
+    let setup = setup();
+    fs::remove_dir_all(&setup.fixture.origin).unwrap();
+    let error = setup
+        .workspaces
+        .create_with_manifest(
+            &setup.root,
+            &name("reading-list"),
+            &setup.fixture.clone,
+            Mode::Change,
+            Some("ports = [\"web\"]\n"),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::MirrorFetchFailed { .. }),
+        "{error:?}"
+    );
+    assert!(!setup.root.join("reading-list").exists());
+}
+
+#[test]
+fn removing_a_workspace_deletes_its_manifest_and_its_directory() {
+    let setup = setup();
+    let workspace = created_with_manifest(&setup, "reading-list", "ports = [\"web\"]\n");
+    let RemovalPlan::Ready(planned) = plan(&setup, "reading-list", NOTHING) else {
+        panic!("the removal is refused");
+    };
+    assert_eq!(planned.workspace_manifest, Some(workspace.manifest_file()));
+    let removal = removed(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.directory, Fate::Removed);
+    assert_eq!(removal.workspace_manifest, Some(workspace.manifest_file()));
+    assert!(!workspace.path.exists());
+}
+
+#[test]
+fn removing_a_workspace_without_a_manifest_names_none() {
+    let setup = setup();
+    created(&setup, "reading-list");
+    let removal = removed(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.workspace_manifest, None);
+}
+
+#[test]
+fn a_workspace_manifest_that_links_to_the_checkouts_makes_its_paths_wait_for_a_confirmation() {
+    let setup = setup();
+    // The repository commits its own mxv.toml, which the link points at.
+    write(setup.fixture.clone.join(".git/info/exclude"), "data/\n");
+    write(
+        setup.fixture.clone.join("mxv.toml"),
+        "disposable = [\"data/\"]\n",
+    );
+    git(&setup.fixture.clone, &["add", "mxv.toml"]);
+    commit(&setup.fixture.clone, "Declare data/ disposable");
+    git(
+        &setup.fixture.clone,
+        &["push", "--quiet", "origin", "HEAD:main"],
+    );
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    std::os::unix::fs::symlink(checkout.join("mxv.toml"), workspace.manifest_file()).unwrap();
+    fs::create_dir_all(checkout.join("data")).unwrap();
+    write(checkout.join("data/file"), "");
+    let planned = plan(&setup, "reading-list", NOTHING);
+    let RemovalPlan::Ready(removal) = planned else {
+        panic!("the removal is refused: {planned:?}");
+    };
+    assert_eq!(removal.manifest, ["app: data/"], "{removal:?}");
+    assert!(
+        removal
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("symbolic link")),
+        "{removal:?}"
+    );
+}
+
+#[test]
+fn a_path_that_the_workspace_manifest_makes_disposable_is_deleted_without_asking() {
+    let setup = setup();
+    write(
+        setup.fixture.clone.join(".git/info/exclude"),
+        "data/\ncache/\nmxv.toml\n",
+    );
+    let workspace = created_with_manifest(&setup, "reading-list", "disposable = [\"data/\"]\n");
+    let checkout = &workspace.checkouts[0].path;
+    write(checkout.join("mxv.toml"), "disposable = [\"cache/\"]\n");
+    for dir in ["data", "cache"] {
+        fs::create_dir_all(checkout.join(dir)).unwrap();
+        write(checkout.join(dir).join("file"), "");
+    }
+    let RemovalPlan::IgnoredFiles { paths, .. } = plan(&setup, "reading-list", NOTHING) else {
+        panic!("the checkout's own glob is not used beside the workspace manifest");
+    };
+    assert!(
+        paths.iter().any(|path| path.contains("cache/")),
+        "{paths:?}"
+    );
+    fs::remove_dir_all(checkout.join("cache")).unwrap();
+    fs::remove_file(checkout.join("mxv.toml")).unwrap();
+    let RemovalPlan::Ready(removal) = plan(&setup, "reading-list", NOTHING) else {
+        panic!("the removal is refused");
+    };
+    assert!(removal.manifest.is_empty(), "{removal:?}");
+    assert_eq!(removal.disposable, ["app: data/"]);
+}
+
+#[test]
+fn a_manifest_source_inside_a_repository_or_under_the_root_is_refused() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("app.toml");
+    write(&outside, "ports = []\n");
+    setup
+        .workspaces
+        .check_manifest_source(&outside, &setup.root)
+        .unwrap();
+    let link = elsewhere.path().join("link.toml");
+    write(setup.fixture.clone.join("mxv.toml"), "ports = []\n");
+    std::os::unix::fs::symlink(setup.fixture.clone.join("mxv.toml"), &link).unwrap();
+    write(workspace.checkouts[0].path.join("mxv.toml"), "ports = []\n");
+    write(workspace.manifest_file(), "ports = []\n");
+    for (path, place) in [
+        (
+            setup.fixture.clone.join("mxv.toml"),
+            "inside the git work tree",
+        ),
+        (link, "inside the git work tree"),
+        (
+            workspace.checkouts[0].path.join("mxv.toml"),
+            "under the root of the workspaces",
+        ),
+        (
+            workspace.manifest_file(),
+            "under the root of the workspaces",
+        ),
+    ] {
+        let error = setup
+            .workspaces
+            .check_manifest_source(&path, &setup.root)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::ManifestUntrusted { reason, .. } if reason.contains(place)),
+            "{}: {error:?}",
+            path.display()
+        );
+    }
+}

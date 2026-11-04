@@ -499,6 +499,26 @@
         }
       ]
     },
+    "ManifestRow": {
+      "description": "Which manifest a workspace's commands read.",
+      "oneOf": [
+        {
+          "description": "The workspace manifest, `<workspace>/mxv.toml`, above the checkout.",
+          "type": "string",
+          "const": "workspace"
+        },
+        {
+          "description": "The checkout's own `mxv.toml`.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "Neither file, so the workspace is bare.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
     "RootSource": {
       "description": "Where the workspace root came from.",
       "oneOf": [
@@ -558,6 +578,17 @@
           "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones.",
           "$ref": "#/$defs/KindRow"
         },
+        "manifest": {
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, or `none` for a bare workspace.",
+          "$ref": "#/$defs/ManifestRow"
+        },
+        "manifest_path": {
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
           "type": "string"
@@ -598,7 +629,7 @@
           "minimum": 0
         },
         "warnings": {
-          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or null.",
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or why its paths\nwait for a confirmation, and each table of the manifest that mxv\nignores although its name is close to one of mxv's own, or null.",
           "type": [
             "string",
             "null"
@@ -629,6 +660,11 @@
           "description": "A glob of the person's config file.",
           "type": "string",
           "const": "config"
+        },
+        {
+          "description": "A glob of the workspace manifest, which the person wrote for the\nworkspace.",
+          "type": "string",
+          "const": "workspace"
         },
         {
           "description": "A glob of the repository's own `mxv.toml`, and nothing else.",

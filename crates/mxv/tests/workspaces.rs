@@ -43,6 +43,12 @@ impl Setup {
         Self::run_json(self.command(args))
     }
 
+    /// Runs `mxv` with `args` and `--json` in `dir`, and returns the exit
+    /// code and the JSON document.
+    fn json_in(&self, dir: &Path, args: &[&str]) -> (i32, Value) {
+        Self::run_json(self.command(args).current_dir(dir))
+    }
+
     /// Runs `mxv` with `args`, and returns the exit code and standard
     /// output.
     fn text(&self, args: &[&str]) -> (i32, String) {
@@ -992,4 +998,346 @@ fn remove_of_a_workspace_of_worktrees_removes_the_worktree_and_its_merged_branch
     assert!(!workspace.exists());
     assert!(git(&setup.clone, &["branch", "--list", "auth-tenants-users"]).is_empty());
     assert!(!git(&setup.clone, &["worktree", "list"]).contains("auth-tenants-users"));
+}
+
+/// Writes `text` as the template `name` in `$XDG_CONFIG_HOME/mxv/templates`.
+fn template(setup: &Setup, name: &str, text: &str) -> PathBuf {
+    let dir = setup.root().join("config").join("mxv").join("templates");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    write_text(&path, text);
+    path
+}
+
+/// Returns a template for the fixture's origin, with `body` before its
+/// `[template]` table and a table of another tool after it.
+fn app_template(setup: &Setup, body: &str) -> String {
+    format!(
+        "{body}\n[template]\norigins = [\"{}\"]\n\n[app]\nname = \"app\"\n",
+        setup.root().join("origin.git").display()
+    )
+}
+
+#[test]
+fn new_copies_the_manifest_file_it_is_given_above_the_checkout() {
+    let setup = Setup::new();
+    let file = setup.root().join("reading-list.toml");
+    write_text(&file, "ports = [\"web\"]\n\n[app]\nname = \"app\"\n");
+    let (exit, document) = setup.json(&[
+        "new",
+        "reading-list",
+        "--repo",
+        "app",
+        "--manifest",
+        "reading-list.toml",
+        "--long",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let workspace = setup.workspace("reading-list");
+    assert_eq!(document["data"]["manifest"], "workspace", "{document}");
+    assert_eq!(
+        document["data"]["manifest_path"],
+        workspace.join("mxv.toml").display().to_string()
+    );
+    assert_eq!(
+        document["data"]["manifest_from"],
+        file.display().to_string()
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("mxv.toml")).unwrap(),
+        "ports = [\"web\"]\n\n[app]\nname = \"app\"\n"
+    );
+}
+
+#[test]
+fn new_copies_the_template_of_the_origin_without_its_template_table() {
+    let setup = Setup::new();
+    let path = template(
+        &setup,
+        "app.toml",
+        &app_template(&setup, "ports = [\"web\"]\n"),
+    );
+    template(
+        &setup,
+        "other.toml",
+        "[template]\norigins = [\"github.com/acme/other\"]\n",
+    );
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["manifest"], "workspace", "{document}");
+    assert_eq!(
+        document["data"]["manifest_from"],
+        path.display().to_string()
+    );
+    let copied = fs::read_to_string(setup.workspace("reading-list").join("mxv.toml")).unwrap();
+    assert!(!copied.contains("[template]"), "{copied}");
+    assert!(copied.contains("ports = [\"web\"]"), "{copied}");
+    assert!(copied.contains("[app]\nname = \"app\"\n"), "{copied}");
+    let (exit, shown) = setup.json(&["show", "reading-list", "--long"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert_eq!(shown["data"][0]["manifest"], "workspace", "{shown}");
+    assert_eq!(shown["data"][0]["ports"], serde_json::json!({}), "{shown}");
+}
+
+#[test]
+fn a_dry_run_names_the_template_it_would_copy_and_writes_nothing() {
+    let setup = Setup::new();
+    let path = template(&setup, "app.toml", &app_template(&setup, ""));
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["manifest"], "workspace", "{document}");
+    assert_eq!(
+        document["data"]["manifest_from"],
+        path.display().to_string()
+    );
+    assert!(!setup.workspace("reading-list").exists());
+}
+
+#[test]
+fn list_and_show_name_the_manifest_that_each_workspace_reads() {
+    let setup = Setup::new();
+    created(&setup, "bare");
+    write_text(&setup.clone.join("mxv.toml"), "ports = [\"api\"]\n");
+    git(&setup.clone, &["add", "mxv.toml"]);
+    git(&setup.clone, &["commit", "--quiet", "-m", "Add a manifest"]);
+    git(&setup.clone, &["push", "--quiet", "origin", "HEAD"]);
+    created(&setup, "repository");
+    let file = setup.root().join("own.toml");
+    write_text(&file, "ports = [\"web\"]\n");
+    let (exit, document) = setup.json(&["new", "own", "--repo", "app", "--manifest", "own.toml"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, listed) = setup.json(&["list", "--long"]);
+    assert_eq!(exit, 0, "{listed}");
+    let rows: Vec<(String, String, Value)> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["name"].as_str().unwrap().to_owned(),
+                row["manifest"].as_str().unwrap().to_owned(),
+                row["manifest_path"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("bare".to_owned(), "none".to_owned(), Value::Null),
+            (
+                "own".to_owned(),
+                "workspace".to_owned(),
+                Value::from(
+                    setup
+                        .workspace("own")
+                        .join("mxv.toml")
+                        .display()
+                        .to_string()
+                )
+            ),
+            (
+                "repository".to_owned(),
+                "repository".to_owned(),
+                Value::from(
+                    setup
+                        .workspace("repository")
+                        .join("app/mxv.toml")
+                        .display()
+                        .to_string()
+                )
+            ),
+        ],
+        "{listed}"
+    );
+    let (exit, text) = setup.text(&["status", "-w", "own"]);
+    assert_eq!(exit, 0, "{text}");
+    assert!(
+        text.contains("The manifest is the workspace manifest"),
+        "{text}"
+    );
+    let (exit, status) = setup.json(&["status", "-w", "repository"]);
+    assert_eq!(exit, 0, "{status}");
+    assert!(
+        status.to_string().contains("\"manifest\":\"repository\""),
+        "{status}"
+    );
+}
+
+#[test]
+fn new_fails_when_two_templates_list_the_origin_and_creates_nothing() {
+    let setup = Setup::new();
+    let first = template(&setup, "a.toml", &app_template(&setup, ""));
+    let second = template(&setup, "b.toml", &app_template(&setup, ""));
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::template::ambiguous", "{document}");
+    assert_eq!(
+        document["fields"]["templates"],
+        serde_json::json!([first.display().to_string(), second.display().to_string()])
+    );
+    assert!(!setup.workspace("reading-list").exists());
+}
+
+#[test]
+fn new_fails_on_a_malformed_template_of_the_origin_and_names_it() {
+    let setup = Setup::new();
+    let text = format!(
+        "[template]\norigins = [\"{}\"]\nports = [\"web\"]\n",
+        setup.root().join("origin.git").display()
+    );
+    let path = template(&setup, "broken.toml", &text);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::template::invalid", "{document}");
+    assert_eq!(document["fields"]["path"], path.display().to_string());
+    assert!(!setup.workspace("reading-list").exists());
+}
+
+#[test]
+fn new_skips_a_malformed_template_of_no_known_origin_and_warns_about_it() {
+    let setup = Setup::new();
+    let path = template(&setup, "broken.toml", "ports = [\"web\"]\n");
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["manifest"], "none", "{document}");
+    let warnings = document["data"]["warnings"].to_string();
+    assert!(
+        warnings.contains(&format!("mxv skipped the template {}", path.display())),
+        "{document}"
+    );
+}
+
+#[test]
+fn new_never_copies_a_template_that_is_a_symbolic_link() {
+    let setup = Setup::new();
+    let real = setup.root().join("real.toml");
+    write_text(&real, &app_template(&setup, "disposable = [\"data/\"]\n"));
+    let dir = setup.root().join("config").join("mxv").join("templates");
+    fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(&real, dir.join("app.toml")).unwrap();
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::template::invalid", "{document}");
+    assert!(document.to_string().contains("symbolic link"), "{document}");
+    assert!(!setup.workspace("reading-list").exists());
+}
+
+#[test]
+fn new_refuses_a_manifest_file_from_a_repository_or_from_another_workspace() {
+    let setup = Setup::new();
+    write_text(&setup.clone.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    let (exit, document) = setup.json_in(
+        &setup.clone,
+        &["new", "m1", "--repo", ".", "--manifest", "mxv.toml"],
+    );
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::untrusted", "{document}");
+    assert!(
+        document["fields"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("inside the git work tree"),
+        "{document}"
+    );
+    assert!(!setup.workspace("m1").exists());
+    created(&setup, "other");
+    let planted = setup.workspace("other").join("app/planted.toml");
+    write_text(&planted, "disposable = [\"data/\"]\n");
+    let (exit, document) = setup.json(&[
+        "new",
+        "m2",
+        "--repo",
+        "app",
+        "--manifest",
+        planted.to_str().unwrap(),
+    ]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::untrusted", "{document}");
+    assert!(!setup.workspace("m2").exists());
+}
+
+#[test]
+fn a_workspace_manifest_that_links_to_the_repositorys_never_deletes_without_a_confirmation() {
+    let setup = Setup::new();
+    write_text(&setup.clone.join(".gitignore"), "data/\n");
+    write_text(&setup.clone.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    git(&setup.clone, &["add", ".gitignore", "mxv.toml"]);
+    git(
+        &setup.clone,
+        &["commit", "--quiet", "-m", "Declare data/ disposable"],
+    );
+    git(&setup.clone, &["push", "--quiet", "origin", "HEAD"]);
+    created(&setup, "s");
+    let workspace = setup.workspace("s");
+    fs::create_dir_all(workspace.join("app/data")).unwrap();
+    write_text(&workspace.join("app/data/file"), "");
+    std::os::unix::fs::symlink("app/mxv.toml", workspace.join("mxv.toml")).unwrap();
+    let (exit, shown) = setup.json(&["show", "s", "--long"]);
+    assert_eq!(exit, 0, "{shown}");
+    let paths = &shown["data"][0]["disposable_paths"];
+    assert_eq!(paths[0]["path"], "data/", "{shown}");
+    assert_eq!(paths[0]["source"], "manifest", "{shown}");
+    let (exit, document) = setup.json(&["remove", "s", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::workspace::ignored_files",
+        "{document}"
+    );
+    assert!(workspace.join("app/data/file").exists());
+}
+
+#[test]
+fn new_fails_on_a_manifest_file_that_is_invalid_or_missing() {
+    let setup = Setup::new();
+    write_text(
+        &setup.root().join("bad.toml"),
+        "[processes.web]\nargv = \"npm\"\n",
+    );
+    let (exit, document) = setup.json(&[
+        "new",
+        "reading-list",
+        "--repo",
+        "app",
+        "--manifest",
+        "bad.toml",
+    ]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::invalid", "{document}");
+    let (exit, document) = setup.json(&[
+        "new",
+        "reading-list",
+        "--repo",
+        "app",
+        "--manifest",
+        "missing.toml",
+    ]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::unreadable", "{document}");
+    assert!(!setup.workspace("reading-list").exists());
+}
+
+#[test]
+fn remove_deletes_the_workspace_manifest_with_the_workspace() {
+    let setup = Setup::new();
+    write_text(&setup.root().join("own.toml"), "ports = [\"web\"]\n");
+    let (exit, document) = setup.json(&["new", "own", "--repo", "app", "--manifest", "own.toml"]);
+    assert_eq!(exit, 0, "{document}");
+    let manifest = setup.workspace("own").join("mxv.toml");
+    let (exit, text) = setup.text(&["remove", "own", "--dry-run"]);
+    assert_eq!(exit, 0, "{text}");
+    assert!(
+        text.contains(&format!(
+            "mxv would delete the workspace manifest {}.",
+            manifest.display()
+        )),
+        "{text}"
+    );
+    let (exit, document) = setup.json(&["remove", "own", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        document["data"]["manifest_deleted"],
+        manifest.display().to_string(),
+        "{document}"
+    );
+    assert!(!setup.workspace("own").exists());
 }

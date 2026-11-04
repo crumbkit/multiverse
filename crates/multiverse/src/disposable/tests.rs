@@ -61,6 +61,16 @@ fn an_absolute_glob_is_refused() {
 }
 
 #[test]
+fn a_glob_that_names_git_in_any_case_is_refused() {
+    assert_eq!(PathGlob::parse(".git"), Err(BadGlob::Git));
+    assert_eq!(PathGlob::parse(".git/"), Err(BadGlob::Git));
+    assert_eq!(PathGlob::parse("**/.git/"), Err(BadGlob::Git));
+    assert_eq!(PathGlob::parse("vendor/.GIT/objects/"), Err(BadGlob::Git));
+    assert_eq!(PathGlob::parse_directory("**/.git/"), Err(BadGlob::Git));
+    assert!(PathGlob::parse(".github/").is_ok());
+}
+
+#[test]
 fn a_glob_that_leaves_the_repository_is_refused() {
     assert_eq!(PathGlob::parse("../other/target/"), Err(BadGlob::Parent));
     assert_eq!(PathGlob::parse("web/../../x/"), Err(BadGlob::Parent));

@@ -161,6 +161,34 @@ pub enum Error {
         /// The line of git's standard error that says what failed.
         message: String,
     },
+    /// A template of workspace manifests cannot be used, such as one that
+    /// is not valid TOML, has no valid `[template]` table, or is not a
+    /// valid manifest once that table is removed.
+    TemplateInvalid {
+        /// The template's file.
+        path: PathBuf,
+        /// What is wrong, in a sentence.
+        message: String,
+    },
+    /// More than one template lists the origin of the repository, so mxv
+    /// cannot tell which one to copy.
+    TemplateAmbiguous {
+        /// The origin's URL, without credentials.
+        origin: String,
+        /// The templates that list it, in name order.
+        templates: Vec<PathBuf>,
+    },
+    /// A file that `--manifest` names could have been written by a
+    /// repository or an agent, because it lies inside a git work tree or
+    /// under the root of the workspaces, so mxv does not trust it as a
+    /// workspace manifest.
+    ManifestUntrusted {
+        /// The file, as the person named it.
+        path: PathBuf,
+        /// Where it lies, in a clause, such as `it lies inside the git work
+        /// tree /home/someone/app`.
+        reason: String,
+    },
     /// Every port of the port range is held by a workspace or taken.
     NoFreePort {
         /// Which range was searched.
@@ -245,6 +273,35 @@ impl Error {
                 "mxv could not fetch the origin of {}, so it cannot tell which commits the origin holds{}",
                 checkout.display(),
                 detail(message)
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Error {
+    /// Writes the text of a template or a `--manifest` file that mxv
+    /// cannot use.
+    fn fmt_template(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TemplateInvalid { path, message } => write!(
+                formatter,
+                "the template {} cannot be used: {message}",
+                path.display()
+            ),
+            Self::ManifestUntrusted { path, reason } => write!(
+                formatter,
+                "mxv does not copy {} as a workspace manifest, because {reason}, where a repository or an agent could have written it",
+                path.display()
+            ),
+            Self::TemplateAmbiguous { origin, templates } => write!(
+                formatter,
+                "more than one template lists the origin {origin}: {}",
+                templates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             _ => Ok(()),
         }
@@ -344,6 +401,9 @@ impl fmt::Display for Error {
             Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::OriginFetchFailed { .. } => self.fmt_fetch(formatter),
+            Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. } => self.fmt_template(formatter),
             Self::NoFreePort { source } => {
                 write!(formatter, "cannot find a free port: {source}")
             }
@@ -418,6 +478,9 @@ impl std::error::Error for Error {
             | Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::OriginFetchFailed { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
             | Self::DockerUnavailable { .. }
             | Self::DockerComposeMissing { .. }
             | Self::DockerNoAddressPool { .. }

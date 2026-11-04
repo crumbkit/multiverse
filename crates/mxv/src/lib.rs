@@ -45,10 +45,11 @@ pub use crate::failures::{
     CHECKOUT_UNOWNED, CHECKOUT_UNPUSHED_COMMITS, CHECKOUT_UNREACHABLE_COMMITS, CONFIG_INVALID,
     CONFIG_NO_LIMIT, CONFIG_UNREADABLE, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
     ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT,
-    MIRROR_FETCH_FAILED, MIRROR_LOCKED, PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED,
-    RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH,
-    REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED,
-    WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
+    MANIFEST_UNTRUSTED, MIRROR_FETCH_FAILED, MIRROR_LOCKED, PATH_INACCESSIBLE, RECORD_CORRUPT,
+    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
+    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, TEMPLATE_AMBIGUOUS,
+    TEMPLATE_INVALID, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
+    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
 };
 #[doc(hidden)]
 pub use crate::failures::{
@@ -195,6 +196,25 @@ where
         }
     };
     crumbkit::finish(output, UNBUILT_RESULT, fail(verb))
+}
+
+/// Prints each of `warnings` on standard error as a line of its own, for
+/// a command such as `mxv up` whose result has no field for them.
+pub(crate) fn warn(warnings: &[String]) {
+    use std::io::Write as _;
+    if warnings.is_empty() {
+        return;
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and a warning goes there beside the command's result"
+    )]
+    let mut stderr = std::io::stderr();
+    for warning in warnings {
+        // A warning that cannot be written changes nothing the command
+        // does, so its failure is ignored.
+        drop(writeln!(stderr, "warning: {warning}."));
+    }
 }
 
 /// Tells the person at a terminal that `mxv new` waits up to `wait` for

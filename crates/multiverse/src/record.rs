@@ -136,6 +136,31 @@ impl Workspace {
     pub fn agents_file(&self) -> PathBuf {
         self.path.join(AGENTS_FILE)
     }
+
+    /// Reports whether a checkout's directory is the workspace manifest's
+    /// path, [`Workspace::manifest_file`], or holds it, as in an old record
+    /// whose checkout is the workspace's directory itself. The repository
+    /// then writes that file, so mxv reads no workspace manifest for the
+    /// workspace. It compares the paths as the record writes them, and
+    /// again once symbolic links are resolved, when the directories exist.
+    #[must_use]
+    pub fn checkout_holds_manifest_file(&self) -> bool {
+        let file = self.manifest_file();
+        let resolved = self
+            .path
+            .canonicalize()
+            .ok()
+            .map(|dir| dir.join(crate::manifest::MANIFEST_FILE));
+        self.checkouts.iter().any(|checkout| {
+            file.starts_with(&checkout.path)
+                || resolved.as_ref().is_some_and(|file| {
+                    checkout
+                        .path
+                        .canonicalize()
+                        .is_ok_and(|path| file.starts_with(path))
+                })
+        })
+    }
 }
 
 impl Checkout {

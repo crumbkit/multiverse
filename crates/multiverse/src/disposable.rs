@@ -72,6 +72,9 @@ pub enum BadGlob {
     EmptyComponent,
     /// The glob holds a NUL character, which no path can hold.
     Nul,
+    /// The glob names `.git`, the directory that holds a checkout's
+    /// history, which mxv never deletes or clones.
+    Git,
     /// A glob of directories to clone names `target`, which a new
     /// workspace never clones.
     Target,
@@ -97,6 +100,9 @@ impl fmt::Display for BadGlob {
             Self::Dot => "the glob holds a `.` component, which it must leave out",
             Self::EmptyComponent => "the glob holds an empty component, such as `a//b`",
             Self::Nul => "the glob holds a NUL character, which no path can hold",
+            Self::Git => {
+                "the glob names `.git`, which holds the checkout's history, and mxv never deletes or clones it"
+            }
             Self::Target => {
                 "a new workspace never clones `target`, because a build of the checkout's own sources writes it"
             }
@@ -138,6 +144,9 @@ impl PathGlob {
                 ".." => return Err(BadGlob::Parent),
                 "." => return Err(BadGlob::Dot),
                 "" => return Err(BadGlob::EmptyComponent),
+                // A case-insensitive file system, such as macOS's default,
+                // finds `.git` under any case.
+                name if name.eq_ignore_ascii_case(".git") => return Err(BadGlob::Git),
                 _ => {}
             }
         }
@@ -281,6 +290,15 @@ pub enum DisposableSource {
     BuiltIn,
     /// A glob of the person's config file.
     Config,
+    /// A glob of the workspace manifest, `<workspace>/mxv.toml`, which the
+    /// person wrote for this workspace, so `mxv remove` deletes such a path
+    /// without asking, as it does a glob of the config file. Only a
+    /// workspace manifest that [`Workspace::manifest_trusted`] trusts gives
+    /// this source, and the globs of one that is a link count as
+    /// [`DisposableSource::Manifest`].
+    ///
+    /// [`Workspace::manifest_trusted`]: crate::Workspace::manifest_trusted
+    Workspace,
     /// A glob of the repository's own `mxv.toml` and nothing else. A
     /// repository is shared, so `mxv remove` deletes such a path only after
     /// the person confirms it at the prompt or passes `--force`.

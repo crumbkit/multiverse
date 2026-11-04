@@ -324,6 +324,10 @@ pub(crate) struct NewArgs {
     #[arg(long)]
     pub(crate) no_clone: bool,
 
+    /// Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template
+    #[arg(long, value_name = "FILE")]
+    pub(crate) manifest: Option<PathBuf>,
+
     /// Print the workspace that the command would create, and create nothing.
     #[command(flatten)]
     pub(crate) dry_run: DryRun,
