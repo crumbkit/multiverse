@@ -32,6 +32,7 @@ mod source;
 mod status;
 
 pub use crate::cancel::Cancel;
+pub use crate::engine::keeper;
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 pub use crate::error::{Operation, PhaseError};
 pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream};
