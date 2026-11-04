@@ -18,6 +18,18 @@ impl AppliedEnvironment for Fixed {
         None
     }
 
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        // The test double mixes the key and the pairs' lengths. A real
+        // implementation uses a keyed cryptographic hash.
+        let mut digest = *key;
+        for (index, (name, value)) in self.0.iter().enumerate() {
+            if let Some(byte) = digest.get_mut(index % 32) {
+                *byte ^= u8::try_from(name.len() + value.len()).unwrap_or(u8::MAX);
+            }
+        }
+        digest
+    }
+
     fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>) {
         for (name, value) in &self.0 {
             if let Some(reference) = reference(name) {

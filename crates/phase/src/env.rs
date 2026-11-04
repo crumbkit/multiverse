@@ -75,6 +75,14 @@ pub trait AppliedEnvironment: Send {
     /// expired.
     fn expires_at(&self) -> Option<SystemTime>;
 
+    /// Returns a keyed hash of every name and value, such as HMAC-SHA-256
+    /// or BLAKE3's keyed mode over the pairs in name order, with `key` as
+    /// the key. phase compares digests to find a process whose environment
+    /// changed, and keeps only the digest in the run record. Equal names
+    /// and values give equal digests under one key, and the digest never
+    /// reveals a value.
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32];
+
     /// Sets each variable on `command` under the name that `reference`
     /// returns for the variable's own name. A variable for which `reference`
     /// returns `None` is left out.

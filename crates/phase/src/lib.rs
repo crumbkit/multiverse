@@ -15,6 +15,7 @@
 //! Every operation of [`Phase`] returns [`PhaseError::NotBuilt`] until its
 //! code lands.
 
+mod cancel;
 mod engine;
 mod env;
 mod error;
@@ -28,6 +29,7 @@ mod select;
 mod source;
 mod status;
 
+pub use crate::cancel::Cancel;
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 pub use crate::error::{Operation, PhaseError};
 pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream};
@@ -35,7 +37,9 @@ pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
     WorkspaceName,
 };
-pub use crate::phase::{Phase, UpDeadlines};
+pub use crate::phase::{
+    DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines,
+};
 pub use crate::plan::container::{BindMount, ContainerOptions};
 pub use crate::plan::probe::{
     DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT, Probe, ProbeCheck,

@@ -1,13 +1,14 @@
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{Phase, UpDeadlines};
+use super::{DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines};
 use crate::AppliedEnvironment;
+use crate::cancel::Cancel;
 use crate::env::{EnvironmentError, EnvironmentSource};
 use crate::error::{Operation, PhaseError};
 use crate::logs::{LineSink, LogLine, LogRequest};
-use crate::name::AppName;
+use crate::name::{AppName, WorkspaceId};
 use crate::plan::Plan;
 use crate::select::Selection;
 
@@ -40,49 +41,66 @@ fn not_built<T: std::fmt::Debug>(result: Result<T, PhaseError>) -> Operation {
     }
 }
 
+fn id() -> WorkspaceId {
+    "0b9f3c8e".parse().unwrap()
+}
+
 fn plan() -> Plan {
-    Plan::new(
-        "reading-list".parse().unwrap(),
-        "0b9f3c8e".parse().unwrap(),
-        Vec::new(),
-    )
-    .unwrap()
+    Plan::new("reading-list".parse().unwrap(), id(), Vec::new()).unwrap()
+}
+
+#[test]
+fn a_new_phase_keeps_its_state_directory_and_the_default_waits() {
+    let phase = Phase::new(PathBuf::from("/state/phase"));
+
+    assert_eq!(phase.state_dir(), Path::new("/state/phase"));
+    assert_eq!(phase.lock_wait(), DEFAULT_LOCK_WAIT);
+    assert_eq!(phase.start_grace(), DEFAULT_START_GRACE);
+    assert_eq!(phase.kill_wait(), DEFAULT_KILL_WAIT);
+}
+
+#[test]
+fn a_phase_takes_other_waits_from_its_builder() {
+    let phase = Phase::new(PathBuf::from("/state/phase"))
+        .with_lock_wait(Duration::from_millis(1))
+        .with_start_grace(Duration::from_millis(2))
+        .with_kill_wait(Duration::from_millis(3));
+
+    assert_eq!(phase.lock_wait(), Duration::from_millis(1));
+    assert_eq!(phase.start_grace(), Duration::from_millis(2));
+    assert_eq!(phase.kill_wait(), Duration::from_millis(3));
 }
 
 #[test]
 fn every_operation_reports_that_it_is_not_built_yet() {
-    let phase = Phase::new();
-    let workspace = Path::new("/workspaces/reading-list");
+    let phase = Phase::new(PathBuf::from("/state/phase"));
     let soon = Instant::now() + Duration::from_secs(1);
-    let deadlines = UpDeadlines {
-        build: soon,
-        ready: soon,
-    };
+    let cancel = Cancel::new();
     let api: AppName = "api".parse().unwrap();
 
-    assert_eq!(
-        not_built(phase.up(&plan(), &Selection::All, &Unused, deadlines)),
-        Operation::Up
+    let up = phase.up(
+        &plan(),
+        &Selection::All,
+        &Unused,
+        UpDeadlines::new(soon, soon),
+        &cancel,
     );
+    assert_eq!(not_built(up), Operation::Up);
+    let restart = phase.restart(&plan(), &Selection::All, &Unused, soon, &cancel);
+    assert_eq!(not_built(restart), Operation::Restart);
     assert_eq!(
-        not_built(phase.restart(&plan(), &Selection::All, &Unused, soon)),
-        Operation::Restart
-    );
-    assert_eq!(
-        not_built(phase.down(workspace, &Selection::All, soon)),
+        not_built(phase.down(&id(), &Selection::All, soon)),
         Operation::Down
     );
-    assert_eq!(not_built(phase.status(workspace)), Operation::Status);
+    assert_eq!(not_built(phase.status(&id())), Operation::Status);
     let request = LogRequest::new(api.clone(), "server".parse().unwrap());
     assert_eq!(
-        not_built(phase.logs(workspace, &request, &mut Unused)),
+        not_built(phase.logs(&id(), &request, &mut Unused)),
         Operation::Logs
     );
-    assert_eq!(not_built(phase.sweep(workspace, true)), Operation::Sweep);
-    assert_eq!(
-        not_built(phase.exec(&plan(), &api, &["true".into()], &Unused, soon)),
-        Operation::Exec
-    );
+    assert_eq!(not_built(phase.sweep(&id(), true)), Operation::Sweep);
+    let exec = phase.exec(&plan(), &api, &["true".into()], &Unused, soon, &cancel);
+    assert_eq!(not_built(exec), Operation::Exec);
 }
 
 #[test]
