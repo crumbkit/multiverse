@@ -1,8 +1,8 @@
 # phase design
 
-Status: draft, 4 November 2026. Nothing here is built yet. The decisions
-listed at the end are still open, and each one says what this draft
-assumes until it is decided.
+Status: draft, 4 November 2026. Nothing here is built yet. The table at
+the end lists each decision, and says which are decided and what this
+draft assumes for the rest.
 
 ## What phase does
 
@@ -48,10 +48,9 @@ manifest, and calls phase's library with it. phase never allocates ports or
 creates checkouts; it reads them from the plan.
 
 multiverse already runs a workspace's processes with `mxv up`, `mxv down`,
-`mxv restart`, `mxv status` and `mxv logs`. Those commands move into phase
-later. Until then the two implementations coexist, and phase's run record
-format is designed so that the move does not need a migration of running
-workspaces.
+`mxv restart`, `mxv status` and `mxv logs`. phase replaces those commands
+from its first release (decision P7), so phase's first release must run
+everything they run today.
 
 ## Concepts
 
@@ -398,13 +397,13 @@ Each decision states what this draft assumes until it is decided.
 | P1 | What restarts a crashed host process: a keeper per process, one supervisor per workspace, or nothing until the next restart. | Decided 4 November 2026: a keeper per process. |
 | P2 | How phase runs containers: Docker Compose with one project per app, or the Docker Engine API directly. | Decided 4 November 2026: Docker Compose, one project per app, with no environment variable value in the Compose file. Each variable maps to a private `MXV_ENV_*` reference set only on that service's compose child, as in crumbkit/multiverse#6. |
 | P3 | How a container receives a secret. | The Compose file lists the name; the value is set on the `docker compose up` child only. |
-| P4 | How workspaces avoid each other on the network: allocated ports on 127.0.0.1, or one loopback address per workspace. | Allocated ports on 127.0.0.1 from multiverse's ledger. |
-| P5 | How `mxv` uses phase: by linking the library, or by running a `phase` program and reading its JSON. | Linking the library; JSON for reading state. |
-| P6 | Where the per-app choice between release and checkout lives. | In multiverse's workspace record, changed with `mxv app edit` and `mxv app release`. |
-| P7 | When multiverse's process commands move into phase. | After phase's host runner passes the same tests. |
-| P8 | The order of the work. | Host runner and probes first, then sources, then containers, then the sandbox. |
+| P4 | How workspaces avoid each other on the network: allocated ports on 127.0.0.1, or one loopback address per workspace. | Decided 4 November 2026: allocated ports on 127.0.0.1 from multiverse's ledger. |
+| P5 | How `mxv` uses phase: by linking the library, or by running a `phase` program and reading its JSON. | Decided 4 November 2026: `mxv` links the library; other tools read state as JSON. |
+| P6 | Where the per-app choice between release and checkout lives. | Decided 4 November 2026: in multiverse's workspace record, changed with `mxv app edit` and `mxv app release`. |
+| P7 | When multiverse's process commands move into phase. | Decided 4 November 2026: immediately. phase takes over `up`, `down`, `restart`, `status` and `logs` from its first release, and multiverse's own process commands are removed. |
+| P8 | The order of the work. | Decided 4 November 2026: host runner and probes first, then sources, then containers and shared services, then the sandbox. |
 | P9 | The sandbox mechanism: the `nono` library, or a profile generator in phase. | Open; to be decided by the owner. |
-| P10 | The trust model described above. | As described. |
-| P11 | Where an app's release, build and permission fields live: in `mxv.toml`, or in a separate file. | In `mxv.toml`. |
-| P12 | The command verbs. | `up` and `down`, matching the commands `mxv` already has. |
+| P10 | The trust model described above. | Decided 4 November 2026: as described in [Trust](#trust). |
+| P11 | Where an app's release, build and permission fields live: in `mxv.toml`, or in a separate file. | Decided 4 November 2026: in `mxv.toml`. |
+| P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
