@@ -509,10 +509,15 @@ pub(crate) struct ProcessRow {
     /// The number of the signal that ended an exited process, such as 15
     /// for SIGTERM, or null.
     signal: Option<i32>,
+    /// Why mxv does not know the exit code of an exited process, or null
+    /// when it knows the code or the signal. A process group that ended
+    /// before its shell wrote the exit file, such as one that SIGKILL
+    /// ended, has a reason.
+    reason: Option<String>,
     /// Whether the process group of an exited process still has a member,
     /// such as a child it started in the background, which `mxv down`
-    /// stops.
-    group_alive: bool,
+    /// stops. It is null while the process runs.
+    group_alive: Option<bool>,
     /// The ports that a process receives, as `VARIABLE=port`, or that a
     /// container publishes, as `port-name=port`.
     ports: Vec<String>,
@@ -552,6 +557,7 @@ impl Row for ProcessRow {
         "pid",
         "code",
         "signal",
+        "reason",
         "group_alive",
         "ports",
     ];
@@ -567,11 +573,15 @@ impl Row for ProcessRow {
 
 impl From<&ProcessStatus> for ProcessRow {
     fn from(status: &ProcessStatus) -> Self {
-        let (state, pid, code, signal) = match status.state {
-            ProcessState::Running { pid } => (StateName::Running, pid, None, None),
-            ProcessState::Exited { code, signal } => (StateName::Exited, None, code, signal),
-            ProcessState::Created => (StateName::Created, None, None, None),
-            ProcessState::Stopped => (StateName::Stopped, None, None, None),
+        let (state, pid, code, signal, reason) = match status.state {
+            ProcessState::Running { pid } => (StateName::Running, pid, None, None, None),
+            ProcessState::Exited {
+                code,
+                signal,
+                reason,
+            } => (StateName::Exited, None, code, signal, reason),
+            ProcessState::Created => (StateName::Created, None, None, None, None),
+            ProcessState::Stopped => (StateName::Stopped, None, None, None, None),
         };
         Self {
             name: status.name.clone(),
@@ -583,6 +593,7 @@ impl From<&ProcessStatus> for ProcessRow {
             pid,
             code,
             signal,
+            reason: reason.map(|reason| reason.describe().to_owned()),
             group_alive: status.group_alive,
             ports: status
                 .ports
@@ -647,5 +658,35 @@ fn unmerged(count: Option<u32>) -> String {
         Some(1) => "it holds 1 commit that is not on its base".to_owned(),
         Some(count) => format!("it holds {count} commits that are not on its base"),
         None => "its base is gone, so mxv cannot tell whether its commits are merged".to_owned(),
+    }
+}
+
+/// What `mxv status` says above its rows: whether the manifest parsed.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct StatusSummary {
+    /// The manifest's error when it does not parse, in which case the rows
+    /// come from the run records alone, or null.
+    manifest_error: Option<String>,
+}
+
+impl StatusSummary {
+    /// Returns the summary of a status whose manifest failed with `error`,
+    /// or parsed or is missing when `error` is `None`.
+    pub(crate) const fn new(manifest_error: Option<String>) -> Self {
+        Self { manifest_error }
+    }
+}
+
+/// Prints one line when the manifest does not parse, and nothing
+/// otherwise.
+impl fmt::Display for StatusSummary {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.manifest_error {
+            Some(error) => write!(
+                formatter,
+                "The manifest does not parse, so the processes come from the run records: {error}"
+            ),
+            None => Ok(()),
+        }
     }
 }

@@ -428,8 +428,11 @@
           "format": "int32"
         },
         "group_alive": {
-          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
-          "type": "boolean"
+          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops. It is null while the process runs.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "kind": {
           "description": "`process` or `container`.",
@@ -459,6 +462,13 @@
             "type": "string"
           }
         },
+        "reason": {
+          "description": "Why mxv does not know the exit code of an exited process, or null\nwhen it knows the code or the signal. A process group that ended\nbefore its shell wrote the exit file, such as one that SIGKILL\nended, has a reason.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "signal": {
           "description": "The number of the signal that ended an exited process, such as 15\nfor SIGTERM, or null.",
           "type": [
@@ -479,6 +489,7 @@
         "pid",
         "code",
         "signal",
+        "reason",
         "group_alive",
         "ports"
       ]

@@ -26,14 +26,14 @@ use serde::{Deserialize, Serialize};
 use crate::clock::{FOLLOW_INTERVAL, pause};
 use crate::docker::{self, ContainerState, Inspected, Scope};
 use crate::error::Error;
-use crate::manifest::{Container, Manifest};
+use crate::manifest::{Container, Manifest, ReadyCheck};
 use crate::name::WorkspaceName;
 use crate::ports;
 use crate::process::{self, Launch};
 use crate::record::Workspace;
 use crate::runs::{
     Kind, ProcessState, ProcessStatus, RUN_VERSION, RunRecord, Runs, START_GRACE, TAIL_LINES,
-    UpOutcome, Versioned, owns_group, read_json, remove_if_present, tail, write_json,
+    UpOutcome, Versioned, Waited, owns_group, read_json, remove_if_present, tail, write_json,
 };
 use crate::store;
 
@@ -317,7 +317,7 @@ impl Runs {
             state,
             ports,
             log: self.log(&workspace.name, container),
-            group_alive: false,
+            group_alive: None,
         }
     }
 
@@ -477,10 +477,14 @@ impl Runs {
     ) -> Result<Option<UpOutcome>, Error> {
         let log = self.log(&workspace.name, name);
         self.follow_logs(scope, name, inspected, false)?;
-        let port = declared
+        let ready_port = declared
             .ready
             .as_ref()
-            .and_then(|ready| workspace.ports.get(&ready.port).copied());
+            .and_then(|ready| match &ready.check {
+                ReadyCheck::Port(port) => Some(port),
+                ReadyCheck::Log(_) => None,
+            });
+        let port = ready_port.and_then(|ready_port| workspace.ports.get(ready_port).copied());
         let timeout = declared
             .ready
             .as_ref()
@@ -506,8 +510,10 @@ impl Runs {
                 self.remove_container(&workspace.name, scope, name)?;
                 return Ok(Some(UpOutcome::NotReady {
                     process: name.to_owned(),
-                    port: ready.port.clone(),
-                    number: port.unwrap_or_default(),
+                    waited: Waited::Port {
+                        port: ready_port.cloned().unwrap_or_default(),
+                        number: port.unwrap_or_default(),
+                    },
                     timeout: ready.timeout,
                     tail: tail(&log, TAIL_LINES),
                     log,
@@ -639,6 +645,8 @@ impl Runs {
             log: &self.log(name, container),
             exit_file: &exit_file,
         })?;
+        // A follower whose record cannot be written stops with its
+        // handle, so mxv never leaves a follower that it does not know of.
         let pid = follower.pid();
         let started = process::start_time(pid)?.unwrap_or_default();
         write_json(
@@ -649,7 +657,9 @@ impl Runs {
                 started,
                 ports: BTreeMap::new(),
             },
-        )
+        )?;
+        follower.keep();
+        Ok(())
     }
 
     /// Returns the volumes of the workspace `name` that a removal deletes:
@@ -713,6 +723,7 @@ const fn container_state(state: ContainerState) -> ProcessState {
         ContainerState::Exited(code) => ProcessState::Exited {
             code: Some(code),
             signal: None,
+            reason: None,
         },
     }
 }

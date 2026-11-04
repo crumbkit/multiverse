@@ -37,8 +37,9 @@ pub use crate::docker::{
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::manifest::{
-    Container, DEFAULT_READY_TIMEOUT, MANIFEST_FILE, MANIFEST_VERSION, MOST_MANIFEST_BYTES,
-    MOST_READY_SECONDS, Manifest, ManifestError, ManifestProblem, Process, Published, Ready, Unit,
+    Container, DEFAULT_READY_TIMEOUT, EnvValue, LogPattern, MANIFEST_FILE, MANIFEST_VERSION,
+    MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError, ManifestProblem, Process,
+    Published, Ready, ReadyCheck, Unit,
 };
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::ports::DEFAULT_PORT_RANGE;
@@ -46,9 +47,9 @@ pub use crate::record::{
     AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
 };
 pub use crate::runs::{
-    DownOutcome, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES,
-    ProcessState, ProcessStatus, RUN_VERSION, Runs, START_GRACE, STOP_GRACE, TAIL_LINES,
-    Unstoppable, UpOutcome, tail,
+    DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES,
+    MOST_TAIL_BYTES, ProcessState, ProcessStatus, RUN_VERSION, Runs, START_GRACE, STOP_GRACE,
+    TAIL_LINES, Unstoppable, UpOutcome, Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::workspaces::{

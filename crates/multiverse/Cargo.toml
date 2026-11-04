@@ -22,6 +22,13 @@ wait-timeout = { workspace = true }
 # the spans that name a bad key's line.
 toml = { workspace = true, features = ["std", "parse", "serde"] }
 rustix = { workspace = true }
+# `ready = { log = "..." }` compiles its pattern with regex.
+regex = { workspace = true }
+
+# macOS reads a process's start time and a process group's sockets with
+# libproc's calls, which libc declares.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

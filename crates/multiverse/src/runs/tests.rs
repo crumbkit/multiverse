@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
-use crate::runs::{DownOutcome, Follower, ProcessState, Runs, UpOutcome, tail};
+use crate::runs::{DownOutcome, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail};
 use crate::store::{Created, Store};
 
 /// A temporary directory with a store, run files and a checkout.
@@ -229,7 +229,59 @@ fn a_run_record_whose_process_id_now_names_another_process_reads_as_exited() {
         statuses[0].state,
         ProcessState::Exited {
             code: None,
-            signal: None
+            signal: None,
+            reason: Some(ExitReason::NoExitFile),
+        }
+    );
+}
+
+/// Writes the run record of the process `a` of `workspace`, naming this
+/// test's own process, with the start time `started`, and returns the run
+/// directory.
+fn record_this_process(setup: &Setup, workspace: &Workspace, started: &str) -> PathBuf {
+    let dir = setup.runs().workspace_dir(&workspace.name);
+    fs::create_dir_all(&dir).unwrap();
+    let record = serde_json::json!({
+        "version": 1,
+        "pid": std::process::id(),
+        "started": started,
+        "ports": {},
+    });
+    write(dir.join("a.json"), record.to_string());
+    dir
+}
+
+#[test]
+fn a_running_process_whose_exit_file_the_shell_has_opened_but_not_written_reads_as_running() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let started = crate::process::start_time(std::process::id())
+        .unwrap()
+        .unwrap();
+    let dir = record_this_process(&setup, &workspace, &started);
+    // `printf ... > file` creates the file empty before it writes the code.
+    write(dir.join("a.exit"), "");
+    let statuses = setup.runs().status(&workspace, None).unwrap();
+    assert_eq!(
+        statuses[0].state,
+        ProcessState::Running {
+            pid: Some(std::process::id())
+        }
+    );
+}
+
+#[test]
+fn status_reports_an_unknown_code_with_a_reason_when_the_shell_ended_without_an_exit_file() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    record_this_process(&setup, &workspace, "Thu Jan  1 00:00:00 1970");
+    let statuses = setup.runs().status(&workspace, None).unwrap();
+    assert_eq!(
+        statuses[0].state,
+        ProcessState::Exited {
+            code: None,
+            signal: None,
+            reason: Some(ExitReason::NoExitFile),
         }
     );
 }
@@ -248,4 +300,48 @@ fn a_second_lock_of_a_workspace_fails_with_busy_while_the_first_is_held() {
     assert!(runs.lock(&other.name).is_ok());
     drop(held);
     assert!(runs.lock(&workspace.name).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_record_with_the_start_time_that_ps_prints_still_owns_its_running_process_on_macos() {
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let manifest = manifest("[processes.a]\nargv = [\"sleep\", \"30\"]\n");
+    let checkout = workspace.checkouts[0].path.clone();
+    let runs = setup.runs();
+    let outcome = runs
+        .up(
+            &runs.lock(&workspace.name).unwrap(),
+            &setup.store(),
+            &mut workspace,
+            &checkout,
+            &manifest,
+            &[],
+        )
+        .unwrap();
+    let UpOutcome::Up(statuses) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let ProcessState::Running { pid: Some(pid) } = statuses[0].state else {
+        panic!("{statuses:?}");
+    };
+    // An mxv before libproc recorded what `ps -o lstart=` prints in UTC.
+    let record_file = runs.workspace_dir(&workspace.name).join("a.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&record_file).unwrap()).unwrap();
+    let old = crate::process::ps_start_time(pid).unwrap().unwrap();
+    assert!(!old.contains('.'), "{old}");
+    record["started"] = serde_json::Value::String(old);
+    write(&record_file, record.to_string());
+    let statuses = runs.status(&workspace, None).unwrap();
+    assert_eq!(statuses[0].state, ProcessState::Running { pid: Some(pid) });
+    runs.down(
+        &runs.lock(&workspace.name).unwrap(),
+        &workspace,
+        Some(&manifest),
+        &[],
+    )
+    .unwrap();
+    assert!(!crate::process::group_exists(pid));
 }

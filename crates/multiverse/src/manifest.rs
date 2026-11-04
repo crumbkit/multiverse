@@ -30,10 +30,18 @@
 //! [processes.web]
 //! argv = ["npm", "run", "dev"]
 //! cwd = "web"
-//! ports = { PORT = "web", API_PORT = "api" }
+//! env = { API_URL = "http://127.0.0.1:{port.api}" }
+//! ports = { PORT = "web" }
 //! listen = "web"
 //! depends_on = ["api"]
+//!
+//! [processes.worker]
+//! argv = ["cargo", "run", "--bin", "worker"]
+//! ready = { log = "^worker ready", timeout_seconds = 300 }
 //! ```
+//!
+//! An `env` value may name a host port as `{port.<name>}`, and writes a
+//! literal brace as `{{` or `}}`. Any other brace fails the manifest.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -43,6 +51,7 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use regex::Regex;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use toml::Spanned;
@@ -167,8 +176,8 @@ pub struct Process {
     /// root. It defaults to `.`.
     pub cwd: PathBuf,
     /// The variables that the process receives on top of mxv's own
-    /// environment.
-    pub env: BTreeMap<String, String>,
+    /// environment, whose values may name host ports.
+    pub env: BTreeMap<String, EnvValue>,
     /// The ports that the process receives: each key is the name of an
     /// environment variable, and each value names a port of
     /// [`Manifest::ports`].
@@ -186,15 +195,157 @@ pub struct Process {
     pub depends_on: Vec<String>,
 }
 
-/// A readiness check: a TCP connection to a named port on the loopback
-/// address succeeds within the timeout.
+/// A readiness check, which must pass within the timeout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Ready {
-    /// The port of [`Manifest::ports`] to connect to.
-    pub port: String,
-    /// How long `mxv up` waits for the connection.
+    /// What `mxv up` waits for.
+    pub check: ReadyCheck,
+    /// How long `mxv up` waits.
     pub timeout: Duration,
+}
+
+/// What a readiness check waits for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReadyCheck {
+    /// A TCP connection to the named port of [`Manifest::ports`] on the
+    /// loopback address succeeds.
+    Port(String),
+    /// The process writes a log line that matches the pattern, after
+    /// `mxv up` started it. A process that listens on no port, such as a
+    /// worker that reads a queue, uses it.
+    Log(LogPattern),
+}
+
+/// A regular expression that a readiness check matches against each new
+/// log line.
+#[derive(Clone, Debug)]
+pub struct LogPattern(Regex);
+
+impl LogPattern {
+    /// Returns the pattern as the manifest writes it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Reports whether `line` matches the pattern.
+    #[must_use]
+    pub fn is_match(&self, line: &str) -> bool {
+        self.0.is_match(line)
+    }
+}
+
+impl PartialEq for LogPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for LogPattern {}
+
+/// The value of an `env` variable, which may name host ports as
+/// `{port.<name>}` and writes a literal brace as `{{` or `}}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvValue {
+    /// The value as the manifest writes it.
+    text: String,
+    /// The value's literal text and port placeholders, in order.
+    parts: Vec<Part>,
+}
+
+/// One part of an [`EnvValue`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Part {
+    /// Literal text, with each doubled brace read as one brace.
+    Text(String),
+    /// The host port of the named port.
+    Port(String),
+}
+
+impl EnvValue {
+    /// Returns the value with each placeholder replaced by its host port in
+    /// `ports`, by port name. A placeholder whose port `ports` lacks stays
+    /// as the manifest writes it.
+    #[must_use]
+    pub fn render(&self, ports: &BTreeMap<String, u16>) -> String {
+        let mut rendered = String::new();
+        for part in &self.parts {
+            match part {
+                Part::Text(text) => rendered.push_str(text),
+                Part::Port(port) => match ports.get(port) {
+                    Some(number) => rendered.push_str(&number.to_string()),
+                    None => {
+                        rendered.push_str("{port.");
+                        rendered.push_str(port);
+                        rendered.push('}');
+                    }
+                },
+            }
+        }
+        rendered
+    }
+
+    /// Returns the names of the ports that the value's placeholders name,
+    /// in order.
+    pub fn ports(&self) -> impl Iterator<Item = &str> {
+        self.parts.iter().filter_map(|part| match part {
+            Part::Port(port) => Some(port.as_str()),
+            Part::Text(_) => None,
+        })
+    }
+
+    /// Returns the value as the manifest writes it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// Reads `text`, or returns `None` when a brace is neither doubled nor
+    /// part of a `{port.<name>}` placeholder whose name is a port name.
+    fn parse(text: &str) -> Option<Self> {
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find(['{', '}']) {
+            literal.push_str(rest.get(..at)?);
+            let tail = rest.get(at..)?;
+            if let Some(after) = tail.strip_prefix("{{") {
+                literal.push('{');
+                rest = after;
+            } else if let Some(after) = tail.strip_prefix("}}") {
+                literal.push('}');
+                rest = after;
+            } else {
+                let inside = tail.strip_prefix("{port.")?;
+                let end = inside.find('}')?;
+                let port = inside.get(..end)?;
+                if !is_name(port) {
+                    return None;
+                }
+                if !literal.is_empty() {
+                    parts.push(Part::Text(std::mem::take(&mut literal)));
+                }
+                parts.push(Part::Port(port.to_owned()));
+                rest = inside.get(end + 1..)?;
+            }
+        }
+        literal.push_str(rest);
+        if !literal.is_empty() {
+            parts.push(Part::Text(literal));
+        }
+        Some(Self {
+            text: text.to_owned(),
+            parts,
+        })
+    }
+}
+
+impl PartialEq<&str> for EnvValue {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
 }
 
 /// A manifest that cannot be read or understood.
@@ -305,14 +456,14 @@ struct RawProcess {
     cwd: Option<Spanned<String>>,
     /// The extra variables.
     #[serde(default)]
-    env: BTreeMap<Spanned<String>, String>,
+    env: BTreeMap<Spanned<String>, Spanned<String>>,
     /// The port variables.
     #[serde(default)]
     ports: BTreeMap<Spanned<String>, Spanned<String>>,
     /// The port that the process listens on.
     listen: Option<Spanned<String>>,
     /// The readiness check.
-    ready: Option<RawReady>,
+    ready: Option<Spanned<RawReady>>,
     /// The dependencies.
     #[serde(default)]
     depends_on: Vec<Spanned<String>>,
@@ -348,6 +499,8 @@ struct RawContainer {
 struct RawReady {
     /// The port to connect to, which defaults to the listen port.
     port: Option<Spanned<String>>,
+    /// The pattern of the log line to wait for.
+    log: Option<Spanned<String>>,
     /// The timeout in seconds.
     timeout_seconds: Option<Spanned<u64>>,
 }
@@ -779,11 +932,12 @@ fn check_process(
             ))
         }
     };
-    let mut env = BTreeMap::new();
-    for (variable, value) in &raw.env {
-        check_variable(errors, process, variable)?;
-        env.insert(variable.get_ref().clone(), value.clone());
-    }
+    let env = check_env(errors, process, raw, ports)?;
+    let templated: BTreeSet<String> = env
+        .values()
+        .flat_map(EnvValue::ports)
+        .map(str::to_owned)
+        .collect();
     let mut port_variables = BTreeMap::new();
     for (variable, port) in &raw.ports {
         check_variable(errors, process, variable)?;
@@ -801,11 +955,13 @@ fn check_process(
     let listen = match &raw.listen {
         Some(listen) => {
             let port = declared(listen)?;
-            if !port_variables.values().any(|received| received == &port) {
+            if !port_variables.values().any(|received| received == &port)
+                && !templated.contains(&port)
+            {
                 return Err(errors.invalid(
                     &listen.span(),
                     format!(
-                        "the process `{process}` listens on `{port}`, which it does not receive; add a variable for it to `ports`"
+                        "the process `{process}` listens on `{port}`, which it does not receive; add a variable for it to `ports`, or name it in an `env` value as `{{port.{port}}}`"
                     ),
                 ));
             }
@@ -813,40 +969,14 @@ fn check_process(
         }
         None => None,
     };
-    let ready = match &raw.ready {
-        Some(ready) => {
-            let timeout = ready_timeout(errors, process, ready)?;
-            let port = match &ready.port {
-                Some(port) => {
-                    let port_name = declared(port)?;
-                    if listen.as_ref() != Some(&port_name)
-                        && !port_variables.values().any(|received| received == &port_name)
-                    {
-                        return Err(errors.invalid(
-                            &port.span(),
-                            format!(
-                                "the readiness port `{port_name}` of `{process}` is neither its listen port nor a port it receives"
-                            ),
-                        ));
-                    }
-                    port_name
-                }
-                None => listen.clone().ok_or_else(|| {
-                    errors.invalid(
-                        &raw.argv.span(),
-                        format!(
-                            "the `ready` table of `{process}` names no port, and the process has no `listen` port to default to"
-                        ),
-                    )
-                })?,
-            };
-            Some(Ready { port, timeout })
-        }
-        None => listen.clone().map(|port| Ready {
-            port,
-            timeout: DEFAULT_READY_TIMEOUT,
-        }),
-    };
+    let ready = check_ready(
+        errors,
+        process,
+        raw,
+        listen.as_ref(),
+        |port| port_variables.values().any(|received| received == port) || templated.contains(port),
+        &declared,
+    )?;
     let depends_on = check_dependencies(errors, process, &raw.depends_on, names)?;
     Ok(Process {
         argv: raw.argv.get_ref().clone(),
@@ -857,6 +987,122 @@ fn check_process(
         ready,
         depends_on,
     })
+}
+
+/// Checks the `env` table of the process `process`: each variable's name,
+/// and each value's braces and the ports that its placeholders name.
+fn check_env(
+    errors: &Errors<'_>,
+    process: &str,
+    raw: &RawProcess,
+    ports: &[String],
+) -> Result<BTreeMap<String, EnvValue>, ManifestError> {
+    let mut env = BTreeMap::new();
+    for (variable, value) in &raw.env {
+        check_variable(errors, process, variable)?;
+        let parsed = EnvValue::parse(value.get_ref()).ok_or_else(|| {
+            errors.invalid(
+                &value.span(),
+                format!(
+                    "the value of `{}` in `{process}` has a brace that is not part of a port placeholder such as `{{port.api}}`; write `{{{{` or `}}}}` for a literal brace",
+                    variable.get_ref()
+                ),
+            )
+        })?;
+        if let Some(port) = parsed
+            .ports()
+            .find(|port| !ports.iter().any(|declared| declared == port))
+        {
+            return Err(errors.invalid(
+                &value.span(),
+                format!(
+                    "the value of `{}` in `{process}` names the port `{port}`, which `ports` does not declare",
+                    variable.get_ref()
+                ),
+            ));
+        }
+        env.insert(variable.get_ref().clone(), parsed);
+    }
+    Ok(env)
+}
+
+/// Checks the `ready` table of the process `process`, whose listen port is
+/// `listen` and which receives the ports that `receives` accepts, and
+/// returns its readiness check. `declared` checks that a port is declared.
+fn check_ready(
+    errors: &Errors<'_>,
+    process: &str,
+    raw: &RawProcess,
+    listen: Option<&String>,
+    receives: impl Fn(&String) -> bool,
+    declared: &impl Fn(&Spanned<String>) -> Result<String, ManifestError>,
+) -> Result<Option<Ready>, ManifestError> {
+    Ok(match &raw.ready {
+        Some(spanned) => {
+            let ready = spanned.get_ref();
+            let timeout = ready_timeout(errors, process, ready)?;
+            let check = match (&ready.port, &ready.log) {
+                (Some(_), Some(_)) => {
+                    return Err(errors.invalid(
+                        &spanned.span(),
+                        format!(
+                            "the `ready` table of `{process}` sets both `port` and `log`, and a readiness check waits for one of them"
+                        ),
+                    ));
+                }
+                (None, Some(log)) => {
+                    let pattern = Regex::new(log.get_ref()).map_err(|error| {
+                        errors.invalid(
+                            &log.span(),
+                            format!(
+                                "the `log` pattern of `{process}` is not a regular expression: {}",
+                                regex_problem(&error)
+                            ),
+                        )
+                    })?;
+                    ReadyCheck::Log(LogPattern(pattern))
+                }
+                (Some(port), None) => {
+                    let port_name = declared(port)?;
+                    if listen != Some(&port_name) && !receives(&port_name) {
+                        return Err(errors.invalid(
+                            &port.span(),
+                            format!(
+                                "the readiness port `{port_name}` of `{process}` is neither its listen port nor a port it receives"
+                            ),
+                        ));
+                    }
+                    ReadyCheck::Port(port_name)
+                }
+                (None, None) => ReadyCheck::Port(listen.cloned().ok_or_else(|| {
+                    errors.invalid(
+                        &raw.argv.span(),
+                        format!(
+                            "the `ready` table of `{process}` names no port or log pattern, and the process has no `listen` port to default to"
+                        ),
+                    )
+                })?),
+            };
+            Some(Ready { check, timeout })
+        }
+        None => listen.cloned().map(|port| Ready {
+            check: ReadyCheck::Port(port),
+            timeout: DEFAULT_READY_TIMEOUT,
+        }),
+    })
+}
+
+/// Returns what is wrong with a pattern that `error` rejected, on one
+/// line. A syntax error prints the pattern with a caret under the problem
+/// and then a line `error: <problem>`, and only that problem is kept.
+fn regex_problem(error: &regex::Error) -> String {
+    let text = error.to_string();
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("error: "))
+        .map_or_else(
+            || text.split_whitespace().collect::<Vec<_>>().join(" "),
+            str::to_owned,
+        )
 }
 
 /// Checks that `variable` is a valid environment variable name.
@@ -1043,6 +1289,14 @@ fn check_container(
     let ready = match &raw.ready {
         Some(ready) => {
             let timeout = ready_timeout(errors, container, ready)?;
+            if let Some(log) = &ready.log {
+                return Err(errors.invalid(
+                    &log.span(),
+                    format!(
+                        "the `ready` table of `{container}` sets `log`, and a container's readiness check waits only for a port"
+                    ),
+                ));
+            }
             let port = match &ready.port {
                 Some(port) => {
                     if !published.iter().any(|published| &published.port == port.get_ref()) {
@@ -1065,10 +1319,13 @@ fn check_container(
                     )
                 })?,
             };
-            Some(Ready { port, timeout })
+            Some(Ready {
+                check: ReadyCheck::Port(port),
+                timeout,
+            })
         }
         None => only.map(|port| Ready {
-            port,
+            check: ReadyCheck::Port(port),
             timeout: DEFAULT_READY_TIMEOUT,
         }),
     };

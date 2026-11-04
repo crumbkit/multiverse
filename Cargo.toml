@@ -48,6 +48,17 @@ etcetera = { version = "0.11.0", default-features = false }
 # the features its own code needs.
 toml = { version = "1.2.0", default-features = false }
 
+# regex matches the log lines of a process against the pattern of its
+# `ready = { log = "..." }` check. Its default features hold Unicode
+# classes and the search optimisations, and `std` is all it needs besides.
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode", "perf"] }
+
+# libc declares macOS's libproc calls, proc_pidinfo, proc_pidfdinfo and
+# proc_listpids, which read a process's start time to the microsecond and
+# the sockets of a process group. Only crates/multiverse/src/process/darwin.rs
+# calls them. It needs no features beyond `std`.
+libc = { version = "0.2.191", default-features = false, features = ["std"] }
+
 # rustix sends signals to the process groups of an app's processes and
 # checks whether a group still exists, without unsafe code. Only the
 # `process` feature is used.
@@ -74,7 +85,7 @@ tempfile = { version = "3.27.0", default-features = false }
 # fails on any warning, and every package inherits the table through
 # `[lints] workspace = true`.
 [workspace.lints.rust]
-unsafe_code = "forbid"                 # BASE-3
+unsafe_code = "deny"                   # BASE-3; only process/darwin.rs expects it
 unreachable_pub = "warn"               # BASE-8
 missing_debug_implementations = "warn"
 missing_docs = "deny"                  # LIB-2

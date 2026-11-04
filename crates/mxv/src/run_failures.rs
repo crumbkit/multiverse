@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem};
+use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem, Waited};
 
 use crate::failures::remove_volumes_line;
 
@@ -35,6 +35,11 @@ pub const PROCESS_NOT_FOUND: Code = Code::new("mxv", "process", "not_found");
 pub const PROCESS_EXITED: Code = Code::new("mxv", "process", "exited");
 /// The code of a process that missed its readiness timeout.
 pub const PROCESS_NOT_READY: Code = Code::new("mxv", "process", "not_ready");
+/// The code of a process whose readiness port another program answered.
+pub const PROCESS_FOREIGN_LISTENER: Code = Code::new("mxv", "process", "foreign_listener");
+/// The code of a listen port that a descendant of a process holds from
+/// outside the process's group.
+pub const PROCESS_DETACHED_LISTENER: Code = Code::new("mxv", "process", "detached_listener");
 /// The code of a process group that outlived SIGKILL.
 pub const PROCESS_UNSTOPPABLE: Code = Code::new("mxv", "process", "unstoppable");
 /// The code of a stored port that something outside the workspace holds.
@@ -56,6 +61,8 @@ pub(crate) const CODES: &[&Code] = &[
     &PROCESS_NOT_FOUND,
     &PROCESS_EXITED,
     &PROCESS_NOT_READY,
+    &PROCESS_FOREIGN_LISTENER,
+    &PROCESS_DETACHED_LISTENER,
     &PROCESS_UNSTOPPABLE,
     &PORT_TAKEN,
     &PORT_NOT_FOUND,
@@ -116,7 +123,7 @@ pub(crate) enum RunFailure {
         /// Its log.
         log: Box<Path>,
         /// The last lines of its log.
-        tail: Box<[String]>,
+        tail: LogTail,
     },
     /// A process missed its readiness timeout.
     NotReady {
@@ -124,16 +131,50 @@ pub(crate) enum RunFailure {
         workspace: String,
         /// The process.
         process: String,
-        /// The readiness port's name.
-        port: String,
-        /// The host port.
-        number: u16,
+        /// What `up` waited for.
+        waited: Box<Waited>,
         /// The timeout in seconds.
         seconds: u64,
         /// Its log.
         log: Box<Path>,
         /// The last lines of its log.
-        tail: Box<[String]>,
+        tail: LogTail,
+    },
+    /// Another program answered on a process's readiness port.
+    ForeignListener {
+        /// The workspace's name.
+        workspace: String,
+        /// The process.
+        process: String,
+        /// The port's name.
+        port: String,
+        /// The host port.
+        number: u16,
+        /// The process that holds the port, or `None` when mxv may not
+        /// read its descriptors.
+        pid: Option<u32>,
+        /// The process's log.
+        log: Box<Path>,
+        /// The last lines of its log.
+        tail: LogTail,
+    },
+    /// A descendant of a process that left the process's group held its
+    /// listen port, so `up` stopped both.
+    DetachedListener {
+        /// The workspace's name.
+        workspace: String,
+        /// The process.
+        process: String,
+        /// The port's name.
+        port: String,
+        /// The host port.
+        number: u16,
+        /// The descendant.
+        pid: u32,
+        /// The process's log.
+        log: Box<Path>,
+        /// The last lines of its log.
+        tail: LogTail,
     },
     /// A process group outlived SIGKILL.
     Unstoppable {
@@ -192,6 +233,8 @@ impl Failure for RunFailure {
             Self::UnknownProcess { .. } => &PROCESS_NOT_FOUND,
             Self::Exited { .. } => &PROCESS_EXITED,
             Self::NotReady { .. } => &PROCESS_NOT_READY,
+            Self::ForeignListener { .. } => &PROCESS_FOREIGN_LISTENER,
+            Self::DetachedListener { .. } => &PROCESS_DETACHED_LISTENER,
             Self::Unstoppable { .. } => &PROCESS_UNSTOPPABLE,
             Self::PortTaken { .. } => &PORT_TAKEN,
             Self::UnknownPort { .. } => &PORT_NOT_FOUND,
@@ -248,6 +291,29 @@ impl Failure for RunFailure {
                 workspace, process, ..
             } => hint(format!(
                 "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
+            )),
+            Self::ForeignListener {
+                workspace,
+                process,
+                number,
+                pid: Some(pid),
+                ..
+            } => hint(format!(
+                "stop the process {pid}, which listens on port {number}, or make {process} listen on the port it receives, and run `mxv up -w {workspace} {process}` again"
+            )),
+            Self::ForeignListener {
+                workspace,
+                process,
+                number,
+                pid: None,
+                ..
+            } => hint(format!(
+                "stop the program of another user that listens on port {number}, or make {process} listen on the port it receives, and run `mxv up -w {workspace} {process}` again"
+            )),
+            Self::DetachedListener {
+                workspace, process, ..
+            } => hint(format!(
+                "make {process} keep the program that listens in its own process group, such as by running the program in the foreground without detaching it, and run `mxv up -w {workspace} {process}` again"
             )),
             Self::Unstoppable { pid, .. } => hint(format!(
                 "find the process group {pid} with `ps -g {pid}` and stop it by hand"
@@ -308,14 +374,41 @@ impl Failure for RunFailure {
                 Field::new("code", *code),
                 Field::new("signal", *signal),
                 Field::new("log", shown(log)),
-                Field::new("tail", FieldValue::list(tail.iter())),
+                Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::NotReady {
                 workspace,
                 process,
+                waited,
+                seconds,
+                log,
+                tail,
+            } => {
+                let mut fields = vec![
+                    Field::new("workspace", workspace),
+                    Field::new("process", process),
+                ];
+                match &**waited {
+                    Waited::Port { port, number } => {
+                        fields.push(Field::new("port", port));
+                        fields.push(Field::new("number", *number));
+                    }
+                    Waited::Log { pattern } => fields.push(Field::new("pattern", pattern)),
+                    _ => {}
+                }
+                fields.extend([
+                    Field::new("timeout_seconds", *seconds),
+                    Field::new("log", shown(log)),
+                    Field::new("tail", FieldValue::list(tail.lines.iter())),
+                ]);
+                fields
+            }
+            Self::ForeignListener {
+                workspace,
+                process,
                 port,
                 number,
-                seconds,
+                pid,
                 log,
                 tail,
             } => vec![
@@ -323,9 +416,26 @@ impl Failure for RunFailure {
                 Field::new("process", process),
                 Field::new("port", port),
                 Field::new("number", *number),
-                Field::new("timeout_seconds", *seconds),
+                Field::new("pid", *pid),
                 Field::new("log", shown(log)),
-                Field::new("tail", FieldValue::list(tail.iter())),
+                Field::new("tail", FieldValue::list(tail.lines.iter())),
+            ],
+            Self::DetachedListener {
+                workspace,
+                process,
+                port,
+                number,
+                pid,
+                log,
+                tail,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("process", process),
+                Field::new("port", port),
+                Field::new("number", *number),
+                Field::new("pid", *pid),
+                Field::new("log", shown(log)),
+                Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::Unstoppable { process, pid } => {
                 vec![Field::new("process", process), Field::new("pid", *pid)]
@@ -420,13 +530,52 @@ impl fmt::Display for RunFailure {
             },
             Self::NotReady {
                 process,
+                waited,
+                seconds,
+                ..
+            } => match &**waited {
+                Waited::Log { pattern } => write!(
+                    formatter,
+                    "the process {process} wrote no log line that matches `{pattern}` within {seconds} seconds, so mxv stopped it"
+                ),
+                Waited::Port { port, number } => write!(
+                    formatter,
+                    "the process {process} did not accept a connection on {port} (port {number}) within {seconds} seconds, so mxv stopped it"
+                ),
+                _ => write!(
+                    formatter,
+                    "the process {process} was not ready within {seconds} seconds, so mxv stopped it"
+                ),
+            },
+            Self::ForeignListener {
+                process,
                 port,
                 number,
-                seconds,
+                pid: Some(pid),
                 ..
             } => write!(
                 formatter,
-                "the process {process} did not accept a connection on {port} (port {number}) within {seconds} seconds, so mxv stopped it"
+                "a connection to {port} (port {number}) succeeded, and the process {pid}, which is not part of {process}, listens on it, so mxv stopped {process}"
+            ),
+            Self::ForeignListener {
+                process,
+                port,
+                number,
+                pid: None,
+                ..
+            } => write!(
+                formatter,
+                "a connection to {port} (port {number}) succeeded, and no process of {process}'s group listens on it, so another program holds the port and mxv stopped {process}"
+            ),
+            Self::DetachedListener {
+                process,
+                port,
+                number,
+                pid,
+                ..
+            } => write!(
+                formatter,
+                "the process {pid}, which {process} started, listens on {port} (port {number}) and left {process}'s process group, so `mxv down` could not stop it; mxv stopped both"
             ),
             Self::Unstoppable { process, pid } => write!(
                 formatter,
@@ -461,4 +610,69 @@ impl fmt::Display for RunFailure {
     }
 }
 
-impl std::error::Error for RunFailure {}
+impl std::error::Error for RunFailure {
+    /// The last lines of the log of a process that exited or missed its
+    /// timeout, one cause for each line, so the text form prints each on a
+    /// `cause:` line under the message.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Exited { tail, .. }
+            | Self::NotReady { tail, .. }
+            | Self::ForeignListener { tail, .. }
+            | Self::DetachedListener { tail, .. } => tail
+                .first
+                .as_deref()
+                .map(|line| line as &(dyn std::error::Error + 'static)),
+            _ => None,
+        }
+    }
+}
+
+/// The last lines of a process's log, as a failure reports them.
+#[derive(Debug)]
+pub(crate) struct LogTail {
+    /// The lines, oldest first.
+    lines: Box<[String]>,
+    /// The same lines as a chain of errors, the first of which the failure
+    /// gives as its source.
+    first: Option<Box<TailLine>>,
+}
+
+impl LogTail {
+    /// Returns the tail of `lines`, oldest first.
+    pub(crate) fn new(lines: Vec<String>) -> Self {
+        let first = lines.iter().rev().fold(None, |next, line| {
+            Some(Box::new(TailLine {
+                line: line.clone(),
+                next,
+            }))
+        });
+        Self {
+            lines: lines.into_boxed_slice(),
+            first,
+        }
+    }
+}
+
+/// One line of a log tail, whose source is the next line.
+#[derive(Debug)]
+struct TailLine {
+    /// The line.
+    line: String,
+    /// The next line, or `None` after the last.
+    next: Option<Box<TailLine>>,
+}
+
+impl fmt::Display for TailLine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.line)
+    }
+}
+
+impl std::error::Error for TailLine {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.next
+            .as_deref()
+            .map(|line| line as &(dyn std::error::Error + 'static))
+    }
+}

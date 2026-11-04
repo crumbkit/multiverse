@@ -110,7 +110,8 @@ ready = { timeout_seconds = 120 }            # optional; port defaults to listen
 
 [processes.worker]
 argv = ["cargo", "run", "--bin", "worker"]
-ports = { API_PORT = "api" }
+env = { API_URL = "http://127.0.0.1:{port.api}" }   # {port.<name>} is a host port
+ready = { log = "^worker ready", timeout_seconds = 300 }   # ready on a matching log line
 depends_on = ["api"]                         # optional: start after these are ready
 
 [processes.web]
@@ -130,14 +131,20 @@ The schema has these keys, and any other key fails with
 | `ports` | The port names, each 1 to 64 letters, digits, `-` and `_`. |
 | `processes.<name>.argv` | The program and its arguments, as separate strings. It is required and not empty. |
 | `processes.<name>.cwd` | The starting directory, relative to the repository root, which defaults to `.`. It may not leave the repository, also through a symbolic link. |
-| `processes.<name>.env` | Variables that the process receives on top of mxv's own environment. |
+| `processes.<name>.env` | Variables that the process receives on top of mxv's own environment. A value may name a host port as `{port.<name>}`, where the name is a port of `ports`, and writes a literal brace as `{{` or `}}`. Any other brace, or a placeholder of an undeclared port, fails with `mxv::manifest::invalid` and the value's line. `status` lists such a port as `{port.api}=<number>`. |
 | `processes.<name>.ports` | Variables that receive a host port, each naming a port of `ports`. |
-| `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives. A port has at most one listener. |
-| `processes.<name>.ready` | `port` and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives. The process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. |
+| `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
+| `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
 | `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
 
 A listener without a `ready` table is ready when its listen port accepts a
-connection within 60 seconds. A process with neither counts as started once
+connection within 60 seconds. A process that listens on no port, such as a
+worker that reads a queue, can still tell `up` when it is ready: give it
+`ready = { log = "<pattern>" }` and have it print a line that the pattern
+matches once it has connected to what it needs. The line must end with a
+line break. When no line matches within the timeout, `up` stops the
+process and fails with `mxv::process::not_ready`, whose `pattern` field
+holds the pattern in place of `port` and `number`. A process with neither counts as started once
 it has run for half a second; when it exits sooner, `up` fails with
 `mxv::process::exited`.
 
@@ -180,7 +187,7 @@ depends_on = ["dynamodb", "localstack"]
 | `containers.<name>.env` | Variables that the container receives. |
 | `containers.<name>.ports` | The TCP ports that mxv publishes: each key is a container port from 1 to 65535, and each value names a port of `ports`. A container that publishes a port is that port's listener, and a port has at most one listener, process or container. |
 | `containers.<name>.volumes` | Named volumes: each key names a volume, and each value is the absolute path it mounts at inside the container. mxv mounts no directory of the host. |
-| `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. |
+| `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. A container's readiness check waits only for a port, so `log` is invalid here, and a container's `env` values hold no port placeholders. |
 | `containers.<name>.depends_on` | Processes or containers that start, and are ready, before this one. |
 
 Processes and containers share one set of names, and either may depend on
@@ -304,7 +311,21 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   standard error appended to its log. When a process exits before it is
   ready, `up` fails with `mxv::process::exited` and the log's last 20 lines;
   when it misses its timeout, `up` stops it and fails with
-  `mxv::process::not_ready`. A failed `up` stops the processes it started
+  `mxv::process::not_ready`. When the readiness port is the listen port
+  and it accepts a connection, `up` also checks which process holds the
+  listening socket, through `/proc` on Linux and libproc's
+  `proc_pidfdinfo` on macOS. When a member of the process's group holds
+  it, the process is ready. When a descendant of the process's shell that
+  left the group holds it, as a daemon that calls `setsid` does, `down`
+  could not stop that descendant, so `up` sends it SIGKILL, stops the
+  process, and fails with `mxv::process::detached_listener` and the
+  descendant's process id. A descendant whose parent between it and the
+  shell has ended counts as another program, because the operating system
+  makes init its parent. When another program holds the socket, `up`
+  stops the process and fails with `mxv::process::foreign_listener` and
+  that program's process id, or a null id when the program belongs to
+  another user. A process that hands its port to a program that it did
+  not start, such as a wrapper around `docker run -p`, fails this check. A failed `up` stops the processes it started
   before the failure. `up` also drops the ports of names that the manifest
   no longer declares, once no running process received them, so a port
   that the manifest renames stays with its old listener until `down`.
@@ -316,10 +337,8 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   second case the group holds the children that an exited process left
   behind. When another process has taken the recorded id, `down` signals
   nothing and deletes the record. `running`, `remove` and `logs -f` apply
-  the same rule. On macOS the start time has a resolution of one second,
-  so a process that takes the id within the second that the original
-  started in reads as the original. A descendant that leaves its process
-  group is not reached.
+  the same rule. A descendant that leaves its process group is not
+  reached.
 - `mxv restart` stops the named processes, or every process, and starts them
   again.
 - `mxv status` reports each process as `running`, `exited` with its code,
@@ -327,7 +346,11 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   lists its process id with the start time that `up` recorded, so a reused
   id reads as exited. The start time does not depend on the time zone: on
   Linux it is the boot-relative start time in `/proc/<pid>/stat`, and on
-  macOS it is what `ps` prints in UTC. The shell records a program that a
+  macOS it is the start that `proc_pidinfo` reports to the microsecond.
+  Run records that an earlier mxv wrote on macOS hold the start time that
+  `ps -o lstart=` printed in UTC, so for such a record mxv runs `ps` again
+  and compares what it prints, and `status` and `down` still find the
+  process. The shell records a program that a
   signal ended as code 128 plus the signal's number, so `status` reports a
   code from 129 to 192 as `code` null and `signal` set; a program that
   exits with such a code by itself reads the same way. A process that
@@ -352,7 +375,13 @@ mxv keeps the run files of each workspace's processes in
 and its start time, `<process>.log`, `<process>.log.1`, and
 `<process>.exit`, which holds the exit code once the process ends. Each
 process runs under `/bin/sh`, which waits for it and writes that code, so a
-crash is reported without a long-running mxv.
+crash is reported without a long-running mxv. The shell's redirection
+creates the exit file empty before `printf` writes the code, so mxv counts
+the file as written only once it ends in a line feed. The shell writes the
+file before it exits, so `status` reads the file once more after it finds
+the shell gone. A shell that something such as SIGKILL ended writes no
+file, and `status` then reports the process as exited with a null code and
+signal and a `reason` that says the shell ended without writing its code.
 
 Each `up` of a process moves its previous log to `<process>.log.1`, which
 replaces the log before it, so a process keeps at most two logs. No mxv

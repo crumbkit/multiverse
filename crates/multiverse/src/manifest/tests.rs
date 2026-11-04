@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::manifest::{
-    DEFAULT_READY_TIMEOUT, Manifest, ManifestError, ManifestProblem, Published, Unit,
+    DEFAULT_READY_TIMEOUT, Manifest, ManifestError, ManifestProblem, Published, ReadyCheck, Unit,
 };
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
@@ -47,7 +48,7 @@ fn a_manifest_of_three_processes_parses_with_its_defaults() {
     assert_eq!(server.ports["PORT"], "api");
     assert_eq!(server.listen.as_deref(), Some("api"));
     let ready = server.ready.as_ref().unwrap();
-    assert_eq!(ready.port, "api");
+    assert_eq!(ready.check, ReadyCheck::Port("api".to_owned()));
     assert_eq!(ready.timeout, Duration::from_secs(120));
     let web = &manifest.processes["web"];
     assert_eq!(web.cwd, PathBuf::from("web"));
@@ -238,7 +239,7 @@ fn reading_a_checkout_without_a_manifest_returns_none() {
 fn a_listener_without_ready_waits_for_its_listen_port_with_the_default_timeout() {
     let manifest = parse(APP).unwrap();
     let ready = manifest.processes["web"].ready.as_ref().unwrap();
-    assert_eq!(ready.port, "web");
+    assert_eq!(ready.check, ReadyCheck::Port("web".to_owned()));
     assert_eq!(ready.timeout, DEFAULT_READY_TIMEOUT);
     assert_eq!(manifest.processes["worker"].ready, None);
 }
@@ -355,7 +356,7 @@ fn a_manifest_of_containers_and_a_process_parses_with_the_containers_defaults() 
     );
     assert_eq!(dynamodb.volumes["data"], "/data");
     let ready = dynamodb.ready.as_ref().unwrap();
-    assert_eq!(ready.port, "dynamodb");
+    assert_eq!(ready.check, ReadyCheck::Port("dynamodb".to_owned()));
     assert_eq!(ready.timeout, DEFAULT_READY_TIMEOUT);
     let localstack = &manifest.containers["localstack"];
     assert!(localstack.command.is_none());
@@ -499,8 +500,8 @@ fn a_ready_table_of_a_container_that_publishes_two_ports_must_name_one() {
     )
     .unwrap();
     assert_eq!(
-        manifest.containers["db"].ready.as_ref().unwrap().port,
-        "other"
+        manifest.containers["db"].ready.as_ref().unwrap().check,
+        ReadyCheck::Port("other".to_owned())
     );
 }
 
@@ -539,4 +540,88 @@ fn a_container_name_or_a_volume_name_with_a_dot_fails_as_invalid() {
     let message =
         invalid_message("image = \"busybox:1.37.0\"\nvolumes = { \"data.x\" = \"/data\" }\n");
     assert!(message.contains("volume"), "{message}");
+}
+
+#[test]
+fn a_container_ready_table_with_a_log_pattern_fails_as_invalid() {
+    let message = invalid_message(
+        "image = \"busybox:1.37.0\"\nports = { 80 = \"db\" }\nready = { log = \"ready\" }\n",
+    );
+    assert!(message.contains("`log`"), "{message}");
+}
+
+#[test]
+fn an_env_value_names_host_ports_with_port_placeholders_and_doubles_braces_for_literal_ones() {
+    let manifest = parse(
+        "ports = [\"api\", \"db\"]\n[processes.a]\nargv = [\"true\"]\nenv = { API_URL = \"http://127.0.0.1:{port.api}/v1\", DB = \"{port.db}\", JSON = \"{{\\\"a\\\": 1}}\", PLAIN = \"info\" }\n",
+    )
+    .unwrap();
+    let env = &manifest.processes["a"].env;
+    let ports = BTreeMap::from([("api".to_owned(), 24001), ("db".to_owned(), 24002)]);
+    assert_eq!(env["API_URL"].render(&ports), "http://127.0.0.1:24001/v1");
+    assert_eq!(env["DB"].render(&ports), "24002");
+    assert_eq!(env["JSON"].render(&ports), "{\"a\": 1}");
+    assert_eq!(env["PLAIN"].render(&ports), "info");
+    assert_eq!(env["PLAIN"], "info");
+    assert_eq!(env["API_URL"].ports().collect::<Vec<_>>(), ["api"]);
+}
+
+#[test]
+fn a_port_placeholder_that_names_an_undeclared_port_fails_with_its_line() {
+    let (line, problem) = problem(
+        "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nenv = { URL = \"127.0.0.1:{port.web}\" }\n",
+    );
+    assert_eq!(line, Some(4));
+    assert!(matches!(problem, ManifestProblem::Invalid { message } if message.contains("`web`")));
+}
+
+#[test]
+fn a_brace_that_opens_no_port_placeholder_fails_with_its_line() {
+    for value in ["{api}", "{port.api", "a}b", "{port.}", "{ port.api }"] {
+        let (line, problem) = problem(&format!(
+            "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nenv = {{ URL = \"{value}\" }}\n"
+        ));
+        assert_eq!(line, Some(4), "{value}");
+        assert!(
+            matches!(&problem, ManifestProblem::Invalid { message } if message.contains("{{") && message.contains("`URL`")),
+            "{value}: {problem:?}"
+        );
+    }
+}
+
+#[test]
+fn a_readiness_check_on_a_log_pattern_needs_no_port() {
+    let manifest = parse(
+        "[processes.worker]\nargv = [\"cargo\", \"run\", \"--bin\", \"worker\"]\nready = { log = \"^worker ready\", timeout_seconds = 300 }\n",
+    )
+    .unwrap();
+    let ready = manifest.processes["worker"].ready.as_ref().unwrap();
+    assert_eq!(ready.timeout, Duration::from_secs(300));
+    match &ready.check {
+        ReadyCheck::Log(pattern) => {
+            assert_eq!(pattern.as_str(), "^worker ready");
+            assert!(pattern.is_match("worker ready on queue jobs"));
+            assert!(!pattern.is_match("compiling worker ready"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_readiness_check_with_both_a_port_and_a_log_pattern_fails_with_its_line() {
+    let (line, problem) = problem(
+        "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nports = { PORT = \"api\" }\nready = { port = \"api\", log = \"ready\" }\n",
+    );
+    assert_eq!(line, Some(5));
+    assert!(matches!(problem, ManifestProblem::Invalid { message } if message.contains("log")));
+}
+
+#[test]
+fn a_log_pattern_that_is_not_a_regular_expression_fails_with_its_line() {
+    let (line, problem) = problem("[processes.a]\nargv = [\"true\"]\nready = { log = \"(\" }\n");
+    assert_eq!(line, Some(3));
+    assert!(
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("regular expression") && message.contains("unclosed group") && !message.contains('\n')),
+        "{problem:?}"
+    );
 }

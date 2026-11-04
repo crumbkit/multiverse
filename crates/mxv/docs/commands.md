@@ -173,7 +173,8 @@ mxv up -w reading-list web
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `reason`: Why mxv does not know the exit code of an exited process, or null when it knows the code or the signal. A process group that ended before its shell wrote the exit file, such as one that SIGKILL ended, has a reason.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
@@ -209,7 +210,8 @@ mxv down -w reading-list
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `reason`: Why mxv does not know the exit code of an exited process, or null when it knows the code or the signal. A process group that ended before its shell wrote the exit file, such as one that SIGKILL ended, has a reason.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
@@ -245,7 +247,8 @@ mxv restart -w reading-list web
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `reason`: Why mxv does not know the exit code of an exited process, or null when it knows the code or the signal. A process group that ended before its shell wrote the exit file, such as one that SIGKILL ended, has a reason.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
@@ -280,7 +283,8 @@ mxv status -w reading-list
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `reason`: Why mxv does not know the exit code of an exited process, or null when it knows the code or the signal. A process group that ended before its shell wrote the exit file, such as one that SIGKILL ended, has a reason.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 ### Columns that `--long` adds
