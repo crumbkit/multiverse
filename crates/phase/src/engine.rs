@@ -1,6 +1,6 @@
 //! The engine that starts, supervises and stops an app's processes. The
-//! container runner and the keeper are built, and each other submodule is
-//! empty until the code it names lands.
+//! container runner, the keeper, the readiness probes and the restart
+//! decisions are built, and the host runner is empty until its code lands.
 
 pub mod container;
 mod host;
