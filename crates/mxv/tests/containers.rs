@@ -882,9 +882,14 @@ fn up_runs_the_containers_as_one_compose_project_whose_file_names_the_variables_
             file.display()
         );
     }
+    // A clone's `.git` names its branch, `mxvtest-compose`, in its refs, so
+    // only the files outside `.git` count.
+    let git_dir = setup.checkout().join(".git");
     assert!(!files(&setup.checkout()).iter().any(|file| {
-        file.file_name()
-            .is_some_and(|name| name.to_string_lossy().contains("compose"))
+        !file.starts_with(&git_dir)
+            && file
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("compose"))
     }));
     assert!(setup.networks().is_empty(), "{:?}", setup.networks());
     let (_, mode) = docker(&[

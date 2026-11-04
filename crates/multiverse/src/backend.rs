@@ -1,5 +1,10 @@
 //! The seam between workspace operations and the version-control system
 //! that makes each checkout. [`Git`](crate::Git) is the one backend.
+//!
+//! A workspace made before clones holds git worktrees of the person's
+//! repository, which the worktree methods make and remove. A newer
+//! workspace holds clones of a bare mirror, which the mirror and clone
+//! methods make.
 
 use std::path::{Path, PathBuf};
 
@@ -195,6 +200,96 @@ pub trait Backend {
     ///
     /// Returns the failure of the count.
     fn stray_commits(&self, dir: &Path, revision: &str) -> Result<u32, Error>;
+
+    /// Returns the URL of the repository's remote named `origin`, as its
+    /// config holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoOrigin`] when the repository has no `origin`.
+    fn origin_url(&self, repository: &Path) -> Result<String, Error>;
+
+    /// Makes `mirror` a bare repository when it is not one yet, and sets the
+    /// config that keeps it from losing objects: `gc.auto=0`,
+    /// `gc.pruneExpire=never` and `maintenance.auto=false`. A clone that
+    /// borrows the mirror's objects breaks when the mirror loses one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when the mirror's directory cannot be
+    /// made, and the failure of the init or the config.
+    fn prepare_mirror(&self, mirror: &Path) -> Result<(), Error>;
+
+    /// Fetches every branch and tag of the origin at `url` into the bare
+    /// `mirror`, deletes the mirror's branches that the origin no longer
+    /// has, and points the mirror's `HEAD` at its branch `default`. The
+    /// fetch uses the person's own git config, so a credential helper
+    /// answers as it does for any other fetch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MirrorFetchFailed`] when the fetch fails, and the
+    /// failure of setting `HEAD`.
+    fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error>;
+
+    /// Clones the bare `mirror` into `checkout` with `--shared` and without
+    /// git's templates, so the clone borrows the mirror's objects and starts
+    /// with no hooks, and checks out no files yet. It then sets the clone's
+    /// `origin` to `url`, so a push or a fetch in the clone goes to the
+    /// origin itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the clone or of setting the URL.
+    fn clone_mirror(&self, mirror: &Path, checkout: &Path, url: &str) -> Result<(), Error>;
+
+    /// Returns the path of the repository's `info/exclude` file, which holds
+    /// the ignore rules that the person keeps outside `.gitignore`. The file
+    /// need not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn exclude_file(&self, repository: &Path) -> Result<PathBuf, Error>;
+
+    /// Checks out the existing branch `branch` in the clone at `checkout`,
+    /// writing its files, and returns the commit that it starts at.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the checkout.
+    fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error>;
+
+    /// Updates the remote branches, and a copy of the tags and notes, of
+    /// the clone at `checkout` and of each submodule it has initialised
+    /// from their `origin`, and deletes those that the origin no longer
+    /// has, so a commit counts as pushed only while the origin still holds
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::OriginFetchFailed`] when a fetch fails.
+    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error>;
+
+    /// Returns the commits that the clone at `checkout`, or a submodule it
+    /// has initialised, holds in its `HEAD`, branches, tags or notes, and
+    /// that no branch, tag or note of `origin` holds, with the commits made
+    /// on a detached `HEAD` that only the reflog of `HEAD` holds and whose
+    /// patch no commit of `origin` or of a local branch has. Deleting the
+    /// clone loses them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error>;
+
+    /// Returns the commit of each stash entry of the clone at `checkout`,
+    /// newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn stashes(&self, checkout: &Path) -> Result<Vec<String>, Error>;
 
     /// Deletes the local branch `branch` only while it still points at
     /// `commit`, so a branch that moved since is kept.

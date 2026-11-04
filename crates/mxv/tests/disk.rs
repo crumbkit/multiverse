@@ -298,7 +298,7 @@ fn clean_of_a_name_that_no_workspace_has_fails_for_that_name_and_cleans_the_othe
 
 /// Breaks the checkout of the workspace `name`, so git no longer knows it.
 fn break_checkout(setup: &Setup, name: &str) {
-    fs::remove_file(setup.checkout(name).join(".git")).unwrap();
+    fs::remove_dir_all(setup.checkout(name).join(".git")).unwrap();
 }
 
 #[test]
@@ -354,6 +354,7 @@ fn a_manifest_that_declares_every_path_disposable_is_refused_and_nothing_else_is
         &checkout,
         &["commit", "--quiet", "-m", "Declare everything disposable"],
     );
+    git(&checkout, &["push", "--quiet", "origin", "HEAD"]);
     write_text(&checkout.join(".env"), "TOKEN=x");
     write_bytes(&checkout.join("target/debug/app"), 1024);
     let (_, shown) = setup.json(&["show", "reading-list"]);
@@ -554,8 +555,9 @@ fn remove_with_yes_refuses_a_path_that_only_the_manifest_declares_disposable() {
         &checkout,
         &["commit", "--quiet", "-m", "Declare data disposable"],
     );
+    git(&checkout, &["push", "--quiet", "origin", "HEAD"]);
     write_text(
-        &setup.clone.join(".git/info/exclude"),
+        &checkout.join(".git/info/exclude"),
         ".env\ntarget/\nnode_modules/\ndata/\n",
     );
     write_text(&checkout.join("data/pg.db"), "rows");
@@ -588,7 +590,7 @@ fn show_and_clean_mark_a_path_that_only_the_manifest_declares_disposable() {
     let checkout = setup.created("reading-list");
     write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
     write_text(
-        &setup.clone.join(".git/info/exclude"),
+        &checkout.join(".git/info/exclude"),
         ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
     );
     write_text(&checkout.join("data/pg.db"), "rows");
@@ -623,7 +625,7 @@ fn clean_with_yes_keeps_a_path_that_only_the_manifest_declares_disposable_unless
     let checkout = setup.created("reading-list");
     write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
     write_text(
-        &setup.clone.join(".git/info/exclude"),
+        &checkout.join(".git/info/exclude"),
         ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
     );
     write_text(&checkout.join("data/pg.db"), "rows");
@@ -658,7 +660,7 @@ fn a_workspace_whose_every_disposable_path_is_kept_names_them_in_its_reason() {
     let checkout = setup.created("reading-list");
     write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
     write_text(
-        &setup.clone.join(".git/info/exclude"),
+        &checkout.join(".git/info/exclude"),
         ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
     );
     write_text(&checkout.join("data/pg.db"), "rows");

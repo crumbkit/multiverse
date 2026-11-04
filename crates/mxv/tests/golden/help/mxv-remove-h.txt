@@ -6,9 +6,9 @@ Arguments:
   <NAME>  The name of the workspace to remove
 
 Options:
-      --force            Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+      --force            Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
       --delete-volumes   Delete the workspace's docker volumes and the data in them
-      --delete-unmerged  Delete branches with unmerged commits, and commits on a detached HEAD
+      --delete-unmerged  Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold
       --dry-run          Report what the command would change, and change nothing
       --yes              Proceed without asking for confirmation
   -h, --help             Print help (see more with '--help')

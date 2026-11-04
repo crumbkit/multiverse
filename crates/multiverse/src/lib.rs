@@ -6,7 +6,12 @@
 //! command is built on this library.
 //!
 //! [`Workspaces`] holds the operations. It makes checkouts through a
-//! [`Backend`], and [`Git`] is the one backend, which runs `git worktree`.
+//! [`Backend`], and [`Git`] is the one backend. With
+//! [`Workspaces::with_mirrors`], each checkout is a `git clone --shared` of
+//! a bare mirror of the repository's origin, with a `.git` of its own, so
+//! nothing in a workspace can change the person's repository or another
+//! workspace. A workspace that an earlier version made holds git worktrees
+//! of the person's repository, and its record's [`WorkspaceKind`] says so.
 //! A workspace named `reading-list` with a checkout of the repository
 //! `app` lives at `<root>/reading-list/app`, with its `AGENTS.md` at
 //! `<root>/reading-list/AGENTS.md`, outside the checkout.
@@ -23,6 +28,7 @@ mod docker;
 mod error;
 mod git;
 mod manifest;
+mod mirror;
 mod name;
 mod ports;
 mod process;
@@ -50,7 +56,8 @@ pub use crate::manifest::{
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::record::{
-    AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
+    AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, WORKTREE_RECORD_VERSION, Workspace,
+    WorkspaceKind, agents_text,
 };
 pub use crate::redacted::Redacted;
 pub use crate::run_files::RUN_VERSION;
@@ -61,7 +68,7 @@ pub use crate::runs::{
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::workspaces::{
-    Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, Mode, NewOutcome, Removal,
+    Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode, NewOutcome, Removal,
     RemovalOutcome, RemovalPlan, Workspaces,
 };
 #[cfg(test)]

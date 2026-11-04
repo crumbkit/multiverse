@@ -52,20 +52,22 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES,
+    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_ORIGIN_UNREACHABLE, CHECKOUT_STASHES,
+    CHECKOUT_UNOWNED, CHECKOUT_UNPUSHED_COMMITS, CHECKOUT_UNREACHABLE_COMMITS, CODES,
     CONFIG_INVALID, CONFIG_NO_LIMIT, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN,
     DOCKER_ADDRESS_POOLS_EXHAUSTED, DOCKER_COMPOSE_MISSING, DOCKER_FAILED, DOCKER_FOREIGN_OBJECT,
     DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
     FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, MANIFEST_INVALID,
     MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNKNOWN_KEY,
-    MANIFEST_UNREADABLE, PATH_INACCESSIBLE, PORT_EXHAUSTED, PORT_NOT_FOUND, PORT_TAKEN,
-    PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
-    PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE, PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE,
-    PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
-    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
-    REPOSITORY_NOT_FOUND, RUN_CODES, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_BUSY,
-    WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    MANIFEST_UNREADABLE, MIRROR_FETCH_FAILED, MIRROR_LOCKED, PATH_INACCESSIBLE, PORT_EXHAUSTED,
+    PORT_NOT_FOUND, PORT_TAKEN, PROCESS_DETACHED_LISTENER, PROCESS_EXITED,
+    PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE,
+    PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT,
+    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
+    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES, UNBUILT,
+    UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY,
+    WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND,
+    WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 use tempfile::TempDir;
 
@@ -442,6 +444,18 @@ const STARTS: &[Failing<'static>] = &[
 /// each needs a state that a fixed fixture cannot hold.
 const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
+        &MIRROR_LOCKED,
+        "Only a mirror whose lock another mxv command holds for longer than mxv waits provokes it, which is longer than the check waits for a run; the library's workspace tests provoke it with a short wait.",
+    ),
+    Unprovoked::new(
+        &MIRROR_FETCH_FAILED,
+        "Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.",
+    ),
+    Unprovoked::new(
+        &CHECKOUT_ORIGIN_UNREACHABLE,
+        "Only a clone whose origin cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.",
+    ),
+    Unprovoked::new(
         &WORKSPACE_CHANGED,
         "Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.",
     ),
@@ -565,16 +579,19 @@ struct Live {
 }
 
 /// Returns real workspaces, each in the state that one refusal of
-/// `remove` needs: `changed` has an untracked file, `secret` an ignored
-/// `.env`, `detached` a commit on a detached `HEAD`, `locked` a checkout
-/// that git lists as locked, and `clean` nothing that stops a removal.
+/// `remove` needs. The clones are `changed`, with an untracked file,
+/// `secret`, with an ignored `.env`, `unpushed`, with a commit that origin
+/// does not hold, `stashed`, with a stash entry, and `clean`, with nothing
+/// that stops a removal. The workspaces of git worktrees, which mxv made
+/// before clones, are `detached`, with a commit on a detached `HEAD`, and
+/// `locked`, with a checkout that git lists as locked.
 fn live_workspaces() -> Live {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let app = repository(&root);
     write_text(&app.join(".git/info/exclude"), ".env\n");
     let xdg = root.join("xdg");
-    for name in ["changed", "secret", "detached", "locked", "clean"] {
+    for name in ["changed", "secret", "unpushed", "stashed", "clean"] {
         #[expect(
             clippy::disallowed_methods,
             reason = "the fixture runs the built binary to create real workspaces"
@@ -599,8 +616,20 @@ fn live_workspaces() -> Live {
         );
     }
     let checkout = |name: &str| root.join("workspaces").join(name).join("app");
+    for name in ["detached", "locked"] {
+        worktree_workspace(&app, &root.join("workspaces"), &xdg, name);
+    }
     write_text(&checkout("changed").join("notes.md"), "notes");
     write_text(&checkout("secret").join(".env"), "TOKEN=1");
+    git(
+        &checkout("unpushed"),
+        &["commit", "--quiet", "--allow-empty", "-m", "Unpushed"],
+    );
+    write_text(&checkout("stashed").join("notes.md"), "notes");
+    git(
+        &checkout("stashed"),
+        &["stash", "push", "--quiet", "--include-untracked"],
+    );
     git(&checkout("detached"), &["switch", "--quiet", "--detach"]);
     git(
         &checkout("detached"),
@@ -617,6 +646,49 @@ fn live_workspaces() -> Live {
         ],
     );
     Live { _dir: dir, xdg }
+}
+
+/// Makes the workspace `name` below `workspaces` as mxv made workspaces
+/// before clones: a git worktree of `app` on a new branch `name`, and a
+/// record of version 1 without a `kind` in the state directory of `xdg`.
+fn worktree_workspace(
+    app: &std::path::Path,
+    workspaces: &std::path::Path,
+    xdg: &std::path::Path,
+    name: &str,
+) {
+    let workspace = workspaces.join(name);
+    let checkout = workspace.join("app");
+    std::fs::create_dir_all(&workspace).unwrap();
+    git(app, &["branch", "--no-track", name, "origin/main"]);
+    git(
+        app,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            checkout.to_str().unwrap(),
+            name,
+        ],
+    );
+    let commit = git(&checkout, &["rev-parse", "HEAD"]);
+    let record = serde_json::json!({
+        "version": 1,
+        "name": name,
+        "path": workspace,
+        "checkouts": [{
+            "name": "app",
+            "backend": "git",
+            "source": app,
+            "path": checkout,
+            "branch": name,
+            "base": "refs/remotes/origin/main",
+            "commit": commit.trim(),
+        }],
+    });
+    let records = xdg.join("state").join("mxv").join("workspaces");
+    std::fs::create_dir_all(&records).unwrap();
+    write_text(&records.join(format!("{name}.json")), &record.to_string());
 }
 
 /// Writes `text` to the file at `path`, as a person editing a file by hand
@@ -643,6 +715,8 @@ impl Live {
             self.line(WORKSPACE_IGNORED_FILES, "secret"),
             self.line(CHECKOUT_UNREACHABLE_COMMITS, "detached"),
             self.line(CHECKOUT_LOCKED, "locked"),
+            self.line(CHECKOUT_UNPUSHED_COMMITS, "unpushed"),
+            self.line(CHECKOUT_STASHES, "stashed"),
         ]
     }
 }

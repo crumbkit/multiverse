@@ -423,6 +423,13 @@
             "null"
           ]
         },
+        "mirror": {
+          "description": "The bare mirror whose objects a clone borrows, or null for a\nworktree.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The repository's name, which names the checkout's directory.",
           "type": "string"
@@ -443,7 +450,8 @@
         "path",
         "branch",
         "base",
-        "commit"
+        "commit",
+        "mirror"
       ]
     },
     "DisposablePathRow": {
@@ -474,6 +482,21 @@
         "path",
         "bytes",
         "source"
+      ]
+    },
+    "KindRow": {
+      "description": "How a workspace's checkouts are made.",
+      "oneOf": [
+        {
+          "description": "A git worktree of the repository, which shares its `.git`.",
+          "type": "string",
+          "const": "worktree"
+        },
+        {
+          "description": "A clone of a mirror of the repository's origin, with a `.git` of\nits own.",
+          "type": "string",
+          "const": "clone"
+        }
       ]
     },
     "RootSource": {
@@ -530,6 +553,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "kind": {
+          "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones.",
+          "$ref": "#/$defs/KindRow"
         },
         "name": {
           "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",

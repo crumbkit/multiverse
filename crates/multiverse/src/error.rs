@@ -136,6 +136,31 @@ pub enum Error {
         /// The lock file.
         path: PathBuf,
     },
+    /// Another mxv command holds the lock of a mirror, such as a
+    /// `mxv new` that still fetches it, for longer than the wait.
+    MirrorBusy {
+        /// The mirror's directory.
+        mirror: PathBuf,
+    },
+    /// The fetch of a mirror from its origin failed, such as when the
+    /// origin does not answer or refuses the person's credentials.
+    MirrorFetchFailed {
+        /// The origin's URL.
+        origin: String,
+        /// The mirror's directory.
+        mirror: PathBuf,
+        /// The line of git's standard error that says what failed.
+        message: String,
+    },
+    /// The fetch of a clone's `origin`, or of the `origin` of one of its
+    /// submodules, failed before a removal, such as when the machine is
+    /// offline, so mxv cannot tell which commits `origin` holds.
+    OriginFetchFailed {
+        /// The clone's directory, or the git directory of its submodule.
+        checkout: PathBuf,
+        /// The line of git's standard error that says what failed.
+        message: String,
+    },
     /// Every port of the port range is held by a workspace or taken.
     NoFreePort {
         /// Which range was searched.
@@ -183,6 +208,47 @@ pub enum Error {
         /// The object's docker name.
         name: String,
     },
+}
+
+/// Returns `message` after `: `, or nothing when it is empty, for the end
+/// of a failure's text.
+fn detail(message: &str) -> String {
+    if message.is_empty() {
+        String::new()
+    } else {
+        format!(": {message}")
+    }
+}
+
+impl Error {
+    /// Writes the text of a failure to lock or fetch a mirror, or to fetch
+    /// a clone's origin.
+    fn fmt_fetch(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MirrorBusy { mirror } => write!(
+                formatter,
+                "another mxv command holds the lock of the mirror {} and has not released it",
+                mirror.display()
+            ),
+            Self::MirrorFetchFailed {
+                origin,
+                mirror,
+                message,
+            } => write!(
+                formatter,
+                "mxv could not fetch {origin} into the mirror {}{}",
+                mirror.display(),
+                detail(message)
+            ),
+            Self::OriginFetchFailed { checkout, message } => write!(
+                formatter,
+                "mxv could not fetch the origin of {}, so it cannot tell which commits the origin holds{}",
+                checkout.display(),
+                detail(message)
+            ),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -275,6 +341,9 @@ impl fmt::Display for Error {
                 "another mxv command holds the lock {} and has not released it",
                 path.display()
             ),
+            Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::OriginFetchFailed { .. } => self.fmt_fetch(formatter),
             Self::NoFreePort { source } => {
                 write!(formatter, "cannot find a free port: {source}")
             }
@@ -346,6 +415,9 @@ impl std::error::Error for Error {
             | Self::ProcessTable { .. }
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::OriginFetchFailed { .. }
             | Self::DockerUnavailable { .. }
             | Self::DockerComposeMissing { .. }
             | Self::DockerNoAddressPool { .. }

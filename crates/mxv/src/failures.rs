@@ -26,6 +26,20 @@ pub const WORKSPACE_CHANGED: Code = Code::new("mxv", "workspace", "changed");
 /// The code of a removal that commits on no branch, such as commits on a
 /// detached `HEAD`, stop.
 pub const CHECKOUT_UNREACHABLE_COMMITS: Code = Code::new("mxv", "checkout", "unreachable_commits");
+/// The code of a removal that a clone's commits stop, because no remote
+/// branch of its `origin` holds them.
+pub const CHECKOUT_UNPUSHED_COMMITS: Code = Code::new("mxv", "checkout", "unpushed_commits");
+/// The code of a removal that a clone's stash entries stop.
+pub const CHECKOUT_STASHES: Code = Code::new("mxv", "checkout", "stashes");
+/// The code of a removal that cannot fetch a clone's `origin`, such as on
+/// a machine that is offline, so mxv cannot tell which commits the origin
+/// holds.
+pub const CHECKOUT_ORIGIN_UNREACHABLE: Code = Code::new("mxv", "checkout", "origin_unreachable");
+/// The code of a mirror whose lock another mxv command holds for longer
+/// than mxv waits, such as a `mxv new` that still fetches it.
+pub const MIRROR_LOCKED: Code = Code::new("mxv", "mirror", "locked");
+/// The code of a mirror that mxv cannot fetch from its origin.
+pub const MIRROR_FETCH_FAILED: Code = Code::new("mxv", "mirror", "fetch_failed");
 /// The code of a removal that a checkout locked for a reason other than
 /// `initializing` stops.
 pub const CHECKOUT_LOCKED: Code = Code::new("mxv", "checkout", "locked");
@@ -179,6 +193,28 @@ pub(crate) enum MxvFailure {
         /// What the removal's flags allowed.
         allow: Allow,
     },
+    /// A clone holds commits that no remote branch of its `origin` holds.
+    Unpushed {
+        /// The workspace's name.
+        name: String,
+        /// The clone's directory.
+        path: PathBuf,
+        /// The number of commits that deleting the clone would lose.
+        commits: u32,
+        /// What the removal's flags allowed.
+        allow: Allow,
+    },
+    /// A clone holds stash entries.
+    Stashed {
+        /// The workspace's name.
+        name: String,
+        /// The clone's directory.
+        path: PathBuf,
+        /// The number of stash entries.
+        stashes: u32,
+        /// What the removal's flags allowed.
+        allow: Allow,
+    },
     /// A checkout is locked for a reason other than `initializing`.
     Locked {
         /// The workspace's name.
@@ -276,6 +312,8 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_IGNORED_FILES,
     &WORKSPACE_CHANGED,
     &CHECKOUT_UNREACHABLE_COMMITS,
+    &CHECKOUT_UNPUSHED_COMMITS,
+    &CHECKOUT_STASHES,
     &CHECKOUT_LOCKED,
     &PATH_INACCESSIBLE,
     &DIRECTORY_TAKEN,
@@ -288,6 +326,9 @@ pub(crate) const CODES: &[&Code] = &[
     &GIT_NOT_FOUND,
     &GIT_FAILED,
     &GIT_TIMED_OUT,
+    &MIRROR_LOCKED,
+    &MIRROR_FETCH_FAILED,
+    &CHECKOUT_ORIGIN_UNREACHABLE,
     &RECORD_UNREADABLE,
     &RECORD_CORRUPT,
     &RECORD_NEWER,
@@ -394,6 +435,8 @@ impl Failure for MxvFailure {
             Self::IgnoredFiles { .. } | Self::ManifestDisposable { .. } => &WORKSPACE_IGNORED_FILES,
             Self::Changed { .. } => &WORKSPACE_CHANGED,
             Self::StrayCommits { .. } => &CHECKOUT_UNREACHABLE_COMMITS,
+            Self::Unpushed { .. } => &CHECKOUT_UNPUSHED_COMMITS,
+            Self::Stashed { .. } => &CHECKOUT_STASHES,
             Self::Locked { .. } => &CHECKOUT_LOCKED,
             Self::DirectoryTaken { .. } => &DIRECTORY_TAKEN,
             Self::Unowned { .. } => &CHECKOUT_UNOWNED,
@@ -421,6 +464,9 @@ impl Failure for MxvFailure {
                 Error::UnsupportedOs { .. } => &PROCESS_UNSUPPORTED_OS,
                 Error::NoFreePort { .. } => &PORT_EXHAUSTED,
                 Error::Busy { .. } => &WORKSPACE_BUSY,
+                Error::MirrorBusy { .. } => &MIRROR_LOCKED,
+                Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
+                Error::OriginFetchFailed { .. } => &CHECKOUT_ORIGIN_UNREACHABLE,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
                 Error::DockerComposeMissing { .. } => &DOCKER_COMPOSE_MISSING,
@@ -476,6 +522,21 @@ impl Failure for MxvFailure {
                 shown(path),
                 remove_line(name, *allow)
             )),
+            Self::Unpushed {
+                name, path, allow, ..
+            } => hint(format!(
+                "push the commits with `git -C {} push origin HEAD` and run `{}` again; `--delete-unmerged` deletes them with the clone",
+                shown(path),
+                remove_line(name, *allow)
+            )),
+            Self::Stashed {
+                name, path, allow, ..
+            } => hint(format!(
+                "apply or drop the stash entries with `git -C {} stash pop` or `git -C {} stash drop` and run `{}` again; `--force` deletes them with the clone",
+                shown(path),
+                shown(path),
+                remove_line(name, *allow)
+            )),
             Self::DirectoryTaken { path } => hint(format!(
                 "choose another name, or move {} out of the way",
                 shown(path)
@@ -526,7 +587,10 @@ impl Failure for MxvFailure {
             | Self::ManifestDisposable { name, allow, .. } => {
                 vec![run_removal(name, forced(*allow))]
             }
-            Self::StrayCommits { name, allow, .. } => vec![run_removal(name, unmerged(*allow))],
+            Self::StrayCommits { name, allow, .. } | Self::Unpushed { name, allow, .. } => {
+                vec![run_removal(name, unmerged(*allow))]
+            }
+            Self::Stashed { name, allow, .. } => vec![run_removal(name, forced(*allow))],
             _ => Vec::new(),
         }
     }
@@ -583,6 +647,26 @@ impl Failure for MxvFailure {
                 Field::new("name", name),
                 Field::new("path", shown(path)),
                 Field::new("commits", *commits),
+            ],
+            Self::Unpushed {
+                name,
+                path,
+                commits,
+                ..
+            } => vec![
+                Field::new("name", name),
+                Field::new("path", shown(path)),
+                Field::new("commits", *commits),
+            ],
+            Self::Stashed {
+                name,
+                path,
+                stashes,
+                ..
+            } => vec![
+                Field::new("name", name),
+                Field::new("path", shown(path)),
+                Field::new("stashes", *stashes),
             ],
             Self::DirectoryTaken { path } => vec![Field::new("path", shown(path))],
             Self::Unowned { name, path } => {
@@ -678,6 +762,16 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::NoFreePort { .. } => hint(
             "widen `ports_range` in the config file, or remove workspaces that hold ports you no longer need",
         ),
+        Error::MirrorBusy { .. } => hint(
+            "wait for the other mxv command that fetches the mirror to finish, such as another `mxv new` of the same repository, and run the command again",
+        ),
+        Error::MirrorFetchFailed { origin, .. } => hint(format!(
+            "check that the machine is online and that `git ls-remote {origin}` works with your credentials, and run the command again"
+        )),
+        Error::OriginFetchFailed { checkout, .. } => hint(format!(
+            "check that the machine is online and that `git -C {} fetch origin` works with your credentials, and run the command again; `--delete-unmerged` removes the workspace without the fetch, and deletes the commits that origin does not hold",
+            shown(checkout)
+        )),
         Error::Busy { .. } => hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a process to be ready, and run the command again",
         ),
@@ -739,6 +833,20 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::CorruptRecord { path, .. }
         | Error::Unwritable { path, .. }
         | Error::Busy { path } => vec![Field::new("path", shown(path))],
+        Error::MirrorBusy { mirror } => vec![Field::new("mirror", shown(mirror))],
+        Error::OriginFetchFailed { checkout, message } => vec![
+            Field::new("checkout", shown(checkout)),
+            Field::new("message", message),
+        ],
+        Error::MirrorFetchFailed {
+            origin,
+            mirror,
+            message,
+        } => vec![
+            Field::new("origin", origin),
+            Field::new("mirror", shown(mirror)),
+            Field::new("message", message),
+        ],
         Error::NewerRecord { path, version } => vec![
             Field::new("path", shown(path)),
             Field::new("version", *version),
@@ -818,6 +926,28 @@ impl fmt::Display for MxvFailure {
                 shown(path),
                 if *commits == 1 { "commit" } else { "commits" }
             ),
+            Self::Unpushed {
+                name,
+                path,
+                commits,
+                ..
+            } => write!(
+                formatter,
+                "the clone {} of the workspace {name} holds {commits} {} that origin does not hold",
+                shown(path),
+                if *commits == 1 { "commit" } else { "commits" }
+            ),
+            Self::Stashed {
+                name,
+                path,
+                stashes,
+                ..
+            } => write!(
+                formatter,
+                "the clone {} of the workspace {name} holds {stashes} stash {}",
+                shown(path),
+                if *stashes == 1 { "entry" } else { "entries" }
+            ),
             Self::DirectoryTaken { path } => {
                 write!(formatter, "the directory {} already exists", shown(path))
             }
@@ -883,6 +1013,8 @@ impl std::error::Error for MxvFailure {
             | Self::ManifestDisposable { .. }
             | Self::Changed { .. }
             | Self::StrayCommits { .. }
+            | Self::Unpushed { .. }
+            | Self::Stashed { .. }
             | Self::Locked { .. }
             | Self::NoHome
             | Self::RelativeRoot { .. }

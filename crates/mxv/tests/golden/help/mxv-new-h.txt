@@ -1,4 +1,4 @@
-Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
+Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin
 
 Usage: mxv new [OPTIONS] --repo <PATH> <NAME>
 

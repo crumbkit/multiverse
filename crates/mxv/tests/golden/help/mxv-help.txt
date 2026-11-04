@@ -3,7 +3,7 @@ Create, archive and restore task workspaces that span several git repositories
 Usage: mxv [OPTIONS] <COMMAND>
 
 Work in a workspace
-  new       Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
+  new       Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin
   list      List the workspaces
   show      Show workspaces by name, in the order given
   cd        Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it

@@ -755,6 +755,33 @@ impl Backend for Scripted {
     fn stray_commits(&self, dir: &Path, revision: &str) -> Result<u32, Error> {
         Git.stray_commits(dir, revision)
     }
+    fn origin_url(&self, repository: &Path) -> Result<String, Error> {
+        Git.origin_url(repository)
+    }
+    fn prepare_mirror(&self, mirror: &Path) -> Result<(), Error> {
+        Git.prepare_mirror(mirror)
+    }
+    fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error> {
+        Git.fetch_mirror(mirror, url, default)
+    }
+    fn clone_mirror(&self, mirror: &Path, checkout: &Path, url: &str) -> Result<(), Error> {
+        Git.clone_mirror(mirror, checkout, url)
+    }
+    fn exclude_file(&self, repository: &Path) -> Result<PathBuf, Error> {
+        Git.exclude_file(repository)
+    }
+    fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error> {
+        Git.switch_branch(checkout, branch)
+    }
+    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
+        Git.refresh_origin(checkout)
+    }
+    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+        Git.unpushed_commits(checkout)
+    }
+    fn stashes(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+        Git.stashes(checkout)
+    }
     fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error> {
         (self.before_delete)(repository);
         Git.delete_branch_at(repository, branch, commit)

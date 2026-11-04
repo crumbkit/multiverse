@@ -8,13 +8,13 @@ Arguments:
 
 Options:
       --force
-          Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+          Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
 
       --delete-volumes
           Delete the workspace's docker volumes and the data in them
 
       --delete-unmerged
-          Delete branches with unmerged commits, and commits on a detached HEAD
+          Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold
 
       --dry-run
           Report what the command would change, and change nothing

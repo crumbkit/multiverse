@@ -180,7 +180,9 @@ pub const GUIDE: Guide = Guide::new()
 /// The commands of `mxv`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Verb {
-    /// Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin.
+    /// Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin.
+    ///
+    /// The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG_DATA_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
     ///
     /// The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
     New(NewArgs),
@@ -340,7 +342,7 @@ pub(crate) struct RemoveArgs {
     /// The name of the workspace to remove
     pub(crate) name: String,
 
-    /// Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+    /// Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
     #[arg(long)]
     pub(crate) force: bool,
 
@@ -348,7 +350,7 @@ pub(crate) struct RemoveArgs {
     #[arg(long)]
     pub(crate) delete_volumes: bool,
 
-    /// Delete branches with unmerged commits, and commits on a detached HEAD
+    /// Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold
     #[arg(long)]
     pub(crate) delete_unmerged: bool,
 

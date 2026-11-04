@@ -43,7 +43,7 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "XDG_DATA_HOME",
-        purpose: "The data directory, an absolute path. The workspace root defaults to `$XDG_DATA_HOME/mxv/workspaces`. When it is unset, empty or relative, mxv uses `~/.local/share`.",
+        purpose: "The data directory, an absolute path. The workspace root defaults to `$XDG_DATA_HOME/mxv/workspaces`, and mxv keeps one bare mirror for each origin in `$XDG_DATA_HOME/mxv/mirrors`. When it is unset, empty or relative, mxv uses `~/.local/share`.",
     },
     Variable {
         name: "XDG_STATE_HOME",
@@ -158,6 +158,12 @@ impl Environment {
     /// `$XDG_STATE_HOME/mxv/workspaces`.
     pub(crate) fn records(&self) -> Result<PathBuf, MxvFailure> {
         Ok(self.bases()?.state.join("mxv").join("workspaces"))
+    }
+
+    /// Returns the directory of the bare mirrors that the workspaces' clones
+    /// borrow objects from, `$XDG_DATA_HOME/mxv/mirrors`.
+    pub(crate) fn mirrors(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.bases()?.data.join("mxv").join("mirrors"))
     }
 
     /// Returns the path of the config file, `$XDG_CONFIG_HOME/mxv/config.toml`.

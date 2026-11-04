@@ -41,13 +41,14 @@ use crate::cli::{
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
 #[doc(hidden)]
 pub use crate::failures::{
-    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CONFIG_INVALID,
+    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_ORIGIN_UNREACHABLE, CHECKOUT_STASHES,
+    CHECKOUT_UNOWNED, CHECKOUT_UNPUSHED_COMMITS, CHECKOUT_UNREACHABLE_COMMITS, CONFIG_INVALID,
     CONFIG_NO_LIMIT, CONFIG_UNREADABLE, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
     ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT,
-    PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
-    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
-    REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
-    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
+    MIRROR_FETCH_FAILED, MIRROR_LOCKED, PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED,
+    RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH,
+    REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED,
+    WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
 };
 #[doc(hidden)]
 pub use crate::failures::{
@@ -194,4 +195,25 @@ where
         }
     };
     crumbkit::finish(output, UNBUILT_RESULT, fail(verb))
+}
+
+/// Tells the person at a terminal that `mxv new` waits up to `wait` for
+/// another mxv command to release the lock of `mirror`. `mxv new` passes
+/// it to the library only when crumbkit's `Output::progress_allowed` is
+/// true, so a pipe, a file and `--json` receive no progress line.
+pub(crate) fn mirror_wait_notice(mirror: &std::path::Path, wait: std::time::Duration) {
+    use std::io::Write as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and this progress line is drawn only when crumbkit allows progress"
+    )]
+    let mut stderr = std::io::stderr();
+    // A progress line that cannot be written changes nothing the command
+    // does, so its failure is ignored.
+    drop(writeln!(
+        stderr,
+        "mxv is waiting up to {} seconds for another mxv command to finish with the mirror {}.",
+        wait.as_secs(),
+        mirror.display()
+    ));
 }

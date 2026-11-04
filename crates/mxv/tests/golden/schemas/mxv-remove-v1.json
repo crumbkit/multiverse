@@ -450,6 +450,12 @@
           "description": "The checkout's directory.",
           "type": "string"
         },
+        "stashes": {
+          "description": "The number of stash entries of a clone, which `--force` allowed\nthe removal to delete, or 0 for a worktree.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
         "stray_commits": {
           "description": "The number of commits that the checkout's `HEAD` holds and no branch\nholds, such as commits on a detached `HEAD`, which\n`--delete-unmerged` allowed the removal to delete.",
           "type": "integer",
@@ -473,7 +479,8 @@
         "branch",
         "branch_fate",
         "unmerged_commits",
-        "stray_commits"
+        "stray_commits",
+        "stashes"
       ]
     },
     "DirectoryFate": {
