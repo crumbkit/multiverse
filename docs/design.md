@@ -388,7 +388,26 @@ impl Phase {
 `mxv` links this library. Other hosts can link it too, giving phase their
 own plan and `EnvironmentSource`.
 
-## Open decisions
+## Releases
+
+The first release replaces mxv's process commands (decision P7), so it must
+run everything they run today. It contains:
+
+- the library crate and `mxv phase up`, `down`, `restart`, `status`, `logs`
+  and `sweep`;
+- host processes from a checkout, each with a keeper, probes, restart
+  policies and stop handling;
+- container apps through Docker Compose, lifted from multiverse's container
+  code (crumbkit/multiverse#6);
+- the run record, `sweep`, and the status document;
+- environment resolution through starmap's `AppliedEnvironment`;
+- `mxv up` and the other old commands calling phase, so that existing
+  workspaces keep working.
+
+Later releases add, in this order (decision P8): release sources with
+verification, shared services with a database and role per app, the
+sandbox, and trust grants.
+
 
 Each decision states what this draft assumes until it is decided.
 
