@@ -1,4 +1,7 @@
-use super::{AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, WorkspaceId, WorkspaceName};
+use super::{
+    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
+    WorkspaceName,
+};
 
 #[test]
 fn a_workspace_name_accepts_letters_digits_dashes_underscores_and_dots() {
@@ -76,4 +79,10 @@ fn a_workspace_id_holds_no_underscore_or_dot() {
         "a.b".parse::<WorkspaceId>(),
         Err(BadName::BadCharacter('.'))
     );
+}
+
+#[test]
+fn a_volume_name_follows_the_rule_of_a_process_name() {
+    assert!("cargo-cache".parse::<VolumeName>().is_ok());
+    assert_eq!("a/b".parse::<VolumeName>(), Err(BadName::BadCharacter('/')));
 }

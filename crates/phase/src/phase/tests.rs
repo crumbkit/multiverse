@@ -65,6 +65,10 @@ fn every_operation_reports_that_it_is_not_built_yet() {
         Operation::Up
     );
     assert_eq!(
+        not_built(phase.restart(&plan(), &Selection::All, &Unused, soon)),
+        Operation::Restart
+    );
+    assert_eq!(
         not_built(phase.down(workspace, &Selection::All, soon)),
         Operation::Down
     );

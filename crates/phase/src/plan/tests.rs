@@ -1,9 +1,13 @@
 use std::num::NonZeroU16;
 use std::path::PathBuf;
 
+use super::container::BindMount;
 use super::probe::{Probe, ProbeCheck};
 use super::restart::{Restart, RestartLimits};
-use super::{AppPlan, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind};
+use super::{
+    AppPlan, ContainerProblem, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem,
+    RunnerKind,
+};
 use crate::source::{BuildSpec, Source};
 
 fn checkout() -> Source {
@@ -29,6 +33,28 @@ fn host_app(name: &str) -> AppPlan {
         path: "/healthz".into(),
     }));
     server.restart = Restart::OnFailure(RestartLimits::default());
+    app.processes.push(server);
+    app
+}
+
+fn container_app(name: &str) -> AppPlan {
+    let mut app = AppPlan::new(
+        name.parse().unwrap(),
+        RunnerKind::Container,
+        Source::Image {
+            image: "postgres:17".parse().unwrap(),
+        },
+    );
+    app.ports
+        .insert("pg".parse().unwrap(), NonZeroU16::new(41_001).unwrap());
+    let mut server = ProcessPlan::new("server".parse().unwrap(), Vec::new());
+    server
+        .publish
+        .insert("pg".parse().unwrap(), NonZeroU16::new(5432).unwrap());
+    server.volumes.insert(
+        "data".parse().unwrap(),
+        PathBuf::from("/var/lib/postgresql/data"),
+    );
     app.processes.push(server);
     app
 }
@@ -229,4 +255,216 @@ fn a_plan_refuses_a_oneshot_process_that_restarts_always() {
     api.processes[0].restart = Restart::Always(RestartLimits::default());
 
     assert_eq!(process_problem(api), ProcessProblem::OneshotRestartsAlways);
+}
+
+#[test]
+fn a_plan_with_every_container_and_environment_field_survives_a_trip_through_json() {
+    let mut db = container_app("db");
+    db.container.mounts.push(BindMount {
+        source: PathBuf::from("/workspaces/reading-list/api"),
+        target: PathBuf::from("/app"),
+        read_only: false,
+    });
+    db.container.caches.insert(
+        "cargo".parse().unwrap(),
+        PathBuf::from("/usr/local/cargo/registry"),
+    );
+    db.container.user = Some("1000:1000".into());
+    let mut api = host_app("api");
+    api.overrides.insert("LOG_LEVEL".into());
+    api.processes[0].cwd = Some(PathBuf::from("server"));
+    api.processes[0]
+        .env
+        .insert("BIND".into(), "127.0.0.1:{port.http}".into());
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::Log {
+        pattern: "listening on".into(),
+    }));
+    let original = plan(vec![api, db]).unwrap();
+
+    let json = serde_json::to_string(&original).unwrap();
+
+    assert_eq!(serde_json::from_str::<Plan>(&json).unwrap(), original);
+}
+
+#[test]
+fn a_plan_refuses_a_dependency_cycle_and_names_it() {
+    let mut api = host_app("api");
+    api.depends.push("auth".parse().unwrap());
+    let mut auth = host_app("auth");
+    auth.depends.push("api".parse().unwrap());
+
+    assert_eq!(
+        plan(vec![api, auth]),
+        Err(PlanError::DependencyCycle {
+            apps: vec![
+                "api".parse().unwrap(),
+                "auth".parse().unwrap(),
+                "api".parse().unwrap(),
+            ],
+        })
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_app_that_depends_on_itself() {
+    let mut api = host_app("api");
+    api.depends.push("api".parse().unwrap());
+
+    assert!(matches!(
+        plan(vec![api]),
+        Err(PlanError::DependencyCycle { .. })
+    ));
+}
+
+#[test]
+fn a_plan_accepts_a_dependency_shared_by_two_apps() {
+    let mut api = host_app("api");
+    api.depends.push("db".parse().unwrap());
+    let mut auth = host_app("auth");
+    auth.depends.push("db".parse().unwrap());
+    auth.depends.push("api".parse().unwrap());
+
+    assert!(plan(vec![auth, api, container_app("db")]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_secret_among_the_literal_values() {
+    let mut api = host_app("api");
+    api.permissions.secrets.insert("STRIPE_KEY".into());
+    api.processes[0]
+        .env
+        .insert("STRIPE_KEY".into(), "a value".into());
+
+    assert_eq!(
+        process_problem(api),
+        ProcessProblem::SecretInPlan("STRIPE_KEY".into())
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_variable_name_that_a_process_cannot_receive() {
+    let mut api = host_app("api");
+    api.processes[0].env.insert("A=B".into(), "c".into());
+
+    assert_eq!(
+        process_problem(api),
+        ProcessProblem::BadVariableName("A=B".into())
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_override_name_that_a_process_cannot_receive() {
+    let mut api = host_app("api");
+    api.overrides.insert(String::new());
+
+    assert_eq!(
+        plan(vec![api]),
+        Err(PlanError::BadOverride {
+            app: "api".parse().unwrap(),
+            name: String::new(),
+        })
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_working_directory_outside_the_app() {
+    let mut api = host_app("api");
+    api.processes[0].cwd = Some(PathBuf::from("../other"));
+    assert_eq!(process_problem(api), ProcessProblem::CwdOutsideApp);
+
+    let mut api = host_app("api");
+    api.processes[0].cwd = Some(PathBuf::from("/tmp"));
+    assert_eq!(process_problem(api), ProcessProblem::CwdOutsideApp);
+}
+
+#[test]
+fn a_plan_refuses_a_log_probe_with_an_empty_pattern() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::Log {
+        pattern: String::new(),
+    }));
+
+    assert_eq!(process_problem(api), ProcessProblem::EmptyLogPattern);
+}
+
+#[test]
+fn a_plan_refuses_a_published_port_on_a_host_process() {
+    let mut api = host_app("api");
+    api.processes[0]
+        .publish
+        .insert("http".parse().unwrap(), NonZeroU16::new(8080).unwrap());
+
+    assert_eq!(process_problem(api), ProcessProblem::ContainerFieldOnHost);
+}
+
+#[test]
+fn a_plan_refuses_a_published_port_the_app_lacks() {
+    let mut db = container_app("db");
+    db.processes[0]
+        .publish
+        .insert("admin".parse().unwrap(), NonZeroU16::new(8080).unwrap());
+
+    assert_eq!(
+        process_problem(db),
+        ProcessProblem::UnknownPort("admin".parse().unwrap())
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_volume_mounted_at_a_relative_path() {
+    let mut db = container_app("db");
+    db.processes[0]
+        .volumes
+        .insert("data".parse().unwrap(), PathBuf::from("data"));
+
+    assert_eq!(
+        process_problem(db),
+        ProcessProblem::RelativeContainerPath(PathBuf::from("data"))
+    );
+}
+
+#[test]
+fn a_plan_refuses_container_options_on_a_host_app() {
+    let mut api = host_app("api");
+    api.container.user = Some("1000".into());
+
+    assert_eq!(
+        plan(vec![api]),
+        Err(PlanError::BadContainer {
+            app: "api".parse().unwrap(),
+            problem: ContainerProblem::OnHostApp,
+        })
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_bind_mount_from_a_relative_host_path() {
+    let mut db = container_app("db");
+    db.container.mounts.push(BindMount {
+        source: PathBuf::from("api"),
+        target: PathBuf::from("/app"),
+        read_only: true,
+    });
+
+    assert_eq!(
+        plan(vec![db]),
+        Err(PlanError::BadContainer {
+            app: "db".parse().unwrap(),
+            problem: ContainerProblem::RelativeHostPath(PathBuf::from("api")),
+        })
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_empty_run_as_user() {
+    let mut db = container_app("db");
+    db.container.user = Some(String::new());
+
+    assert_eq!(
+        plan(vec![db]),
+        Err(PlanError::BadContainer {
+            app: "db".parse().unwrap(),
+            problem: ContainerProblem::EmptyUser,
+        })
+    );
 }

@@ -29,12 +29,14 @@ mod source;
 mod status;
 
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
-pub use crate::error::{Growth, Operation, PhaseError};
+pub use crate::error::{Operation, PhaseError};
 pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream};
 pub use crate::name::{
-    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, WorkspaceId, WorkspaceName,
+    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
+    WorkspaceName,
 };
 pub use crate::phase::{Phase, UpDeadlines};
+pub use crate::plan::container::{BindMount, ContainerOptions};
 pub use crate::plan::probe::{
     DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT, Probe, ProbeCheck,
 };
@@ -43,7 +45,8 @@ pub use crate::plan::restart::{
     Restart, RestartLimits, Stop, StopSignal,
 };
 pub use crate::plan::{
-    AppPlan, Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind,
+    AppPlan, ContainerProblem, Permissions, Plan, PlanError, ProcessKind, ProcessPlan,
+    ProcessProblem, RunnerKind,
 };
 pub use crate::record::{BadContainerId, ContainerId, Handle, SweepOutcome, Swept, SweptItem};
 pub use crate::report::{AppOutcome, AppReport, Report};

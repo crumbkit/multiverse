@@ -3,8 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::name::AppName;
+use crate::plan::Permissions;
 
-/// What `up` or `down` did to each app it acted on.
+// Only phase builds a report, so it has no constructor. It is
+// non-exhaustive because LIB-9 says adding a field to an exhaustive public
+// type breaks every dependant that builds or matches it.
+/// What `up`, `down` or `restart` did to each app it acted on.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Report {
@@ -12,6 +16,9 @@ pub struct Report {
     pub apps: Vec<AppReport>,
 }
 
+// Only phase builds an app's report, so it has no constructor. It is
+// non-exhaustive because LIB-9 says adding a field to an exhaustive public
+// type breaks every dependant that builds or matches it.
 /// What an operation did to one app.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -34,8 +41,16 @@ pub enum AppOutcome {
     AlreadyRunning,
     /// phase restarted the app because its inputs changed.
     Restarted,
-    /// phase did not start the app because another app failed to start.
+    /// phase did not start the app because an app it depends on did not
+    /// start, or because another app failed to start.
     NotStarted,
+    /// phase did not start the app because its permissions grew beyond what
+    /// was granted. `mxv phase grants approve APP` grants them, and the next
+    /// `up` starts it.
+    AwaitingGrant {
+        /// The permissions the app asks for beyond its grant.
+        asked: Permissions,
+    },
     /// phase stopped the app and checked that its processes are gone.
     Stopped,
     /// The app was not running.

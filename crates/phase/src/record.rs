@@ -73,6 +73,9 @@ impl From<ContainerId> for String {
     }
 }
 
+// Only phase builds a sweep result, so it has no constructor. It is
+// non-exhaustive because LIB-9 says adding a field to an exhaustive public
+// type breaks every dependant that builds or matches it.
 /// What `sweep` found and did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -81,6 +84,9 @@ pub struct Swept {
     pub items: Vec<SweptItem>,
 }
 
+// Only phase builds a swept item, so it has no constructor. It is
+// non-exhaustive because LIB-9 says adding a field to an exhaustive public
+// type breaks every dependant that builds or matches it.
 /// One process or container that the run record names, and what `sweep`
 /// did to it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

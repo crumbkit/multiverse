@@ -65,6 +65,9 @@ pub enum WorkspaceState {
     Stopped,
 }
 
+// Only phase builds a status row, so it has no constructor. It is
+// non-exhaustive because LIB-9 says adding a field to an exhaustive public
+// type breaks every dependant that builds or matches it.
 /// The status of one process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

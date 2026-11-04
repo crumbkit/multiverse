@@ -7,21 +7,27 @@
 //! reading one from JSON goes through it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::num::NonZeroU16;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::name::{AppName, PortName, ProcessName, WorkspaceId, WorkspaceName};
+use crate::name::{AppName, PortName, ProcessName, VolumeName, WorkspaceId, WorkspaceName};
 use crate::source::Source;
 
+mod check;
+pub(crate) mod container;
 pub(crate) mod probe;
 pub(crate) mod restart;
+
+use check::check_apps;
+pub use check::{ContainerProblem, PlanError, ProcessProblem};
+use container::ContainerOptions;
 
 #[cfg(test)]
 mod tests;
 
-use probe::{Probe, ProbeCheck};
+use probe::Probe;
 use restart::{Restart, Stop};
 
 /// The run plan of one workspace. App names are unique within it.
@@ -44,8 +50,10 @@ impl Plan {
     ///
     /// Returns a [`PlanError`] when two apps share a name, two processes of
     /// an app share a name, an app depends on an app the plan lacks, an
-    /// app's source does not suit its runner, a port is not one of its
-    /// app's ports, or a process's command or probe is unusable.
+    /// app's source does not suit its runner, the dependencies form a
+    /// cycle, a port is not one of its app's ports, a secret has a value in
+    /// the plan, or a process's command, environment, probe or container
+    /// fields are unusable.
     pub fn new(
         workspace: WorkspaceName,
         id: WorkspaceId,
@@ -160,6 +168,16 @@ pub struct AppPlan {
     /// What the app's processes may do inside the sandbox.
     #[serde(default)]
     pub permissions: Permissions,
+    /// The names of the variables that `up --env KEY=VALUE` sets for this
+    /// run. Such a value is not a secret, and it reaches the app through
+    /// the [`EnvironmentSource`](crate::EnvironmentSource), so the plan
+    /// records only its name.
+    #[serde(default)]
+    pub overrides: BTreeSet<String>,
+    /// The bind mounts, cache volumes and run-as user of a container app. A
+    /// host app leaves them empty.
+    #[serde(default)]
+    pub container: ContainerOptions,
 }
 
 impl AppPlan {
@@ -175,6 +193,8 @@ impl AppPlan {
             processes: Vec::new(),
             depends: Vec::new(),
             permissions: Permissions::default(),
+            overrides: BTreeSet::new(),
+            container: ContainerOptions::default(),
         }
     }
 }
@@ -212,9 +232,31 @@ pub struct ProcessPlan {
     /// for the app's program. It is not empty. For a container process it
     /// replaces the image's command, and an empty command keeps the image's.
     pub run: Vec<String>,
+    /// The directory the process starts in, relative to the app's checkout
+    /// or release directory, or `None` for that directory itself. It never
+    /// leaves that directory.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    /// The literal values of variables that are not secrets, which the
+    /// manifest states. `{port.NAME}` in a value stands for the host port
+    /// of the app's port `NAME`. A variable that the app's permissions name
+    /// as a secret never has a value here, and its value comes from the
+    /// [`EnvironmentSource`](crate::EnvironmentSource).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
     /// The app port the process listens on, or `None`.
     #[serde(default)]
     pub port: Option<PortName>,
+    /// For a container process, the port inside the container that each of
+    /// the app's named ports publishes on 127.0.0.1. A host process leaves
+    /// it empty.
+    #[serde(default)]
+    pub publish: BTreeMap<PortName, NonZeroU16>,
+    /// For a container process, the workspace's volumes it mounts, each at
+    /// an absolute path inside the container, such as a database's data. A
+    /// host process leaves it empty.
+    #[serde(default)]
+    pub volumes: BTreeMap<VolumeName, PathBuf>,
     /// The check that tells phase the process is ready, or `None` when the
     /// process is ready as soon as it starts. A oneshot process has none.
     #[serde(default)]
@@ -228,16 +270,20 @@ pub struct ProcessPlan {
 }
 
 impl ProcessPlan {
-    /// Returns a long-running process named `name` that runs `run`, with no
-    /// port and no probe, which is never restarted and stops with the
-    /// default [`Stop`].
+    /// Returns a long-running process named `name` that runs `run` in its
+    /// app's directory, with no literal values, ports, volumes or probe,
+    /// which is never restarted and stops with the default [`Stop`].
     #[must_use]
     pub fn new(name: ProcessName, run: Vec<String>) -> Self {
         Self {
             name,
             kind: ProcessKind::LongRunning,
             run,
+            cwd: None,
+            env: BTreeMap::new(),
             port: None,
+            publish: BTreeMap::new(),
+            volumes: BTreeMap::new(),
             ready: None,
             restart: Restart::No,
             stop: Stop::default(),
@@ -265,238 +311,4 @@ pub struct Permissions {
     /// The names of the app's environment variables that are secrets.
     #[serde(default)]
     pub secrets: BTreeSet<String>,
-}
-
-/// The reason that a set of apps is not a valid plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum PlanError {
-    /// Two apps have this name.
-    DuplicateApp {
-        /// The name.
-        app: AppName,
-    },
-    /// Two processes of the app have this name.
-    DuplicateProcess {
-        /// The app.
-        app: AppName,
-        /// The name.
-        process: ProcessName,
-    },
-    /// The app depends on an app that the plan lacks.
-    UnknownDependency {
-        /// The app.
-        app: AppName,
-        /// The app it depends on.
-        depends: AppName,
-    },
-    /// The app's source does not suit its runner: a host app runs from an
-    /// image, or a container app runs from a release or a checkout.
-    RunnerMismatch {
-        /// The app.
-        app: AppName,
-        /// The app's runner.
-        runner: RunnerKind,
-    },
-    /// The app's permissions let it listen on a port it does not have.
-    UnknownPort {
-        /// The app.
-        app: AppName,
-        /// The port.
-        port: PortName,
-    },
-    /// A process of the app cannot run as planned.
-    BadProcess {
-        /// The app.
-        app: AppName,
-        /// The process.
-        process: ProcessName,
-        /// What is wrong with it.
-        problem: ProcessProblem,
-    },
-}
-
-/// What is wrong with a process in a plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ProcessProblem {
-    /// A host process's command is empty.
-    EmptyCommand,
-    /// The process, or its probe, names a port its app does not have.
-    UnknownPort(PortName),
-    /// The process has an HTTP probe but no port.
-    HttpProbeWithoutPort,
-    /// The HTTP probe's path does not start with `/`.
-    HttpPathWithoutSlash,
-    /// The command probe's command is empty.
-    EmptyProbeCommand,
-    /// The probe's period or timeout is zero.
-    ZeroProbeTime,
-    /// A oneshot process has a readiness probe, but it is ready when it
-    /// exits with status 0.
-    OneshotWithProbe,
-    /// A oneshot process restarts always, so it would never complete.
-    OneshotRestartsAlways,
-}
-
-impl fmt::Display for ProcessProblem {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyCommand => formatter.write_str("its command is empty"),
-            Self::UnknownPort(port) => write!(formatter, "it names the unknown port {port}"),
-            Self::HttpProbeWithoutPort => formatter.write_str("it has an http probe but no port"),
-            Self::HttpPathWithoutSlash => {
-                formatter.write_str("its http probe's path does not start with `/`")
-            }
-            Self::EmptyProbeCommand => formatter.write_str("its probe's command is empty"),
-            Self::ZeroProbeTime => formatter.write_str("its probe's period or timeout is zero"),
-            Self::OneshotWithProbe => formatter.write_str("it is a oneshot with a probe"),
-            Self::OneshotRestartsAlways => {
-                formatter.write_str("it is a oneshot that restarts always")
-            }
-        }
-    }
-}
-
-impl fmt::Display for PlanError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateApp { app } => write!(formatter, "two apps are named {app}"),
-            Self::DuplicateProcess { app, process } => {
-                write!(formatter, "two processes of {app} are named {process}")
-            }
-            Self::UnknownDependency { app, depends } => {
-                write!(
-                    formatter,
-                    "{app} depends on {depends}, which the plan lacks"
-                )
-            }
-            Self::RunnerMismatch { app, runner } => {
-                let runner = match runner {
-                    RunnerKind::Host => "host",
-                    RunnerKind::Container => "container",
-                };
-                write!(
-                    formatter,
-                    "{app} is a {runner} app with a source that does not suit it"
-                )
-            }
-            Self::UnknownPort { app, port } => {
-                write!(
-                    formatter,
-                    "{app} may listen on {port}, which is not one of its ports"
-                )
-            }
-            Self::BadProcess {
-                app,
-                process,
-                problem,
-            } => write!(formatter, "{app}/{process} cannot run because {problem}"),
-        }
-    }
-}
-
-impl std::error::Error for PlanError {}
-
-/// Checks the rules of [`Plan::new`].
-fn check_apps(apps: &[AppPlan]) -> Result<(), PlanError> {
-    let mut names = BTreeSet::new();
-    for app in apps {
-        if !names.insert(&app.name) {
-            return Err(PlanError::DuplicateApp {
-                app: app.name.clone(),
-            });
-        }
-    }
-    for app in apps {
-        if let Some(depends) = app.depends.iter().find(|depends| !names.contains(depends)) {
-            return Err(PlanError::UnknownDependency {
-                app: app.name.clone(),
-                depends: depends.clone(),
-            });
-        }
-        check_app(app)?;
-    }
-    Ok(())
-}
-
-/// Checks one app's source, ports and processes.
-fn check_app(app: &AppPlan) -> Result<(), PlanError> {
-    let suits = match (&app.runner, &app.source) {
-        (RunnerKind::Host, Source::Release { .. } | Source::Checkout { .. })
-        | (RunnerKind::Container, Source::Image { .. }) => true,
-        (RunnerKind::Host, Source::Image { .. })
-        | (RunnerKind::Container, Source::Release { .. } | Source::Checkout { .. }) => false,
-    };
-    if !suits {
-        return Err(PlanError::RunnerMismatch {
-            app: app.name.clone(),
-            runner: app.runner,
-        });
-    }
-    if let Some(port) = app
-        .permissions
-        .listen
-        .iter()
-        .find(|port| !app.ports.contains_key(*port))
-    {
-        return Err(PlanError::UnknownPort {
-            app: app.name.clone(),
-            port: port.clone(),
-        });
-    }
-    let mut processes = BTreeSet::new();
-    for process in &app.processes {
-        if !processes.insert(&process.name) {
-            return Err(PlanError::DuplicateProcess {
-                app: app.name.clone(),
-                process: process.name.clone(),
-            });
-        }
-        check_process(app, process).map_err(|problem| PlanError::BadProcess {
-            app: app.name.clone(),
-            process: process.name.clone(),
-            problem,
-        })?;
-    }
-    Ok(())
-}
-
-/// Checks one process against its app.
-fn check_process(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProblem> {
-    if app.runner == RunnerKind::Host && process.run.is_empty() {
-        return Err(ProcessProblem::EmptyCommand);
-    }
-    if let Some(port) = &process.port
-        && !app.ports.contains_key(port)
-    {
-        return Err(ProcessProblem::UnknownPort(port.clone()));
-    }
-    if let ProcessKind::Oneshot { .. } = process.kind {
-        if process.ready.is_some() {
-            return Err(ProcessProblem::OneshotWithProbe);
-        }
-        if let Restart::Always(_) = process.restart {
-            return Err(ProcessProblem::OneshotRestartsAlways);
-        }
-    }
-    let Some(probe) = &process.ready else {
-        return Ok(());
-    };
-    if probe.period.is_zero() || probe.timeout.is_zero() {
-        return Err(ProcessProblem::ZeroProbeTime);
-    }
-    match &probe.check {
-        ProbeCheck::Http { .. } if process.port.is_none() => {
-            Err(ProcessProblem::HttpProbeWithoutPort)
-        }
-        ProbeCheck::Http { path } if !path.starts_with('/') => {
-            Err(ProcessProblem::HttpPathWithoutSlash)
-        }
-        ProbeCheck::Tcp { port } if !app.ports.contains_key(port) => {
-            Err(ProcessProblem::UnknownPort(port.clone()))
-        }
-        ProbeCheck::Command { run } if run.is_empty() => Err(ProcessProblem::EmptyProbeCommand),
-        ProbeCheck::Http { .. } | ProbeCheck::Tcp { .. } | ProbeCheck::Command { .. } => Ok(()),
-    }
 }

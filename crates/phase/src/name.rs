@@ -1,5 +1,5 @@
 //! The names that a plan uses: a workspace's name and stable id, an app, a
-//! process and a port.
+//! process, a port and a volume.
 //! Each name has one type with one checking constructor, and every way to
 //! build it, including reading it from JSON, goes through that check.
 
@@ -151,7 +151,8 @@ macro_rules! name_type {
 
 /// The name of a workspace, such as `reading-list`.
 ///
-/// A workspace name follows multiverse's rule, so the same text names the
+/// phase keeps its own type, because it does not depend on the multiverse
+/// crate. A workspace name follows multiverse's rule, so the same text names the
 /// workspace, its directory and its branches. It holds 1 to
 /// [`MOST_NAME_BYTES`] lowercase ASCII letters, digits, `-`, `_` and `.`,
 /// starts with a letter or a digit, holds no `..`, and does not end with `.`
@@ -202,6 +203,19 @@ name_type!(ProcessName, Rule::Unit);
 pub struct PortName(String);
 
 name_type!(PortName, Rule::Unit);
+
+/// The name of a Docker volume of a container app, such as `data` or
+/// `cargo-cache`. phase creates the volume for the workspace and labels it
+/// with the workspace's stable id.
+///
+/// A volume name follows the same rule as a [`ProcessName`].
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct VolumeName(String);
+
+name_type!(VolumeName, Rule::Unit);
 
 /// The stable id of a workspace, such as a UUID, which multiverse's
 /// workspace record holds.

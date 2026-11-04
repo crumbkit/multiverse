@@ -72,6 +72,14 @@ pub enum ProbeCheck {
         /// One of the app's ports.
         port: PortName,
     },
+    /// The process writes a log line that matches a regular expression,
+    /// after phase started it. A process that listens on no port, such as a
+    /// worker that reads a queue, uses it. The plan holds the pattern's
+    /// text, and the engine's probe module compiles it.
+    Log {
+        /// The regular expression. It is not empty.
+        pattern: String,
+    },
     /// A command exits with status 0. The command runs with the app's
     /// environment, as separate values that no shell reads.
     Command {

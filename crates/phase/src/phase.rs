@@ -45,10 +45,13 @@ impl Phase {
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::PermissionsGrew`] when a selected app asks for
-    /// permissions beyond its grant, [`PhaseError::Environment`] when a
-    /// value cannot be resolved, and [`PhaseError::NotBuilt`] until phase
-    /// carries the operation out.
+    /// Returns [`PhaseError::Environment`] when a value cannot be resolved,
+    /// and [`PhaseError::NotBuilt`] until phase carries the operation out.
+    /// An app whose permissions grew beyond its grant does not start, and
+    /// the report gives it [`AppOutcome::AwaitingGrant`]; the other apps
+    /// start.
+    ///
+    /// [`AppOutcome::AwaitingGrant`]: crate::AppOutcome::AwaitingGrant
     #[expect(unused_variables, reason = "phase does not carry out `up` yet")]
     pub fn up(
         &self,
@@ -59,6 +62,26 @@ impl Phase {
     ) -> Result<Report, PhaseError> {
         Err(PhaseError::NotBuilt {
             operation: Operation::Up,
+        })
+    }
+
+    /// Resolves the environment of the selected apps of `plan` again
+    /// through `env`, then restarts their processes, before `deadline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::Environment`] when a value cannot be resolved,
+    /// and [`PhaseError::NotBuilt`] until phase carries the operation out.
+    #[expect(unused_variables, reason = "phase does not carry out `restart` yet")]
+    pub fn restart(
+        &self,
+        plan: &Plan,
+        select: &Selection,
+        env: &dyn EnvironmentSource,
+        deadline: Instant,
+    ) -> Result<Report, PhaseError> {
+        Err(PhaseError::NotBuilt {
+            operation: Operation::Restart,
         })
     }
 
