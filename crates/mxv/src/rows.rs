@@ -210,6 +210,12 @@ pub(crate) struct RemovalResult {
     /// The changes and other ignored paths, such as `app: .env`, that
     /// the removal discards because of `--force`.
     discarded: Vec<String>,
+    /// The workspace's docker containers, running or stopped, that the
+    /// removal removes.
+    containers: Vec<String>,
+    /// The docker volumes that the removal deletes because of
+    /// `--delete-volumes`, named and anonymous.
+    volumes: Vec<String>,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -332,8 +338,18 @@ impl RemovalResult {
             delete_unmerged: removal.allow.delete_unmerged,
             disposable: removal.disposable.clone(),
             discarded: removal.discarded.clone(),
+            containers: Vec::new(),
+            volumes: Vec::new(),
             planned,
         }
+    }
+
+    /// Returns this result with the docker containers that the removal
+    /// removes and the volumes that it deletes.
+    pub(crate) fn with_docker(mut self, containers: Vec<String>, volumes: Vec<String>) -> Self {
+        self.containers = containers;
+        self.volumes = volumes;
+        self
     }
 }
 
@@ -358,6 +374,15 @@ impl fmt::Display for RemovalResult {
             writeln!(
                 formatter,
                 "mxv {deletes} the ignored build directory {path}."
+            )?;
+        }
+        for container in &self.containers {
+            writeln!(formatter, "mxv {removes} the docker container {container}.")?;
+        }
+        for volume in &self.volumes {
+            writeln!(
+                formatter,
+                "mxv {deletes} the docker volume {volume} and the data in it."
             )?;
         }
         for checkout in &self.checkouts {
@@ -471,13 +496,15 @@ pub(crate) struct ProcessRow {
     /// `process` or `container`.
     kind: KindName,
     /// `running`, `exited` when it ended on its own or something other
-    /// than `mxv down` stopped it, or `stopped`.
+    /// than `mxv down` stopped it, `created` for a container that docker
+    /// created and did not start, or `stopped`.
     state: StateName,
     /// The process id, which is also its process group's id, while a
     /// process runs, and null for a container.
     pid: Option<u32>,
     /// The exit code of an exited process, or null when a signal ended it
-    /// or it has not exited.
+    /// or it has not exited. A container's code is the one docker reports,
+    /// such as 137 for a container that SIGKILL ended.
     code: Option<i32>,
     /// The number of the signal that ended an exited process, such as 15
     /// for SIGTERM, or null.
@@ -511,6 +538,8 @@ pub(crate) enum StateName {
     Running,
     /// The process ended.
     Exited,
+    /// docker created the container and did not start it.
+    Created,
     /// The process is not started.
     Stopped,
 }
@@ -541,6 +570,7 @@ impl From<&ProcessStatus> for ProcessRow {
         let (state, pid, code, signal) = match status.state {
             ProcessState::Running { pid } => (StateName::Running, pid, None, None),
             ProcessState::Exited { code, signal } => (StateName::Exited, None, code, signal),
+            ProcessState::Created => (StateName::Created, None, None, None),
             ProcessState::Stopped => (StateName::Stopped, None, None, None),
         };
         Self {

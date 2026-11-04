@@ -116,6 +116,7 @@ codes that no start provokes:
   mxv::docker::not_found: Only a live checkout whose mxv.toml declares containers, on a PATH without docker, provokes it; tests/containers.rs provokes it.
   mxv::docker::unavailable: Only a docker daemon that does not answer provokes it, which the fixture cannot hold; tests/containers.rs provokes it with a docker that cannot reach its daemon.
   mxv::docker::failed: Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.
+  mxv::docker::foreign_object: Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.
   mxv::manifest::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::unknown_key: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::newer: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.

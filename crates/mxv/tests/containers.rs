@@ -1,9 +1,10 @@
 //! End-to-end tests of the containers of a manifest: `up`, `down`,
 //! `status`, `logs` and `remove` with `[containers.<name>]`. The tests that
 //! start a container use the `busybox:1.37.0` image and skip, with a line
-//! that says so, when no docker daemon answers. Each test names its
-//! workspace after itself, because containers and volumes live in one
-//! docker daemon that tests running at once share.
+//! that says so, when no docker daemon answers. Each test's setup has a
+//! state directory of its own, so its store id labels and names its
+//! containers and volumes, and tests that run at once in one docker daemon,
+//! from one checkout or two, never touch each other's.
 
 #![cfg(test)]
 
@@ -14,7 +15,7 @@ use std::fs;
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use snapbox::cmd::Command;
@@ -24,6 +25,9 @@ use crate::support::{GIT_ENV, PATH, repository};
 
 /// The image of the tests, pinned by its tag.
 const IMAGE: &str = "busybox:1.37.0";
+
+/// How long a test waits for a container's log to change.
+const MOST_WAIT: Duration = Duration::from_secs(30);
 
 /// Writes `text` to the file at `path`, as a person working in a checkout
 /// would.
@@ -72,7 +76,8 @@ fn docker_installed(test: &str) -> bool {
 
 /// A temporary directory with a repository, a workspace root and a state
 /// directory, and one workspace whose containers and volumes it removes
-/// when it drops.
+/// when it drops. It finds them only by its own store id, so it never
+/// removes another setup's.
 struct Setup {
     /// The temporary directory.
     dir: TempDir,
@@ -83,19 +88,27 @@ struct Setup {
 impl Setup {
     /// Creates the workspace `name` with `manifest` as its `mxv.toml`.
     fn new(name: &str, manifest: &str) -> Self {
+        Self::in_range(name, manifest, [31000, 31999])
+    }
+
+    /// Creates the workspace `name` with `manifest` as its `mxv.toml`, in
+    /// a state directory that allocates host ports from `range`.
+    fn in_range(name: &str, manifest: &str, range: [u16; 2]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         repository(&dir.path().canonicalize().unwrap());
         let setup = Self {
             dir,
             name: name.to_owned(),
         };
-        setup.clean_docker();
         // The tests of other files allocate from the default range at the
         // same time, each with records of its own, so these tests take
         // ports from a range that no other test uses.
         let config = setup.root().join("config/mxv/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
-        write(&config, "ports_range = [31000, 31999]\n");
+        write(
+            &config,
+            &format!("ports_range = [{}, {}]\n", range[0], range[1]),
+        );
         let (exit, document) = setup.json(&["new", name, "--repo", "app"]);
         assert_eq!(exit, 0, "{document}");
         write(&setup.checkout().join("mxv.toml"), manifest);
@@ -142,32 +155,89 @@ impl Setup {
         self.json_with(self.command(PATH, args), args)
     }
 
+    /// Runs `mxv` with `args` and `--json` against a docker whose daemon
+    /// does not answer.
+    fn json_without_daemon(&self, args: &[&str]) -> (i32, Value) {
+        let socket = self.root().join("no-daemon.sock");
+        let command = self
+            .command(PATH, args)
+            .env("DOCKER_HOST", format!("unix://{}", socket.display()));
+        self.json_with(command, args)
+    }
+
     /// Returns the host port that the workspace holds for `port`.
     fn port(&self, port: &str) -> u16 {
         let (_, shown) = self.json(&["show", &self.name]);
         u16::try_from(shown["data"][0]["ports"][port].as_u64().unwrap()).unwrap()
     }
 
+    /// Returns the store id of the setup's state directory, or `None`
+    /// before its first container started.
+    fn store_id(&self) -> Option<String> {
+        let text = fs::read_to_string(self.root().join("state/mxv/runs/.store-id")).ok()?;
+        let record: Value = serde_json::from_str(&text).unwrap();
+        Some(record["id"].as_str().unwrap().to_owned())
+    }
+
+    /// Returns the docker name of the container or volume `object` of the
+    /// workspace.
+    fn docker_name(&self, object: &str) -> String {
+        let id = self.store_id().unwrap();
+        format!("mxv-{}-{}.{object}", &id[..8], self.name)
+    }
+
+    /// Returns the `docker ps` and `docker volume ls` filters of the
+    /// setup's store and workspace.
+    fn filters(&self) -> Option<[String; 4]> {
+        let id = self.store_id()?;
+        Some([
+            "--filter".to_owned(),
+            format!("label=mxv.store={id}"),
+            "--filter".to_owned(),
+            format!("label=mxv.workspace={}", self.name),
+        ])
+    }
+
     /// Returns the names of the workspace's containers that docker lists.
     fn containers(&self) -> Vec<String> {
-        let filter = format!("label=mxv.workspace={}", self.name);
-        let (_, printed) = docker(&["ps", "--all", "--filter", &filter, "--format", "{{.Names}}"]);
+        let Some(filters) = self.filters() else {
+            return Vec::new();
+        };
+        let mut args = vec!["ps", "--all", "--format", "{{.Names}}"];
+        args.extend(filters.iter().map(String::as_str));
+        let (_, printed) = docker(&args);
         printed.lines().map(str::to_owned).collect()
     }
 
     /// Returns the names of the workspace's volumes that docker lists.
     fn volumes(&self) -> Vec<String> {
-        let filter = format!("label=mxv.workspace={}", self.name);
-        let (_, printed) = docker(&["volume", "ls", "--quiet", "--filter", &filter]);
+        let Some(filters) = self.filters() else {
+            return Vec::new();
+        };
+        let mut args = vec!["volume", "ls", "--quiet"];
+        args.extend(filters.iter().map(String::as_str));
+        let (_, printed) = docker(&args);
         printed.lines().map(str::to_owned).collect()
     }
 
-    /// Removes the containers and volumes of the workspace.
+    /// Returns the anonymous volumes that `down` recorded.
+    fn anonymous_volumes(&self) -> Vec<String> {
+        let path = self
+            .root()
+            .join(format!("state/mxv/runs/{}/.anonymous-volumes", self.name));
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Removes the containers and volumes that carry the setup's store id,
+    /// and the anonymous volumes that `down` recorded.
     fn clean_docker(&self) {
         for container in self.containers() {
-            let _ = docker(&["rm", "--force", &container]);
+            let _ = docker(&["rm", "--force", "--volumes", &container]);
         }
-        for volume in self.volumes() {
+        for volume in self.volumes().into_iter().chain(self.anonymous_volumes()) {
             let _ = docker(&["volume", "rm", &volume]);
         }
     }
@@ -176,6 +246,25 @@ impl Setup {
 impl Drop for Setup {
     fn drop(&mut self) {
         self.clean_docker();
+    }
+}
+
+/// Removes the docker container or volume `name` when it drops, for an
+/// object that a test made without mxv's labels.
+struct Foreign {
+    /// `container` or `volume`.
+    kind: &'static str,
+    /// Its docker name.
+    name: String,
+}
+
+impl Drop for Foreign {
+    fn drop(&mut self) {
+        if self.kind == "container" {
+            let _ = docker(&["rm", "--force", &self.name]);
+        } else {
+            let _ = docker(&["volume", "rm", &self.name]);
+        }
     }
 }
 
@@ -221,13 +310,13 @@ fn up_runs_a_container_on_the_loopback_address_and_down_removes_it_and_keeps_its
     assert_eq!(web["pid"], Value::Null);
     let port = setup.port("web");
     assert_eq!(web["ports"][0], format!("web={port}"));
-    assert_eq!(setup.containers(), ["mxv-mxvtest-up-down.web"]);
+    assert_eq!(setup.containers(), [setup.docker_name("web")]);
     let (_, bindings) = docker(&[
         "container",
         "inspect",
         "--format",
         "{{json .HostConfig.PortBindings}}",
-        "mxv-mxvtest-up-down.web",
+        &setup.docker_name("web"),
     ]);
     assert!(
         bindings.contains(&format!("\"HostIp\":\"127.0.0.1\",\"HostPort\":\"{port}\"")),
@@ -254,7 +343,7 @@ fn up_runs_a_container_on_the_loopback_address_and_down_removes_it_and_keeps_its
     assert_eq!(exit, 0, "{document}");
     assert_eq!(row(&document, "web")["state"], "stopped");
     assert!(setup.containers().is_empty());
-    assert_eq!(setup.volumes(), ["mxv-mxvtest-up-down.srv"]);
+    assert_eq!(setup.volumes(), [setup.docker_name("srv")]);
     let (_, logs) = setup.json(&["logs", "-w", "mxvtest-up-down", "web"]);
     assert!(
         logs.to_string().contains("hello from the container"),
@@ -322,8 +411,13 @@ fn remove_refuses_a_workspace_with_volumes_until_delete_volumes_allows_deleting_
     let (exit, document) = setup.json(&["remove", "mxvtest-volumes", "--yes", "--force"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::workspace::volumes");
-    assert_eq!(document["fields"]["volumes"][0], "mxv-mxvtest-volumes.srv");
-    assert_eq!(setup.volumes(), ["mxv-mxvtest-volumes.srv"]);
+    assert_eq!(document["fields"]["volumes"][0], setup.docker_name("srv"));
+    assert_eq!(setup.volumes(), [setup.docker_name("srv")]);
+    let hint = document["recovery"]["text"].as_str().unwrap();
+    assert!(
+        hint.contains("mxv remove mxvtest-volumes --force --delete-volumes --yes"),
+        "the recovery keeps --force: {hint}"
+    );
 
     let (exit, document) = setup.json(&[
         "remove",
@@ -361,12 +455,7 @@ fn up_with_containers_fails_as_docker_unavailable_when_the_daemon_does_not_answe
         return;
     }
     let setup = Setup::new("mxvtest-unavailable", &web());
-    let socket = setup.root().join("no-daemon.sock");
-    let args = ["up", "-w", "mxvtest-unavailable"];
-    let command = setup
-        .command(PATH, &args)
-        .env("DOCKER_HOST", format!("unix://{}", socket.display()));
-    let (exit, document) = setup.json_with(command, &args);
+    let (exit, document) = setup.json_without_daemon(&["up", "-w", "mxvtest-unavailable"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::docker::unavailable");
 }
@@ -416,4 +505,328 @@ fn a_container_that_misses_its_readiness_timeout_fails_up_and_is_removed() {
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::process::not_ready");
     assert!(setup.containers().is_empty());
+}
+
+#[test]
+fn two_state_directories_with_one_workspace_name_never_touch_each_others_containers_or_volumes() {
+    if !docker_runs("two_state_directories_with_one_workspace_name") {
+        return;
+    }
+    let first = Setup::in_range("mxvtest-twin", &web(), [31000, 31499]);
+    let second = Setup::in_range("mxvtest-twin", &web(), [31500, 31999]);
+    for setup in [&first, &second] {
+        let (exit, document) = setup.json(&["up", "-w", "mxvtest-twin"]);
+        assert_eq!(exit, 0, "{document}");
+    }
+    assert_ne!(first.docker_name("web"), second.docker_name("web"));
+
+    let (exit, document) = first.json(&["down", "-w", "mxvtest-twin"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(first.containers().is_empty());
+    let (_, status) = second.json(&["status", "-w", "mxvtest-twin"]);
+    assert_eq!(row(&status, "web")["state"], "running", "{status}");
+
+    let (exit, document) = first.json(&[
+        "remove",
+        "mxvtest-twin",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(first.volumes().is_empty());
+    assert_eq!(second.containers(), [second.docker_name("web")]);
+    assert_eq!(second.volumes(), [second.docker_name("srv")]);
+}
+
+#[test]
+fn up_leaves_alone_a_container_with_its_name_that_lacks_its_labels() {
+    if !docker_runs("up_leaves_alone_a_container_with_its_name") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-foreign", &web());
+    setup.json(&["up", "-w", "mxvtest-foreign"]);
+    setup.json(&["down", "-w", "mxvtest-foreign"]);
+    let foreign = Foreign {
+        kind: "container",
+        name: setup.docker_name("web"),
+    };
+    let (created, _) = docker(&["create", "--name", &foreign.name, IMAGE, "true"]);
+    assert!(created);
+
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-foreign"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::docker::foreign_object",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["kind"], "container");
+    assert_eq!(document["fields"]["name"], foreign.name);
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-foreign", "web"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exists, _) = docker(&["container", "inspect", &foreign.name]);
+    assert!(exists, "mxv removed a container that it did not make");
+}
+
+#[test]
+fn up_leaves_alone_a_volume_with_its_name_that_lacks_its_labels() {
+    if !docker_runs("up_leaves_alone_a_volume_with_its_name") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-foreign-volume", &web());
+    setup.json(&["up", "-w", "mxvtest-foreign-volume"]);
+    setup.json(&["down", "-w", "mxvtest-foreign-volume"]);
+    let name = setup.docker_name("srv");
+    let (removed, _) = docker(&["volume", "rm", &name]);
+    assert!(removed);
+    let foreign = Foreign {
+        kind: "volume",
+        name,
+    };
+    let (created, _) = docker(&["volume", "create", &foreign.name]);
+    assert!(created);
+
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-foreign-volume"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::docker::foreign_object",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["kind"], "volume");
+    assert!(setup.containers().is_empty());
+}
+
+#[test]
+fn down_stops_a_running_container_that_the_manifest_no_longer_declares() {
+    if !docker_runs("down_stops_a_running_container_that_the_manifest_no_longer_declares") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-dropped", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-dropped"]);
+    assert_eq!(exit, 0, "{document}");
+    write(
+        &setup.checkout().join("mxv.toml"),
+        "[processes.idle]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
+    );
+    let (_, status) = setup.json(&["status", "-w", "mxvtest-dropped"]);
+    assert_eq!(row(&status, "web")["state"], "running", "{status}");
+    assert_eq!(row(&status, "web")["kind"], "container", "{status}");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-dropped"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(row(&document, "web")["state"], "stopped");
+    assert!(setup.containers().is_empty());
+}
+
+#[test]
+fn down_and_remove_fail_as_docker_unavailable_once_the_workspace_has_run_a_container() {
+    if !docker_runs("down_and_remove_fail_as_docker_unavailable") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-gone-daemon", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-gone-daemon"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json_without_daemon(&["down", "-w", "mxvtest-gone-daemon"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::docker::unavailable", "{document}");
+    let (exit, document) = setup.json_without_daemon(&[
+        "remove",
+        "mxvtest-gone-daemon",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::docker::unavailable", "{document}");
+    assert_eq!(setup.containers(), [setup.docker_name("web")]);
+}
+
+#[test]
+fn a_workspace_that_has_never_run_a_container_never_runs_docker() {
+    let setup = Setup::new("mxvtest-no-calls", &web());
+    let bin = setup.root().join("fake-bin");
+    fs::create_dir(&bin).unwrap();
+    let calls = setup.root().join("docker-calls");
+    let fake = bin.join("docker");
+    write(
+        &fake,
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n", calls.display()),
+    );
+    let made = Command::new("chmod")
+        .args(["+x", &fake.display().to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let path = format!("{}:{PATH}", bin.display());
+    let logs = setup
+        .command(&path, &["logs", "-w", "mxvtest-no-calls", "web"])
+        .output()
+        .unwrap();
+    assert!(logs.status.success(), "{logs:?}");
+    for args in [
+        &["status", "-w", "mxvtest-no-calls"][..],
+        &["down", "-w", "mxvtest-no-calls"],
+        &["remove", "mxvtest-no-calls", "--yes", "--force"],
+    ] {
+        let (exit, document) = setup.json_with(setup.command(&path, args), args);
+        assert_eq!(exit, 0, "{args:?}: {document}");
+    }
+    assert!(
+        !calls.exists(),
+        "mxv ran docker: {}",
+        fs::read_to_string(&calls).unwrap_or_default()
+    );
+}
+
+#[test]
+fn a_failed_docker_run_names_the_container_and_dockers_own_message() {
+    if !docker_runs("a_failed_docker_run_names_the_container") {
+        return;
+    }
+    let manifest = web().replace(IMAGE, "busybox:0.0.0-mxv-test-missing");
+    let setup = Setup::new("mxvtest-no-image", &manifest);
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-no-image"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::docker::failed", "{document}");
+    assert_eq!(document["fields"]["operation"], "run");
+    assert_eq!(document["fields"]["container"], "web");
+    let message = document["fields"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("docker:") || message.starts_with("Error"),
+        "{message}"
+    );
+}
+
+#[test]
+fn status_gives_a_container_that_restarted_outside_mxv_its_log_follower_back() {
+    if !docker_runs("status_gives_a_container_that_restarted_outside_mxv") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-restarted", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-restarted"]);
+    assert_eq!(exit, 0, "{document}");
+    let (restarted, _) = docker(&["restart", "--time", "1", &setup.docker_name("web")]);
+    assert!(restarted);
+    let log = setup
+        .root()
+        .join("state/mxv/runs/mxvtest-restarted/web.log");
+    let deadline = Instant::now() + MOST_WAIT;
+    while Instant::now() < deadline {
+        setup.json(&["status", "-w", "mxvtest-restarted"]);
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        if text.matches("hello from the container").count() == 2 {
+            return;
+        }
+    }
+    panic!(
+        "the log holds no line of the second start: {}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+#[test]
+fn down_keeps_a_containers_anonymous_volumes_until_remove_delete_volumes() {
+    if !docker_runs("down_keeps_a_containers_anonymous_volumes") {
+        return;
+    }
+    let tag = format!("mxvtest-anonymous:{}", std::process::id());
+    let built = Command::new("docker")
+        .args(["build", "--quiet", "--tag", &tag, "-"])
+        .env("PATH", PATH)
+        .stdin(format!("FROM {IMAGE}\nVOLUME /data\n"))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{built:?}");
+    let manifest = web()
+        .replace(IMAGE, &tag)
+        .replace("volumes = { srv = \"/srv\" }\n", "");
+    let setup = Setup::new("mxvtest-anonymous", &manifest);
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-anonymous"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, mounts) = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{range .Mounts}}{{.Name}}{{end}}",
+        &setup.docker_name("web"),
+    ]);
+    assert!(!mounts.is_empty());
+
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-anonymous",
+        "--force",
+        "--delete-volumes",
+        "--dry-run",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["containers"], serde_json::json!(["web"]));
+    assert_eq!(document["data"]["volumes"], serde_json::json!([mounts]));
+
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-anonymous"]);
+    assert_eq!(exit, 0, "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &mounts]);
+    assert!(kept, "down deleted the anonymous volume");
+    let (exit, document) = setup.json(&["remove", "mxvtest-anonymous", "--yes", "--force"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::volumes");
+    assert_eq!(document["fields"]["volumes"][0], mounts.as_str());
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-anonymous",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &mounts]);
+    assert!(!kept, "remove --delete-volumes kept the anonymous volume");
+    let _ = docker(&["image", "rm", &tag]);
+}
+
+#[test]
+fn status_reports_a_container_that_docker_created_and_did_not_start_as_created() {
+    if !docker_runs("status_reports_a_container_that_docker_created") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-created", &web());
+    setup.json(&["up", "-w", "mxvtest-created"]);
+    setup.json(&["down", "-w", "mxvtest-created"]);
+    let id = setup.store_id().unwrap();
+    let (created, _) = docker(&[
+        "create",
+        "--name",
+        &setup.docker_name("web"),
+        "--label",
+        &format!("mxv.store={id}"),
+        "--label",
+        "mxv.workspace=mxvtest-created",
+        "--label",
+        "mxv.container=web",
+        IMAGE,
+        "true",
+    ]);
+    assert!(created);
+    let (_, status) = setup.json(&["status", "-w", "mxvtest-created"]);
+    assert_eq!(row(&status, "web")["state"], "created", "{status}");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-created"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(setup.containers().is_empty());
+}
+
+#[test]
+fn a_container_that_exits_with_137_reports_code_137_and_no_signal() {
+    if !docker_runs("a_container_that_exits_with_137") {
+        return;
+    }
+    let manifest = format!(
+        "ports = [\"web\"]\n\n[containers.web]\nimage = \"{IMAGE}\"\ncommand = [\"sh\", \"-c\", \"exit 137\"]\nports = {{ 80 = \"web\" }}\n"
+    );
+    let setup = Setup::new("mxvtest-137", &manifest);
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-137"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["fields"]["code"], 137, "{document}");
+    let (_, status) = setup.json(&["status", "-w", "mxvtest-137"]);
+    assert_eq!(row(&status, "web")["code"], 137, "{status}");
+    assert_eq!(row(&status, "web")["signal"], Value::Null, "{status}");
 }

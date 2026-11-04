@@ -1,27 +1,59 @@
 use std::path::Path;
 
-use crate::docker::{Run, container_name, run_args, volume_name};
+use crate::docker::{Run, Scope, message, run_args};
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 
-fn name(text: &str) -> WorkspaceName {
-    WorkspaceName::try_from(text.to_owned()).unwrap()
+/// A store id of the tests.
+const STORE: &str = "0123456789abcdef0123456789abcdef";
+
+fn scope(workspace: &str) -> Scope {
+    Scope::new(
+        STORE,
+        &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
+    )
 }
 
 #[test]
 fn two_workspaces_whose_names_join_alike_never_share_a_container_or_volume_name() {
     assert_ne!(
-        container_name(&name("reading-list"), "db"),
-        container_name(&name("login"), "fix-db")
+        scope("reading-list").container_name("db"),
+        scope("reading").container_name("list-db")
     );
     assert_eq!(
-        container_name(&name("reading-list"), "db"),
-        "mxv-reading-list.db"
+        scope("reading-list").container_name("db"),
+        "mxv-01234567-reading-list.db"
     );
     assert_eq!(
-        volume_name(&name("reading-list"), "data"),
-        "mxv-reading-list.data"
+        scope("reading-list").volume_name("data"),
+        "mxv-01234567-reading-list.data"
     );
+}
+
+#[test]
+fn two_stores_give_one_workspace_name_different_container_and_volume_names() {
+    let other = Scope::new(
+        "fedcba9876543210fedcba9876543210",
+        &WorkspaceName::try_from("reading-list".to_owned()).unwrap(),
+    );
+    assert_ne!(
+        other.container_name("db"),
+        scope("reading-list").container_name("db")
+    );
+    assert_ne!(
+        other.volume_name("data"),
+        scope("reading-list").volume_name("data")
+    );
+}
+
+#[test]
+fn a_scope_owns_only_objects_whose_labels_name_its_store_workspace_and_object() {
+    let scope = scope("reading-list");
+    assert!(scope.owns(&format!("{STORE}\treading-list\tdb"), "db"));
+    assert!(!scope.owns("\t\t", "db"));
+    assert!(!scope.owns(&format!("{STORE}\treading-list\tcache"), "db"));
+    assert!(!scope.owns(&format!("{STORE}\treading\tdb"), "db"));
+    assert!(!scope.owns("fedcba9876543210fedcba9876543210\treading-list\tdb", "db"));
 }
 
 #[test]
@@ -40,9 +72,8 @@ volumes = { data = "/data" }
         Path::new("/repo/mxv.toml"),
     )
     .unwrap();
-    let workspace = name("reading-list");
     let args = run_args(&Run {
-        workspace: &workspace,
+        scope: &scope("reading-list"),
         name: "dynamodb",
         container: &manifest.containers["dynamodb"],
         host_ports: &[24001],
@@ -53,7 +84,9 @@ volumes = { data = "/data" }
             "run",
             "--detach",
             "--name",
-            "mxv-reading-list.dynamodb",
+            "mxv-01234567-reading-list.dynamodb",
+            "--label",
+            "mxv.store=0123456789abcdef0123456789abcdef",
             "--label",
             "mxv.workspace=reading-list",
             "--label",
@@ -63,7 +96,7 @@ volumes = { data = "/data" }
             "--env",
             "AWS_REGION=eu-west-1",
             "--mount",
-            "type=volume,source=mxv-reading-list.data,target=/data",
+            "type=volume,source=mxv-01234567-reading-list.data,target=/data",
             "--",
             "amazon/dynamodb-local:2.5.4",
             "-jar",
@@ -76,11 +109,30 @@ volumes = { data = "/data" }
 
 #[test]
 fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_last_dot() {
-    // A container name never holds `.`, so `mxv-release.2.db` is only the
-    // workspace `release.2` with the container `db`.
-    assert_eq!(container_name(&name("release.2"), "db"), "mxv-release.2.db");
-    assert_ne!(
-        container_name(&name("release.2"), "db"),
-        container_name(&name("release"), "2-db")
+    // A container name never holds `.`, so `mxv-01234567-release.2.db` is
+    // only the workspace `release.2` with the container `db`.
+    assert_eq!(
+        scope("release.2").container_name("db"),
+        "mxv-01234567-release.2.db"
     );
+    assert_ne!(
+        scope("release.2").container_name("db"),
+        scope("release").container_name("2-db")
+    );
+}
+
+#[test]
+fn the_message_of_a_failed_docker_command_is_its_first_docker_or_error_line() {
+    assert_eq!(
+        message(
+            "Unable to find image 'busybox:0' locally\ndocker: Error response from daemon: manifest unknown\n\nRun 'docker run --help' for more information\n"
+        ),
+        "docker: Error response from daemon: manifest unknown"
+    );
+    assert_eq!(
+        message("Error response from daemon: No such container: x\nmore\n"),
+        "Error response from daemon: No such container: x"
+    );
+    assert_eq!(message("first\nlast\n\n"), "last");
+    assert_eq!(message(""), "");
 }

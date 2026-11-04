@@ -513,7 +513,16 @@ pub(crate) fn volumes(
     environment: &Environment,
     name: &WorkspaceName,
 ) -> Result<Vec<String>, MxvFailure> {
-    Ok(Runs::new(environment.runs()?).volumes(name))
+    Ok(Runs::new(environment.runs()?).volumes(name)?)
+}
+
+/// Returns the docker containers of the workspace `name`, running or
+/// stopped, which `mxv remove` removes.
+pub(crate) fn containers(
+    environment: &Environment,
+    name: &WorkspaceName,
+) -> Result<Vec<String>, MxvFailure> {
+    Ok(Runs::new(environment.runs()?).docker_containers(name)?)
 }
 
 /// Deletes the docker volumes `volumes`, for `mxv remove --delete-volumes`.

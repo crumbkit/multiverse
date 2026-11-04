@@ -143,15 +143,26 @@ pub enum Error {
     },
     /// The `docker` program runs, and its daemon does not answer.
     DockerUnavailable {
-        /// The last line that docker printed to standard error.
+        /// The line of docker's standard error that says what failed.
         message: String,
     },
     /// A docker command failed or missed its deadline.
     DockerFailed {
         /// The docker command, such as `run`.
         operation: &'static str,
-        /// The last line that docker printed to standard error.
+        /// The manifest name of the container that the command worked on,
+        /// when it worked on one.
+        container: Option<String>,
+        /// The line of docker's standard error that says what failed.
         message: String,
+    },
+    /// A docker container or volume has a name of mxv's, and its labels do
+    /// not name this store, workspace and object, so mxv leaves it alone.
+    DockerForeign {
+        /// `container` or `volume`.
+        kind: &'static str,
+        /// The object's docker name.
+        name: String,
     },
 }
 
@@ -254,13 +265,24 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
-            Self::DockerFailed { operation, message } => {
+            Self::DockerFailed {
+                operation,
+                container,
+                message,
+            } => {
                 write!(formatter, "docker {operation} failed")?;
+                if let Some(container) = container {
+                    write!(formatter, " for the container {container}")?;
+                }
                 if !message.is_empty() {
                     write!(formatter, ": {message}")?;
                 }
                 Ok(())
             }
+            Self::DockerForeign { kind, name } => write!(
+                formatter,
+                "the docker {kind} {name} has a name of mxv's, and its labels name another mxv state directory or none, so mxv leaves it alone"
+            ),
         }
     }
 }
@@ -287,7 +309,8 @@ impl std::error::Error for Error {
             | Self::ProcessTable { .. }
             | Self::Busy { .. }
             | Self::DockerUnavailable { .. }
-            | Self::DockerFailed { .. } => None,
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. } => None,
         }
     }
 }

@@ -31,7 +31,8 @@ mod workspaces;
 pub use crate::backend::{Backend, Changes, INITIALIZING, Listed, Repository};
 pub use crate::clock::FOLLOW_INTERVAL;
 pub use crate::docker::{
-    CONTAINER_LABEL, DOCKER_DEADLINE, PULL_DEADLINE, WORKSPACE_LABEL, container_name, volume_name,
+    CONTAINER_LABEL, DOCKER_DEADLINE, PULL_DEADLINE, STORE_LABEL, Scope, VOLUME_LABEL,
+    WORKSPACE_LABEL,
 };
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};

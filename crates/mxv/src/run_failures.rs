@@ -6,7 +6,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{MANIFEST_FILE, ManifestError, ManifestProblem};
+use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem};
+
+use crate::failures::remove_volumes_line;
 
 /// The code of a process verb that names no workspace, run outside every
 /// workspace.
@@ -154,6 +156,9 @@ pub(crate) enum RunFailure {
         workspace: String,
         /// The volumes.
         volumes: Vec<String>,
+        /// What the refused removal's flags allowed, which the recovery
+        /// keeps.
+        allow: Allow,
     },
 }
 
@@ -199,8 +204,11 @@ impl Failure for RunFailure {
             Self::Running { workspace, .. } => {
                 Recovery::Run(Call::new(&["down"]).value("workspace", workspace))
             }
-            Self::Volumes { workspace, .. } => hint(format!(
-                "copy out any data you need from the volumes, then run `mxv remove --delete-volumes {workspace}`, which deletes them"
+            Self::Volumes {
+                workspace, allow, ..
+            } => hint(format!(
+                "copy out any data you need from the volumes, then run `{}`, which deletes them",
+                remove_volumes_line(workspace, *allow)
             )),
             Self::ManifestMissing { checkout } => hint(format!(
                 "write an {MANIFEST_FILE} that declares the app's processes at the root of {}",
@@ -273,7 +281,9 @@ impl Failure for RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("processes", FieldValue::list(processes.iter())),
             ],
-            Self::Volumes { workspace, volumes } => vec![
+            Self::Volumes {
+                workspace, volumes, ..
+            } => vec![
                 Field::new("workspace", workspace),
                 Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
@@ -372,7 +382,9 @@ impl fmt::Display for RunFailure {
                 "the workspace {workspace} has running processes: {}",
                 processes.join(", ")
             ),
-            Self::Volumes { workspace, volumes } => write!(
+            Self::Volumes {
+                workspace, volumes, ..
+            } => write!(
                 formatter,
                 "the workspace {workspace} has docker volumes, which may hold data: {}",
                 volumes.join(", ")

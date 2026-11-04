@@ -80,6 +80,10 @@ pub const DOCKER_UNAVAILABLE: Code = Code::new("mxv", "docker", "unavailable");
 /// The code of a docker command that failed or missed its deadline, such as
 /// a `docker run` whose image cannot be pulled.
 pub const DOCKER_FAILED: Code = Code::new("mxv", "docker", "failed");
+/// The code of a docker container or volume that has a name of mxv's and
+/// lacks the labels of this state directory and workspace, which mxv
+/// leaves alone.
+pub const DOCKER_FOREIGN_OBJECT: Code = Code::new("mxv", "docker", "foreign_object");
 /// The code of an environment in which mxv finds no home directory, so it
 /// has no directory for the records, the config file or the default root.
 pub const ENVIRONMENT_NO_DIRECTORY: Code = Code::new("mxv", "environment", "no_directory");
@@ -251,6 +255,7 @@ pub(crate) const CODES: &[&Code] = &[
     &DOCKER_NOT_FOUND,
     &DOCKER_UNAVAILABLE,
     &DOCKER_FAILED,
+    &DOCKER_FOREIGN_OBJECT,
 ];
 
 /// Returns `path` as text for a field or a hint.
@@ -284,6 +289,16 @@ fn remove_words(name: &str, allow: Allow, last: &str) -> Vec<String> {
 /// without a terminal cannot answer the question, so the line has `--yes`.
 pub(crate) fn remove_line(name: &str, allow: Allow) -> String {
     format!("mxv {}", remove_words(name, allow, "--yes").join(" "))
+}
+
+/// Returns the command line of a removal of the workspace `name` that
+/// allows what `allow` allows, deletes the workspace's docker volumes and
+/// runs without asking, such as `mxv remove notes --force
+/// --delete-volumes --yes`, for the text of a hint.
+pub(crate) fn remove_volumes_line(name: &str, allow: Allow) -> String {
+    let mut words = remove_words(name, allow, "--delete-volumes");
+    words.push("--yes".to_owned());
+    format!("mxv {}", words.join(" "))
 }
 
 /// Returns the recovery that runs the removal of the workspace `name` with
@@ -346,6 +361,7 @@ impl Failure for MxvFailure {
                 Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
                 Error::DockerUnavailable { .. } => &DOCKER_UNAVAILABLE,
                 Error::DockerFailed { .. } => &DOCKER_FAILED,
+                Error::DockerForeign { .. } => &DOCKER_FOREIGN_OBJECT,
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
                 // mxv gives it a code of its own.
@@ -553,13 +569,16 @@ fn library_recovery(error: &Error) -> Recovery {
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a process to be ready, and run the command again",
         ),
         Error::DockerMissing { .. } => hint(
-            "install docker and put it on PATH, or remove the containers from mxv.toml, and run the command again",
+            "install docker and put it on PATH, and run the command again; a workspace that has run containers needs docker until `mxv remove` removes it",
         ),
         Error::DockerUnavailable { .. } => hint(
             "start the docker daemon, such as by opening Docker Desktop, and run the command again",
         ),
         Error::DockerFailed { operation, .. } => hint(format!(
             "read docker's message, fix what `docker {operation}` reports, such as an image name that cannot be pulled, and run the command again"
+        )),
+        Error::DockerForeign { kind, name } => hint(format!(
+            "find out who made the docker {kind} {name}, rename or remove it with docker if nobody needs it, and run the command again"
         )),
         _ => hint("run the command again"),
     }
@@ -607,10 +626,21 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         ],
         Error::ProcessUnstartable { process, .. } => vec![Field::new("process", process)],
         Error::DockerUnavailable { message } => vec![Field::new("message", message)],
-        Error::DockerFailed { operation, message } => vec![
-            Field::new("operation", *operation),
-            Field::new("message", message),
-        ],
+        Error::DockerFailed {
+            operation,
+            container,
+            message,
+        } => {
+            let mut fields = vec![Field::new("operation", *operation)];
+            if let Some(container) = container {
+                fields.push(Field::new("container", container));
+            }
+            fields.push(Field::new("message", message));
+            fields
+        }
+        Error::DockerForeign { kind, name } => {
+            vec![Field::new("kind", *kind), Field::new("name", name)]
+        }
         _ => Vec::new(),
     }
 }

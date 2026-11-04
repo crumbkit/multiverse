@@ -17,8 +17,10 @@
 //! A container of the manifest has no run record: docker holds its state,
 //! and mxv finds it by its labels, as the `docker` module describes. Its
 //! log is `<container>.log` too, which a detached `docker logs --follow`
-//! appends to while the container exists, so the log outlives the
-//! container that `mxv down` removes.
+//! appends to while the container runs, so the log outlives the container
+//! that `mxv down` removes. `<container>.follower` records the follower's
+//! process id, so `up` and `status` start a new follower when the old one
+//! has ended and the container runs, such as after a restart outside mxv.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -81,16 +83,16 @@ const MOST_RUN_BYTES: u64 = 64 * 1024;
 
 /// The run record of one started process.
 #[derive(Debug, Serialize, Deserialize)]
-struct RunRecord {
+pub(super) struct RunRecord {
     /// The record's version, which is [`RUN_VERSION`].
-    version: u32,
+    pub(super) version: u32,
     /// The process id, which is also the id of its process group.
-    pid: u32,
+    pub(super) pid: u32,
     /// The process's start time as `ps` printed it, which tells the
     /// process from a later one that reuses its id.
-    started: String,
+    pub(super) started: String,
     /// The ports that the process received, by variable name.
-    ports: BTreeMap<String, u16>,
+    pub(super) ports: BTreeMap<String, u16>,
 }
 
 /// The state of one process.
@@ -105,13 +107,17 @@ pub enum ProcessState {
     /// The process ended on its own, or something other than `mxv down`
     /// stopped it.
     Exited {
-        /// Its exit code, or `None` when a signal ended it.
+        /// Its exit code, or `None` when a signal ended a process. A
+        /// container's code is the one docker reports.
         code: Option<i32>,
-        /// The signal that ended it, when the shell recorded one. The shell
+        /// The signal that ended a process, when the shell recorded one. The shell
         /// records a program that a signal ended as code 128 plus the
         /// signal's number, so a code from 129 to 192 reads as that signal.
         signal: Option<i32>,
     },
+    /// docker created the container and has not started it, such as when
+    /// `docker run` stopped between the two steps.
+    Created,
     /// The process has not started since the last `mxv down`, or never.
     Stopped,
 }
@@ -347,31 +353,7 @@ impl Runs {
 
     /// Returns the run record of `process`, or `None`.
     fn record(&self, name: &WorkspaceName, process: &str) -> Result<Option<RunRecord>, Error> {
-        let path = self.file(name, process, "json");
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(Error::StateUnreadable { path, source }),
-        };
-        let mut bytes = Vec::new();
-        file.take(MOST_RUN_BYTES)
-            .read_to_end(&mut bytes)
-            .map_err(|source| Error::StateUnreadable {
-                path: path.clone(),
-                source,
-            })?;
-        let record: RunRecord =
-            serde_json::from_slice(&bytes).map_err(|source| Error::CorruptRecord {
-                path: path.clone(),
-                source,
-            })?;
-        if record.version > RUN_VERSION {
-            return Err(Error::NewerRecord {
-                path,
-                version: record.version,
-            });
-        }
-        Ok(Some(record))
+        read_json(&self.file(name, process, "json"))
     }
 
     /// Returns the state of `process` from its run files.
@@ -408,7 +390,7 @@ impl Runs {
         workspace: &Workspace,
         manifest: Option<&Manifest>,
     ) -> Result<Vec<ProcessStatus>, Error> {
-        let containers = self.containers(workspace, manifest);
+        let containers = self.containers(workspace, manifest)?;
         let names = self.known(workspace, manifest, &containers)?;
         self.cap_logs(&workspace.name, &names)?;
         names
@@ -455,7 +437,7 @@ impl Runs {
     /// Returns the errors of [`Runs::status`].
     pub fn writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
         if self.record(name, process)?.is_none() {
-            return Ok(Self::container_runs(name, process));
+            return self.follower_alive(name, process);
         }
         Ok(
             matches!(self.state(name, process)?, ProcessState::Running { .. })
@@ -481,7 +463,7 @@ impl Runs {
                 running.push(process);
             }
         }
-        running.extend(Self::running_containers(&workspace.name));
+        running.extend(self.running_containers(&workspace.name)?);
         Ok(running)
     }
 
@@ -585,24 +567,33 @@ impl Runs {
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
         };
         self.cap_logs(&workspace.name, &order)?;
-        if order
+        let scope = if order
             .iter()
             .any(|name| manifest.containers.contains_key(name))
         {
             docker::check()?;
-        }
+            Some(self.ensure_scope(&workspace.name)?)
+        } else {
+            None
+        };
         self.assign_ports(store, workspace, manifest, &BTreeSet::new())?;
         let mut started = Vec::new();
         for process in &order {
-            let started_one = match manifest.unit(process) {
-                None => return Ok(UpOutcome::UnknownProcess(process.clone())),
-                Some(Unit::Container(declared)) => {
-                    if Self::container_runs(&workspace.name, process) {
+            let started_one = match (manifest.unit(process), &scope) {
+                (None, _) => return Ok(UpOutcome::UnknownProcess(process.clone())),
+                (Some(Unit::Container(declared)), Some(scope)) => {
+                    if self.container_runs(&workspace.name, process)? {
+                        // A container that runs is left as it is, apart
+                        // from a log follower that it may have lost.
+                        self.start_container(workspace, scope, process, declared)?;
                         continue;
                     }
-                    self.start_container(workspace, checkout, process, declared)
+                    self.start_container(workspace, scope, process, declared)
                 }
-                Some(Unit::Process(declared)) => {
+                (Some(Unit::Container(_)), None) => {
+                    return Ok(UpOutcome::UnknownProcess(process.clone()));
+                }
+                (Some(Unit::Process(declared)), _) => {
                     if matches!(
                         self.state(&workspace.name, process)?,
                         ProcessState::Running { .. }
@@ -615,11 +606,11 @@ impl Runs {
             match started_one {
                 Ok(None) => started.push(process),
                 Ok(Some(outcome)) => {
-                    self.roll_back(&workspace.name, &started);
+                    self.roll_back(&workspace.name, manifest, &started);
                     return Ok(outcome);
                 }
                 Err(error) => {
-                    self.roll_back(&workspace.name, &started);
+                    self.roll_back(&workspace.name, manifest, &started);
                     return Err(error);
                 }
             }
@@ -636,10 +627,12 @@ impl Runs {
     /// their start order, and deletes their run records, so a failed `up`
     /// leaves no process of its own running. Each step is best effort,
     /// because the caller reports the failure that stopped `up`.
-    fn roll_back(&self, name: &WorkspaceName, started: &[&String]) {
+    fn roll_back(&self, name: &WorkspaceName, manifest: &Manifest, started: &[&String]) {
         for process in started.iter().rev() {
-            if self.record(name, process).ok().flatten().is_none() {
-                let _ = docker::remove(&docker::container_name(name, process), self.grace);
+            if manifest.containers.contains_key(*process) {
+                if let Ok(Some(scope)) = self.scope(name) {
+                    let _ = self.remove_container(name, &scope, process);
+                }
                 continue;
             }
             if let Ok(Some(record)) = self.record(name, process) {
@@ -766,14 +759,7 @@ impl Runs {
             started,
             ports,
         };
-        let path = self.file(name, process, "json");
-        let mut bytes =
-            serde_json::to_vec_pretty(&record).map_err(|source| Error::CorruptRecord {
-                path: path.clone(),
-                source,
-            })?;
-        bytes.push(b'\n');
-        store::replace_file(&path, &bytes)
+        write_json(&self.file(name, process, "json"), &record)
     }
 
     /// Stops the processes `names` of `workspace`, or every process that a
@@ -796,7 +782,7 @@ impl Runs {
         manifest: Option<&Manifest>,
         names: &[String],
     ) -> Result<DownOutcome, Error> {
-        let containers = self.existing_containers(&workspace.name, manifest);
+        let containers = self.existing_containers(&workspace.name)?;
         let known = self.known(workspace, manifest, &containers)?;
         self.cap_logs(&workspace.name, &known)?;
         let recorded = self.recorded(&workspace.name)?;
@@ -823,11 +809,10 @@ impl Runs {
                 .is_some_and(|manifest| manifest.containers.contains_key(process))
                 || (!recorded.contains(process) && containers.contains(process));
             if is_container {
-                if containers.contains(process) {
-                    docker::remove(
-                        &docker::container_name(&workspace.name, process),
-                        self.grace,
-                    )?;
+                if containers.contains(process)
+                    && let Some(scope) = self.scope(&workspace.name)?
+                {
+                    self.remove_container(&workspace.name, &scope, process)?;
                 }
                 results.push(Ok(self.container_status_of(
                     workspace,
@@ -971,8 +956,10 @@ impl Runs {
     /// Returns the docker errors of [`Runs::down`], and
     /// [`Error::Unwritable`] when the directory cannot be deleted.
     pub fn forget(&self, name: &WorkspaceName) -> Result<(), Error> {
-        for container in docker::listed(name) {
-            docker::remove(&docker::container_name(name, &container), self.grace)?;
+        if let Some(scope) = self.scope(name)? {
+            for container in docker::listed(&scope)? {
+                self.remove_container(name, &scope, &container)?;
+            }
         }
         let dir = self.workspace_dir(name);
         match fs::remove_dir_all(&dir) {
@@ -1027,7 +1014,7 @@ fn wait_ready(launched: &mut Launched, port: Option<u16>, timeout: Duration) -> 
 /// group is the one `up` started even after its leader exited. A process
 /// with the recorded id and another start time took a free id after the
 /// group ended, so the group is not ours.
-fn owns_group(record: &RunRecord) -> Result<bool, Error> {
+pub(super) fn owns_group(record: &RunRecord) -> Result<bool, Error> {
     Ok(match process::start_time(record.pid)? {
         Some(started) => started == record.started,
         None => process::group_exists(record.pid),
@@ -1068,8 +1055,83 @@ fn code_and_signal(code: Option<i32>) -> (Option<i32>, Option<i32>) {
     }
 }
 
+/// A run file in JSON whose version mxv checks.
+pub(super) trait Versioned {
+    /// The file's version, or `None` for a file without one.
+    fn version(&self) -> Option<u32>;
+}
+
+impl Versioned for RunRecord {
+    fn version(&self) -> Option<u32> {
+        Some(self.version)
+    }
+}
+
+impl Versioned for BTreeSet<String> {
+    fn version(&self) -> Option<u32> {
+        None
+    }
+}
+
+/// Reads the run file at `path` in JSON, or returns `None` when it does
+/// not exist. It reads at most [`MOST_RUN_BYTES`] bytes.
+///
+/// # Errors
+///
+/// Returns [`Error::StateUnreadable`], [`Error::CorruptRecord`] for a file
+/// that does not parse, and [`Error::NewerRecord`] for a version above
+/// [`RUN_VERSION`].
+pub(super) fn read_json<T: for<'de> Deserialize<'de> + Versioned>(
+    path: &Path,
+) -> Result<Option<T>, Error> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::StateUnreadable {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MOST_RUN_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|source| Error::StateUnreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let value: T = serde_json::from_slice(&bytes).map_err(|source| Error::CorruptRecord {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Some(version) = value.version()
+        && version > RUN_VERSION
+    {
+        return Err(Error::NewerRecord {
+            path: path.to_path_buf(),
+            version,
+        });
+    }
+    Ok(Some(value))
+}
+
+/// Writes `value` in JSON to the run file at `path`, replacing it whole.
+///
+/// # Errors
+///
+/// Returns [`Error::Unwritable`] when the file cannot be written.
+pub(super) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|source| Error::CorruptRecord {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    bytes.push(b'\n');
+    store::replace_file(path, &bytes)
+}
+
 /// Deletes the file at `path`, and succeeds when it does not exist.
-fn remove_if_present(path: &Path) -> Result<(), Error> {
+pub(super) fn remove_if_present(path: &Path) -> Result<(), Error> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),

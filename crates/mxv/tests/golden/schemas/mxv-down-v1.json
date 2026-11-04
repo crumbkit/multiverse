@@ -420,7 +420,7 @@
       "type": "object",
       "properties": {
         "code": {
-          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited.",
+          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited. A container's code is the one docker reports,\nsuch as 137 for a container that SIGKILL ended.",
           "type": [
             "integer",
             "null"
@@ -468,7 +468,7 @@
           "format": "int32"
         },
         "state": {
-          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, or `stopped`.",
+          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, or `stopped`.",
           "$ref": "#/$defs/StateName"
         }
       },
@@ -495,6 +495,11 @@
           "description": "The process ended.",
           "type": "string",
           "const": "exited"
+        },
+        {
+          "description": "docker created the container and did not start it.",
+          "type": "string",
+          "const": "created"
         },
         {
           "description": "The process is not started.",

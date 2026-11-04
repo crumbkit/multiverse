@@ -187,47 +187,74 @@ Processes and containers share one set of names, and either may depend on
 the other. A process receives a container's host port through its own
 `ports`, as `api` receives `DYNAMODB_PORT` above.
 
-mxv names each container `mxv-<workspace>.<name>` and each volume
-`mxv-<workspace>.<volume>`, and labels both with `mxv.workspace=<workspace>`.
-A container also carries `mxv.container=<name>`. A container or volume name
-never holds `.`, so the last `.` separates it from the workspace's name, and
-two workspaces never share a container or a volume. mxv publishes each port
-on 127.0.0.1 only.
+One docker daemon may serve several mxv state directories, such as two
+checkouts that run mxv's tests at once, and each may have a workspace with
+the same name. So each state directory has a store id: a random 32-digit hex
+number that mxv writes to `$XDG_STATE_HOME/mxv/runs/.store-id` when the
+directory's first container starts. mxv labels each container and volume
+with `mxv.store=<id>`, `mxv.workspace=<workspace>`, and
+`mxv.container=<name>` or `mxv.volume=<volume>`. It names each container
+`mxv-<id8>-<workspace>.<name>` and each volume
+`mxv-<id8>-<workspace>.<volume>`, where `<id8>` is the first 8 digits of the
+store id. A container or volume name never holds `.`, so the last `.`
+separates it from the workspace's name.
+
+mxv lists a workspace's containers and volumes only by the store and
+workspace labels together. Before it stops, removes, adopts or reuses a
+container or volume that has one of its names, it reads the object's
+labels. When they do not name this store, workspace and object, mxv leaves
+the object alone and fails with `mxv::docker::foreign_object`, whose fields
+name the object's kind and name. mxv publishes each port on 127.0.0.1 only.
+
+A workspace runs docker only once it has run a container. The first `up`
+that starts one writes `$XDG_STATE_HOME/mxv/runs/<workspace>/.containers`.
+After that, `status`, `down`, `logs`, `remove` and `up` ask docker for the
+workspace's containers by their labels, whatever the manifest declares, so
+`down` stops a container that the manifest no longer declares. A workspace
+without that file never runs docker, so a missing docker or a daemon that
+does not answer never stops it.
 
 - `mxv up` checks that docker answers, then that each published port is
-  free, removes a stopped container of the same name, creates the missing
-  volumes and runs the container detached. Docker pulls the image when it
-  is missing. `docker run` has a deadline of 10 minutes for the pull, and
-  each other docker command one of 30 seconds. A container with a readiness
-  port is ready when that port answers. Docker's port proxy accepts a
-  connection before anything in the container listens and then closes it,
-  so mxv counts the port as answering only when a connection stays open for
-  0.3 seconds or the container sends data. A container without a readiness
-  port is ready once it has run for half a second. When the container stops
-  first, `up` fails with `mxv::process::exited` and its exit code; when it
-  misses its timeout, `up` removes it and fails with
-  `mxv::process::not_ready`.
+  free, removes a stopped container of its own with the same name, creates
+  the missing volumes and runs the container detached. Docker pulls the
+  image when it is missing. `docker run` has a deadline of 10 minutes for
+  the pull, and each other docker command one of 30 seconds. A container
+  with a readiness port is ready when that port answers. Docker's port
+  proxy accepts a connection before anything in the container listens and
+  then closes it, so mxv counts the port as answering only when a
+  connection stays open for 0.3 seconds or the container sends data. A
+  container without a readiness port is ready once it has run for half a
+  second. When the container stops first, `up` fails with
+  `mxv::process::exited` and its exit code; when it misses its timeout, or
+  a step after `docker run` fails, `up` removes it. A failed `up` removes
+  the containers it started before the failure, as it stops processes.
 - `mxv down` stops each container with `docker stop`, which sends SIGTERM
-  and then SIGKILL after 10 seconds, and removes it with its anonymous
-  volumes. Its named volumes stay, with their data.
+  and then SIGKILL after 10 seconds, and removes it. Its named volumes and
+  the anonymous volumes of its image stay, with their data. mxv records the
+  anonymous volumes in `$XDG_STATE_HOME/mxv/runs/<workspace>/.anonymous-volumes`,
+  so `mxv remove --delete-volumes` deletes them with the named ones.
 - `mxv status` reports a container's state as docker reports it, with
-  `kind` set to `container` and `pid` null. Docker reports a container that
-  a signal ended as code 128 plus the signal's number, which `status` reads
-  as it does for a process.
+  `kind` set to `container` and `pid` null: `running`, `exited`, or
+  `created` for a container that docker created and did not start. An
+  exited container's `code` is the code that docker reports, such as 137
+  for a container that SIGKILL ended, and its `signal` is null.
 - `mxv logs` reads `<container>.log`, which a detached `docker logs
-  --follow` appends to while the container exists, so the log stays after
-  `down` removes the container. Each `up` moves the previous log to
+  --follow` appends to while the container runs, so the log stays after
+  `down` removes the container. `<container>.follower` records the
+  follower's process id. The follower ends when the container stops, so
+  when docker restarts a container outside mxv, the next `up` or `status`
+  starts a new follower from the container's latest start. `logs -f` ends
+  once the follower has ended. Each `up` moves the previous log to
   `<container>.log.1`, as for a process.
 
-When the manifest declares containers and no `docker` program is on `PATH`,
-`up` fails with `mxv::docker::not_found`. When docker's daemon does not
-answer, it fails with `mxv::docker::unavailable`. A docker command that
-fails, such as a `docker run` whose image cannot be pulled, fails with
-`mxv::docker::failed` and docker's last line of error output. A manifest
-without containers never runs docker. `mxv status` and `mxv logs` of a workspace
-whose manifest declares containers fail with the same codes. `mxv down`
-still stops the workspace's processes, because a container cannot run
-while docker is missing or its daemon is down.
+When a workspace needs docker and no `docker` program is on `PATH`, its
+command fails with `mxv::docker::not_found`. When docker's daemon does not
+answer, it fails with `mxv::docker::unavailable`; `down` and `remove
+--force` fail too, so they never report a workspace as stopped while its
+containers may still run. A docker command that fails, such as a `docker
+run` whose image cannot be pulled, fails with `mxv::docker::failed`, whose
+fields name the operation, the container, and the line of docker's error
+output that starts with `docker:` or `Error`, or else its last line.
 
 Each process verb works on the workspace that `-w/--workspace` names, or on
 the one that holds the current directory when it names none. Its positional
@@ -324,14 +351,18 @@ deletes the record. It refuses, and changes nothing, in these cases:
 - The workspace's processes or containers run. The refusal is
   `mxv::workspace::running`, and `--force` stops them before it removes
   the workspace.
-- The workspace has docker volumes. A volume may hold the only copy of a
+- The workspace has docker volumes: named volumes, or anonymous volumes
+  of its containers' images. A volume may hold the only copy of a
   database, and docker cannot tell cheaply whether a volume holds data, so
   mxv treats every volume as holding data. The refusal is
-  `mxv::workspace::volumes`, which lists the volumes, and
-  `--delete-volumes` deletes them after the workspace is removed. `--force`
-  does not delete volumes. mxv also removes the workspace's stopped
-  containers. When docker's daemon does not answer, mxv cannot list the
-  volumes, so the removal goes ahead and leaves them in docker.
+  `mxv::workspace::volumes`, which lists the volumes, and its hint repeats
+  the refused command's flags with `--delete-volumes`, which deletes them
+  after the workspace is removed. `--force` does not delete volumes. mxv
+  also removes the workspace's stopped containers. A dry run lists the
+  containers that the removal removes and, with `--delete-volumes`, the
+  volumes that it deletes. When the workspace has run containers and
+  docker's daemon does not answer, the removal fails with
+  `mxv::docker::unavailable` and changes nothing.
 - A checkout has uncommitted changes or untracked files. The refusal is
   `mxv::workspace::dirty`, and `--force` discards the changes.
 - A checkout holds ignored files outside the disposable set, such as

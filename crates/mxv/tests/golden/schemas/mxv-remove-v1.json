@@ -507,6 +507,13 @@
             "$ref": "#/$defs/CheckoutRemovalRow"
           }
         },
+        "containers": {
+          "description": "The workspace's docker containers, running or stopped, that the\nremoval removes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "delete_unmerged": {
           "description": "Whether `--delete-unmerged` allowed deleting commits that no other\nbranch holds.",
           "type": "boolean"
@@ -540,6 +547,13 @@
         "path": {
           "description": "The workspace's directory.",
           "type": "string"
+        },
+        "volumes": {
+          "description": "The docker volumes that the removal deletes because of\n`--delete-volumes`, named and anonymous.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -550,7 +564,9 @@
         "force",
         "delete_unmerged",
         "disposable",
-        "discarded"
+        "discarded",
+        "containers",
+        "volumes"
       ]
     }
   }
