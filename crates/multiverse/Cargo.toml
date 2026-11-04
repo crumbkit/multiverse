@@ -24,6 +24,10 @@ toml = { workspace = true, features = ["std", "parse", "serde"] }
 rustix = { workspace = true }
 # `ready = { log = "..." }` compiles its pattern with regex.
 regex = { workspace = true }
+# phase holds the container engine that `up`, `down`, `status`, `logs` and
+# `remove` run a manifest's containers with, the run directory's paths, and
+# the rules of workspace and unit names. phase never depends on multiverse.
+phase = { package = "mxv-phase", path = "../phase", version = "0.0.0" }
 
 # macOS reads a process's start time and a process group's sockets with
 # libproc's calls, which libc declares, and clones a new checkout's ignored

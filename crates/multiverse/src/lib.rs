@@ -24,7 +24,6 @@ mod clock;
 mod clone;
 mod disk;
 mod disposable;
-mod docker;
 mod error;
 mod git;
 mod lookup;
@@ -63,7 +62,6 @@ pub use crate::record::{
     WorkspaceKind, agents_text,
 };
 pub use crate::redacted::Redacted;
-pub use crate::run_files::RUN_VERSION;
 pub use crate::runs::{
     DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES,
     MOST_TAIL_BYTES, ProcessState, ProcessStatus, Runs, START_GRACE, STOP_GRACE, TAIL_LINES,
@@ -77,5 +75,6 @@ pub use crate::workspaces::{
     Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode, NewOutcome, Removal,
     RemovalOutcome, RemovalPlan, Workspaces,
 };
+pub use phase::container::RUN_VERSION;
 #[cfg(test)]
 mod testing;

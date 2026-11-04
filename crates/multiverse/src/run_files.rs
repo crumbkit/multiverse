@@ -1,69 +1,29 @@
-//! The files that mxv keeps in a workspace's run directory: their paths,
-//! and reading and writing the JSON records among them.
+//! The files that mxv keeps in a workspace's run directory: reading and
+//! writing the JSON records among them, and the [`RunHost`] through which
+//! phase's container engine keeps its files, locks and log followers in
+//! the same directory.
 //!
 //! A workspace's run directory is `<runs>/<workspace>/`. Each process or
 //! container `<name>` of the workspace has files `<name>.<extension>`
 //! there, such as its log `<name>.log`, and `.lock` is the lock that `up`
-//! and `down` hold. [`RunDir`] is the one place that builds these paths.
+//! and `down` hold. phase's [`RunDir`] is the one place that builds these
+//! paths.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::time::Duration;
 
+use phase::container::{Follow, Host};
+pub(crate) use phase::container::{RUN_VERSION, RunDir, Versioned};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
-use crate::name::WorkspaceName;
-use crate::process;
-use crate::store;
-
-#[cfg(test)]
-mod tests;
-
-/// The run directory of one workspace.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RunDir(PathBuf);
-
-impl RunDir {
-    /// Returns the run directory of the workspace `workspace` in the runs
-    /// directory `runs`.
-    pub(crate) fn new(runs: &Path, workspace: &WorkspaceName) -> Self {
-        Self(runs.join(workspace.as_str()))
-    }
-
-    /// Returns the directory's path.
-    pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
-
-    /// Returns the path of the file of the process or container `unit`
-    /// with `extension`, `<unit>.<extension>`.
-    pub(crate) fn file(&self, unit: &str, extension: &str) -> PathBuf {
-        self.0.join(format!("{unit}.{extension}"))
-    }
-
-    /// Returns the log of the process or container `unit`, `<unit>.log`.
-    pub(crate) fn log(&self, unit: &str) -> PathBuf {
-        self.file(unit, "log")
-    }
-
-    /// Returns the older log of the process or container `unit`,
-    /// `<unit>.log.1`, which holds the log of its previous start or the
-    /// part of its log that a cap moved aside.
-    pub(crate) fn older_log(&self, unit: &str) -> PathBuf {
-        self.file(unit, "log.1")
-    }
-
-    /// Returns the lock file of the workspace, `.lock`.
-    pub(crate) fn lock(&self) -> PathBuf {
-        self.0.join(".lock")
-    }
-}
-
-/// The version of the run record that this version of multiverse writes
-/// and reads. A run record with a higher version is refused.
-pub const RUN_VERSION: u32 = 1;
+use crate::ports;
+use crate::process::{self, Launch};
+use crate::store::{self, Lock};
 
 /// The most bytes of a run record that multiverse reads.
 const MOST_RUN_BYTES: u64 = 64 * 1024;
@@ -97,21 +57,9 @@ pub(crate) fn owns_group(record: &RunRecord) -> Result<bool, Error> {
     })
 }
 
-/// A run file in JSON whose version mxv checks.
-pub(crate) trait Versioned {
-    /// The file's version, or `None` for a file without one.
-    fn version(&self) -> Option<u32>;
-}
-
 impl Versioned for RunRecord {
     fn version(&self) -> Option<u32> {
         Some(self.version)
-    }
-}
-
-impl Versioned for BTreeSet<String> {
-    fn version(&self) -> Option<u32> {
-        None
     }
 }
 
@@ -123,9 +71,7 @@ impl Versioned for BTreeSet<String> {
 /// Returns [`Error::StateUnreadable`], [`Error::CorruptRecord`] for a file
 /// that does not parse, and [`Error::NewerRecord`] for a version above
 /// [`RUN_VERSION`].
-pub(crate) fn read_json<T: for<'de> Deserialize<'de> + Versioned>(
-    path: &Path,
-) -> Result<Option<T>, Error> {
+pub(crate) fn read_json<T: DeserializeOwned + Versioned>(path: &Path) -> Result<Option<T>, Error> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -181,5 +127,74 @@ pub(crate) fn remove_if_present(path: &Path) -> Result<(), Error> {
             path: path.to_path_buf(),
             source,
         }),
+    }
+}
+
+/// The host side of phase's container engine: mxv's run files, store
+/// locks, port check and log followers, so the files that the engine
+/// writes are the ones that mxv's other commands read.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RunHost;
+
+impl Host for RunHost {
+    type Error = Error;
+    type Lock = Lock;
+
+    fn read_json<T: DeserializeOwned + Versioned>(&self, path: &Path) -> Result<Option<T>, Error> {
+        read_json(path)
+    }
+
+    fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), Error> {
+        write_json(path, value)
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
+        remove_if_present(path)
+    }
+
+    fn rotate_log(&self, log: &Path, older: &Path) -> Result<(), Error> {
+        store::rotate_log(log, older)
+    }
+
+    fn lock(&self, path: &Path, wait: Duration) -> Result<Lock, Error> {
+        store::lock(path, wait)
+    }
+
+    fn port_taken(&self, port: u16) -> bool {
+        ports::is_taken(port)
+    }
+
+    fn follower_alive(&self, record: &Path) -> Result<bool, Error> {
+        let record: Option<RunRecord> = read_json(record)?;
+        match record {
+            Some(record) => owns_group(&record),
+            None => Ok(false),
+        }
+    }
+
+    fn follow(&self, follow: &Follow<'_>) -> Result<(), Error> {
+        let follower = process::launch(&Launch {
+            name: follow.name,
+            argv: follow.argv,
+            cwd: follow.cwd,
+            env: &[],
+            log: follow.log,
+            exit_file: follow.exit_file,
+        })?;
+        // A follower whose record cannot be written stops with its
+        // handle, so mxv never leaves a follower that it does not know of.
+        let pid = follower.pid();
+        let started = process::start_time(pid)?.unwrap_or_default();
+        write_json(
+            follow.record,
+            &RunRecord {
+                version: RUN_VERSION,
+                pid,
+                started,
+                ports: BTreeMap::new(),
+            },
+        )?;
+        follower.keep();
+        Ok(())
     }
 }

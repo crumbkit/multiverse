@@ -1083,3 +1083,73 @@ fn logs_follow_gives_a_running_container_its_follower_back() {
     let _ = child.wait();
     assert!(restarted, "logs -f did not start a new follower");
 }
+
+/// Returns the workspace record of `setup`'s workspace, as JSON.
+fn record(setup: &Setup) -> Value {
+    let path = setup
+        .root()
+        .join(format!("state/mxv/workspaces/{}.json", setup.name));
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// Returns the label `label` of the docker object `object`, which `kind`
+/// such as `container` or `volume` inspects.
+fn label(kind: &str, object: &str, label: &str) -> String {
+    let format = format!(
+        "{{{{index .{} \"{label}\"}}}}",
+        if kind == "container" {
+            "Config.Labels"
+        } else {
+            "Labels"
+        }
+    );
+    docker(&[kind, "inspect", "--format", &format, "--", object]).1
+}
+
+#[test]
+fn up_labels_containers_and_volumes_with_the_stable_id_that_the_record_holds() {
+    if !docker_runs("up_labels_with_the_stable_id") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-stable-id", &web());
+    let minted = record(&setup)["id"].as_str().unwrap().to_owned();
+    assert_eq!(minted.len(), 32, "mxv new mints a stable id: {minted}");
+    // A record that an earlier mxv wrote has no id.
+    let path = setup
+        .root()
+        .join("state/mxv/workspaces/mxvtest-stable-id.json");
+    let mut legacy = record(&setup);
+    legacy.as_object_mut().unwrap().remove("id");
+    write(&path, &serde_json::to_string_pretty(&legacy).unwrap());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-stable-id"]);
+    assert_eq!(exit, 0, "{document}");
+    let id = record(&setup)["id"].as_str().unwrap().to_owned();
+    assert_eq!(id.len(), 32);
+    let run_record = setup
+        .root()
+        .join(format!("state/mxv/runs/{id}.json"))
+        .display()
+        .to_string();
+    for (kind, object) in [
+        ("container", setup.docker_name("web")),
+        ("volume", setup.docker_name("srv")),
+    ] {
+        assert_eq!(label(kind, &object, "mxv.workspace-id"), id, "{kind}");
+        assert_eq!(
+            label(kind, &object, "mxv.app"),
+            "mxvtest-stable-id",
+            "{kind}"
+        );
+        assert_eq!(label(kind, &object, "mxv.run-record"), run_record, "{kind}");
+        assert_eq!(
+            label(kind, &object, "mxv.workspace"),
+            "mxvtest-stable-id",
+            "{kind}"
+        );
+    }
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-stable-id"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(record(&setup)["id"], id, "the id never changes");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-stable-id"]);
+    assert_eq!(exit, 0, "{document}");
+}

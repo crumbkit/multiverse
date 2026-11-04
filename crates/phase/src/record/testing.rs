@@ -316,6 +316,28 @@ impl Docker for FakeDocker {
     }
 }
 
+/// A Docker whose every call fails, so a record that names a Docker object
+/// makes `sweep` fail, and `sweep` never reports such an object as gone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Unreachable;
+
+impl Unreachable {
+    /// Returns the failure of every call.
+    fn failure() -> DockerError {
+        DockerError::unavailable("the test's Docker does not answer".to_owned())
+    }
+}
+
+impl Docker for Unreachable {
+    fn find(&self, _object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+        Err(Self::failure())
+    }
+
+    fn remove(&self, _kind: DockerKind, _id: &str, _wait: Duration) -> Result<(), DockerError> {
+        Err(Self::failure())
+    }
+}
+
 /// Writes `text` to the file at `path`, as a damaged or foreign record
 /// would be.
 pub(crate) fn write_file(path: &std::path::Path, text: &str) {

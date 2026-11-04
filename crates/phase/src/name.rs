@@ -73,6 +73,16 @@ enum Rule {
     Id,
 }
 
+/// Reports whether `text` is a valid name of a manifest's process,
+/// container, volume or port: 1 to [`MOST_NAME_BYTES`] ASCII letters,
+/// digits, `-` and `_`, starting with a letter or a digit. Such a name
+/// never holds a `.`. It is the rule of a [`ProcessName`], a [`PortName`]
+/// and a [`VolumeName`].
+#[must_use]
+pub fn is_unit_name(text: &str) -> bool {
+    check(text, Rule::Unit).is_ok()
+}
+
 /// Checks `text` against `rule`.
 fn check(text: &str, rule: Rule) -> Result<(), BadName> {
     let Some(first) = text.chars().next() else {
@@ -233,3 +243,19 @@ name_type!(VolumeName, Rule::Unit);
 pub struct WorkspaceId(String);
 
 name_type!(WorkspaceId, Rule::Id);
+
+impl WorkspaceId {
+    /// Returns a new id: 32 lowercase hex digits from the operating
+    /// system's cryptographically secure random number generator. The host
+    /// program mints a workspace's id once, keeps it in the workspace's
+    /// record, and never changes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading the random number generator, whose
+    /// device is `/dev/urandom`.
+    pub fn mint() -> std::io::Result<Self> {
+        let text = crate::random::hex_id()?;
+        Self::try_from(text).map_err(std::io::Error::other)
+    }
+}

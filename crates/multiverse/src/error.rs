@@ -453,6 +453,37 @@ impl fmt::Display for Error {
     }
 }
 
+/// A failure of phase's container engine is the docker failure of the same
+/// kind, so mxv's codes and messages stay those of its docker backend.
+impl From<phase::container::ContainerError> for Error {
+    fn from(error: phase::container::ContainerError) -> Self {
+        use phase::container::ContainerError as Container;
+        match error {
+            Container::Missing { source, .. } => Self::DockerMissing { source },
+            Container::ComposeMissing { message, .. } => Self::DockerComposeMissing { message },
+            Container::NoAddressPool { message, .. } => Self::DockerNoAddressPool { message },
+            Container::Unavailable { message, .. } => Self::DockerUnavailable { message },
+            Container::Failed {
+                operation,
+                container,
+                message,
+                ..
+            } => Self::DockerFailed {
+                operation,
+                container,
+                message,
+            },
+            Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },
+            Container::Unreadable { path, source, .. } => Self::StateUnreadable { path, source },
+            other => Self::DockerFailed {
+                operation: "container engine",
+                container: None,
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

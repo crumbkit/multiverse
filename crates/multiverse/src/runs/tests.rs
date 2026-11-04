@@ -345,3 +345,57 @@ fn a_record_with_the_start_time_that_ps_prints_still_owns_its_running_process_on
     .unwrap();
     assert!(!crate::process::group_exists(pid));
 }
+
+#[test]
+fn the_manifests_containers_become_the_container_engines_specs_with_every_field() {
+    let manifest = Manifest::parse(
+        r#"
+ports = ["dynamodb"]
+
+[containers.dynamodb]
+image = "amazon/dynamodb-local:2.5.4"
+command = ["sh", "-c", "echo $HOME"]
+env = { AWS_REGION = "eu-west-1", TOKEN = "s3cret$x" }
+ports = { 8000 = "dynamodb" }
+volumes = { data = "/data" }
+
+[containers.cache]
+image = "busybox:1.37.0"
+"#,
+        std::path::Path::new("/repo/mxv.toml"),
+    )
+    .unwrap();
+    let specs = crate::runs::container_specs(&manifest.containers);
+    let names: Vec<&str> = specs.keys().map(|service| service.as_str()).collect();
+    assert_eq!(names, ["cache", "dynamodb"]);
+    let dynamodb = specs
+        .iter()
+        .find(|(service, _)| service.as_str() == "dynamodb")
+        .map(|(_, spec)| spec)
+        .unwrap();
+    assert_eq!(dynamodb.image, "amazon/dynamodb-local:2.5.4");
+    assert_eq!(
+        dynamodb.command.as_deref(),
+        Some(["sh".to_owned(), "-c".to_owned(), "echo $HOME".to_owned()].as_slice())
+    );
+    let variables: Vec<&str> = dynamodb.env.keys().map(String::as_str).collect();
+    assert_eq!(variables, ["AWS_REGION", "TOKEN"]);
+    assert_eq!(
+        dynamodb.env["TOKEN"],
+        phase::container::ComposeValue::new("s3cret$x".to_owned())
+    );
+    assert_eq!(
+        dynamodb.ports,
+        [phase::container::PublishedPort::new(
+            8000,
+            "dynamodb".to_owned()
+        )]
+    );
+    let volumes: Vec<(&str, &str)> = dynamodb
+        .volumes
+        .iter()
+        .map(|(key, path)| (key.as_str(), path.as_str()))
+        .collect();
+    assert_eq!(volumes, [("data", "/data")]);
+    assert!(!format!("{dynamodb:?}").contains("s3cret"));
+}

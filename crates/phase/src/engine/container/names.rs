@@ -1,6 +1,6 @@
 //! The names of docker objects: a [`Scope`] and the names that it gives a
 //! workspace's compose project, containers and volumes, and the names and
-//! ids that mxv reads back from docker.
+//! ids that the engine reads back from docker.
 //!
 //! Each type holds text that its constructor checked, so a function that
 //! takes one never receives a name that docker would read as an option or
@@ -8,13 +8,14 @@
 
 use std::ffi::OsStr;
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value};
 
 #[cfg(doc)]
 use crate::name::MOST_NAME_BYTES;
-use crate::name::{WorkspaceName, is_unit_name};
+use crate::name::{WorkspaceId, WorkspaceName, is_unit_name};
 
 /// The label that names the store id of an object's state directory.
 pub(crate) const STORE_LABEL: &str = "mxv.store";
@@ -28,11 +29,20 @@ pub(crate) const CONTAINER_LABEL: &str = "mxv.container";
 /// The label that names a volume's name in the manifest.
 pub(crate) const VOLUME_LABEL: &str = "mxv.volume";
 
+/// The label that names the stable id of an object's workspace, which
+/// phase's `sweep` matches an object by.
+pub(crate) const WORKSPACE_ID_LABEL: &str = "mxv.workspace-id";
+
+/// The label that names the absolute path of the run record of an
+/// object's workspace.
+pub(crate) const RUN_RECORD_LABEL: &str = "mxv.run-record";
+
+/// The label that names an object's app. Until mxv names apps, a
+/// workspace's app is named after the workspace.
+pub(crate) const APP_LABEL: &str = "mxv.app";
+
 /// The number of digits of the store id that project names hold.
 const SHORT_ID: usize = 8;
-
-/// The number of hex digits of a container id.
-const ID_DIGITS: usize = 64;
 
 /// The number of hex digits of a store id.
 const STORE_DIGITS: usize = 32;
@@ -47,7 +57,7 @@ fn is_hex(text: &str, digits: usize) -> bool {
 
 /// The text of a name that a constructor refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BadDockerName(pub(crate) String);
+pub struct BadDockerName(pub(crate) String);
 
 /// Implements [`AsRef<OsStr>`], [`fmt::Display`] and comparison with text
 /// for a name type that wraps a `String`, and `as_str` when the type is
@@ -57,6 +67,17 @@ macro_rules! name_type {
         impl $name {
             /// Returns the name as text.
             pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        name_type!($name);
+    };
+    ($name:ident, pub as_str) => {
+        impl $name {
+            /// Returns the name as text.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
                 &self.0
             }
         }
@@ -142,9 +163,9 @@ name_type!(ProjectName, as_str);
 /// accepts, and none holds a `.`, so the part of a container or volume
 /// name after the scope's `.` is always the service or volume.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ServiceName(String);
+pub struct ServiceName(String);
 
-name_type!(ServiceName, as_str);
+name_type!(ServiceName, pub as_str);
 
 impl ServiceName {
     /// Returns the service name `text`.
@@ -152,7 +173,7 @@ impl ServiceName {
     /// # Errors
     ///
     /// Returns [`BadDockerName`] when `text` breaks the rules of the type.
-    pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
+    pub fn new(text: &str) -> Result<Self, BadDockerName> {
         if is_unit_name(text) {
             Ok(Self(text.to_owned()))
         } else {
@@ -163,11 +184,11 @@ impl ServiceName {
 
 /// The name of a named volume in the manifest, such as `data`, which
 /// follows the rule of a [`ServiceName`]. Its docker name is
-/// `<project>.<volume>`, which [`Scope::volume_name`] builds.
+/// `<project>.<volume>`, which its scope builds.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct VolumeKey(String);
+pub struct VolumeKey(String);
 
-name_type!(VolumeKey, as_str);
+name_type!(VolumeKey, pub as_str);
 
 impl VolumeKey {
     /// Returns the volume name `text` of a manifest.
@@ -176,7 +197,7 @@ impl VolumeKey {
     ///
     /// Returns [`BadDockerName`] when `text` breaks the rules of a
     /// [`ServiceName`].
-    pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
+    pub fn new(text: &str) -> Result<Self, BadDockerName> {
         if is_unit_name(text) {
             Ok(Self(text.to_owned()))
         } else {
@@ -241,32 +262,70 @@ impl ContainerId {
     /// Returns [`BadDockerName`] when `text` is not 64 lowercase hex
     /// digits.
     pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
-        if is_hex(text, ID_DIGITS) {
-            Ok(Self(text.to_owned()))
-        } else {
-            Err(BadDockerName(text.to_owned()))
-        }
+        crate::record::hex_id(text.to_owned())
+            .map(Self)
+            .map_err(|_| BadDockerName(text.to_owned()))
     }
 }
 
+/// The stable id of a workspace and the path of its run record, which
+/// label the objects that a scope creates.
+#[derive(Clone, Debug)]
+pub(crate) struct Identity {
+    /// The workspace's stable id.
+    pub(crate) id: WorkspaceId,
+    /// The absolute path of the workspace's run record.
+    pub(crate) run_record: PathBuf,
+}
+
 /// One workspace of one store: its compose project and the labels and
-/// names of its containers and volumes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// names of its containers and volumes. Two scopes are equal when they
+/// name the same store and workspace.
+#[derive(Clone, Debug)]
 pub(crate) struct Scope {
     /// The store id.
     store: StoreId,
     /// The workspace.
     workspace: WorkspaceName,
+    /// The workspace's stable id and run record, which label the objects
+    /// that the scope creates, or `None` for a scope that only finds and
+    /// checks objects.
+    identity: Option<Identity>,
 }
+
+impl PartialEq for Scope {
+    fn eq(&self, other: &Self) -> bool {
+        self.store == other.store && self.workspace == other.workspace
+    }
+}
+
+impl Eq for Scope {}
 
 impl Scope {
     /// Returns the scope of the workspace `workspace` in the store with the
     /// id `store`.
-    pub(super) fn new(store: &StoreId, workspace: &WorkspaceName) -> Self {
+    pub(crate) fn new(store: &StoreId, workspace: &WorkspaceName) -> Self {
         Self {
             store: store.clone(),
             workspace: workspace.clone(),
+            identity: None,
         }
+    }
+
+    /// Returns the scope, whose objects are also labelled with `identity`.
+    pub(crate) fn identified(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// Returns the scope's store id.
+    pub(crate) const fn store(&self) -> &StoreId {
+        &self.store
+    }
+
+    /// Returns the scope's workspace.
+    pub(crate) const fn workspace(&self) -> &WorkspaceName {
+        &self.workspace
     }
 
     /// Returns the name of the scope's compose project,
@@ -300,13 +359,23 @@ impl Scope {
         VolumeName(format!("{}{volume}", self.prefix()))
     }
 
-    /// Returns the labels of the scope's object `object` under `label`.
+    /// Returns the labels of the scope's object `object` under `label`:
+    /// the store, workspace and object labels, and the workspace's stable
+    /// id, run record and app when the scope has its identity.
     pub(super) fn labels(&self, label: &str, object: &str) -> Value {
-        json!({
-            STORE_LABEL: self.store.as_str(),
-            WORKSPACE_LABEL: self.workspace.as_str(),
-            label: object,
-        })
+        let mut labels = Map::new();
+        let mut put = |key: &str, value: &str| {
+            labels.insert(key.to_owned(), Value::String(value.to_owned()));
+        };
+        put(STORE_LABEL, self.store.as_str());
+        put(WORKSPACE_LABEL, self.workspace.as_str());
+        put(label, object);
+        if let Some(identity) = &self.identity {
+            put(WORKSPACE_ID_LABEL, identity.id.as_str());
+            put(RUN_RECORD_LABEL, &identity.run_record.to_string_lossy());
+            put(APP_LABEL, self.workspace.as_str());
+        }
+        Value::Object(labels)
     }
 
     /// Reports whether `labels`, as [`super::objects`] prints them with

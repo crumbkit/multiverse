@@ -16,8 +16,8 @@
 //!
 //! A container of the manifest has the record `<container>.container`,
 //! which holds the id of the container that `up` started; docker holds its
-//! state. The `docker` module keeps that record, describes the compose
-//! project and checks the labels before it acts on a recorded id. Its
+//! state. phase's container engine keeps that record, describes the
+//! compose project and checks the labels before it acts on a recorded id. Its
 //! log is `<container>.log` too, which a detached `docker logs --follow`
 //! appends to while the container runs, so the log outlives the container
 //! that `mxv down` removes. `<container>.follower` records the follower's
@@ -34,10 +34,11 @@ use std::time::{Duration, Instant};
 use rustix::process::Signal;
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
-use crate::docker::{
-    self, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle, OwnedContainer,
-    Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
+use phase::container::{
+    self as docker, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle,
+    OwnedContainer, Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
 };
+
 use crate::error::Error;
 use crate::manifest::{Container, LogPattern, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
@@ -46,7 +47,7 @@ use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
 use crate::redacted::Redacted;
 use crate::run_files::{
-    RUN_VERSION, RunDir, RunRecord, owns_group, read_json, remove_if_present, write_json,
+    RUN_VERSION, RunDir, RunHost, RunRecord, owns_group, read_json, remove_if_present, write_json,
 };
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
@@ -650,7 +651,19 @@ impl Runs {
             .iter()
             .any(|name| manifest.containers.contains_key(name))
         {
-            Some(self.lifecycle(&workspace.name).prepare()?)
+            // The record holds the workspace's stable id before any docker
+            // object is labelled with it.
+            if workspace.id.is_none() {
+                store.update(workspace)?;
+            }
+            let Some(id) = workspace.id.clone() else {
+                return Err(Error::DockerFailed {
+                    operation: "workspace id",
+                    container: None,
+                    message: "the workspace's record holds no stable id".to_owned(),
+                });
+            };
+            Some(self.lifecycle(&workspace.name).prepare(&id)?)
         } else {
             None
         };
@@ -1178,13 +1191,13 @@ impl Runs {
     }
 }
 
-/// The containers of a workspace's app, which `Lifecycle` in the
-/// `docker` module starts, reports and stops. These methods put them among
+/// The containers of a workspace's app, which `Lifecycle` in phase's
+/// container engine starts, reports and stops. These methods put them among
 /// the workspace's processes and wait for their readiness.
 impl Runs {
     /// Returns the containers of the workspace `name`.
-    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle {
-        Lifecycle::new(&self.dir, name, self.grace, self.lock_wait)
+    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle<'static, RunHost> {
+        Lifecycle::new(&RunHost, &self.dir, name, self.grace, self.lock_wait)
     }
 
     /// Returns the names of the containers that `manifest` declares, and
@@ -1384,7 +1397,7 @@ impl Runs {
     fn wait_container(
         &self,
         workspace: &Workspace,
-        lifecycle: &Lifecycle,
+        lifecycle: &Lifecycle<'_, RunHost>,
         prepared: &Prepared,
         declared: &Container,
         container: &OwnedContainer,
@@ -1506,37 +1519,37 @@ impl Volumes {
     }
 }
 
-/// Returns the docker module's specs of the manifest's containers
+/// Returns the container engine's specs of the manifest's containers
 /// `containers`. A container or volume whose name no manifest accepts is
 /// left out; the manifest refuses such names when it is read.
 pub(crate) fn container_specs(containers: &BTreeMap<String, Container>) -> ContainerSpecs {
     containers
         .iter()
         .filter_map(|(name, container)| {
-            let spec = ContainerSpec {
-                image: container.image.clone(),
-                command: container.command.clone(),
-                env: container
-                    .env
-                    .iter()
-                    .map(|(variable, value)| (variable.clone(), ComposeValue::from(value)))
-                    .collect(),
-                ports: container
-                    .ports
-                    .iter()
-                    .map(|published| PublishedPort {
-                        container: published.container,
-                        port: published.port.clone(),
-                    })
-                    .collect(),
-                volumes: container
-                    .volumes
-                    .iter()
-                    .filter_map(|(volume, path)| {
-                        VolumeKey::new(volume).ok().map(|key| (key, path.clone()))
-                    })
-                    .collect(),
-            };
+            let mut spec = ContainerSpec::new(container.image.clone());
+            spec.command.clone_from(&container.command);
+            spec.env = container
+                .env
+                .iter()
+                .map(|(variable, value)| {
+                    (
+                        variable.clone(),
+                        ComposeValue::new(value.reveal().to_owned()),
+                    )
+                })
+                .collect();
+            spec.ports = container
+                .ports
+                .iter()
+                .map(|published| PublishedPort::new(published.container, published.port.clone()))
+                .collect();
+            spec.volumes = container
+                .volumes
+                .iter()
+                .filter_map(|(volume, path)| {
+                    VolumeKey::new(volume).ok().map(|key| (key, path.clone()))
+                })
+                .collect();
             service(name).map(|service| (service, spec))
         })
         .collect()

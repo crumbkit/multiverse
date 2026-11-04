@@ -1,6 +1,5 @@
 //! The Docker calls that `sweep` makes, behind a trait. The container
-//! module supplies the implementation that runs `docker`, and tests supply
-//! a fake.
+//! module's `DockerCli` runs `docker`, and tests supply a fake.
 
 use std::fmt;
 use std::time::Duration;
@@ -108,28 +107,3 @@ impl fmt::Display for DockerError {
 }
 
 impl std::error::Error for DockerError {}
-
-/// The Docker that `sweep` uses until the container module supplies the
-/// real one. Every call fails, so a record that names a Docker object makes
-/// `sweep` fail, and `sweep` never reports such an object as gone.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Unreachable;
-
-impl Unreachable {
-    /// Returns the failure of every call.
-    fn failure() -> DockerError {
-        DockerError::unavailable(
-            "phase cannot call Docker yet, because its container module is not built".to_owned(),
-        )
-    }
-}
-
-impl Docker for Unreachable {
-    fn find(&self, _object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
-        Err(Self::failure())
-    }
-
-    fn remove(&self, _kind: DockerKind, _id: &str, _wait: Duration) -> Result<(), DockerError> {
-        Err(Self::failure())
-    }
-}

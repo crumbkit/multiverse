@@ -22,32 +22,34 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::hash::{BuildHasher as _, RandomState};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::docker::command::{check, check_compose};
-use crate::docker::compose::{ContainerSpecs, Up, compose_env, compose_file, compose_up};
-use crate::docker::names::{ContainerId, Scope, ServiceName, StoreId, VolumeName};
-use crate::docker::objects::{
-    AnonymousVolume, ContainerState, FollowFiles, Inspected, OwnedContainer, Volume, delete_volume,
-    follow_logs, inspect_anonymous, inspect_id, inspect_named, inspect_volume, reinspect_volume,
-    remove, stop,
+use crate::engine::container::command::{check, check_compose};
+use crate::engine::container::compose::{
+    ContainerSpecs, Up, compose_env, compose_file, compose_up,
 };
-use crate::error::Error;
-use crate::name::WorkspaceName;
-use crate::ports;
-use crate::process;
-use crate::run_files::{
-    RUN_VERSION, RunDir, RunRecord, Versioned, owns_group, read_json, remove_if_present, write_json,
+use crate::engine::container::host::{Follow, Host, Versioned};
+use crate::engine::container::names::{
+    ContainerId, Identity, Scope, ServiceName, StoreId, VolumeName,
 };
-use crate::store;
+use crate::engine::container::objects::{
+    AnonymousVolume, ContainerState, Inspected, OwnedContainer, Volume, delete_volume, follow_args,
+    inspect_anonymous, inspect_id, inspect_named, inspect_volume, reinspect_volume, remove, stop,
+};
+use crate::engine::container::{ContainerError, RunDir};
+use crate::name::{WorkspaceId, WorkspaceName};
 
 #[cfg(test)]
 mod tests;
+
+/// The version of the run files that this version of the engine writes
+/// and reads, for containers and for the host's processes. A run file with
+/// a higher version is refused.
+pub const RUN_VERSION: u32 = 1;
 
 /// The file in the runs directory that holds the store id.
 const STORE_ID_FILE: &str = ".store-id";
@@ -113,21 +115,17 @@ impl Versioned for VolumesRecord {
     }
 }
 
-/// Returns a new store id: 32 hex digits from two hashes that std seeds
-/// with the operating system's randomness, mixed with the time and the
-/// process id.
-fn new_store_id() -> Result<StoreId, Error> {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let seed = (nanos, std::process::id());
-    let high = RandomState::new().hash_one(seed);
-    let low = RandomState::new().hash_one((seed, high));
-    let text = format!("{high:016x}{low:016x}");
-    StoreId::new(&text).map_err(|_| Error::DockerFailed {
-        operation: "store id",
-        container: None,
-        message: format!("mxv made the store id {text:?}, which is not 32 hex digits"),
+/// Returns a new store id: 32 hex digits from the operating system's
+/// cryptographically secure random number generator.
+fn new_store_id() -> Result<StoreId, ContainerError> {
+    let text = crate::random::hex_id()
+        .map_err(|error| ContainerError::failed("store id", None, error.to_string()))?;
+    StoreId::new(&text).map_err(|_| {
+        ContainerError::failed(
+            "store id",
+            None,
+            format!("mxv made the store id {text:?}, which is not 32 hex digits"),
+        )
     })
 }
 
@@ -137,7 +135,7 @@ fn new_store_id() -> Result<StoreId, Error> {
 /// those of the store id in the runs directory. A [`Lifecycle`] refuses a
 /// `Prepared` of another workspace or runs directory.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Prepared {
+pub struct Prepared {
     /// The run directory of the workspace that the scope names.
     dir: RunDir,
     /// The scope.
@@ -146,7 +144,7 @@ pub(crate) struct Prepared {
 
 /// What [`Lifecycle::start`] did.
 #[derive(Debug)]
-pub(crate) enum Start {
+pub enum Start {
     /// The recorded container already ran, and has a log follower now.
     Running,
     /// `docker compose up` started the container, and its log follower
@@ -171,7 +169,7 @@ pub(crate) enum Start {
 /// that they belong to. [`Lifecycle::delete_volumes`] refuses the volumes
 /// of another scope.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct WorkspaceVolumes {
+pub struct WorkspaceVolumes {
     /// The scope of the volumes, or `None` for a workspace without them.
     scope: Option<Scope>,
     /// The volumes.
@@ -180,7 +178,8 @@ pub(crate) struct WorkspaceVolumes {
 
 impl WorkspaceVolumes {
     /// Returns the volumes' docker names, in name order.
-    pub(crate) fn names(&self) -> Vec<String> {
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
         self.volumes
             .iter()
             .map(|volume| volume.name().as_str().to_owned())
@@ -188,9 +187,12 @@ impl WorkspaceVolumes {
     }
 }
 
-/// The containers of one workspace and their run records.
+/// The containers of one workspace and their run records, kept through the
+/// host `H`.
 #[derive(Debug)]
-pub(crate) struct Lifecycle {
+pub struct Lifecycle<'h, H> {
+    /// The host program's files, locks, port check and followers.
+    host: &'h H,
     /// The runs directory, which holds the store id.
     runs: PathBuf,
     /// The workspace's run directory.
@@ -203,17 +205,21 @@ pub(crate) struct Lifecycle {
     lock_wait: Duration,
 }
 
-impl Lifecycle {
+impl<'h, H: Host> Lifecycle<'h, H> {
     /// Returns the containers of the workspace `workspace` in the runs
-    /// directory `runs`. A container stops with `grace` between SIGTERM
-    /// and SIGKILL, and the store id's lock waits up to `lock_wait`.
-    pub(crate) fn new(
+    /// directory `runs`, whose files, locks and followers `host` keeps. A
+    /// container stops with `grace` between SIGTERM and SIGKILL, and the
+    /// store id's lock waits up to `lock_wait`.
+    #[must_use]
+    pub fn new(
+        host: &'h H,
         runs: &Path,
         workspace: &WorkspaceName,
         grace: Duration,
         lock_wait: Duration,
     ) -> Self {
         Self {
+            host,
             runs: runs.to_path_buf(),
             dir: RunDir::new(runs, workspace),
             workspace: workspace.clone(),
@@ -229,21 +235,23 @@ impl Lifecycle {
 
     /// Returns the store id, or `None` before the first container of any
     /// workspace started.
-    fn store_id(&self) -> Result<Option<StoreId>, Error> {
-        let record: Option<StoreIdRecord> = read_json(&self.runs.join(STORE_ID_FILE))?;
+    fn store_id(&self) -> Result<Option<StoreId>, H::Error> {
+        let record: Option<StoreIdRecord> = self.host.read_json(&self.runs.join(STORE_ID_FILE))?;
         Ok(record.map(|record| record.id))
     }
 
     /// Returns the store id, and writes a new one when the store has none.
     /// It holds `<runs>/.store-id.lock` meanwhile, so two commands that
     /// start the store's first containers at once agree on one id.
-    fn ensure_store_id(&self) -> Result<StoreId, Error> {
-        let _lock = store::lock(&self.runs.join(".store-id.lock"), self.lock_wait)?;
+    fn ensure_store_id(&self) -> Result<StoreId, H::Error> {
+        let _lock = self
+            .host
+            .lock(&self.runs.join(".store-id.lock"), self.lock_wait)?;
         if let Some(id) = self.store_id()? {
             return Ok(id);
         }
         let id = new_store_id()?;
-        write_json(
+        self.host.write_json(
             &self.runs.join(STORE_ID_FILE),
             &StoreIdRecord {
                 version: RUN_VERSION,
@@ -259,15 +267,24 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`super::command::check`] and
-    /// [`super::command::check_compose`], [`Error::Busy`] when another
-    /// command holds the store id's lock, and [`Error::Unwritable`].
-    pub(crate) fn prepare(&self) -> Result<Prepared, Error> {
+    /// Returns the errors of `docker version` and
+    /// `docker compose version`, and the host's errors when another
+    /// command holds the store id's lock or the store id cannot be written.
+    ///
+    /// The containers and volumes that the scope creates are also labelled
+    /// with the workspace's stable id `id`, the path of its run record,
+    /// `<runs>/<id>.json`, and its app. The host has saved `id` in the
+    /// workspace's record before it calls this.
+    pub fn prepare(&self, id: &WorkspaceId) -> Result<Prepared, H::Error> {
         check()?;
         check_compose()?;
+        let identity = Identity {
+            id: id.clone(),
+            run_record: self.runs.join(format!("{id}.json")),
+        };
         Ok(Prepared {
             dir: self.dir.clone(),
-            scope: Scope::new(&self.ensure_store_id()?, &self.workspace),
+            scope: Scope::new(&self.ensure_store_id()?, &self.workspace).identified(identity),
         })
     }
 
@@ -276,9 +293,8 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StateUnreadable`], [`Error::CorruptRecord`] and
-    /// [`Error::NewerRecord`] for a store id file that cannot be read.
-    pub(crate) fn existing(&self) -> Result<Option<Prepared>, Error> {
+    /// Returns the host's errors for a store id file that cannot be read.
+    pub fn existing(&self) -> Result<Option<Prepared>, H::Error> {
         Ok(self.store_id()?.map(|id| Prepared {
             dir: self.dir.clone(),
             scope: Scope::new(&id, &self.workspace),
@@ -290,21 +306,22 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerFailed`] for a `prepared` of another
+    /// Returns [`ContainerError::Failed`] for a `prepared` of another
     /// workspace or runs directory, before any docker command runs.
-    fn scope_of<'a>(&self, prepared: &'a Prepared) -> Result<&'a Scope, Error> {
+    fn scope_of<'a>(&self, prepared: &'a Prepared) -> Result<&'a Scope, H::Error> {
         if prepared.dir == self.dir {
             Ok(&prepared.scope)
         } else {
-            Err(Error::DockerFailed {
-                operation: "scope check",
-                container: None,
-                message: format!(
+            Err(ContainerError::failed(
+                "scope check",
+                None,
+                format!(
                     "the docker scope of the run directory {} cannot act on the workspace {}",
                     prepared.dir.path().display(),
                     self.workspace
                 ),
-            })
+            )
+            .into())
         }
     }
 
@@ -314,18 +331,18 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StateUnreadable`] when the run directory cannot be
+    /// Returns [`ContainerError::Unreadable`] when the run directory cannot be
     /// read.
-    pub(crate) fn recorded(&self) -> Result<BTreeSet<ServiceName>, Error> {
+    pub fn recorded(&self) -> Result<BTreeSet<ServiceName>, H::Error> {
         let dir = self.dir.path();
-        let unreadable = |source| Error::StateUnreadable {
+        let unreadable = |source| ContainerError::Unreadable {
             path: dir.to_path_buf(),
             source,
         };
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
-            Err(error) => return Err(unreadable(error)),
+            Err(error) => return Err(unreadable(error).into()),
         };
         let mut names = BTreeSet::new();
         for entry in entries {
@@ -344,8 +361,10 @@ impl Lifecycle {
 
     /// Returns the recorded id of the container of `service`. A record
     /// whose id is not a container id names no container.
-    fn recorded_id(&self, service: &ServiceName) -> Result<Option<ContainerId>, Error> {
-        let record: Option<ContainerRecord> = read_json(&self.file(service, CONTAINER_EXTENSION))?;
+    fn recorded_id(&self, service: &ServiceName) -> Result<Option<ContainerId>, H::Error> {
+        let record: Option<ContainerRecord> = self
+            .host
+            .read_json(&self.file(service, CONTAINER_EXTENSION))?;
         Ok(record.and_then(|record| ContainerId::new(&record.id).ok()))
     }
 
@@ -356,9 +375,9 @@ impl Lifecycle {
         &self,
         scope: &Scope,
         service: &ServiceName,
-    ) -> Result<Option<Inspected>, Error> {
+    ) -> Result<Option<Inspected>, H::Error> {
         match self.recorded_id(service)? {
-            Some(id) => inspect_id(scope, service, &id),
+            Some(id) => Ok(inspect_id(scope, service, &id)?),
             None => Ok(None),
         }
     }
@@ -368,13 +387,13 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns the errors of reading the records, [`Error::DockerForeign`],
-    /// the errors of [`super::command::check`] and [`Error::DockerFailed`].
-    pub(crate) fn state(
+    /// Returns the errors of reading the records, [`ContainerError::Foreign`],
+    /// the errors of `docker version` and [`ContainerError::Failed`].
+    pub fn state(
         &self,
         prepared: &Prepared,
         service: &ServiceName,
-    ) -> Result<Option<ContainerState>, Error> {
+    ) -> Result<Option<ContainerState>, H::Error> {
         Ok(self
             .inspect_recorded(self.scope_of(prepared)?, service)?
             .map(|inspected| inspected.state))
@@ -389,17 +408,17 @@ impl Lifecycle {
     ///
     /// Returns the errors of [`Lifecycle::state`] and of starting the
     /// follower.
-    pub(crate) fn status(
+    pub fn status(
         &self,
         prepared: &Prepared,
         service: &ServiceName,
-    ) -> Result<Option<ContainerState>, Error> {
+    ) -> Result<Option<ContainerState>, H::Error> {
         let Some(inspected) = self.inspect_recorded(self.scope_of(prepared)?, service)? else {
             return Ok(None);
         };
         if inspected.state == ContainerState::Running
             && !self.follower_alive(service)?
-            && let Ok(_lock) = store::lock(&self.dir.lock(), Duration::ZERO)
+            && let Ok(_lock) = self.host.lock(&self.dir.lock(), Duration::ZERO)
         {
             self.follow(&inspected, true)?;
         }
@@ -418,16 +437,16 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerForeign`], [`Error::DockerNoAddressPool`],
-    /// the errors of [`super::command::check`], [`Error::DockerFailed`],
+    /// Returns [`ContainerError::Foreign`], [`ContainerError::NoAddressPool`],
+    /// the errors of `docker version`, [`ContainerError::Failed`],
     /// and the errors of reading and writing the run records.
-    pub(crate) fn start(
+    pub fn start(
         &self,
         prepared: &Prepared,
         containers: &ContainerSpecs,
         service: &ServiceName,
         ports: &BTreeMap<String, u16>,
-    ) -> Result<Start, Error> {
+    ) -> Result<Start, H::Error> {
         let scope = self.scope_of(prepared)?;
         let declared = containers.get(service);
         match self.inspect_recorded(scope, service)? {
@@ -459,7 +478,7 @@ impl Lifecycle {
             let Some(number) = ports.get(&port.port).copied() else {
                 continue;
             };
-            if ports::is_taken(number) {
+            if self.host.port_taken(number) {
                 return Ok(Start::PortTaken {
                     port: port.port.clone(),
                     number,
@@ -479,12 +498,13 @@ impl Lifecycle {
             inspect_volume(scope, volume)?;
         }
         self.record_volumes(volumes)?;
-        store::rotate_log(
+        self.host.rotate_log(
             &self.dir.log(service.as_str()),
             &self.dir.older_log(service.as_str()),
         )?;
         let file = self.dir.path().join(COMPOSE_FILE);
-        write_json(&file, &compose_file(scope, containers, ports))?;
+        self.host
+            .write_json(&file, &compose_file(scope, containers, ports))?;
         let started = compose_up(
             scope,
             self.dir.path(),
@@ -494,18 +514,20 @@ impl Lifecycle {
         );
         // `compose up` may have created the container before it failed, so
         // the container is recorded and removed whatever it reported.
-        let recorded = inspect_named(scope, service).and_then(|inspected| {
-            if let Some(inspected) = &inspected {
-                write_json(
-                    &self.file(service, CONTAINER_EXTENSION),
-                    &ContainerRecord {
-                        version: RUN_VERSION,
-                        id: inspected.container.id().as_str().to_owned(),
-                    },
-                )?;
-            }
-            Ok(inspected)
-        });
+        let recorded = inspect_named(scope, service)
+            .map_err(H::Error::from)
+            .and_then(|inspected| {
+                if let Some(inspected) = &inspected {
+                    self.host.write_json(
+                        &self.file(service, CONTAINER_EXTENSION),
+                        &ContainerRecord {
+                            version: RUN_VERSION,
+                            id: inspected.container.id().as_str().to_owned(),
+                        },
+                    )?;
+                }
+                Ok(inspected)
+            });
         match started {
             Ok(Up::Started) => {}
             Ok(Up::PortAllocated(number)) => {
@@ -528,7 +550,7 @@ impl Lifecycle {
             }
             Err(error) => {
                 let _ = self.remove_recorded(scope, service);
-                return Err(error);
+                return Err(error.into());
             }
         }
         let Some(inspected) = recorded? else {
@@ -543,33 +565,33 @@ impl Lifecycle {
 
     /// Adds the named volumes `named` of the scope to the record of the
     /// workspace's volumes.
-    fn record_volumes(&self, named: Vec<VolumeName>) -> Result<(), Error> {
+    fn record_volumes(&self, named: Vec<VolumeName>) -> Result<(), H::Error> {
         self.record(named.iter().map(VolumeName::as_str))
     }
 
     /// Adds the anonymous volumes `anonymous`, which an inspection of one
     /// of the scope's containers found, to the record of the workspace's
     /// volumes.
-    fn record_anonymous(&self, anonymous: &[AnonymousVolume]) -> Result<(), Error> {
+    fn record_anonymous(&self, anonymous: &[AnonymousVolume]) -> Result<(), H::Error> {
         self.record(anonymous.iter().map(|volume| volume.name().as_str()))
     }
 
     /// Adds `names` to the record of the workspace's volumes.
-    fn record<'a>(&self, names: impl Iterator<Item = &'a str>) -> Result<(), Error> {
+    fn record<'a>(&self, names: impl Iterator<Item = &'a str>) -> Result<(), H::Error> {
         let path = self.dir.path().join(VOLUMES_FILE);
-        let mut record: VolumesRecord = read_json(&path)?.unwrap_or_default();
+        let mut record: VolumesRecord = self.host.read_json(&path)?.unwrap_or_default();
         let before = record.volumes.len();
         record.volumes.extend(names.map(str::to_owned));
         if record.volumes.len() == before {
             return Ok(());
         }
         record.version = RUN_VERSION;
-        write_json(&path, &record)
+        self.host.write_json(&path, &record)
     }
 
     /// Stops and removes the container `inspected`, and records its
     /// anonymous volumes, which stay until `mxv remove --delete-volumes`.
-    fn discard(&self, inspected: Inspected) -> Result<(), Error> {
+    fn discard(&self, inspected: Inspected) -> Result<(), H::Error> {
         stop(&inspected.container, self.grace)?;
         remove(inspected.container)?;
         self.record_anonymous(&inspected.anonymous)
@@ -577,7 +599,7 @@ impl Lifecycle {
 
     /// Stops and removes the recorded container of `service` in `scope`,
     /// records its anonymous volumes, and deletes its record.
-    fn remove_recorded(&self, scope: &Scope, service: &ServiceName) -> Result<(), Error> {
+    fn remove_recorded(&self, scope: &Scope, service: &ServiceName) -> Result<(), H::Error> {
         if let Some(inspected) = self.inspect_recorded(scope, service)? {
             self.discard(inspected)?;
         }
@@ -590,18 +612,20 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerForeign`], the errors of
-    /// [`super::command::check`], [`Error::DockerFailed`], and the errors
+    /// Returns [`ContainerError::Foreign`], the errors of
+    /// `docker version`, [`ContainerError::Failed`], and the errors
     /// of reading and writing the run records.
-    pub(crate) fn stop(&self, prepared: &Prepared, service: &ServiceName) -> Result<(), Error> {
+    pub fn stop(&self, prepared: &Prepared, service: &ServiceName) -> Result<(), H::Error> {
         self.remove_recorded(self.scope_of(prepared)?, service)
     }
 
     /// Deletes the record and the follower record of the container of
     /// `service`.
-    fn forget(&self, service: &ServiceName) -> Result<(), Error> {
-        remove_if_present(&self.file(service, CONTAINER_EXTENSION))?;
-        remove_if_present(&self.file(service, FOLLOWER_EXTENSION))
+    fn forget(&self, service: &ServiceName) -> Result<(), H::Error> {
+        self.host
+            .remove_file(&self.file(service, CONTAINER_EXTENSION))?;
+        self.host
+            .remove_file(&self.file(service, FOLLOWER_EXTENSION))
     }
 
     /// Stops and removes every recorded container of the workspace, for
@@ -611,7 +635,7 @@ impl Lifecycle {
     /// # Errors
     ///
     /// Returns the errors of [`Lifecycle::stop`].
-    pub(crate) fn stop_all(&self, prepared: &Prepared) -> Result<(), Error> {
+    pub fn stop_all(&self, prepared: &Prepared) -> Result<(), H::Error> {
         let scope = self.scope_of(prepared)?;
         for service in self.recorded()? {
             self.remove_recorded(scope, &service)?;
@@ -628,11 +652,7 @@ impl Lifecycle {
     /// # Errors
     ///
     /// Returns the errors of [`Lifecycle::status`].
-    pub(crate) fn writing(
-        &self,
-        prepared: &Prepared,
-        service: &ServiceName,
-    ) -> Result<bool, Error> {
+    pub fn writing(&self, prepared: &Prepared, service: &ServiceName) -> Result<bool, H::Error> {
         if self.follower_alive(service)? {
             return Ok(true);
         }
@@ -642,19 +662,16 @@ impl Lifecycle {
         if inspected.state != ContainerState::Running {
             return Ok(false);
         }
-        if let Ok(_lock) = store::lock(&self.dir.lock(), Duration::ZERO) {
+        if let Ok(_lock) = self.host.lock(&self.dir.lock(), Duration::ZERO) {
             self.follow(&inspected, true)?;
         }
         Ok(true)
     }
 
     /// Reports whether the log follower of `service` runs.
-    fn follower_alive(&self, service: &ServiceName) -> Result<bool, Error> {
-        let record: Option<RunRecord> = read_json(&self.file(service, FOLLOWER_EXTENSION))?;
-        match record {
-            Some(record) => owns_group(&record),
-            None => Ok(false),
-        }
+    fn follower_alive(&self, service: &ServiceName) -> Result<bool, H::Error> {
+        self.host
+            .follower_alive(&self.file(service, FOLLOWER_EXTENSION))
     }
 
     /// Starts a detached `docker logs --follow` that appends the output of
@@ -662,36 +679,26 @@ impl Lifecycle {
     /// records the follower's process id in `<service>.follower`. With
     /// `since` the follower starts at the container's last start, which
     /// skips the lines that an earlier follower copied.
-    fn follow(&self, inspected: &Inspected, since: bool) -> Result<(), Error> {
+    fn follow(&self, inspected: &Inspected, since: bool) -> Result<(), H::Error> {
         let service = inspected.container.service();
         let exit_file = self.file(service, "logs-exit");
-        remove_if_present(&exit_file)?;
-        // The follower runs in a process group of its own and ends when
-        // the container stops, so mxv does not wait for it.
-        let follower = follow_logs(
+        self.host.remove_file(&exit_file)?;
+        // The host starts the follower in a process group of its own, and
+        // it ends when the container stops, so the engine does not wait
+        // for it. A follower whose record cannot be written is stopped, so
+        // the host never leaves a follower that it does not know of.
+        let argv = follow_args(
             &inspected.container,
             since.then_some(inspected.started.as_str()),
-            &FollowFiles {
-                cwd: self.dir.path(),
-                log: &self.dir.log(service.as_str()),
-                exit_file: &exit_file,
-            },
-        )?;
-        // A follower whose record cannot be written stops with its
-        // handle, so mxv never leaves a follower that it does not know of.
-        let pid = follower.pid();
-        let started = process::start_time(pid)?.unwrap_or_default();
-        write_json(
-            &self.file(service, FOLLOWER_EXTENSION),
-            &RunRecord {
-                version: RUN_VERSION,
-                pid,
-                started,
-                ports: BTreeMap::new(),
-            },
-        )?;
-        follower.keep();
-        Ok(())
+        );
+        self.host.follow(&Follow {
+            name: service.as_str(),
+            argv: &argv,
+            cwd: self.dir.path(),
+            log: &self.dir.log(service.as_str()),
+            exit_file: &exit_file,
+            record: &self.file(service, FOLLOWER_EXTENSION),
+        })
     }
 
     /// Returns the volumes of the workspace that a removal deletes: the
@@ -703,11 +710,12 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
-    /// [`Error::DockerFailed`].
-    pub(crate) fn volumes(&self, prepared: &Prepared) -> Result<WorkspaceVolumes, Error> {
+    /// Returns [`ContainerError::Missing`], [`ContainerError::Unavailable`] and
+    /// [`ContainerError::Failed`].
+    pub fn volumes(&self, prepared: &Prepared) -> Result<WorkspaceVolumes, H::Error> {
         let scope = self.scope_of(prepared)?;
-        let record: Option<VolumesRecord> = read_json(&self.dir.path().join(VOLUMES_FILE))?;
+        let record: Option<VolumesRecord> =
+            self.host.read_json(&self.dir.path().join(VOLUMES_FILE))?;
         let services = self.recorded()?;
         if record.is_none() && services.is_empty() {
             return Ok(WorkspaceVolumes::default());
@@ -727,8 +735,8 @@ impl Lifecycle {
                 Ok(Some(volume)) => {
                     volumes.insert(name, volume);
                 }
-                Ok(None) | Err(Error::DockerForeign { .. }) => {}
-                Err(error) => return Err(error),
+                Ok(None) | Err(ContainerError::Foreign { .. }) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         for service in services {
@@ -750,24 +758,21 @@ impl Lifecycle {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerForeign`] for the first of `volumes` when
+    /// Returns [`ContainerError::Foreign`] for the first of `volumes` when
     /// they belong to another scope, before any docker command runs, and
     /// for a volume whose labels changed. Returns the errors of
-    /// [`Lifecycle::scope_of`], [`Error::DockerMissing`],
-    /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
-    pub(crate) fn delete_volumes(
+    /// the scope check, [`ContainerError::Missing`],
+    /// [`ContainerError::Unavailable`] and [`ContainerError::Failed`].
+    pub fn delete_volumes(
         &self,
         prepared: &Prepared,
         volumes: WorkspaceVolumes,
-    ) -> Result<(), Error> {
+    ) -> Result<(), H::Error> {
         let scope = self.scope_of(prepared)?;
         if let Some(first) = volumes.volumes.first()
             && volumes.scope.as_ref() != Some(scope)
         {
-            return Err(Error::DockerForeign {
-                kind: "volume",
-                name: first.name().as_str().to_owned(),
-            });
+            return Err(ContainerError::foreign("volume", first.name().as_str()).into());
         }
         for volume in volumes.volumes {
             if let Some(volume) = reinspect_volume(scope, &volume)? {

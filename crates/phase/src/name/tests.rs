@@ -86,3 +86,12 @@ fn a_volume_name_follows_the_rule_of_a_process_name() {
     assert!("cargo-cache".parse::<VolumeName>().is_ok());
     assert_eq!("a/b".parse::<VolumeName>(), Err(BadName::BadCharacter('/')));
 }
+
+#[test]
+fn a_minted_workspace_id_is_32_lowercase_hex_digits_and_each_mint_differs() {
+    let first = WorkspaceId::mint().unwrap();
+    let second = WorkspaceId::mint().unwrap();
+    assert_eq!(first.as_str().len(), 32);
+    assert!(first.as_str().parse::<WorkspaceId>().is_ok());
+    assert_ne!(first, second);
+}

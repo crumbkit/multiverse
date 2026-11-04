@@ -4,8 +4,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use phase::WorkspaceId;
 use serde::{Deserialize, Serialize};
 
+use crate::error::Error;
 use crate::name::WorkspaceName;
 
 /// The version of the record form that this version of multiverse writes
@@ -92,6 +94,13 @@ pub struct Workspace {
     /// out.
     #[serde(default, skip_serializing_if = "WorkspaceKind::is_worktree")]
     pub kind: WorkspaceKind,
+    /// The workspace's stable id: 32 lowercase hex digits, which mxv mints
+    /// when it creates the workspace and never changes, even when the
+    /// workspace moves. It labels the workspace's docker objects and names
+    /// its run record. A record that an earlier version wrote has none, and
+    /// gets one the first time mxv writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<WorkspaceId>,
     /// The workspace's name.
     pub name: WorkspaceName,
     /// The workspace's directory, which holds its `AGENTS.md` and one
@@ -115,6 +124,7 @@ impl Workspace {
         Self {
             version: RECORD_VERSION,
             kind: WorkspaceKind::Clone,
+            id: None,
             name,
             path,
             checkouts,
@@ -129,6 +139,26 @@ impl Workspace {
         self.version = WORKTREE_RECORD_VERSION;
         self.kind = WorkspaceKind::Worktree;
         self
+    }
+
+    /// Gives the workspace a new stable id when its record has none, and
+    /// reports whether it did. An id that the record holds is never
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when the operating system's
+    /// random number generator, `/dev/urandom`, cannot be read.
+    pub fn ensure_id(&mut self) -> Result<bool, Error> {
+        if self.id.is_some() {
+            return Ok(false);
+        }
+        let id = WorkspaceId::mint().map_err(|source| Error::StateUnreadable {
+            path: PathBuf::from("/dev/urandom"),
+            source,
+        })?;
+        self.id = Some(id);
+        Ok(true)
     }
 
     /// Returns the path of the workspace's `AGENTS.md`.

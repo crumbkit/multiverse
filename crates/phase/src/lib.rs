@@ -25,6 +25,7 @@ mod millis;
 mod name;
 mod phase;
 mod plan;
+mod random;
 mod record;
 mod report;
 mod select;
@@ -33,12 +34,13 @@ mod status;
 
 pub use crate::cancel::Cancel;
 pub use crate::engine::keeper;
+pub use crate::engine::container;
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 pub use crate::error::{Operation, PhaseError};
 pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
-    WorkspaceName,
+    WorkspaceName, is_unit_name,
 };
 pub use crate::phase::{
     DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines,

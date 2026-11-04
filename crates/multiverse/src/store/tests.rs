@@ -63,7 +63,7 @@ fn a_store_leaves_no_temporary_file_behind() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     store.create(&workspace("app")).unwrap();
-    store.update(&workspace("app")).unwrap();
+    store.update(&mut workspace("app")).unwrap();
     let names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -142,7 +142,7 @@ fn a_record_of_worktrees_written_again_keeps_version_one_and_no_kind() {
         .unwrap()
         .unwrap();
     found.ports.insert("api".to_owned(), 41001);
-    store.update(&found).unwrap();
+    store.update(&mut found).unwrap();
     let text = fs::read_to_string(dir.path().join("inbox-ingest.json")).unwrap();
     assert!(text.contains("\"version\": 1"), "{text}");
     assert!(!text.contains("kind"), "{text}");
@@ -228,7 +228,7 @@ fn a_record_keeps_its_allocated_ports_and_a_record_without_ports_leaves_the_key_
     let text = fs::read_to_string(store.path(&triage.name)).unwrap();
     assert!(!text.contains("ports"), "{text}");
     triage.ports.insert("api".to_owned(), 49_152);
-    store.update(&triage).unwrap();
+    store.update(&mut triage).unwrap();
     assert_eq!(
         store.read(&triage.name).unwrap().unwrap().ports["api"],
         49_152
@@ -280,4 +280,48 @@ fn rotating_a_missing_log_succeeds_and_a_present_log_replaces_the_older_one() {
     rotate_log(&log, &older).unwrap();
     assert_eq!(fs::read_to_string(&older).unwrap(), "previous\n");
     assert!(!log.exists());
+}
+
+#[test]
+fn a_record_without_a_stable_id_reads_with_none_and_its_first_write_gives_it_one_that_later_writes_keep()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    write(dir.path().join("inbox-ingest.json"), WORKTREE_RECORD);
+    let name = "inbox-ingest".parse().unwrap();
+    let mut found = store.read(&name).unwrap().unwrap();
+    assert_eq!(found.id, None);
+    store.update(&mut found).unwrap();
+    let id = found.id.clone().unwrap();
+    assert_eq!(id.as_str().len(), 32);
+    let mut again = store.read(&name).unwrap().unwrap();
+    assert_eq!(again.id.as_ref(), Some(&id));
+    assert_eq!(again.version, 1);
+    store.update(&mut again).unwrap();
+    assert_eq!(store.read(&name).unwrap().unwrap().id, Some(id));
+}
+
+#[test]
+fn a_workspace_keeps_its_stable_id_when_it_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut moved = workspace("triage");
+    moved.ensure_id().unwrap();
+    let id = moved.id.clone();
+    store.create(&moved).unwrap();
+    moved.path = PathBuf::from("/elsewhere/triage");
+    store.update(&mut moved).unwrap();
+    let found = store.read(&moved.name).unwrap().unwrap();
+    assert_eq!(found.path, PathBuf::from("/elsewhere/triage"));
+    assert_eq!(found.id, id);
+    assert!(!moved.ensure_id().unwrap());
+}
+
+#[test]
+fn two_workspaces_get_different_stable_ids() {
+    let mut first = workspace("first");
+    let mut second = workspace("second");
+    assert!(first.ensure_id().unwrap());
+    assert!(second.ensure_id().unwrap());
+    assert_ne!(first.id, second.id);
 }

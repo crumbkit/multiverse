@@ -1,7 +1,8 @@
-//! The engine that starts, supervises and stops an app's processes. Each
-//! submodule is empty until the code it names lands.
+//! The engine that starts, supervises and stops an app's processes. The
+//! container runner and the keeper are built, and each other submodule is
+//! empty until the code it names lands.
 
-mod container;
+pub mod container;
 mod host;
 pub mod keeper;
 #[cfg_attr(

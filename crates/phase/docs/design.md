@@ -347,6 +347,17 @@ phase labels every Compose project, container, network and volume it
 creates with the workspace and app, and records each container by its
 immutable id.
 
+The labels are `mxv.workspace-id`, the workspace's stable id, which is 32
+lowercase hex digits that mxv mints when it creates the workspace and keeps
+in the workspace's record; `mxv.run-record`, the absolute path of the
+workspace's run record; and `mxv.app`, the app, which is the workspace's
+name until mxv names apps. Objects also keep mxv's older labels,
+`mxv.store`, `mxv.workspace`, `mxv.container` and `mxv.volume`, so the
+objects that mxv created before it wrote the new labels stay manageable.
+`sweep` matches an object by `mxv.workspace-id`, and an object that carries
+only the older labels by `mxv.store` and `mxv.workspace`, until the object
+is recreated. It never removes an object without an mxv label.
+
 ### Container secrets
 
 Decided 4 November 2026 (P3): phase delivers each secret to a container as

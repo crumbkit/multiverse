@@ -1,29 +1,91 @@
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::docker::lifecycle::{
-    Lifecycle, Prepared, STORE_ID_FILE, StoreIdRecord, WorkspaceVolumes,
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::engine::container::ContainerError as Error;
+use crate::engine::container::host::{Follow, Host, Versioned};
+use crate::engine::container::lifecycle::{
+    Lifecycle, Prepared, RUN_VERSION, STORE_ID_FILE, StoreIdRecord, WorkspaceVolumes,
 };
-use crate::docker::names::{ServiceName, StoreId, VolumeName};
-use crate::docker::objects::{Volume, mint_anonymous};
-use crate::error::Error;
+use crate::engine::container::names::{ServiceName, StoreId, VolumeName};
+use crate::engine::container::objects::{Volume, mint_anonymous};
 use crate::name::WorkspaceName;
-use crate::run_files::{RUN_VERSION, write_json};
+
+/// A host that keeps the run files as plain JSON files, takes no lock and
+/// starts no follower.
+#[derive(Debug)]
+struct Files;
+
+impl Host for Files {
+    type Error = Error;
+    type Lock = ();
+
+    fn read_json<T: DeserializeOwned + Versioned>(&self, path: &Path) -> Result<Option<T>, Error> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).unwrap())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(Error::Unreadable {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
+
+    fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), Error> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test's host writes its run files directly"
+        )]
+        fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
+        let _ = fs::remove_file(path);
+        Ok(())
+    }
+
+    fn rotate_log(&self, _log: &Path, _older: &Path) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn lock(&self, _path: &Path, _wait: Duration) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn port_taken(&self, _port: u16) -> bool {
+        false
+    }
+
+    fn follower_alive(&self, _record: &Path) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    fn follow(&self, _follow: &Follow<'_>) -> Result<(), Error> {
+        Ok(())
+    }
+}
 
 /// Writes the store id file of the runs directory `runs`.
 fn write_store_id(runs: &Path) {
-    write_json(
-        &runs.join(STORE_ID_FILE),
-        &StoreIdRecord {
-            version: RUN_VERSION,
-            id: StoreId::new("0123456789abcdef0123456789abcdef").unwrap(),
-        },
-    )
-    .unwrap();
+    Files
+        .write_json(
+            &runs.join(STORE_ID_FILE),
+            &StoreIdRecord {
+                version: RUN_VERSION,
+                id: StoreId::new("0123456789abcdef0123456789abcdef").unwrap(),
+            },
+        )
+        .unwrap();
 }
 
-fn lifecycle(runs: &Path, workspace: &str) -> Lifecycle {
+fn lifecycle(runs: &Path, workspace: &str) -> Lifecycle<'static, Files> {
     Lifecycle::new(
+        &Files,
         runs,
         &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
         Duration::ZERO,
@@ -33,7 +95,7 @@ fn lifecycle(runs: &Path, workspace: &str) -> Lifecycle {
 
 /// Returns the `Prepared` of `lifecycle`, from its runs directory's store
 /// id.
-fn prepared(lifecycle: &Lifecycle) -> Prepared {
+fn prepared(lifecycle: &Lifecycle<'_, Files>) -> Prepared {
     lifecycle.existing().unwrap().unwrap()
 }
 
@@ -41,7 +103,7 @@ fn refused_scope<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(
         matches!(
             &result,
-            Err(Error::DockerFailed {
+            Err(Error::Failed {
                 operation: "scope check",
                 ..
             })
@@ -99,7 +161,7 @@ fn a_lifecycle_refuses_to_delete_the_volumes_of_another_workspace_before_it_runs
     assert!(
         matches!(
             &refused,
-            Err(Error::DockerForeign { kind: "volume", name })
+            Err(Error::Foreign { kind: "volume", name })
                 if name == "0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675"
         ),
         "{refused:?}"
