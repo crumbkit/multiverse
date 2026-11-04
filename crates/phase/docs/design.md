@@ -268,23 +268,52 @@ A process with no readiness probe is ready as soon as it starts.
 ### Containers
 
 Each container app is one Docker Compose project, and each of its processes
-is one Compose service. The Compose file holds no value. It maps each of a
-service's environment variables to a private reference, such as
-`POSTGRES_PASSWORD: "${MXV_ENV_postgres_1:-}"`, and phase sets the `MXV_ENV_*` values
-only on that service's `docker compose up` child process, which drops them
-when it exits. phase does not list a variable by its bare name, because
-Compose would then read it from the child's own environment, and a
-container variable named `PATH` or `DOCKER_HOST` would change which docker
-program or daemon the child uses. multiverse uses the same rule
-(crumbkit/multiverse#6), so its code can move into phase. The Docker engine
-still keeps the values in the container's configuration for the container's
-life, where `docker inspect` shows them; every way of passing an
-environment variable to a container does this. Docker's restart policy
-restarts container processes.
+is one Compose service. Docker's restart policy restarts container
+processes.
 
 phase labels every Compose project, container, network and volume it
 creates with the workspace and app, and records each container by its
 immutable id.
+
+### Container secrets
+
+Decided 4 November 2026 (P3): phase delivers each secret to a container as
+a file in a memory-only directory, and never through the container's
+environment.
+
+- The Compose file mounts a tmpfs at `/run/secrets` with mode 0700. The
+  directory lives in the container's memory, so a secret never reaches the
+  disk of the Mac or of the Docker virtual machine.
+- After the container starts, phase writes each secret to
+  `/run/secrets/<NAME>` by running `docker exec -i` with the value on
+  standard input. The value never appears in an argument list, the Compose
+  file, `docker inspect`, `docker compose config` or a container label.
+- The image's entrypoint is a small wrapper that phase supplies. It waits
+  until every file the app needs exists, then starts the app. The app reads
+  its secrets from those files.
+- To rotate a secret, such as a short-lived cloud key that its resolver
+  renews before it expires, phase rewrites the file the same way. The
+  container keeps running. An app that reads the file each time it uses the
+  value picks up the new value.
+- phase never serves a secret on the Mac's loopback, because OrbStack lets
+  every container reach the Mac's `127.0.0.1`.
+
+An image that can read a secret only from an environment variable falls
+back to environment references. The Compose file maps the variable to a
+private reference, such as `POSTGRES_PASSWORD: "${MXV_ENV_postgres_1:-}"`,
+and phase sets the `MXV_ENV_*` values only on that service's
+`docker compose up` child process. phase never lists a variable by its
+bare name, because Compose would then read it from the child's own
+environment, and a container variable named `PATH` or `DOCKER_HOST` would
+change which docker program or daemon the child uses. With this fallback,
+`docker inspect` and every process in the container can read the value, and
+a new value means recreating the container.
+
+The eval `/evals/container-secret-delivery-orbstack` in the owner's board
+measured each option on OrbStack 2.2.5 with test values. Compose secrets
+copy the value onto the virtual machine's disk, readable by every user in
+the container. A file bind-mounted from the Mac breaks when it is replaced.
+The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 ### Run record and sweep
 
@@ -322,8 +351,11 @@ A secret value takes only these paths:
 
 - for a host process, from starmap's resolvers into the keeper's
   environment, and from the keeper into the app process when it starts;
-- for a container, from starmap's resolvers into the `docker compose up`
-  child, and from there into the Docker engine.
+- for a container, from starmap's resolvers into phase, and from phase
+  through `docker exec -i` standard input into a file in the container's
+  tmpfs at `/run/secrets` (see [Container secrets](#container-secrets));
+  only an image that can read nothing but environment variables receives
+  it through the `docker compose up` child instead.
 
 No value is written to a file, an argument list, a log, the run record or a
 status document. When a resolver cannot supply a value, for example because
@@ -562,7 +594,7 @@ Each decision states what this draft assumes until it is decided.
 | --- | --- | --- |
 | P1 | What restarts a crashed host process: a keeper per process, one supervisor per workspace, or nothing until the next restart. | Decided 4 November 2026: a keeper per process. |
 | P2 | How phase runs containers: Docker Compose with one project per app, or the Docker Engine API directly. | Decided 4 November 2026: Docker Compose, one project per app, with no environment variable value in the Compose file. Each variable maps to a private `MXV_ENV_*` reference set only on that service's compose child, as in crumbkit/multiverse#6. |
-| P3 | How a container receives a secret. | The Compose file lists the name; the value is set on the `docker compose up` child only. |
+| P3 | How a container receives a secret. | Decided 4 November 2026: as a file in a tmpfs at `/run/secrets`, written by `docker exec -i` on standard input and rewritten to rotate it. Environment references remain only for images that can read nothing else. See [Container secrets](#container-secrets). |
 | P4 | How workspaces avoid each other on the network: allocated ports on 127.0.0.1, or one loopback address per workspace. | Decided 4 November 2026: allocated ports on 127.0.0.1 from multiverse's ledger. |
 | P5 | How `mxv` uses phase: by linking the library, or by running a `phase` program and reading its JSON. | Decided 4 November 2026: `mxv` links the library; other tools read state as JSON. |
 | P6 | Where the per-app choice between release and checkout lives. | Decided 4 November 2026: in multiverse's workspace record, changed with `mxv app edit` and `mxv app release`. |
