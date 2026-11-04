@@ -10,7 +10,8 @@ multiverse command, as `mxv phase …`, and the crate is published as
 `mxv-phase`. Other programs can link the library instead.
 
 phase is being designed. [docs/design.md](docs/design.md) describes what it
-will do and lists the decisions that are still open. No code exists yet.
+will do and lists the decisions that are still open. The library defines
+its interface, and every operation reports that it is not built yet.
 
 ## Licence
 

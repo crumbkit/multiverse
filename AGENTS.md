@@ -1,8 +1,11 @@
 # Working on multiverse
 
-multiverse is a Cargo workspace of two crates: `crates/multiverse`, the
-library, and `crates/mxv`, the command built on it. The rules are the Rust
-standards that [rust-standards.toml](rust-standards.toml) adopts.
+multiverse is a Cargo workspace of three crates: `crates/multiverse`, the
+library, `crates/mxv`, the command built on it, and `crates/phase`, the
+library that will run a workspace's apps. phase is published as
+`mxv-phase`, imported as `phase`, and described by
+[crates/phase/docs/design.md](crates/phase/docs/design.md). The rules are
+the Rust standards that [rust-standards.toml](rust-standards.toml) adopts.
 
 A change is ready when the pull-request lane passes:
 

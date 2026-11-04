@@ -1,0 +1,25 @@
+[package]
+name = "mxv-phase"
+description = "Runs a workspace's apps locally, as supervised host processes and Docker Compose projects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["workspace", "process", "supervisor", "compose"]
+categories = ["development-tools"]
+include = ["src/**/*.rs", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+
+# The package is published as `mxv-phase`, and code imports it as `phase`.
+[lib]
+name = "phase"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

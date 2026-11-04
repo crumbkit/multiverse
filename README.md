@@ -5,10 +5,12 @@ workspace holds one git worktree for each repository, branched from the
 latest main, an `AGENTS.md` that tells an agent how to work there, and a
 record from which an archived workspace can be restored.
 
-The repository holds two crates:
+The repository holds three crates:
 
 - [`multiverse`](crates/multiverse), the library.
 - [`mxv`](crates/mxv), the command built on the library.
+- [`phase`](crates/phase), published as `mxv-phase`, the library that will
+  run a workspace's apps for `mxv`.
 
 ## Quick start
 
