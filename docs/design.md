@@ -58,7 +58,9 @@ workspaces.
 - **Workspace.** A directory that multiverse created, holding one checkout
   per repository and a record of the workspace.
 - **App.** One program the workspace runs, such as an API server or a
-  database. An app has one or more processes.
+  database. An app has one or more processes. An app is a named entry in a
+  manifest, and one manifest can declare several apps. App names are unique
+  within a workspace, and phase names each app's Compose project after it.
 - **Source.** Where an app's program comes from. It is either a *release*,
   which phase downloads and verifies, or a *checkout*, which phase builds
   from the workspace's working tree. You choose per app, per workspace: the
