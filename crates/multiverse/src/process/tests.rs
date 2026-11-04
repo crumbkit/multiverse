@@ -128,9 +128,12 @@ fn the_start_time_in_a_proc_stat_line_is_field_22_even_when_the_name_holds_paren
 }
 
 #[test]
-fn two_processes_started_within_one_second_have_different_start_times() {
+fn two_processes_started_20_ms_apart_have_different_start_times() {
     let dir = tempfile::tempdir().unwrap();
     let first = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
+    // Linux counts a start in clock ticks, which are 10 ms at the usual
+    // 100 Hz, and macOS counts it in microseconds.
+    crate::clock::pause(std::time::Duration::from_millis(20));
     let second = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
     let times = (
         start_time(first.pid()).unwrap().unwrap(),
