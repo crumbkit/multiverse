@@ -406,8 +406,13 @@ before starting anything, and names the variable and the resolver.
 
 starmap can keep 1Password values in a per-user agent that holds them in
 memory for a limited time after one unlock, so that starting another
-workspace does not ask for 1Password again. phase reaches it only through
-starmap's resolver, and treats its values like any other secret.
+workspace does not ask for 1Password again. mxv's `EnvironmentSource`
+reaches the agent only through starmap's resolver, which falls back to
+reading 1Password directly. starmap never caches a value resolved in
+production mode, or one whose binding says `cache = false`. A keeper that
+resolves a fresh environment for a restart uses the same resolver. The
+resolver's API is still being decided in starmap, and phase builds against
+it once it lands.
 
 Any process running as the same user can read another process's environment
 on macOS. The keeper design limits how many processes hold a secret and for
@@ -446,6 +451,22 @@ The profile always denies an app the socket of starmap's secret agent and
 the 1Password and Keychain services. Only phase, outside the sandbox,
 resolves secrets, and an app receives only the values its own manifest
 declares.
+
+phase takes the agent's directory from starmap's resolver, so it denies
+exactly the path the agent uses. The agent ignores `TMPDIR` and uses the
+per-user temporary directory that macOS reports through
+`confstr(_CS_DARWIN_USER_TEMP_DIR)`, and `/run/user/<uid>` on Linux. On
+macOS the Seatbelt profile denies reading, writing and connecting to any
+socket below that directory, which is the control.
+
+Landlock on released Linux kernels cannot stop a `connect()` to an existing
+Unix socket by path; the access right that would cover it is not yet in a
+released kernel. On Linux, starmap therefore leaves the agent off unless the
+kernel's Landlock ABI has that right, so a sandboxed app has no agent to
+reach. If the agent is wanted on older kernels later, phase would mount an
+empty tmpfs over the agent's directory in the app's own mount namespace.
+An eval checks on both platforms that a process under phase's generated
+profile fails to connect to the agent's socket.
 
 phase and multiverse will share one generator for Seatbelt profiles.
 
