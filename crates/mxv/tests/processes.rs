@@ -440,12 +440,15 @@ fn a_second_command_on_a_workspace_fails_with_busy_while_up_waits_for_readiness(
         while !record.exists() && !up.is_finished() {
             std::thread::yield_now();
         }
-        let (exit, document) = setup.json(&["down", "-w", "triage"]);
-        assert_eq!(exit, 1, "{document}");
-        assert_eq!(document["code"], "mxv::workspace::busy", "{document}");
-        let (exit, document) = up.join().unwrap();
-        assert_eq!(exit, 1, "{document}");
-        assert_eq!(document["code"], "mxv::process::not_ready");
+        let (down_exit, down) = setup.json(&["down", "-w", "triage"]);
+        let (up_exit, up) = up.join().unwrap();
+        assert_eq!(down_exit, 1, "down: {down}\nup: {up}");
+        assert_eq!(
+            down["code"], "mxv::workspace::busy",
+            "down: {down}\nup: {up}"
+        );
+        assert_eq!(up_exit, 1, "{up}");
+        assert_eq!(up["code"], "mxv::process::not_ready", "{up}");
     });
 }
 
