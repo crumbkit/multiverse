@@ -69,6 +69,10 @@ workspaces.
 - **Runner.** How a process runs. A *host* process runs directly on the
   machine under the sandbox. A *container* process runs through Docker
   Compose.
+- **Service.** A supporting app that several apps share, such as one
+  Postgres. A service is declared once, in the workspace's manifest, and
+  each app that uses it says what it needs from it. See
+  [Shared services](#shared-services).
 - **Plan.** Plain data describing every app, process, source, port, probe,
   restart policy, dependency and permission of one workspace. A plan holds
   no secret values, so it can be printed, stored and reviewed.
@@ -82,7 +86,7 @@ belong there or in a separate file.
 ```toml
 [app]
 name = "api"
-depends = ["db"]
+depends = ["auth"]                        # other apps that must be ready first
 
 # Where the published program comes from.
 [release]
@@ -107,20 +111,71 @@ stop = { signal = "TERM", grace = "10s" }
 [permissions]
 write = ["$STATE"]                        # the app's own state directory
 listen = ["http"]
-connect = ["db", "api.stripe.com"]        # other apps by name, or external hosts
+connect = ["api.stripe.com"]              # other apps by name, or external hosts
 secrets = ["STRIPE_KEY"]
 
-# A supporting service run by Docker Compose.
-[app.db]
-runner = "container"
-image = "postgres:17"
-ready = { tcp = "pg" }
-env = ["POSTGRES_PASSWORD"]               # names only; values come from starmap at start
+# What the app needs from the workspace's shared services.
+[needs.postgres]
+database = "api"                          # the app's own database and role
 ```
 
 The environment variables an app reads are declared by starmap, not here.
 `secrets` in `[permissions]` lists which of those variables are secrets, so
 that phase can show you when an app starts asking for a new one.
+
+## Shared services
+
+Decided 4 November 2026 (P13): a service such as Postgres is declared once
+per workspace and shared by the apps that need it. Each workspace runs its
+own copy, so workspaces cannot affect each other, and removing a workspace
+removes its data.
+
+The workspace's manifest declares the service:
+
+```toml
+[service.postgres]
+kind = "postgres"                         # phase knows how to provision this kind
+runner = "container"
+image = "postgres:17"
+port = "pg"                               # a named port from multiverse's ledger
+ready = { tcp = "pg" }
+```
+
+An app's `[needs.<service>]` table says what it needs from the service. A
+need makes the app depend on the service, and lets the app's sandbox
+connect to the service's port. An app that declares no need cannot reach
+the service.
+
+### One database and role per app
+
+For a service of kind `postgres`, phase gives each app that needs it its
+own database and role. Before the app starts, phase creates the database
+and role if they do not exist, and gives the role access to that database
+alone. phase then adds `DATABASE_URL`, naming that role and database, to the
+app's environment. The app's starmap declaration still names
+`DATABASE_URL`, and records phase as its source. One app cannot read
+another app's data.
+
+phase generates the password of the service's superuser and of each role.
+It keeps them in the operating system's credential store, the Keychain on
+macOS, and never in a file, the plan, the run record or a log. A role's
+password reaches only its app's process, and the superuser's password
+reaches only the service's compose child and phase's provisioning step.
+
+A service without a `kind` is shared as it is: every app that needs it gets
+the same access, and phase provisions nothing.
+
+### Lifecycle and data
+
+- `mxv phase up api` starts the services api needs before it starts api.
+- `mxv phase down api` leaves a service running while another running app
+  needs it. `mxv phase down` with no app stops every app and then the
+  services.
+- A service's data lives in a Docker volume labelled with the workspace and
+  service. It survives `down` and restarts. `mxv phase reset SERVICE`
+  removes it after asking, and removing the workspace removes it too.
+- Schema migrations are each app's job. An app runs them as a process that
+  must finish before its server starts.
 
 ## Starting a workspace
 
@@ -168,7 +223,7 @@ A process with no readiness probe is ready as soon as it starts.
 Each container app is one Docker Compose project, and each of its processes
 is one Compose service. The Compose file holds no value. It maps each of a
 service's environment variables to a private reference, such as
-`DATABASE_URL: "${MXV_ENV_db_1:-}"`, and phase sets the `MXV_ENV_*` values
+`POSTGRES_PASSWORD: "${MXV_ENV_postgres_1:-}"`, and phase sets the `MXV_ENV_*` values
 only on that service's `docker compose up` child process, which drops them
 when it exits. phase does not list a variable by its bare name, because
 Compose would then read it from the child's own environment, and a
@@ -295,6 +350,7 @@ mxv phase restart APP[/PROCESS]...   # resolve the environment again, then resta
 mxv phase status [--json]
 mxv phase logs APP/PROCESS [--follow] [--since 5m] [--json]
 mxv phase sweep [--dry-run]          # stop what a crashed run left behind
+mxv phase reset SERVICE              # remove a shared service's data, after asking
 mxv phase plan check FILE            # validate a plan without running it
 mxv phase grants [APP]               # show and revoke granted permissions
 ```
@@ -351,3 +407,4 @@ Each decision states what this draft assumes until it is decided.
 | P10 | The trust model described above. | As described. |
 | P11 | Where an app's release, build and permission fields live: in `mxv.toml`, or in a separate file. | In `mxv.toml`. |
 | P12 | The command verbs. | `up` and `down`, matching the commands `mxv` already has. |
+| P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
