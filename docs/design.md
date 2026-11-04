@@ -331,7 +331,7 @@ Each decision states what this draft assumes until it is decided.
 
 | # | Decision | Draft assumes |
 | --- | --- | --- |
-| P1 | What restarts a crashed host process: a keeper per process, one supervisor per workspace, or nothing until the next restart. | A keeper per process. |
+| P1 | What restarts a crashed host process: a keeper per process, one supervisor per workspace, or nothing until the next restart. | Decided 4 November 2026: a keeper per process. |
 | P2 | How phase runs containers: Docker Compose with one project per app, or the Docker Engine API directly. | Docker Compose. |
 | P3 | How a container receives a secret. | The Compose file lists the name; the value is set on the `docker compose up` child only. |
 | P4 | How workspaces avoid each other on the network: allocated ports on 127.0.0.1, or one loopback address per workspace. | Allocated ports on 127.0.0.1 from multiverse's ledger. |
