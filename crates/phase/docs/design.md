@@ -307,12 +307,20 @@ finds it from the run record.
 
 phase uses the probe and restart vocabulary of process-compose:
 
-- probes: `http` (any 2xx passes), `tcp` and `command`, each with a period,
-  a timeout, and success and failure thresholds;
+- probes: `http` (any 2xx passes, and no redirect is followed), `tcp`,
+  `command` and `log` (a line written since the start matches a regular
+  expression), each with a period, a timeout, and success and failure
+  thresholds;
 - restart policies: `no`, `on-failure` and `always`, with exponential
   backoff and a maximum count.
 
 A process with no readiness probe is ready as soon as it starts.
+
+A readiness wait during `up` attempts the probe once each period until the
+passes in a row reach the success threshold. Failures do not end it, and the
+process's ready timeout bounds it. A liveness wait in a keeper ends when the
+failures in a row reach the failure threshold. A command probe of a
+container process runs inside its container through `docker exec`.
 
 ### Containers
 
