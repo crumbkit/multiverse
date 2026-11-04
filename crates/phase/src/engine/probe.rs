@@ -24,6 +24,9 @@
 //!   3xx status fails. It reads at most [`MOST_RESPONSE_BYTES`] bytes of
 //!   the response and only needs the status line.
 //! - `tcp` passes when a connection to 127.0.0.1 on the port succeeds.
+//!   The connection blocks in `connect_timeout`, so a TCP check, and the
+//!   connect step of an HTTP check, see a cancel only once the connection
+//!   succeeds or fails, at most the probe's timeout later.
 //! - `command` passes when the command exits with status 0 within the
 //!   timeout. A [`ProbeExec`] runs it with the process's environment:
 //!   [`HostExec`] for a host process, and `docker exec` in the container

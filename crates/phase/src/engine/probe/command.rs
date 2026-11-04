@@ -160,17 +160,23 @@ pub(crate) fn run_bounded(
     })
 }
 
-/// Reports whether the child `pid` has exited, and leaves it unreaped.
+/// Reports whether the child `pid` has exited, and leaves it unreaped. A
+/// wait that a signal interrupts is tried again.
 fn exited(pid: Option<Pid>) -> io::Result<bool> {
     let Some(pid) = pid else {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     };
     let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
-    rustix::process::waitid(WaitId::Pid(pid), options)
-        .map(|status| {
-            status.is_some_and(|status| status.exited() || status.killed() || status.dumped())
-        })
-        .map_err(io::Error::from)
+    loop {
+        match rustix::process::waitid(WaitId::Pid(pid), options) {
+            Ok(status) => {
+                return Ok(status
+                    .is_some_and(|status| status.exited() || status.killed() || status.dumped()));
+            }
+            Err(error) if error == rustix::io::Errno::INTR => {}
+            Err(error) => return Err(io::Error::from(error)),
+        }
+    }
 }
 
 /// Runs `run` through `exec` within `timeout`, and passes when it exits

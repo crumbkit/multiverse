@@ -15,7 +15,9 @@ use crate::plan::probe::is_sendable_path;
 /// cancel or its deadline in good time.
 const READ_SLICE: Duration = Duration::from_millis(50);
 
-/// Connects to 127.0.0.1 at `port` within `timeout`.
+/// Connects to 127.0.0.1 at `port` within `timeout`. The connection blocks
+/// in `connect_timeout`, so a cancel that comes meanwhile takes effect only
+/// once the connection succeeds or fails, at most `timeout` later.
 pub(super) fn connect(port: u16, timeout: Duration) -> Result<TcpStream, Failure> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     TcpStream::connect_timeout(&address, timeout).map_err(|error| match error.kind() {
@@ -32,7 +34,9 @@ pub(super) fn request(port: u16, path: &str) -> String {
 }
 
 /// Sends `GET path` to 127.0.0.1 at `port` and passes on a 2xx status,
-/// all within `timeout` and until `cancel` is set.
+/// all within `timeout` and until `cancel` is set. The connect step does not
+/// see `cancel` until `connect_timeout` returns, which is at most `timeout`
+/// later, and the read of the response sees it within [`READ_SLICE`].
 pub(super) fn attempt(port: u16, path: &str, timeout: Duration, cancel: &Cancel) -> Attempt {
     get(port, path, timeout, cancel).into()
 }
@@ -52,9 +56,6 @@ fn get(port: u16, path: &str, timeout: Duration, cancel: &Cancel) -> Result<(), 
     stream
         .write_all(request(port, path).as_bytes())
         .map_err(exchange)?;
-    stream
-        .set_read_timeout(Some(READ_SLICE))
-        .map_err(exchange)?;
     let line = status_line(&mut stream, deadline, cancel)?;
     match status(&line) {
         Some(code) if (200..300).contains(&code) => Ok(()),
@@ -63,13 +64,33 @@ fn get(port: u16, path: &str, timeout: Duration, cancel: &Cancel) -> Result<(), 
     }
 }
 
+/// A response that a status line is read from, whose reads can be told how
+/// long to block.
+pub(super) trait Response: Read {
+    /// Makes each later read block for at most `slice`, which is more than
+    /// zero, and then fail with a timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error that kept the limit from being set.
+    fn set_slice(&mut self, slice: Duration) -> io::Result<()>;
+}
+
+impl Response for TcpStream {
+    fn set_slice(&mut self, slice: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(slice))
+    }
+}
+
 /// Reads `response` until the end of its status line, at most
 /// [`MOST_RESPONSE_BYTES`] bytes, before `deadline` and until `cancel` is
 /// set. The line may end with CRLF or a bare LF, and the line returned
-/// holds neither. A read that times out is tried again until the deadline,
-/// so `response` should time out its reads after a short slice.
+/// holds neither. Before each read it limits the read to [`READ_SLICE`] or
+/// the time left, whichever is shorter, so it notices a cancel in good time
+/// and never reads past the deadline. A read that times out is tried again
+/// until the deadline.
 pub(super) fn status_line(
-    response: &mut impl Read,
+    response: &mut impl Response,
     deadline: Instant,
     cancel: &Cancel,
 ) -> Result<Vec<u8>, Failure> {
@@ -89,7 +110,8 @@ pub(super) fn status_line(
         if cancel.is_cancelled() {
             return Err(Failure::Cancelled);
         }
-        left(deadline)?;
+        let slice = READ_SLICE.min(left(deadline)?);
+        response.set_slice(slice).map_err(exchange)?;
         let room = MOST_RESPONSE_BYTES
             .saturating_sub(read.len())
             .min(buffer.len());
@@ -147,8 +169,14 @@ mod tests {
     use std::io::{self, Read};
     use std::time::{Duration, Instant};
 
-    use super::{Failure, MOST_RESPONSE_BYTES, status, status_line};
+    use super::{Failure, MOST_RESPONSE_BYTES, READ_SLICE, Response, status, status_line};
     use crate::cancel::Cancel;
+
+    impl Response for &[u8] {
+        fn set_slice(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn a_status_line_gives_its_code() {
@@ -173,6 +201,59 @@ mod tests {
             self.0 += buffer.len();
             Ok(buffer.len())
         }
+    }
+
+    impl Response for Endless {
+        fn set_slice(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A response that never answers, and records the time it is told to
+    /// block each read and the time left until a deadline when it is told.
+    struct Stalled {
+        deadline: Instant,
+        slices: Vec<(Duration, Duration)>,
+    }
+
+    impl Read for Stalled {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            let slice = self
+                .slices
+                .last()
+                .map_or(Duration::ZERO, |(slice, _)| *slice);
+            crate::clock::pause(slice);
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+    }
+
+    impl Response for Stalled {
+        fn set_slice(&mut self, slice: Duration) -> io::Result<()> {
+            let left = self.deadline.saturating_duration_since(Instant::now());
+            self.slices.push((slice, left));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_status_line_read_never_blocks_past_its_deadline() {
+        let deadline = Instant::now() + READ_SLICE + READ_SLICE / 2;
+        let mut response = Stalled {
+            deadline,
+            slices: Vec::new(),
+        };
+
+        let read = status_line(&mut response, deadline, &Cancel::new());
+
+        assert_eq!(read, Err(Failure::TimedOut));
+        assert!(response.slices.len() >= 2, "{:?}", response.slices);
+        for (slice, left) in &response.slices {
+            assert!(
+                *slice <= *left + Duration::from_millis(1),
+                "a read blocks {slice:?} with {left:?} left"
+            );
+        }
+        assert!(Instant::now() < deadline + READ_SLICE);
     }
 
     #[test]
