@@ -4,10 +4,16 @@ mxv new                Create a workspace with a git worktree of a repository, o
 mxv list               List the workspaces
 mxv show               Show workspaces by name, in the order given
 mxv cd                 Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
-mxv run                Run an app's processes, or one command in the app's environment
+mxv up                 Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
+mxv down               Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+mxv restart            Stop a workspace's processes and start them again
+mxv status             Report whether each process of a workspace is running, exited or stopped
+mxv logs               Print the last lines of a process's log, and follow it with --follow
 mxv archive            Archive a workspace, so restore can rebuild it at the same commits
 mxv restore            Rebuild an archived workspace at its archived commits
 mxv remove             Remove a workspace's checkouts, its merged branches, its directory and its record
+mxv ports              Manage the host ports that a workspace holds
+mxv ports reset        Give a stopped workspace new host ports, each different from the port it held
 mxv commands           Explore mxv's commands
 mxv commands list      List a branch of mxv's commands with their arguments, examples and columns
 mxv schemas            Explore the JSON documents that mxv prints

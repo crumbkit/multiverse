@@ -35,6 +35,7 @@ Columns:
   path         The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
   root         The workspace root that the run used, in which `new` creates a workspace's directory.
   root_source  Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+  ports        The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 
 Columns that --long adds:
   repositories  The top-level directory of each repository that the workspace checks out.

@@ -8,6 +8,10 @@ built on this library.
 
 `Workspaces` holds the operations: create, list, find, plan a removal and
 remove. It makes checkouts through the `Backend` trait, and `Git`, which
-runs `git worktree`, is the one backend. The library reads no environment
+runs `git worktree`, is the one backend. `Manifest` parses a repository's
+`mxv.toml`, and `Runs` starts, stops and reports the processes it declares,
+with a host port for each named port that the workspace's record keeps. The
+process supervision uses Unix process groups and signals, so it runs on
+Linux and macOS. The library reads no environment
 variable, and its caller passes the workspace root and the store's
 directory.

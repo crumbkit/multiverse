@@ -177,3 +177,37 @@ fn without_a_home_directory_the_records_and_the_default_root_are_refused() {
     let environment = Environment::read(|_| Some(OsString::from("/srv/mxv")), None);
     assert_eq!(environment.root().unwrap().path, PathBuf::from("/srv/mxv"));
 }
+
+#[test]
+fn the_run_files_sit_beside_the_records_in_the_state_directory() {
+    let home = Home::new();
+    let environment = home.environment(None);
+    assert_eq!(
+        environment.runs().unwrap(),
+        home.path().join(".local/state/mxv/runs")
+    );
+}
+
+#[test]
+fn the_snapshot_holds_the_current_directory_that_main_passes() {
+    let environment = Home::new()
+        .environment(None)
+        .with_current_dir(Some(PathBuf::from("/home/agent/mxv/triage")));
+    assert_eq!(
+        environment.current_dir(),
+        Some(Path::new("/home/agent/mxv/triage"))
+    );
+}
+
+#[test]
+fn without_a_ports_range_in_the_config_file_ports_come_from_20000_to_29999() {
+    let home = Home::new();
+    assert_eq!(home.environment(None).port_range().unwrap(), 20000..=29999);
+}
+
+#[test]
+fn the_config_file_ports_range_sets_the_ports_that_up_allocates_from() {
+    let home = Home::new();
+    home.config("ports_range = [23000, 23099]\n");
+    assert_eq!(home.environment(None).port_range().unwrap(), 23000..=23099);
+}

@@ -110,6 +110,31 @@ pub enum Error {
         /// The record's version.
         version: u32,
     },
+    /// An app's process could not start, such as when its `cwd` does not
+    /// exist.
+    ProcessUnstartable {
+        /// The process's name in the manifest.
+        process: String,
+        /// Why it could not start.
+        source: io::Error,
+    },
+    /// The process table could not be read, which `ps` reads to tell a
+    /// running process from a reused process id.
+    ProcessTable {
+        /// What went wrong.
+        message: String,
+    },
+    /// Another mxv command holds the lock of a workspace, or of port
+    /// allocation, for longer than [`crate::LOCK_WAIT`] by default.
+    Busy {
+        /// The lock file.
+        path: PathBuf,
+    },
+    /// Every port of the port range is held by a workspace or taken.
+    NoFreePort {
+        /// Which range was searched.
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -187,6 +212,20 @@ impl fmt::Display for Error {
                 "the workspace record {} has version {version}, which this version of multiverse cannot read",
                 path.display()
             ),
+            Self::ProcessUnstartable { process, source } => {
+                write!(formatter, "cannot start the process {process}: {source}")
+            }
+            Self::ProcessTable { message } => {
+                write!(formatter, "cannot read the process table: {message}")
+            }
+            Self::Busy { path } => write!(
+                formatter,
+                "another mxv command holds the lock {} and has not released it",
+                path.display()
+            ),
+            Self::NoFreePort { source } => {
+                write!(formatter, "cannot find a free port: {source}")
+            }
         }
     }
 }
@@ -197,6 +236,8 @@ impl std::error::Error for Error {
             Self::ProgramMissing { source, .. }
             | Self::StateUnreadable { source, .. }
             | Self::Unwritable { source, .. }
+            | Self::ProcessUnstartable { source, .. }
+            | Self::NoFreePort { source }
             | Self::Inaccessible { source, .. } => Some(source),
             Self::CorruptRecord { source, .. } => Some(source),
             Self::RepositoryNotFound { .. }
@@ -206,7 +247,9 @@ impl std::error::Error for Error {
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
             | Self::MismatchedRecord { .. }
-            | Self::NewerRecord { .. } => None,
+            | Self::NewerRecord { .. }
+            | Self::ProcessTable { .. }
+            | Self::Busy { .. } => None,
         }
     }
 }

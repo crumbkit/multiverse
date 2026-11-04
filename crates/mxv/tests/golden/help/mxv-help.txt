@@ -7,7 +7,14 @@ Work in a workspace
   list      List the workspaces
   show      Show workspaces by name, in the order given
   cd        Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
-  run       Run an app's processes, or one command in the app's environment
+
+Run a workspace's app
+  up        Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
+  down      Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+  restart   Stop a workspace's processes and start them again
+  status    Report whether each process of a workspace is running, exited or stopped
+  logs      Print the last lines of a process's log, and follow it with --follow
+  ports     Manage the host ports that a workspace holds
 
 Put a workspace away
   archive   Archive a workspace, so restore can rebuild it at the same commits

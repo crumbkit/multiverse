@@ -37,6 +37,7 @@ Columns:
   name     The workspace's name, which is also the name of its directory and of its checkouts' branch.
   branch   The branch that the workspace's checkouts were created on.
   path     The workspace's directory, which `mxv cd` prints.
+  ports    The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
   problem  Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
 Columns that --long adds:

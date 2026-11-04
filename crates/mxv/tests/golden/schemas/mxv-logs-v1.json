@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/logs/v1",
+  "description": "The last lines of a process's log, then with --follow each line that the process writes.",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/LogLine"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/logs/v1"
+    }
+  },
+  "required": [
+    "schema",
+    "data"
+  ],
+  "$defs": {
+    "LogLine": {
+      "description": "One line of a process's log, as `mxv logs` prints it.",
+      "type": "object",
+      "properties": {
+        "line": {
+          "description": "The line's text, without its line feed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "line"
+      ]
+    }
+  }
+}

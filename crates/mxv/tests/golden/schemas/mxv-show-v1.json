@@ -469,6 +469,16 @@
           "description": "The workspace's directory, which `mxv cd` prints. It comes from the\nworkspace's record, so it stays where the workspace was created when\nthe root changes later.",
           "type": "string"
         },
+        "ports": {
+          "description": "The host port that the workspace holds for each named port of its\nmanifest, which the first `mxv up` allocates.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          }
+        },
         "repositories": {
           "description": "The top-level directory of each repository that the workspace checks\nout.",
           "type": "array",
@@ -490,7 +500,8 @@
         "branch",
         "path",
         "root",
-        "root_source"
+        "root_source",
+        "ports"
       ]
     },
     "RootSource": {

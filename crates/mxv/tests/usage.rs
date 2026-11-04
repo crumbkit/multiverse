@@ -12,7 +12,7 @@ use snapbox::cmd::Command;
 #[test]
 fn each_run_appends_one_line_that_names_its_command_and_exit_code() {
     let state = tempfile::tempdir().unwrap();
-    for args in [&["commands", "list"][..], &["run"][..]] {
+    for args in [&["commands", "list"][..], &["archive"][..]] {
         Command::new(env!("CARGO_BIN_EXE_mxv"))
             .args(args)
             .current_dir(state.path())
@@ -34,6 +34,6 @@ fn each_run_appends_one_line_that_names_its_command_and_exit_code() {
         .collect();
     assert_eq!(
         commands,
-        [("commands list".to_owned(), 0), ("run".to_owned(), 1)]
+        [("commands list".to_owned(), 0), ("archive".to_owned(), 1)]
     );
 }

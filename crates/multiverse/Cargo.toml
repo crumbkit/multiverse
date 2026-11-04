@@ -18,6 +18,10 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 wait-timeout = { workspace = true }
+# `parse` and `serde` read the manifest `mxv.toml` into typed structs with
+# the spans that name a bad key's line.
+toml = { workspace = true, features = ["std", "parse", "serde"] }
+rustix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

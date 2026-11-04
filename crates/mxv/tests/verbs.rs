@@ -7,7 +7,7 @@ use serde_json::Value;
 use snapbox::cmd::Command;
 
 /// Each root verb with the fewest words that its arguments accept.
-const VERBS: &[&[&str]] = &[&["run"], &["archive"], &["restore"]];
+const VERBS: &[&[&str]] = &[&["archive"], &["restore"]];
 
 /// Runs `mxv` with `args` and `--json` in an empty directory, and returns
 /// the exit code and the JSON document that it printed.

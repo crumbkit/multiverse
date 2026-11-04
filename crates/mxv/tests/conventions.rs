@@ -21,6 +21,12 @@
 //! measures them before it replaces that path with its placeholder. `new`
 //! runs as a dry run, so the examples fetch nothing.
 //!
+//! The process verbs `up`, `restart` and `logs` need a live checkout with
+//! an `mxv.toml` and start real processes, so their examples do not run
+//! here, and `tests/processes.rs` runs them instead. `down` and `status`
+//! of the fixture's workspace run, because they read the run files, which
+//! the fixture does not hold, and need no checkout.
+//!
 //! The refusals of `remove` need live checkouts, which a record under
 //! `/home/agent` cannot name. The recovery and twin checks therefore also
 //! start from [`live_workspaces`], which creates real workspaces with the
@@ -29,7 +35,7 @@
 //! of that fixture, and acts on the real checkouts, so each refusal has a
 //! workspace of its own.
 //!
-//! `run`, `archive` and `restore` are declared before they are built. Each
+//! `archive` and `restore` are declared before they are built. Each
 //! one fails with `mxv::command::unbuilt`, so its examples cannot run and a
 //! write verb has no document yet. The opt-outs below name each verb and
 //! say so, and the pull request that builds a verb removes its opt-outs.
@@ -49,10 +55,14 @@ use mxv::{
     BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES,
     CONFIG_INVALID, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
     ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE,
-    PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
-    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
-    REPOSITORY_NOT_FOUND, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED,
-    WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
+    MANIFEST_INVALID, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNKNOWN_KEY,
+    MANIFEST_UNREADABLE, PATH_INACCESSIBLE, PORT_EXHAUSTED, PORT_NOT_FOUND, PORT_TAKEN,
+    PROCESS_EXITED, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE,
+    PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER,
+    RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, RUN_CODES, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_BUSY,
+    WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
 };
 use tempfile::TempDir;
 
@@ -61,13 +71,21 @@ use crate::support::{git, repository};
 /// The reason that an unbuilt verb's examples do not run.
 const NO_RUN: &str = "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.";
 
+/// The reason that a process verb's examples do not run.
+const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.";
+
+/// The reason that `down` and `restart` ask no question.
+const NO_QUESTION: &str = "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";
+
 /// The reason that an unbuilt write verb declares no document.
 const NO_DOCUMENT: &str = "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.";
 
 /// The `mxv` command's opt-outs from crumbkit's conventions, which every
 /// check below reads.
 const ALLOW: &[Allow] = &[
-    Allow::new(Rule::Examples, "run", NO_RUN),
+    Allow::new(Rule::Examples, "up", NO_LIVE_CHECKOUT),
+    Allow::new(Rule::Examples, "restart", NO_LIVE_CHECKOUT),
+    Allow::new(Rule::Examples, "logs", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "archive", NO_RUN),
     Allow::new(Rule::Examples, "restore", NO_RUN),
     Allow::new(
@@ -82,13 +100,16 @@ const ALLOW: &[Allow] = &[
     ),
     Allow::new(Rule::GuideDocument, "archive", NO_DOCUMENT),
     Allow::new(Rule::GuideDocument, "restore", NO_DOCUMENT),
+    Allow::new(Rule::Yes, "down", NO_QUESTION),
+    Allow::new(Rule::Yes, "restart", NO_QUESTION),
     Allow::new(
         Rule::Yes,
-        "run",
-        "run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.",
+        "ports reset",
+        "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
     ),
+    Allow::new(Rule::Examples, "ports reset", NO_LIVE_CHECKOUT),
     Allow::untwinned(
-        Failing::new(&UNBUILT, &["run"]),
+        Failing::new(&UNBUILT, &["archive"]),
         "Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.",
     ),
     Allow::untwinned(
@@ -210,7 +231,12 @@ fn every_command_and_argument_has_one_name() {
 
 #[test]
 fn every_command_is_a_root_verb_or_a_resource_followed_by_its_verb() {
-    crumbkit_test::check_grammar(&Cli::command(), Pages::rendered(&GUIDE), &["usage"], ALLOW);
+    crumbkit_test::check_grammar(
+        &Cli::command(),
+        Pages::rendered(&GUIDE),
+        &["usage", "reset"],
+        ALLOW,
+    );
 }
 
 #[test]
@@ -240,7 +266,7 @@ fn every_exit_code_meets_the_exit_code_rules() {
 
 #[test]
 fn every_failure_code_is_declared_once_and_spelled_by_the_rules() {
-    crumbkit_test::check_codes(&GUIDE, &[CODES, UNBUILT_CODES]);
+    crumbkit_test::check_codes(&GUIDE, &[CODES, RUN_CODES, UNBUILT_CODES]);
 }
 
 #[test]
@@ -366,6 +392,13 @@ const NEW_NO_GIT: Failing<'static> = Failing::new(
 )
 .env(&[("PATH", Some("/nonexistent"))]);
 
+/// `status` outside every workspace, without a name.
+const STATUS_OUTSIDE: Failing<'static> = Failing::new(&WORKSPACE_NOT_CURRENT, &["status"]);
+
+/// `status` of a name that no workspace has.
+const STATUS_MISSING: Failing<'static> =
+    Failing::new(&WORKSPACE_NOT_FOUND, &["status", "-w", "missing"]);
+
 /// The words of `new` that the fixture accepts, which each `new` line above
 /// differs from in one word.
 const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "app", "--dry-run"];
@@ -389,7 +422,9 @@ const STARTS: &[Failing<'static>] = &[
     BAD_CONFIG,
     UNREADABLE_CONFIG,
     Failing::new(&CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
-    Failing::new(&UNBUILT, &["run"]),
+    Failing::new(&UNBUILT, &["archive"]),
+    STATUS_OUTSIDE,
+    STATUS_MISSING,
 ];
 
 /// The declared codes that no command line in this test provokes, because
@@ -431,8 +466,45 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
         &FILE_UNWRITABLE,
         "Only a directory without write permission or a full disk provokes it, and the examples write nothing outside their fresh directories.",
     ),
+    Unprovoked::new(&WORKSPACE_RUNNING, LIVE),
+    Unprovoked::new(&MANIFEST_NOT_FOUND, LIVE),
+    Unprovoked::new(&MANIFEST_UNKNOWN_KEY, LIVE),
+    Unprovoked::new(&MANIFEST_NEWER, LIVE),
+    Unprovoked::new(&PORT_NOT_FOUND, LIVE),
+    Unprovoked::new(&MANIFEST_RESERVED, LIVE),
+    Unprovoked::new(&MANIFEST_INVALID, LIVE),
+    Unprovoked::new(
+        &MANIFEST_UNREADABLE,
+        "Only an mxv.toml without read permission provokes it, in a live checkout that the fixture cannot hold.",
+    ),
+    Unprovoked::new(&PROCESS_NOT_FOUND, LIVE),
+    Unprovoked::new(&PROCESS_EXITED, LIVE),
+    Unprovoked::new(&PROCESS_NOT_READY, LIVE),
+    Unprovoked::new(
+        &PROCESS_UNSTOPPABLE,
+        "Only a process group that outlives SIGKILL provokes it, such as a process stuck in the kernel, which a test cannot make on demand.",
+    ),
+    Unprovoked::new(&PORT_TAKEN, LIVE),
+    Unprovoked::new(
+        &PROCESS_UNSTARTABLE,
+        "Only a manifest process whose cwd is missing from a live checkout provokes it; the library's process tests provoke it.",
+    ),
+    Unprovoked::new(
+        &PROCESS_TABLE_UNREADABLE,
+        "Only a PATH without ps, during a run that has started processes, provokes it, which the fixture cannot hold.",
+    ),
+    Unprovoked::new(
+        &PORT_EXHAUSTED,
+        "Only a port range whose every port is held or taken provokes it.",
+    ),
+    Unprovoked::new(
+        &WORKSPACE_BUSY,
+        "Only a second mxv command that runs while the first holds the workspace's lock provokes it; tests/processes.rs provokes it.",
+    ),
 ];
 
+/// The reason that a code of the process verbs is unprovoked here.
+const LIVE: &str = "Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.";
 /// The variables of the runs that create the live workspaces, beside the
 /// XDG directories: git without the person's configuration, with an author
 /// for the commits.
@@ -549,9 +621,12 @@ fn every_recovery_leads_to_a_command_that_runs() {
             .into_iter()
             .map(RuntimeFailing::into_failing),
     );
-    let recoveries = Recoveries::new(examples(&repositories.path), &[CODES, UNBUILT_CODES])
-        .starts(&starts)
-        .unprovoked(UNPROVOKED);
+    let recoveries = Recoveries::new(
+        examples(&repositories.path),
+        &[CODES, RUN_CODES, UNBUILT_CODES],
+    )
+    .starts(&starts)
+    .unprovoked(UNPROVOKED);
     crumbkit_test::check_recoveries(&Cli::command(), &GUIDE, &recoveries, "tests/golden");
 }
 
@@ -571,6 +646,7 @@ const PAIRS: &[Twin<'static>] = &[
         &["new", "sorting", "--repo", "app", "--dry-run"],
     ),
     Twin::variable(NEW_NO_GIT, "PATH"),
+    Twin::new(STATUS_OUTSIDE, &["status", "--workspace=reading-list"]),
 ];
 
 #[test]
@@ -583,8 +659,11 @@ fn every_declared_code_has_a_twin_that_the_command_accepts() {
             .into_iter()
             .map(|refused| refused.twin(["remove", "clean", "--dry-run"])),
     );
-    let twins = Twins::new(examples(&repositories.path), &[CODES, UNBUILT_CODES])
-        .pairs(&pairs)
-        .unprovoked(UNPROVOKED);
+    let twins = Twins::new(
+        examples(&repositories.path),
+        &[CODES, RUN_CODES, UNBUILT_CODES],
+    )
+    .pairs(&pairs)
+    .unprovoked(UNPROVOKED);
     crumbkit_test::check_twins(&Cli::command(), &GUIDE, &twins);
 }

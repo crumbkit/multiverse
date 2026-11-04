@@ -3,8 +3,28 @@
   "data": [
     {
       "rule": "examples/run",
-      "applies_to": "mxv run",
-      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
+      "applies_to": "mxv up",
+      "reason": "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv restart",
+      "reason": "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv logs",
+      "reason": "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.",
       "costs": [
         "The examples are not run, so help can show an example that fails.",
         "The command's output weight counts 0 bytes, so its path weight is too low."
@@ -73,16 +93,44 @@
     },
     {
       "rule": "effects/yes",
-      "applies_to": "mxv run",
-      "reason": "run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.",
+      "applies_to": "mxv down",
+      "reason": "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",
       "costs": [
         "An agent without a terminal cannot run the command, or the command runs without asking anyone."
       ],
       "budget": null
     },
     {
+      "rule": "effects/yes",
+      "applies_to": "mxv restart",
+      "reason": "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "effects/yes",
+      "applies_to": "mxv ports reset",
+      "reason": "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv ports reset",
+      "reason": "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
       "rule": "twins/no-twin",
-      "applies_to": "mxv run",
+      "applies_to": "mxv archive",
       "reason": "Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.",
       "costs": [
         "No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason."
@@ -138,9 +186,14 @@
   "customisations": [
     {
       "declaration": "root-verbs",
-      "applies_to": "mxv new, mxv list, mxv show, mxv cd, mxv run, mxv archive, mxv restore, mxv remove",
+      "applies_to": "mxv new, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove",
       "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
       "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
+    },
+    {
+      "declaration": "text-line",
+      "applies_to": "mxv logs",
+      "declares": "The text prints each row as the line <LINE> in place of a table row."
     }
   ]
 }

@@ -1,0 +1,37 @@
+Give a stopped workspace new host ports, each different from the port it held
+
+Usage: mxv ports reset [OPTIONS] [PORT]...
+
+Arguments:
+  [PORT]...
+          The ports of the manifest to reallocate, which default to every port
+
+Options:
+  -w, --workspace <WORKSPACE>
+          The workspace, which defaults to the one that holds the current directory
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv ports reset -w reading-list api
+          Give the workspace reading-list a new host port for api
+
+Columns:
+  name  The port's name in the manifest.
+  port  The host port that the workspace holds for it.
+
+Effects: destructive, not idempotent, closed-world.
+Writes: applies all items or none.

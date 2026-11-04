@@ -1,0 +1,18 @@
+Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
+
+Usage: mxv up [OPTIONS] [PROCESS]...
+
+Arguments:
+  [PROCESS]...  The processes, which default to every process
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv up -w reading-list web
+
+Effects: additive, idempotent, open-world.
+Writes: applies all items or none.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv up --help` describes them.
+Next: mxv up --help explains each column.

@@ -1,7 +1,17 @@
-mxv has 14 opt-outs from the conventions.
+mxv has 19 opt-outs from the conventions.
 
-examples/run: mxv run
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
+examples/run: mxv up
+  Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+examples/run: mxv restart
+  Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+examples/run: mxv logs
+  Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
 
@@ -35,11 +45,24 @@ guide/document: mxv restore
   Cost: Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.
   Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
 
-effects/yes: mxv run
-  Reason: run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.
+effects/yes: mxv down
+  Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
-twins/no-twin: mxv run
+effects/yes: mxv restart
+  Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
+  Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
+
+effects/yes: mxv ports reset
+  Reason: The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.
+  Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
+
+examples/run: mxv ports reset
+  Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+twins/no-twin: mxv archive
   Reason: Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
@@ -63,8 +86,11 @@ twins/no-twin: mxv new triage --repo app --dry-run
   Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
-mxv declares 1 customisation.
+mxv declares 2 customisations.
 
-root-verbs: mxv new, mxv list, mxv show, mxv cd, mxv run, mxv archive, mxv restore, mxv remove
+root-verbs: mxv new, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove
   Declares: Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
+
+text-line: mxv logs
+  Declares: The text prints each row as the line <LINE> in place of a table row.
