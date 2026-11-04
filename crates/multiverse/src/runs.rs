@@ -119,6 +119,10 @@ pub struct ProcessStatus {
     pub ports: BTreeMap<String, u16>,
     /// Its log file.
     pub log: PathBuf,
+    /// Whether its process group still has a member although the process
+    /// itself has exited, such as a child it started in the background.
+    /// `mxv down` stops that group.
+    pub group_alive: bool,
 }
 
 /// The outcome of [`Runs::up`].
@@ -383,17 +387,26 @@ impl Runs {
         manifest: Option<&Manifest>,
     ) -> Result<Vec<ProcessStatus>, Error> {
         let names = self.known(workspace, manifest)?;
-        for process in &names {
-            store::cap_log(
-                &self.log(&workspace.name, process),
-                &self.file(&workspace.name, process, "log.1"),
-                MOST_LOG_BYTES,
-            )?;
-        }
+        self.cap_logs(&workspace.name, &names)?;
         names
             .iter()
             .map(|process| self.process_status(workspace, manifest, process))
             .collect()
+    }
+
+    /// Moves each log of `names` that holds more than [`MOST_LOG_BYTES`] to
+    /// `<process>.log.1` and empties it. `status`, `logs`, `up` and `down`
+    /// call it, because no mxv process runs between commands to watch the
+    /// logs.
+    fn cap_logs(&self, name: &WorkspaceName, names: &[String]) -> Result<(), Error> {
+        for process in names {
+            store::cap_log(
+                &self.log(name, process),
+                &self.file(name, process, "log.1"),
+                MOST_LOG_BYTES,
+            )?;
+        }
+        Ok(())
     }
 
     /// Reports whether `process` of the workspace `name` runs, or has left
@@ -429,25 +442,13 @@ impl Runs {
     }
 
     /// Reports whether the process group that the run record of `process`
-    /// names still has a member. A group keeps its id while any member
-    /// lives, and no new process can take that id meanwhile, so a live
-    /// group is the one that `up` started, even after its leader exited.
+    /// names is the one that `up` started and still has a member, as
+    /// [`owns_group`] decides.
     fn group_lives(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
-        Ok(self
-            .record(name, process)?
-            .is_some_and(|record| process::group_exists(record.pid)))
-    }
-
-    /// Returns the processes of `workspace` whose process groups still have
-    /// members, in name order.
-    fn live_groups(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
-        let mut live = Vec::new();
-        for process in self.recorded(name)? {
-            if self.group_lives(name, &process)? {
-                live.push(process);
-            }
+        match self.record(name, process)? {
+            Some(record) => owns_group(&record),
+            None => Ok(false),
         }
-        Ok(live)
     }
 
     /// Returns the manifest's processes in start order, then the other
@@ -482,11 +483,15 @@ impl Runs {
                 .map(|record| record.ports)
                 .unwrap_or_default(),
         };
+        let state = self.state(&workspace.name, process)?;
+        let group_alive = matches!(state, ProcessState::Exited { .. })
+            && self.group_lives(&workspace.name, process)?;
         Ok(ProcessStatus {
             name: process.to_owned(),
-            state: self.state(&workspace.name, process)?,
+            state,
             ports,
             log: self.log(&workspace.name, process),
+            group_alive,
         })
     }
 
@@ -528,6 +533,7 @@ impl Runs {
             Ok(order) => order,
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
         };
+        self.cap_logs(&workspace.name, &order)?;
         self.assign_ports(store, workspace, manifest, &BTreeSet::new())?;
         let mut started = Vec::new();
         for process in &order {
@@ -593,7 +599,11 @@ impl Runs {
                 process: process.to_owned(),
                 port: port.clone(),
                 number,
-                holders: self.live_groups(name)?,
+                holders: if self.group_lives(name, process)? {
+                    vec![process.to_owned()]
+                } else {
+                    Vec::new()
+                },
             }));
         }
         let exit_file = self.file(name, process, "exit");
@@ -716,6 +726,7 @@ impl Runs {
         names: &[String],
     ) -> Result<DownOutcome, Error> {
         let known = self.known(workspace, manifest)?;
+        self.cap_logs(&workspace.name, &known)?;
         let recorded = self.recorded(&workspace.name)?;
         let targets: Vec<&String> = if names.is_empty() {
             known
@@ -733,8 +744,11 @@ impl Runs {
         };
         let mut results = Vec::new();
         for process in targets.into_iter().rev() {
+            // A record whose pid now names another process's group is
+            // stale: its group is gone, so `down` drops the record and
+            // signals nothing.
             if let Some(record) = self.record(&workspace.name, process)?
-                && process::group_exists(record.pid)
+                && owns_group(&record)?
                 && !self.stop_group(record.pid)
             {
                 let pid = record.pid;
@@ -777,10 +791,21 @@ impl Runs {
         manifest: &Manifest,
         avoid: &BTreeSet<u16>,
     ) -> Result<(), Error> {
+        // A port that the manifest no longer names stays while a process
+        // that received it still runs, so the old listener keeps its port
+        // until `down`.
+        let mut live = BTreeSet::new();
+        for process in self.recorded(&workspace.name)? {
+            if let Some(record) = self.record(&workspace.name, &process)?
+                && owns_group(&record)?
+            {
+                live.extend(record.ports.values().copied());
+            }
+        }
         let before = workspace.ports.len();
         workspace
             .ports
-            .retain(|port, _| manifest.ports.contains(port));
+            .retain(|port, number| manifest.ports.contains(port) || live.contains(number));
         let dropped = workspace.ports.len() != before;
         if manifest
             .ports
@@ -896,6 +921,21 @@ fn wait_ready(launched: &mut Launched, port: Option<u16>, timeout: Duration) -> 
         }
         pause(POLL_INTERVAL);
     }
+}
+
+/// Reports whether the process group that `record` names is the one that
+/// `up` started and still has a member. It is when the process with the
+/// recorded id has the recorded start time, and when no process has that
+/// id but a group with it still exists: a group keeps its id while any
+/// member lives, and no new process can take that id meanwhile, so the
+/// group is the one `up` started even after its leader exited. A process
+/// with the recorded id and another start time took a free id after the
+/// group ended, so the group is not ours.
+fn owns_group(record: &RunRecord) -> Result<bool, Error> {
+    Ok(match process::start_time(record.pid)? {
+        Some(started) => started == record.started,
+        None => process::group_exists(record.pid),
+    })
 }
 
 /// Waits until the process group `pid` is gone or `timeout` passes, and

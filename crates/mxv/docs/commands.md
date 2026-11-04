@@ -172,6 +172,7 @@ mxv up -w reading-list web
 - `pid`: The process id, which is also its process group's id, while it runs.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
 - `ports`: The ports that the process receives, as `VARIABLE=port`.
 
 ### Columns that `--long` adds
@@ -206,6 +207,7 @@ mxv down -w reading-list
 - `pid`: The process id, which is also its process group's id, while it runs.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
 - `ports`: The ports that the process receives, as `VARIABLE=port`.
 
 ### Columns that `--long` adds
@@ -240,6 +242,7 @@ mxv restart -w reading-list web
 - `pid`: The process id, which is also its process group's id, while it runs.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
 - `ports`: The ports that the process receives, as `VARIABLE=port`.
 
 ### Columns that `--long` adds
@@ -273,6 +276,7 @@ mxv status -w reading-list
 - `pid`: The process id, which is also its process group's id, while it runs.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
 - `ports`: The ports that the process receives, as `VARIABLE=port`.
 
 ### Columns that `--long` adds

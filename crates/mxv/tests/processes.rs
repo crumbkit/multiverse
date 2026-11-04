@@ -176,11 +176,33 @@ impl Setup {
 }
 
 impl Drop for Setup {
-    /// Stops every process that a test left running.
+    /// Stops every process that a test left running, also when the test
+    /// failed or rewrote a run record: `mxv down` first, then SIGKILL to
+    /// the group of every process whose command line names the temporary
+    /// directory, as each run's shell does with its exit file.
     fn drop(&mut self) {
         let (_, listed) = self.json(&["list"]);
         for row in listed["data"].as_array().cloned().unwrap_or_default() {
             let _ = self.json(&["down", "-w", row["name"].as_str().unwrap_or_default()]);
+        }
+        let root = self.root().display().to_string();
+        let Ok(table) = Command::new("ps")
+            .args(["-A", "-o", "pgid=,command="])
+            .env("PATH", PATH)
+            .output()
+        else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&table.stdout).lines() {
+            let mut words = line.split_whitespace();
+            if let Some(group) = words.next()
+                && line.contains(&root)
+            {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{group}")])
+                    .env("PATH", PATH)
+                    .output();
+            }
         }
     }
 }
@@ -514,6 +536,8 @@ fn down_stops_the_children_that_an_exited_process_left_in_its_group() {
         }
     }
     assert!(group_exists(pid), "the child should outlive its wrapper");
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(row(&status, "wrapper")["group_alive"], true, "{status}");
     let (exit, document) = setup.json(&["down", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
     assert!(
@@ -543,7 +567,15 @@ fn a_port_held_by_a_leftover_child_of_the_workspace_names_that_process_and_not_a
     assert_eq!(document["code"], "mxv::port::taken");
     assert_eq!(document["fields"]["holders"], serde_json::json!(["server"]));
     let message = document["message"].as_str().unwrap();
-    assert!(!message.contains("outside"), "{message}");
+    assert!(!message.contains("outside"), "{message}"); // The recovery is a command whose words are separate, so running it
+    // word by word stops the process that holds the port.
+    let call = document["recovery"]["call"].as_str().unwrap();
+    assert_eq!(call, "mxv down --workspace triage server");
+    let words: Vec<&str> = call.split_whitespace().skip(1).collect();
+    let (exit, document) = setup.json(&words);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
 }
 
 #[test]
@@ -738,4 +770,188 @@ fn run_is_no_longer_a_command() {
     let setup = Setup::new();
     let (exit, _) = setup.text(&["run"]);
     assert_eq!(exit, 2);
+}
+
+/// Returns once more than a second has passed. `ps` prints a start time to
+/// the second on macOS, so two processes that start within one second have
+/// the same recorded start time.
+fn after_a_second() {
+    let deadline = Instant::now() + Duration::from_millis(1100);
+    while Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+}
+
+/// Rewrites the pid of the run record of `process` in the workspace `name`
+/// to `pid`, as a record left behind looks once another process took its
+/// id.
+fn rewrite_pid(setup: &Setup, name: &str, process: &str, pid: u64) {
+    let path = setup
+        .root()
+        .join(format!("state/mxv/runs/{name}/{process}.json"));
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["pid"] = pid.into();
+    write(&path, &record.to_string());
+}
+
+#[test]
+fn down_leaves_alone_a_group_whose_leader_took_the_pid_of_a_stale_record() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.short]\nargv = [\"sh\", \"-c\", \"sleep 1\"]\n",
+    );
+    setup.workspace(
+        "reading-list",
+        "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "reading-list"]);
+    assert_eq!(exit, 0, "{document}");
+    let other = row(&document, "api")["pid"].as_u64().unwrap();
+    after_a_second();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    for () in waiting() {
+        if row(&setup.json(&["status", "-w", "triage"]).1, "short")["state"] == "exited" {
+            break;
+        }
+    }
+    rewrite_pid(&setup, "triage", "short", other);
+
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(row(&status, "short")["state"], "exited", "{status}");
+    assert_eq!(row(&status, "short")["group_alive"], false, "{status}");
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(
+        group_exists(other),
+        "down killed another workspace's process"
+    );
+    assert!(
+        !setup
+            .root()
+            .join("state/mxv/runs/triage/short.json")
+            .exists(),
+        "down keeps the stale record"
+    );
+    let (_, status) = setup.json(&["status", "-w", "reading-list"]);
+    assert_eq!(row(&status, "api")["state"], "running", "{status}");
+}
+
+#[test]
+fn a_stale_record_does_not_count_as_running_for_remove_or_logs_follow() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.short]\nargv = [\"sh\", \"-c\", \"echo done; sleep 1\"]\n",
+    );
+    setup.workspace(
+        "reading-list",
+        "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
+    );
+    let (_, document) = setup.json(&["up", "-w", "reading-list"]);
+    let other = row(&document, "api")["pid"].as_u64().unwrap();
+    after_a_second();
+    setup.json(&["up", "-w", "triage"]);
+    for () in waiting() {
+        if row(&setup.json(&["status", "-w", "triage"]).1, "short")["state"] == "exited" {
+            break;
+        }
+    }
+    rewrite_pid(&setup, "triage", "short", other);
+    let (exit, text) = setup.text(&["logs", "-w", "triage", "short", "-f"]);
+    assert_eq!(exit, 0, "logs -f must end: {text}");
+    assert!(text.contains("done"), "{text}");
+    let (exit, document) = setup.json(&["ports", "reset", "-w", "triage", "--yes"]);
+    assert_ne!(
+        document["code"], "mxv::workspace::running",
+        "{exit} {document}"
+    );
+    assert!(group_exists(other));
+}
+
+#[test]
+fn down_and_status_work_from_the_run_records_when_the_manifest_does_not_parse() {
+    let setup = Setup::new();
+    let checkout = setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let pid = row(&document, "api")["pid"].as_u64().unwrap();
+    write(&checkout.join("mxv.toml"), "[processes.api\n");
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    assert_eq!(row(&status, "api")["state"], "running");
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!group_exists(pid), "down left the process running");
+}
+
+#[test]
+fn a_command_that_waited_for_the_lock_reads_the_workspace_record_again() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        &format!(
+            "ports = [\"api\"]\n[processes.server]\nargv = [\"sh\", \"-c\", \"sleep 2; exec \\\"$0\\\"\", \"{}\"]\nports = {{ PORT = \"api\" }}\nlisten = \"api\"\nready = {{ timeout_seconds = 20 }}\n",
+            listen()
+        ),
+    );
+    let record = setup.root().join("state/mxv/workspaces/triage.json");
+    let run = setup.root().join("state/mxv/runs/triage/server.json");
+    let second = std::thread::scope(|scope| {
+        let first = scope.spawn(|| setup.json(&["up", "-w", "triage"]));
+        while !run.exists() && !first.is_finished() {
+            std::thread::yield_now();
+        }
+        let second = scope.spawn(|| setup.json(&["up", "-w", "triage"]));
+        // The second up reads the record within milliseconds and then
+        // waits for the lock, which the first holds for about two seconds.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        // Another writer changes the record while the second up waits.
+        let mut stored: Value =
+            serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+        stored["ports"]["api"] = 31999.into();
+        write(&record, &stored.to_string());
+        let (exit, document) = first.join().unwrap();
+        assert_eq!(exit, 0, "{document}");
+        second.join().unwrap()
+    });
+    let (exit, document) = second;
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        row(&document, "server")["ports"][0],
+        "PORT=31999",
+        "{document}"
+    );
+}
+
+#[test]
+fn a_port_that_the_manifest_renames_stays_with_the_workspace_until_its_listener_stops() {
+    let setup = Setup::new();
+    let manifest = server_and_worker();
+    let checkout = setup.workspace("triage", &manifest);
+    let (exit, document) = setup.json(&["up", "-w", "triage", "server"]);
+    assert_eq!(exit, 0, "{document}");
+    let old = setup.port("triage", "api");
+    write(
+        &checkout.join("mxv.toml"),
+        &manifest
+            .replace("\"api\"", "\"http\"")
+            .replace("[processes.worker]", "[processes.unused]"),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage", "server"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.port("triage", "api"), old);
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["up", "-w", "triage", "server"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, shown) = setup.json(&["show", "triage"]);
+    assert!(shown["data"][0]["ports"].get("api").is_none(), "{shown}");
 }

@@ -206,8 +206,12 @@ impl Failure for RunFailure {
                 ManifestProblem::Unreadable { .. } => {
                     hint(format!("make {} readable", shown(&error.path)))
                 }
-                _ => hint(format!(
+                _ if error.line.is_some() => hint(format!(
                     "fix the line of {} that the message names",
+                    shown(&error.path)
+                )),
+                _ => hint(format!(
+                    "fix what the message names in {}",
                     shown(&error.path)
                 )),
             },
@@ -227,11 +231,10 @@ impl Failure for RunFailure {
             )),
             Self::PortTaken {
                 workspace, holders, ..
-            } if !holders.is_empty() => Recovery::Run(
-                Call::new(&["down"])
-                    .value("workspace", workspace)
-                    .value("processes", holders.join(" ")),
-            ),
+            } if !holders.is_empty() => Recovery::Run(holders.iter().fold(
+                Call::new(&["down"]).value("workspace", workspace),
+                |call, holder| call.value("processes", holder),
+            )),
             Self::PortTaken {
                 workspace, port, ..
             } => Recovery::Run(

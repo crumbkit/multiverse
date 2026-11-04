@@ -412,6 +412,10 @@
           ],
           "format": "int32"
         },
+        "group_alive": {
+          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
+          "type": "boolean"
+        },
         "log": {
           "description": "The process's log file, which `mxv logs` prints.",
           "type": "string"
@@ -455,6 +459,7 @@
         "pid",
         "code",
         "signal",
+        "group_alive",
         "ports"
       ]
     },

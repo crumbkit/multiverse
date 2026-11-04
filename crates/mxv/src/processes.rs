@@ -85,9 +85,15 @@ struct Context {
 
 impl Context {
     /// Takes the workspace's lock, which `up`, `down` and `restart` hold
-    /// while they start or stop its processes.
-    fn lock(&self) -> Result<Lock, MxvFailure> {
-        Ok(self.runs.lock(&self.workspace.name)?)
+    /// while they start or stop its processes, then reads the workspace's
+    /// record again, so the ports are the ones that a command which held
+    /// the lock before stored.
+    fn lock(&mut self) -> Result<Lock, MxvFailure> {
+        let lock = self.runs.lock(&self.workspace.name)?;
+        if let Some(fresh) = self.store.read(&self.workspace.name)? {
+            self.workspace = fresh;
+        }
+        Ok(lock)
     }
 }
 
@@ -146,6 +152,13 @@ fn checkout(workspace: &Workspace) -> &Path {
 /// Returns the workspace's manifest, or `None` when its checkout has none.
 fn manifest(workspace: &Workspace) -> Result<Option<Manifest>, RunFailure> {
     Manifest::read(checkout(workspace)).map_err(RunFailure::Manifest)
+}
+
+/// Returns the workspace's manifest, or `None` when its checkout has none
+/// or it does not parse, for `down` and `status`, which then work from the
+/// run records so a broken manifest never keeps processes running.
+fn lenient_manifest(workspace: &Workspace) -> Option<Manifest> {
+    Manifest::read(checkout(workspace)).ok().flatten()
 }
 
 /// Returns the workspace's manifest, or the failure of a checkout without
@@ -282,9 +295,9 @@ pub(crate) fn down(
     environment: &Environment,
     args: &ProcessesArgs,
 ) -> Result<Batch<ProcessRow, RunFailure>, crumbkit::Error> {
-    let context = context(environment, args.workspace.as_ref(), &args.processes)?;
-    let manifest = manifest(&context.workspace)?;
+    let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
+    let manifest = lenient_manifest(&context.workspace);
     let results = stop(&context, &lock, manifest.as_ref())?;
     let keys: Vec<&str> = results
         .iter()
@@ -332,7 +345,7 @@ pub(crate) fn status(
     args: &StatusArgs,
 ) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let context = context(environment, args.workspace.as_ref(), &[])?;
-    let manifest = manifest(&context.workspace)?;
+    let manifest = lenient_manifest(&context.workspace);
     let statuses = context
         .runs
         .status(&context.workspace, manifest.as_ref())
@@ -478,7 +491,7 @@ pub(crate) fn stop_all(
     environment: &Environment,
     workspace: &Workspace,
 ) -> Result<(), crumbkit::Error> {
-    let context = Context {
+    let mut context = Context {
         store: Store::new(environment.records()?),
         runs: Runs::new(environment.runs()?),
         workspace: workspace.clone(),

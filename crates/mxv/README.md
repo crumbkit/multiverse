@@ -154,19 +154,29 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   dependencies first. It skips a process that already runs. Before it
   starts a listener, it checks that the listen port is free; when it is
   taken, `up` fails with `mxv::port::taken`, whose `holders` field names the
-  workspace's own processes whose groups still run, or is empty when a
-  program outside the workspace holds the port. Each process runs in its
+  listener when its own process group still runs, such as a child that it
+  left behind, or is empty when a program outside the workspace holds the
+  port. Each process runs in its
   own process group, with standard input empty and standard output and
   standard error appended to its log. When a process exits before it is
   ready, `up` fails with `mxv::process::exited` and the log's last 20 lines;
   when it misses its timeout, `up` stops it and fails with
   `mxv::process::not_ready`. A failed `up` stops the processes it started
   before the failure. `up` also drops the ports of names that the manifest
-  no longer declares.
-- `mxv down` sends SIGTERM to each process group that a run record names
-  and that still has a member, including the children that an exited
-  process left in its group, waits up to 10 seconds, then sends SIGKILL. A
-  descendant that leaves its process group is not reached.
+  no longer declares, once no running process received them, so a port
+  that the manifest renames stays with its old listener until `down`.
+- `mxv down` sends SIGTERM to the process group that a run record names,
+  waits up to 10 seconds, then sends SIGKILL. It signals the group only
+  when it is the group that `up` started: the process with the recorded id
+  has the recorded start time, or no process has that id and a group with
+  it still exists. A group keeps its id while any member lives, so in the
+  second case the group holds the children that an exited process left
+  behind. When another process has taken the recorded id, `down` signals
+  nothing and deletes the record. `running`, `remove` and `logs -f` apply
+  the same rule. On macOS the start time has a resolution of one second,
+  so a process that takes the id within the second that the original
+  started in reads as the original. A descendant that leaves its process
+  group is not reached.
 - `mxv restart` stops the named processes, or every process, and starts them
   again.
 - `mxv status` reports each process as `running`, `exited` with its code,
@@ -179,6 +189,10 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   code from 129 to 192 as `code` null and `signal` set; a program that
   exits with such a code by itself reads the same way. A process that
   exited with a code other than 0 makes `status` exit with code 1.
+  `group_alive` is true for an exited process whose group still has a
+  member, which `down` stops.
+- `mxv status` and `mxv down` read the run records when the manifest does
+  not parse, so a broken manifest never keeps processes running.
 - `mxv logs` prints the last 50 lines of a log, or `--lines N`. With `-f`
   it prints each new line, and it ends once the process has exited and no
   member of its group remains, or the log is deleted. A line longer than
@@ -198,16 +212,19 @@ process runs under `/bin/sh`, which waits for it and writes that code, so a
 crash is reported without a long-running mxv.
 
 Each `up` of a process moves its previous log to `<process>.log.1`, which
-replaces the log before it, so a process keeps at most two logs. A log
-that holds more than 32 MiB is copied to `<process>.log.1` and emptied when
-`mxv status` reads the workspace. The process keeps writing to the emptied
-log, and lines that it writes between the copy and the emptying are lost.
-Between two `status` runs a log can grow past 32 MiB.
+replaces the log before it, so a process keeps at most two logs. No mxv
+process runs between commands, so mxv checks the size of the logs only
+when a command runs: `up`, `down`, `status` and `logs` copy a log that
+holds more than 32 MiB to `<process>.log.1` and empty it. The process keeps
+writing to the emptied log, and lines that it writes between the copy and
+the emptying are lost. Between two of those commands a log has no bound,
+so a process that writes a lot while nobody runs mxv can fill the disk.
 
 `mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
 while processes run, hold an exclusive lock on
 `$XDG_STATE_HOME/mxv/runs/<name>/.lock` while they start or stop the
-workspace's processes. Allocating ports holds a second lock,
+workspace's processes. Each reads the workspace's record again once it
+holds the lock, so it uses the ports that a command before it stored. Allocating ports holds a second lock,
 `$XDG_STATE_HOME/mxv/runs/.ports.lock`, so two workspaces never take the
 same port. A command that finds a lock held tries again for 5 seconds,
 then fails with `mxv::workspace::busy`. The operating system releases a

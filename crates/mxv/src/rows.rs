@@ -480,6 +480,10 @@ pub(crate) struct ProcessRow {
     /// The number of the signal that ended an exited process, such as 15
     /// for SIGTERM, or null.
     signal: Option<i32>,
+    /// Whether the process group of an exited process still has a member,
+    /// such as a child it started in the background, which `mxv down`
+    /// stops.
+    group_alive: bool,
     /// The ports that the process receives, as `VARIABLE=port`.
     ports: Vec<String>,
     /// The process's log file, which `mxv logs` prints.
@@ -499,7 +503,15 @@ pub(crate) enum StateName {
 }
 
 impl Row for ProcessRow {
-    const COLUMNS: &'static [&'static str] = &["name", "state", "pid", "code", "signal", "ports"];
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "state",
+        "pid",
+        "code",
+        "signal",
+        "group_alive",
+        "ports",
+    ];
     const LONG_COLUMNS: &'static [&'static str] = &["log"];
     // A person copies the name into `mxv logs`.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
@@ -523,6 +535,7 @@ impl From<&ProcessStatus> for ProcessRow {
             pid,
             code,
             signal,
+            group_alive: status.group_alive,
             ports: status
                 .ports
                 .iter()
