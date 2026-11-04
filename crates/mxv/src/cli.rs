@@ -1,11 +1,15 @@
 //! The `mxv` command's command-line grammar and help guide.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 use crumbkit::commands::{COMMANDS_LIST, CommandsList};
 use crumbkit::help::{Effects, Example, Goal, Group, Guide, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, ViewFlags, Yes};
 use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
+
+use crate::verbs::{CD, LIST, NEW, REMOVE, SHOW};
 
 /// Create, archive and restore task workspaces that span several git
 /// repositories.
@@ -47,23 +51,30 @@ pub const GUIDE: Guide = Guide::new()
     .compact()])
     .leaves(&[
         Leaf::new(&["new"])
-            .examples(&[Example::new(&[], "Create a workspace")])
-            .effects(Effects::additive().open_world()),
+            .examples(&[Example::new(
+                &["triage", "--repo", "inbox", "--dry-run"],
+                "Print the workspace that a checkout of the repository inbox would get",
+            )])
+            .effects(Effects::additive().open_world())
+            .document(NEW),
         Leaf::new(&["list"])
-            .examples(&[Example::new(&[], "List the first page of live workspaces")])
-            .effects(Effects::read_only()),
+            .examples(&[Example::new(&[], "List the first page of workspaces")])
+            .effects(Effects::read_only())
+            .document(LIST),
         Leaf::new(&["show"])
             .examples(&[Example::new(
                 &["reading-list"],
                 "Show the workspace reading-list",
             )])
-            .effects(Effects::read_only()),
+            .effects(Effects::read_only())
+            .document(SHOW),
         Leaf::new(&["cd"])
             .examples(&[Example::new(
-                &[],
-                "Print the directory of the current workspace",
+                &["reading-list"],
+                "Print the directory of the workspace reading-list",
             )])
-            .effects(Effects::read_only()),
+            .effects(Effects::read_only())
+            .document(CD),
         Leaf::new(&["run"])
             .examples(&[Example::new(&[], "Start the current app's processes")])
             .effects(Effects::destructive().open_world())
@@ -82,10 +93,11 @@ pub const GUIDE: Guide = Guide::new()
             .effects(Effects::additive().open_world()),
         Leaf::new(&["remove"])
             .examples(&[Example::new(
-                &["--dry-run"],
-                "Print what removing would delete",
+                &["reading-list", "--dry-run"],
+                "Print what removing the workspace reading-list would delete",
             )])
-            .effects(Effects::destructive()),
+            .effects(Effects::destructive())
+            .document(REMOVE),
         Leaf::new(&["commands", "list"])
             .examples(&[Example::new(&[], "List every command")])
             .effects(Effects::read_only())
@@ -117,25 +129,27 @@ pub const GUIDE: Guide = Guide::new()
 /// The commands of `mxv`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Verb {
-    /// Create a workspace with one git worktree for each repository.
-    New(WriteArgs),
-    /// List the live workspaces.
+    /// Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin.
+    ///
+    /// The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
+    New(NewArgs),
+    /// List the workspaces.
     List(ListArgs),
-    /// Show live workspaces by name, in the order given.
+    /// Show workspaces by name, in the order given.
     Show(ShowArgs),
-    /// Print the directory of a workspace or of one of its apps.
-    Cd,
+    /// Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it.
+    Cd(CdArgs),
     /// Run an app's processes, or one command in the app's environment.
     Run,
     /// Archive a workspace, so restore can rebuild it at the same commits.
     Archive(WriteArgs),
     /// Rebuild an archived workspace at its archived commits.
     Restore(WriteArgs),
-    /// Delete a live or archived workspace.
+    /// Remove a workspace's checkouts, its merged branches, its directory and its record.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`
     // lines and `commands list` name only `remove`.
     #[command(alias = "rm")]
-    Remove(WriteArgs),
+    Remove(RemoveArgs),
     /// Explore mxv's commands.
     Commands {
         /// What to do with the commands.
@@ -202,6 +216,51 @@ pub(crate) struct WriteArgs {
     pub(crate) dry_run: DryRun,
 
     /// Run without asking.
+    #[command(flatten)]
+    pub(crate) yes: Yes,
+}
+
+/// The arguments of `mxv new`.
+#[derive(Debug, Args)]
+pub(crate) struct NewArgs {
+    /// The workspace's name, which also names its directory and its branch
+    pub(crate) name: String,
+
+    /// The git repository to check out, or any directory inside it
+    #[arg(long, value_name = "PATH")]
+    pub(crate) repo: PathBuf,
+
+    /// Print the workspace that the command would create, and create nothing.
+    #[command(flatten)]
+    pub(crate) dry_run: DryRun,
+}
+
+/// The arguments of `mxv cd`.
+#[derive(Debug, Args)]
+pub(crate) struct CdArgs {
+    /// The name of the workspace
+    pub(crate) name: String,
+}
+
+/// The arguments of `mxv remove`.
+#[derive(Debug, Args)]
+pub(crate) struct RemoveArgs {
+    /// The name of the workspace to remove
+    pub(crate) name: String,
+
+    /// Discard uncommitted changes, untracked files and ignored files such as .env; an unmerged branch is still kept
+    #[arg(long)]
+    pub(crate) force: bool,
+
+    /// Delete branches with unmerged commits, and commits on a detached HEAD
+    #[arg(long)]
+    pub(crate) delete_unmerged: bool,
+
+    /// Print what the command would remove, and remove nothing.
+    #[command(flatten)]
+    pub(crate) dry_run: DryRun,
+
+    /// Remove the workspace without asking.
     #[command(flatten)]
     pub(crate) yes: Yes,
 }

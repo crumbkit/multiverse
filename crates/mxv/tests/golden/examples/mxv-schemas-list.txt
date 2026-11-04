@@ -1,5 +1,10 @@
 ID                        KIND    FORM      DESCRIPTION
 mxv/failure/v1            output  document  The document that a command prints on standard output when it fails with --json.
+mxv/new/v1                output  document  The workspace that the run created, or would create on a dry run.
+mxv/list/v1               output  document  One page of the workspaces, in name order, and the number of workspaces.
+mxv/show/v1               output  document  The workspaces with the given names, and a failure for each name that no workspace has.
+mxv/cd/v1                 output  document  The directory of the workspace, for `cd "$(mxv cd <NAME>)"`.
+mxv/remove/v1             output  document  What the run removed, deleted and kept, or would on a dry run.
 mxv/commands-list/v1      output  document  One branch of the tool's commands with their arguments, examples and columns.
 mxv/schemas-list/v1       output  document  The JSON documents that the tool prints, with a description of each.
 mxv/schemas-show/v1       output  document  The JSON Schema of each document id given.

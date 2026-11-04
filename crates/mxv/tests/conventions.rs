@@ -7,20 +7,48 @@
 //! `SNAPSHOTS=overwrite cargo test` writes, rewrites and deletes the golden
 //! files.
 //!
-//! The workspace verbs are declared before they are built. Each one fails
-//! with `mxv::command::unbuilt`, so its examples cannot run and a write verb
-//! has no document yet. The opt-outs below name each verb and say so, and
-//! the pull request that builds a verb removes its opt-outs. The opt-out
-//! report in `tests/golden/opt-outs.txt` therefore lists the verbs that are
-//! still to be built.
+//! Each example runs in a fresh copy of a directory that the test builds
+//! with git: a bare `origin.git`, its clone `inbox`, a repository `plain`
+//! without an origin, and a clone `fresh` of an origin without commits. Its
+//! XDG state starts as a copy of `tests/fixtures/xdg`, which holds the
+//! record of the workspace `reading-list`. That record names directories
+//! under `/home/agent`, which do not exist, so the examples of `show`, `cd`
+//! and `remove` read a record whose checkout is already gone. `MXV_ROOT` is
+//! unset, and the fixture's config file sets `root = "/home/agent/mxv"`, so
+//! the examples of `new` and `show` print a root whose length is the same on
+//! every machine. The default root under the temporary `XDG_DATA_HOME`
+//! would change the width of the table's columns, because crumbkit-test
+//! measures them before it replaces that path with its placeholder. `new`
+//! runs as a dry run, so the examples fetch nothing.
+//!
+//! `run`, `archive` and `restore` are declared before they are built. Each
+//! one fails with `mxv::command::unbuilt`, so its examples cannot run and a
+//! write verb has no document yet. The opt-outs below name each verb and
+//! say so, and the pull request that builds a verb removes its opt-outs.
 
 #![cfg(test)]
 
 use clap::CommandFactory as _;
 use crumbkit_test::{
-    Allow, Budgets, Examples, Failing, Pages, PathBudgets, Recoveries, Rule, Twins,
+    Allow, Budgets, Examples, Failing, Pages, PathBudgets, Recoveries, Rule, Twin, Twins,
+    Unprovoked,
 };
-use mxv::{CODES, Cli, GUIDE, UNBUILT};
+#[path = "support/git.rs"]
+mod support;
+
+use crumbkit::codes::CONFIRM_NEEDS_YES;
+use mxv::{
+    BRANCH_EXISTS, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES, CONFIG_INVALID,
+    CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
+    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, RECORD_CORRUPT,
+    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
+    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, UNBUILT,
+    UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
+    WORKSPACE_NOT_FOUND,
+};
+use tempfile::TempDir;
+
+use crate::support::{git, repository};
 
 /// The reason that an unbuilt verb's examples do not run.
 const NO_RUN: &str = "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.";
@@ -31,14 +59,9 @@ const NO_DOCUMENT: &str = "The verb is declared before it is built, and the pull
 /// The `mxv` command's opt-outs from crumbkit's conventions, which every
 /// check below reads.
 const ALLOW: &[Allow] = &[
-    Allow::new(Rule::Examples, "new", NO_RUN),
-    Allow::new(Rule::Examples, "list", NO_RUN),
-    Allow::new(Rule::Examples, "show", NO_RUN),
-    Allow::new(Rule::Examples, "cd", NO_RUN),
     Allow::new(Rule::Examples, "run", NO_RUN),
     Allow::new(Rule::Examples, "archive", NO_RUN),
     Allow::new(Rule::Examples, "restore", NO_RUN),
-    Allow::new(Rule::Examples, "remove", NO_RUN),
     Allow::new(
         Rule::Examples,
         "self usage",
@@ -49,20 +72,65 @@ const ALLOW: &[Allow] = &[
         "self figures list",
         "The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.",
     ),
-    Allow::new(Rule::GuideDocument, "new", NO_DOCUMENT),
     Allow::new(Rule::GuideDocument, "archive", NO_DOCUMENT),
     Allow::new(Rule::GuideDocument, "restore", NO_DOCUMENT),
-    Allow::new(Rule::GuideDocument, "remove", NO_DOCUMENT),
     Allow::new(
         Rule::Yes,
         "run",
         "run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.",
     ),
     Allow::untwinned(
-        Failing::new(&UNBUILT, &["new"]),
+        Failing::new(&UNBUILT, &["run"]),
         "Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.",
     ),
+    Allow::untwinned(
+        NEWER_RECORD,
+        "The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.",
+    ),
+    Allow::untwinned(
+        CORRUPT_RECORD,
+        "The corrupt record causes the failure, and every word of the command line that names it reads the same record.",
+    ),
+    Allow::untwinned(
+        MISMATCHED_RECORD,
+        "The record that holds another name causes the failure, and every word of the command line that names it reads the same record.",
+    ),
+    Allow::untwinned(
+        BAD_CONFIG,
+        "The config file causes the failure, and no word of the command line names the config file.",
+    ),
+    Allow::untwinned(
+        UNREADABLE_CONFIG,
+        "The directory at the config file's path causes the failure, and no word of the command line names the config file.",
+    ),
 ];
+
+/// `show` of a record that holds another name than its file.
+const MISMATCHED_RECORD: Failing<'static> =
+    Failing::new(&RECORD_MISMATCHED, &["show", "reading-list"])
+        .xdg("tests/fixtures/xdg-mismatched");
+
+/// `new` with a config file that sets an unknown key.
+const BAD_CONFIG: Failing<'static> = Failing::new(
+    &CONFIG_INVALID,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.xdg("tests/fixtures/xdg-bad-config");
+
+/// `new` with a directory where the config file belongs.
+const UNREADABLE_CONFIG: Failing<'static> = Failing::new(
+    &CONFIG_UNREADABLE,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.xdg("tests/fixtures/xdg-config-directory");
+
+/// `show` of a record that a newer mxv wrote.
+const NEWER_RECORD: Failing<'static> =
+    Failing::new(&RECORD_NEWER, &["show", "reading-list"]).xdg("tests/fixtures/xdg-newer");
+
+/// `show` of a record that is not JSON.
+const CORRUPT_RECORD: Failing<'static> =
+    Failing::new(&RECORD_CORRUPT, &["show", "reading-list"]).xdg("tests/fixtures/xdg-corrupt");
 
 /// The budgets of the `-h` pages, which are crumbkit's defaults.
 const BUDGETS: Budgets = Budgets::new();
@@ -70,12 +138,62 @@ const BUDGETS: Budgets = Budgets::new();
 /// The budgets of the paths through the help, which are crumbkit's
 /// defaults.
 const PATH_BUDGETS: PathBudgets<'_> = PathBudgets::new("tests/golden/examples");
+/// The variables of every run: a `PATH` that finds git, and git without
+/// the person's configuration. `MXV_ROOT` is unset, so the workspace root
+/// comes from the config file of `tests/fixtures/xdg`.
+const ENV: &[(&str, &str)] = &[
+    ("PATH", support::PATH),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+];
 
-/// The built binary and the directory that holds the example golden files.
-/// Each example runs in a fresh empty directory, because no command reads
-/// a workspace yet.
-const EXAMPLES: Examples<'_> =
-    Examples::new(env!("CARGO_BIN_EXE_mxv"), "tests/golden/examples").allow(ALLOW);
+/// The directory of repositories that each run starts in a fresh copy of,
+/// which the test deletes when it drops.
+struct Repositories {
+    /// The temporary directory.
+    _dir: TempDir,
+    /// The directory's path, which [`Examples`] borrows.
+    path: String,
+}
+
+/// Returns a new directory of the repositories that the module docs name.
+/// The clone `inbox` also holds a branch named `taken`.
+fn repositories() -> Repositories {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let inbox = repository(&root);
+    git(&inbox, &["branch", "taken"]);
+    let plain = root.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    git(&plain, &["init", "--quiet"]);
+    git(
+        &root,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            "empty.git",
+        ],
+    );
+    git(&root, &["clone", "--quiet", "empty.git", "fresh"]);
+    git(
+        &root.join("fresh"),
+        &["remote", "set-url", "origin", "../empty.git"],
+    );
+    let path = root.to_str().unwrap().to_owned();
+    Repositories { _dir: dir, path }
+}
+
+/// Returns the settings that run the built binary in a fresh copy of the
+/// repositories at `path`, with the XDG state of `tests/fixtures/xdg`.
+fn examples(path: &str) -> Examples<'_> {
+    Examples::new(env!("CARGO_BIN_EXE_mxv"), "tests/golden/examples")
+        .env(ENV)
+        .xdg("tests/fixtures/xdg")
+        .fresh_dir(path)
+        .allow(ALLOW)
+}
 
 #[test]
 fn every_command_and_argument_has_one_name() {
@@ -114,7 +232,7 @@ fn every_exit_code_meets_the_exit_code_rules() {
 
 #[test]
 fn every_failure_code_is_declared_once_and_spelled_by_the_rules() {
-    crumbkit_test::check_codes(&GUIDE, &[CODES]);
+    crumbkit_test::check_codes(&GUIDE, &[CODES, UNBUILT_CODES]);
 }
 
 #[test]
@@ -153,12 +271,14 @@ fn every_crumbkit_command_sits_at_its_fixed_path() {
 
 #[test]
 fn every_example_in_the_guide_runs_and_prints_its_golden_output() {
-    crumbkit_test::check_examples(&Cli::command(), &GUIDE, &EXAMPLES);
+    let repositories = repositories();
+    crumbkit_test::check_examples(&Cli::command(), &GUIDE, &examples(&repositories.path));
 }
 
 #[test]
 fn every_json_example_cuts_or_refuses_a_result_past_its_output_budget() {
-    crumbkit_test::check_output_budget(&Cli::command(), &GUIDE, &EXAMPLES);
+    let repositories = repositories();
+    crumbkit_test::check_output_budget(&Cli::command(), &GUIDE, &examples(&repositories.path));
 }
 
 #[test]
@@ -178,22 +298,171 @@ fn every_opt_out_matches_the_opt_out_report() {
     );
 }
 
-/// The command lines that fail, one for each declared code.
-const STARTS: &[Failing<'static>] = &[Failing::new(&UNBUILT, &["new"])];
+/// `cd` of a name that no workspace has.
+const CD_MISSING: Failing<'static> = Failing::new(&WORKSPACE_NOT_FOUND, &["cd", "missing"]);
 
-/// The settings of the recovery check.
-const RECOVERIES: Recoveries<'_> = Recoveries::new(EXAMPLES, &[CODES]).starts(STARTS);
+/// `new` of the name of the workspace in the fixture.
+const NEW_TAKEN_NAME: Failing<'static> = Failing::new(
+    &WORKSPACE_EXISTS,
+    &["new", "reading-list", "--repo", "inbox", "--dry-run"],
+);
+
+/// `new` of a name with a slash.
+const NEW_BAD_NAME: Failing<'static> = Failing::new(
+    &WORKSPACE_BAD_NAME,
+    &["new", "a/b", "--repo", "inbox", "--dry-run"],
+);
+
+/// `new` of the name of a branch that the repository already has.
+const NEW_TAKEN_BRANCH: Failing<'static> = Failing::new(
+    &BRANCH_EXISTS,
+    &["new", "taken", "--repo", "inbox", "--dry-run"],
+);
+
+/// `new` of a path that does not exist.
+const NEW_MISSING_REPOSITORY: Failing<'static> = Failing::new(
+    &REPOSITORY_NOT_FOUND,
+    &["new", "triage", "--repo", "missing", "--dry-run"],
+);
+
+/// `new` of a repository without an origin.
+const NEW_NO_ORIGIN: Failing<'static> = Failing::new(
+    &REPOSITORY_NO_ORIGIN,
+    &["new", "triage", "--repo", "plain", "--dry-run"],
+);
+
+/// `new` of a repository whose origin has no commits.
+const NEW_EMPTY_ORIGIN: Failing<'static> = Failing::new(
+    &REPOSITORY_EMPTY_ORIGIN,
+    &["new", "triage", "--repo", "fresh", "--dry-run"],
+);
+
+/// `new` with a relative `MXV_ROOT`.
+const NEW_RELATIVE_ROOT: Failing<'static> = Failing::new(
+    &ENVIRONMENT_RELATIVE_ROOT,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.env(&[("MXV_ROOT", Some("work"))]);
+
+/// `new` of a name whose directory already exists under the default root.
+const NEW_TAKEN_DIRECTORY: Failing<'static> = Failing::new(
+    &DIRECTORY_TAKEN,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.xdg("tests/fixtures/xdg-taken");
+
+/// `new` with a `PATH` that finds no git.
+const NEW_NO_GIT: Failing<'static> = Failing::new(
+    &GIT_NOT_FOUND,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.env(&[("PATH", Some("/nonexistent"))]);
+
+/// The words of `new` that the fixture accepts, which each `new` line above
+/// differs from in one word.
+const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "inbox", "--dry-run"];
+
+/// The command lines that start the recovery chains, one for each code that
+/// a command line provokes.
+const STARTS: &[Failing<'static>] = &[
+    CD_MISSING,
+    NEW_TAKEN_NAME,
+    NEW_BAD_NAME,
+    NEW_TAKEN_BRANCH,
+    NEW_MISSING_REPOSITORY,
+    NEW_NO_ORIGIN,
+    NEW_EMPTY_ORIGIN,
+    NEW_RELATIVE_ROOT,
+    NEW_TAKEN_DIRECTORY,
+    NEW_NO_GIT,
+    NEWER_RECORD,
+    CORRUPT_RECORD,
+    MISMATCHED_RECORD,
+    BAD_CONFIG,
+    UNREADABLE_CONFIG,
+    Failing::new(&CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
+    Failing::new(&UNBUILT, &["run"]),
+];
+
+/// The declared codes that no command line in this test provokes, because
+/// each needs a state that a fixed fixture cannot hold.
+/// `tests/workspaces.rs` provokes the refusals of `remove` with real
+/// checkouts.
+const UNPROVOKED: &[Unprovoked<'static>] = &[
+    Unprovoked::new(
+        &WORKSPACE_DIRTY,
+        "Only a live checkout with changes provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &WORKSPACE_IGNORED_FILES,
+        "Only a live checkout with an ignored file such as .env provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &CHECKOUT_UNREACHABLE_COMMITS,
+        "Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &ENVIRONMENT_NO_DIRECTORY,
+        "Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.",
+    ),
+    Unprovoked::new(
+        &CHECKOUT_UNOWNED,
+        "Only a checkout directory that git does not list provokes it, and the fixture's workspace has no checkout directory.",
+    ),
+    Unprovoked::new(
+        &REPOSITORY_NO_DEFAULT_BRANCH,
+        "Only a clone whose origin has branches but no default branch provokes it; the library's git tests provoke it.",
+    ),
+    Unprovoked::new(
+        &GIT_FAILED,
+        "Only a git command that fails in a working repository provokes it, such as a fetch from an origin that is gone; the library's git tests provoke it.",
+    ),
+    Unprovoked::new(
+        &GIT_TIMED_OUT,
+        "Only a git command that runs past its deadline of 30, 120 or 600 seconds provokes it, which is longer than the check waits for a run.",
+    ),
+    Unprovoked::new(
+        &RECORD_UNREADABLE,
+        "Only a record directory without read permission provokes it, and the check's fixture copies keep the permissions readable.",
+    ),
+    Unprovoked::new(
+        &FILE_UNWRITABLE,
+        "Only a directory without write permission or a full disk provokes it, and the examples write nothing outside their fresh directories.",
+    ),
+];
 
 #[test]
 fn every_recovery_leads_to_a_command_that_runs() {
-    crumbkit_test::check_recoveries(&Cli::command(), &GUIDE, &RECOVERIES, "tests/golden");
+    let repositories = repositories();
+    let recoveries = Recoveries::new(examples(&repositories.path), &[CODES, UNBUILT_CODES])
+        .starts(STARTS)
+        .unprovoked(UNPROVOKED);
+    crumbkit_test::check_recoveries(&Cli::command(), &GUIDE, &recoveries, "tests/golden");
 }
 
-/// The settings of the twin check. The one code has no twin, and `ALLOW`
-/// says why.
-const TWINS: Twins<'_> = Twins::new(EXAMPLES, &[CODES]);
+/// One twin for each declared code that a command line provokes. Each twin
+/// differs from its refused line in one word or one variable (TEST-1).
+const PAIRS: &[Twin<'static>] = &[
+    Twin::new(CD_MISSING, &["cd", "reading-list"]),
+    Twin::new(NEW_TAKEN_NAME, NEW_TRIAGE),
+    Twin::new(NEW_BAD_NAME, NEW_TRIAGE),
+    Twin::new(NEW_TAKEN_BRANCH, NEW_TRIAGE),
+    Twin::new(NEW_MISSING_REPOSITORY, NEW_TRIAGE),
+    Twin::new(NEW_NO_ORIGIN, NEW_TRIAGE),
+    Twin::new(NEW_EMPTY_ORIGIN, NEW_TRIAGE),
+    Twin::variable(NEW_RELATIVE_ROOT, "MXV_ROOT"),
+    Twin::new(
+        NEW_TAKEN_DIRECTORY,
+        &["new", "sorting", "--repo", "inbox", "--dry-run"],
+    ),
+    Twin::variable(NEW_NO_GIT, "PATH"),
+];
 
 #[test]
 fn every_declared_code_has_a_twin_that_the_command_accepts() {
-    crumbkit_test::check_twins(&Cli::command(), &GUIDE, &TWINS);
+    let repositories = repositories();
+    let twins = Twins::new(examples(&repositories.path), &[CODES, UNBUILT_CODES])
+        .pairs(PAIRS)
+        .unprovoked(UNPROVOKED);
+    crumbkit_test::check_twins(&Cli::command(), &GUIDE, &twins);
 }

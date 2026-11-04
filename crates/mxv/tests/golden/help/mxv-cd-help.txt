@@ -1,19 +1,14 @@
-Print the directory of a workspace or of one of its apps
+Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
 
-Usage: mxv cd [OPTIONS]
+Usage: mxv cd [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          The name of the workspace
 
 Options:
       --json
           Print the result as a JSON document. The default prints text.
-
-      --fields <FIELD>
-          Print only these comma-separated fields, in this order. The default prints the compact columns.
-
-      --long
-          Add the long columns after the compact ones. The default prints only the compact columns.
-
-      --full
-          With --json, print every field of every row. The default prints only the fields of the columns.
 
       --no-input
           Fail instead of asking a question
@@ -22,7 +17,7 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  mxv cd
-          Print the directory of the current workspace
+  mxv cd reading-list
+          Print the directory of the workspace reading-list
 
 Effects: read-only, closed-world.

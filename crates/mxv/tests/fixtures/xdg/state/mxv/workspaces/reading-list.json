@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "reading-list",
+  "path": "/home/agent/mxv/reading-list",
+  "checkouts": [
+    {
+      "name": "inbox",
+      "backend": "git",
+      "source": "/home/agent/code/inbox",
+      "path": "/home/agent/mxv/reading-list/inbox",
+      "branch": "reading-list",
+      "base": "refs/remotes/origin/main",
+      "commit": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    }
+  ]
+}

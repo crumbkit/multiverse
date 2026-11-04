@@ -1,24 +1,4 @@
-mxv has 16 opt-outs from the conventions.
-
-examples/run: mxv new
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
-  Cost: The examples are not run, so help can show an example that fails.
-  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-examples/run: mxv list
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
-  Cost: The examples are not run, so help can show an example that fails.
-  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-examples/run: mxv show
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
-  Cost: The examples are not run, so help can show an example that fails.
-  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-examples/run: mxv cd
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
-  Cost: The examples are not run, so help can show an example that fails.
-  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+mxv has 14 opt-outs from the conventions.
 
 examples/run: mxv run
   Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
@@ -35,11 +15,6 @@ examples/run: mxv restore
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
 
-examples/run: mxv remove
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
-  Cost: The examples are not run, so help can show an example that fails.
-  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
 examples/run: mxv self usage
   Reason: The output names the day the report starts, which changes every day, and tests/usage.rs checks the usage log instead.
   Cost: The examples are not run, so help can show an example that fails.
@@ -49,11 +24,6 @@ examples/run: mxv self figures list
   Reason: The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-guide/document: mxv new
-  Reason: The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.
-  Cost: Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.
-  Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
 
 guide/document: mxv archive
   Reason: The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.
@@ -65,17 +35,32 @@ guide/document: mxv restore
   Cost: Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.
   Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
 
-guide/document: mxv remove
-  Reason: The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.
-  Cost: Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.
-  Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
-
 effects/yes: mxv run
   Reason: run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
-twins/no-twin: mxv new
+twins/no-twin: mxv run
   Reason: Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv show reading-list
+  Reason: The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv show reading-list
+  Reason: The corrupt record causes the failure, and every word of the command line that names it reads the same record.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv show reading-list
+  Reason: The record that holds another name causes the failure, and every word of the command line that names it reads the same record.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv new triage --repo inbox --dry-run
+  Reason: The config file causes the failure, and no word of the command line names the config file.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv new triage --repo inbox --dry-run
+  Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
 mxv declares 1 customisation.

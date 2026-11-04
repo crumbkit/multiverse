@@ -22,6 +22,31 @@ clap = { version = "4.6.7", default-features = false, features = ["std"] }
 # no feature, and mxv enables the ones it uses.
 crumbkit = { version = "0.1.0", default-features = false }
 
+# serde reads and writes the workspace records of the multiverse library,
+# and mxv derives `Serialize` for the documents it prints.
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+
+# serde_json is the form of the workspace records on disk. Tests also read
+# the JSON documents that the `mxv` binary prints.
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+
+# schemars describes the JSON documents that mxv prints, which crumbkit's
+# `Row` and `Document` need. Only mxv uses it.
+schemars = { version = "1.2.3", default-features = false, features = ["std", "derive"] }
+
+# wait-timeout gives each git command a deadline (BASE-34): the library
+# waits for the child with a timeout, and kills it when the deadline passes,
+# without polling with a sleep (BASE-11).
+wait-timeout = "0.2.1"
+
+# etcetera finds the XDG base directories of mxv, as crumbkit does. It has
+# no features.
+etcetera = { version = "0.11.0", default-features = false }
+
+# toml parses the person's mxv config file. The workspace entry enables no
+# feature, and mxv enables only `parse`.
+toml = { version = "1.2.0", default-features = false }
+
 # crumbkit-usage keeps the `mxv` command's local usage log and adds
 # `self usage` and `self figures list` (CLI-7).
 crumbkit-usage = "0.1.0"
@@ -34,12 +59,8 @@ crumbkit-test = "0.1.0"
 # use it.
 snapbox = { version = "1.2.2", default-features = false }
 
-# serde_json reads the usage log lines that the end-to-end tests compare.
-# Only tests use it.
-serde_json = { version = "1.0.151", default-features = false }
-
-# tempfile gives each end-to-end test its own state directory, which it
-# removes when the test ends. Only tests use it.
+# tempfile gives each test its own state directory and git repositories,
+# which it removes when the test ends. Only tests use it.
 tempfile = { version = "3.27.0", default-features = false }
 
 # The lint table is lints/base.toml and lints/library.toml of the Rust

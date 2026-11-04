@@ -1,4 +1,4 @@
-Show live workspaces by name, in the order given
+Show workspaces by name, in the order given
 
 Usage: mxv show [OPTIONS] <NAME>...
 
@@ -13,3 +13,4 @@ Examples:
 
 Effects: read-only, closed-world.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv show --help` describes them.
+Next: mxv show --help explains each column.

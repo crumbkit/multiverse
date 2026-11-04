@@ -1,13 +1,19 @@
-Create a workspace with one git worktree for each repository
+Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin.
 
-Usage: mxv new [OPTIONS]
+The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
+
+Usage: mxv new [OPTIONS] --repo <PATH> <NAME>
+
+Arguments:
+  <NAME>
+          The workspace's name, which also names its directory and its branch
 
 Options:
+      --repo <PATH>
+          The git repository to check out, or any directory inside it
+
       --dry-run
           Report what the command would change, and change nothing
-
-      --yes
-          Proceed without asking for confirmation
 
       --json
           Print the result as a JSON document. The default prints text.
@@ -28,7 +34,17 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  mxv new
-          Create a workspace
+  mxv new triage --repo inbox --dry-run
+          Print the workspace that a checkout of the repository inbox would get
+
+Columns:
+  name         The workspace's name, which is also the name of its directory and of its checkouts' branch.
+  branch       The branch that the workspace's checkouts were created on.
+  path         The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
+  root         The workspace root that the run used, in which `new` creates a workspace's directory.
+  root_source  Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+
+Columns that --long adds:
+  repositories  The top-level directory of each repository that the workspace checks out.
 
 Effects: additive, not idempotent, open-world.

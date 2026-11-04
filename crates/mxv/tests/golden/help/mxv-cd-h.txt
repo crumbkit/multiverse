@@ -1,12 +1,15 @@
-Print the directory of a workspace or of one of its apps
+Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
 
-Usage: mxv cd [OPTIONS]
+Usage: mxv cd [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The name of the workspace
 
 Options:
   -h, --help  Print help (see more with '--help')
 
 Examples:
-  mxv cd
+  mxv cd reading-list
 
 Effects: read-only, closed-world.
-Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv cd --help` describes them.
+Global flags: --json, --no-input. `mxv cd --help` describes them.
