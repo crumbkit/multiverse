@@ -1052,8 +1052,9 @@ fn logs_follow_gives_a_running_container_its_follower_back() {
         std::thread::yield_now();
     }
     let old = follower();
+    assert_ne!(old, 0, "up recorded no follower");
     let killed = Command::new("kill")
-        .args(["-KILL", &format!("-{old}")])
+        .args(["-KILL", "--", &format!("-{old}")])
         .env("PATH", PATH)
         .output()
         .unwrap()
