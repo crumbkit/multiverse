@@ -404,6 +404,11 @@ status document. When a resolver cannot supply a value, for example because
 a 1Password vault is locked, `Phase::up` returns that error for the app
 before starting anything, and names the variable and the resolver.
 
+starmap can keep 1Password values in a per-user agent that holds them in
+memory for a limited time after one unlock, so that starting another
+workspace does not ask for 1Password again. phase reaches it only through
+starmap's resolver, and treats its values like any other secret.
+
 Any process running as the same user can read another process's environment
 on macOS. The keeper design limits how many processes hold a secret and for
 how long; it does not hide a secret from the user's own processes.
@@ -421,6 +426,11 @@ app's `[permissions]` and allows:
 - connecting only to the localhost ports of the apps it depends on, and to
   external hosts through an allowlist proxy that phase runs outside the
   sandbox.
+
+The profile always denies an app the socket of starmap's secret agent and
+the 1Password and Keychain services. Only phase, outside the sandbox,
+resolves secrets, and an app receives only the values its own manifest
+declares.
 
 phase and multiverse will share one generator for Seatbelt profiles.
 
