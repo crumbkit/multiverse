@@ -563,5 +563,5 @@ Each decision states what this draft assumes until it is decided.
 | P10 | The trust model described above. | Decided 4 November 2026: as described in [Trust](#trust). |
 | P11 | Where an app's release, build and permission fields live: in `mxv.toml`, or in a separate file. | Decided 4 November 2026: in `mxv.toml`. |
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
-| P14 | Whether phase builds container images and runs host-built apps in containers with the checkout mounted, cache volumes and a run-as user, or leaves images to the host program. | Open. The draft keeps image building out of scope; a host program that runs its apps in containers would need it, or would pass phase a built image and mounts. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
+| P14 | Whether phase builds container images and runs host-built apps in containers with the checkout mounted, cache volumes and a run-as user, or leaves images to the host program. | Open. The draft keeps image building out of scope; a host program that runs its apps in containers would need it, or would pass phase a built image and mounts. |
