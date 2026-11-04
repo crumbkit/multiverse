@@ -791,19 +791,32 @@ impl Manifest {
             }
             containers.insert(name.get_ref().clone(), container);
         }
-        let globs =
-            |raw: &[Spanned<String>], parse: fn(&str) -> Result<PathGlob, BadGlob>, key: &str| {
-                raw.iter()
+        let globs = |raw: &[Spanned<String>],
+                     parse: fn(&str) -> Result<PathGlob, BadGlob>,
+                     key: &str| {
+            raw.iter()
                     .map(|glob| {
                         parse(glob.get_ref()).map_err(|reason| {
+                            // Only the config file's own `disposable` list may
+                            // name files or end in a wildcard, so only that
+                            // key's message says where such a glob belongs.
+                            let elsewhere = match (key, &reason) {
+                                ("disposable", BadGlob::NotDirectory | BadGlob::Wildcard) => {
+                                    "; only the config file's `disposable` may name files or use a wildcard in the last name"
+                                }
+                                _ => "",
+                            };
                             errors.invalid(
                                 &glob.span(),
-                                format!("the {key} glob {:?} is refused: {reason}", glob.get_ref()),
+                                format!(
+                                    "the {key} glob {:?} is refused: {reason}{elsewhere}",
+                                    glob.get_ref()
+                                ),
                             )
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()
-            };
+        };
         let manifest = Self {
             ports,
             processes,

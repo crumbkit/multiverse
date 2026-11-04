@@ -390,7 +390,7 @@ fn a_directory_swapped_for_a_symbolic_link_during_the_deletion_is_never_followed
         write_bytes(&decoy.join(format!("file-{index}")), 16);
     }
     let mut swapped = false;
-    let result = super::remove_tree_with(&checkout.join("target"), &mut |_| {
+    let result = super::tree::remove(&checkout, "target/", &mut |_| {
         if !swapped {
             swapped = true;
             #[expect(
@@ -459,4 +459,113 @@ fn the_disk_usage_marks_a_path_that_only_the_manifest_makes_disposable() {
             ("target/", DisposableSource::BuiltIn)
         ]
     );
+}
+
+#[test]
+fn a_parent_component_swapped_for_a_symbolic_link_before_the_deletion_is_never_followed() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("web/node_modules/left-pad/index.js"), 16);
+    let decoy = setup.fixture.dir.path().join("decoyweb");
+    write_bytes(&decoy.join("node_modules/left-pad/index.js"), 16);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test swaps a directory for a link, as another process would"
+    )]
+    fs::rename(checkout.join("web"), checkout.join("web.old")).unwrap();
+    std::os::unix::fs::symlink(&decoy, checkout.join("web")).unwrap();
+    let result = super::tree::remove(&checkout, "web/node_modules/", &mut |_| {});
+    assert!(result.is_err(), "{result:?}");
+    assert!(decoy.join("node_modules/left-pad/index.js").exists());
+}
+
+#[test]
+fn a_parent_component_swapped_during_the_deletion_leaves_the_link_target_alone() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    for index in 0..20 {
+        write_bytes(&checkout.join(format!("web/node_modules/file-{index}")), 16);
+    }
+    let decoy = setup.fixture.dir.path().join("decoyweb");
+    for index in 0..20 {
+        write_bytes(&decoy.join(format!("node_modules/file-{index}")), 16);
+    }
+    let mut swapped = false;
+    let _ = super::tree::remove(&checkout, "web/node_modules/", &mut |_| {
+        if !swapped {
+            swapped = true;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the test swaps a directory for a link, as another process would"
+            )]
+            fs::rename(checkout.join("web"), checkout.join("web.old")).unwrap();
+            std::os::unix::fs::symlink(&decoy, checkout.join("web")).unwrap();
+        }
+    });
+    assert!(swapped);
+    let left = fs::read_dir(decoy.join("node_modules")).unwrap().count();
+    assert_eq!(left, 20, "the deletion followed the link into the decoy");
+}
+
+#[test]
+fn a_directory_on_another_device_is_kept_and_never_deleted() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/mnt/image"), 16);
+    // A device that no directory has makes every directory below the path
+    // look like the mount point of another file system.
+    let reason =
+        super::tree::keep_reason_on(&checkout, "target/", Some(rustix::fs::Dev::MAX)).unwrap();
+    assert!(reason.contains("target/mnt"), "{reason}");
+    assert!(reason.contains("mount point"), "{reason}");
+    let result = super::tree::remove_on(
+        &checkout,
+        "target/",
+        Some(rustix::fs::Dev::MAX),
+        &mut |_| {},
+    );
+    let (failed, error) = result.unwrap_err();
+    assert_eq!(failed, checkout.join("target"));
+    assert!(error.to_string().contains("mount point"), "{error}");
+    assert!(checkout.join("target/mnt/image").exists());
+}
+
+/// Creates `depth` directories named `name` inside each other below `dir`
+/// by file descriptor, which no path limit stops, and returns the deepest.
+fn nest(dir: &Path, name: &str, depth: usize) -> std::os::fd::OwnedFd {
+    use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let mut fd = openat(CWD, dir, flags, Mode::empty()).unwrap();
+    for _ in 0..depth {
+        mkdirat(&fd, name, Mode::from_raw_mode(0o755)).unwrap();
+        fd = openat(&fd, name, flags, Mode::empty()).unwrap();
+    }
+    fd
+}
+
+#[test]
+fn a_repository_beyond_the_path_limit_is_still_found_and_kept() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    fs::create_dir_all(checkout.join("node_modules")).unwrap();
+    // 60 names of 60 bytes make a path of about 3,600 bytes, beyond the
+    // 1,024 bytes of PATH_MAX on macOS.
+    let deepest = nest(&checkout.join("node_modules"), &"n".repeat(60), 60);
+    rustix::fs::mkdirat(&deepest, ".git", rustix::fs::Mode::from_raw_mode(0o755)).unwrap();
+    let reason = super::tree::keep_reason(&checkout, "node_modules/").unwrap();
+    assert!(reason.contains(".git"), "{reason}");
+}
+
+#[test]
+fn a_tree_deeper_than_the_limit_is_kept_with_a_reason() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    fs::create_dir_all(checkout.join("target")).unwrap();
+    nest(&checkout.join("target"), "d", super::tree::MOST_DEPTH + 5);
+    let usage = setup.usage();
+    assert!(usage.disposable.is_empty(), "{usage:?}");
+    assert!(usage.kept[0].reason.contains("deeper than"), "{usage:?}");
+    let result = super::tree::remove(&checkout, "target/", &mut |_| {});
+    let (_, error) = result.unwrap_err();
+    assert!(error.to_string().contains("deeper than"), "{error}");
 }

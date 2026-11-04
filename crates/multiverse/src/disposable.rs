@@ -101,10 +101,10 @@ impl fmt::Display for BadGlob {
                 "a new workspace never clones `target`, because a build of the checkout's own sources writes it"
             }
             Self::NotDirectory => {
-                "the glob must name a directory and end with `/`, such as `web/test-results/`; only the config file may name files"
+                "the glob must name a directory and end with `/`, such as `web/test-results/`"
             }
             Self::Wildcard => {
-                "the glob must name a directory by a literal last name without `*` or `?`, such as `**/coverage/`; only the config file may use a wildcard there"
+                "the glob must name a directory by a literal last name without `*` or `?`, such as `**/coverage/`"
             }
         })
     }

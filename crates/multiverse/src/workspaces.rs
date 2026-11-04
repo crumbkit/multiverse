@@ -664,7 +664,8 @@ impl<B: Backend> Workspaces<B> {
                     // repository with unpushed work, so it is never
                     // deleted without the caller's leave.
                     let source = set.source(path);
-                    if source.is_some() && crate::disk::nested_git(&checkout.path, path).is_none() {
+                    if source.is_some() && crate::disk::keep_reason(&checkout.path, path).is_none()
+                    {
                         if source == Some(DisposableSource::Manifest) {
                             manifest.push(named(path));
                         }

@@ -728,6 +728,10 @@ fn a_disposable_glob_that_could_match_any_ignored_path_fails_as_invalid_with_its
             panic!("{glob}: {problem:?}");
         };
         assert!(message.contains("directory"), "{message}");
+        assert!(
+            message.contains("only the config file's `disposable`"),
+            "{message}"
+        );
     }
 }
 
@@ -735,8 +739,8 @@ fn a_disposable_glob_that_could_match_any_ignored_path_fails_as_invalid_with_its
 fn a_clone_glob_that_could_match_any_ignored_directory_fails_as_invalid() {
     let (line, problem) = problem("clone_on_new = [\"*/\"]\n");
     assert_eq!(line, Some(1));
-    assert!(
-        matches!(problem, ManifestProblem::Invalid { .. }),
-        "{problem:?}"
-    );
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(!message.contains("config file"), "{message}");
 }

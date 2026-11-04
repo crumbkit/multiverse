@@ -166,6 +166,25 @@ struct Candidate {
 }
 
 impl Candidate {
+    /// Keeps each path that only the repository's own `mxv.toml` makes
+    /// disposable, because `--yes` without `--force` gave no person a
+    /// chance to confirm it.
+    fn hold_manifest_paths(&mut self) {
+        let (held, paths): (Vec<DisposablePath>, Vec<DisposablePath>) = self
+            .paths
+            .drain(..)
+            .partition(|found| found.source == DisposableSource::Manifest);
+        self.paths = paths;
+        for found in held {
+            self.disposable = self.disposable.saturating_sub(found.bytes);
+            self.kept.push(KeptPath::new(
+                found.checkout,
+                found.path,
+                "only the repository's mxv.toml declares it disposable, and --yes alone does not delete such paths; answer the prompt without --yes, or pass --force".to_owned(),
+            ));
+        }
+    }
+
     /// Returns the row of the candidate in `state`, with `reason`.
     fn row(&self, state: CleanState, reason: Option<String>, now: SystemTime) -> CleanRow {
         let deletes = state != CleanState::Kept;
@@ -505,11 +524,16 @@ pub(crate) fn clean(
     let now = SystemTime::now();
     let mut keys = Vec::new();
     let mut entries = Vec::new();
+    // `Yes` hides its flag, and only its default holds no `--yes`.
+    let hold = args.yes != crumbkit::Yes::default() && !args.force;
     for (key, found) in selected(&workspaces, args)? {
         keys.push(key);
-        entries.push(
-            found.and_then(|workspace| measure(environment, &workspaces, workspace, now, idle)),
-        );
+        let mut entry =
+            found.and_then(|workspace| measure(environment, &workspaces, workspace, now, idle));
+        if hold && let Ok(candidate) = &mut entry {
+            candidate.hold_manifest_paths();
+        }
+        entries.push(entry);
     }
     let total = entries.iter().flatten().fold(0_u64, |sum, candidate| {
         sum.saturating_add(candidate.disposable)
@@ -566,7 +590,8 @@ pub(crate) fn clean(
         if !picked.contains(&index) {
             let reason = candidate.busy.clone().unwrap_or_else(|| {
                 if candidate.paths.is_empty() {
-                    "it holds no disposable directory".to_owned()
+                    skipped_reason(&candidate.kept)
+                        .unwrap_or_else(|| "it holds no disposable directory".to_owned())
                 } else {
                     within_limit_reason(total, limit.unwrap_or(u64::MAX))
                 }

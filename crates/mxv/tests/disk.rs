@@ -616,3 +616,61 @@ fn show_and_clean_mark_a_path_that_only_the_manifest_declares_disposable() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(checkout.join("data/pg.db").exists(), "{stderr}");
 }
+
+#[test]
+fn clean_with_yes_keeps_a_path_that_only_the_manifest_declares_disposable_unless_forced() {
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    write_text(
+        &setup.clone.join(".git/info/exclude"),
+        ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
+    );
+    write_text(&checkout.join("data/pg.db"), "rows");
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = &document["data"][0];
+    assert_eq!(row["state"], "cleaned", "{document}");
+    assert_eq!(
+        row["paths"],
+        serde_json::json!(["app: target/"]),
+        "{document}"
+    );
+    let skipped = row["skipped"][0].as_str().unwrap();
+    assert!(skipped.contains("app: data/"), "{skipped}");
+    assert!(skipped.contains("--force"), "{skipped}");
+    assert!(checkout.join("data/pg.db").exists());
+    assert!(!checkout.join("target").exists());
+
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes", "--force"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        document["data"][0]["manifest_paths"][0], "app: data/",
+        "{document}"
+    );
+    assert!(!checkout.join("data").exists());
+}
+
+#[test]
+fn a_workspace_whose_every_disposable_path_is_kept_names_them_in_its_reason() {
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    write_text(
+        &setup.clone.join(".git/info/exclude"),
+        ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
+    );
+    write_text(&checkout.join("data/pg.db"), "rows");
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = &document["data"][0];
+    assert_eq!(row["state"], "kept", "{document}");
+    let reason = row["reason"].as_str().unwrap();
+    assert!(reason.contains("app: data/"), "{reason}");
+    assert!(
+        !reason.contains("holds no disposable directory"),
+        "{reason}"
+    );
+    assert!(checkout.join("data/pg.db").exists());
+}

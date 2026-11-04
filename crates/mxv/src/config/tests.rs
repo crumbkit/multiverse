@@ -194,4 +194,5 @@ fn a_clone_glob_in_the_config_file_must_name_a_directory_by_a_literal_name() {
     let (line, reason) = invalid("\nclone_on_new = [\"*/\"]\n");
     assert_eq!(line, Some(2));
     assert!(reason.contains("directory"), "{reason}");
+    assert!(!reason.contains("only the config file"), "{reason}");
 }

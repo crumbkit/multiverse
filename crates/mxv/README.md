@@ -512,8 +512,8 @@ disk, and `disposable`, the bytes its disposable paths take. `--long` and
 `--full` add `disposable_paths`, each disposable path with its checkout, its
 size and its `source`: `built_in` for a built-in name, `config` for a glob
 of the config file, or `manifest` for a glob of the repository's own
-`mxv.toml` and nothing else. They also add `kept_paths`, each path that the disposable set matches and
-that mxv keeps, with the reason. A size counts the blocks the file system
+`mxv.toml` and nothing else. They also add `kept_paths`, each path that
+the disposable set matches and that mxv keeps, with the reason. A size counts the blocks the file system
 allocated, so a sparse file counts only what it holds. A file with several
 hard links counts once, and mxv never follows a symbolic link. A
 copy-on-write clone counts in full, although it shares its blocks with its
@@ -542,6 +542,16 @@ repository at any depth, an entry named `.git` in any case or a directory
 that holds `HEAD`, `objects/` and `refs/`, is never disposable, because it
 may hold commits that exist nowhere else.
 
+mxv also keeps a directory that it cannot check in full. A directory that
+holds the mount point of another file system, such as a disk image mounted
+below `target/`, is kept, and its reason names the mount point. A directory
+with an entry that mxv cannot read is kept, because mxv cannot tell whether
+the entry holds a repository. A directory more than 100 levels deep below
+the disposable path is kept, and its reason names the level where the check
+stopped. The check opens each directory by file descriptor relative to its
+parent, so it reads a tree whose paths are longer than the system's path
+limit, and it holds at most one open descriptor for each level.
+
 A glob is a path relative to the repository's root, written as `git status`
 prints it:
 
@@ -568,8 +578,9 @@ as `*.log`, or a wildcard in the last name. A literal directory name in
 `mxv.toml` can still name a directory that holds data, such as `data/`, so
 mxv marks each path that only the manifest makes disposable. `show` gives
 it the source `manifest`, the prompts of `clean` and `remove` name it and
-say that it comes from the repository's `mxv.toml`, and `remove --yes`
-refuses it without `--force`. Any glob that is empty, starts
+say that it comes from the repository's `mxv.toml`, `remove --yes`
+refuses it without `--force`, and `clean --yes` keeps it without `--force`
+and lists it in `skipped`. Any glob that is empty, starts
 with `/`, or holds a `..`, `.` or empty component fails, with
 `mxv::manifest::invalid` in `mxv.toml` or `mxv::config::invalid` in the
 config file, and the failure names the glob's line.
@@ -601,9 +612,14 @@ workspace changes none of its times, because mxv runs `git status` with
 bytes it freed in `freed`, or `kept` with the reason in `reason`, such as a
 running process or a recent change. A dry run prints `would_clean` and
 deletes nothing. `skipped` lists each matched path that the run kept, such
-as a directory that holds a `.git` entry, and `reason` names them too. The
-note after the rows gives the total freed. `clean` asks before it deletes,
-and `--yes` answers for a script.
+as a directory that holds a `.git` entry, and `reason` names them too. A
+workspace whose every disposable path was kept has the state `kept`, and its
+`reason` names the kept paths and why. The note after the rows gives the
+total freed. `clean` asks before it deletes, and `--yes` answers for a
+script. With `--yes`, `clean` keeps each path that only the repository's
+`mxv.toml` declares disposable, because no person confirmed it, and
+`--force` deletes those paths too. `--over-limit --yes` keeps them in the
+same way, so they do not count toward the bytes that the run frees.
 
 Before it deletes anything in a workspace, `clean` takes the workspace's
 lock, which `mxv up` and `mxv down` also take, so no process starts while
@@ -617,11 +633,16 @@ holds the lock for more than 5 seconds, the workspace is kept with that
 reason.
 
 `clean` deletes by file descriptor, as Rust's `std::fs::remove_dir_all`
-does. It opens each directory relative to its parent with `O_NOFOLLOW` and
-deletes the directory's entries relative to it. A directory that another
-process swaps for a symbolic link during the deletion is never followed:
+does. It opens the checkout's root once, then opens each component of the
+path, such as `web` and then `node_modules` for `web/node_modules/`,
+relative to the one before it with `O_NOFOLLOW`. Below the path, it opens
+each directory relative to its parent in the same way and deletes the
+directory's entries relative to it. A component that another process swaps
+for a symbolic link before or during the deletion is never followed:
 `clean` deletes the link or fails on it, and touches nothing outside the
-checkout.
+checkout. The deletion also refuses a directory on another file system and
+a directory more than 100 levels below the path, and fails the path with
+`mxv::file::unwritable` while it deletes the path's other entries.
 
 A workspace that mxv cannot find, read or measure fails alone, the other
 workspaces are still cleaned, and `clean` exits with 1. When a path cannot

@@ -407,6 +407,9 @@ A workspace is idle when none of its processes or containers run and no file or 
 - `--all`: Clean every idle workspace. Required, or give one of `<NAME>` and `--over-limit` in its place.
 - `--over-limit`: Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max\_disposable. Required, or give one of `<NAME>` and `--all` in its place.
 - `--idle <AGE>`: How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean\_idle, or else 7d
+- `--force`: With --yes, also delete the paths that only mxv.toml declares disposable
+
+  \--yes alone keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it.
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 

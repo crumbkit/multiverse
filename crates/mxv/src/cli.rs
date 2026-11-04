@@ -397,6 +397,12 @@ pub(crate) struct CleanArgs {
     #[arg(long, value_name = "AGE", value_parser = parse_age)]
     pub(crate) idle: Option<std::time::Duration>,
 
+    /// With --yes, also delete the paths that only mxv.toml declares disposable
+    ///
+    /// --yes alone keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it.
+    #[arg(long)]
+    pub(crate) force: bool,
+
     /// Print what the command would delete, and delete nothing.
     #[command(flatten)]
     pub(crate) dry_run: DryRun,

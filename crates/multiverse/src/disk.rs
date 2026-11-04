@@ -21,21 +21,18 @@
 //! change. The status-change time cannot be set back, so a file whose
 //! modification time a tool restored still counts as changed.
 //!
-//! A disposable directory that holds a `.git` entry at any depth, such as
-//! a nested repository, is kept, because it may hold commits that exist
-//! nowhere else. [`DiskUsage::kept`] lists it with the reason.
+//! A disposable directory is kept whole when it holds a nested repository
+//! at any depth, which may hold commits that exist nowhere else, when it
+//! holds the mount point of another file system, when it is deeper than
+//! [`tree::MOST_DEPTH`], or when mxv cannot read all of it.
+//! [`DiskUsage::kept`] lists it with the reason. The checks and the
+//! deletion work by file descriptor from the checkout's root, as the
+//! `tree` module describes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsStr;
 use std::fs::{self, Metadata};
-use std::io;
-use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, openat, statat, unlinkat};
-use rustix::io::Errno;
 
 use crate::backend::Backend;
 use crate::disposable::DisposableSource;
@@ -45,6 +42,9 @@ use crate::workspaces::{Entry, Workspaces};
 
 #[cfg(test)]
 mod tests;
+mod tree;
+
+pub(crate) use tree::keep_reason;
 
 /// The files of a checkout's git directory that a commit, a checkout or a
 /// staged change writes.
@@ -100,6 +100,19 @@ pub struct KeptPath {
     pub path: String,
     /// Why mxv keeps it.
     pub reason: String,
+}
+
+impl KeptPath {
+    /// Returns the path `path` of the checkout `checkout`, which mxv keeps
+    /// for `reason`.
+    #[must_use]
+    pub fn new(checkout: String, path: String, reason: String) -> Self {
+        Self {
+            checkout,
+            path,
+            reason,
+        }
+    }
 }
 
 /// A planned path that [`Workspaces::clean`] could not delete in full.
@@ -289,53 +302,6 @@ fn absolute(checkout: &Path, path: &str) -> PathBuf {
     checkout.join(path.trim_end_matches('/'))
 }
 
-/// Returns the first nested repository at any depth below the ignored
-/// path `path` of the checkout at `checkout`, relative to the checkout, or
-/// `None` when it holds none or is not a directory. A nested repository is
-/// an entry named `.git` in any case, or a directory that looks like a bare
-/// repository because it holds `HEAD`, `objects/` and `refs/`. It never
-/// follows a symbolic link.
-pub(crate) fn nested_git(checkout: &Path, path: &str) -> Option<String> {
-    if !path.ends_with('/') {
-        return None;
-    }
-    let relative = |found: &Path| {
-        found
-            .strip_prefix(checkout)
-            .unwrap_or(found)
-            .display()
-            .to_string()
-    };
-    let mut stack = vec![absolute(checkout, path)];
-    while let Some(dir) = stack.pop() {
-        if is_bare(&dir) {
-            return Some(format!("{}/", relative(&dir)));
-        }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let found = entry.path();
-            if entry.file_name().eq_ignore_ascii_case(".git") {
-                return Some(relative(&found));
-            }
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                stack.push(found);
-            }
-        }
-    }
-    None
-}
-
-/// Reports whether the directory `dir` looks like a bare repository: it
-/// holds a `HEAD` file and the directories `objects` and `refs`.
-fn is_bare(dir: &Path) -> bool {
-    let kind = |name: &str| fs::symlink_metadata(dir.join(name)).ok();
-    kind("HEAD").is_some_and(|metadata| metadata.is_file())
-        && kind("objects").is_some_and(|metadata| metadata.is_dir())
-        && kind("refs").is_some_and(|metadata| metadata.is_dir())
-}
-
 /// Returns the bytes that deleting the tree at `root` frees: the blocks of
 /// each directory, and of each file whose every hard link lies inside the
 /// tree. A file with a hard link elsewhere, such as in a package store,
@@ -371,112 +337,6 @@ fn freeable(root: &Path) -> u64 {
         .fold(total, |sum, (bytes, _, _)| sum.saturating_add(*bytes))
 }
 
-/// Deletes the tree at `path` without following symbolic links, as
-/// [`remove_tree_with`] describes.
-fn remove_tree(path: &Path) -> Result<(), (PathBuf, io::Error)> {
-    remove_tree_with(path, &mut |_| {})
-}
-
-/// Deletes the tree at `path` and calls `removed` with each entry it
-/// deleted. A failure below `path` does not stop the deletion of its other
-/// entries, and the result names the first entry that could not be
-/// deleted.
-///
-/// The deletion works by file descriptor, as `std::fs::remove_dir_all`
-/// does. It opens each directory relative to its parent with
-/// `O_NOFOLLOW` and deletes its entries relative to that descriptor, so a
-/// directory that another process replaces with a symbolic link during
-/// the deletion is never followed. The link itself is deleted, or the
-/// deletion of its name fails, and nothing outside the tree is touched.
-fn remove_tree_with(
-    path: &Path,
-    removed: &mut dyn FnMut(&Path),
-) -> Result<(), (PathBuf, io::Error)> {
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err((path.to_path_buf(), io::ErrorKind::InvalidInput.into()));
-    };
-    let parent_fd = openat(
-        CWD,
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| (parent.to_path_buf(), io::Error::from(error)))?;
-    remove_entry(&parent_fd, name, path, removed)
-}
-
-/// Deletes the entry `name` of the open directory `dir`, whose path is
-/// `path`, and everything below it.
-fn remove_entry(
-    dir: &OwnedFd,
-    name: &OsStr,
-    path: &Path,
-    removed: &mut dyn FnMut(&Path),
-) -> Result<(), (PathBuf, io::Error)> {
-    let fail = |error: Errno| (path.to_path_buf(), io::Error::from(error));
-    let stat = match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => stat,
-        Err(Errno::NOENT) => return Ok(()),
-        Err(error) => return Err(fail(error)),
-    };
-    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-        return unlink(dir, name, AtFlags::empty(), path, removed);
-    }
-    let child = match openat(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(child) => child,
-        // The entry stopped being a directory after the stat, such as a
-        // directory that was swapped for a symbolic link, so only the
-        // entry itself is deleted.
-        Err(Errno::LOOP | Errno::NOTDIR) => {
-            return unlink(dir, name, AtFlags::empty(), path, removed);
-        }
-        Err(Errno::NOENT) => return Ok(()),
-        Err(error) => return Err(fail(error)),
-    };
-    let mut names = Vec::new();
-    for entry in Dir::read_from(&child).map_err(fail)? {
-        let entry = entry.map_err(fail)?;
-        let bytes = entry.file_name().to_bytes();
-        if bytes != b"." && bytes != b".." {
-            names.push(OsStr::from_bytes(bytes).to_os_string());
-        }
-    }
-    let mut first = None;
-    for entry in names {
-        if let Err(failure) = remove_entry(&child, &entry, &path.join(&entry), removed) {
-            first.get_or_insert(failure);
-        }
-    }
-    if let Some(failure) = first {
-        return Err(failure);
-    }
-    unlink(dir, name, AtFlags::REMOVEDIR, path, removed)
-}
-
-/// Deletes the entry `name` of the open directory `dir`, whose path is
-/// `path`, with `unlinkat` and `flags`, and calls `removed` with it.
-fn unlink(
-    dir: &OwnedFd,
-    name: &OsStr,
-    flags: AtFlags,
-    path: &Path,
-    removed: &mut dyn FnMut(&Path),
-) -> Result<(), (PathBuf, io::Error)> {
-    match unlinkat(dir, name, flags) {
-        Ok(()) => {
-            removed(path);
-            Ok(())
-        }
-        Err(Errno::NOENT) => Ok(()),
-        Err(error) => Err((path.to_path_buf(), io::Error::from(error))),
-    }
-}
-
 impl<B: Backend> Workspaces<B> {
     /// Returns the disposable paths of each checkout of `workspace` that
     /// exists, as `git status` reports its ignored paths and the
@@ -505,12 +365,10 @@ impl<B: Backend> Workspaces<B> {
                 let Some(source) = set.source(&path) else {
                     continue;
                 };
-                if let Some(git) = nested_git(&checkout.path, &path) {
+                if let Some(reason) = keep_reason(&checkout.path, &path) {
                     kept.push(KeptPath {
                         checkout: checkout.name.clone(),
-                        reason: format!(
-                            "it holds the repository {git}, which may hold commits that exist nowhere else"
-                        ),
+                        reason,
                         path,
                     });
                     continue;
@@ -688,7 +546,7 @@ impl<B: Backend> Workspaces<B> {
             }
             let path = absolute(&checkout.path, &found.path);
             let before = freeable(&path);
-            let removed = remove_tree(&path);
+            let removed = tree::remove(&checkout.path, &found.path, &mut |_| {});
             let after = if path.exists() { freeable(&path) } else { 0 };
             let bytes = before.saturating_sub(after);
             match removed {
@@ -730,10 +588,8 @@ impl<B: Backend> Workspaces<B> {
                 "its parent directory lies outside the checkout".to_owned(),
             ));
         }
-        if let Some(git) = nested_git(&checkout.path, path) {
-            return Ok(Some(format!(
-                "it holds the repository {git}, which may hold commits that exist nowhere else"
-            )));
+        if let Some(reason) = keep_reason(&checkout.path, path) {
+            return Ok(Some(reason));
         }
         if self.backend.tracks(&checkout.path, path)? {
             return Ok(Some("the repository tracks a file in it".to_owned()));
