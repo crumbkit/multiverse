@@ -30,7 +30,9 @@ Create, archive and restore task workspaces that span several git repositories
 
 ## `mxv new`
 
-Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
+Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin.
+
+The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
 ### Arguments
 
@@ -50,7 +52,9 @@ mxv new triage --repo inbox --dry-run
 
 - `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
 - `branch`: The branch that the workspace's checkouts were created on.
-- `path`: The workspace's directory, which `mxv cd` prints.
+- `path`: The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
+- `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
+- `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
 
 ### Columns that `--long` adds
 
@@ -80,6 +84,7 @@ mxv list
 - `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
 - `branch`: The branch that the workspace's checkouts were created on.
 - `path`: The workspace's directory, which `mxv cd` prints.
+- `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record file in `name` and leaves the other fields empty.
 
 ### Columns that `--long` adds
 
@@ -107,7 +112,9 @@ mxv show reading-list
 
 - `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
 - `branch`: The branch that the workspace's checkouts were created on.
-- `path`: The workspace's directory, which `mxv cd` prints.
+- `path`: The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
+- `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
+- `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
 
 ### Columns that `--long` adds
 
@@ -192,7 +199,8 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 ### Arguments
 
 - `<NAME>`: The name of the workspace to remove. Required.
-- `--force`: Remove checkouts with uncommitted or untracked changes, and delete unmerged branches
+- `--force`: Discard uncommitted changes, untracked files and ignored files such as .env; an unmerged branch is still kept
+- `--delete-unmerged`: Delete branches with unmerged commits, and commits on a detached HEAD
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 

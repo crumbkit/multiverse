@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "data": {
-      "$ref": "#/$defs/WorkspaceRow"
+      "$ref": "#/$defs/PlacedRow"
     },
     "dry_run": {
       "description": "Present, and true, when the run was a dry run that changed nothing.",
@@ -30,7 +30,7 @@
           "type": "string"
         },
         "base": {
-          "description": "The remote branch that the branch started from, such as `origin/main`.",
+          "description": "The remote branch that the branch started from, such as\n`refs/remotes/origin/main`.",
           "type": "string"
         },
         "branch": {
@@ -67,8 +67,8 @@
         "commit"
       ]
     },
-    "WorkspaceRow": {
-      "description": "One workspace, as `new`, `list` and `show` print it.",
+    "PlacedRow": {
+      "description": "One workspace and the workspace root that the run used, as `new` and\n`show` print it.",
       "type": "object",
       "properties": {
         "branch": {
@@ -87,7 +87,7 @@
           "type": "string"
         },
         "path": {
-          "description": "The workspace's directory, which `mxv cd` prints.",
+          "description": "The workspace's directory, which `mxv cd` prints. It comes from the\nworkspace's record, so it stays where the workspace was created when\nthe root changes later.",
           "type": "string"
         },
         "repositories": {
@@ -96,12 +96,42 @@
           "items": {
             "type": "string"
           }
+        },
+        "root": {
+          "description": "The workspace root that the run used, in which `new` creates a\nworkspace's directory.",
+          "type": "string"
+        },
+        "root_source": {
+          "description": "Where the root came from: `env` for `MXV_ROOT`, `config` for the\nconfig file's `root`, or `default` for\n`$XDG_DATA_HOME/mxv/workspaces`.",
+          "$ref": "#/$defs/RootSource"
         }
       },
       "required": [
         "name",
         "branch",
-        "path"
+        "path",
+        "root",
+        "root_source"
+      ]
+    },
+    "RootSource": {
+      "description": "Where the workspace root came from.",
+      "oneOf": [
+        {
+          "description": "The `MXV_ROOT` environment variable named it.",
+          "type": "string",
+          "const": "env"
+        },
+        {
+          "description": "The config file's `root` named it.",
+          "type": "string",
+          "const": "config"
+        },
+        {
+          "description": "Neither named one, so it is `$XDG_DATA_HOME/mxv/workspaces`.",
+          "type": "string",
+          "const": "default"
+        }
       ]
     }
   }

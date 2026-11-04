@@ -16,6 +16,18 @@ pub struct Repository {
     pub name: String,
 }
 
+/// The changes in a checkout that removing it would delete.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Changes {
+    /// One line for each uncommitted change or untracked path, as
+    /// `git status --porcelain` prints it, such as `?? notes.md`.
+    pub changed: Vec<String>,
+    /// Each path that the repository's ignore rules ignore, such as
+    /// `target/` or `.env`. An ignored directory is one path.
+    pub ignored: Vec<String>,
+}
+
 /// The operations that a workspace needs from a version-control system.
 ///
 /// Each method runs one operation in one repository or checkout, and
@@ -41,8 +53,8 @@ pub trait Backend {
     /// Returns the failure of the fetch.
     fn fetch(&self, repository: &Path) -> Result<(), Error>;
 
-    /// Returns the remote branch that new work starts from, such as
-    /// `origin/main`.
+    /// Returns the remote branch that new work starts from, as a full
+    /// reference such as `refs/remotes/origin/main`.
     ///
     /// # Errors
     ///
@@ -81,14 +93,13 @@ pub trait Backend {
     /// Returns the failure of the listing.
     fn owns_checkout(&self, repository: &Path, checkout: &Path) -> Result<bool, Error>;
 
-    /// Returns one line for each uncommitted or untracked change in
-    /// `checkout`, such as `?? notes.md`, and no lines for a clean
-    /// checkout.
+    /// Returns the uncommitted changes, untracked paths and ignored paths
+    /// in `checkout`.
     ///
     /// # Errors
     ///
     /// Returns the failure of the status command.
-    fn changes(&self, checkout: &Path) -> Result<Vec<String>, Error>;
+    fn changes(&self, checkout: &Path) -> Result<Changes, Error>;
 
     /// Removes the checkout at `checkout` from the repository and deletes
     /// its directory. With `force`, it also deletes uncommitted and
@@ -107,12 +118,24 @@ pub trait Backend {
     /// Returns the failure of the prune.
     fn prune_checkouts(&self, repository: &Path) -> Result<(), Error>;
 
-    /// Reports whether every commit of `branch` is already on `base`.
+    /// Returns the number of commits that `revision`, such as
+    /// `refs/heads/reading-list`, holds and `base` does not.
     ///
     /// # Errors
     ///
-    /// Returns the failure of the comparison.
-    fn is_merged(&self, repository: &Path, branch: &str, base: &str) -> Result<bool, Error>;
+    /// Returns the failure of the count.
+    fn unmerged_commits(&self, repository: &Path, revision: &str, base: &str)
+    -> Result<u32, Error>;
+
+    /// Returns the number of commits that the `HEAD` of `checkout` holds
+    /// and no branch, tag or remote branch of its repository holds, such
+    /// as commits made on a detached `HEAD`. Removing the checkout loses
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the count.
+    fn stray_commits(&self, checkout: &Path) -> Result<u32, Error>;
 
     /// Deletes the local branch `branch`, merged or not.
     ///

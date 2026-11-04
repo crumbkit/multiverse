@@ -2,15 +2,15 @@
 //! documents they print.
 
 use crumbkit::{Batch, Call, Document, Listing, Output, Prose};
-use multiverse::{Git, Mode, NewOutcome, RemovalPlan, Store, WorkspaceName, Workspaces};
+use multiverse::{Allow, Git, Mode, NewOutcome, RemovalPlan, Store, WorkspaceName, Workspaces};
 
 use crate::cli::{CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
-use crate::rows::{RemovalResult, WorkspaceRow};
+use crate::rows::{PlacedRow, RemovalResult, WorkspaceRow};
 
 /// The document that `mxv new` prints.
-pub(crate) const NEW: Document<WorkspaceRow> = Document::new(
+pub(crate) const NEW: Document<PlacedRow> = Document::new(
     "mxv",
     "new",
     1,
@@ -27,7 +27,7 @@ pub(crate) const LIST: Document<Listing<WorkspaceRow>> = Document::new(
 .when_empty("no workspace exists yet, and `mxv new <NAME> --repo <PATH>` creates one");
 
 /// The document that `mxv show` prints.
-pub(crate) const SHOW: Document<Batch<WorkspaceRow, MxvFailure>> = Document::new(
+pub(crate) const SHOW: Document<Batch<PlacedRow, MxvFailure>> = Document::new(
     "mxv",
     "show",
     1,
@@ -73,7 +73,7 @@ pub(crate) fn new(
     output: &Output,
     environment: &Environment,
     args: &NewArgs,
-) -> Result<WorkspaceRow, MxvFailure> {
+) -> Result<PlacedRow, MxvFailure> {
     let name = parse_name(&args.name)?;
     let mode = if output.is_dry_run() {
         Mode::DryRun
@@ -81,9 +81,9 @@ pub(crate) fn new(
         Mode::Change
     };
     let root = environment.root()?;
-    match workspaces(environment)?.create(&root, &name, &args.repo, mode)? {
+    match workspaces(environment)?.create(&root.path, &name, &args.repo, mode)? {
         NewOutcome::Created(workspace) | NewOutcome::Planned(workspace) => {
-            Ok(WorkspaceRow::from(&workspace))
+            Ok(PlacedRow::new(&workspace, &root))
         }
         NewOutcome::NameTaken(_) => Err(MxvFailure::Exists {
             name: name.to_string(),
@@ -95,15 +95,18 @@ pub(crate) fn new(
     }
 }
 
-/// Returns the first page of the workspaces, in name order.
+/// Returns the first page of the workspaces: a row for each record that
+/// mxv cannot read, first, and then the workspaces in name order.
 pub(crate) fn list(
     environment: &Environment,
     args: &ListArgs,
 ) -> Result<Listing<WorkspaceRow>, MxvFailure> {
-    let rows = store(environment)?
-        .list()?
+    let records = store(environment)?.list()?;
+    let rows = records
+        .problems
         .iter()
-        .map(WorkspaceRow::from)
+        .map(WorkspaceRow::unreadable)
+        .chain(records.workspaces.iter().map(WorkspaceRow::from))
         .collect();
     Ok(args.page.first_of(rows).described("workspaces").next(
         Call::new(&["show"]).arg("names"),
@@ -116,14 +119,15 @@ pub(crate) fn list(
 pub(crate) fn show(
     environment: &Environment,
     args: &ShowArgs,
-) -> Result<Batch<WorkspaceRow, MxvFailure>, MxvFailure> {
+) -> Result<Batch<PlacedRow, MxvFailure>, MxvFailure> {
     let store = store(environment)?;
+    let root = environment.root()?;
     let mut batch = Batch::new(&["show"], "names", &args.names);
     for text in &args.names {
         let found = parse_name(text).and_then(|name| {
             store
                 .read(&name)?
-                .map(|workspace| WorkspaceRow::from(&workspace))
+                .map(|workspace| PlacedRow::new(&workspace, &root))
                 .ok_or(MxvFailure::NotFound {
                     name: name.to_string(),
                 })
@@ -154,7 +158,13 @@ pub(crate) fn remove(
     let name = parse_name(&args.name)?;
     let workspaces = workspaces(environment)?;
     let removal = match workspaces
-        .plan_removal(&name, args.force)
+        .plan_removal(
+            &name,
+            Allow {
+                discard_changes: args.force,
+                delete_unmerged: args.delete_unmerged,
+            },
+        )
         .map_err(MxvFailure::from)?
     {
         RemovalPlan::Ready(removal) => removal,
@@ -168,6 +178,23 @@ pub(crate) fn remove(
             return Err(MxvFailure::Dirty {
                 name: name.to_string(),
                 changes,
+            }
+            .into());
+        }
+        RemovalPlan::IgnoredFiles { paths, .. } => {
+            return Err(MxvFailure::IgnoredFiles {
+                name: name.to_string(),
+                paths,
+            }
+            .into());
+        }
+        RemovalPlan::StrayCommits {
+            checkout, commits, ..
+        } => {
+            return Err(MxvFailure::StrayCommits {
+                name: name.to_string(),
+                path: checkout,
+                commits,
             }
             .into());
         }

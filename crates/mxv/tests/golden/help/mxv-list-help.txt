@@ -34,11 +34,13 @@ Examples:
           List the first page of workspaces
 
 Columns:
-  name    The workspace's name, which is also the name of its directory and of its checkouts' branch.
-  branch  The branch that the workspace's checkouts were created on.
-  path    The workspace's directory, which `mxv cd` prints.
+  name     The workspace's name, which is also the name of its directory and of its checkouts' branch.
+  branch   The branch that the workspace's checkouts were created on.
+  path     The workspace's directory, which `mxv cd` prints.
+  problem  Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record file in `name` and leaves the other fields empty.
 
 Columns that --long adds:
   repositories  The top-level directory of each repository that the workspace checks out.
 
 Effects: read-only, closed-world.
+Problems: a value in the problem column marks a row with a problem, and the command then exits with 1.

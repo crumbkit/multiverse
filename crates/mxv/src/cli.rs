@@ -130,6 +130,8 @@ pub const GUIDE: Guide = Guide::new()
 #[derive(Debug, Subcommand)]
 pub(crate) enum Verb {
     /// Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin.
+    ///
+    /// The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
     New(NewArgs),
     /// List the workspaces.
     List(ListArgs),
@@ -246,9 +248,13 @@ pub(crate) struct RemoveArgs {
     /// The name of the workspace to remove
     pub(crate) name: String,
 
-    /// Remove checkouts with uncommitted or untracked changes, and delete unmerged branches
+    /// Discard uncommitted changes, untracked files and ignored files such as .env; an unmerged branch is still kept
     #[arg(long)]
     pub(crate) force: bool,
+
+    /// Delete branches with unmerged commits, and commits on a detached HEAD
+    #[arg(long)]
+    pub(crate) delete_unmerged: bool,
 
     /// Print what the command would remove, and remove nothing.
     #[command(flatten)]

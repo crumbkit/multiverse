@@ -39,6 +39,17 @@ pub enum Created {
     Taken,
 }
 
+/// The records that [`Store::list`] found.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Records {
+    /// Each record that the store could read, in name order.
+    pub workspaces: Vec<Workspace>,
+    /// The error of each record that the store could not read, such as
+    /// [`Error::CorruptRecord`] or [`Error::NewerRecord`], in name order.
+    pub problems: Vec<Error>,
+}
+
 /// The part of a record that the store reads first, so a record of a newer
 /// version is refused before its other fields are read.
 #[derive(Deserialize)]
@@ -68,22 +79,27 @@ impl Store {
         self.dir.join(format!("{name}.{EXTENSION}"))
     }
 
-    /// Returns every record in the store, in name order. A store whose
-    /// directory does not exist holds none.
+    /// Returns every record in the store, in name order, and the error of
+    /// each record that cannot be read, so one bad record does not hide
+    /// the others. A store whose directory does not exist holds none.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StateUnreadable`] when the directory or a record
-    /// cannot be read, and the errors of [`Store::read`] for a record that
-    /// cannot be understood.
-    pub fn list(&self) -> Result<Vec<Workspace>, Error> {
+    /// Returns [`Error::StateUnreadable`] when the directory cannot be
+    /// read.
+    pub fn list(&self) -> Result<Records, Error> {
         let unreadable = |source| Error::StateUnreadable {
             path: self.dir.clone(),
             source,
         };
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Records {
+                    workspaces: Vec::new(),
+                    problems: Vec::new(),
+                });
+            }
             Err(error) => return Err(unreadable(error)),
         };
         let mut paths = Vec::new();
@@ -100,13 +116,22 @@ impl Store {
             }
         }
         paths.sort();
-        let mut workspaces = Vec::new();
+        let mut records = Records {
+            workspaces: Vec::new(),
+            problems: Vec::new(),
+        };
         for path in paths {
-            if let Some(workspace) = read_record(&path)? {
-                workspaces.push(workspace);
+            let stem = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match read_record(&path).and_then(|found| matching(&path, &stem, found)) {
+                Ok(Some(workspace)) => records.workspaces.push(workspace),
+                Ok(None) => {}
+                Err(error) => records.problems.push(error),
             }
         }
-        Ok(workspaces)
+        Ok(records)
     }
 
     /// Returns the record of `name`, or `None` when the store has none.
@@ -115,9 +140,12 @@ impl Store {
     ///
     /// Returns [`Error::StateUnreadable`] when the record cannot be read,
     /// [`Error::NewerRecord`] when a newer version of multiverse wrote it,
-    /// and [`Error::CorruptRecord`] when it is not a record.
+    /// [`Error::CorruptRecord`] when it is not a record, and
+    /// [`Error::MismatchedRecord`] when it holds another name.
     pub fn read(&self, name: &WorkspaceName) -> Result<Option<Workspace>, Error> {
-        read_record(&self.path(name))
+        let path = self.path(name);
+        let found = read_record(&path)?;
+        matching(&path, name.as_str(), found)
     }
 
     /// Writes the record of `workspace` unless the store already holds a
@@ -190,6 +218,20 @@ fn record_bytes(workspace: &Workspace, target: &Path) -> Result<Vec<u8>, Error> 
         })?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+/// Returns `found`, the record at `path`, when it holds the name `name`
+/// that its file is named for, and [`Error::MismatchedRecord`] otherwise,
+/// such as when a file system that ignores case opened `Inbox.json` for
+/// `inbox.json`.
+fn matching(path: &Path, name: &str, found: Option<Workspace>) -> Result<Option<Workspace>, Error> {
+    match found {
+        Some(workspace) if workspace.name.as_str() != name => Err(Error::MismatchedRecord {
+            path: path.to_path_buf(),
+            name: workspace.name.to_string(),
+        }),
+        found => Ok(found),
+    }
 }
 
 /// Returns the record at `path`, or `None` when no file is there.

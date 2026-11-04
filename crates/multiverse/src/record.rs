@@ -37,7 +37,7 @@ pub struct Checkout {
     /// The branch that the checkout was created on.
     pub branch: String,
     /// The remote branch that the branch started from, such as
-    /// `origin/main`.
+    /// `refs/remotes/origin/main`.
     pub base: String,
     /// The commit that the branch started at, or `None` for a planned
     /// checkout that a dry run reports.
@@ -133,8 +133,10 @@ pub fn agents_text(workspace: &Workspace) -> String {
          - `mxv list` lists every workspace.\n\
          - `cd \"$(mxv cd {name})\"` returns to this directory.\n\
          - `mxv remove {name}` removes the checkouts, their branches when they are\n\
-         \x20 merged, and the record. It refuses while a checkout has uncommitted or\n\
-         \x20 untracked changes.\n\
+         \x20 merged, and the record. It refuses while a checkout has uncommitted\n\
+         \x20 changes, untracked files, ignored files such as `.env`, or commits\n\
+         \x20 that no branch holds. `--force` discards the files and keeps unmerged\n\
+         \x20 branches; `--delete-unmerged` deletes unmerged commits.\n\
          \n\
          This file sits above the checkouts, so git does not see it.\n"
     ));

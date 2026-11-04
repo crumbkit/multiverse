@@ -48,3 +48,13 @@ fn a_name_reads_back_from_json_only_through_the_checks() {
     assert_eq!(name.as_str(), "inbox");
     assert!(serde_json::from_str::<WorkspaceName>("\"a/b\"").is_err());
 }
+
+#[test]
+fn a_name_with_an_uppercase_letter_is_refused_so_names_never_alias_on_a_case_insensitive_disk() {
+    assert_eq!(parse("Reading-list"), Err(BadName::Uppercase('R')));
+}
+
+#[test]
+fn head_is_refused_before_any_record_is_written() {
+    assert!(parse("HEAD").is_err());
+}

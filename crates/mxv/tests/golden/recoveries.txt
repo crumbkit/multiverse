@@ -28,8 +28,12 @@ mxv new triage --repo fresh --dry-run
   fails with mxv::repository::empty_origin
   hint
 
-mxv new triage --repo inbox --dry-run (with MXV_ROOT removed)
-  fails with mxv::environment::no_directory
+mxv new triage --repo inbox --dry-run (with MXV_ROOT=work)
+  fails with mxv::environment::relative_root
+  hint
+
+mxv new triage --repo inbox --dry-run
+  fails with mxv::directory::taken
   hint
 
 mxv new triage --repo inbox --dry-run (with PATH=/nonexistent)
@@ -44,6 +48,18 @@ mxv show reading-list
   fails with mxv::record::corrupt
   hint
 
+mxv show reading-list
+  fails with mxv::record::mismatched
+  hint
+
+mxv new triage --repo inbox --dry-run
+  fails with mxv::config::invalid
+  hint
+
+mxv new triage --repo inbox --dry-run
+  fails with mxv::config::unreadable
+  hint
+
 mxv remove reading-list
   fails with mxv::confirmation::needs_yes
   run mxv remove reading-list --json --yes
@@ -55,11 +71,13 @@ mxv run
 
 codes that no start provokes:
   mxv::workspace::dirty: Only a live checkout with changes provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
-  mxv::directory::taken: Only an existing directory under the workspace root provokes it, and the root of the examples is /home/agent/mxv, which a test cannot create.
+  mxv::workspace::ignored_files: Only a live checkout with an ignored file such as .env provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
+  mxv::checkout::unreachable_commits: Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
+  mxv::environment::no_directory: Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.
   mxv::checkout::unowned: Only a checkout directory that git does not list provokes it, and the fixture's workspace has no checkout directory.
   mxv::repository::no_default_branch: Only a clone whose origin has branches but no default branch provokes it; the library's git tests provoke it.
   mxv::git::failed: Only a git command that fails in a working repository provokes it, such as a fetch from an origin that is gone; the library's git tests provoke it.
-  mxv::git::timed_out: Only a git command that runs past its deadline of 30 or 120 seconds provokes it, which is longer than the check waits for a run.
+  mxv::git::timed_out: Only a git command that runs past its deadline of 30, 120 or 600 seconds provokes it, which is longer than the check waits for a run.
   mxv::record::unreadable: Only a record directory without read permission provokes it, and the check's fixture copies keep the permissions readable.
   mxv::file::unwritable: Only a directory without write permission or a full disk provokes it, and the examples write nothing outside their fresh directories.
 

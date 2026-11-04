@@ -64,7 +64,7 @@
           "type": "string"
         },
         "base": {
-          "description": "The remote branch that the branch started from, such as `origin/main`.",
+          "description": "The remote branch that the branch started from, such as\n`refs/remotes/origin/main`.",
           "type": "string"
         },
         "branch": {
@@ -102,7 +102,7 @@
       ]
     },
     "WorkspaceRow": {
-      "description": "One workspace, as `new`, `list` and `show` print it.",
+      "description": "One workspace, as `list` prints it.",
       "type": "object",
       "properties": {
         "branch": {
@@ -124,6 +124,10 @@
           "description": "The workspace's directory, which `mxv cd` prints.",
           "type": "string"
         },
+        "problem": {
+          "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record file in `name` and leaves the\nother fields empty.",
+          "type": "string"
+        },
         "repositories": {
           "description": "The top-level directory of each repository that the workspace checks\nout.",
           "type": "array",
@@ -135,7 +139,8 @@
       "required": [
         "name",
         "branch",
-        "path"
+        "path",
+        "problem"
       ]
     }
   }

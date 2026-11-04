@@ -22,16 +22,17 @@ mod record;
 mod store;
 mod workspaces;
 
-pub use crate::backend::{Backend, Repository};
+pub use crate::backend::{Backend, Changes, Repository};
 pub use crate::error::Error;
-pub use crate::git::{FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
+pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::record::{
     AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
 };
-pub use crate::store::{Created, MOST_RECORD_BYTES, Store};
+pub use crate::store::{Created, MOST_RECORD_BYTES, Records, Store};
 pub use crate::workspaces::{
-    BranchFate, CheckoutRemoval, Fate, Mode, NewOutcome, Removal, RemovalPlan, Workspaces,
+    Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, Mode, NewOutcome, Removal, RemovalPlan,
+    Workspaces,
 };
 #[cfg(test)]
 mod testing;

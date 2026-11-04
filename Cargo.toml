@@ -39,6 +39,14 @@ schemars = { version = "1.2.3", default-features = false, features = ["std", "de
 # without polling with a sleep (BASE-11).
 wait-timeout = "0.2.1"
 
+# etcetera finds the XDG base directories of mxv, as crumbkit does. It has
+# no features.
+etcetera = { version = "0.11.0", default-features = false }
+
+# toml parses the person's mxv config file. The workspace entry enables no
+# feature, and mxv enables only `parse`.
+toml = { version = "1.2.0", default-features = false }
+
 # crumbkit-usage keeps the `mxv` command's local usage log and adds
 # `self usage` and `self figures list` (CLI-7).
 crumbkit-usage = "0.1.0"

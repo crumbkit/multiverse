@@ -42,6 +42,10 @@ clap = { workspace = true, features = [
     "color",
 ] }
 crumbkit-usage = { workspace = true }
+# etcetera finds the XDG base directories, as crumbkit does (ADR-0027,
+# ADR-0029): the state directory of the records, the config directory of
+# the config file, and the data directory of the default workspace root.
+etcetera = { workspace = true }
 # multiverse holds the workspace operations, their records and the git
 # backend that the verbs run.
 multiverse = { path = "../multiverse", version = "0.0.0" }
@@ -49,6 +53,10 @@ multiverse = { path = "../multiverse", version = "0.0.0" }
 # print.
 schemars = { workspace = true }
 serde = { workspace = true }
+# `parse` gives `toml::de::DeTable`, whose keys keep their place in the
+# config file, so a failure names the line. mxv reads the parsed values
+# directly and needs no other toml feature.
+toml = { workspace = true, features = ["parse"] }
 
 [dev-dependencies]
 crumbkit-test = { workspace = true }

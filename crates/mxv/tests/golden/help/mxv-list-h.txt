@@ -11,5 +11,6 @@ Examples:
   mxv list
 
 Effects: read-only, closed-world.
+Problems: a value in the problem column marks a row with a problem, and the command then exits with 1.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv list --help` describes them.
 Next: mxv list --help explains each column.

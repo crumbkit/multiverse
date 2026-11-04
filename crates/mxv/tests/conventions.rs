@@ -13,9 +13,10 @@
 //! XDG state starts as a copy of `tests/fixtures/xdg`, which holds the
 //! record of the workspace `reading-list`. That record names directories
 //! under `/home/agent`, which do not exist, so the examples of `show`, `cd`
-//! and `remove` read a record whose checkout is already gone. `new` runs
-//! as a dry run, because `MXV_ROOT` names `/home/agent/mxv`, which a test
-//! cannot create.
+//! and `remove` read a record whose checkout is already gone. `MXV_ROOT` is
+//! unset and the config file is absent, so `new` uses the default root
+//! `$XDG_DATA_HOME/mxv/workspaces`. `new` runs as a dry run, so the
+//! examples fetch nothing.
 //!
 //! `run`, `archive` and `restore` are declared before they are built. Each
 //! one fails with `mxv::command::unbuilt`, so its examples cannot run and a
@@ -34,11 +35,13 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    BRANCH_EXISTS, CHECKOUT_UNOWNED, CODES, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
-    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, RECORD_CORRUPT, RECORD_NEWER,
-    RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
-    REPOSITORY_NOT_FOUND, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY,
-    WORKSPACE_EXISTS, WORKSPACE_NOT_FOUND,
+    BRANCH_EXISTS, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES, CONFIG_INVALID,
+    CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
+    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, RECORD_CORRUPT,
+    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
+    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, UNBUILT,
+    UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
+    WORKSPACE_NOT_FOUND,
 };
 use tempfile::TempDir;
 
@@ -85,7 +88,38 @@ const ALLOW: &[Allow] = &[
         CORRUPT_RECORD,
         "The corrupt record causes the failure, and every word of the command line that names it reads the same record.",
     ),
+    Allow::untwinned(
+        MISMATCHED_RECORD,
+        "The record that holds another name causes the failure, and every word of the command line that names it reads the same record.",
+    ),
+    Allow::untwinned(
+        BAD_CONFIG,
+        "The config file causes the failure, and no word of the command line names the config file.",
+    ),
+    Allow::untwinned(
+        UNREADABLE_CONFIG,
+        "The directory at the config file's path causes the failure, and no word of the command line names the config file.",
+    ),
 ];
+
+/// `show` of a record that holds another name than its file.
+const MISMATCHED_RECORD: Failing<'static> =
+    Failing::new(&RECORD_MISMATCHED, &["show", "reading-list"])
+        .xdg("tests/fixtures/xdg-mismatched");
+
+/// `new` with a config file that sets an unknown key.
+const BAD_CONFIG: Failing<'static> = Failing::new(
+    &CONFIG_INVALID,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.xdg("tests/fixtures/xdg-bad-config");
+
+/// `new` with a directory where the config file belongs.
+const UNREADABLE_CONFIG: Failing<'static> = Failing::new(
+    &CONFIG_UNREADABLE,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.xdg("tests/fixtures/xdg-config-directory");
 
 /// `show` of a record that a newer mxv wrote.
 const NEWER_RECORD: Failing<'static> =
@@ -101,13 +135,13 @@ const BUDGETS: Budgets = Budgets::new();
 /// The budgets of the paths through the help, which are crumbkit's
 /// defaults.
 const PATH_BUDGETS: PathBudgets<'_> = PathBudgets::new("tests/golden/examples");
-/// The variables of every run: a `PATH` that finds git, git without the
-/// person's configuration, and a workspace root that does not exist.
+/// The variables of every run: a `PATH` that finds git, and git without
+/// the person's configuration. `MXV_ROOT` is unset, so the workspace root
+/// is the default one under the fresh `XDG_DATA_HOME` of each run.
 const ENV: &[(&str, &str)] = &[
     ("PATH", support::PATH),
     ("GIT_CONFIG_GLOBAL", "/dev/null"),
     ("GIT_CONFIG_NOSYSTEM", "1"),
-    ("MXV_ROOT", "/home/agent/mxv"),
 ];
 
 /// The directory of repositories that each run starts in a fresh copy of,
@@ -300,12 +334,19 @@ const NEW_EMPTY_ORIGIN: Failing<'static> = Failing::new(
     &["new", "triage", "--repo", "fresh", "--dry-run"],
 );
 
-/// `new` without `MXV_ROOT` and without `HOME`.
-const NEW_NO_ROOT: Failing<'static> = Failing::new(
-    &ENVIRONMENT_NO_DIRECTORY,
+/// `new` with a relative `MXV_ROOT`.
+const NEW_RELATIVE_ROOT: Failing<'static> = Failing::new(
+    &ENVIRONMENT_RELATIVE_ROOT,
     &["new", "triage", "--repo", "inbox", "--dry-run"],
 )
-.env(&[("MXV_ROOT", None)]);
+.env(&[("MXV_ROOT", Some("work"))]);
+
+/// `new` of a name whose directory already exists under the default root.
+const NEW_TAKEN_DIRECTORY: Failing<'static> = Failing::new(
+    &DIRECTORY_TAKEN,
+    &["new", "triage", "--repo", "inbox", "--dry-run"],
+)
+.xdg("tests/fixtures/xdg-taken");
 
 /// `new` with a `PATH` that finds no git.
 const NEW_NO_GIT: Failing<'static> = Failing::new(
@@ -328,25 +369,38 @@ const STARTS: &[Failing<'static>] = &[
     NEW_MISSING_REPOSITORY,
     NEW_NO_ORIGIN,
     NEW_EMPTY_ORIGIN,
-    NEW_NO_ROOT,
+    NEW_RELATIVE_ROOT,
+    NEW_TAKEN_DIRECTORY,
     NEW_NO_GIT,
     NEWER_RECORD,
     CORRUPT_RECORD,
+    MISMATCHED_RECORD,
+    BAD_CONFIG,
+    UNREADABLE_CONFIG,
     Failing::new(&CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
     Failing::new(&UNBUILT, &["run"]),
 ];
 
 /// The declared codes that no command line in this test provokes, because
 /// each needs a state that a fixed fixture cannot hold.
-/// `tests/workspaces.rs` provokes the dirty refusal with a real checkout.
+/// `tests/workspaces.rs` provokes the refusals of `remove` with real
+/// checkouts.
 const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         &WORKSPACE_DIRTY,
         "Only a live checkout with changes provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
     ),
     Unprovoked::new(
-        &DIRECTORY_TAKEN,
-        "Only an existing directory under the workspace root provokes it, and the root of the examples is /home/agent/mxv, which a test cannot create.",
+        &WORKSPACE_IGNORED_FILES,
+        "Only a live checkout with an ignored file such as .env provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &CHECKOUT_UNREACHABLE_COMMITS,
+        "Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &ENVIRONMENT_NO_DIRECTORY,
+        "Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.",
     ),
     Unprovoked::new(
         &CHECKOUT_UNOWNED,
@@ -362,7 +416,7 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     ),
     Unprovoked::new(
         &GIT_TIMED_OUT,
-        "Only a git command that runs past its deadline of 30 or 120 seconds provokes it, which is longer than the check waits for a run.",
+        "Only a git command that runs past its deadline of 30, 120 or 600 seconds provokes it, which is longer than the check waits for a run.",
     ),
     Unprovoked::new(
         &RECORD_UNREADABLE,
@@ -393,7 +447,11 @@ const PAIRS: &[Twin<'static>] = &[
     Twin::new(NEW_MISSING_REPOSITORY, NEW_TRIAGE),
     Twin::new(NEW_NO_ORIGIN, NEW_TRIAGE),
     Twin::new(NEW_EMPTY_ORIGIN, NEW_TRIAGE),
-    Twin::variable(NEW_NO_ROOT, "MXV_ROOT"),
+    Twin::variable(NEW_RELATIVE_ROOT, "MXV_ROOT"),
+    Twin::new(
+        NEW_TAKEN_DIRECTORY,
+        &["new", "sorting", "--repo", "inbox", "--dry-run"],
+    ),
     Twin::variable(NEW_NO_GIT, "PATH"),
 ];
 

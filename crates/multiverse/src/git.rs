@@ -14,8 +14,9 @@
 //!   errors quote are in English.
 //! - Streams and deadline: standard input is empty. The module keeps the
 //!   first [`MOST_OUTPUT_BYTES`] bytes of standard output and of standard
-//!   error and discards the rest. A fetch has [`FETCH_DEADLINE`], and every
-//!   other command has [`LOCAL_DEADLINE`].
+//!   error and discards the rest. A fetch has [`FETCH_DEADLINE`],
+//!   `worktree add` has [`CHECKOUT_DEADLINE`], and every other command has
+//!   [`LOCAL_DEADLINE`].
 //! - End: the module waits for the child and reads its exit status. A
 //!   child that misses its deadline is killed and reaped, and the
 //!   operation returns [`Error::TimedOut`]. The module stops only the
@@ -33,7 +34,7 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::backend::{Backend, Repository};
+use crate::backend::{Backend, Changes, Repository};
 use crate::error::Error;
 
 #[cfg(test)]
@@ -42,7 +43,13 @@ mod tests;
 /// The deadline of `git fetch`, which talks to the network.
 pub const FETCH_DEADLINE: Duration = Duration::from_secs(120);
 
-/// The deadline of every git command that reads or writes only local files.
+/// The deadline of `git worktree add`, which writes every file of the
+/// checkout and runs the repository's `post-checkout` hook, and may fetch
+/// large files through a filter such as Git LFS.
+pub const CHECKOUT_DEADLINE: Duration = Duration::from_secs(600);
+
+/// The deadline of every other git command, which reads or writes only
+/// local files.
 pub const LOCAL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The most bytes of each output stream that a command keeps.
@@ -72,14 +79,7 @@ impl Finished {
             operation,
             dir: dir.to_path_buf(),
             code: self.status.code(),
-            message: self
-                .stderr
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
+            message: message(&self.stderr),
         }
     }
 
@@ -91,6 +91,36 @@ impl Finished {
             Err(self.failure(operation, dir))
         }
     }
+}
+
+/// The most lines of standard error that a failure quotes when git printed
+/// no `fatal:` or `error:` line.
+const MOST_QUOTED_LINES: usize = 5;
+
+/// Returns the part of git's standard error that explains a failure: the
+/// last line that starts with `fatal:` or `error:`, or else the last
+/// [`MOST_QUOTED_LINES`] lines that are not empty and are not `hint:`
+/// lines, joined with ` / `.
+fn message(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if let Some(line) = lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+    {
+        return (*line).to_owned();
+    }
+    let kept: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| !line.starts_with("hint:"))
+        .collect();
+    let start = kept.len().saturating_sub(MOST_QUOTED_LINES);
+    kept.get(start..).unwrap_or_default().join(" / ")
 }
 
 /// Runs `git -C <dir> <args>` as the module docs describe, and returns
@@ -145,6 +175,7 @@ where
             let _ = child.wait();
             return Err(Error::TimedOut {
                 operation,
+                dir: dir.to_path_buf(),
                 deadline,
             });
         }
@@ -233,12 +264,7 @@ impl Backend for Git {
     fn base(&self, repository: &Path) -> Result<String, Error> {
         let head = run(
             repository,
-            [
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "refs/remotes/origin/HEAD",
-            ],
+            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
             "symbolic-ref",
             LOCAL_DEADLINE,
         )?;
@@ -257,7 +283,7 @@ impl Backend for Git {
                 LOCAL_DEADLINE,
             )?;
             if found.status.success() {
-                return Ok(format!("origin/{candidate}"));
+                return Ok(reference);
             }
         }
         let branches = run(
@@ -311,7 +337,7 @@ impl Backend for Git {
                 OsStr::new(base),
             ],
             "worktree add",
-            LOCAL_DEADLINE,
+            CHECKOUT_DEADLINE,
         )?
         .ok("worktree add", repository)?;
         let commit = run(checkout, ["rev-parse", "HEAD"], "rev-parse", LOCAL_DEADLINE)?
@@ -334,19 +360,31 @@ impl Backend for Git {
             .any(|listed| same_path(Path::new(listed)) == wanted))
     }
 
-    fn changes(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+    fn changes(&self, checkout: &Path) -> Result<Changes, Error> {
+        // `--ignored=matching` names each path that an ignore rule
+        // matches, and names a matched directory once, such as
+        // `web/node_modules/`, so a large build directory costs one line
+        // and keeps the name that marks it disposable.
         let status = run(
             checkout,
-            ["status", "--porcelain=v1", "--untracked-files=all"],
+            [
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=normal",
+                "--ignored=matching",
+            ],
             "status",
             LOCAL_DEADLINE,
         )?
         .ok("status", checkout)?;
-        Ok(status
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect())
+        let mut changes = Changes::default();
+        for line in status.lines().filter(|line| !line.is_empty()) {
+            match line.strip_prefix("!! ") {
+                Some(path) => changes.ignored.push(path.to_owned()),
+                None => changes.changed.push(line.to_owned()),
+            }
+        }
+        Ok(changes)
     }
 
     fn remove_checkout(
@@ -376,19 +414,41 @@ impl Backend for Git {
         .map(drop)
     }
 
-    fn is_merged(&self, repository: &Path, branch: &str, base: &str) -> Result<bool, Error> {
-        let reference = format!("refs/heads/{branch}");
-        let compared = run(
+    fn unmerged_commits(
+        &self,
+        repository: &Path,
+        revision: &str,
+        base: &str,
+    ) -> Result<u32, Error> {
+        let range = format!("{base}..{revision}");
+        let counted = run(
             repository,
-            ["merge-base", "--is-ancestor", reference.as_str(), base],
-            "merge-base",
+            ["rev-list", "--count", range.as_str(), "--"],
+            "rev-list",
             LOCAL_DEADLINE,
-        )?;
-        match compared.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(compared.failure("merge-base", repository)),
-        }
+        )?
+        .ok("rev-list", repository)?;
+        Ok(count(&counted))
+    }
+
+    fn stray_commits(&self, checkout: &Path) -> Result<u32, Error> {
+        let counted = run(
+            checkout,
+            [
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--not",
+                "--branches",
+                "--tags",
+                "--remotes",
+                "--",
+            ],
+            "rev-list",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-list", checkout)?;
+        Ok(count(&counted))
     }
 
     fn delete_branch(&self, repository: &Path, branch: &str) -> Result<(), Error> {
@@ -403,9 +463,23 @@ impl Backend for Git {
     }
 }
 
-/// Returns `path` with symbolic links resolved when it exists, so a path
-/// that git prints and the path that a record holds compare equal on macOS,
-/// where `/var` leads to `/private/var`.
+/// Returns the number that `git rev-list --count` printed, or `u32::MAX`
+/// when git printed something else, so a caller that guards commits treats
+/// an unreadable count as commits that would be lost.
+fn count(printed: &str) -> u32 {
+    printed.trim().parse().unwrap_or(u32::MAX)
+}
+
+/// Returns `path` with the symbolic links of its parent directories
+/// resolved, so a path that git prints and the path that a record holds
+/// compare equal on macOS, where `/var` leads to `/private/var`. The last
+/// component stays as it is, so a symbolic link in place of a checkout
+/// never compares equal to the checkout it leads to.
 fn same_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => parent
+            .canonicalize()
+            .map_or_else(|_| path.to_path_buf(), |parent| parent.join(name)),
+        _ => path.to_path_buf(),
+    }
 }

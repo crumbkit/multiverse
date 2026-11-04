@@ -400,14 +400,19 @@
       "description": "What `mxv remove` does to a branch.",
       "oneOf": [
         {
-          "description": "The branch is deleted.",
+          "description": "The branch is deleted, because its commits are all on its base.",
           "type": "string",
           "const": "deleted"
         },
         {
           "description": "The branch stays, because it holds commits that are not on its base.",
           "type": "string",
-          "const": "kept"
+          "const": "kept_unmerged"
+        },
+        {
+          "description": "The branch is deleted with commits that are not on its base.",
+          "type": "string",
+          "const": "deleted_unmerged"
         },
         {
           "description": "The branch was already gone.",
@@ -425,7 +430,7 @@
           "type": "string"
         },
         "branch_fate": {
-          "description": "What happens to the branch: `deleted`, `kept` when it holds commits\nthat are not on its base, or `missing` when it was already gone.",
+          "description": "What happens to the branch: `deleted` when its commits are all on\nits base, `kept_unmerged` when it holds other commits, which\n`--delete-unmerged` would delete, `deleted_unmerged` when\n`--delete-unmerged` deletes such commits, or `missing` when it was\nalready gone.",
           "$ref": "#/$defs/BranchState"
         },
         "checkout": {
@@ -439,6 +444,18 @@
         "path": {
           "description": "The checkout's directory.",
           "type": "string"
+        },
+        "stray_commits": {
+          "description": "The number of commits that the checkout's `HEAD` holds and no branch\nholds, such as commits on a detached `HEAD`, which\n`--delete-unmerged` allowed the removal to delete.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "unmerged_commits": {
+          "description": "The number of commits on the branch that are not on its base.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
         }
       },
       "required": [
@@ -446,7 +463,9 @@
         "path",
         "checkout",
         "branch",
-        "branch_fate"
+        "branch_fate",
+        "unmerged_commits",
+        "stray_commits"
       ]
     },
     "DirectoryFate": {
@@ -480,12 +499,30 @@
             "$ref": "#/$defs/CheckoutRemovalRow"
           }
         },
+        "delete_unmerged": {
+          "description": "Whether `--delete-unmerged` allowed deleting commits that no other\nbranch holds.",
+          "type": "boolean"
+        },
         "directory": {
           "description": "What happens to the workspace's directory: `removed`, `missing` when\nit was already gone, or `kept` when it still holds other files.",
           "$ref": "#/$defs/DirectoryFate"
         },
-        "forced": {
-          "description": "Whether the removal was forced with `--force`.",
+        "discarded": {
+          "description": "The changes and other ignored paths, such as `inbox: .env`, that\nthe removal discards because of `--force`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disposable": {
+          "description": "The ignored build directories, such as `inbox: target/`, that the\nremoval deletes without asking, because a build makes them again.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "force": {
+          "description": "Whether `--force` allowed discarding uncommitted changes, untracked\nfiles and ignored files.",
           "type": "boolean"
         },
         "name": {
@@ -502,7 +539,10 @@
         "path",
         "directory",
         "checkouts",
-        "forced"
+        "force",
+        "delete_unmerged",
+        "disposable",
+        "discarded"
       ]
     }
   }

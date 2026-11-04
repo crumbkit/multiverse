@@ -60,6 +60,8 @@ pub enum Error {
     TimedOut {
         /// What the command was doing.
         operation: &'static str,
+        /// The directory the command ran in.
+        dir: PathBuf,
         /// The deadline that the command missed.
         deadline: Duration,
     },
@@ -84,6 +86,14 @@ pub enum Error {
         path: PathBuf,
         /// What is wrong with it.
         source: serde_json::Error,
+    },
+    /// A workspace record holds a name other than the one its file is
+    /// named for, such as on a file system that ignores case.
+    MismatchedRecord {
+        /// The path of the record.
+        path: PathBuf,
+        /// The name that the record holds.
+        name: String,
     },
     /// A workspace record was written by a newer version of multiverse.
     NewerRecord {
@@ -135,10 +145,12 @@ impl fmt::Display for Error {
             }
             Self::TimedOut {
                 operation,
+                dir,
                 deadline,
             } => write!(
                 formatter,
-                "git {operation} did not finish within {} seconds",
+                "git {operation} in {} did not finish within {} seconds, so mxv stopped it",
+                dir.display(),
                 deadline.as_secs()
             ),
             Self::StateUnreadable { path, .. } => {
@@ -152,6 +164,11 @@ impl fmt::Display for Error {
                     path.display()
                 )
             }
+            Self::MismatchedRecord { path, name } => write!(
+                formatter,
+                "the workspace record {} holds the name {name}, which its file name does not match",
+                path.display()
+            ),
             Self::NewerRecord { path, version } => write!(
                 formatter,
                 "the workspace record {} has version {version}, which this version of multiverse cannot read",
@@ -174,6 +191,7 @@ impl std::error::Error for Error {
             | Self::NoDefaultBranch { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
+            | Self::MismatchedRecord { .. }
             | Self::NewerRecord { .. } => None,
         }
     }

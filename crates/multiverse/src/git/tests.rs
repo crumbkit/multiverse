@@ -1,8 +1,8 @@
 use std::fs;
 
-use crate::backend::Backend as _;
+use crate::backend::{Backend as _, Changes};
 use crate::error::Error;
-use crate::git::Git;
+use crate::git::{Git, message};
 use crate::testing::{advance_origin, fixture, git, write};
 
 #[test]
@@ -46,7 +46,10 @@ fn a_subdirectory_of_a_clone_names_the_clone_and_its_directory_name() {
 #[test]
 fn the_base_is_the_default_branch_of_origin() {
     let fixture = fixture();
-    assert_eq!(Git.base(&fixture.clone).unwrap(), "origin/main");
+    assert_eq!(
+        Git.base(&fixture.clone).unwrap(),
+        "refs/remotes/origin/main"
+    );
 }
 
 #[test]
@@ -56,7 +59,12 @@ fn a_checkout_starts_at_the_fetched_base_on_a_branch_that_tracks_nothing() {
     Git.fetch(&fixture.clone).unwrap();
     let checkout = fixture.dir.path().join("work");
     let commit = Git
-        .add_checkout(&fixture.clone, &checkout, "reading-list", "origin/main")
+        .add_checkout(
+            &fixture.clone,
+            &checkout,
+            "reading-list",
+            "refs/remotes/origin/main",
+        )
         .unwrap();
     assert_eq!(commit, latest);
     assert!(Git.owns_checkout(&fixture.clone, &checkout).unwrap());
@@ -74,29 +82,107 @@ fn a_checkout_starts_at_the_fetched_base_on_a_branch_that_tracks_nothing() {
 #[test]
 fn a_new_file_in_a_checkout_is_a_change() {
     let fixture = fixture();
-    assert!(Git.changes(&fixture.clone).unwrap().is_empty());
+    assert_eq!(Git.changes(&fixture.clone).unwrap(), Changes::default());
     write(fixture.clone.join("notes.md"), "notes");
-    assert_eq!(Git.changes(&fixture.clone).unwrap(), ["?? notes.md"]);
+    assert_eq!(
+        Git.changes(&fixture.clone).unwrap().changed,
+        ["?? notes.md"]
+    );
 }
 
 #[test]
-fn a_branch_without_commits_of_its_own_is_merged_and_one_with_a_commit_is_not() {
+fn an_ignored_file_and_an_ignored_directory_are_listed_apart_from_the_changes() {
+    let fixture = fixture();
+    write(fixture.clone.join(".git/info/exclude"), ".env\ntarget/\n");
+    write(fixture.clone.join(".env"), "TOKEN=x");
+    fs::create_dir_all(fixture.clone.join("target/debug")).unwrap();
+    write(fixture.clone.join("target/debug/mxv"), "binary");
+    let changes = Git.changes(&fixture.clone).unwrap();
+    assert!(changes.changed.is_empty(), "{changes:?}");
+    assert_eq!(changes.ignored, [".env", "target/"]);
+}
+
+#[test]
+fn a_branch_counts_the_commits_that_its_base_does_not_hold() {
+    let fixture = fixture();
+    let base = "refs/remotes/origin/main";
+    let checkout = fixture.dir.path().join("work");
+    Git.add_checkout(&fixture.clone, &checkout, "topic", base)
+        .unwrap();
+    let unmerged = || {
+        Git.unmerged_commits(&fixture.clone, "refs/heads/topic", base)
+            .unwrap()
+    };
+    assert_eq!(unmerged(), 0);
+    for _ in 0..2 {
+        git(
+            &checkout,
+            &["commit", "--quiet", "--allow-empty", "-m", "Work"],
+        );
+    }
+    assert_eq!(unmerged(), 2);
+}
+
+#[test]
+fn commits_on_a_detached_head_count_as_stray_and_commits_on_any_branch_do_not() {
     let fixture = fixture();
     let checkout = fixture.dir.path().join("work");
-    Git.add_checkout(&fixture.clone, &checkout, "topic", "origin/main")
-        .unwrap();
-    assert!(
-        Git.is_merged(&fixture.clone, "topic", "origin/main")
-            .unwrap()
-    );
+    Git.add_checkout(
+        &fixture.clone,
+        &checkout,
+        "topic",
+        "refs/remotes/origin/main",
+    )
+    .unwrap();
     git(
         &checkout,
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
     );
-    assert!(
-        !Git.is_merged(&fixture.clone, "topic", "origin/main")
-            .unwrap()
+    assert_eq!(Git.stray_commits(&checkout).unwrap(), 0);
+    git(&checkout, &["switch", "--quiet", "--detach"]);
+    git(
+        &checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Lost"],
     );
+    assert_eq!(Git.stray_commits(&checkout).unwrap(), 1);
+}
+
+#[test]
+fn a_failure_message_prefers_the_last_fatal_or_error_line() {
+    let stderr = "hint: try this\nerror: first\nwarning: noise\nfatal: the cause\nhint: more\n";
+    assert_eq!(message(stderr), "fatal: the cause");
+}
+
+#[test]
+fn a_failure_message_without_a_fatal_line_quotes_the_last_lines_that_are_not_hints() {
+    let stderr = "one\ntwo\nhint: skip\nthree\nfour\nfive\nsix\n\n";
+    assert_eq!(message(stderr), "two / three / four / five / six");
+}
+
+#[test]
+fn a_symbolic_link_in_place_of_a_checkout_is_not_the_checkout() {
+    let fixture = fixture();
+    let checkout = fixture.dir.path().join("work");
+    Git.add_checkout(
+        &fixture.clone,
+        &checkout,
+        "topic",
+        "refs/remotes/origin/main",
+    )
+    .unwrap();
+    let moved = fixture.dir.path().join("moved");
+    git(
+        &fixture.clone,
+        &[
+            "worktree",
+            "move",
+            checkout.to_str().unwrap(),
+            moved.to_str().unwrap(),
+        ],
+    );
+    std::os::unix::fs::symlink(&moved, &checkout).unwrap();
+    assert!(!Git.owns_checkout(&fixture.clone, &checkout).unwrap());
+    assert!(Git.owns_checkout(&fixture.clone, &moved).unwrap());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-mxv has 11 opt-outs from the conventions.
+mxv has 14 opt-outs from the conventions.
 
 examples/run: mxv run
   Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
@@ -49,6 +49,18 @@ twins/no-twin: mxv show reading-list
 
 twins/no-twin: mxv show reading-list
   Reason: The corrupt record causes the failure, and every word of the command line that names it reads the same record.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv show reading-list
+  Reason: The record that holds another name causes the failure, and every word of the command line that names it reads the same record.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv new triage --repo inbox --dry-run
+  Reason: The config file causes the failure, and no word of the command line names the config file.
+  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
+
+twins/no-twin: mxv new triage --repo inbox --dry-run
+  Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
 mxv declares 1 customisation.

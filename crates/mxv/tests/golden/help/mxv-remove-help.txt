@@ -8,7 +8,10 @@ Arguments:
 
 Options:
       --force
-          Remove checkouts with uncommitted or untracked changes, and delete unmerged branches
+          Discard uncommitted changes, untracked files and ignored files such as .env; an unmerged branch is still kept
+
+      --delete-unmerged
+          Delete branches with unmerged commits, and commits on a detached HEAD
 
       --dry-run
           Report what the command would change, and change nothing

@@ -10,11 +10,12 @@ fn main() -> ExitCode {
     // returns, after the output is flushed (CLI-7).
     let _log = crumbkit_usage::start();
     // BASE-6: main is the one place that reads the environment, and it
-    // reads only the variables of `mxv::VARIABLES`.
+    // reads only the variables of `mxv::VARIABLES`: MXV_ROOT here, and HOME
+    // and the XDG base directories through etcetera.
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/mxv/src/main.rs reads the environment once, into a snapshot"
     )]
-    let environment = mxv::Environment::read(|name| std::env::var_os(name));
+    let environment = mxv::Environment::read(|name| std::env::var_os(name), mxv::Bases::find());
     mxv::run(std::env::args_os(), &environment)
 }

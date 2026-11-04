@@ -15,7 +15,7 @@ fn workspace(name: &str) -> Workspace {
         &PathBuf::from("/home/agent/code/inbox"),
         path.join("inbox"),
         name.to_string(),
-        "origin/main".to_owned(),
+        "refs/remotes/origin/main".to_owned(),
     );
     Workspace::new(name, path, vec![checkout])
 }
@@ -24,7 +24,7 @@ fn workspace(name: &str) -> Workspace {
 fn a_store_whose_directory_does_not_exist_lists_no_workspaces() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().join("workspaces"));
-    assert!(store.list().unwrap().is_empty());
+    assert!(store.list().unwrap().workspaces.is_empty());
 }
 
 #[test]
@@ -37,6 +37,7 @@ fn a_created_record_reads_back_and_lists_in_name_order() {
     let names: Vec<String> = store
         .list()
         .unwrap()
+        .workspaces
         .into_iter()
         .map(|workspace| workspace.name.to_string())
         .collect();
@@ -100,7 +101,7 @@ fn a_record_that_is_not_json_is_corrupt() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     write(dir.path().join("inbox.json"), "not json");
-    let error = store.list().unwrap_err();
+    let error = store.read(&"inbox".parse().unwrap()).unwrap_err();
     assert!(matches!(error, Error::CorruptRecord { .. }), "{error:?}");
 }
 
@@ -114,4 +115,38 @@ fn a_record_whose_name_breaks_the_rules_is_corrupt() {
     write(dir.path().join("inbox.json"), text);
     let error = store.read(&"inbox".parse().unwrap()).unwrap_err();
     assert!(matches!(error, Error::CorruptRecord { .. }), "{error:?}");
+}
+
+#[test]
+fn listing_reports_a_corrupt_record_and_a_newer_record_and_still_lists_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    store.create(&workspace("reading-list")).unwrap();
+    write(dir.path().join("broken.json"), "not json");
+    write(
+        dir.path().join("future.json"),
+        r#"{"version": 99, "name": "future"}"#,
+    );
+    let records = store.list().unwrap();
+    let names: Vec<&str> = records
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.name.as_str())
+        .collect();
+    assert_eq!(names, ["reading-list"]);
+    assert_eq!(records.problems.len(), 2, "{:?}", records.problems);
+    assert!(matches!(records.problems[0], Error::CorruptRecord { .. }));
+    assert!(matches!(records.problems[1], Error::NewerRecord { .. }));
+}
+
+#[test]
+fn a_record_that_holds_another_name_than_its_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    store.create(&workspace("reading-list")).unwrap();
+    let text = fs::read_to_string(dir.path().join("reading-list.json")).unwrap();
+    write(dir.path().join("inbox.json"), text);
+    let name: WorkspaceName = "inbox".parse().unwrap();
+    let error = store.read(&name).unwrap_err();
+    assert!(matches!(error, Error::MismatchedRecord { .. }), "{error:?}");
 }

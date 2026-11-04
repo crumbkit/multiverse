@@ -23,8 +23,11 @@ mxv show reading-list                      # print its record
 mxv remove reading-list                    # remove it, and its branch when merged
 ```
 
-[crates/mxv/README.md](crates/mxv/README.md) describes the layout of a
-workspace, where mxv keeps its records, and the variables it reads.
+Workspaces live in `~/.local/share/mxv/workspaces` by default. `MXV_ROOT`,
+or `root = "~/work"` in `~/.config/mxv/config.toml`, moves the root for new
+workspaces. [crates/mxv/README.md](crates/mxv/README.md) describes the layout
+of a workspace, the root and its config file, where mxv keeps its records,
+and the variables it reads.
 
 multiverse is under construction. A workspace holds one repository for
 now. `mxv run`, `mxv archive` and `mxv restore` are declared and fail with

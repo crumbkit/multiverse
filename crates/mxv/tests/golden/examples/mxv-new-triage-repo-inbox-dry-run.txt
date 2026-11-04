@@ -1,2 +1,2 @@
-NAME    BRANCH  PATH
-triage  triage  /home/agent/mxv/triage
+NAME    BRANCH  PATH                                                                                                               ROOT                                                                                                        ROOT_SOURCE
+triage  triage  [XDG_DATA_HOME]/mxv/workspaces/triage  [XDG_DATA_HOME]/mxv/workspaces  default

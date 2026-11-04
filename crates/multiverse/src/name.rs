@@ -42,6 +42,10 @@ pub enum BadName {
     BadStart,
     /// The text holds this character, which a name never holds.
     BadCharacter(char),
+    /// The text holds this uppercase letter. Names are lowercase, so two
+    /// names never refer to the same record on a file system that ignores
+    /// case, such as the default one on macOS, and a name is never `HEAD`.
+    Uppercase(char),
     /// The text holds `..`, or ends with `.` or `.lock`, which git refuses
     /// in a branch name.
     BadDots,
@@ -56,6 +60,12 @@ impl fmt::Display for BadName {
                 .write_str("the name starts with a character other than a letter or a digit"),
             Self::BadCharacter(character) => {
                 write!(formatter, "the name holds the character {character:?}")
+            }
+            Self::Uppercase(character) => {
+                write!(
+                    formatter,
+                    "the name holds the uppercase letter {character:?}"
+                )
             }
             Self::BadDots => {
                 formatter.write_str("the name holds `..`, or ends with `.` or `.lock`")
@@ -78,6 +88,9 @@ impl TryFrom<String> for WorkspaceName {
         }
         if !first.is_ascii_alphanumeric() {
             return Err(BadName::BadStart);
+        }
+        if let Some(upper) = text.chars().find(char::is_ascii_uppercase) {
+            return Err(BadName::Uppercase(upper));
         }
         if let Some(bad) = text
             .chars()
