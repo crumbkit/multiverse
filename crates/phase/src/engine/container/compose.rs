@@ -4,57 +4,95 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use crate::docker::command::{PULL_DEADLINE, message, run};
-use crate::docker::names::{CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey};
-use crate::docker::objects::inspect_named;
-use crate::error::Error;
-use crate::redacted::Redacted;
+use crate::engine::container::ContainerError as Error;
+use crate::engine::container::command::{PULL_DEADLINE, message, run};
+use crate::engine::container::names::{
+    CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey,
+};
+use crate::engine::container::objects::inspect_named;
 
-/// The value of a container's variable. It implements neither `Debug`,
-/// `Display` nor `Serialize`, so it reaches no log, error or file. Only
-/// the environment of the `docker compose` process reads it.
+/// The value of a container's variable, which may be a secret. Its
+/// `Debug` prints `<redacted>`, it implements neither `Display` nor
+/// `Serialize`, so it reaches no log, error or file, and it has no
+/// accessor. Only the environment of the `docker compose` process reads
+/// it.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct ComposeValue(String);
+pub struct ComposeValue(String);
 
-impl From<&Redacted> for ComposeValue {
-    fn from(value: &Redacted) -> Self {
-        Self(value.reveal().to_owned())
+impl ComposeValue {
+    /// Returns the value `value` of a container's variable.
+    #[must_use]
+    pub const fn new(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Debug for ComposeValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
     }
 }
 
 /// A container port that a [`ContainerSpec`] publishes as a named port.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PublishedPort {
+#[non_exhaustive]
+pub struct PublishedPort {
     /// The TCP port inside the container.
-    pub(crate) container: u16,
+    pub container: u16,
     /// The name of the port whose host port it is published on.
-    pub(crate) port: String,
+    pub port: String,
 }
 
-/// What the compose file declares for one service: the docker module's
+impl PublishedPort {
+    /// Returns the container port `container`, published on the host port
+    /// of the port named `port`.
+    #[must_use]
+    pub const fn new(container: u16, port: String) -> Self {
+        Self { container, port }
+    }
+}
+
+/// What the compose file declares for one service: the container engine's
 /// own copy of a manifest container, which the caller builds.
-#[derive(Clone)]
-pub(crate) struct ContainerSpec {
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ContainerSpec {
     /// The image.
-    pub(crate) image: String,
+    pub image: String,
     /// The arguments that replace the image's command, or `None` to keep
     /// it.
-    pub(crate) command: Option<Vec<String>>,
+    pub command: Option<Vec<String>>,
     /// The variables that the container receives, by name.
-    pub(crate) env: BTreeMap<String, ComposeValue>,
+    pub env: BTreeMap<String, ComposeValue>,
     /// The container ports that are published on the loopback address.
-    pub(crate) ports: Vec<PublishedPort>,
+    pub ports: Vec<PublishedPort>,
     /// The named volumes that the container mounts, with the path that
     /// each mounts at.
-    pub(crate) volumes: BTreeMap<VolumeKey, String>,
+    pub volumes: BTreeMap<VolumeKey, String>,
+}
+
+impl ContainerSpec {
+    /// Returns the service that runs `image` with its own command, no
+    /// variables, no published ports and no volumes.
+    #[must_use]
+    pub const fn new(image: String) -> Self {
+        Self {
+            image,
+            command: None,
+            env: BTreeMap::new(),
+            ports: Vec::new(),
+            volumes: BTreeMap::new(),
+        }
+    }
 }
 
 /// The services of a workspace's compose project, in name order.
-pub(crate) type ContainerSpecs = BTreeMap<ServiceName, ContainerSpec>;
+pub type ContainerSpecs = BTreeMap<ServiceName, ContainerSpec>;
 
 /// The variables of a `docker compose` process: the values of one
 /// container's variables, under the names that [`compose_file`] refers
@@ -238,13 +276,13 @@ pub(crate) enum Up {
 /// The project directory is `dir`, which holds no other file that Compose
 /// reads.
 ///
-/// The caller has checked the compose plugin with [`super::command::check_compose`].
+/// The caller has checked the compose plugin with `docker compose version`.
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] when a container with the name of the
-/// service lacks the scope's labels, [`Error::DockerNoAddressPool`], the
-/// errors of [`super::command::check`], and [`Error::DockerFailed`] when docker
+/// Returns [`Error::Foreign`] when a container with the name of the
+/// service lacks the scope's labels, [`Error::NoAddressPool`], the
+/// errors of `docker version`, and [`Error::Failed`] when docker
 /// cannot pull the image or start the container.
 pub(crate) fn compose_up(
     scope: &Scope,
@@ -274,13 +312,13 @@ pub(crate) fn compose_up(
         return Ok(Up::Started);
     }
     if finished.stderr.contains("Conflict") {
-        // Another program created a container with the name after mxv
-        // removed its own, so the name is foreign.
+        // Another program created a container with the name after the
+        // engine removed its own, so the name is foreign.
         inspect_named(scope, service)?;
     }
     match up_failure(&finished.stderr) {
         UpFailure::PortAllocated(port) => Ok(Up::PortAllocated(port)),
-        UpFailure::NoAddressPool => Err(Error::DockerNoAddressPool {
+        UpFailure::NoAddressPool => Err(Error::NoAddressPool {
             message: message(&finished.stderr),
         }),
         UpFailure::Other => {

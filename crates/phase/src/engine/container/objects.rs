@@ -1,11 +1,11 @@
-//! The containers and volumes that mxv acts on, and the handles that prove
-//! it checked their labels.
+//! The containers and volumes that the engine acts on, and the handles
+//! that prove it checked their labels.
 //!
 //! An [`OwnedContainer`] or [`OwnedVolume`] exists only after a call here
 //! inspected the object and found that its `mxv.store`, `mxv.workspace`
 //! and `mxv.container` or `mxv.volume` labels name the scope and the
 //! object. That call is the only place that fails with
-//! [`Error::DockerForeign`]. Stopping, removing, deleting and following
+//! [`Error::Foreign`]. Stopping, removing, deleting and following
 //! the log of an object take its handle, so nothing outside this module
 //! acts on an object whose labels it did not check.
 //!
@@ -13,21 +13,19 @@
 //! carries no label that names a scope. An [`AnonymousVolume`] therefore
 //! comes from the inspection of the [`OwnedContainer`] that mounts it.
 //! After the container is removed, the workspace's volume record, which
-//! mxv writes only from such values, is what names the volume, and
+//! the engine writes only from such values, is what names the volume, and
 //! [`inspect_anonymous`] checks that docker still labels it anonymous.
 
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::path::Path;
 use std::time::Duration;
 
-use crate::docker::command::{DOCKER, DOCKER_DEADLINE, quick, run};
-use crate::docker::compose::ComposeEnv;
-use crate::docker::names::{
+use crate::engine::container::ContainerError as Error;
+use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run};
+use crate::engine::container::compose::ComposeEnv;
+use crate::engine::container::names::{
     CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeName,
 };
-use crate::error::Error;
-use crate::process::{self, Launch, Launched};
 
 /// The label that docker gives the anonymous volumes of an image's
 /// `VOLUME` paths.
@@ -38,22 +36,17 @@ const ANONYMOUS_LABEL: &str = "com.docker.volume.anonymous";
 /// listens on from one that something does.
 const PROBE_WAIT: Duration = Duration::from_millis(300);
 
-/// The Go template that prints an object's store, workspace and object
-/// labels, separated by tabs, for [`Scope::owns`]. `%s` stands for the
-/// object label, such as `mxv.container`, and `%l` for the path of the
-/// labels, which differs between containers and other objects.
-const LABELS_FORMAT: &str =
-    r#"{{index %l "mxv.store"}}	{{index %l "mxv.workspace"}}	{{index %l "%s"}}"#;
-
-/// Returns [`LABELS_FORMAT`] for the labels at `path` and the object label
-/// `label`.
-fn labels_format(path: &str, label: &str) -> String {
-    LABELS_FORMAT.replace("%l", path).replace("%s", label)
+/// Returns the Go template that prints the labels at `path`, which differs
+/// between containers and other objects, as one line of JSON for
+/// [`Scope::owns`]. JSON escapes every tab and newline in a label's value,
+/// so no value can reach another field or line.
+fn labels_format(path: &str) -> String {
+    format!("{{{{json {path}}}}}")
 }
 
 /// What `docker container inspect` reports about a container.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ContainerState {
+pub enum ContainerState {
     /// The container runs, or is paused or restarting.
     Running,
     /// docker created the container and has not started it.
@@ -78,7 +71,7 @@ impl ContainerState {
 /// A container whose labels name its scope and service, as an inspection
 /// found them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OwnedContainer {
+pub struct OwnedContainer {
     /// The scope that the labels name.
     scope: Scope,
     /// The service that the labels name.
@@ -89,7 +82,8 @@ pub(crate) struct OwnedContainer {
 
 impl OwnedContainer {
     /// Returns the service that the container's labels name.
-    pub(crate) const fn service(&self) -> &ServiceName {
+    #[must_use]
+    pub const fn service(&self) -> &ServiceName {
         &self.service
     }
 
@@ -101,11 +95,12 @@ impl OwnedContainer {
 
 /// What an inspection of an owned container reported.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Inspected {
+#[non_exhaustive]
+pub struct Inspected {
     /// The container.
     pub(crate) container: OwnedContainer,
     /// Its state.
-    pub(crate) state: ContainerState,
+    pub state: ContainerState,
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
     pub(crate) started: String,
@@ -161,7 +156,7 @@ impl Volume {
 fn container_format() -> String {
     format!(
         "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}",
-        labels_format(".Config.Labels", CONTAINER_LABEL)
+        labels_format(".Config.Labels")
     )
 }
 
@@ -171,8 +166,8 @@ fn container_format() -> String {
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] when the labels do not name `scope` and
-/// `service`, and [`Error::DockerFailed`] when docker printed no container
+/// Returns [`Error::Foreign`] when the labels do not name `scope` and
+/// `service`, and [`Error::Failed`] when docker printed no container
 /// id.
 pub(super) fn mint_container(
     scope: &Scope,
@@ -181,14 +176,18 @@ pub(super) fn mint_container(
     printed: &str,
 ) -> Result<Inspected, Error> {
     let mut lines = printed.lines();
-    if !scope.owns(lines.next().unwrap_or_default(), service.as_str()) {
-        return Err(Error::DockerForeign {
+    if !scope.owns(
+        lines.next().unwrap_or_default(),
+        CONTAINER_LABEL,
+        service.as_str(),
+    ) {
+        return Err(Error::Foreign {
             kind: "container",
             name: target.to_owned(),
         });
     }
     let printed_id = lines.next().unwrap_or_default().trim();
-    let id = ContainerId::new(printed_id).map_err(|_| Error::DockerFailed {
+    let id = ContainerId::new(printed_id).map_err(|_| Error::Failed {
         operation: "container inspect",
         container: Some(service.as_str().to_owned()),
         message: format!("docker printed {printed_id:?} as the container's id"),
@@ -238,9 +237,9 @@ fn inspect(scope: &Scope, service: &ServiceName, target: &str) -> Result<Option<
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] when the container's labels do not name
-/// `scope` and `service`, and the errors of [`super::command::check`] and
-/// [`Error::DockerFailed`].
+/// Returns [`Error::Foreign`] when the container's labels do not name
+/// `scope` and `service`, and the errors of `docker version` and
+/// [`Error::Failed`].
 pub(crate) fn inspect_id(
     scope: &Scope,
     service: &ServiceName,
@@ -267,8 +266,10 @@ pub(crate) fn inspect_named(
 ///
 /// # Errors
 ///
-/// Returns the errors of [`inspect_id`].
-pub(crate) fn reinspect(container: &OwnedContainer) -> Result<Option<Inspected>, Error> {
+/// Returns [`Error::Foreign`] when the container's labels no longer name
+/// its scope and service, the errors of checking that docker answers, and
+/// [`Error::Failed`].
+pub fn reinspect(container: &OwnedContainer) -> Result<Option<Inspected>, Error> {
     inspect_id(&container.scope, &container.service, &container.id)
 }
 
@@ -277,7 +278,7 @@ pub(crate) fn reinspect(container: &OwnedContainer) -> Result<Option<Inspected>,
 ///
 /// # Errors
 ///
-/// Returns the errors of [`super::command::check`] and [`Error::DockerFailed`].
+/// Returns the errors of `docker version` and [`Error::Failed`].
 pub(crate) fn stop(container: &OwnedContainer, grace: Duration) -> Result<(), Error> {
     let seconds = grace.as_secs().to_string();
     let stopped = run(
@@ -297,7 +298,7 @@ pub(crate) fn stop(container: &OwnedContainer, grace: Duration) -> Result<(), Er
 ///
 /// # Errors
 ///
-/// Returns the errors of [`super::command::check`] and [`Error::DockerFailed`].
+/// Returns the errors of `docker version` and [`Error::Failed`].
 pub(crate) fn remove(container: OwnedContainer) -> Result<(), Error> {
     let removed = quick(["rm", "--force", "--", container.id.as_str()], "rm")?;
     if !removed.missing() {
@@ -332,7 +333,7 @@ fn inspect_volume_with(name: &VolumeName, format: &str) -> Result<Option<String>
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] when `name` is not a name of the scope,
+/// Returns [`Error::Foreign`] when `name` is not a name of the scope,
 /// or its labels do not name the scope and the volume.
 pub(super) fn mint_volume(
     scope: &Scope,
@@ -342,11 +343,11 @@ pub(super) fn mint_volume(
     let owned = name
         .as_str()
         .strip_prefix(&scope.prefix())
-        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), volume));
+        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), VOLUME_LABEL, volume));
     if owned {
         Ok(OwnedVolume { name: name.clone() })
     } else {
-        Err(Error::DockerForeign {
+        Err(Error::Foreign {
             kind: "volume",
             name: name.as_str().to_owned(),
         })
@@ -358,13 +359,13 @@ pub(super) fn mint_volume(
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] when docker does not label the volume
+/// Returns [`Error::Foreign`] when docker does not label the volume
 /// anonymous.
 pub(super) fn mint_anonymous(name: &VolumeName, printed: &str) -> Result<AnonymousVolume, Error> {
     if printed.trim() == "anonymous" {
         Ok(AnonymousVolume { name: name.clone() })
     } else {
-        Err(Error::DockerForeign {
+        Err(Error::Foreign {
             kind: "volume",
             name: name.as_str().to_owned(),
         })
@@ -376,13 +377,13 @@ pub(super) fn mint_anonymous(name: &VolumeName, printed: &str) -> Result<Anonymo
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] as [`mint_volume`] describes, and the
-/// errors of [`super::command::check`] and [`Error::DockerFailed`].
+/// Returns [`Error::Foreign`] as [`mint_volume`] describes, and the
+/// errors of `docker version` and [`Error::Failed`].
 pub(crate) fn inspect_volume(
     scope: &Scope,
     name: &VolumeName,
 ) -> Result<Option<OwnedVolume>, Error> {
-    let format = labels_format(".Labels", VOLUME_LABEL);
+    let format = labels_format(".Labels");
     inspect_volume_with(name, &format)?
         .map(|printed| mint_volume(scope, name, &printed))
         .transpose()
@@ -394,8 +395,8 @@ pub(crate) fn inspect_volume(
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] as [`mint_anonymous`] describes, and
-/// the errors of [`super::command::check`] and [`Error::DockerFailed`].
+/// Returns [`Error::Foreign`] as [`mint_anonymous`] describes, and
+/// the errors of `docker version` and [`Error::Failed`].
 pub(super) fn inspect_anonymous(name: &VolumeName) -> Result<Option<AnonymousVolume>, Error> {
     inspect_volume_with(name, &anonymous_format())?
         .map(|printed| mint_anonymous(name, &printed))
@@ -419,8 +420,8 @@ pub(crate) fn reinspect_volume(scope: &Scope, volume: &Volume) -> Result<Option<
 ///
 /// # Errors
 ///
-/// Returns the errors of [`super::command::check`] and
-/// [`Error::DockerFailed`].
+/// Returns the errors of `docker version` and
+/// [`Error::Failed`].
 pub(crate) fn delete_volume(volume: Volume) -> Result<(), Error> {
     let finished = quick(["volume", "rm", "--", volume.name().as_str()], "volume rm")?;
     if !finished.missing() {
@@ -429,59 +430,26 @@ pub(crate) fn delete_volume(volume: Volume) -> Result<(), Error> {
     Ok(())
 }
 
-/// The files of a log follower.
-#[derive(Debug)]
-pub(crate) struct FollowFiles<'a> {
-    /// The directory that the follower starts in.
-    pub(crate) cwd: &'a Path,
-    /// The log that the follower appends to.
-    pub(crate) log: &'a Path,
-    /// The file that the follower's shell writes its exit code to.
-    pub(crate) exit_file: &'a Path,
-}
-
-/// Returns the arguments of the `docker logs` that follows the container
-/// with the id `id` from `since`, when docker last started it, or from its
-/// first line without `since`.
-pub(super) fn follow_args(id: &ContainerId, since: Option<&str>) -> Vec<String> {
+/// Returns the arguments of the `docker logs` that follows `container`
+/// from `since`, when docker last started it, or from its first line
+/// without `since`. The host starts the follower, which ends when the
+/// container stops.
+pub(crate) fn follow_args(container: &OwnedContainer, since: Option<&str>) -> Vec<String> {
     let mut argv = vec![DOCKER.to_owned(), "logs".to_owned(), "--follow".to_owned()];
     if let Some(since) = since {
         argv.extend(["--since".to_owned(), since.to_owned()]);
     }
-    argv.extend(["--".to_owned(), id.as_str().to_owned()]);
+    argv.extend(["--".to_owned(), container.id.as_str().to_owned()]);
     argv
-}
-
-/// Starts a detached `docker logs --follow` of `container` from `since`,
-/// when docker last started it, or from its first line without `since`,
-/// through the process module, with `files`. The follower runs in a
-/// process group of its own and ends when the container stops.
-///
-/// # Errors
-///
-/// Returns the errors of [`process::launch`].
-pub(crate) fn follow_logs(
-    container: &OwnedContainer,
-    since: Option<&str>,
-    files: &FollowFiles<'_>,
-) -> Result<Launched, Error> {
-    let argv = follow_args(&container.id, since);
-    process::launch(&Launch {
-        name: container.service.as_str(),
-        argv: &argv,
-        cwd: files.cwd,
-        env: &[],
-        log: files.log,
-        exit_file: files.exit_file,
-    })
 }
 
 /// Reports whether something inside a container answers on the host port
 /// `port`. Docker's port proxy accepts a connection to a published port
 /// before anything in the container listens, and then closes it at once,
 /// so the probe counts the port as answering only when a connection stays
-/// open for [`PROBE_WAIT`] or the container sends data.
-pub(crate) fn answers(port: u16) -> bool {
+/// open for 300 ms or the container sends data.
+#[must_use]
+pub fn answers(port: u16) -> bool {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let Ok(mut stream) = TcpStream::connect_timeout(&address, PROBE_WAIT) else {
         return false;

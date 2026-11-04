@@ -3,15 +3,15 @@ use std::time::Duration;
 use rustix::process::Signal;
 
 use super::{Reach, Waits, sweep};
-use crate::record::docker::{Docker, DockerKind, Unreachable};
+use crate::record::docker::{Docker, DockerKind};
 use crate::record::process::{Processes, Start, System};
 use crate::record::run::{
     EntryState, HostProcess, NetworkId, ObjectKey, RunRecord, Started, VolumeLifetime,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{
-    FakeDocker, FakeProcesses, Spawned, alive, app, empty_record, host_at, process, recorded,
-    workspace,
+    FakeDocker, FakeProcesses, Spawned, Unreachable, alive, app, empty_record, host_at, process,
+    recorded, workspace,
 };
 use crate::record::{ContainerId, DockerName, Handle, ObjectKind, Role, SweepOutcome, Swept};
 

@@ -106,7 +106,7 @@ fn context(
     processes: &[String],
 ) -> Result<Context, crumbkit::Error> {
     let store = Store::new(environment.records()?);
-    let runs = Runs::new(environment.runs()?).with_port_range(environment.port_range()?);
+    let runs = Runs::new(&environment.state()?).with_port_range(environment.port_range()?);
     let workspace = match workspace {
         Some(text) => {
             let name = verbs::parse_name(text)?;
@@ -552,13 +552,13 @@ pub(crate) fn running(
     environment: &Environment,
     workspace: &Workspace,
 ) -> Result<Vec<String>, MxvFailure> {
-    Ok(Runs::new(environment.runs()?).running(workspace)?)
+    Ok(Runs::new(&environment.state()?).running(workspace)?)
 }
 
 /// Takes the lock of the workspace `name`, which `up` and `down` also
 /// take, so `mxv clean` deletes nothing while they start or stop it.
 pub(crate) fn lock(environment: &Environment, name: &WorkspaceName) -> Result<Lock, MxvFailure> {
-    Ok(Runs::new(environment.runs()?).lock(name)?)
+    Ok(Runs::new(&environment.state()?).lock(name)?)
 }
 
 /// Stops every process of `workspace` and deletes its run files and logs,
@@ -569,7 +569,7 @@ pub(crate) fn stop_all(
 ) -> Result<(), crumbkit::Error> {
     let mut context = Context {
         store: Store::new(environment.records()?),
-        runs: Runs::new(environment.runs()?),
+        runs: Runs::new(&environment.state()?),
         workspace: workspace.clone(),
         processes: Vec::new(),
     };
@@ -580,7 +580,7 @@ pub(crate) fn stop_all(
 /// Removes the stopped containers of the workspace `name` and deletes its
 /// run files and logs.
 pub(crate) fn forget(environment: &Environment, name: &WorkspaceName) -> Result<(), MxvFailure> {
-    Ok(Runs::new(environment.runs()?).forget(name)?)
+    Ok(Runs::new(&environment.state()?).forget(name)?)
 }
 
 /// Returns the docker volumes of the workspace `name`, for the refusal of
@@ -589,7 +589,7 @@ pub(crate) fn volumes(
     environment: &Environment,
     name: &WorkspaceName,
 ) -> Result<Volumes, MxvFailure> {
-    Ok(Runs::new(environment.runs()?).volumes(name)?)
+    Ok(Runs::new(&environment.state()?).volumes(name)?)
 }
 
 /// Returns the docker containers of the workspace `name`, running or
@@ -598,7 +598,7 @@ pub(crate) fn containers(
     environment: &Environment,
     name: &WorkspaceName,
 ) -> Result<Vec<String>, MxvFailure> {
-    Ok(Runs::new(environment.runs()?).docker_containers(name)?)
+    Ok(Runs::new(&environment.state()?).docker_containers(name)?)
 }
 
 /// Deletes the docker volumes `volumes`, which [`volumes`] returned for a
@@ -607,5 +607,5 @@ pub(crate) fn delete_volumes(
     environment: &Environment,
     volumes: Volumes,
 ) -> Result<(), MxvFailure> {
-    Ok(Runs::new(environment.runs()?).delete_volumes(volumes)?)
+    Ok(Runs::new(&environment.state()?).delete_volumes(volumes)?)
 }

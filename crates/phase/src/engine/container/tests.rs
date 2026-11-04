@@ -1,17 +1,21 @@
-use std::path::Path;
-
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde_json::json;
 
-use crate::docker::command::message;
-use crate::docker::compose::{UpFailure, compose_env, compose_file, up_failure};
-use crate::docker::names::{ContainerId, Scope, ServiceName, StoreId, VolumeKey, VolumeName};
-use crate::docker::objects::{ContainerState, mint_anonymous, mint_container, mint_volume};
-use crate::error::Error;
-use crate::manifest::Manifest;
+use crate::engine::container::ContainerError as Error;
+use crate::engine::container::command::{message, says_missing};
+use crate::engine::container::compose::{
+    ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort, UpFailure, compose_env,
+    compose_file, up_failure,
+};
+use crate::engine::container::names::{
+    ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
+};
+use crate::engine::container::objects::{
+    ContainerState, mint_anonymous, mint_container, mint_volume,
+};
 use crate::name::WorkspaceName;
-use crate::runs::container_specs;
 
 /// A store id of the tests.
 const STORE: &str = "0123456789abcdef0123456789abcdef";
@@ -27,11 +31,101 @@ fn key(name: &str) -> VolumeKey {
     VolumeKey::new(name).unwrap()
 }
 
+/// Returns an object's labels as `docker inspect` prints them with
+/// `{{json .Labels}}`: the store, workspace and `label` labels, where an
+/// empty value leaves its label out.
+fn printed_labels(store: &str, workspace: &str, label: &str, object: &str) -> String {
+    let mut labels = serde_json::Map::new();
+    for (key, value) in [
+        ("mxv.store", store),
+        ("mxv.workspace", workspace),
+        (label, object),
+    ] {
+        if !value.is_empty() {
+            labels.insert(key.to_owned(), json!(value));
+        }
+    }
+    serde_json::Value::Object(labels).to_string()
+}
+
+/// Returns the labels of the scope's container `service`.
+fn container_labels(store: &str, workspace: &str, service: &str) -> String {
+    printed_labels(store, workspace, "mxv.container", service)
+}
+
+/// Returns the labels of the scope's volume `volume`.
+fn volume_labels(store: &str, workspace: &str, volume: &str) -> String {
+    printed_labels(store, workspace, "mxv.volume", volume)
+}
+
 fn scope(workspace: &str) -> Scope {
     Scope::new(
         &StoreId::new(STORE).unwrap(),
         &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
     )
+}
+
+fn variables(pairs: &[(&str, &str)]) -> BTreeMap<String, ComposeValue> {
+    pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), ComposeValue::new((*value).to_owned())))
+        .collect()
+}
+
+/// Returns the services of the tests: `dynamodb`, which publishes a port
+/// and mounts a volume, and `cache`.
+fn specs() -> ContainerSpecs {
+    let mut dynamodb = ContainerSpec::new("amazon/dynamodb-local:2.5.4".to_owned());
+    dynamodb.command = Some(vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "echo $HOME".to_owned(),
+    ]);
+    dynamodb.env = variables(&[("AWS_REGION", "eu-west-1"), ("TOKEN", "s3cret$x")]);
+    dynamodb.ports = vec![
+        PublishedPort::new(8000, "dynamodb".to_owned()),
+        PublishedPort::new(9000, "unused".to_owned()),
+    ];
+    dynamodb.volumes = BTreeMap::from([(key("data"), "/data".to_owned())]);
+    let mut cache = ContainerSpec::new("busybox:1.37.0".to_owned());
+    cache.env = variables(&[("TOKEN", "other")]);
+    BTreeMap::from([(service("dynamodb"), dynamodb), (service("cache"), cache)])
+}
+
+#[test]
+fn a_scope_with_the_workspaces_identity_adds_its_stable_id_run_record_and_app_to_every_label() {
+    let identity = Identity {
+        id: "fedcba9876543210fedcba9876543210".parse().unwrap(),
+        run_record: PathBuf::from("/state/runs/fedcba9876543210fedcba9876543210.json"),
+    };
+    let scope = scope("reading-list").identified(identity);
+    let file = compose_file(&scope, &specs(), &BTreeMap::new());
+    let expected = |label: &str, object: &str| {
+        json!({
+            "mxv.store": STORE,
+            "mxv.workspace": "reading-list",
+            label: object,
+            "mxv.workspace-id": "fedcba9876543210fedcba9876543210",
+            "mxv.run-record": "/state/runs/fedcba9876543210fedcba9876543210.json",
+            "mxv.app": "reading-list",
+        })
+    };
+    assert_eq!(
+        file["services"]["cache"]["labels"],
+        expected("mxv.container", "cache")
+    );
+    assert_eq!(
+        file["volumes"]["data"]["labels"],
+        expected("mxv.volume", "data")
+    );
+    // The identity labels the objects that the scope creates, and the
+    // scope still owns the objects that carry only the older labels.
+    assert!(scope.owns(
+        &container_labels(STORE, "reading-list", "db"),
+        "mxv.container",
+        "db"
+    ));
+    assert_eq!(scope, self::scope("reading-list"));
 }
 
 #[test]
@@ -69,37 +163,52 @@ fn two_stores_give_one_workspace_name_different_container_and_volume_names() {
 #[test]
 fn a_scope_owns_only_objects_whose_labels_name_its_store_workspace_and_object() {
     let scope = scope("reading-list");
-    assert!(scope.owns(&format!("{STORE}\treading-list\tdb"), "db"));
-    assert!(!scope.owns("\t\t", "db"));
-    assert!(!scope.owns(&format!("{STORE}\treading-list\tcache"), "db"));
-    assert!(!scope.owns(&format!("{STORE}\treading\tdb"), "db"));
-    assert!(!scope.owns("fedcba9876543210fedcba9876543210\treading-list\tdb", "db"));
+    let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
+    assert!(owns(&container_labels(STORE, "reading-list", "db")));
+    assert!(!owns("null"));
+    assert!(!owns("{}"));
+    assert!(!owns(""));
+    assert!(!owns(&container_labels(STORE, "reading-list", "cache")));
+    assert!(!owns(&container_labels(STORE, "reading", "db")));
+    assert!(!owns(&container_labels(
+        "fedcba9876543210fedcba9876543210",
+        "reading-list",
+        "db"
+    )));
+    assert!(!owns(&printed_labels(
+        STORE,
+        "reading-list",
+        "mxv.volume",
+        "db"
+    )));
+}
+
+#[test]
+fn a_scope_owns_no_object_whose_label_values_differ_by_a_tab_or_a_space() {
+    let scope = scope("reading-list");
+    let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
+    // A value that holds tabs cannot stand in for the other labels.
+    assert!(!owns(&printed_labels(
+        &format!("{STORE}\treading-list\tdb"),
+        "",
+        "mxv.container",
+        ""
+    )));
+    assert!(!owns(&container_labels(
+        &format!("{STORE} "),
+        "reading-list",
+        "db"
+    )));
+    assert!(!owns(&container_labels(STORE, " reading-list", "db")));
+    assert!(!owns(&container_labels(STORE, "reading-list", "db\n")));
 }
 
 #[test]
 fn the_compose_file_publishes_on_the_loopback_address_labels_every_object_and_holds_no_value_of_a_variable()
  {
-    let manifest = Manifest::parse(
-        r#"
-ports = ["dynamodb", "unused"]
-
-[containers.dynamodb]
-image = "amazon/dynamodb-local:2.5.4"
-command = ["sh", "-c", "echo $HOME"]
-env = { AWS_REGION = "eu-west-1", TOKEN = "s3cret$x" }
-ports = { 8000 = "dynamodb" }
-volumes = { data = "/data" }
-
-[containers.cache]
-image = "busybox:1.37.0"
-env = { TOKEN = "other" }
-"#,
-        Path::new("/repo/mxv.toml"),
-    )
-    .unwrap();
+    let specs = specs();
     let scope = scope("reading-list");
     let ports = BTreeMap::from([("dynamodb".to_owned(), 24001)]);
-    let specs = container_specs(&manifest.containers);
     let file = compose_file(&scope, &specs, &ports);
     let labels = |label: &str, object: &str| json!({"mxv.store": STORE, "mxv.workspace": "reading-list", label: object});
     assert_eq!(
@@ -188,6 +297,34 @@ fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_dot()
         scope("release.2").container_name(&service("db")),
         scope("release").container_name(&service("2-db"))
     );
+}
+
+#[test]
+fn only_the_daemons_answer_that_an_object_does_not_exist_counts_as_missing() {
+    // What docker 29 prints for each kind of object that its daemon does
+    // not have.
+    for said in [
+        "Error response from daemon: No such container: phase-nope",
+        "Error response from daemon: get phase-nope: no such volume",
+        "Error response from daemon: network phase-nope not found",
+        "error: no such object: phase-nope",
+        "Error: No such object: phase-nope",
+    ] {
+        assert!(says_missing(said), "{said}");
+    }
+    // A failure that is no answer about the object never counts as
+    // missing, even when it says "not found".
+    for said in [
+        "Failed to initialize: unable to resolve docker endpoint: context \"nope\": context not found: open /home/agent/.docker/contexts/meta/0/meta.json: no such file or directory",
+        "context \"nope\": context not found",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        "error during connect: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/x/json\": dial unix /var/run/docker.sock: connect: no such file or directory",
+        "Error response from daemon: conflict: phase-nope is in use",
+        "docker: unknown command: docker volume inspect: not found",
+        "",
+    ] {
+        assert!(!says_missing(said), "{said}");
+    }
 }
 
 #[test]
@@ -287,7 +424,7 @@ fn a_container_handle_is_minted_for_labels_that_name_its_store_workspace_and_ser
         &scope,
         &service("db"),
         ID,
-        &printed_container(&format!("{STORE}\treading-list\tdb")),
+        &printed_container(&container_labels(STORE, "reading-list", "db")),
     )
     .unwrap();
     assert_eq!(inspected.container.service(), &service("db"));
@@ -312,10 +449,10 @@ fn a_container_handle_is_minted_for_labels_that_name_its_store_workspace_and_ser
 fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_service() {
     let scope = scope("reading-list");
     for labels in [
-        "\t\t".to_owned(),
-        format!("{STORE}\treading-list\tcache"),
-        format!("{STORE}\treading\tdb"),
-        "fedcba9876543210fedcba9876543210\treading-list\tdb".to_owned(),
+        "null".to_owned(),
+        container_labels(STORE, "reading-list", "cache"),
+        container_labels(STORE, "reading", "db"),
+        container_labels("fedcba9876543210fedcba9876543210", "reading-list", "db"),
     ] {
         let minted = mint_container(
             &scope,
@@ -326,7 +463,7 @@ fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_servic
         assert!(
             matches!(
                 &minted,
-                Err(Error::DockerForeign { kind: "container", name })
+                Err(Error::Foreign { kind: "container", name })
                     if name == "mxv-01234567-reading-list.db"
             ),
             "{labels:?}: {minted:?}"
@@ -336,12 +473,15 @@ fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_servic
 
 #[test]
 fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
-    let printed = format!("{STORE}\treading-list\tdb\nnot-an-id\nrunning 0\n\n\n");
+    let printed = format!(
+        "{}\nnot-an-id\nrunning 0\n\n\n",
+        container_labels(STORE, "reading-list", "db")
+    );
     let minted = mint_container(&scope("reading-list"), &service("db"), ID, &printed);
     assert!(
         matches!(
             &minted,
-            Err(Error::DockerFailed {
+            Err(Error::Failed {
                 operation: "container inspect",
                 ..
             })
@@ -354,18 +494,31 @@ fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
 fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_store_workspace_and_volume() {
     let scope = scope("reading-list");
     let name = scope.volume_name(&key("data"));
-    assert!(mint_volume(&scope, &name, &format!("{STORE}\treading-list\tdata\n")).is_ok());
+    let printed = |labels: String| format!("{labels}\n");
+    assert!(
+        mint_volume(
+            &scope,
+            &name,
+            &printed(volume_labels(STORE, "reading-list", "data"))
+        )
+        .is_ok()
+    );
     for labels in [
-        "\t\t\n".to_owned(),
-        format!("{STORE}\treading-list\tother\n"),
-        format!("{STORE}\treading\tdata\n"),
-        "fedcba9876543210fedcba9876543210\treading-list\tdata\n".to_owned(),
+        printed("null".to_owned()),
+        printed(volume_labels(STORE, "reading-list", "other")),
+        printed(volume_labels(STORE, "reading", "data")),
+        printed(volume_labels(
+            "fedcba9876543210fedcba9876543210",
+            "reading-list",
+            "data",
+        )),
+        printed(container_labels(STORE, "reading-list", "data")),
     ] {
         let minted = mint_volume(&scope, &name, &labels);
         assert!(
             matches!(
                 &minted,
-                Err(Error::DockerForeign { kind: "volume", name })
+                Err(Error::Foreign { kind: "volume", name })
                     if name == "mxv-01234567-reading-list.data"
             ),
             "{labels:?}: {minted:?}"
@@ -384,9 +537,13 @@ fn no_named_volume_handle_is_minted_for_a_volume_without_a_name_of_the_scope() {
         let name = VolumeName::new(name).unwrap();
         // Labels that would name the volume do not make another volume
         // the scope's.
-        let minted = mint_volume(&scope, &name, &format!("{STORE}\treading-list\tdata\n"));
+        let minted = mint_volume(
+            &scope,
+            &name,
+            &format!("{}\n", volume_labels(STORE, "reading-list", "data")),
+        );
         assert!(
-            matches!(&minted, Err(Error::DockerForeign { kind: "volume", .. })),
+            matches!(&minted, Err(Error::Foreign { kind: "volume", .. })),
             "{name}: {minted:?}"
         );
     }
@@ -401,7 +558,7 @@ fn an_anonymous_volume_handle_is_minted_only_for_a_volume_with_dockers_anonymous
         assert!(
             matches!(
                 mint_anonymous(&name, printed),
-                Err(Error::DockerForeign { kind: "volume", .. })
+                Err(Error::Foreign { kind: "volume", .. })
             ),
             "{printed:?}"
         );

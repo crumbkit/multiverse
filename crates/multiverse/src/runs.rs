@@ -16,8 +16,8 @@
 //!
 //! A container of the manifest has the record `<container>.container`,
 //! which holds the id of the container that `up` started; docker holds its
-//! state. The `docker` module keeps that record, describes the compose
-//! project and checks the labels before it acts on a recorded id. Its
+//! state. phase's container engine keeps that record, describes the
+//! compose project and checks the labels before it acts on a recorded id. Its
 //! log is `<container>.log` too, which a detached `docker logs --follow`
 //! appends to while the container runs, so the log outlives the container
 //! that `mxv down` removes. `<container>.follower` records the follower's
@@ -34,10 +34,12 @@ use std::time::{Duration, Instant};
 use rustix::process::Signal;
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
-use crate::docker::{
-    self, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle, OwnedContainer,
-    Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
+use phase::Phase;
+use phase::container::{
+    self as docker, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle,
+    OwnedContainer, Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
 };
+
 use crate::error::Error;
 use crate::manifest::{Container, LogPattern, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
@@ -46,7 +48,7 @@ use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
 use crate::redacted::Redacted;
 use crate::run_files::{
-    RUN_VERSION, RunDir, RunRecord, owns_group, read_json, remove_if_present, write_json,
+    RUN_VERSION, RunDir, RunHost, RunRecord, owns_group, read_json, remove_if_present, write_json,
 };
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
@@ -302,11 +304,22 @@ enum Readiness {
     TimedOut,
 }
 
+/// The directory under mxv's state directory that holds the run files of
+/// each workspace's processes.
+const RUNS_DIR: &str = "runs";
+
+/// The directory under mxv's state directory that phase keeps its own state
+/// in. Phase keeps each workspace's run record at
+/// `<PHASE_DIR>/runs/<workspace-id>.json`, apart from mxv's records.
+const PHASE_DIR: &str = "phase";
+
 /// The run files of every workspace's processes, under one directory.
 #[derive(Clone, Debug)]
 pub struct Runs {
     /// The directory that holds one directory for each workspace.
     dir: PathBuf,
+    /// The phase whose state directory is `<mxv state>/phase`.
+    phase: Phase,
     /// How long [`Runs::down`] waits after SIGTERM.
     grace: Duration,
     /// The host ports that [`Runs::up`] allocates from.
@@ -317,13 +330,16 @@ pub struct Runs {
 }
 
 impl Runs {
-    /// Returns the run files under `dir`, such as `~/.local/state/mxv/runs`,
-    /// which stop processes with a grace of [`STOP_GRACE`] and allocate
-    /// ports from [`DEFAULT_PORT_RANGE`].
+    /// Returns the run files under mxv's state directory `state`, such as
+    /// `~/.local/state/mxv`, which stop processes with a grace of
+    /// [`STOP_GRACE`] and allocate ports from [`DEFAULT_PORT_RANGE`]. The
+    /// run files live in `<state>/runs`, and phase keeps its state in
+    /// `<state>/phase`.
     #[must_use]
-    pub const fn new(dir: PathBuf) -> Self {
+    pub fn new(state: &Path) -> Self {
         Self {
-            dir,
+            dir: state.join(RUNS_DIR),
+            phase: Phase::new(state.join(PHASE_DIR)),
             grace: STOP_GRACE,
             port_range: DEFAULT_PORT_RANGE,
             lock_wait: LOCK_WAIT,
@@ -650,7 +666,15 @@ impl Runs {
             .iter()
             .any(|name| manifest.containers.contains_key(name))
         {
-            Some(self.lifecycle(&workspace.name).prepare()?)
+            // The record on disk holds the workspace's stable id before any
+            // docker object is labelled with it.
+            let host = RunHost {
+                records: Some(store),
+            };
+            let lifecycle = self.lifecycle_with(&host, &workspace.name);
+            let saved = lifecycle.saved_id()?;
+            workspace.id = Some(saved.id().clone());
+            Some(lifecycle.prepare(&self.phase, &saved)?)
         } else {
             None
         };
@@ -1178,13 +1202,22 @@ impl Runs {
     }
 }
 
-/// The containers of a workspace's app, which `Lifecycle` in the
-/// `docker` module starts, reports and stops. These methods put them among
+/// The containers of a workspace's app, which `Lifecycle` in phase's
+/// container engine starts, reports and stops. These methods put them among
 /// the workspace's processes and wait for their readiness.
 impl Runs {
     /// Returns the containers of the workspace `name`.
-    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle {
-        Lifecycle::new(&self.dir, name, self.grace, self.lock_wait)
+    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle<'static, RunHost<'static>> {
+        self.lifecycle_with(&RunHost::WITHOUT_RECORDS, name)
+    }
+
+    /// Returns the containers of the workspace `name`, kept through `host`.
+    fn lifecycle_with<'h, 's>(
+        &self,
+        host: &'h RunHost<'s>,
+        name: &WorkspaceName,
+    ) -> Lifecycle<'h, RunHost<'s>> {
+        Lifecycle::new(host, &self.dir, name, self.grace, self.lock_wait)
     }
 
     /// Returns the names of the containers that `manifest` declares, and
@@ -1384,7 +1417,7 @@ impl Runs {
     fn wait_container(
         &self,
         workspace: &Workspace,
-        lifecycle: &Lifecycle,
+        lifecycle: &Lifecycle<'_, RunHost>,
         prepared: &Prepared,
         declared: &Container,
         container: &OwnedContainer,
@@ -1506,37 +1539,37 @@ impl Volumes {
     }
 }
 
-/// Returns the docker module's specs of the manifest's containers
+/// Returns the container engine's specs of the manifest's containers
 /// `containers`. A container or volume whose name no manifest accepts is
 /// left out; the manifest refuses such names when it is read.
 pub(crate) fn container_specs(containers: &BTreeMap<String, Container>) -> ContainerSpecs {
     containers
         .iter()
         .filter_map(|(name, container)| {
-            let spec = ContainerSpec {
-                image: container.image.clone(),
-                command: container.command.clone(),
-                env: container
-                    .env
-                    .iter()
-                    .map(|(variable, value)| (variable.clone(), ComposeValue::from(value)))
-                    .collect(),
-                ports: container
-                    .ports
-                    .iter()
-                    .map(|published| PublishedPort {
-                        container: published.container,
-                        port: published.port.clone(),
-                    })
-                    .collect(),
-                volumes: container
-                    .volumes
-                    .iter()
-                    .filter_map(|(volume, path)| {
-                        VolumeKey::new(volume).ok().map(|key| (key, path.clone()))
-                    })
-                    .collect(),
-            };
+            let mut spec = ContainerSpec::new(container.image.clone());
+            spec.command.clone_from(&container.command);
+            spec.env = container
+                .env
+                .iter()
+                .map(|(variable, value)| {
+                    (
+                        variable.clone(),
+                        ComposeValue::new(value.reveal().to_owned()),
+                    )
+                })
+                .collect();
+            spec.ports = container
+                .ports
+                .iter()
+                .map(|published| PublishedPort::new(published.container, published.port.clone()))
+                .collect();
+            spec.volumes = container
+                .volumes
+                .iter()
+                .filter_map(|(volume, path)| {
+                    VolumeKey::new(volume).ok().map(|key| (key, path.clone()))
+                })
+                .collect();
             service(name).map(|service| (service, spec))
         })
         .collect()

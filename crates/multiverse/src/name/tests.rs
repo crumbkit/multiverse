@@ -31,8 +31,14 @@ fn a_name_that_starts_with_a_dash_or_a_dot_is_refused() {
 
 #[test]
 fn a_name_with_a_slash_or_a_space_is_refused() {
-    assert_eq!(parse("a/b"), Err(BadName::BadCharacter('/')));
-    assert_eq!(parse("a b"), Err(BadName::BadCharacter(' ')));
+    assert_eq!(
+        parse("a/b").unwrap_err().to_string(),
+        "the name holds the character '/'"
+    );
+    assert_eq!(
+        parse("a b").unwrap_err().to_string(),
+        "the name holds the character ' '"
+    );
 }
 
 #[test]
@@ -51,7 +57,10 @@ fn a_name_reads_back_from_json_only_through_the_checks() {
 
 #[test]
 fn a_name_with_an_uppercase_letter_is_refused_so_names_never_alias_on_a_case_insensitive_disk() {
-    assert_eq!(parse("Reading-list"), Err(BadName::Uppercase('R')));
+    assert_eq!(
+        parse("Reading-list").unwrap_err().to_string(),
+        "the name holds the uppercase letter 'R'"
+    );
 }
 
 #[test]

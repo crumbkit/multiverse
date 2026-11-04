@@ -308,6 +308,7 @@ name = "multiverse"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "mxv-phase",
  "reflink-copy",
  "regex",
  "rustix",
@@ -347,6 +348,7 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tempfile",
+ "wait-timeout",
 ]
 
 [[package]]

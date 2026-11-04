@@ -158,13 +158,16 @@ impl Store {
 
     /// Writes the record of `workspace` unless the store already holds a
     /// record with its name. Two runs that create the same name at once
-    /// write one record, and the other run reads [`Created::Taken`].
+    /// write one record, and the other run reads [`Created::Taken`]. A
+    /// workspace without a stable id gets one first, so every record that
+    /// the store creates holds one.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Unwritable`] when the directory or the record
-    /// cannot be written.
-    pub fn create(&self, workspace: &Workspace) -> Result<Created, Error> {
+    /// cannot be written, and the errors of [`Workspace::ensure_id`].
+    pub fn create(&self, workspace: &mut Workspace) -> Result<Created, Error> {
+        workspace.ensure_id()?;
         let target = self.path(&workspace.name);
         let bytes = record_bytes(workspace, &target)?;
         let unwritable = |source| Error::Unwritable {
@@ -187,12 +190,17 @@ impl Store {
         }
     }
 
-    /// Writes the record of `workspace` over the record with its name.
+    /// Writes the record of `workspace` over the record with its name. A
+    /// workspace whose record an earlier version wrote, which has no stable
+    /// id, gets one first, so the record on disk holds the id before any
+    /// docker object is labelled with it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unwritable`] when the record cannot be written.
-    pub fn update(&self, workspace: &Workspace) -> Result<(), Error> {
+    /// Returns [`Error::Unwritable`] when the record cannot be written, and
+    /// the errors of [`Workspace::ensure_id`].
+    pub fn update(&self, workspace: &mut Workspace) -> Result<(), Error> {
+        workspace.ensure_id()?;
         let target = self.path(&workspace.name);
         let bytes = record_bytes(workspace, &target)?;
         replace_file(&target, &bytes)

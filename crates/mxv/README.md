@@ -149,10 +149,15 @@ and `show`, `cd` and `remove` still find each workspace where it was created.
 mxv keeps one JSON record for each workspace in
 `$XDG_STATE_HOME/mxv/workspaces/<name>.json`, which defaults to
 `~/.local/state/mxv/workspaces/<name>.json`. A record of a workspace of
-clones has version 2 and the `kind` `clone`, and names each clone's mirror
-in `mirror`. A record of a workspace of worktrees has version 1 and no
-`kind`, so an mxv from before clones still reads it, and refuses a record of
-clones as one that a newer mxv wrote. `mxv new` writes the record before it
+clones has the `kind` `clone`, and names each clone's mirror in `mirror`. A
+record of a workspace of worktrees has no `kind`. Every record also holds
+the workspace's stable `id`, 32 lowercase hex digits that mxv mints when it
+creates the workspace and never changes, and that labels the workspace's
+docker objects. A record that holds an `id` has version 3, so an mxv from
+before stable ids refuses it as one that a newer mxv wrote, rather than
+rewriting it without the id. mxv still reads the records that earlier
+versions wrote, version 1 for worktrees and version 2 for clones, and gives
+such a record an id the first time it writes it. `mxv new` writes the record before it
 makes the checkout, so a run that stops partway leaves a record that
 `mxv remove` cleans up. When the fetch, the clone or the checkout fails,
 `mxv new` deletes the clone, the `AGENTS.md` and the directory that the run

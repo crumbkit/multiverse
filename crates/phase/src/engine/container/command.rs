@@ -1,4 +1,4 @@
-//! Running the `docker` program: the one place in mxv that starts it and
+//! Running the `docker` program: the one place in phase that starts it and
 //! waits for it, with a deadline, and reads what it printed.
 
 use std::ffi::OsStr;
@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::docker::compose::ComposeEnv;
-use crate::error::Error;
+use crate::engine::container::ContainerError as Error;
+use crate::engine::container::compose::ComposeEnv;
 
 /// The program that this backend runs.
-pub(super) const DOCKER: &str = "docker";
+pub(crate) const DOCKER: &str = "docker";
 
 /// The deadline of `docker compose up`, which may pull the image first.
 pub(crate) const PULL_DEADLINE: Duration = Duration::from_secs(600);
@@ -46,22 +46,20 @@ impl Finished {
         if self.status.success() {
             Ok(self.stdout)
         } else {
-            Err(failed(operation, container, &self.stderr))
+            Err(Error::failed(operation, container, message(&self.stderr)))
         }
     }
 
-    /// Reports whether docker said that the object does not exist.
+    /// Reports whether docker's daemon answered that the object does not
+    /// exist. Only the daemon's own answers count: a line that starts with
+    /// `Error response from daemon:` and says `No such container`, `No
+    /// such volume`, `No such object` or `network <name> not found`, or the
+    /// `no such object` line that `docker inspect` prints after the daemon
+    /// answered for every kind of object. Any other failure, such as an
+    /// unknown context or a daemon that does not answer, is no answer
+    /// about the object, so it never counts as missing.
     pub(super) fn missing(&self) -> bool {
-        !self.status.success()
-            && [
-                "No such container",
-                "No such volume",
-                "no such volume",
-                "No such object",
-                "not found",
-            ]
-            .iter()
-            .any(|said| self.stderr.contains(said))
+        !self.status.success() && self.stderr.lines().any(says_missing)
     }
 
     /// Returns standard output when the command succeeded. When it failed,
@@ -72,21 +70,47 @@ impl Finished {
         operation: &'static str,
         container: Option<&str>,
     ) -> Result<String, Error> {
+        self.checked_with(DOCKER.as_ref(), operation, container)
+    }
+
+    /// Returns standard output when the command succeeded. When it failed,
+    /// it checks whether the daemon of `program` answers, and returns the
+    /// failure of `operation` on `container`.
+    pub(super) fn checked_with(
+        self,
+        program: &OsStr,
+        operation: &'static str,
+        container: Option<&str>,
+    ) -> Result<String, Error> {
         if !self.status.success() {
-            check()?;
+            check_with(program)?;
         }
         self.ok(operation, container)
     }
 }
 
-/// Returns the failure of `operation` on `container` whose standard error
-/// is `stderr`.
-fn failed(operation: &'static str, container: Option<&str>, stderr: &str) -> Error {
-    Error::DockerFailed {
-        operation,
-        container: container.map(str::to_owned),
-        message: message(stderr),
+/// The start of every answer that docker's daemon sends back as an error.
+const DAEMON_ANSWER: &str = "Error response from daemon:";
+
+/// Reports whether `line` of docker's standard error is the daemon's
+/// answer that an object does not exist, as [`Finished::missing`]
+/// describes.
+pub(super) fn says_missing(line: &str) -> bool {
+    let line = line.trim();
+    if let Some(answer) = line.strip_prefix(DAEMON_ANSWER) {
+        let answer = answer.trim();
+        return [
+            "No such container",
+            "No such volume",
+            "no such volume",
+            "No such object",
+        ]
+        .iter()
+        .any(|said| answer.contains(said))
+            || (answer.starts_with("network ") && answer.ends_with(" not found"));
     }
+    line.to_ascii_lowercase()
+        .starts_with("error: no such object:")
 }
 
 /// Returns the line of docker's standard error that says what failed: the
@@ -106,9 +130,26 @@ pub(crate) fn message(stderr: &str) -> String {
 }
 
 /// Runs `docker <args>` with `deadline` and the variables `env` on top of
-/// mxv's own environment, and returns what it printed and how it exited.
-/// It is the only place where `env`'s values leave their [`ComposeEnv`].
+/// the host program's own environment, and returns what it printed and how
+/// it exited.
 pub(super) fn run<I, S>(
+    args: I,
+    env: ComposeEnv,
+    operation: &'static str,
+    deadline: Duration,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_program(DOCKER.as_ref(), args, env, operation, deadline)
+}
+
+/// Runs `<program> <args>`, where `program` is the `docker` program, as
+/// [`run`] does. It is the only place where `env`'s values leave their
+/// [`ComposeEnv`].
+pub(super) fn run_program<I, S>(
+    program: &OsStr,
     args: I,
     env: ComposeEnv,
     operation: &'static str,
@@ -120,9 +161,9 @@ where
 {
     #[expect(
         clippy::disallowed_methods,
-        reason = "crates/multiverse/src/docker/command.rs is the module that runs docker (PROC-1)"
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
     )]
-    let mut command = Command::new(DOCKER);
+    let mut command = Command::new(program);
     command
         .args(args)
         .env("LC_ALL", "C")
@@ -132,24 +173,20 @@ where
         .stderr(Stdio::piped());
     #[expect(
         clippy::disallowed_methods,
-        reason = "crates/multiverse/src/docker/command.rs is the module that runs docker (PROC-1)"
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
     )]
     let spawned = command.spawn();
     #[expect(
         clippy::disallowed_types,
-        reason = "crates/multiverse/src/docker/command.rs holds the child and owns its deadline and cleanup (PROC-1)"
+        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its deadline and cleanup (PROC-1)"
     )]
     let mut child: std::process::Child = match spawned {
         Ok(child) => child,
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::DockerMissing { source });
+            return Err(Error::Missing { source });
         }
         Err(source) => {
-            return Err(Error::DockerFailed {
-                operation,
-                container: None,
-                message: source.to_string(),
-            });
+            return Err(Error::failed(operation, None, source.to_string()));
         }
     };
     let stdout = child.stdout.take().map(drain);
@@ -161,14 +198,14 @@ where
             // no zombie remains.
             let _ = child.kill();
             let _ = child.wait();
-            return Err(Error::DockerFailed {
+            return Err(Error::failed(
                 operation,
-                container: None,
-                message: format!(
+                None,
+                format!(
                     "docker did not finish within {} seconds, so mxv stopped it",
                     deadline.as_secs()
                 ),
-            });
+            ));
         }
     };
     Ok(Finished {
@@ -184,7 +221,27 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run(args, ComposeEnv::default(), operation, DOCKER_DEADLINE)
+    quick_with(DOCKER.as_ref(), args, operation)
+}
+
+/// Runs `<program> <args>`, where `program` is the `docker` program, as
+/// [`quick`] does.
+pub(super) fn quick_with<I, S>(
+    program: &OsStr,
+    args: I,
+    operation: &'static str,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_program(
+        program,
+        args,
+        ComposeEnv::default(),
+        operation,
+        DOCKER_DEADLINE,
+    )
 }
 
 /// Reads `stream` on a thread of its own: the first [`MOST_OUTPUT_BYTES`]
@@ -211,14 +268,24 @@ fn joined(handle: Option<thread::JoinHandle<Vec<u8>>>) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerMissing`] when no `docker` program is on `PATH`,
-/// and [`Error::DockerUnavailable`] when the daemon does not answer.
+/// Returns [`Error::Missing`] when no `docker` program is on `PATH`,
+/// and [`Error::Unavailable`] when the daemon does not answer.
 pub(crate) fn check() -> Result<(), Error> {
-    let finished = quick(["version", "--format", "{{.Server.Version}}"], "version")?;
+    check_with(DOCKER.as_ref())
+}
+
+/// Checks that the `docker` program `program` runs and that its daemon
+/// answers, as [`check`] does.
+pub(super) fn check_with(program: &OsStr) -> Result<(), Error> {
+    let finished = quick_with(
+        program,
+        ["version", "--format", "{{.Server.Version}}"],
+        "version",
+    )?;
     if finished.status.success() && !finished.stdout.trim().is_empty() {
         Ok(())
     } else {
-        Err(Error::DockerUnavailable {
+        Err(Error::Unavailable {
             message: message(&finished.stderr),
         })
     }
@@ -228,14 +295,14 @@ pub(crate) fn check() -> Result<(), Error> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerComposeMissing`] when `docker compose version`
-/// fails, and [`Error::DockerMissing`].
+/// Returns [`Error::ComposeMissing`] when `docker compose version`
+/// fails, and [`Error::Missing`].
 pub(crate) fn check_compose() -> Result<(), Error> {
     let finished = quick(["compose", "version"], "compose version")?;
     if finished.status.success() {
         Ok(())
     } else {
-        Err(Error::DockerComposeMissing {
+        Err(Error::ComposeMissing {
             message: message(&finished.stderr),
         })
     }

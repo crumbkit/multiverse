@@ -148,16 +148,17 @@ impl Environment {
         self.current_dir.as_deref()
     }
 
-    /// Returns the directory of the run files of the workspaces'
-    /// processes, `$XDG_STATE_HOME/mxv/runs`.
-    pub(crate) fn runs(&self) -> Result<PathBuf, MxvFailure> {
-        Ok(self.bases()?.state.join("mxv").join("runs"))
+    /// Returns mxv's state directory, `$XDG_STATE_HOME/mxv`, which holds
+    /// the workspace records, the run files of the workspaces' processes
+    /// and phase's state.
+    pub(crate) fn state(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.bases()?.state.join("mxv"))
     }
 
     /// Returns the directory of the workspace records,
     /// `$XDG_STATE_HOME/mxv/workspaces`.
     pub(crate) fn records(&self) -> Result<PathBuf, MxvFailure> {
-        Ok(self.bases()?.state.join("mxv").join("workspaces"))
+        Ok(self.state()?.join("workspaces"))
     }
 
     /// Returns the directory of the bare mirrors that the workspaces' clones

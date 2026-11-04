@@ -5,13 +5,13 @@ use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
+use crate::engine::container::DockerCli;
 use crate::env::EnvironmentSource;
 use crate::error::{Operation, PhaseError};
 use crate::logs::{LineSink, LogRequest};
 use crate::name::{AppName, WorkspaceId};
 use crate::plan::Plan;
 use crate::record::Swept;
-use crate::record::docker::Unreachable;
 use crate::record::process::System;
 use crate::record::store::RunStore;
 use crate::record::sweep::{self, Reach, Waits};
@@ -114,6 +114,14 @@ impl Phase {
     #[must_use]
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
+    }
+
+    /// Returns the path of the run record of the workspace `workspace`,
+    /// `<state_dir>/runs/<workspace>.json`, which the run store computes.
+    /// A host labels a workspace's Docker objects with it.
+    #[must_use]
+    pub fn run_record(&self, workspace: &WorkspaceId) -> PathBuf {
+        RunStore::new(&self.state_dir).path(workspace)
     }
 
     /// Returns how long an operation waits for the lifecycle lock.
@@ -271,16 +279,13 @@ impl Phase {
     /// [`SweepOutcome::PidReused`]: crate::SweepOutcome::PidReused
     /// [`SweepOutcome::Unknown`]: crate::SweepOutcome::Unknown
     pub fn sweep(&self, workspace: &WorkspaceId, dry_run: bool) -> Result<Swept, PhaseError> {
-        // The container module supplies the Docker that runs `docker` when
-        // it lands. Until then a record that names a Docker object makes
-        // `sweep` fail with `PhaseError::Docker`.
         let store = RunStore::new(&self.state_dir);
         let waits = Waits {
             lock: self.lock_wait,
             kill: self.kill_wait,
         };
         let reach = Reach {
-            docker: &Unreachable,
+            docker: &DockerCli::new(),
             processes: &System,
         };
         sweep::sweep(&store, workspace, dry_run, reach, waits)

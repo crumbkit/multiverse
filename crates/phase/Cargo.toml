@@ -32,6 +32,10 @@ signal-hook = { workspace = true }
 # each new line of a process's log against it, with the same compiler and
 # features as mxv's own log readiness check.
 regex = { workspace = true }
+# The container engine gives each `docker` command a deadline (BASE-34): it
+# waits for the child with a timeout, and kills it when the deadline passes,
+# without polling with a sleep (BASE-11).
+wait-timeout = { workspace = true }
 
 # Linux reads a process's start in clock ticks from /proc, and the `param`
 # feature gives the number of ticks in a second.

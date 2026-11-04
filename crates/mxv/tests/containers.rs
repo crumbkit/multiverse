@@ -676,6 +676,43 @@ fn down_and_remove_fail_as_docker_unavailable_once_the_workspace_has_run_a_conta
 }
 
 #[test]
+fn status_down_and_remove_fail_as_docker_unavailable_when_dockers_context_is_unknown() {
+    if !docker_runs("status_down_and_remove_fail_as_docker_unavailable_when") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-no-context", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-no-context"]);
+    assert_eq!(exit, 0, "{document}");
+    // docker says `context "...": context not found` for an unknown
+    // context. That is no answer from the daemon, so mxv never reads it as
+    // a container that is gone.
+    for args in [
+        &["status", "-w", "mxvtest-no-context"][..],
+        &["down", "-w", "mxvtest-no-context"],
+        &[
+            "remove",
+            "mxvtest-no-context",
+            "--yes",
+            "--force",
+            "--delete-volumes",
+        ],
+    ] {
+        let command = setup
+            .command(PATH, args)
+            .env("DOCKER_CONTEXT", "mxvtest-no-such-context");
+        let (exit, document) = setup.json_with(command, args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(
+            document["code"], "mxv::docker::unavailable",
+            "{args:?}: {document}"
+        );
+    }
+    assert_eq!(setup.containers(), [setup.docker_name("web")]);
+    let (_, status) = setup.json(&["status", "-w", "mxvtest-no-context"]);
+    assert_eq!(row(&status, "web")["state"], "running", "{status}");
+}
+
+#[test]
 fn a_workspace_that_has_never_run_a_container_never_runs_docker() {
     let setup = Setup::new("mxvtest-no-calls", &web());
     let bin = setup.root().join("fake-bin");
@@ -1082,4 +1119,74 @@ fn logs_follow_gives_a_running_container_its_follower_back() {
     let _ = child.kill();
     let _ = child.wait();
     assert!(restarted, "logs -f did not start a new follower");
+}
+
+/// Returns the workspace record of `setup`'s workspace, as JSON.
+fn record(setup: &Setup) -> Value {
+    let path = setup
+        .root()
+        .join(format!("state/mxv/workspaces/{}.json", setup.name));
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// Returns the label `label` of the docker object `object`, which `kind`
+/// such as `container` or `volume` inspects.
+fn label(kind: &str, object: &str, label: &str) -> String {
+    let format = format!(
+        "{{{{index .{} \"{label}\"}}}}",
+        if kind == "container" {
+            "Config.Labels"
+        } else {
+            "Labels"
+        }
+    );
+    docker(&[kind, "inspect", "--format", &format, "--", object]).1
+}
+
+#[test]
+fn up_labels_containers_and_volumes_with_the_stable_id_that_the_record_holds() {
+    if !docker_runs("up_labels_with_the_stable_id") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-stable-id", &web());
+    let minted = record(&setup)["id"].as_str().unwrap().to_owned();
+    assert_eq!(minted.len(), 32, "mxv new mints a stable id: {minted}");
+    // A record that an earlier mxv wrote has no id.
+    let path = setup
+        .root()
+        .join("state/mxv/workspaces/mxvtest-stable-id.json");
+    let mut legacy = record(&setup);
+    legacy.as_object_mut().unwrap().remove("id");
+    write(&path, &serde_json::to_string_pretty(&legacy).unwrap());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-stable-id"]);
+    assert_eq!(exit, 0, "{document}");
+    let id = record(&setup)["id"].as_str().unwrap().to_owned();
+    assert_eq!(id.len(), 32);
+    let run_record = setup
+        .root()
+        .join(format!("state/mxv/phase/runs/{id}.json"))
+        .display()
+        .to_string();
+    for (kind, object) in [
+        ("container", setup.docker_name("web")),
+        ("volume", setup.docker_name("srv")),
+    ] {
+        assert_eq!(label(kind, &object, "mxv.workspace-id"), id, "{kind}");
+        assert_eq!(
+            label(kind, &object, "mxv.app"),
+            "mxvtest-stable-id",
+            "{kind}"
+        );
+        assert_eq!(label(kind, &object, "mxv.run-record"), run_record, "{kind}");
+        assert_eq!(
+            label(kind, &object, "mxv.workspace"),
+            "mxvtest-stable-id",
+            "{kind}"
+        );
+    }
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-stable-id"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(record(&setup)["id"], id, "the id never changes");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-stable-id"]);
+    assert_eq!(exit, 0, "{document}");
 }

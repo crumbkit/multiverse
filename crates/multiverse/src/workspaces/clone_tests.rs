@@ -358,7 +358,7 @@ fn a_workspace_of_worktrees_keeps_working_after_workspaces_gain_mirrors() {
         other => panic!("{other:?}"),
     };
     assert_eq!(legacy.kind, WorkspaceKind::Worktree);
-    assert_eq!(legacy.version, 1);
+    assert_eq!(legacy.version, crate::record::RECORD_VERSION);
     let found = setup
         .workspaces
         .find(&name("inbox-ingest"))
