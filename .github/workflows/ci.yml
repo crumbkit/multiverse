@@ -84,6 +84,33 @@ jobs:
       - name: msrv
         run: cargo +1.89.0 check --locked --workspace --all-targets --all-features
 
+  # The macOS lane runs the code that only builds on macOS, such as
+  # process/darwin.rs, daily and on demand. Pull requests do not wait for
+  # it, because macOS runners queue longer than Linux ones. The container
+  # tests skip on this runner, which has no docker daemon.
+  macos:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest@0.9.140
+          fallback: none
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features
+      - name: tests
+        run: cargo nextest run --locked --workspace --all-features
+      - name: doctests
+        run: cargo test --locked --doc --workspace --all-features
+
   advisories:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest

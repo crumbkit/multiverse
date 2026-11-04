@@ -15,8 +15,9 @@ id = "lanes"
 requirement = """
 - Lane: `lane` in .github/workflows/ci.yml, on each pull request and each push to main. It runs every step of the pull-request lane in the standards' order (format, workflows, deny, shear, clippy, tests, doctests, rustdoc, features), then `msrv` (LIB-4). Its budget is ten minutes, the job's timeout.
 - Lane: `advisories` in .github/workflows/ci.yml, daily at 06:43 UTC and on demand (BASE-29). Nothing waits for it.
+- Lane: `macos` in .github/workflows/ci.yml, daily at 06:43 UTC and on demand. It runs clippy, tests and doctests on macOS, which builds the macOS-only code. Nothing waits for it.
 """
-reason = "The pull-request lane stays within ten minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main."
+reason = "The pull-request lane stays within ten minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main. A daily macOS run checks the macOS-only code without making pull requests wait for a macOS runner."
 realizations = [".github/workflows/ci.yml"]
 
 [[decision]]
