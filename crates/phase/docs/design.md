@@ -297,6 +297,31 @@ environment values.
 run that phase no longer supervises. It matches a process by pid and start
 time together, so a reused pid is never mistaken for an app.
 
+The record of a workspace is `<state_dir>/runs/<workspace-id>.json`, with
+mode 0600. phase writes it to a temporary file, syncs it and renames it over
+the record, so a reader sees a whole record. The lifecycle lock is an
+exclusive `flock` on `<state_dir>/runs/<workspace-id>.lock`. Each object in
+the record has a state: `planned`, `running`, `stopping` or `stopped`.
+
+A process's start time is in microseconds: since the Unix epoch on macOS,
+where `proc_pidinfo` reports it, and since boot on Linux, where
+`/proc/<pid>/stat` reports it in clock ticks. phase only compares a start
+time with one it read on the same machine.
+
+Each volume in the record has a lifetime. A `run` volume, such as a scratch
+cache, belongs to one run, and `sweep` removes it. A `workspace` volume
+holds data that outlives a run, such as a database's, and `sweep` leaves
+it; only `reset` removes it.
+
+`sweep` stops keepers first, so no keeper restarts its process, then host
+processes, containers, networks and volumes. For a host process it sends
+`TERM` to the process group when the process leads its group, and to the
+process alone otherwise. It waits up to the kill wait, sends `KILL`, and
+waits again. A process that is still there is reported as unstoppable, and
+the record keeps it. `sweep` removes the record once every object in it is
+stopped. `sweep --dry-run` reads the record without the lock and changes
+nothing.
+
 ### Status and logs
 
 `phase status --json` prints a `phase/status/v1` document with one row per

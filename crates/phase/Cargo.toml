@@ -20,6 +20,21 @@ workspace = true
 
 [dependencies]
 serde = { workspace = true }
+# The run record is JSON on disk.
+serde_json = { workspace = true }
+# `sweep` signals the process groups of recorded processes and checks
+# whether a group still has a member, without unsafe code.
+rustix = { workspace = true }
+
+# Linux reads a process's start in clock ticks from /proc, and the `param`
+# feature gives the number of ticks in a second.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["param"] }
+
+# macOS reads a process's start time to the microsecond with libproc's
+# `proc_pidinfo`, which libc declares.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+tempfile = { workspace = true }

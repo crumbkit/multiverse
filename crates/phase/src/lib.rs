@@ -12,10 +12,11 @@
 //! The library reads no environment variable and writes to no standard
 //! stream. The `mxv` command links it.
 //!
-//! Every operation of [`Phase`] returns [`PhaseError::NotBuilt`] until its
-//! code lands.
+//! Every operation of [`Phase`] other than [`Phase::sweep`] returns
+//! [`PhaseError::NotBuilt`] until its code lands.
 
 mod cancel;
+mod clock;
 mod engine;
 mod env;
 mod error;
@@ -54,7 +55,10 @@ pub use crate::plan::{
     Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind,
     SourceProblem,
 };
-pub use crate::record::{BadContainerId, ContainerId, Handle, SweepOutcome, Swept, SweptItem};
+pub use crate::record::{
+    BadContainerId, BadDockerName, ContainerId, DockerError, DockerName, Handle,
+    MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept, SweptItem, SweptObject,
+};
 pub use crate::report::{AppOutcome, AppReport, Report, StartProblem};
 pub use crate::select::{BadTarget, Selection, Target};
 pub use crate::source::{

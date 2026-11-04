@@ -28,9 +28,9 @@ realizations = ["Cargo.toml"]
 
 [[decision]]
 id = "unsafe-libproc"
-requirement = "`unsafe_code` is `deny` in the workspace lints. Only crates/multiverse/src/process/darwin.rs expects it, and it holds one unsafe block per libproc call (`proc_pidinfo`, `proc_pidfdinfo`, `proc_listpids`), each with a SAFETY comment (BASE-3). The blocks pass only buffers that the module owns, with their sizes, and safe code reads the fields from the bytes."
+requirement = "`unsafe_code` is `deny` in the workspace lints. Only crates/multiverse/src/process/darwin.rs and crates/phase/src/record/process/darwin.rs expect it. Each holds one unsafe block per libproc call (`proc_pidinfo`, `proc_pidfdinfo`, `proc_listpids` in multiverse, and `proc_pidinfo` in phase), each with a SAFETY comment (BASE-3). The blocks pass only buffers that the module owns, with their sizes, and safe code reads the fields from the bytes. phase holds its own copy because it does not depend on the multiverse crate."
 reason = "macOS gives a process's start time to the microsecond, and the sockets of a process's descriptors, only through libproc, which has no safe interface in std or rustix. The libproc crate wraps it without unsafe code in mxv, but its build runs bindgen, which makes every macOS build need libclang."
-realizations = ["Cargo.toml", "crates/multiverse/src/process/darwin.rs"]
+realizations = ["Cargo.toml", "crates/multiverse/src/process/darwin.rs", "crates/phase/src/record/process/darwin.rs"]
 
 [[decision]]
 id = "workspace-clones"
