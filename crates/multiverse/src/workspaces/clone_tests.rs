@@ -397,18 +397,75 @@ fn a_commit_that_only_the_reflog_holds_counts_as_unpushed() {
     );
 }
 
+/// Commits a change to `file` in `checkout`, so the commit has a patch.
+fn change(checkout: &Path, file: &str, text: &str, message: &str) {
+    write(checkout.join(file), text);
+    git(checkout, &["add", file]);
+    git(checkout, &["commit", "--quiet", "-m", message]);
+}
+
 #[test]
-fn a_commit_that_a_branch_reset_left_in_its_reflog_counts_as_unpushed() {
+fn a_detached_commit_cherry_picked_onto_the_pushed_branch_is_not_unpushed() {
     let setup = setup();
     let workspace = created(&setup, "reading-list");
     let checkout = workspace.checkouts[0].path.clone();
-    commit(&checkout, "Undone");
-    git(&checkout, &["reset", "--quiet", "--hard", "HEAD~1"]);
-    let refused = plan(&setup, "reading-list", NOTHING);
-    assert!(
-        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
-        "{refused:?}"
+    git(&checkout, &["checkout", "--quiet", "--detach"]);
+    change(&checkout, "notes.md", "draft", "Drafted detached");
+    let detached = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["checkout", "--quiet", "reading-list"]);
+    git(&checkout, &["cherry-pick", detached.trim()]);
+    git(&checkout, &["push", "--quiet", "origin", "reading-list"]);
+    removed(&setup, "reading-list", NOTHING);
+    assert!(!checkout.exists());
+}
+
+#[test]
+fn a_branch_rebased_and_pushed_is_removed_without_deleting_unmerged_commits() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    change(&checkout, "notes.md", "draft", "Drafted");
+    git(&checkout, &["push", "--quiet", "origin", "reading-list"]);
+    advance_origin(&setup.fixture);
+    git(&checkout, &["fetch", "--quiet", "origin"]);
+    git(&checkout, &["rebase", "--quiet", "origin/main"]);
+    git(
+        &checkout,
+        &["push", "--quiet", "--force", "origin", "reading-list"],
     );
+    removed(&setup, "reading-list", NOTHING);
+    assert!(!checkout.exists());
+}
+
+#[test]
+fn a_commit_amended_and_pushed_is_removed_without_deleting_unmerged_commits() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    change(&checkout, "notes.md", "draft", "Drafted");
+    git(&checkout, &["push", "--quiet", "origin", "reading-list"]);
+    write(checkout.join("notes.md"), "final");
+    git(
+        &checkout,
+        &["commit", "--quiet", "--all", "--amend", "--no-edit"],
+    );
+    git(
+        &checkout,
+        &["push", "--quiet", "--force", "origin", "reading-list"],
+    );
+    removed(&setup, "reading-list", NOTHING);
+    assert!(!checkout.exists());
+}
+
+#[test]
+fn a_commit_that_a_reset_on_the_branch_undid_is_removed_without_deleting_unmerged_commits() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    change(&checkout, "notes.md", "draft", "Undone");
+    git(&checkout, &["reset", "--quiet", "--hard", "HEAD~1"]);
+    removed(&setup, "reading-list", NOTHING);
+    assert!(!checkout.exists());
 }
 
 #[test]

@@ -272,9 +272,11 @@ pub trait Backend {
     fn refresh_origin(&self, checkout: &Path) -> Result<(), Error>;
 
     /// Returns the commits that the clone at `checkout`, or a submodule it
-    /// has initialised, holds in its `HEAD`, branches, tags or notes, or in
-    /// the reflog of its `HEAD` or of a branch, and that no branch, tag or
-    /// note of `origin` holds. Deleting the clone loses them.
+    /// has initialised, holds in its `HEAD`, branches, tags or notes, and
+    /// that no branch, tag or note of `origin` holds, with the commits made
+    /// on a detached `HEAD` that only the reflog of `HEAD` holds and whose
+    /// patch no commit of `origin` or of a local branch has. Deleting the
+    /// clone loses them.
     ///
     /// # Errors
     ///

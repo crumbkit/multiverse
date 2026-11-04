@@ -533,10 +533,16 @@ is never followed. It refuses, and changes nothing, in these cases:
   `refs/mxv/origin/` in the clone. The fetch deletes what the origin no
   longer has, so a commit counts as pushed only while the origin still
   holds it. The count includes the commits of the clone's `HEAD`,
-  branches, tags and notes, and the commits that only the reflog of `HEAD`
-  or of a branch still holds, such as a commit made on a detached `HEAD`
-  before switching back to the branch, or one that `git reset` undid. A
-  tag that the origin also holds counts as pushed. Each submodule that the
+  branches, tags and notes, and the commits made on a detached `HEAD` that
+  nothing else holds, such as a commit made there before switching back to
+  the branch, which git warns about when `HEAD` leaves it. A commit counts
+  as detached when only the reflog of `HEAD` holds it, and the reflog of no
+  local branch does. A commit that was rewritten or undone on a branch,
+  such as by `git rebase`, `git commit --amend` or `git reset`, stays in the
+  branch's reflog, was given up on purpose, and does not count. A detached
+  commit whose patch matches a commit that the origin or a local branch
+  holds, such as one that was cherry-picked onto the branch, does not count
+  either. A tag that the origin also holds counts as pushed. Each submodule that the
   clone has initialised, whose git directory git keeps below
   `.git/modules`, is fetched and counted the same way, because its commits
   are deleted with the clone. The refusal is
@@ -568,11 +574,10 @@ unpushed commits. A branch that was merged into the origin's default branch
 by squashing, and then deleted on the origin, holds commits that no remote
 branch holds any more, so mxv counts them as unpushed and refuses the
 removal. This is the safe side of the check, and `--delete-unmerged`
-removes such a clone once you know that the work was merged. The reflog
-leads to the same refusal when the origin's history was rewritten: a
-commit that the clone once fetched or pulled, and that a force-push then
-removed from the origin, stays in the clone's reflog and counts as
-unpushed.
+removes such a clone once you know that the work was merged. A commit that
+a force-push removed from the origin, such as after a rebase, does not
+count as unpushed, unless it was made on a detached `HEAD` and no branch
+or patch on the origin holds it.
 
 When the person confirmed a removal at the prompt, mxv plans it again
 before it deletes anything, and stops with `mxv::workspace::changed` when
