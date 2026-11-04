@@ -1,22 +1,23 @@
 use std::num::NonZeroU16;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::container::BindMount;
 use super::probe::{Probe, ProbeCheck};
 use super::restart::{Restart, RestartLimits};
 use super::{
-    AppPlan, ContainerProblem, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem,
-    RunnerKind,
+    AppPlan, ContainerProblem, MOST_READY_TIMEOUT, Plan, PlanError, ProcessKind, ProcessPlan,
+    ProcessProblem, RunnerKind, SourceProblem,
 };
-use crate::source::{BuildSpec, Source};
+use crate::source::{BuildSpec, ReleaseSpec, Source, Verification};
 
 fn checkout() -> Source {
     Source::Checkout {
         dir: PathBuf::from("/workspaces/reading-list/api"),
-        build: BuildSpec::new(
+        build: Some(BuildSpec::new(
             vec!["cargo".into(), "build".into(), "--release".into()],
             PathBuf::from("target/release/api"),
-        ),
+        )),
     }
 }
 
@@ -273,9 +274,7 @@ fn a_plan_with_every_container_and_environment_field_survives_a_trip_through_jso
     let mut api = host_app("api");
     api.overrides.insert("LOG_LEVEL".into());
     api.processes[0].cwd = Some(PathBuf::from("server"));
-    api.processes[0]
-        .env
-        .insert("BIND".into(), "127.0.0.1:{port.http}".into());
+    api.processes[0].env.insert("BIND".into());
     api.processes[0].ready = Some(Probe::new(ProbeCheck::Log {
         pattern: "listening on".into(),
     }));
@@ -328,23 +327,9 @@ fn a_plan_accepts_a_dependency_shared_by_two_apps() {
 }
 
 #[test]
-fn a_plan_refuses_a_secret_among_the_literal_values() {
-    let mut api = host_app("api");
-    api.permissions.secrets.insert("STRIPE_KEY".into());
-    api.processes[0]
-        .env
-        .insert("STRIPE_KEY".into(), "a value".into());
-
-    assert_eq!(
-        process_problem(api),
-        ProcessProblem::SecretInPlan("STRIPE_KEY".into())
-    );
-}
-
-#[test]
 fn a_plan_refuses_a_variable_name_that_a_process_cannot_receive() {
     let mut api = host_app("api");
-    api.processes[0].env.insert("A=B".into(), "c".into());
+    api.processes[0].env.insert("A=B".into());
 
     assert_eq!(
         process_problem(api),
@@ -465,6 +450,221 @@ fn a_plan_refuses_an_empty_run_as_user() {
         Err(PlanError::BadContainer {
             app: "db".parse().unwrap(),
             problem: ContainerProblem::EmptyUser,
+        })
+    );
+}
+
+fn release(spec: ReleaseSpec) -> Source {
+    Source::Release {
+        version: "v1.2.0".parse().unwrap(),
+        spec,
+    }
+}
+
+fn release_spec() -> ReleaseSpec {
+    ReleaseSpec::new(
+        "crumbkit/example-api".parse().unwrap(),
+        "example-api-{target}.tar.gz".into(),
+        PathBuf::from("bin/example-api"),
+        Verification::Attestation,
+    )
+}
+
+fn source_problem(app: AppPlan) -> SourceProblem {
+    match plan(vec![app]) {
+        Err(PlanError::BadSource { problem, .. }) => problem,
+        other => panic!("expected a bad source, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_checkout_app_runs_a_command_from_its_checkout_without_a_build() {
+    let mut api = host_app("api");
+    api.source = Source::Checkout {
+        dir: PathBuf::from("/workspaces/reading-list/web"),
+        build: None,
+    };
+    api.processes[0].run = vec!["npm".into(), "run".into(), "dev".into()];
+
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_the_program_placeholder_when_the_checkout_has_no_build() {
+    let mut api = host_app("api");
+    api.source = Source::Checkout {
+        dir: PathBuf::from("/workspaces/reading-list/web"),
+        build: None,
+    };
+
+    assert_eq!(process_problem(api), ProcessProblem::ProgramWithoutBuild);
+}
+
+#[test]
+fn a_plan_refuses_a_relative_checkout_directory() {
+    let mut api = host_app("api");
+    api.source = Source::Checkout {
+        dir: PathBuf::from("api"),
+        build: None,
+    };
+    api.processes[0].run = vec!["npm".into(), "start".into()];
+
+    assert_eq!(
+        source_problem(api),
+        SourceProblem::RelativeCheckout(PathBuf::from("api"))
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_build_output_outside_the_checkout() {
+    let mut api = host_app("api");
+    api.source = Source::Checkout {
+        dir: PathBuf::from("/workspaces/reading-list/api"),
+        build: Some(BuildSpec::new(
+            vec!["make".into()],
+            PathBuf::from("../elsewhere/api"),
+        )),
+    };
+
+    assert_eq!(
+        source_problem(api),
+        SourceProblem::OutputOutsideCheckout(PathBuf::from("../elsewhere/api"))
+    );
+}
+
+#[test]
+fn a_plan_accepts_a_release_whose_program_lies_inside_its_asset() {
+    let mut api = host_app("api");
+    api.source = release(release_spec());
+
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_release_program_at_an_absolute_path() {
+    let mut spec = release_spec();
+    spec.binary = PathBuf::from("/usr/bin/api");
+    let mut api = host_app("api");
+    api.source = release(spec);
+
+    assert_eq!(
+        source_problem(api),
+        SourceProblem::BinaryOutsideAsset(PathBuf::from("/usr/bin/api"))
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_release_asset_name_with_a_slash() {
+    let mut spec = release_spec();
+    spec.asset = "dist/api.tar.gz".into();
+    let mut api = host_app("api");
+    api.source = release(spec);
+
+    assert_eq!(
+        source_problem(api),
+        SourceProblem::AssetWithSlash("dist/api.tar.gz".into())
+    );
+}
+
+#[test]
+fn a_server_may_wait_for_a_oneshot_migration_of_its_app() {
+    let mut api = host_app("api");
+    let mut migrate = ProcessPlan::new("migrate".parse().unwrap(), vec!["{program}".into()]);
+    migrate.kind = ProcessKind::Oneshot { once: false };
+    api.processes.insert(0, migrate);
+    api.processes[1].depends.push("migrate".parse().unwrap());
+
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_process_dependency_on_a_process_its_app_lacks() {
+    let mut api = host_app("api");
+    api.processes[0].depends.push("migrate".parse().unwrap());
+
+    assert_eq!(
+        process_problem(api),
+        ProcessProblem::UnknownDependency("migrate".parse().unwrap())
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_cycle_among_an_apps_processes_and_names_it() {
+    let mut api = host_app("api");
+    let mut worker = ProcessPlan::new("worker".parse().unwrap(), vec!["{program}".into()]);
+    worker.depends.push("server".parse().unwrap());
+    api.processes.push(worker);
+    api.processes[0].depends.push("worker".parse().unwrap());
+
+    assert_eq!(
+        plan(vec![api]),
+        Err(PlanError::ProcessCycle {
+            app: "api".parse().unwrap(),
+            processes: vec![
+                "server".parse().unwrap(),
+                "worker".parse().unwrap(),
+                "server".parse().unwrap(),
+            ],
+        })
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_process_that_depends_on_itself() {
+    let mut api = host_app("api");
+    api.processes[0].depends.push("server".parse().unwrap());
+
+    assert!(matches!(
+        plan(vec![api]),
+        Err(PlanError::ProcessCycle { .. })
+    ));
+}
+
+#[test]
+fn a_plan_refuses_an_override_of_a_secret() {
+    let mut api = host_app("api");
+    api.permissions.secrets.insert("STRIPE_KEY".into());
+    api.overrides.insert("STRIPE_KEY".into());
+
+    assert_eq!(
+        plan(vec![api]),
+        Err(PlanError::SecretOverride {
+            app: "api".parse().unwrap(),
+            name: "STRIPE_KEY".into(),
+        })
+    );
+}
+
+#[test]
+fn a_process_waits_up_to_a_minute_to_become_ready_by_default() {
+    let server = ProcessPlan::new("server".parse().unwrap(), Vec::new());
+
+    assert_eq!(server.ready_timeout, Duration::from_secs(60));
+}
+
+#[test]
+fn a_plan_refuses_a_ready_timeout_of_zero_or_longer_than_an_hour() {
+    let mut api = host_app("api");
+    api.processes[0].ready_timeout = Duration::ZERO;
+    assert_eq!(process_problem(api), ProcessProblem::ReadyTimeoutOutOfRange);
+
+    let mut api = host_app("api");
+    api.processes[0].ready_timeout = MOST_READY_TIMEOUT + Duration::from_secs(1);
+    assert_eq!(process_problem(api), ProcessProblem::ReadyTimeoutOutOfRange);
+
+    let mut api = host_app("api");
+    api.processes[0].ready_timeout = MOST_READY_TIMEOUT;
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_probe_read_from_json_takes_the_defaults_it_omits() {
+    let read: Probe = serde_json::from_str(r#"{"check":{"tcp":{"port":"pg"}}}"#).unwrap();
+
+    assert_eq!(
+        read,
+        Probe::new(ProbeCheck::Tcp {
+            port: "pg".parse().unwrap()
         })
     );
 }

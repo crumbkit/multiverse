@@ -311,6 +311,11 @@ produces an `AppliedEnvironment`, a type that can list variable names and
 apply values to a `Command` but cannot return a value. It has no `Debug`,
 `Display` or `Serialize` implementation.
 
+The plan names each process's variables and holds no value, literal or
+secret. The host program's `EnvironmentSource` supplies every value, and
+mxv's renders its manifest's literal values and their `{port.NAME}`
+placeholders before phase sees them.
+
 A secret value takes only these paths:
 
 - for a host process, from starmap's resolvers into the keeper's

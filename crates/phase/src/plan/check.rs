@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::probe::ProbeCheck;
 use super::restart::Restart;
-use super::{AppPlan, ProcessKind, ProcessPlan, RunnerKind};
+use super::{AppPlan, MOST_READY_TIMEOUT, ProcessKind, ProcessPlan, RunnerKind};
 use crate::name::{AppName, PortName, ProcessName};
 use crate::source::Source;
 
@@ -41,6 +41,22 @@ pub enum PlanError {
         /// it starts with.
         apps: Vec<AppName>,
     },
+    /// The processes of the app depend on each other in a cycle, so none of
+    /// them can start first.
+    ProcessCycle {
+        /// The app.
+        app: AppName,
+        /// The processes of the cycle, in dependency order, ending with the
+        /// process it starts with.
+        processes: Vec<ProcessName>,
+    },
+    /// The app's source cannot be used.
+    BadSource {
+        /// The app.
+        app: AppName,
+        /// What is wrong with it.
+        problem: SourceProblem,
+    },
     /// The app's source does not suit its runner: a host app runs from an
     /// image, or a container app runs from a release or a checkout.
     RunnerMismatch {
@@ -64,6 +80,14 @@ pub enum PlanError {
         /// The variable's name.
         name: String,
     },
+    /// An `up --env` override names a variable that the app's permissions
+    /// name as a secret. An override is never a secret.
+    SecretOverride {
+        /// The app.
+        app: AppName,
+        /// The variable's name.
+        name: String,
+    },
     /// The app's container options cannot be used.
     BadContainer {
         /// The app.
@@ -80,6 +104,20 @@ pub enum PlanError {
         /// What is wrong with it.
         problem: ProcessProblem,
     },
+}
+
+/// What is wrong with an app's source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SourceProblem {
+    /// The checkout's directory is a relative path.
+    RelativeCheckout(PathBuf),
+    /// The build's output is absolute or leaves the checkout.
+    OutputOutsideCheckout(PathBuf),
+    /// The release's program is absolute or leaves the asset.
+    BinaryOutsideAsset(PathBuf),
+    /// The release's asset name holds a `/`.
+    AssetWithSlash(String),
 }
 
 /// What is wrong with an app's container options.
@@ -106,11 +144,16 @@ pub enum ProcessProblem {
     /// The process's working directory is absolute or leaves its app's
     /// directory.
     CwdOutsideApp,
-    /// A literal value names a variable that a process cannot receive.
+    /// The command names `{program}`, but the app runs from a checkout
+    /// without a build, so it has no program.
+    ProgramWithoutBuild,
+    /// The process depends on a process its app does not have.
+    UnknownDependency(ProcessName),
+    /// The process receives a variable whose name a process cannot receive.
     BadVariableName(String),
-    /// A literal value belongs to a variable that the app's permissions name
-    /// as a secret.
-    SecretInPlan(String),
+    /// The ready timeout is zero or longer than
+    /// [`MOST_READY_TIMEOUT`](super::MOST_READY_TIMEOUT).
+    ReadyTimeoutOutOfRange,
     /// The process, or its probe, names a port its app does not have.
     UnknownPort(PortName),
     /// A host process publishes a port or mounts a volume, which only a
@@ -150,13 +193,20 @@ impl fmt::Display for PlanError {
             }
             Self::DependencyCycle { apps } => {
                 formatter.write_str("the apps depend on each other in a cycle: ")?;
-                for (index, app) in apps.iter().enumerate() {
-                    if index > 0 {
-                        formatter.write_str(" -> ")?;
-                    }
-                    write!(formatter, "{app}")?;
-                }
-                Ok(())
+                write_chain(formatter, apps)
+            }
+            Self::ProcessCycle { app, processes } => {
+                write!(
+                    formatter,
+                    "the processes of {app} depend on each other in a cycle: "
+                )?;
+                write_chain(formatter, processes)
+            }
+            Self::BadSource { app, problem } => {
+                write!(
+                    formatter,
+                    "the source of {app} cannot be used because {problem}"
+                )
             }
             Self::RunnerMismatch { app, runner } => {
                 let runner = match runner {
@@ -176,6 +226,10 @@ impl fmt::Display for PlanError {
                 formatter,
                 "an override of {app} names the variable {name:?}, which a process cannot receive"
             ),
+            Self::SecretOverride { app, name } => write!(
+                formatter,
+                "an override of {app} sets the secret {name}, and an override is never a secret"
+            ),
             Self::BadContainer { app, problem } => {
                 write!(
                     formatter,
@@ -192,6 +246,46 @@ impl fmt::Display for PlanError {
 }
 
 impl std::error::Error for PlanError {}
+
+/// Writes `names` joined by ` -> `.
+fn write_chain<N: fmt::Display>(formatter: &mut fmt::Formatter<'_>, names: &[N]) -> fmt::Result {
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            formatter.write_str(" -> ")?;
+        }
+        write!(formatter, "{name}")?;
+    }
+    Ok(())
+}
+
+impl fmt::Display for SourceProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RelativeCheckout(dir) => {
+                write!(
+                    formatter,
+                    "the checkout {} is a relative path",
+                    dir.display()
+                )
+            }
+            Self::OutputOutsideCheckout(path) => {
+                write!(
+                    formatter,
+                    "the build output {} is outside the checkout",
+                    path.display()
+                )
+            }
+            Self::BinaryOutsideAsset(path) => {
+                write!(
+                    formatter,
+                    "the program {} is outside the asset",
+                    path.display()
+                )
+            }
+            Self::AssetWithSlash(asset) => write!(formatter, "the asset {asset:?} holds a `/`"),
+        }
+    }
+}
 
 impl fmt::Display for ContainerProblem {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -219,14 +313,18 @@ impl fmt::Display for ProcessProblem {
             Self::CwdOutsideApp => {
                 formatter.write_str("its working directory is outside its app's directory")
             }
-            Self::BadVariableName(name) => {
-                write!(
-                    formatter,
-                    "it sets the variable {name:?}, which a process cannot receive"
-                )
+            Self::ProgramWithoutBuild => {
+                formatter.write_str("it names `{program}` but its checkout has no build")
             }
-            Self::SecretInPlan(name) => {
-                write!(formatter, "the plan holds a value of the secret {name}")
+            Self::UnknownDependency(process) => {
+                write!(formatter, "it depends on {process}, which its app lacks")
+            }
+            Self::BadVariableName(name) => write!(
+                formatter,
+                "it receives the variable {name:?}, which a process cannot receive"
+            ),
+            Self::ReadyTimeoutOutOfRange => {
+                formatter.write_str("its ready timeout is zero or longer than an hour")
             }
             Self::UnknownPort(port) => write!(formatter, "it names the unknown port {port}"),
             Self::ContainerFieldOnHost => {
@@ -287,12 +385,12 @@ pub(super) fn check_apps(apps: &[AppPlan]) -> Result<(), PlanError> {
             });
         }
     }
-    let mut done = BTreeSet::new();
-    for app in apps {
-        let mut path = Vec::new();
-        if let Some(apps) = find_cycle(&app.name, &by_name, &mut path, &mut done) {
-            return Err(PlanError::DependencyCycle { apps });
-        }
+    let graph = apps
+        .iter()
+        .map(|app| (&app.name, app.depends.as_slice()))
+        .collect();
+    if let Some(apps) = find_cycle(&graph) {
+        return Err(PlanError::DependencyCycle { apps });
     }
     for app in apps {
         check_app(app)?;
@@ -300,38 +398,47 @@ pub(super) fn check_apps(apps: &[AppPlan]) -> Result<(), PlanError> {
     Ok(())
 }
 
-/// Follows the dependencies of `name` depth first, and returns the first
-/// cycle it finds. `path` holds the apps from the walk's start to `name`,
-/// and `done` holds the apps whose dependencies hold no cycle. The walk's
-/// depth is at most the number of apps.
-fn find_cycle<'a>(
-    name: &'a AppName,
-    by_name: &BTreeMap<&'a AppName, &'a AppPlan>,
-    path: &mut Vec<&'a AppName>,
-    done: &mut BTreeSet<&'a AppName>,
-) -> Option<Vec<AppName>> {
-    if done.contains(name) {
-        return None;
-    }
-    if let Some(start) = path.iter().position(|seen| *seen == name) {
-        let mut cycle: Vec<AppName> = path
-            .iter()
-            .skip(start)
-            .map(|seen| (*seen).clone())
-            .collect();
-        cycle.push(name.clone());
-        return Some(cycle);
-    }
-    path.push(name);
-    if let Some(app) = by_name.get(name) {
-        for depends in &app.depends {
-            if let Some(cycle) = find_cycle(depends, by_name, path, done) {
+/// Returns the first cycle in `graph`, which maps each name to the names it
+/// depends on, as the names of the cycle in dependency order, ending with
+/// the name it starts with. Every name that `graph` depends on is one of its
+/// keys. The walk is depth first, with an explicit stack in place of
+/// recursion, so a long chain of dependencies cannot overflow the call
+/// stack.
+fn find_cycle<'a, N: Ord + Clone>(graph: &BTreeMap<&'a N, &'a [N]>) -> Option<Vec<N>> {
+    // `done` holds the names whose dependencies hold no cycle.
+    let mut done: BTreeSet<&N> = BTreeSet::new();
+    for &start in graph.keys() {
+        if done.contains(start) {
+            continue;
+        }
+        // Each entry is a name on the current path and the index of its next
+        // dependency to visit.
+        let mut stack: Vec<(&N, usize)> = vec![(start, 0)];
+        while let Some(&(name, next)) = stack.last() {
+            let depends = graph.get(name).copied().unwrap_or_default();
+            let Some(depend) = depends.get(next) else {
+                done.insert(name);
+                stack.pop();
+                continue;
+            };
+            if let Some(top) = stack.last_mut() {
+                top.1 = next + 1;
+            }
+            if done.contains(depend) {
+                continue;
+            }
+            if let Some(position) = stack.iter().position(|(seen, _)| *seen == depend) {
+                let mut cycle: Vec<N> = stack
+                    .iter()
+                    .skip(position)
+                    .map(|(seen, _)| (*seen).clone())
+                    .collect();
+                cycle.push(depend.clone());
                 return Some(cycle);
             }
+            stack.push((depend, 0));
         }
     }
-    path.pop();
-    done.insert(name);
     None
 }
 
@@ -350,6 +457,10 @@ fn check_app(app: &AppPlan) -> Result<(), PlanError> {
             runner: app.runner,
         });
     }
+    check_source(&app.source).map_err(|problem| PlanError::BadSource {
+        app: app.name.clone(),
+        problem,
+    })?;
     if let Some(port) = app
         .permissions
         .listen
@@ -363,6 +474,16 @@ fn check_app(app: &AppPlan) -> Result<(), PlanError> {
     }
     if let Some(name) = app.overrides.iter().find(|name| !is_variable_name(name)) {
         return Err(PlanError::BadOverride {
+            app: app.name.clone(),
+            name: name.clone(),
+        });
+    }
+    if let Some(name) = app
+        .overrides
+        .iter()
+        .find(|name| app.permissions.secrets.contains(*name))
+    {
+        return Err(PlanError::SecretOverride {
             app: app.name.clone(),
             name: name.clone(),
         });
@@ -385,7 +506,45 @@ fn check_app(app: &AppPlan) -> Result<(), PlanError> {
             problem,
         })?;
     }
+    let graph = app
+        .processes
+        .iter()
+        .map(|process| (&process.name, process.depends.as_slice()))
+        .collect();
+    if let Some(processes) = find_cycle(&graph) {
+        return Err(PlanError::ProcessCycle {
+            app: app.name.clone(),
+            processes,
+        });
+    }
     Ok(())
+}
+
+/// Checks an app's source's paths and asset name.
+fn check_source(source: &Source) -> Result<(), SourceProblem> {
+    match source {
+        Source::Checkout { dir, build } => {
+            if !dir.is_absolute() {
+                return Err(SourceProblem::RelativeCheckout(dir.clone()));
+            }
+            match build {
+                Some(build) if !stays_inside(&build.output) => {
+                    Err(SourceProblem::OutputOutsideCheckout(build.output.clone()))
+                }
+                Some(_) | None => Ok(()),
+            }
+        }
+        Source::Release { spec, .. } => {
+            if !stays_inside(&spec.binary) {
+                return Err(SourceProblem::BinaryOutsideAsset(spec.binary.clone()));
+            }
+            if spec.asset.contains('/') {
+                return Err(SourceProblem::AssetWithSlash(spec.asset.clone()));
+            }
+            Ok(())
+        }
+        Source::Image { .. } => Ok(()),
+    }
 }
 
 /// Checks an app's container options.
@@ -433,16 +592,25 @@ fn check_process(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProb
     if app.runner == RunnerKind::Host && process.run.is_empty() {
         return Err(ProcessProblem::EmptyCommand);
     }
+    let no_program = matches!(app.source, Source::Checkout { build: None, .. });
+    if no_program && process.run.iter().any(|part| part.contains("{program}")) {
+        return Err(ProcessProblem::ProgramWithoutBuild);
+    }
+    if let Some(depend) = process
+        .depends
+        .iter()
+        .find(|depend| !app.processes.iter().any(|other| &other.name == *depend))
+    {
+        return Err(ProcessProblem::UnknownDependency(depend.clone()));
+    }
     if process.cwd.as_deref().is_some_and(|cwd| !stays_inside(cwd)) {
         return Err(ProcessProblem::CwdOutsideApp);
     }
-    for name in process.env.keys() {
-        if !is_variable_name(name) {
-            return Err(ProcessProblem::BadVariableName(name.clone()));
-        }
-        if app.permissions.secrets.contains(name) {
-            return Err(ProcessProblem::SecretInPlan(name.clone()));
-        }
+    if let Some(name) = process.env.iter().find(|name| !is_variable_name(name)) {
+        return Err(ProcessProblem::BadVariableName(name.clone()));
+    }
+    if process.ready_timeout.is_zero() || process.ready_timeout > MOST_READY_TIMEOUT {
+        return Err(ProcessProblem::ReadyTimeoutOutOfRange);
     }
     check_ports(app, process)?;
     if let ProcessKind::Oneshot { .. } = process.kind {

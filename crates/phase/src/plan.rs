@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU16;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,7 @@ pub(crate) mod probe;
 pub(crate) mod restart;
 
 use check::check_apps;
-pub use check::{ContainerProblem, PlanError, ProcessProblem};
+pub use check::{ContainerProblem, PlanError, ProcessProblem, SourceProblem};
 use container::ContainerOptions;
 
 #[cfg(test)]
@@ -29,6 +30,20 @@ mod tests;
 
 use probe::Probe;
 use restart::{Restart, Stop};
+
+/// How long phase waits for a process to become ready, unless the plan
+/// states another time.
+pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The longest time a plan may give a process to become ready. A longer
+/// time is refused with [`ProcessProblem::ReadyTimeoutOutOfRange`].
+pub const MOST_READY_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// Returns [`DEFAULT_READY_TIMEOUT`], for a plan read from JSON that omits
+/// it.
+const fn default_ready_timeout() -> Duration {
+    DEFAULT_READY_TIMEOUT
+}
 
 /// The run plan of one workspace. App names are unique within it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +68,8 @@ impl Plan {
     /// app's source does not suit its runner, the dependencies form a
     /// cycle, a port is not one of its app's ports, a secret has a value in
     /// the plan, or a process's command, environment, probe or container
-    /// fields are unusable.
+    /// fields are unusable, or the processes of an app depend on each other
+    /// in a cycle.
     pub fn new(
         workspace: WorkspaceName,
         id: WorkspaceId,
@@ -228,22 +244,28 @@ pub struct ProcessPlan {
     #[serde(default)]
     pub kind: ProcessKind,
     /// The command, as separate values that no shell reads. For a host
-    /// process it is the program and its arguments, and `{program}` stands
-    /// for the app's program. It is not empty. For a container process it
-    /// replaces the image's command, and an empty command keeps the image's.
+    /// process it is the program and its arguments, such as `npm run dev`,
+    /// and `{program}` stands for the app's program, which a release or a
+    /// checkout with a build supplies. It is not empty. For a container
+    /// process it replaces the image's command, and an empty command keeps
+    /// the image's.
     pub run: Vec<String>,
+    /// The processes of the same app that must be ready, or for a oneshot
+    /// must have completed, before this one starts.
+    #[serde(default)]
+    pub depends: Vec<ProcessName>,
     /// The directory the process starts in, relative to the app's checkout
     /// or release directory, or `None` for that directory itself. It never
     /// leaves that directory.
     #[serde(default)]
     pub cwd: Option<PathBuf>,
-    /// The literal values of variables that are not secrets, which the
-    /// manifest states. `{port.NAME}` in a value stands for the host port
-    /// of the app's port `NAME`. A variable that the app's permissions name
-    /// as a secret never has a value here, and its value comes from the
-    /// [`EnvironmentSource`](crate::EnvironmentSource).
+    /// The names of the variables the process receives. The plan holds no
+    /// value: the [`EnvironmentSource`](crate::EnvironmentSource) supplies
+    /// every value, literal or secret. A host process also inherits `PATH`
+    /// and `HOME` from the program that calls phase, and no other variable
+    /// of its environment.
     #[serde(default)]
-    pub env: BTreeMap<String, String>,
+    pub env: BTreeSet<String>,
     /// The app port the process listens on, or `None`.
     #[serde(default)]
     pub port: Option<PortName>,
@@ -261,6 +283,11 @@ pub struct ProcessPlan {
     /// process is ready as soon as it starts. A oneshot process has none.
     #[serde(default)]
     pub ready: Option<Probe>,
+    /// How long phase waits for the process to become ready, or for a
+    /// oneshot to complete, before the start fails. It is more than zero
+    /// and at most [`MOST_READY_TIMEOUT`].
+    #[serde(default = "default_ready_timeout")]
+    pub ready_timeout: Duration,
     /// When phase restarts the process.
     #[serde(default)]
     pub restart: Restart,
@@ -271,20 +298,23 @@ pub struct ProcessPlan {
 
 impl ProcessPlan {
     /// Returns a long-running process named `name` that runs `run` in its
-    /// app's directory, with no literal values, ports, volumes or probe,
-    /// which is never restarted and stops with the default [`Stop`].
+    /// app's directory, with no dependencies, variables, ports, volumes or
+    /// probe and a ready timeout of [`DEFAULT_READY_TIMEOUT`], which is
+    /// never restarted and stops with the default [`Stop`].
     #[must_use]
     pub fn new(name: ProcessName, run: Vec<String>) -> Self {
         Self {
             name,
             kind: ProcessKind::LongRunning,
             run,
+            depends: Vec::new(),
             cwd: None,
-            env: BTreeMap::new(),
+            env: BTreeSet::new(),
             port: None,
             publish: BTreeMap::new(),
             volumes: BTreeMap::new(),
             ready: None,
+            ready_timeout: DEFAULT_READY_TIMEOUT,
             restart: Restart::No,
             stop: Stop::default(),
         }

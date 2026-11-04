@@ -45,12 +45,12 @@ pub use crate::plan::probe::{
     DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT, Probe, ProbeCheck,
 };
 pub use crate::plan::restart::{
-    Backoff, BadBackoff, DEFAULT_FIRST_BACKOFF, DEFAULT_MOST_BACKOFF, DEFAULT_STOP_GRACE, Resolve,
-    Restart, RestartLimits, Stop, StopSignal,
+    Backoff, BadBackoff, DEFAULT_FIRST_BACKOFF, DEFAULT_MOST_BACKOFF, DEFAULT_STOP_GRACE,
+    LimitsWithoutRestart, Resolve, Restart, RestartLimits, Stop, StopSignal,
 };
 pub use crate::plan::{
-    AppPlan, ContainerProblem, Permissions, Plan, PlanError, ProcessKind, ProcessPlan,
-    ProcessProblem, RunnerKind,
+    AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, Permissions, Plan,
+    PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind, SourceProblem,
 };
 pub use crate::record::{BadContainerId, ContainerId, Handle, SweepOutcome, Swept, SweptItem};
 pub use crate::report::{AppOutcome, AppReport, Report};

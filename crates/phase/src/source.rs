@@ -34,13 +34,16 @@ pub enum Source {
         /// Where the release's asset is and how phase verifies it.
         spec: ReleaseSpec,
     },
-    /// The workspace's checkout of the app's repository, which phase builds.
-    /// A host app uses it.
+    /// The workspace's checkout of the app's repository. A host app uses
+    /// it, and its processes start in the checkout.
     Checkout {
-        /// The checkout's directory.
+        /// The checkout's absolute directory.
         dir: PathBuf,
-        /// How phase builds the program in the checkout.
-        build: BuildSpec,
+        /// How phase builds the app's program in the checkout, or `None`
+        /// when the processes run commands from the checkout, such as
+        /// `npm run dev`, and no process names `{program}`.
+        #[serde(default)]
+        build: Option<BuildSpec>,
     },
     /// A container image that already exists. A container app uses it, and
     /// each of the app's processes runs this image. phase builds no image.
@@ -59,8 +62,10 @@ pub struct ReleaseSpec {
     pub repository: GithubRepository,
     /// The asset's file name, in which `{target}` stands for the Rust
     /// target triple of this machine, such as `example-api-{target}.tar.gz`.
+    /// It holds no `/`.
     pub asset: String,
-    /// The path of the program inside the asset.
+    /// The path of the program inside the asset. It is relative and holds no
+    /// `..`.
     pub binary: PathBuf,
     /// How phase verifies the asset before it runs the program.
     pub verify: Verification,
@@ -106,7 +111,8 @@ pub struct BuildSpec {
     /// The build command and its arguments, as separate values. No shell
     /// reads them. The command runs in the checkout.
     pub run: Vec<String>,
-    /// The path of the built program, relative to the checkout.
+    /// The path of the built program, relative to the checkout. It holds no
+    /// `..`.
     pub output: PathBuf,
 }
 

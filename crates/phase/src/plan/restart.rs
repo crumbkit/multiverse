@@ -23,7 +23,7 @@ pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 /// When phase restarts a process that exits. phase restarts a container
 /// process by recreating its container.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "policy", rename_all = "kebab-case")]
+#[serde(tag = "policy", rename_all = "kebab-case", try_from = "RestartFile")]
 pub enum Restart {
     /// phase never restarts the process.
     #[default]
@@ -35,10 +35,75 @@ pub enum Restart {
     Always(RestartLimits),
 }
 
+/// The JSON form of a [`Restart`]. A reader refuses an unknown field, and
+/// refuses limits on the policy `no`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestartFile {
+    /// The policy's name.
+    policy: Policy,
+    /// The most restarts.
+    #[serde(default)]
+    max: Option<NonZeroU32>,
+    /// The waits before each restart.
+    #[serde(default)]
+    backoff: Option<Backoff>,
+    /// Whether a crash restart resolves the environment again.
+    #[serde(default)]
+    resolve: Option<Resolve>,
+}
+
+/// The name of a restart policy in JSON.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Policy {
+    /// [`Restart::No`].
+    No,
+    /// [`Restart::OnFailure`].
+    OnFailure,
+    /// [`Restart::Always`].
+    Always,
+}
+
+impl TryFrom<RestartFile> for Restart {
+    type Error = LimitsWithoutRestart;
+
+    fn try_from(file: RestartFile) -> Result<Self, LimitsWithoutRestart> {
+        let limits = RestartLimits {
+            max: file.max,
+            backoff: file.backoff.unwrap_or_default(),
+            resolve: file.resolve.unwrap_or_default(),
+        };
+        match file.policy {
+            Policy::No
+                if file.max.is_some() || file.backoff.is_some() || file.resolve.is_some() =>
+            {
+                Err(LimitsWithoutRestart)
+            }
+            Policy::No => Ok(Self::No),
+            Policy::OnFailure => Ok(Self::OnFailure(limits)),
+            Policy::Always => Ok(Self::Always(limits)),
+        }
+    }
+}
+
+/// The policy `no` states restart limits, which apply only to a policy that
+/// restarts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitsWithoutRestart;
+
+impl fmt::Display for LimitsWithoutRestart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the restart policy `no` states restart limits")
+    }
+}
+
+impl std::error::Error for LimitsWithoutRestart {}
+
 /// How often and how soon phase restarts a process, and whether it resolves
 /// the environment again first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct RestartLimits {
     /// The most restarts after which phase leaves the process stopped, or
     /// `None` when phase restarts it without limit.
@@ -46,7 +111,6 @@ pub struct RestartLimits {
     /// The waits before each restart.
     pub backoff: Backoff,
     /// Whether a restart after a crash resolves the app's environment again.
-    #[serde(default)]
     pub resolve: Resolve,
 }
 
