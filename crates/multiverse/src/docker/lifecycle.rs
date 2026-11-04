@@ -46,6 +46,9 @@ use crate::run_files::{
 };
 use crate::store;
 
+#[cfg(test)]
+mod tests;
+
 /// The file in the runs directory that holds the store id.
 const STORE_ID_FILE: &str = ".store-id";
 
@@ -131,9 +134,12 @@ fn new_store_id() -> Result<StoreId, Error> {
 /// The scope of a workspace's containers, which only [`Lifecycle::prepare`]
 /// and [`Lifecycle::existing`] return. Every method that acts on the
 /// workspace's docker objects takes one, so the labels that it checks are
-/// those of the store id in the runs directory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// those of the store id in the runs directory. A [`Lifecycle`] refuses a
+/// `Prepared` of another workspace or runs directory.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Prepared {
+    /// The run directory of the workspace that the scope names.
+    dir: RunDir,
     /// The scope.
     scope: Scope,
 }
@@ -161,14 +167,21 @@ pub(crate) enum Start {
 }
 
 /// The volumes of a workspace that a removal deletes, which
-/// [`Lifecycle::volumes`] found and checked, in name order.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct WorkspaceVolumes(Vec<Volume>);
+/// [`Lifecycle::volumes`] found and checked, in name order, and the scope
+/// that they belong to. [`Lifecycle::delete_volumes`] refuses the volumes
+/// of another scope.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceVolumes {
+    /// The scope of the volumes, or `None` for a workspace without them.
+    scope: Option<Scope>,
+    /// The volumes.
+    volumes: Vec<Volume>,
+}
 
 impl WorkspaceVolumes {
     /// Returns the volumes' docker names, in name order.
     pub(crate) fn names(&self) -> Vec<String> {
-        self.0
+        self.volumes
             .iter()
             .map(|volume| volume.name().as_str().to_owned())
             .collect()
@@ -176,7 +189,7 @@ impl WorkspaceVolumes {
 }
 
 /// The containers of one workspace and their run records.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Lifecycle {
     /// The runs directory, which holds the store id.
     runs: PathBuf,
@@ -253,6 +266,7 @@ impl Lifecycle {
         check()?;
         check_compose()?;
         Ok(Prepared {
+            dir: self.dir.clone(),
             scope: Scope::new(&self.ensure_store_id()?, &self.workspace),
         })
     }
@@ -266,8 +280,32 @@ impl Lifecycle {
     /// [`Error::NewerRecord`] for a store id file that cannot be read.
     pub(crate) fn existing(&self) -> Result<Option<Prepared>, Error> {
         Ok(self.store_id()?.map(|id| Prepared {
+            dir: self.dir.clone(),
             scope: Scope::new(&id, &self.workspace),
         }))
+    }
+
+    /// Returns the scope of `prepared`, which this lifecycle's
+    /// [`Lifecycle::prepare`] or [`Lifecycle::existing`] returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DockerFailed`] for a `prepared` of another
+    /// workspace or runs directory, before any docker command runs.
+    fn scope_of<'a>(&self, prepared: &'a Prepared) -> Result<&'a Scope, Error> {
+        if prepared.dir == self.dir {
+            Ok(&prepared.scope)
+        } else {
+            Err(Error::DockerFailed {
+                operation: "scope check",
+                container: None,
+                message: format!(
+                    "the docker scope of the run directory {} cannot act on the workspace {}",
+                    prepared.dir.path().display(),
+                    self.workspace
+                ),
+            })
+        }
     }
 
     /// Returns the services of the workspace that have a container record,
@@ -338,7 +376,7 @@ impl Lifecycle {
         service: &ServiceName,
     ) -> Result<Option<ContainerState>, Error> {
         Ok(self
-            .inspect_recorded(&prepared.scope, service)?
+            .inspect_recorded(self.scope_of(prepared)?, service)?
             .map(|inspected| inspected.state))
     }
 
@@ -356,7 +394,7 @@ impl Lifecycle {
         prepared: &Prepared,
         service: &ServiceName,
     ) -> Result<Option<ContainerState>, Error> {
-        let Some(inspected) = self.inspect_recorded(&prepared.scope, service)? else {
+        let Some(inspected) = self.inspect_recorded(self.scope_of(prepared)?, service)? else {
             return Ok(None);
         };
         if inspected.state == ContainerState::Running
@@ -390,7 +428,7 @@ impl Lifecycle {
         service: &ServiceName,
         ports: &BTreeMap<String, u16>,
     ) -> Result<Start, Error> {
-        let scope = &prepared.scope;
+        let scope = self.scope_of(prepared)?;
         let declared = containers.get(service);
         match self.inspect_recorded(scope, service)? {
             Some(inspected) if inspected.state == ContainerState::Running => {
@@ -556,7 +594,7 @@ impl Lifecycle {
     /// [`super::command::check`], [`Error::DockerFailed`], and the errors
     /// of reading and writing the run records.
     pub(crate) fn stop(&self, prepared: &Prepared, service: &ServiceName) -> Result<(), Error> {
-        self.remove_recorded(&prepared.scope, service)
+        self.remove_recorded(self.scope_of(prepared)?, service)
     }
 
     /// Deletes the record and the follower record of the container of
@@ -574,8 +612,9 @@ impl Lifecycle {
     ///
     /// Returns the errors of [`Lifecycle::stop`].
     pub(crate) fn stop_all(&self, prepared: &Prepared) -> Result<(), Error> {
+        let scope = self.scope_of(prepared)?;
         for service in self.recorded()? {
-            self.remove_recorded(&prepared.scope, &service)?;
+            self.remove_recorded(scope, &service)?;
         }
         Ok(())
     }
@@ -597,7 +636,7 @@ impl Lifecycle {
         if self.follower_alive(service)? {
             return Ok(true);
         }
-        let Some(inspected) = self.inspect_recorded(&prepared.scope, service)? else {
+        let Some(inspected) = self.inspect_recorded(self.scope_of(prepared)?, service)? else {
             return Ok(false);
         };
         if inspected.state != ContainerState::Running {
@@ -667,7 +706,7 @@ impl Lifecycle {
     /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
     /// [`Error::DockerFailed`].
     pub(crate) fn volumes(&self, prepared: &Prepared) -> Result<WorkspaceVolumes, Error> {
-        let scope = &prepared.scope;
+        let scope = self.scope_of(prepared)?;
         let record: Option<VolumesRecord> = read_json(&self.dir.path().join(VOLUMES_FILE))?;
         let services = self.recorded()?;
         if record.is_none() && services.is_empty() {
@@ -699,24 +738,39 @@ impl Lifecycle {
                 }
             }
         }
-        Ok(WorkspaceVolumes(volumes.into_values().collect()))
+        Ok(WorkspaceVolumes {
+            scope: Some(scope.clone()),
+            volumes: volumes.into_values().collect(),
+        })
     }
 
-    /// Deletes `volumes`, which [`Lifecycle::volumes`] returned, after it
-    /// checked each one again. A volume that no longer exists counts as
-    /// deleted.
+    /// Deletes `volumes`, which [`Lifecycle::volumes`] returned for this
+    /// workspace, after it checked each one again. A volume that no longer
+    /// exists counts as deleted.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerForeign`], [`Error::DockerMissing`],
+    /// Returns [`Error::DockerForeign`] for the first of `volumes` when
+    /// they belong to another scope, before any docker command runs, and
+    /// for a volume whose labels changed. Returns the errors of
+    /// [`Lifecycle::scope_of`], [`Error::DockerMissing`],
     /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
     pub(crate) fn delete_volumes(
         &self,
         prepared: &Prepared,
         volumes: WorkspaceVolumes,
     ) -> Result<(), Error> {
-        for volume in volumes.0 {
-            if let Some(volume) = reinspect_volume(&prepared.scope, &volume)? {
+        let scope = self.scope_of(prepared)?;
+        if let Some(first) = volumes.volumes.first()
+            && volumes.scope.as_ref() != Some(scope)
+        {
+            return Err(Error::DockerForeign {
+                kind: "volume",
+                name: first.name().as_str().to_owned(),
+            });
+        }
+        for volume in volumes.volumes {
+            if let Some(volume) = reinspect_volume(scope, &volume)? {
                 delete_volume(volume)?;
             }
         }

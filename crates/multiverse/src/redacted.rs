@@ -30,6 +30,7 @@ impl fmt::Debug for Redacted {
 }
 
 /// A test compares a value with the text it expects without showing it.
+#[cfg(test)]
 impl PartialEq<&str> for Redacted {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other

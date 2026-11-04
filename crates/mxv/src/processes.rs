@@ -568,12 +568,11 @@ pub(crate) fn containers(
     Ok(Runs::new(environment.runs()?).docker_containers(name)?)
 }
 
-/// Deletes the docker volumes `volumes` of the workspace `name`, for `mxv
-/// remove --delete-volumes`.
+/// Deletes the docker volumes `volumes`, which [`volumes`] returned for a
+/// workspace, for `mxv remove --delete-volumes`.
 pub(crate) fn delete_volumes(
     environment: &Environment,
-    name: &WorkspaceName,
     volumes: Volumes,
 ) -> Result<(), MxvFailure> {
-    Ok(Runs::new(environment.runs()?).delete_volumes(name, volumes)?)
+    Ok(Runs::new(environment.runs()?).delete_volumes(volumes)?)
 }

@@ -222,7 +222,7 @@ pub(crate) fn remove(
         RemovalOutcome::Done(removed) => {
             processes::forget(environment, &name)?;
             if let Some(volumes) = volumes {
-                processes::delete_volumes(environment, &name, volumes)?;
+                processes::delete_volumes(environment, volumes)?;
             }
             Ok(Prose::new(
                 RemovalResult::new(&removed, false).with_docker(containers, names),

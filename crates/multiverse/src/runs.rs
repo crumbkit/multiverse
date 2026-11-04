@@ -1453,23 +1453,24 @@ impl Runs {
             None => WorkspaceVolumes::default(),
         };
         Ok(Volumes {
+            workspace: name.clone(),
             names: found.names(),
             found,
         })
     }
 
-    /// Deletes `volumes`, the volumes of the workspace `name` that
-    /// [`Runs::volumes`] returned, after it checked each one again.
+    /// Deletes `volumes`, which [`Runs::volumes`] returned for one
+    /// workspace, from that workspace, after it checked each one again.
     ///
     /// # Errors
     ///
     /// Returns [`Error::DockerForeign`], [`Error::DockerMissing`],
     /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
-    pub fn delete_volumes(&self, name: &WorkspaceName, volumes: Volumes) -> Result<(), Error> {
+    pub fn delete_volumes(&self, volumes: Volumes) -> Result<(), Error> {
         if volumes.is_empty() {
             return Ok(());
         }
-        let lifecycle = self.lifecycle(name);
+        let lifecycle = self.lifecycle(&volumes.workspace);
         match lifecycle.existing()? {
             Some(prepared) => lifecycle.delete_volumes(&prepared, volumes.found),
             None => Ok(()),
@@ -1479,9 +1480,12 @@ impl Runs {
 
 /// The docker volumes of a workspace that a removal deletes, which only
 /// [`Runs::volumes`] returns, after it checked that each one is the
-/// workspace's.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// workspace's. [`Runs::delete_volumes`] deletes them from that workspace
+/// alone.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Volumes {
+    /// The workspace that the volumes belong to.
+    workspace: WorkspaceName,
     /// The volumes' docker names, in name order.
     names: Vec<String>,
     /// The volumes.
