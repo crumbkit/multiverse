@@ -15,15 +15,17 @@ use std::io::{self, Read as _};
 use std::path::Path;
 use std::time::Duration;
 
+use phase::WorkspaceId;
 use phase::container::{Follow, Host};
 pub(crate) use phase::container::{RUN_VERSION, RunDir, Versioned};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::name::WorkspaceName;
 use crate::ports;
 use crate::process::{self, Launch};
-use crate::store::{self, Lock};
+use crate::store::{self, Lock, Store};
 
 /// The most bytes of a run record that multiverse reads.
 const MOST_RUN_BYTES: u64 = 64 * 1024;
@@ -132,11 +134,21 @@ pub(crate) fn remove_if_present(path: &Path) -> Result<(), Error> {
 
 /// The host side of phase's container engine: mxv's run files, store
 /// locks, port check and log followers, so the files that the engine
-/// writes are the ones that mxv's other commands read.
+/// writes are the ones that mxv's other commands read, and the store of
+/// workspace records that saves each workspace's stable id.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RunHost;
+pub(crate) struct RunHost<'s> {
+    /// The store of the workspace records, or `None` for a host that
+    /// labels no new docker object.
+    pub(crate) records: Option<&'s Store>,
+}
 
-impl Host for RunHost {
+impl RunHost<'_> {
+    /// The host that labels no new docker object, so it needs no store.
+    pub(crate) const WITHOUT_RECORDS: RunHost<'static> = RunHost { records: None };
+}
+
+impl Host for RunHost<'_> {
     type Error = Error;
     type Lock = Lock;
 
@@ -158,6 +170,26 @@ impl Host for RunHost {
 
     fn lock(&self, path: &Path, wait: Duration) -> Result<Lock, Error> {
         store::lock(path, wait)
+    }
+
+    fn saved_workspace_id(&self, workspace: &WorkspaceName) -> Result<WorkspaceId, Error> {
+        let no_id = |message: &str| Error::DockerFailed {
+            operation: "workspace id",
+            container: None,
+            message: message.to_owned(),
+        };
+        let store = self
+            .records
+            .ok_or_else(|| no_id("mxv has no store of workspace records here"))?;
+        let mut record = store
+            .read(workspace)?
+            .ok_or_else(|| no_id("the workspace has no record"))?;
+        if record.id.is_none() {
+            store.update(&mut record)?;
+        }
+        record
+            .id
+            .ok_or_else(|| no_id("the workspace's record holds no stable id"))
     }
 
     fn port_taken(&self, port: u16) -> bool {

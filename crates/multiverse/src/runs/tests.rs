@@ -6,11 +6,14 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace};
+use crate::record::{Checkout, RECORD_VERSION, Workspace};
+use crate::run_files::RunHost;
 use crate::runs::{DownOutcome, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail};
 use crate::store::{Created, Store};
+use phase::container::Host as _;
 
 /// A temporary directory with a store, run files and a checkout.
 struct Setup {
@@ -43,8 +46,11 @@ impl Setup {
             name.to_string(),
             "origin/main".to_owned(),
         );
-        let workspace = Workspace::new(name, path, vec![checkout]);
-        assert_eq!(self.store().create(&workspace).unwrap(), Created::Written);
+        let mut workspace = Workspace::new(name, path, vec![checkout]);
+        assert_eq!(
+            self.store().create(&mut workspace).unwrap(),
+            Created::Written
+        );
         workspace
     }
 }
@@ -409,4 +415,52 @@ fn the_run_files_sit_in_the_runs_directory_of_mxvs_state_directory() {
         Runs::new(state).workspace_dir(&name),
         Path::new("/state/mxv/runs/triage")
     );
+}
+
+#[test]
+fn the_run_host_saves_a_stable_id_in_a_record_without_one_and_then_returns_the_saved_id() {
+    let setup = Setup::new();
+    let store = setup.store();
+    let mut workspace = setup.workspace("triage");
+    workspace.id = None;
+    // A record that an earlier mxv wrote holds no stable id.
+    let path = setup.dir.path().join("workspaces/triage.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("id");
+    record["version"] = 2.into();
+    write(&path, record.to_string());
+    let host = RunHost {
+        records: Some(&store),
+    };
+    let id = host.saved_workspace_id(&workspace.name).unwrap();
+    let saved = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(saved.id.as_ref(), Some(&id));
+    assert_eq!(saved.version, RECORD_VERSION);
+    assert_eq!(host.saved_workspace_id(&workspace.name).unwrap(), id);
+}
+
+#[test]
+fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id() {
+    let setup = Setup::new();
+    let store = setup.store();
+    let name: WorkspaceName = "triage".parse().unwrap();
+    for host in [
+        RunHost::WITHOUT_RECORDS,
+        RunHost {
+            records: Some(&store),
+        },
+    ] {
+        let saved = host.saved_workspace_id(&name);
+        assert!(
+            matches!(
+                saved,
+                Err(Error::DockerFailed {
+                    operation: "workspace id",
+                    ..
+                })
+            ),
+            "{saved:?}"
+        );
+    }
 }

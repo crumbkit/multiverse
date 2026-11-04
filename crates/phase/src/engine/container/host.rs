@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::engine::container::ContainerError;
+use crate::name::{WorkspaceId, WorkspaceName};
 
 /// A JSON file of the run directory whose version the host checks.
 pub trait Versioned {
@@ -100,6 +101,18 @@ pub trait Host {
     /// Returns the host's error when another holder keeps the lock for all
     /// of `wait`, or the file cannot be locked.
     fn lock(&self, path: &Path, wait: Duration) -> Result<Self::Lock, Self::Error>;
+
+    /// Returns the stable id that the record of `workspace` holds on disk.
+    /// When the record holds none, the host mints one and saves the record
+    /// with it first. The engine labels docker objects only with an id that
+    /// this returned, through [`super::SavedWorkspaceId`], so no object is
+    /// ever labelled with an id that the record does not hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's error when the record cannot be read or written,
+    /// or the workspace has no record.
+    fn saved_workspace_id(&self, workspace: &WorkspaceName) -> Result<WorkspaceId, Self::Error>;
 
     /// Reports whether something on the host holds the TCP port `port`.
     fn port_taken(&self, port: u16) -> bool;

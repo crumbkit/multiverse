@@ -92,7 +92,7 @@ pub use crate::engine::container::compose::{
 pub use crate::engine::container::error::ContainerError;
 pub use crate::engine::container::host::{Follow, Host, Versioned};
 pub use crate::engine::container::lifecycle::{
-    Lifecycle, Prepared, RUN_VERSION, Start, WorkspaceVolumes,
+    Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, Start, WorkspaceVolumes,
 };
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
 pub use crate::engine::container::objects::{

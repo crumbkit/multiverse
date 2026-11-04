@@ -6,6 +6,7 @@
 //! takes one never receives a name that docker would read as an option or
 //! that would split at the wrong `.`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::PathBuf;
@@ -378,13 +379,19 @@ impl Scope {
         Value::Object(labels)
     }
 
-    /// Reports whether `labels`, as [`super::objects`] prints them with
-    /// tabs between the store, workspace and object labels, name this
-    /// scope and the object `object`.
-    pub(super) fn owns(&self, labels: &str, object: &str) -> bool {
-        let mut fields = labels.split('\t');
-        fields.next() == Some(self.store.as_str())
-            && fields.next() == Some(self.workspace.as_str())
-            && fields.next() == Some(object)
+    /// Reports whether `labels`, an object's labels as the JSON that
+    /// [`super::objects`] prints, name this scope's store and workspace
+    /// and, under `label`, such as `mxv.container`, the object `object`.
+    /// Each value must equal the expected one exactly, with nothing
+    /// trimmed.
+    pub(super) fn owns(&self, labels: &str, label: &str, object: &str) -> bool {
+        let Ok(Some(labels)) = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
+        else {
+            return false;
+        };
+        let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
+        is(STORE_LABEL, self.store.as_str())
+            && is(WORKSPACE_LABEL, self.workspace.as_str())
+            && is(label, object)
     }
 }

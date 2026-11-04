@@ -666,19 +666,15 @@ impl Runs {
             .iter()
             .any(|name| manifest.containers.contains_key(name))
         {
-            // The record holds the workspace's stable id before any docker
-            // object is labelled with it.
-            if workspace.id.is_none() {
-                store.update(workspace)?;
-            }
-            let Some(id) = workspace.id.clone() else {
-                return Err(Error::DockerFailed {
-                    operation: "workspace id",
-                    container: None,
-                    message: "the workspace's record holds no stable id".to_owned(),
-                });
+            // The record on disk holds the workspace's stable id before any
+            // docker object is labelled with it.
+            let host = RunHost {
+                records: Some(store),
             };
-            Some(self.lifecycle(&workspace.name).prepare(&self.phase, &id)?)
+            let lifecycle = self.lifecycle_with(&host, &workspace.name);
+            let saved = lifecycle.saved_id()?;
+            workspace.id = Some(saved.id().clone());
+            Some(lifecycle.prepare(&self.phase, &saved)?)
         } else {
             None
         };
@@ -1211,8 +1207,17 @@ impl Runs {
 /// the workspace's processes and wait for their readiness.
 impl Runs {
     /// Returns the containers of the workspace `name`.
-    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle<'static, RunHost> {
-        Lifecycle::new(&RunHost, &self.dir, name, self.grace, self.lock_wait)
+    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle<'static, RunHost<'static>> {
+        self.lifecycle_with(&RunHost::WITHOUT_RECORDS, name)
+    }
+
+    /// Returns the containers of the workspace `name`, kept through `host`.
+    fn lifecycle_with<'h, 's>(
+        &self,
+        host: &'h RunHost<'s>,
+        name: &WorkspaceName,
+    ) -> Lifecycle<'h, RunHost<'s>> {
+        Lifecycle::new(host, &self.dir, name, self.grace, self.lock_wait)
     }
 
     /// Returns the names of the containers that `manifest` declares, and

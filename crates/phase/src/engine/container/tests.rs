@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use crate::engine::container::ContainerError as Error;
-use crate::engine::container::command::message;
+use crate::engine::container::command::{message, says_missing};
 use crate::engine::container::compose::{
     ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort, UpFailure, compose_env,
     compose_file, up_failure,
@@ -29,6 +29,33 @@ fn service(name: &str) -> ServiceName {
 
 fn key(name: &str) -> VolumeKey {
     VolumeKey::new(name).unwrap()
+}
+
+/// Returns an object's labels as `docker inspect` prints them with
+/// `{{json .Labels}}`: the store, workspace and `label` labels, where an
+/// empty value leaves its label out.
+fn printed_labels(store: &str, workspace: &str, label: &str, object: &str) -> String {
+    let mut labels = serde_json::Map::new();
+    for (key, value) in [
+        ("mxv.store", store),
+        ("mxv.workspace", workspace),
+        (label, object),
+    ] {
+        if !value.is_empty() {
+            labels.insert(key.to_owned(), json!(value));
+        }
+    }
+    serde_json::Value::Object(labels).to_string()
+}
+
+/// Returns the labels of the scope's container `service`.
+fn container_labels(store: &str, workspace: &str, service: &str) -> String {
+    printed_labels(store, workspace, "mxv.container", service)
+}
+
+/// Returns the labels of the scope's volume `volume`.
+fn volume_labels(store: &str, workspace: &str, volume: &str) -> String {
+    printed_labels(store, workspace, "mxv.volume", volume)
 }
 
 fn scope(workspace: &str) -> Scope {
@@ -93,7 +120,11 @@ fn a_scope_with_the_workspaces_identity_adds_its_stable_id_run_record_and_app_to
     );
     // The identity labels the objects that the scope creates, and the
     // scope still owns the objects that carry only the older labels.
-    assert!(scope.owns(&format!("{STORE}\treading-list\tdb"), "db"));
+    assert!(scope.owns(
+        &container_labels(STORE, "reading-list", "db"),
+        "mxv.container",
+        "db"
+    ));
     assert_eq!(scope, self::scope("reading-list"));
 }
 
@@ -132,11 +163,44 @@ fn two_stores_give_one_workspace_name_different_container_and_volume_names() {
 #[test]
 fn a_scope_owns_only_objects_whose_labels_name_its_store_workspace_and_object() {
     let scope = scope("reading-list");
-    assert!(scope.owns(&format!("{STORE}\treading-list\tdb"), "db"));
-    assert!(!scope.owns("\t\t", "db"));
-    assert!(!scope.owns(&format!("{STORE}\treading-list\tcache"), "db"));
-    assert!(!scope.owns(&format!("{STORE}\treading\tdb"), "db"));
-    assert!(!scope.owns("fedcba9876543210fedcba9876543210\treading-list\tdb", "db"));
+    let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
+    assert!(owns(&container_labels(STORE, "reading-list", "db")));
+    assert!(!owns("null"));
+    assert!(!owns("{}"));
+    assert!(!owns(""));
+    assert!(!owns(&container_labels(STORE, "reading-list", "cache")));
+    assert!(!owns(&container_labels(STORE, "reading", "db")));
+    assert!(!owns(&container_labels(
+        "fedcba9876543210fedcba9876543210",
+        "reading-list",
+        "db"
+    )));
+    assert!(!owns(&printed_labels(
+        STORE,
+        "reading-list",
+        "mxv.volume",
+        "db"
+    )));
+}
+
+#[test]
+fn a_scope_owns_no_object_whose_label_values_differ_by_a_tab_or_a_space() {
+    let scope = scope("reading-list");
+    let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
+    // A value that holds tabs cannot stand in for the other labels.
+    assert!(!owns(&printed_labels(
+        &format!("{STORE}\treading-list\tdb"),
+        "",
+        "mxv.container",
+        ""
+    )));
+    assert!(!owns(&container_labels(
+        &format!("{STORE} "),
+        "reading-list",
+        "db"
+    )));
+    assert!(!owns(&container_labels(STORE, " reading-list", "db")));
+    assert!(!owns(&container_labels(STORE, "reading-list", "db\n")));
 }
 
 #[test]
@@ -236,6 +300,34 @@ fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_dot()
 }
 
 #[test]
+fn only_the_daemons_answer_that_an_object_does_not_exist_counts_as_missing() {
+    // What docker 29 prints for each kind of object that its daemon does
+    // not have.
+    for said in [
+        "Error response from daemon: No such container: phase-nope",
+        "Error response from daemon: get phase-nope: no such volume",
+        "Error response from daemon: network phase-nope not found",
+        "error: no such object: phase-nope",
+        "Error: No such object: phase-nope",
+    ] {
+        assert!(says_missing(said), "{said}");
+    }
+    // A failure that is no answer about the object never counts as
+    // missing, even when it says "not found".
+    for said in [
+        "Failed to initialize: unable to resolve docker endpoint: context \"nope\": context not found: open /home/agent/.docker/contexts/meta/0/meta.json: no such file or directory",
+        "context \"nope\": context not found",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        "error during connect: Get \"http://%2Fvar%2Frun%2Fdocker.sock/v1.47/containers/x/json\": dial unix /var/run/docker.sock: connect: no such file or directory",
+        "Error response from daemon: conflict: phase-nope is in use",
+        "docker: unknown command: docker volume inspect: not found",
+        "",
+    ] {
+        assert!(!says_missing(said), "{said}");
+    }
+}
+
+#[test]
 fn the_message_of_a_failed_docker_command_is_its_first_docker_or_error_line() {
     assert_eq!(
         message(
@@ -332,7 +424,7 @@ fn a_container_handle_is_minted_for_labels_that_name_its_store_workspace_and_ser
         &scope,
         &service("db"),
         ID,
-        &printed_container(&format!("{STORE}\treading-list\tdb")),
+        &printed_container(&container_labels(STORE, "reading-list", "db")),
     )
     .unwrap();
     assert_eq!(inspected.container.service(), &service("db"));
@@ -357,10 +449,10 @@ fn a_container_handle_is_minted_for_labels_that_name_its_store_workspace_and_ser
 fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_service() {
     let scope = scope("reading-list");
     for labels in [
-        "\t\t".to_owned(),
-        format!("{STORE}\treading-list\tcache"),
-        format!("{STORE}\treading\tdb"),
-        "fedcba9876543210fedcba9876543210\treading-list\tdb".to_owned(),
+        "null".to_owned(),
+        container_labels(STORE, "reading-list", "cache"),
+        container_labels(STORE, "reading", "db"),
+        container_labels("fedcba9876543210fedcba9876543210", "reading-list", "db"),
     ] {
         let minted = mint_container(
             &scope,
@@ -381,7 +473,10 @@ fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_servic
 
 #[test]
 fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
-    let printed = format!("{STORE}\treading-list\tdb\nnot-an-id\nrunning 0\n\n\n");
+    let printed = format!(
+        "{}\nnot-an-id\nrunning 0\n\n\n",
+        container_labels(STORE, "reading-list", "db")
+    );
     let minted = mint_container(&scope("reading-list"), &service("db"), ID, &printed);
     assert!(
         matches!(
@@ -399,12 +494,25 @@ fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
 fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_store_workspace_and_volume() {
     let scope = scope("reading-list");
     let name = scope.volume_name(&key("data"));
-    assert!(mint_volume(&scope, &name, &format!("{STORE}\treading-list\tdata\n")).is_ok());
+    let printed = |labels: String| format!("{labels}\n");
+    assert!(
+        mint_volume(
+            &scope,
+            &name,
+            &printed(volume_labels(STORE, "reading-list", "data"))
+        )
+        .is_ok()
+    );
     for labels in [
-        "\t\t\n".to_owned(),
-        format!("{STORE}\treading-list\tother\n"),
-        format!("{STORE}\treading\tdata\n"),
-        "fedcba9876543210fedcba9876543210\treading-list\tdata\n".to_owned(),
+        printed("null".to_owned()),
+        printed(volume_labels(STORE, "reading-list", "other")),
+        printed(volume_labels(STORE, "reading", "data")),
+        printed(volume_labels(
+            "fedcba9876543210fedcba9876543210",
+            "reading-list",
+            "data",
+        )),
+        printed(container_labels(STORE, "reading-list", "data")),
     ] {
         let minted = mint_volume(&scope, &name, &labels);
         assert!(
@@ -429,7 +537,11 @@ fn no_named_volume_handle_is_minted_for_a_volume_without_a_name_of_the_scope() {
         let name = VolumeName::new(name).unwrap();
         // Labels that would name the volume do not make another volume
         // the scope's.
-        let minted = mint_volume(&scope, &name, &format!("{STORE}\treading-list\tdata\n"));
+        let minted = mint_volume(
+            &scope,
+            &name,
+            &format!("{}\n", volume_labels(STORE, "reading-list", "data")),
+        );
         assert!(
             matches!(&minted, Err(Error::Foreign { kind: "volume", .. })),
             "{name}: {minted:?}"

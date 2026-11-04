@@ -50,18 +50,16 @@ impl Finished {
         }
     }
 
-    /// Reports whether docker said that the object does not exist.
+    /// Reports whether docker's daemon answered that the object does not
+    /// exist. Only the daemon's own answers count: a line that starts with
+    /// `Error response from daemon:` and says `No such container`, `No
+    /// such volume`, `No such object` or `network <name> not found`, or the
+    /// `no such object` line that `docker inspect` prints after the daemon
+    /// answered for every kind of object. Any other failure, such as an
+    /// unknown context or a daemon that does not answer, is no answer
+    /// about the object, so it never counts as missing.
     pub(super) fn missing(&self) -> bool {
-        !self.status.success()
-            && [
-                "No such container",
-                "No such volume",
-                "no such volume",
-                "No such object",
-                "not found",
-            ]
-            .iter()
-            .any(|said| self.stderr.contains(said))
+        !self.status.success() && self.stderr.lines().any(says_missing)
     }
 
     /// Returns standard output when the command succeeded. When it failed,
@@ -89,6 +87,30 @@ impl Finished {
         }
         self.ok(operation, container)
     }
+}
+
+/// The start of every answer that docker's daemon sends back as an error.
+const DAEMON_ANSWER: &str = "Error response from daemon:";
+
+/// Reports whether `line` of docker's standard error is the daemon's
+/// answer that an object does not exist, as [`Finished::missing`]
+/// describes.
+pub(super) fn says_missing(line: &str) -> bool {
+    let line = line.trim();
+    if let Some(answer) = line.strip_prefix(DAEMON_ANSWER) {
+        let answer = answer.trim();
+        return [
+            "No such container",
+            "No such volume",
+            "no such volume",
+            "No such object",
+        ]
+        .iter()
+        .any(|said| answer.contains(said))
+            || (answer.starts_with("network ") && answer.ends_with(" not found"));
+    }
+    line.to_ascii_lowercase()
+        .starts_with("error: no such object:")
 }
 
 /// Returns the line of docker's standard error that says what failed: the

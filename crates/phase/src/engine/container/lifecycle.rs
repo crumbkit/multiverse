@@ -43,6 +43,7 @@ use crate::engine::container::objects::{
 use crate::engine::container::{ContainerError, RunDir};
 use crate::name::{WorkspaceId, WorkspaceName};
 use crate::phase::Phase;
+use crate::random::RANDOM_DEVICE;
 
 #[cfg(test)]
 mod tests;
@@ -117,10 +118,14 @@ impl Versioned for VolumesRecord {
 }
 
 /// Returns a new store id: 32 hex digits from the operating system's
-/// cryptographically secure random number generator.
+/// cryptographically secure random number generator. A generator that
+/// cannot be read fails as [`ContainerError::Unreadable`] at
+/// [`RANDOM_DEVICE`], as the stable id of a workspace does.
 fn new_store_id() -> Result<StoreId, ContainerError> {
-    let text = crate::random::hex_id()
-        .map_err(|error| ContainerError::failed("store id", None, error.to_string()))?;
+    let text = crate::random::hex_id().map_err(|source| ContainerError::Unreadable {
+        path: PathBuf::from(RANDOM_DEVICE),
+        source,
+    })?;
     StoreId::new(&text).map_err(|_| {
         ContainerError::failed(
             "store id",
@@ -128,6 +133,26 @@ fn new_store_id() -> Result<StoreId, ContainerError> {
             format!("mxv made the store id {text:?}, which is not 32 hex digits"),
         )
     })
+}
+
+/// A workspace's stable id that its host has saved in the workspace's
+/// record, which only [`Lifecycle::saved_id`] returns. [`Lifecycle::prepare`]
+/// takes one, so the engine never labels a docker object with an id that
+/// the record does not hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedWorkspaceId {
+    /// The workspace whose record holds the id.
+    workspace: WorkspaceName,
+    /// The id.
+    id: WorkspaceId,
+}
+
+impl SavedWorkspaceId {
+    /// Returns the id.
+    #[must_use]
+    pub const fn id(&self) -> &WorkspaceId {
+        &self.id
+    }
 }
 
 /// The scope of a workspace's containers, which only [`Lifecycle::prepare`]
@@ -262,6 +287,20 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         Ok(id)
     }
 
+    /// Returns the workspace's stable id once its host has saved it in the
+    /// workspace's record, which [`Host::saved_workspace_id`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns the host's errors of reading and writing the record.
+    pub fn saved_id(&self) -> Result<SavedWorkspaceId, H::Error> {
+        let id = self.host.saved_workspace_id(&self.workspace)?;
+        Ok(SavedWorkspaceId {
+            workspace: self.workspace.clone(),
+            id,
+        })
+    }
+
     /// Checks that docker and its compose plugin answer, and returns the
     /// scope of the workspace's containers, after it wrote the store id
     /// when the store had none, for [`Lifecycle::start`].
@@ -273,16 +312,28 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     /// command holds the store id's lock or the store id cannot be written.
     ///
     /// The containers and volumes that the scope creates are also labelled
-    /// with the workspace's stable id `id`, the path of its run record,
-    /// which [`Phase::run_record`] gives under `phase`'s state directory,
-    /// and its app. The host has saved `id` in the workspace's record
-    /// before it calls this.
-    pub fn prepare(&self, phase: &Phase, id: &WorkspaceId) -> Result<Prepared, H::Error> {
+    /// with the workspace's stable id `saved`, which the host has saved in
+    /// the workspace's record, the path of its run record, which
+    /// [`Phase::run_record`] gives under `phase`'s state directory, and its
+    /// app. A `saved` of another workspace is refused with
+    /// [`ContainerError::Failed`] before any docker command runs.
+    pub fn prepare(&self, phase: &Phase, saved: &SavedWorkspaceId) -> Result<Prepared, H::Error> {
+        if saved.workspace != self.workspace {
+            return Err(ContainerError::failed(
+                "scope check",
+                None,
+                format!(
+                    "the stable id of {} cannot label the containers of {}",
+                    saved.workspace, self.workspace
+                ),
+            )
+            .into());
+        }
         check()?;
         check_compose()?;
         let identity = Identity {
-            id: id.clone(),
-            run_record: phase.run_record(id),
+            id: saved.id.clone(),
+            run_record: phase.run_record(&saved.id),
         };
         Ok(Prepared {
             dir: self.dir.clone(),

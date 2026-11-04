@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace, WorkspaceKind};
+use crate::record::{Checkout, RECORD_VERSION, Workspace, WorkspaceKind};
 use crate::store::{Created, Store, cap_log, lock, rotate_log};
 use crate::testing::write;
 
@@ -32,8 +32,11 @@ fn a_store_whose_directory_does_not_exist_lists_no_workspaces() {
 fn a_created_record_reads_back_and_lists_in_name_order() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().join("workspaces"));
+    let mut created = Vec::new();
     for name in ["zeta", "alpha"] {
-        assert_eq!(store.create(&workspace(name)).unwrap(), Created::Written);
+        let mut workspace = workspace(name);
+        assert_eq!(store.create(&mut workspace).unwrap(), Created::Written);
+        created.push(workspace);
     }
     let names: Vec<String> = store
         .list()
@@ -44,25 +47,26 @@ fn a_created_record_reads_back_and_lists_in_name_order() {
         .collect();
     assert_eq!(names, ["alpha", "zeta"]);
     let read = store.read(&"alpha".parse().unwrap()).unwrap();
-    assert_eq!(read, Some(workspace("alpha")));
+    assert_eq!(read.as_ref(), created.get(1));
 }
 
 #[test]
 fn creating_a_name_that_exists_leaves_the_first_record() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    store.create(&workspace("app")).unwrap();
+    let mut first = workspace("app");
+    store.create(&mut first).unwrap();
     let mut second = workspace("app");
     second.path = PathBuf::from("/elsewhere");
-    assert_eq!(store.create(&second).unwrap(), Created::Taken);
-    assert_eq!(store.read(&second.name).unwrap(), Some(workspace("app")));
+    assert_eq!(store.create(&mut second).unwrap(), Created::Taken);
+    assert_eq!(store.read(&second.name).unwrap(), Some(first));
 }
 
 #[test]
 fn a_store_leaves_no_temporary_file_behind() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    store.create(&workspace("app")).unwrap();
+    store.create(&mut workspace("app")).unwrap();
     store.update(&mut workspace("app")).unwrap();
     let names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
@@ -76,7 +80,7 @@ fn deleting_a_record_twice_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     let name: WorkspaceName = "app".parse().unwrap();
-    store.create(&workspace("app")).unwrap();
+    store.create(&mut workspace("app")).unwrap();
     store.delete(&name).unwrap();
     store.delete(&name).unwrap();
     assert_eq!(store.read(&name).unwrap(), None);
@@ -88,11 +92,11 @@ fn a_record_of_a_newer_version_is_refused() {
     let store = Store::new(dir.path().to_path_buf());
     write(
         dir.path().join("app.json"),
-        r#"{"version": 3, "future": true}"#,
+        r#"{"version": 4, "future": true}"#,
     );
     let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(
-        matches!(error, Error::NewerRecord { version: 3, .. }),
+        matches!(error, Error::NewerRecord { version: 4, .. }),
         "{error:?}"
     );
 }
@@ -133,7 +137,7 @@ fn a_record_without_a_kind_reads_as_a_workspace_of_worktrees() {
 }
 
 #[test]
-fn a_record_of_worktrees_written_again_keeps_version_one_and_no_kind() {
+fn a_record_of_worktrees_written_again_gains_a_stable_id_and_version_three_and_keeps_no_kind() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     write(dir.path().join("inbox-ingest.json"), WORKTREE_RECORD);
@@ -144,24 +148,44 @@ fn a_record_of_worktrees_written_again_keeps_version_one_and_no_kind() {
     found.ports.insert("api".to_owned(), 41001);
     store.update(&mut found).unwrap();
     let text = fs::read_to_string(dir.path().join("inbox-ingest.json")).unwrap();
-    assert!(text.contains("\"version\": 1"), "{text}");
+    // An older mxv refuses a record of version 3, so it never rewrites the
+    // record without the id.
+    assert!(text.contains("\"version\": 3"), "{text}");
+    assert!(text.contains("\"id\": "), "{text}");
     assert!(!text.contains("kind"), "{text}");
     assert!(!text.contains("mirror"), "{text}");
 }
 
 #[test]
-fn a_record_of_clones_has_version_two_and_its_kind() {
+fn a_created_record_of_clones_has_a_stable_id_version_three_and_its_kind() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    let workspace = workspace("app");
-    assert_eq!(store.create(&workspace).unwrap(), Created::Written);
+    let mut workspace = workspace("app");
+    assert_eq!(workspace.id, None);
+    assert_eq!(store.create(&mut workspace).unwrap(), Created::Written);
+    assert!(workspace.id.is_some());
     let text = fs::read_to_string(dir.path().join("app.json")).unwrap();
-    assert!(text.contains("\"version\": 2"), "{text}");
+    assert!(text.contains("\"version\": 3"), "{text}");
+    assert!(text.contains("\"id\": "), "{text}");
     assert!(text.contains("\"kind\": \"clone\""), "{text}");
     assert_eq!(
         store.read(&"app".parse().unwrap()).unwrap(),
         Some(workspace)
     );
+}
+
+#[test]
+fn a_record_of_clones_of_version_two_without_a_stable_id_still_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let record = WORKTREE_RECORD
+        .replace("\"version\": 1,", "\"version\": 2,\n  \"kind\": \"clone\",")
+        .replace("inbox-ingest", "app");
+    write(dir.path().join("app.json"), &record);
+    let found = store.read(&"app".parse().unwrap()).unwrap().unwrap();
+    assert_eq!(found.version, 2);
+    assert_eq!(found.kind, WorkspaceKind::Clone);
+    assert_eq!(found.id, None);
 }
 
 #[test]
@@ -189,7 +213,7 @@ fn a_record_whose_name_breaks_the_rules_is_corrupt() {
 fn listing_reports_a_corrupt_record_and_a_newer_record_and_still_lists_the_rest() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    store.create(&workspace("reading-list")).unwrap();
+    store.create(&mut workspace("reading-list")).unwrap();
     write(dir.path().join("broken.json"), "not json");
     write(
         dir.path().join("future.json"),
@@ -211,7 +235,7 @@ fn listing_reports_a_corrupt_record_and_a_newer_record_and_still_lists_the_rest(
 fn a_record_that_holds_another_name_than_its_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    store.create(&workspace("reading-list")).unwrap();
+    store.create(&mut workspace("reading-list")).unwrap();
     let text = fs::read_to_string(dir.path().join("reading-list.json")).unwrap();
     write(dir.path().join("app.json"), text);
     let name: WorkspaceName = "app".parse().unwrap();
@@ -224,7 +248,7 @@ fn a_record_keeps_its_allocated_ports_and_a_record_without_ports_leaves_the_key_
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     let mut triage = workspace("triage");
-    store.create(&triage).unwrap();
+    store.create(&mut triage).unwrap();
     let text = fs::read_to_string(store.path(&triage.name)).unwrap();
     assert!(!text.contains("ports"), "{text}");
     triage.ports.insert("api".to_owned(), 49_152);
@@ -296,7 +320,7 @@ fn a_record_without_a_stable_id_reads_with_none_and_its_first_write_gives_it_one
     assert_eq!(id.as_str().len(), 32);
     let mut again = store.read(&name).unwrap().unwrap();
     assert_eq!(again.id.as_ref(), Some(&id));
-    assert_eq!(again.version, 1);
+    assert_eq!(again.version, RECORD_VERSION);
     store.update(&mut again).unwrap();
     assert_eq!(store.read(&name).unwrap().unwrap().id, Some(id));
 }
@@ -308,7 +332,7 @@ fn a_workspace_keeps_its_stable_id_when_it_moves() {
     let mut moved = workspace("triage");
     moved.ensure_id().unwrap();
     let id = moved.id.clone();
-    store.create(&moved).unwrap();
+    store.create(&mut moved).unwrap();
     moved.path = PathBuf::from("/elsewhere/triage");
     store.update(&mut moved).unwrap();
     let found = store.read(&moved.name).unwrap().unwrap();

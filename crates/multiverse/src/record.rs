@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use phase::WorkspaceId;
+use phase::random::RANDOM_DEVICE;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
@@ -16,8 +17,14 @@ use crate::name::WorkspaceName;
 /// worktrees, which records without a `kind` are, and its record keeps
 /// version 1 so that an older mxv still reads it. Version 2 adds `kind`,
 /// so an older mxv refuses a workspace of clones rather than treating
-/// its checkouts as worktrees.
-pub const RECORD_VERSION: u32 = 2;
+/// its checkouts as worktrees. Version 3 adds the stable `id`, and every
+/// record that holds one has version 3, whatever its kind, so an older mxv
+/// refuses the record rather than dropping the id when it rewrites it.
+pub const RECORD_VERSION: u32 = 3;
+
+/// The version of the record form of a workspace of clones without a
+/// stable id.
+pub const CLONE_RECORD_VERSION: u32 = 2;
 
 /// The version of the record form of a workspace of git worktrees.
 pub const WORKTREE_RECORD_VERSION: u32 = 1;
@@ -122,7 +129,7 @@ impl Workspace {
     #[must_use]
     pub const fn new(name: WorkspaceName, path: PathBuf, checkouts: Vec<Checkout>) -> Self {
         Self {
-            version: RECORD_VERSION,
+            version: CLONE_RECORD_VERSION,
             kind: WorkspaceKind::Clone,
             id: None,
             name,
@@ -133,32 +140,40 @@ impl Workspace {
     }
 
     /// Returns the record as one of a workspace of git worktrees, with the
-    /// version that such a record has.
+    /// version that such a record has: [`WORKTREE_RECORD_VERSION`], or
+    /// [`RECORD_VERSION`] once it holds a stable id.
     #[must_use]
     pub const fn of_worktrees(mut self) -> Self {
-        self.version = WORKTREE_RECORD_VERSION;
+        self.version = if self.id.is_some() {
+            RECORD_VERSION
+        } else {
+            WORKTREE_RECORD_VERSION
+        };
         self.kind = WorkspaceKind::Worktree;
         self
     }
 
     /// Gives the workspace a new stable id when its record has none, and
     /// reports whether it did. An id that the record holds is never
-    /// changed.
+    /// changed. A record that holds an id has [`RECORD_VERSION`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::StateUnreadable`] when the operating system's
-    /// random number generator, `/dev/urandom`, cannot be read.
+    /// random number generator, [`RANDOM_DEVICE`], cannot be read.
     pub fn ensure_id(&mut self) -> Result<bool, Error> {
-        if self.id.is_some() {
-            return Ok(false);
-        }
-        let id = WorkspaceId::mint().map_err(|source| Error::StateUnreadable {
-            path: PathBuf::from("/dev/urandom"),
-            source,
-        })?;
-        self.id = Some(id);
-        Ok(true)
+        let minted = if self.id.is_some() {
+            false
+        } else {
+            let id = WorkspaceId::mint().map_err(|source| Error::StateUnreadable {
+                path: PathBuf::from(RANDOM_DEVICE),
+                source,
+            })?;
+            self.id = Some(id);
+            true
+        };
+        self.version = self.version.max(RECORD_VERSION);
+        Ok(minted)
     }
 
     /// Returns the path of the workspace's `AGENTS.md`.

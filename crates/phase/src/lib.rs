@@ -25,7 +25,7 @@ mod millis;
 mod name;
 mod phase;
 mod plan;
-mod random;
+pub mod random;
 mod record;
 mod report;
 mod select;

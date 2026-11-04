@@ -3,10 +3,16 @@
 //! It matches an object by phase's workspace label, `mxv.workspace-id`.
 //! An object that mxv created before it wrote that label carries only
 //! `mxv.store` and `mxv.workspace`, and matches when a scope of those
-//! labels is given with [`DockerCli::with_legacy`], until the object is
-//! recreated. An object that carries no mxv label never matches, even by a
-//! recorded id, so `sweep` never removes it.
+//! labels is given with [`DockerCli::with_legacy`]. An object that carries
+//! no mxv label never matches, even by a recorded id, so `sweep` never
+//! removes it. Labels are read as JSON and compared exactly.
+//!
+//! An object is gone only when Docker's daemon answered that it does not
+//! have it. Every other failure, such as an unknown context, a daemon that
+//! does not answer or a missing `docker` program, fails the call with
+//! [`DockerError::Unavailable`].
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
@@ -65,15 +71,19 @@ impl DockerCli {
         &self.program
     }
 
-    /// Reports whether an object whose workspace id, store and workspace
-    /// labels are `workspace_id`, `store` and `name` belongs to the
-    /// workspace `workspace`.
-    fn ours(&self, workspace: &str, workspace_id: &str, store: &str, name: &str) -> bool {
-        if !workspace_id.is_empty() {
+    /// Reports whether an object with `labels` belongs to the workspace
+    /// `workspace`. Its `mxv.workspace-id` label decides when it has one.
+    /// Otherwise its `mxv.store` and `mxv.workspace` labels must name the
+    /// legacy scope, when one is given. Each value must equal the expected
+    /// one exactly, with nothing trimmed.
+    fn ours(&self, workspace: &str, labels: &BTreeMap<String, String>) -> bool {
+        if let Some(workspace_id) = labels.get(WORKSPACE_ID_LABEL) {
             return workspace_id == workspace;
         }
+        let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
         self.legacy.as_ref().is_some_and(|scope| {
-            store == scope.store().as_str() && name == scope.workspace().as_str()
+            is(STORE_LABEL, scope.store().as_str())
+                && is(WORKSPACE_LABEL, scope.workspace().as_str())
         })
     }
 
@@ -86,6 +96,14 @@ impl DockerCli {
             Err(error) => unavailable(&error),
         }
     }
+}
+
+/// Returns the whole seconds that `docker stop --time` gives a container
+/// for `wait`: `wait` rounded up, and at least one second, so a wait under
+/// a second never stops the container at once.
+fn stop_seconds(wait: Duration) -> u64 {
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    seconds.max(1)
 }
 
 /// Returns the failure of a Docker that `error` shows does not answer.
@@ -103,22 +121,21 @@ const fn inspect_of(kind: DockerKind) -> (&'static str, &'static str, &'static s
     }
 }
 
-/// Returns the Go template that prints an object's id and its workspace
-/// id, store and workspace labels, separated by tabs.
+/// Returns the Go template that prints an object's id on one line and its
+/// labels on the next, as JSON. JSON escapes every tab and newline in a
+/// label's value, so no value can reach another field or line.
 fn format(kind: DockerKind) -> String {
     let (_, id, labels) = inspect_of(kind);
-    format!(
-        "{id}\t{{{{index {labels} \"{WORKSPACE_ID_LABEL}\"}}}}\t{{{{index {labels} \"{STORE_LABEL}\"}}}}\t{{{{index {labels} \"{WORKSPACE_LABEL}\"}}}}"
-    )
+    format!("{id}\n{{{{json {labels}}}}}")
 }
 
-/// Returns a label's value as the template printed it, with Go's
-/// placeholder for a missing value read as empty.
-fn label(field: Option<&str>) -> &str {
-    match field.map(str::trim) {
-        None | Some("<no value>") => "",
-        Some(value) => value,
-    }
+/// Returns the labels that `docker inspect` printed as `printed`, the JSON
+/// of [`format`]'s second line, or `None` when they are not a map of
+/// strings. Docker prints `null` for an object without labels.
+fn labels(printed: &str) -> Option<BTreeMap<String, String>> {
+    serde_json::from_str::<Option<BTreeMap<String, String>>>(printed)
+        .ok()
+        .flatten()
 }
 
 impl Docker for DockerCli {
@@ -138,26 +155,19 @@ impl Docker for DockerCli {
         if !finished.status.success() {
             return Err(DockerError::unavailable(message(&finished.stderr)));
         }
-        let mut fields = finished
-            .stdout
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .split('\t');
-        let id = fields.next().unwrap_or_default().trim().to_owned();
-        let workspace_id = label(fields.next());
-        let store = label(fields.next());
-        let name = label(fields.next());
-        if id.is_empty() || !self.ours(object.workspace.as_str(), workspace_id, store, name) {
+        let mut lines = finished.stdout.lines();
+        let id = lines.next().unwrap_or_default();
+        let labels = labels(lines.next().unwrap_or_default()).unwrap_or_default();
+        if id.is_empty() || !self.ours(object.workspace.as_str(), &labels) {
             return Ok(None);
         }
-        Ok(Some(id))
+        Ok(Some(id.to_owned()))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError> {
         let removed = match kind {
             DockerKind::Container => {
-                let seconds = wait.as_secs().to_string();
+                let seconds = stop_seconds(wait).to_string();
                 let stopped = run_program(
                     self.program(),
                     ["stop", "--time", &seconds, "--", id],

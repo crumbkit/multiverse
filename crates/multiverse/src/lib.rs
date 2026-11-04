@@ -58,8 +58,8 @@ pub use crate::manifest::{
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::record::{
-    AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, WORKTREE_RECORD_VERSION, Workspace,
-    WorkspaceKind, agents_text,
+    AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, RECORD_VERSION,
+    WORKTREE_RECORD_VERSION, Workspace, WorkspaceKind, agents_text,
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{

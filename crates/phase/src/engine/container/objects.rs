@@ -36,17 +36,12 @@ const ANONYMOUS_LABEL: &str = "com.docker.volume.anonymous";
 /// listens on from one that something does.
 const PROBE_WAIT: Duration = Duration::from_millis(300);
 
-/// The Go template that prints an object's store, workspace and object
-/// labels, separated by tabs, for [`Scope::owns`]. `%s` stands for the
-/// object label, such as `mxv.container`, and `%l` for the path of the
-/// labels, which differs between containers and other objects.
-const LABELS_FORMAT: &str =
-    r#"{{index %l "mxv.store"}}	{{index %l "mxv.workspace"}}	{{index %l "%s"}}"#;
-
-/// Returns [`LABELS_FORMAT`] for the labels at `path` and the object label
-/// `label`.
-fn labels_format(path: &str, label: &str) -> String {
-    LABELS_FORMAT.replace("%l", path).replace("%s", label)
+/// Returns the Go template that prints the labels at `path`, which differs
+/// between containers and other objects, as one line of JSON for
+/// [`Scope::owns`]. JSON escapes every tab and newline in a label's value,
+/// so no value can reach another field or line.
+fn labels_format(path: &str) -> String {
+    format!("{{{{json {path}}}}}")
 }
 
 /// What `docker container inspect` reports about a container.
@@ -161,7 +156,7 @@ impl Volume {
 fn container_format() -> String {
     format!(
         "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}",
-        labels_format(".Config.Labels", CONTAINER_LABEL)
+        labels_format(".Config.Labels")
     )
 }
 
@@ -181,7 +176,11 @@ pub(super) fn mint_container(
     printed: &str,
 ) -> Result<Inspected, Error> {
     let mut lines = printed.lines();
-    if !scope.owns(lines.next().unwrap_or_default(), service.as_str()) {
+    if !scope.owns(
+        lines.next().unwrap_or_default(),
+        CONTAINER_LABEL,
+        service.as_str(),
+    ) {
         return Err(Error::Foreign {
             kind: "container",
             name: target.to_owned(),
@@ -344,7 +343,7 @@ pub(super) fn mint_volume(
     let owned = name
         .as_str()
         .strip_prefix(&scope.prefix())
-        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), volume));
+        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), VOLUME_LABEL, volume));
     if owned {
         Ok(OwnedVolume { name: name.clone() })
     } else {
@@ -384,7 +383,7 @@ pub(crate) fn inspect_volume(
     scope: &Scope,
     name: &VolumeName,
 ) -> Result<Option<OwnedVolume>, Error> {
-    let format = labels_format(".Labels", VOLUME_LABEL);
+    let format = labels_format(".Labels");
     inspect_volume_with(name, &format)?
         .map(|printed| mint_volume(scope, name, &printed))
         .transpose()

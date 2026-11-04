@@ -13,7 +13,8 @@ use crate::engine::container::lifecycle::{
 };
 use crate::engine::container::names::{ServiceName, StoreId, VolumeName};
 use crate::engine::container::objects::{Volume, mint_anonymous};
-use crate::name::WorkspaceName;
+use crate::name::{WorkspaceId, WorkspaceName};
+use crate::phase::Phase;
 
 /// A host that keeps the run files as plain JSON files, takes no lock and
 /// starts no follower.
@@ -55,6 +56,10 @@ impl Host for Files {
 
     fn lock(&self, _path: &Path, _wait: Duration) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn saved_workspace_id(&self, _workspace: &WorkspaceName) -> Result<WorkspaceId, Error> {
+        Ok("0123456789abcdef0123456789abcdef".parse().unwrap())
     }
 
     fn port_taken(&self, _port: u16) -> bool {
@@ -128,6 +133,11 @@ fn a_lifecycle_refuses_the_prepared_scope_of_another_workspace_before_it_runs_do
     refused_scope(other.volumes(&foreign));
     refused_scope(other.delete_volumes(&foreign, WorkspaceVolumes::default()));
     refused_scope(other.start(&foreign, &Default::default(), &db, &Default::default()));
+    // The stable id that the host saved for one workspace never labels
+    // the containers of another.
+    let saved = reading.saved_id().unwrap();
+    assert_eq!(saved.id().as_str(), "0123456789abcdef0123456789abcdef");
+    refused_scope(other.prepare(&Phase::new(runs.path().join("phase")), &saved));
     // The workspace's own scope reaches no docker command for a workspace
     // without records.
     assert_eq!(other.state(&prepared(&other), &db).unwrap(), None);

@@ -38,9 +38,18 @@ pub(crate) struct DockerObject<'r> {
 /// The Docker calls of `sweep`. Each call fails with
 /// [`DockerError::Unavailable`] when Docker does not answer, and never
 /// reports an object as gone because Docker did not answer.
+///
+/// Only Docker's daemon can say that an object does not exist. A call
+/// treats an object as gone only when the daemon itself answered that it
+/// does not have it, such as `Error response from daemon: No such
+/// container`. Every other failure is an error: an unknown Docker
+/// context, a daemon that does not answer and a missing `docker` program
+/// all fail with [`DockerError::Unavailable`].
 pub(crate) trait Docker {
-    /// Returns the id of `object` when it exists, or `None` when it does
-    /// not. An object with a recorded id matches by that id. An object
+    /// Returns the id of `object` when it exists, or `None` when the
+    /// daemon answered that it does not exist or that it exists without
+    /// this workspace's labels. An object with a recorded id matches by
+    /// that id. An object
     /// without one matches by its name, and only when it also carries
     /// phase's workspace label with `object.workspace`, so an object of
     /// another workspace or program that has the same name is never
@@ -48,16 +57,19 @@ pub(crate) trait Docker {
     ///
     /// # Errors
     ///
-    /// Returns [`DockerError::Unavailable`] when Docker does not answer.
+    /// Returns [`DockerError::Unavailable`] when Docker does not answer,
+    /// including when its context is unknown or its program is missing.
     fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError>;
 
     /// Removes the object of `kind` whose id is `id`. A running container
     /// is stopped first, and is killed when it has not stopped after
-    /// `wait`.
+    /// `wait`. An object that the daemon answers it does not have counts
+    /// as removed.
     ///
     /// # Errors
     ///
     /// Returns [`DockerError::Unavailable`] when Docker does not answer,
+    /// including when its context is unknown or its program is missing,
     /// and [`DockerError::Refused`] when it answers and refuses.
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError>;
 }

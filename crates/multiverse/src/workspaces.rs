@@ -845,8 +845,7 @@ impl<B: Backend> Workspaces<B> {
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
-        workspace.ensure_id()?;
-        if self.store.create(&workspace)? == Created::Taken {
+        if self.store.create(&mut workspace)? == Created::Taken {
             return Ok(self.store.read(name)?.map_or(
                 NewOutcome::PathTaken(workspace.path.clone()),
                 NewOutcome::NameTaken,
@@ -895,8 +894,7 @@ impl<B: Backend> Workspaces<B> {
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
-        workspace.ensure_id()?;
-        if self.store.create(&workspace)? == Created::Taken {
+        if self.store.create(&mut workspace)? == Created::Taken {
             return Ok(self.store.read(name)?.map_or(
                 NewOutcome::PathTaken(workspace.path.clone()),
                 NewOutcome::NameTaken,

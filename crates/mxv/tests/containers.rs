@@ -676,6 +676,43 @@ fn down_and_remove_fail_as_docker_unavailable_once_the_workspace_has_run_a_conta
 }
 
 #[test]
+fn status_down_and_remove_fail_as_docker_unavailable_when_dockers_context_is_unknown() {
+    if !docker_runs("status_down_and_remove_fail_as_docker_unavailable_when") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-no-context", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-no-context"]);
+    assert_eq!(exit, 0, "{document}");
+    // docker says `context "...": context not found` for an unknown
+    // context. That is no answer from the daemon, so mxv never reads it as
+    // a container that is gone.
+    for args in [
+        &["status", "-w", "mxvtest-no-context"][..],
+        &["down", "-w", "mxvtest-no-context"],
+        &[
+            "remove",
+            "mxvtest-no-context",
+            "--yes",
+            "--force",
+            "--delete-volumes",
+        ],
+    ] {
+        let command = setup
+            .command(PATH, args)
+            .env("DOCKER_CONTEXT", "mxvtest-no-such-context");
+        let (exit, document) = setup.json_with(command, args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(
+            document["code"], "mxv::docker::unavailable",
+            "{args:?}: {document}"
+        );
+    }
+    assert_eq!(setup.containers(), [setup.docker_name("web")]);
+    let (_, status) = setup.json(&["status", "-w", "mxvtest-no-context"]);
+    assert_eq!(row(&status, "web")["state"], "running", "{status}");
+}
+
+#[test]
 fn a_workspace_that_has_never_run_a_container_never_runs_docker() {
     let setup = Setup::new("mxvtest-no-calls", &web());
     let bin = setup.root().join("fake-bin");

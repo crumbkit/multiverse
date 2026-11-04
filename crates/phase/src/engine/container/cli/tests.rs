@@ -16,11 +16,13 @@ use crate::record::DockerName;
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 
 /// The fake `docker` program. It appends each call's arguments to
-/// `calls`, and fails every call while the file `down` exists, as a
-/// daemon that does not answer does. `inspect` prints the file
-/// `objects/<target>`, which holds what the real format prints, or fails
-/// as docker does for a missing object. A removal deletes that file, or
-/// fails as a refusal while the file `refuse` exists.
+/// `calls`. While the file `down` exists it fails every call as docker does
+/// when its daemon does not answer, and while the file `nocontext` exists
+/// it fails every call as docker does for an unknown context. `inspect`
+/// prints the file `objects/<target>`, which holds what the real format
+/// prints, or fails as docker's daemon does for a missing object of that
+/// kind. A removal deletes that file, or fails as a refusal while the file
+/// `refuse` exists.
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 echo "$*" >> "$dir/calls"
@@ -28,12 +30,24 @@ if [ -e "$dir/down" ]; then
     echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2
     exit 1
 fi
+if [ -e "$dir/nocontext" ]; then
+    echo "Failed to initialize: unable to resolve docker endpoint: context \"phase-test\": context not found: open $dir/meta.json: no such file or directory" >&2
+    exit 1
+fi
 for last; do :; done
+missing() {
+    case "$1" in
+        network) echo "Error response from daemon: network $last not found" >&2 ;;
+        volume) echo "Error response from daemon: get $last: no such volume" >&2 ;;
+        *) echo "Error response from daemon: No such container: $last" >&2 ;;
+    esac
+    exit 1
+}
 case "$1 $2" in
     "version --format") echo "29.0.0"; exit 0 ;;
     "container inspect"|"network inspect"|"volume inspect")
         if [ -e "$dir/objects/$last" ]; then cat "$dir/objects/$last"; exit 0; fi
-        echo "Error: No such object: $last" >&2; exit 1 ;;
+        missing "$1" ;;
 esac
 case "$1" in
     stop|rm|network|volume)
@@ -41,7 +55,7 @@ case "$1" in
         if [ "$1" = stop ]; then
             if [ -e "$dir/objects/$last" ]; then exit 0; fi
         elif [ -e "$dir/objects/$last" ]; then rm "$dir/objects/$last"; exit 0; fi
-        echo "Error response from daemon: No such container: $last" >&2; exit 1 ;;
+        missing "$1" ;;
 esac
 echo "unexpected call $*" >&2
 exit 1
@@ -79,12 +93,35 @@ impl Fake {
     }
 
     /// Adds an object that docker finds by each of `targets`, whose id,
-    /// workspace id, store and workspace labels are `fields`.
+    /// workspace id, store and workspace labels are `fields`. An empty
+    /// label is left out, and an object without labels prints `null`, as
+    /// docker does.
     fn object(&self, targets: &[&str], fields: [&str; 4]) {
+        let [id, workspace_id, store, workspace] = fields;
+        let labels: serde_json::Map<String, serde_json::Value> = [
+            ("mxv.workspace-id", workspace_id),
+            ("mxv.store", store),
+            ("mxv.workspace", workspace),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| (key.to_owned(), value.into()))
+        .collect();
+        let labels = if labels.is_empty() {
+            "null".to_owned()
+        } else {
+            serde_json::Value::Object(labels).to_string()
+        };
+        self.labelled(targets, id, &labels);
+    }
+
+    /// Adds an object that docker finds by each of `targets`, whose id is
+    /// `id` and whose labels print as the JSON `labels`.
+    fn labelled(&self, targets: &[&str], id: &str, labels: &str) {
         for target in targets {
             write(
                 &self.dir.path().join("objects").join(target),
-                &format!("{}\n", fields.join("\t")),
+                &format!("{id}\n{labels}\n"),
             );
         }
     }
@@ -490,4 +527,137 @@ fn a_real_daemon_finds_and_removes_a_volume_and_a_container_by_this_workspaces_i
     assert_eq!(found.len(), 64, "{found}");
     removed.unwrap().unwrap();
     assert_eq!(after.unwrap(), None);
+}
+
+#[test]
+fn a_label_value_that_holds_tabs_or_spaces_never_matches() {
+    let fake = Fake::new();
+    let workspace = workspace();
+    let target = "mxv-fedcba98-reading-list.db";
+    // A workspace id label that holds the older labels' values after tabs
+    // is a workspace id of its own, so the object is not this workspace's.
+    fake.labelled(
+        &[target],
+        &container_id('5'),
+        &serde_json::json!({ "mxv.workspace-id": format!("\t{STORE}\treading-list") }).to_string(),
+    );
+    let container = name(target);
+    let wanted = object(&workspace, DockerKind::Container, &container, None);
+    let docker = fake.docker().with_legacy(legacy_scope());
+    assert_eq!(docker.find(&wanted).unwrap(), None);
+    for labels in [
+        serde_json::json!({ "mxv.workspace-id": " " }),
+        serde_json::json!({ "mxv.workspace-id": format!("{WORKSPACE_ID} ") }),
+        serde_json::json!({ "mxv.store": format!("{STORE} "), "mxv.workspace": "reading-list" }),
+        serde_json::json!({ "mxv.store": STORE, "mxv.workspace": "reading-list\n" }),
+    ] {
+        fake.labelled(&[target], &container_id('5'), &labels.to_string());
+        assert_eq!(docker.find(&wanted).unwrap(), None, "{labels}");
+    }
+}
+
+#[test]
+fn an_unknown_docker_context_fails_a_find_and_a_removal_and_never_reports_an_object_gone() {
+    let fake = Fake::new();
+    let id = container_id('6');
+    fake.object(&[&id, "data"], [&id, WORKSPACE_ID, "", ""]);
+    fake.mark("nocontext");
+    let workspace = workspace();
+    let docker = fake.docker();
+    for kind in [
+        DockerKind::Container,
+        DockerKind::Network,
+        DockerKind::Volume,
+    ] {
+        let db = name("db");
+        let found = docker.find(&object(&workspace, kind, &db, Some(&id)));
+        assert!(
+            matches!(&found, Err(DockerError::Unavailable { message }) if message.contains("context not found")),
+            "{kind:?}: {found:?}"
+        );
+        let removed = docker.remove(kind, &id, Duration::ZERO);
+        assert!(
+            matches!(removed, Err(DockerError::Unavailable { .. })),
+            "{kind:?}: {removed:?}"
+        );
+    }
+    assert!(fake.has(&id));
+}
+
+#[test]
+fn a_removal_of_every_kind_while_docker_does_not_answer_fails_as_unavailable() {
+    let fake = Fake::new();
+    fake.mark("down");
+    for kind in [
+        DockerKind::Container,
+        DockerKind::Network,
+        DockerKind::Volume,
+    ] {
+        let removed = fake.docker().remove(kind, "data", Duration::ZERO);
+        assert!(
+            matches!(removed, Err(DockerError::Unavailable { .. })),
+            "{kind:?}: {removed:?}"
+        );
+    }
+}
+
+#[test]
+fn a_find_of_every_kind_while_docker_does_not_answer_fails_as_unavailable() {
+    let fake = Fake::new();
+    fake.mark("down");
+    let workspace = workspace();
+    let db = name("db");
+    for kind in [
+        DockerKind::Container,
+        DockerKind::Network,
+        DockerKind::Volume,
+    ] {
+        let found = fake.docker().find(&object(&workspace, kind, &db, None));
+        assert!(
+            matches!(found, Err(DockerError::Unavailable { .. })),
+            "{kind:?}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_network_or_volume_is_not_found_from_the_daemons_own_answer() {
+    let fake = Fake::new();
+    let workspace = workspace();
+    let gone = name("gone");
+    for kind in [DockerKind::Network, DockerKind::Volume] {
+        assert_eq!(
+            fake.docker()
+                .find(&object(&workspace, kind, &gone, None))
+                .unwrap(),
+            None,
+            "{kind:?}"
+        );
+    }
+    fake.docker()
+        .remove(DockerKind::Network, "gone", Duration::ZERO)
+        .unwrap();
+}
+
+#[test]
+fn a_container_removal_waits_at_least_a_second_and_rounds_a_part_second_up() {
+    let id = container_id('7');
+    for (wait, seconds) in [
+        (Duration::ZERO, 1),
+        (Duration::from_millis(300), 1),
+        (Duration::from_millis(1500), 2),
+        (Duration::from_secs(3), 3),
+    ] {
+        let fake = Fake::new();
+        fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+        fake.docker()
+            .remove(DockerKind::Container, &id, wait)
+            .unwrap();
+        assert!(
+            fake.calls()
+                .contains(&format!("stop --time {seconds} -- {id}")),
+            "{wait:?}: {}",
+            fake.calls()
+        );
+    }
 }

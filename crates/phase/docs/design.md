@@ -358,8 +358,29 @@ objects that mxv created before it wrote the new labels stay manageable.
 The container engine finds an object by `mxv.workspace-id`. It matches an
 object that carries only the older labels by `mxv.store` and
 `mxv.workspace` only when the host names the workspace's older scope, and
-`sweep` names none, so `sweep` leaves such an object alone until mxv
-recreates it. The engine never removes an object without an mxv label.
+`sweep` names none, so `sweep` leaves such an object alone. The engine
+never removes an object without an mxv label. It compares each label's
+exact value, read as JSON, so a value that holds a tab, a newline or a
+trailing space never matches another value.
+
+A container gains the new labels when mxv recreates it. Docker cannot
+change a volume's labels, and mxv never recreates a kept volume, so a
+volume that mxv created before the new labels keeps only the older labels
+until a migration copies it into a newly labelled volume. Until then it is
+found only through the older labels.
+
+The `mxv.run-record` label holds an absolute path. A run of mxv with
+another `XDG_STATE_HOME` keeps the run record elsewhere, so the label of
+an object that an earlier run created then names a path that this run
+does not use. The label also shows the home directory's path, which
+usually holds the user's name, to anyone who can read the object's
+Docker labels.
+
+phase treats an object as gone only when Docker's daemon answered that it
+does not have it. An unknown Docker context, a daemon that does not
+answer and a missing `docker` program are errors, so neither `sweep` nor
+mxv's own commands report a running container as gone because Docker
+could not be asked.
 
 ### Container secrets
 

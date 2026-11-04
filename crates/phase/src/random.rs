@@ -7,7 +7,7 @@ use std::io::{self, Read as _};
 use std::path::Path;
 
 /// The device that serves the operating system's random bytes.
-pub(crate) const RANDOM_DEVICE: &str = "/dev/urandom";
+pub const RANDOM_DEVICE: &str = "/dev/urandom";
 
 /// The number of random bytes in an id. Each byte is two hex digits.
 const ID_BYTES: usize = 16;
