@@ -73,7 +73,7 @@ fn a_phase_takes_other_waits_from_its_builder() {
 }
 
 #[test]
-fn every_operation_reports_that_it_is_not_built_yet() {
+fn every_operation_but_sweep_reports_that_it_is_not_built_yet() {
     let phase = Phase::new(PathBuf::from("/state/phase"));
     let soon = Instant::now() + Duration::from_secs(1);
     let cancel = Cancel::new();
@@ -99,7 +99,6 @@ fn every_operation_reports_that_it_is_not_built_yet() {
         not_built(phase.logs(&id(), &request, &mut Unused)),
         Operation::Logs
     );
-    assert_eq!(not_built(phase.sweep(&id(), true)), Operation::Sweep);
     let exec = phase.exec(&plan(), &api, &["true".into()], &Unused, soon, &cancel);
     assert_eq!(not_built(exec), Operation::Exec);
 }
@@ -113,4 +112,15 @@ fn a_not_built_error_names_the_operation() {
         error.to_string(),
         "phase cannot sweep yet, because it is not built"
     );
+}
+
+#[test]
+fn sweeping_a_workspace_with_no_run_record_finds_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let phase = Phase::new(state.path().to_path_buf());
+
+    let swept = phase.sweep(&id(), false).unwrap();
+
+    assert!(swept.items.is_empty());
+    assert!(swept.objects.is_empty());
 }
