@@ -78,6 +78,8 @@ pub(crate) enum RunFailure {
     ManifestMissing {
         /// The checkout.
         checkout: PathBuf,
+        /// The path of the workspace manifest, which does not exist either.
+        workspace: PathBuf,
     },
     /// The manifest cannot be read or understood.
     Manifest(ManifestError),
@@ -253,8 +255,12 @@ impl Failure for RunFailure {
                 "copy out any data you need from the volumes, then run `{}`, which deletes them",
                 remove_volumes_line(workspace, *allow)
             )),
-            Self::ManifestMissing { checkout } => hint(format!(
-                "write an {MANIFEST_FILE} that declares the app's processes at the root of {}",
+            Self::ManifestMissing {
+                checkout,
+                workspace,
+            } => hint(format!(
+                "write a workspace manifest at {} or an {MANIFEST_FILE} at the root of {} that declares the app's processes",
+                shown(workspace),
                 shown(checkout)
             )),
             Self::Manifest(error) => match &error.problem {
@@ -353,9 +359,13 @@ impl Failure for RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
-            Self::ManifestMissing { checkout } => {
-                vec![Field::new("path", shown(&checkout.join(MANIFEST_FILE)))]
-            }
+            Self::ManifestMissing {
+                checkout,
+                workspace,
+            } => vec![
+                Field::new("path", shown(&checkout.join(MANIFEST_FILE))),
+                Field::new("workspace_path", shown(workspace)),
+            ],
             Self::Manifest(error) => manifest_fields(error),
             Self::UnknownProcess { workspace, process } => vec![
                 Field::new("workspace", workspace),
@@ -499,10 +509,14 @@ impl fmt::Display for RunFailure {
                 "the workspace {workspace} has docker volumes, which may hold data: {}",
                 volumes.join(", ")
             ),
-            Self::ManifestMissing { checkout } => write!(
+            Self::ManifestMissing {
+                checkout,
+                workspace,
+            } => write!(
                 formatter,
-                "the checkout {} has no {MANIFEST_FILE}",
-                shown(checkout)
+                "the workspace has no manifest: neither {} nor {} exists",
+                shown(workspace),
+                shown(&checkout.join(MANIFEST_FILE))
             ),
             Self::Manifest(error) => error.fmt(formatter),
             Self::UnknownProcess { workspace, process } => write!(

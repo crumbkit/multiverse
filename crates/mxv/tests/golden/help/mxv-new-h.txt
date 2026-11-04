@@ -6,10 +6,11 @@ Arguments:
   <NAME>  The workspace's name, which also names its directory and its branch
 
 Options:
-      --repo <PATH>  The git repository to check out, or any directory inside it
-      --no-clone     Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
-      --dry-run      Report what the command would change, and change nothing
-  -h, --help         Print help (see more with '--help')
+      --repo <PATH>      The git repository to check out, or any directory inside it
+      --no-clone         Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
+      --manifest <FILE>  Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template
+      --dry-run          Report what the command would change, and change nothing
+  -h, --help             Print help (see more with '--help')
 
 Examples:
   mxv new triage --repo app --dry-run

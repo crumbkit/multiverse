@@ -27,6 +27,7 @@ mod disposable;
 mod docker;
 mod error;
 mod git;
+mod lookup;
 mod manifest;
 mod mirror;
 mod name;
@@ -37,6 +38,7 @@ mod redacted;
 mod run_files;
 mod runs;
 mod store;
+mod template;
 mod workspaces;
 
 pub use crate::backend::{Backend, Changes, INITIALIZING, Listed, Repository};
@@ -48,6 +50,7 @@ pub use crate::disposable::{
 };
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
+pub use crate::lookup::{ManifestInputs, ManifestSource};
 pub use crate::manifest::{
     Container, DEFAULT_READY_TIMEOUT, EnvValue, LogPattern, MANIFEST_FILE, MANIFEST_VERSION,
     MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError, ManifestProblem, Process,
@@ -67,6 +70,7 @@ pub use crate::runs::{
     Unstoppable, UpOutcome, Volumes, Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
+pub use crate::template::{TEMPLATE_TABLE, Template, find as find_template};
 pub use crate::workspaces::{
     Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode, NewOutcome, Removal,
     RemovalOutcome, RemovalPlan, Workspaces,

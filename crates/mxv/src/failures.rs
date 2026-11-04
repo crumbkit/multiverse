@@ -35,6 +35,11 @@ pub const CHECKOUT_STASHES: Code = Code::new("mxv", "checkout", "stashes");
 /// a machine that is offline, so mxv cannot tell which commits the origin
 /// holds.
 pub const CHECKOUT_ORIGIN_UNREACHABLE: Code = Code::new("mxv", "checkout", "origin_unreachable");
+/// The code of a template of workspace manifests that mxv cannot use, such
+/// as one without a valid `[template]` table.
+pub const TEMPLATE_INVALID: Code = Code::new("mxv", "template", "invalid");
+/// The code of a repository whose origin more than one template lists.
+pub const TEMPLATE_AMBIGUOUS: Code = Code::new("mxv", "template", "ambiguous");
 /// The code of a mirror whose lock another mxv command holds for longer
 /// than mxv waits, such as a `mxv new` that still fetches it.
 pub const MIRROR_LOCKED: Code = Code::new("mxv", "mirror", "locked");
@@ -329,6 +334,8 @@ pub(crate) const CODES: &[&Code] = &[
     &MIRROR_LOCKED,
     &MIRROR_FETCH_FAILED,
     &CHECKOUT_ORIGIN_UNREACHABLE,
+    &TEMPLATE_INVALID,
+    &TEMPLATE_AMBIGUOUS,
     &RECORD_UNREADABLE,
     &RECORD_CORRUPT,
     &RECORD_NEWER,
@@ -467,6 +474,8 @@ impl Failure for MxvFailure {
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
                 Error::OriginFetchFailed { .. } => &CHECKOUT_ORIGIN_UNREACHABLE,
+                Error::TemplateInvalid { .. } => &TEMPLATE_INVALID,
+                Error::TemplateAmbiguous { .. } => &TEMPLATE_AMBIGUOUS,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
                 Error::DockerComposeMissing { .. } => &DOCKER_COMPOSE_MISSING,
@@ -768,6 +777,13 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::MirrorFetchFailed { origin, .. } => hint(format!(
             "check that the machine is online and that `git ls-remote {origin}` works with your credentials, and run the command again"
         )),
+        Error::TemplateInvalid { path, .. } => hint(format!(
+            "fix {} as the README's section on templates describes, with a top-level [template] table that lists its origins, or move it out of the templates directory, and run the command again; `--manifest <FILE>` copies a file of your choice in place of a template",
+            shown(path)
+        )),
+        Error::TemplateAmbiguous { origin, .. } => hint(format!(
+            "list {origin} in the [template] table of one template only, or pass `--manifest <FILE>` to choose the file, and run the command again"
+        )),
         Error::OriginFetchFailed { checkout, .. } => hint(format!(
             "check that the machine is online and that `git -C {} fetch origin` works with your credentials, and run the command again; `--delete-unmerged` removes the workspace without the fetch, and deletes the commits that origin does not hold",
             shown(checkout)
@@ -834,6 +850,17 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::Unwritable { path, .. }
         | Error::Busy { path } => vec![Field::new("path", shown(path))],
         Error::MirrorBusy { mirror } => vec![Field::new("mirror", shown(mirror))],
+        Error::TemplateInvalid { path, message } => vec![
+            Field::new("path", shown(path)),
+            Field::new("message", message),
+        ],
+        Error::TemplateAmbiguous { origin, templates } => vec![
+            Field::new("origin", origin),
+            Field::new(
+                "templates",
+                FieldValue::list(templates.iter().map(|path| shown(path))),
+            ),
+        ],
         Error::OriginFetchFailed { checkout, message } => vec![
             Field::new("checkout", shown(checkout)),
             Field::new("message", message),

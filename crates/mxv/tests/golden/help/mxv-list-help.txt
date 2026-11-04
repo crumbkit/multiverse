@@ -46,8 +46,10 @@ Columns:
   problem     Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
 Columns that --long adds:
-  kind          How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.
-  repositories  The top-level directory of each repository that the workspace checks out.
+  kind           How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.
+  manifest       Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace. Null in a row whose record mxv cannot read.
+  manifest_path  The path of the manifest that the workspace's commands read, or null when they read none.
+  repositories   The top-level directory of each repository that the workspace checks out.
 
 Effects: read-only, closed-world.
 Problems: a value in the problem column marks a row with a problem, and the command then exits with 1.

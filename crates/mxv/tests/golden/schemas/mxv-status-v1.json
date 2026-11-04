@@ -74,6 +74,26 @@
         }
       ]
     },
+    "ManifestRow": {
+      "description": "Which manifest a workspace's commands read.",
+      "oneOf": [
+        {
+          "description": "The workspace manifest, `<workspace>/mxv.toml`, above the checkout.",
+          "type": "string",
+          "const": "workspace"
+        },
+        {
+          "description": "The checkout's own `mxv.toml`.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "Neither file, so the workspace is bare.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
     "ProcessRow": {
       "description": "One process or container of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
       "type": "object",
@@ -182,8 +202,19 @@
       "description": "What `mxv status` says above its rows: whether the manifest parsed.",
       "type": "object",
       "properties": {
+        "manifest": {
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, or `none` for a bare workspace.",
+          "$ref": "#/$defs/ManifestRow"
+        },
         "manifest_error": {
           "description": "The manifest's error when it does not parse, in which case the rows\ncome from the run records alone, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest_path": {
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none.",
           "type": [
             "string",
             "null"
@@ -191,6 +222,8 @@
         }
       },
       "required": [
+        "manifest",
+        "manifest_path",
         "manifest_error"
       ]
     }

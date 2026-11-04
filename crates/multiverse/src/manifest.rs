@@ -445,9 +445,24 @@ impl fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
-/// The manifest as TOML holds it, with the spans that errors cite.
+/// The top-level keys that mxv reads. [`Manifest::parse`] leaves any other
+/// top-level table to the tools that read it.
+const OWN_KEYS: &[&str] = &[
+    "version",
+    "ports",
+    "processes",
+    "containers",
+    "disposable",
+    "clone_on_new",
+    "secrets",
+    "actions",
+];
+
+/// The manifest as TOML holds it, with the spans that errors cite. It
+/// declares no `deny_unknown_fields`, because another tool's top-level
+/// table may share the file; [`check_top_level`] refuses every other
+/// unknown top-level key.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawManifest {
     /// The manifest's version.
     version: Option<Spanned<u64>>,
@@ -577,6 +592,42 @@ impl Errors<'_> {
     }
 }
 
+/// Checks that `text` is valid TOML and that each top-level key that mxv
+/// does not read holds a table or an array of tables, such as the `[app]`,
+/// `[service.web]` or `[[release]]` of another tool that shares the file,
+/// which mxv leaves alone. Any other unknown top-level key fails with
+/// [`ManifestProblem::UnknownKey`]. A table named like one of mxv's own,
+/// such as `[process.api]`, is another tool's, because phase declares its
+/// processes there.
+fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<(), ManifestError> {
+    let table = toml::de::DeTable::parse(text).map_err(|error| errors.of_toml(&error))?;
+    for (key, value) in table.get_ref() {
+        let name = key.get_ref().as_ref();
+        if OWN_KEYS.contains(&name) {
+            continue;
+        }
+        let tables = match value.get_ref() {
+            toml::de::DeValue::Table(_) => true,
+            toml::de::DeValue::Array(items) => {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|item| matches!(item.get_ref(), toml::de::DeValue::Table(_)))
+            }
+            _ => false,
+        };
+        if !tables {
+            return Err(errors.at(
+                Some(&key.span()),
+                ManifestProblem::UnknownKey {
+                    key: name.to_owned(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Returns the key of serde's message about an unknown field, such as
 /// ``unknown field `command`, expected one of ...``.
 fn unknown_field(message: &str) -> Option<String> {
@@ -623,7 +674,55 @@ impl Manifest {
     /// Returns a [`ManifestError`] when the file cannot be read, is larger
     /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
     pub fn read(checkout: &Path) -> Result<Option<Self>, ManifestError> {
-        let path = checkout.join(MANIFEST_FILE);
+        Self::read_file(&checkout.join(MANIFEST_FILE), checkout)
+    }
+
+    /// Returns the manifest at `path`, whose paths are relative to
+    /// `checkout`, or `None` when no file is at `path`. It reads the
+    /// workspace manifest above a checkout as [`Manifest::read`] reads the
+    /// checkout's own.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestError`] when the file cannot be read, is larger
+    /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
+    pub fn read_file(path: &Path, checkout: &Path) -> Result<Option<Self>, ManifestError> {
+        let Some(text) = Self::read_text(path)? else {
+            return Ok(None);
+        };
+        let manifest = Self::parse(&text, path)?;
+        manifest.check_cwds(checkout, path)?;
+        Ok(Some(manifest))
+    }
+
+    /// Returns the text of the manifest at `path`, after checking that it
+    /// parses, as [`Manifest::read_text`] does, for a file that the person
+    /// named, which must exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Manifest::read_text`], and a
+    /// [`ManifestProblem::Unreadable`] when no file is at `path`.
+    pub fn read_named(path: &Path) -> Result<String, ManifestError> {
+        Self::read_text(path)?.ok_or_else(|| ManifestError {
+            path: path.to_path_buf(),
+            line: None,
+            problem: ManifestProblem::Unreadable {
+                message: "no file is at this path".to_owned(),
+            },
+        })
+    }
+
+    /// Returns the text of the manifest at `path`, after checking that it
+    /// parses, or `None` when no file is at `path`. `mxv new` copies a
+    /// file it reads this way into a new workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestError`] when the file cannot be read, is larger
+    /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
+    pub fn read_text(path: &Path) -> Result<Option<String>, ManifestError> {
+        let path = path.to_path_buf();
         let unreadable = |error: io::Error| ManifestError {
             path: path.clone(),
             line: None,
@@ -649,9 +748,8 @@ impl Manifest {
                 },
             });
         }
-        let manifest = Self::parse(&text, &path)?;
-        manifest.check_cwds(checkout, &path)?;
-        Ok(Some(manifest))
+        Self::parse(&text, &path)?;
+        Ok(Some(text))
     }
 
     /// Checks that each process's `cwd` that exists in `checkout` stays
@@ -689,6 +787,7 @@ impl Manifest {
     /// problem it finds.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ManifestError> {
         let errors = Errors { path, text };
+        check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         if let Some(version) = &raw.version {
             match *version.get_ref() {

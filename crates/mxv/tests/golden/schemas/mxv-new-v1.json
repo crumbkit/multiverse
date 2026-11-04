@@ -90,6 +90,26 @@
         }
       ]
     },
+    "ManifestRow": {
+      "description": "Which manifest a workspace's commands read.",
+      "oneOf": [
+        {
+          "description": "The workspace manifest, `<workspace>/mxv.toml`, above the checkout.",
+          "type": "string",
+          "const": "workspace"
+        },
+        {
+          "description": "The checkout's own `mxv.toml`.",
+          "type": "string",
+          "const": "repository"
+        },
+        {
+          "description": "Neither file, so the workspace is bare.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
     "NewRow": {
       "description": "The workspace that `new` created, or would create on a dry run, and the\nignored directories that it cloned into the checkout.",
       "type": "object",
@@ -122,6 +142,24 @@
         "kind": {
           "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones.",
           "$ref": "#/$defs/KindRow"
+        },
+        "manifest": {
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, or `none` for a bare workspace.",
+          "$ref": "#/$defs/ManifestRow"
+        },
+        "manifest_from": {
+          "description": "The file that `new` copied into the workspace manifest: the\n`--manifest` file, or the template whose `[template]` table lists\nthe repository's origin, or null when it copied none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest_path": {
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
@@ -163,9 +201,11 @@
         "path",
         "root",
         "root_source",
+        "manifest",
         "ports",
         "cloned",
-        "clone_warning"
+        "clone_warning",
+        "manifest_from"
       ]
     },
     "RootSource": {

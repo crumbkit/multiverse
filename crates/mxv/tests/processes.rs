@@ -1213,3 +1213,36 @@ fn up_fails_with_foreign_listener_when_another_program_answers_on_the_listen_por
         [("server".to_owned(), "stopped".to_owned())]
     );
 }
+
+#[test]
+fn up_starts_the_processes_of_the_workspace_manifest_and_never_the_checkouts() {
+    let setup = Setup::new();
+    let file = setup.root().join("triage.toml");
+    write(
+        &file,
+        &format!("{}\n[app]\nname = \"triage\"\n", server_and_worker()),
+    );
+    let (exit, document) = setup.json(&[
+        "new",
+        "triage",
+        "--repo",
+        "app",
+        "--manifest",
+        file.to_str().unwrap(),
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let checkout = setup.root().join("workspaces/triage/app");
+    write(
+        &checkout.join("mxv.toml"),
+        "[processes.other]\nargv = [\"sleep\", \"30\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let names: Vec<&str> = document["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["server", "worker"]);
+}

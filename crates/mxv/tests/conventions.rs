@@ -64,10 +64,10 @@ use mxv::{
     PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE,
     PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT,
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES, UNBUILT,
-    UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY,
-    WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND,
-    WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES,
+    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME,
+    WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 use tempfile::TempDir;
 
@@ -450,6 +450,14 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         &MIRROR_FETCH_FAILED,
         "Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.",
+    ),
+    Unprovoked::new(
+        &TEMPLATE_INVALID,
+        "Only a malformed template in the config directory's templates provokes it, and the check's fixture has no templates; tests/workspaces.rs provokes it with a template that has no [template] table.",
+    ),
+    Unprovoked::new(
+        &TEMPLATE_AMBIGUOUS,
+        "Only two templates that list the repository's origin provoke it, and the check's fixture has no templates; tests/workspaces.rs provokes it with two such templates.",
     ),
     Unprovoked::new(
         &CHECKOUT_ORIGIN_UNREACHABLE,

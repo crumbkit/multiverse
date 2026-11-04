@@ -166,6 +166,12 @@ impl Environment {
         Ok(self.bases()?.data.join("mxv").join("mirrors"))
     }
 
+    /// Returns the directory of the templates of workspace manifests,
+    /// `$XDG_CONFIG_HOME/mxv/templates`.
+    pub(crate) fn templates(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.bases()?.config.join("mxv").join("templates"))
+    }
+
     /// Returns the path of the config file, `$XDG_CONFIG_HOME/mxv/config.toml`.
     pub(crate) fn config_file(&self) -> Result<PathBuf, MxvFailure> {
         Ok(self.bases()?.config.join("mxv").join("config.toml"))

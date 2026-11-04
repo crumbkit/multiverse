@@ -150,22 +150,24 @@ fn checkout(workspace: &Workspace) -> &Path {
         .map_or(workspace.path.as_path(), |checkout| checkout.path.as_path())
 }
 
-/// Returns the workspace's manifest, or `None` when its checkout has none.
+/// Returns the one manifest that the workspace reads, the workspace
+/// manifest or else the checkout's `mxv.toml`, or `None` when it has
+/// neither.
 fn manifest(workspace: &Workspace) -> Result<Option<Manifest>, RunFailure> {
-    Manifest::read(checkout(workspace)).map_err(RunFailure::Manifest)
+    workspace.manifest().map_err(RunFailure::Manifest)
 }
 
-/// Returns the workspace's manifest, or `None` when its checkout has none
-/// or it does not parse, for `down` and `status`, which then work from the
-/// run records so a broken manifest never keeps processes running.
+/// Returns the workspace's manifest, or `None` when it has none or it does
+/// not parse, for `down` and `status`, which then work from the run records
+/// so a broken manifest never keeps processes running.
 fn lenient_manifest(workspace: &Workspace) -> Option<Manifest> {
-    Manifest::read(checkout(workspace)).ok().flatten()
+    workspace.manifest().ok().flatten()
 }
 
 /// Returns the workspace's manifest as [`lenient_manifest`] does, and the
 /// manifest's error as text when it does not parse.
 fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<String>) {
-    match Manifest::read(checkout(workspace)) {
+    match workspace.manifest() {
         Ok(manifest) => (manifest, None),
         Err(error) => (None, Some(error.to_string())),
     }
@@ -176,6 +178,7 @@ fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<String>
 fn required_manifest(workspace: &Workspace) -> Result<Manifest, RunFailure> {
     manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {
         checkout: checkout(workspace).to_path_buf(),
+        workspace: workspace.manifest_file(),
     })
 }
 
@@ -393,7 +396,7 @@ pub(crate) fn status(
         .status(&context.workspace, manifest.as_ref())
         .map_err(MxvFailure::from)?;
     let rows = statuses.iter().map(ProcessRow::from).collect();
-    Ok(Listing::from_all(rows, None).summary(StatusSummary::new(error)))
+    Ok(Listing::from_all(rows, None).summary(StatusSummary::new(&context.workspace, error)))
 }
 
 /// Prints the last lines of the log of the process that `args` names, and

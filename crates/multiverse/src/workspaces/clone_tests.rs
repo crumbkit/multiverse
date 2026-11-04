@@ -695,3 +695,92 @@ fn a_held_mirror_lock_is_announced_once_before_waiting() {
     assert!(matches!(error, Error::MirrorBusy { .. }), "{error:?}");
     assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
 }
+
+fn created_with_manifest(setup: &Setup, text: &str, manifest: &str) -> Workspace {
+    match setup
+        .workspaces
+        .create_with_manifest(
+            &setup.root,
+            &name(text),
+            &setup.fixture.clone,
+            Mode::Change,
+            Some(manifest),
+        )
+        .unwrap()
+    {
+        NewOutcome::Created(workspace) => workspace,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_workspace_created_with_a_manifest_holds_it_above_the_checkout() {
+    let setup = setup();
+    let workspace = created_with_manifest(&setup, "reading-list", "ports = [\"web\"]\n");
+    assert_eq!(workspace.manifest_file(), workspace.path.join("mxv.toml"));
+    assert_eq!(
+        fs::read_to_string(workspace.manifest_file()).unwrap(),
+        "ports = [\"web\"]\n"
+    );
+    assert_eq!(workspace.manifest().unwrap().unwrap().ports, ["web"]);
+}
+
+#[test]
+fn a_failed_creation_deletes_the_manifest_it_wrote_with_the_rest() {
+    let setup = setup();
+    fs::remove_dir_all(&setup.fixture.origin).unwrap();
+    let error = setup
+        .workspaces
+        .create_with_manifest(
+            &setup.root,
+            &name("reading-list"),
+            &setup.fixture.clone,
+            Mode::Change,
+            Some("ports = [\"web\"]\n"),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::MirrorFetchFailed { .. }),
+        "{error:?}"
+    );
+    assert!(!setup.root.join("reading-list").exists());
+}
+
+#[test]
+fn removing_a_workspace_deletes_its_manifest_and_its_directory() {
+    let setup = setup();
+    let workspace = created_with_manifest(&setup, "reading-list", "ports = [\"web\"]\n");
+    let removal = removed(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.directory, Fate::Removed);
+    assert!(!workspace.path.exists());
+}
+
+#[test]
+fn a_path_that_the_workspace_manifest_makes_disposable_is_deleted_without_asking() {
+    let setup = setup();
+    write(
+        setup.fixture.clone.join(".git/info/exclude"),
+        "data/\ncache/\nmxv.toml\n",
+    );
+    let workspace = created_with_manifest(&setup, "reading-list", "disposable = [\"data/\"]\n");
+    let checkout = &workspace.checkouts[0].path;
+    write(checkout.join("mxv.toml"), "disposable = [\"cache/\"]\n");
+    for dir in ["data", "cache"] {
+        fs::create_dir_all(checkout.join(dir)).unwrap();
+        write(checkout.join(dir).join("file"), "");
+    }
+    let RemovalPlan::IgnoredFiles { paths, .. } = plan(&setup, "reading-list", NOTHING) else {
+        panic!("the checkout's own glob is not used beside the workspace manifest");
+    };
+    assert!(
+        paths.iter().any(|path| path.contains("cache/")),
+        "{paths:?}"
+    );
+    fs::remove_dir_all(checkout.join("cache")).unwrap();
+    fs::remove_file(checkout.join("mxv.toml")).unwrap();
+    let RemovalPlan::Ready(removal) = plan(&setup, "reading-list", NOTHING) else {
+        panic!("the removal is refused");
+    };
+    assert!(removal.manifest.is_empty(), "{removal:?}");
+    assert_eq!(removal.disposable, ["app: data/"]);
+}

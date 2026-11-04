@@ -47,6 +47,7 @@ The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it i
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
 - `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
 - `--no-clone`: Clone none of the repository's ignored directories, such as node\_modules/, into the new checkout
+- `--manifest <FILE>`: Copy FILE into the new workspace as its workspace manifest, \<ROOT\>/\<NAME\>/mxv.toml, in place of a template
 - `--dry-run`: Report what the command would change, and change nothing
 
 ### Examples
@@ -67,10 +68,13 @@ mxv new triage --repo app --dry-run
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `cloned`: Each ignored directory of the repository that `new` cloned into the checkout, or would clone on a dry run, with the checkout's name in front, such as `app: web/node_modules/`. A clone shares its disk with the repository's copy until a file in either changes.
 - `clone_warning`: Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace.
+- `manifest_from`: The file that `new` copied into the workspace manifest: the `--manifest` file, or the template whose `[template]` table lists the repository's origin, or null when it copied none.
 
 ### Columns that `--long` adds
 
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: additive, not idempotent, open-world.
@@ -106,6 +110,8 @@ mxv list
 ### Columns that `--long` adds
 
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace. Null in a row whose record mxv cannot read.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: read-only, closed-world.
@@ -141,6 +147,8 @@ mxv show reading-list
 ### Columns that `--long` adds
 
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 - `disposable_paths`: Each disposable path with its checkout and the bytes it takes.
 - `kept_paths`: Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.

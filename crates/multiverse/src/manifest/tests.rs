@@ -65,13 +65,51 @@ fn an_empty_manifest_declares_no_ports_and_no_processes() {
 
 #[test]
 fn an_unknown_top_level_key_fails_and_names_the_key_and_its_line() {
-    let (line, problem) = problem("ports = []\nprocess = {}\n");
+    let (line, problem) = problem("ports = []\nprocess = 1\n");
     assert_eq!(line, Some(2));
     assert_eq!(
         problem,
         ManifestProblem::UnknownKey {
             key: "process".to_owned()
         }
+    );
+}
+
+#[test]
+fn a_top_level_table_of_another_tool_is_accepted_and_left_alone() {
+    let manifest = parse(
+        "ports = [\"api\"]\n\n[app]\nname = \"reading-list\"\n\n[service.web]\nimage = \"x\"\n\n[needs.db]\nkind = \"postgres\"\n\n[release]\nchannel = \"beta\"\n\n[[steps]]\nrun = \"make\"\n",
+    )
+    .unwrap();
+    assert_eq!(manifest.ports, ["api"]);
+    assert!(manifest.processes.is_empty());
+}
+
+#[test]
+fn an_unknown_top_level_key_that_is_not_a_table_fails_and_names_the_key_and_its_line() {
+    let (line, problem) = problem("ports = []\nport = [\"api\"]\n");
+    assert_eq!(line, Some(2));
+    assert_eq!(
+        problem,
+        ManifestProblem::UnknownKey {
+            key: "port".to_owned()
+        }
+    );
+}
+
+#[test]
+fn a_table_named_like_one_of_mxvs_own_belongs_to_another_tool() {
+    let manifest = parse("[process.api]\nargv = [\"true\"]\n").unwrap();
+    assert!(manifest.processes.is_empty());
+}
+
+#[test]
+fn a_file_that_is_not_toml_fails_even_inside_another_tools_table() {
+    let (line, problem) = problem("ports = []\n[app]\nname = \n");
+    assert_eq!(line, Some(3));
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
     );
 }
 

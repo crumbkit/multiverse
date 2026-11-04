@@ -281,6 +281,10 @@ pub enum DisposableSource {
     BuiltIn,
     /// A glob of the person's config file.
     Config,
+    /// A glob of the workspace manifest, `<workspace>/mxv.toml`, which the
+    /// person wrote for this workspace, so `mxv remove` deletes such a path
+    /// without asking, as it does a glob of the config file.
+    Workspace,
     /// A glob of the repository's own `mxv.toml` and nothing else. A
     /// repository is shared, so `mxv remove` deletes such a path only after
     /// the person confirms it at the prompt or passes `--force`.

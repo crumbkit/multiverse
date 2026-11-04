@@ -12,7 +12,12 @@ one backend. With `Workspaces::with_mirrors`, each checkout is a
 `git clone --shared` of a bare mirror of the origin, with a `.git` of its
 own. A workspace that an earlier version made holds git worktrees of the
 person's repository, and the library still lists and removes it. `Manifest` parses a repository's
-`mxv.toml`, and `Runs` starts, stops and reports the processes it declares,
+`mxv.toml` or a workspace manifest. `Workspace::manifest` reads the one
+manifest that a workspace uses, the workspace manifest at
+`<workspace>/mxv.toml` or else the checkout's `mxv.toml`, and
+`Workspace::manifest_inputs` returns both paths as separate inputs for a
+tool that reads them both. `find_template` picks the template of
+workspace manifests that lists a repository's origin. `Runs` starts, stops and reports the processes it declares,
 with a host port for each named port that the workspace's record keeps. The
 process supervision uses Unix process groups and signals, so it runs on
 Linux and macOS. The library reads no environment

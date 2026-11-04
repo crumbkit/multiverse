@@ -51,3 +51,23 @@ realizations = [
     "crates/multiverse/src/record.rs",
     "crates/mxv/src/environment.rs",
 ]
+
+[[decision]]
+id = "workspace-manifest"
+requirement = """
+- `mxv new` sets up the workspace manifest at `<root>/<name>/mxv.toml`, above the checkout, from the first source that applies: the `--manifest` file, or else the one template in `$XDG_CONFIG_HOME/mxv/templates/*.toml` whose `[template]` table lists the repository's origin, compared by the key of its mirror, or else nothing. mxv removes the `[template]` table when it copies a template. A malformed template fails with `mxv::template::invalid`, and an origin that more than one template lists fails with `mxv::template::ambiguous`.
+- Every command reads exactly one manifest: the workspace manifest when it exists, or else the checkout's `mxv.toml`, or else none. The two files are never merged, and an invalid workspace manifest never falls back to the checkout's file.
+- `list --long`, `show --long` and `status` name the manifest used, as `workspace`, `repository` or `none`, with its path.
+- mxv checks that the whole file is valid TOML, reads only its own top-level keys, and leaves any other top-level table or array of tables untouched. An unknown top-level key that is not a table, and an unknown key inside one of mxv's own tables, still fail.
+- The library returns both paths as separate inputs, through `Workspace::manifest_inputs`, for a tool that reads both even when the workspace manifest wins.
+- The workspace manifest's `disposable` globs count as the person's own, as the config file's do, and keep the manifest's rule that each names a directory.
+"""
+reason = "Luke and phase agreed the rule, and crates/phase/docs/design.md describes the same lookup in \"Which manifest is read\". A workspace manifest lets a person run an app that a repository declares differently, or not at all, without changing the shared repository. Reading one file keeps it clear which keys apply, and passing other tables through lets phase own the schema of its own tables in the same file."
+realizations = [
+    "crates/multiverse/src/lookup.rs",
+    "crates/multiverse/src/template.rs",
+    "crates/multiverse/src/manifest.rs",
+    "crates/multiverse/src/workspaces.rs",
+    "crates/mxv/src/verbs.rs",
+    "crates/mxv/src/rows.rs",
+]

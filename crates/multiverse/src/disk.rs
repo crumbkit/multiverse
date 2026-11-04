@@ -366,7 +366,7 @@ impl<B: Backend> Workspaces<B> {
             if Entry::at(&checkout.path)? != Entry::Present || !checkout.path.is_dir() {
                 continue;
             }
-            let (set, warning) = self.disposable_set(checkout);
+            let (set, warning) = self.disposable_set(workspace, checkout);
             warnings.extend(warning);
             let changes = self.backend.changes(&checkout.path)?;
             for path in changes.ignored {

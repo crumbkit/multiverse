@@ -24,6 +24,11 @@ by default. That directory holds:
   `origin/master`, recorded as a full reference such as
   `refs/remotes/origin/main`.
 
+- `mxv.toml`, the workspace manifest, when `mxv new` copied one from
+  `--manifest` or from a template, as
+  [The workspace manifest](#the-workspace-manifest) describes. It also sits
+  above the checkout.
+
 A later workspace with several repositories holds one such directory for
 each repository, beside the one `AGENTS.md`.
 
@@ -162,7 +167,9 @@ exits with 1.
 
 ## Running an app
 
-A repository declares its app in `mxv.toml` at its root. `mxv up` starts
+A repository declares its app in `mxv.toml` at its root, or a workspace
+declares it in its own workspace manifest, as
+[The workspace manifest](#the-workspace-manifest) describes. `mxv up` starts
 the processes and containers it declares in each workspace of that
 repository, in the background, and returns once each is ready. No mxv
 process stays running.
@@ -227,6 +234,19 @@ it has run for half a second; when it exits sooner, `up` fails with
 The sections `secrets` and `actions` are reserved for later versions and
 fail with `mxv::manifest::reserved`. A manifest larger than 64 KiB fails
 with `mxv::manifest::invalid`.
+
+Another tool may keep its own tables in the same file. mxv checks that the
+whole file is valid TOML, reads only its own top-level keys (`version`,
+`ports`, `disposable`, `clone_on_new`, `processes` and `containers`), and
+leaves every other top-level table alone, such as `[app]`,
+`[service.web]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
+top-level key that is not a table, such as `port = ["api"]`, fails with
+`mxv::manifest::unknown_key`. A table named like one of mxv's own, such as
+`[process.api]`, belongs to another tool and is left alone, so a
+misspelling of `[processes.api]` declares no process. Inside mxv's own
+tables, such as
+`[processes.api]`, an unknown key still fails with
+`mxv::manifest::unknown_key`.
 
 ### Containers
 
@@ -477,6 +497,89 @@ holds the lock, so it uses the ports that a command before it stored. Allocating
 same port. A command that finds a lock held tries again for 5 seconds,
 then fails with `mxv::workspace::busy`. The operating system releases a
 lock when its command ends, so a crashed mxv leaves no lock behind.
+
+## The workspace manifest
+
+A workspace can hold a manifest of its own, the workspace manifest, at
+`<root>/<name>/mxv.toml`, beside `AGENTS.md` and above the checkout. It has
+the same schema as a repository's `mxv.toml`, and its paths, such as a
+process's `cwd` or a `disposable` glob, are relative to the checkout. It
+lets a person run an app that the repository declares no manifest for, or
+declares differently, without changing the repository.
+
+`mxv new` writes the workspace manifest from the first source that applies:
+
+1. `--manifest <FILE>`, which it copies in. The file must parse as a
+   manifest, or `new` fails with the manifest's code, such as
+   `mxv::manifest::invalid`, and creates nothing.
+2. The template in `$XDG_CONFIG_HOME/mxv/templates/*.toml`, which is
+   `~/.config/mxv/templates` by default, whose `[template]` table lists the
+   repository's origin.
+3. Nothing, and the workspace reads the repository's `mxv.toml`, if any.
+
+The result's `manifest_from` names the file that `new` copied, and
+`manifest` says which manifest the workspace reads. A dry run reports the
+same and writes nothing.
+
+Every command afterwards reads exactly one manifest, from the first file
+that exists:
+
+1. the workspace manifest;
+2. otherwise, the `mxv.toml` at the root of the checkout;
+3. otherwise, none, and the workspace is bare.
+
+mxv never merges the two files. A workspace manifest that does not parse
+fails as any manifest does, and mxv does not fall back to the checkout's
+file. `list --long`, `show --long` and `status` report the manifest that
+the workspace reads in `manifest`, as `workspace`, `repository` or `none`,
+and its path in `manifest_path`. `status` also prints it above the
+processes.
+
+The globs in the workspace manifest's `disposable` count as the person's
+own, as the config file's do, because the person wrote the file for this
+workspace. `remove` and `clean` delete the paths they match without
+`--force`, and `show` gives them the source `workspace`. They follow the
+manifest's rules for globs, so each names a directory, such as `data/`.
+The globs of the repository's `mxv.toml` keep the rule that
+[Disposable paths](#disposable-paths) describes, but only while the
+workspace has no workspace manifest, because the checkout's file is not
+read then. `mxv remove` deletes the workspace manifest with the workspace.
+
+### Templates
+
+A template is a manifest with one more top-level table, `[template]`, that
+lists the origins it is for. A key after a table header belongs to that
+table, so the manifest's own top-level keys come before every table, and
+`[template]` usually comes last:
+
+```toml
+ports = ["web"]
+
+[processes.web]
+argv = ["npm", "run", "dev"]
+ports = { PORT = "web" }
+
+[template]
+origins = ["github.com/acme/app", "git@gitlab.example.com:team/app.git"]
+```
+
+An origin is a URL that git accepts, such as `https://github.com/acme/app`
+or `git@github.com:acme/app.git`, or a host and path without a scheme, such
+as `github.com/acme/app`. mxv compares origins by the key of their mirror,
+as [Clones and mirrors](#clones-and-mirrors) describes, so the `https` and
+`ssh` forms of one repository match, and the case of the path counts.
+`[template]` holds only `origins`, and mxv removes the table, from its
+header to the next table header, when it copies the template, so the
+workspace manifest holds the rest of the file as it was written.
+
+`mxv new` reads every `*.toml` file in the directory, in name order, and
+ignores other files. A template that is not valid TOML, has no valid
+`[template]` table, writes the table inline as `template = { ... }`, or is
+not a valid manifest without it fails with `mxv::template::invalid`, which
+names the file, whether or not it lists the origin. When more than one
+template lists the origin, `new` fails with `mxv::template::ambiguous`,
+which names each of them, and creates nothing. `--manifest` chooses a file
+in either case.
 
 ## Removing a workspace
 
