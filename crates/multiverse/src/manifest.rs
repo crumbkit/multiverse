@@ -808,7 +808,7 @@ impl Manifest {
             ports,
             processes,
             containers,
-            disposable: globs(&raw.disposable, PathGlob::parse, "disposable")?,
+            disposable: globs(&raw.disposable, PathGlob::parse_directory, "disposable")?,
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
         };
         if let Some(name) = manifest.cycle() {

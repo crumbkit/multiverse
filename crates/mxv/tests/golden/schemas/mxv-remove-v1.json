@@ -554,6 +554,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "warnings": {
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -566,7 +573,8 @@
         "disposable",
         "discarded",
         "containers",
-        "volumes"
+        "volumes",
+        "warnings"
       ]
     }
   }

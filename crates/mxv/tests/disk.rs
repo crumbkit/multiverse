@@ -12,7 +12,6 @@ mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 use snapbox::cmd::Command;
@@ -106,17 +105,6 @@ impl Setup {
     fn checkout(&self, name: &str) -> PathBuf {
         self.root().join("workspaces").join(name).join("app")
     }
-
-    /// Sets the modification time of every file of the workspace `name`
-    /// and of its checkout's git directory `days` days back, as if nobody
-    /// had touched it since.
-    fn backdate(&self, name: &str, days: u64) {
-        let time = SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60);
-        backdate(&self.root().join("workspaces").join(name), time);
-        let link = fs::read_to_string(self.checkout(name).join(".git")).unwrap();
-        let git_dir = link.trim().strip_prefix("gitdir: ").unwrap();
-        backdate(Path::new(git_dir), time);
-    }
 }
 
 /// Writes `text` to the file at `path`, as a person or a build would.
@@ -132,22 +120,6 @@ fn write_text(path: &Path, text: &str) {
 /// Writes a file of `bytes` bytes, as a build would.
 fn write_bytes(path: &Path, bytes: usize) {
     write_text(path, &"x".repeat(bytes));
-}
-
-/// Sets the modification time of every file below `dir` to `time`.
-fn backdate(dir: &Path, time: SystemTime) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        let metadata = fs::symlink_metadata(&path).unwrap();
-        if metadata.is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            backdate(&path, time);
-        } else {
-            fs::File::open(&path).unwrap().set_modified(time).unwrap();
-        }
-    }
 }
 
 /// Returns the bytes in the JSON value `value`, which a size prints as.
@@ -174,7 +146,10 @@ fn list_measures_sizes_only_with_sizes_and_show_always_measures_them() {
     let (exit, shown) = setup.json(&["show", "reading-list"]);
     assert_eq!(exit, 0, "{shown}");
     assert_eq!(bytes(&shown["data"][0]["disposable"]), disposable);
-    assert_eq!(shown["data"][0]["disposable_paths"][0], "app: target/");
+    let path = &shown["data"][0]["disposable_paths"][0];
+    assert_eq!(path["checkout"], "app", "{shown}");
+    assert_eq!(path["path"], "target/", "{shown}");
+    assert_eq!(bytes(&path["bytes"]), disposable, "{shown}");
 }
 
 #[test]
@@ -231,8 +206,7 @@ fn clean_deletes_the_disposable_directories_of_an_idle_workspace_and_keeps_every
     write_bytes(&checkout.join("web/node_modules/left-pad/index.js"), 4096);
     write_text(&checkout.join(".env"), "TOKEN=x");
     write_text(&checkout.join("notes.md"), "notes");
-    setup.backdate("reading-list", 8);
-    let (exit, document) = setup.json(&["clean", "reading-list", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "reading-list", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     let row = &document["data"][0];
     assert_eq!(row["state"], "cleaned", "{document}");
@@ -269,8 +243,7 @@ fn the_config_file_sets_the_idle_age_and_idle_overrides_it() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
-    setup.backdate("reading-list", 3);
-    setup.config("clean_idle = \"2d\"\n");
+    setup.config("clean_idle = \"0s\"\n");
     let (_, document) = setup.json(&["clean", "--all", "--idle", "4d", "--dry-run"]);
     assert_eq!(document["data"][0]["state"], "kept", "{document}");
     let (_, document) = setup.json(&["clean", "--all", "--dry-run"]);
@@ -302,15 +275,119 @@ fn clean_without_yes_and_without_a_terminal_asks_for_yes() {
 }
 
 #[test]
-fn clean_of_a_name_that_no_workspace_has_fails_with_not_found_and_deletes_nothing() {
+fn clean_of_a_name_that_no_workspace_has_fails_for_that_name_and_cleans_the_others() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
     let (exit, document) =
-        setup.json(&["clean", "reading-list", "missing", "--idle", "0s", "--yes"]);
+        setup.json(&["clean", "missing", "reading-list", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::workspace::not_found");
-    assert!(checkout.join("target").exists());
+    assert_eq!(document["data"][0]["name"], "reading-list", "{document}");
+    assert_eq!(document["data"][0]["state"], "cleaned", "{document}");
+    let failure = &document["failures"][0];
+    assert_eq!(failure["code"], "mxv::workspace::not_found", "{document}");
+    assert_eq!(failure["key"], "missing", "{document}");
+    assert!(!checkout.join("target").exists());
+}
+
+/// Breaks the checkout of the workspace `name`, so git no longer knows it.
+fn break_checkout(setup: &Setup, name: &str) {
+    fs::remove_file(setup.checkout(name).join(".git")).unwrap();
+}
+
+#[test]
+fn clean_all_goes_on_past_a_workspace_that_it_cannot_measure() {
+    let setup = Setup::new();
+    setup.created("broken");
+    break_checkout(&setup, "broken");
+    let checkout = setup.created("reading-list");
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["data"][0]["name"], "reading-list", "{document}");
+    assert_eq!(document["data"][0]["state"], "cleaned", "{document}");
+    assert_eq!(document["failures"][0]["key"], "broken", "{document}");
+    assert!(!checkout.join("target").exists());
+}
+
+#[test]
+fn list_with_sizes_goes_on_past_a_workspace_that_it_cannot_measure() {
+    let setup = Setup::new();
+    setup.created("broken");
+    break_checkout(&setup, "broken");
+    let checkout = setup.created("reading-list");
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let (_, listed) = setup.json(&["list", "--sizes"]);
+    let row = |name: &str| {
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .cloned()
+            .unwrap()
+    };
+    let broken = row("broken");
+    assert!(
+        broken["problem"].as_str().unwrap().contains("measure"),
+        "{listed}"
+    );
+    assert!(
+        bytes(&row("reading-list")["disposable"]) >= 1024,
+        "{listed}"
+    );
+}
+
+#[test]
+fn a_manifest_that_declares_every_path_disposable_is_refused_and_nothing_else_is_deleted() {
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_text(&checkout.join("mxv.toml"), "disposable = [\"*\"]\n");
+    git(&checkout, &["add", "mxv.toml"]);
+    git(
+        &checkout,
+        &["commit", "--quiet", "-m", "Declare everything disposable"],
+    );
+    write_text(&checkout.join(".env"), "TOKEN=x");
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let (_, shown) = setup.json(&["show", "reading-list"]);
+    let warning = shown["data"][0]["warnings"].as_str().unwrap();
+    assert!(warning.contains("mxv.toml"), "{shown}");
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        document["data"][0]["paths"][0], "app: target/",
+        "{document}"
+    );
+    assert!(document["data"][0]["warnings"].is_string(), "{document}");
+    assert!(checkout.join(".env").exists());
+    assert!(checkout.join("mxv.toml").exists());
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::workspace::ignored_files",
+        "{document}"
+    );
+    assert!(document["fields"]["warnings"][0].is_string(), "{document}");
+}
+
+#[test]
+fn clean_keeps_a_disposable_directory_that_holds_a_nested_repository() {
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    git(&checkout, &["init", "--quiet", "node_modules/fork"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = &document["data"][0];
+    assert_eq!(row["paths"][0], "app: target/", "{document}");
+    let skipped = row["skipped"][0].as_str().unwrap();
+    assert!(skipped.contains("node_modules/fork/.git"), "{document}");
+    assert!(
+        row["reason"].as_str().unwrap().contains("kept"),
+        "{document}"
+    );
+    assert!(checkout.join("node_modules/fork/.git").exists());
 }
 
 #[test]
@@ -323,37 +400,35 @@ fn clean_needs_names_all_or_over_limit() {
 #[test]
 fn over_limit_cleans_the_oldest_idle_workspaces_until_the_total_is_under_the_limit() {
     let setup = Setup::new();
-    for (name, days) in [("older", 30), ("newer", 10), ("busy", 1)] {
+    for name in ["older", "newer", "newest"] {
         let checkout = setup.created(name);
         write_bytes(&checkout.join("target/debug/app"), 100 * 1024);
-        setup.backdate(name, days);
     }
-    setup.config("max_disposable = \"250KiB\"\n");
+    setup.config("max_disposable = \"250KiB\"\nclean_idle = \"0s\"\n");
     let (exit, document) = setup.json(&["clean", "--over-limit", "--yes"]);
     assert_eq!(exit, 0, "{document}");
-    let state = |name: &str| {
+    let row = |name: &str| {
         document["data"]
             .as_array()
             .unwrap()
             .iter()
             .find(|row| row["name"] == name)
-            .map(|row| row["state"].clone())
+            .cloned()
             .unwrap()
     };
-    assert_eq!(state("older"), "cleaned", "{document}");
-    assert_eq!(state("newer"), "kept", "{document}");
-    assert_eq!(state("busy"), "kept", "{document}");
+    assert_eq!(row("older")["state"], "cleaned", "{document}");
+    assert_eq!(row("newer")["state"], "kept", "{document}");
+    let reason = row("newer")["reason"].as_str().unwrap().to_owned();
+    assert!(reason.contains("unchanged longer"), "{reason}");
     assert!(!setup.checkout("older").join("target").exists());
     assert!(setup.checkout("newer").join("target").exists());
     let (_, document) = setup.json(&["clean", "--over-limit", "--yes"]);
-    assert!(
-        document["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|row| row["state"] == "kept"),
-        "{document}"
-    );
+    let rows = document["data"].as_array().unwrap();
+    assert!(rows.iter().all(|row| row["state"] == "kept"), "{document}");
+    let reason = rows.iter().find(|row| row["name"] == "newer").unwrap()["reason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.contains("within the limit"), "{reason}");
 }
 
 #[test]
@@ -433,4 +508,27 @@ fn a_dry_run_of_new_names_the_directories_it_would_clone() {
     let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app", "--dry-run"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"]["cloned"][0], "app: node_modules/");
+}
+
+#[test]
+fn a_path_that_cannot_be_deleted_in_full_fails_its_workspace_and_names_the_entry() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_bytes(&checkout.join("target/locked/app"), 1024);
+    write_bytes(&checkout.join("web/node_modules/left-pad/index.js"), 1024);
+    let locked = checkout.join("target/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(exit, 1, "{document}");
+    let failure = &document["failures"][0];
+    assert_eq!(failure["code"], "mxv::file::unwritable", "{document}");
+    let path = failure["fields"]["path"].as_str().unwrap();
+    assert!(path.ends_with("target/locked/app"), "{document}");
+    assert_eq!(
+        failure["fields"]["deleted"][0], "app: web/node_modules/",
+        "{document}"
+    );
+    assert!(!checkout.join("web/node_modules").exists());
 }

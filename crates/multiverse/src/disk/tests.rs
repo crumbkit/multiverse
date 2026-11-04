@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use tempfile::TempDir;
 
@@ -11,7 +11,9 @@ use crate::store::Store;
 use crate::testing::{Fixture, fixture, git, write};
 use crate::workspaces::{Mode, NewOutcome, Workspaces};
 
-use super::DiskUsage;
+use crate::error::Error;
+
+use super::{Cleaned, DiskUsage, DisposablePath};
 
 /// A fixture repository that ignores `.env`, `target/` and
 /// `node_modules/`, and one workspace of it.
@@ -29,6 +31,13 @@ impl Setup {
 
     fn usage(&self) -> DiskUsage {
         self.workspaces.disk_usage(&self.workspace).unwrap()
+    }
+
+    /// Cleans `planned` from the workspace, which is idle.
+    fn clean(&self, planned: &[DisposablePath]) -> Cleaned {
+        self.workspaces
+            .clean(&self.workspace, planned, |_| Ok::<_, Error>(None))
+            .unwrap()
     }
 }
 
@@ -66,32 +75,6 @@ fn write_bytes(path: &Path, bytes: usize) {
     write(path, text);
 }
 
-/// Sets the modification time of every file below `dir`, and of `dir`
-/// itself, to `time`, without following symbolic links.
-fn backdate(dir: &Path, time: SystemTime) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        let metadata = fs::symlink_metadata(&path).unwrap();
-        if metadata.is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            backdate(&path, time);
-        } else {
-            fs::File::open(&path).unwrap().set_modified(time).unwrap();
-        }
-    }
-}
-
-/// Backdates the workspace's checkout and the repository's git directory,
-/// which holds the checkout's `HEAD`, index and reflog, by `days` days.
-fn backdate_all(setup: &Setup, days: u64) -> SystemTime {
-    let time = SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60);
-    backdate(&setup.workspace.path, time);
-    backdate(&setup.fixture.clone.join(".git"), time);
-    time
-}
-
 #[test]
 fn the_disposable_size_counts_the_bytes_of_each_disposable_directory() {
     let setup = setup();
@@ -104,7 +87,9 @@ fn the_disposable_size_counts_the_bytes_of_each_disposable_directory() {
     write_bytes(&checkout.join("notes.md"), 16 * 1024);
     let usage = setup.usage();
     assert!(usage.disposable_bytes >= 96 * 1024, "{usage:?}");
-    assert!(usage.disposable_bytes < 112 * 1024, "{usage:?}");
+    // Each of the four directories takes a block of its own on most file
+    // systems.
+    assert!(usage.disposable_bytes <= 128 * 1024, "{usage:?}");
     assert!(
         usage.bytes >= usage.disposable_bytes + 16 * 1024,
         "{usage:?}"
@@ -155,34 +140,66 @@ fn a_workspace_whose_directory_is_gone_uses_no_bytes() {
     assert!(usage.disposable.is_empty());
 }
 
+// The file system stamps times from a coarse clock, which can lag
+// `SystemTime::now()` on Linux, so these tests compare one measurement with
+// another, with a git command or more between them.
+
+/// Returns when the workspace of `setup` last changed.
+fn modified(setup: &Setup) -> SystemTime {
+    setup.usage().modified.unwrap()
+}
+
 #[test]
-fn the_last_modification_is_the_newest_file_outside_the_disposable_directories() {
+fn the_last_modification_is_the_newest_change_outside_the_disposable_directories() {
     let setup = setup();
     let checkout = setup.checkout();
     write(checkout.join("notes.md"), "notes");
     write_bytes(&checkout.join("target/debug/app"), 1024);
-    let old = backdate_all(&setup, 10);
+    let first = modified(&setup);
     write(checkout.join("target/debug/app"), "rebuilt");
-    let modified = setup.usage().modified.unwrap();
-    assert!(
-        modified < old + Duration::from_secs(5),
-        "a build inside target/ counted as a change: {modified:?}"
+    assert_eq!(
+        modified(&setup),
+        first,
+        "a build inside target/ counted as a change"
     );
     write(checkout.join("notes.md"), "edited");
-    let modified = setup.usage().modified.unwrap();
-    assert!(modified > old + Duration::from_secs(60), "{modified:?}");
+    assert!(modified(&setup) > first);
+}
+
+#[test]
+fn a_deleted_file_counts_as_a_change_of_the_checkout() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    fs::create_dir_all(checkout.join("docs")).unwrap();
+    write(checkout.join("docs/old.md"), "old");
+    let first = modified(&setup);
+    fs::remove_file(checkout.join("docs/old.md")).unwrap();
+    assert!(modified(&setup) > first);
+}
+
+#[test]
+fn a_restored_modification_time_still_counts_as_a_change() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write(checkout.join("notes.md"), "notes");
+    let first = modified(&setup);
+    let file = fs::File::options()
+        .append(true)
+        .open(checkout.join("notes.md"))
+        .unwrap();
+    file.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+    assert!(modified(&setup) > first);
 }
 
 #[test]
 fn a_commit_counts_as_a_modification_of_the_checkout() {
     let setup = setup();
-    let old = backdate_all(&setup, 10);
-    assert!(setup.usage().modified.unwrap() < old + Duration::from_secs(5));
+    let first = modified(&setup);
     git(
         &setup.checkout(),
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
     );
-    assert!(setup.usage().modified.unwrap() > old + Duration::from_secs(60));
+    assert!(modified(&setup) > first);
 }
 
 #[test]
@@ -194,10 +211,7 @@ fn cleaning_deletes_the_disposable_directories_and_nothing_else() {
     write(checkout.join(".env"), "TOKEN=x");
     write(checkout.join("notes.md"), "untracked notes");
     let planned = setup.usage();
-    let cleaned = setup
-        .workspaces
-        .clean(&setup.workspace, &planned.disposable)
-        .unwrap();
+    let cleaned = setup.clean(&planned.disposable).deleted;
     let paths: Vec<&str> = cleaned.iter().map(|found| found.path.as_str()).collect();
     assert_eq!(paths, ["target/", "web/node_modules/"]);
     assert!(cleaned[0].bytes >= 64 * 1024);
@@ -217,11 +231,9 @@ fn cleaning_skips_a_planned_directory_that_holds_a_tracked_file_by_then() {
     write_bytes(&checkout.join("target/kept"), 1024);
     let planned = setup.usage();
     git(&checkout, &["add", "--force", "target/kept"]);
-    let cleaned = setup
-        .workspaces
-        .clean(&setup.workspace, &planned.disposable)
-        .unwrap();
-    assert!(cleaned.is_empty(), "{cleaned:?}");
+    let cleaned = setup.clean(&planned.disposable);
+    assert!(cleaned.deleted.is_empty(), "{cleaned:?}");
+    assert_eq!(cleaned.kept.len(), 1, "{cleaned:?}");
     assert!(checkout.join("target/kept").exists());
 }
 
@@ -235,10 +247,129 @@ fn cleaning_skips_a_planned_directory_that_became_a_symbolic_link() {
     write_bytes(&outside.join("precious"), 1024);
     fs::remove_dir_all(checkout.join("target")).unwrap();
     std::os::unix::fs::symlink(&outside, checkout.join("target")).unwrap();
+    let cleaned = setup.clean(&planned.disposable);
+    assert!(cleaned.deleted.is_empty(), "{cleaned:?}");
+    assert_eq!(cleaned.kept.len(), 1, "{cleaned:?}");
+    assert!(outside.join("precious").exists());
+}
+
+#[test]
+fn a_disposable_directory_that_holds_a_git_entry_is_kept_with_a_reason() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    fs::create_dir_all(checkout.join("node_modules/fork/.git")).unwrap();
+    write(
+        checkout.join("node_modules/fork/.git/HEAD"),
+        "ref: refs/heads/main\n",
+    );
+    let usage = setup.usage();
+    let paths: Vec<&str> = usage
+        .disposable
+        .iter()
+        .map(|found| found.path.as_str())
+        .collect();
+    assert_eq!(paths, ["target/"]);
+    assert_eq!(usage.kept.len(), 1, "{usage:?}");
+    assert_eq!(usage.kept[0].path, "node_modules/");
+    assert!(
+        usage.kept[0].reason.contains("node_modules/fork/.git"),
+        "{usage:?}"
+    );
+}
+
+#[test]
+fn cleaning_keeps_a_planned_directory_that_gained_a_git_entry_by_then() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let planned = setup.usage();
+    fs::create_dir_all(checkout.join("target/vendored")).unwrap();
+    write(checkout.join("target/vendored/.git"), "gitdir: elsewhere\n");
+    let cleaned = setup.clean(&planned.disposable);
+    assert!(cleaned.deleted.is_empty(), "{cleaned:?}");
+    assert!(cleaned.kept[0].reason.contains(".git"), "{cleaned:?}");
+    assert!(checkout.join("target/vendored/.git").exists());
+}
+
+#[test]
+fn cleaning_deletes_nothing_when_the_check_finds_the_workspace_busy() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let planned = setup.usage();
     let cleaned = setup
         .workspaces
-        .clean(&setup.workspace, &planned.disposable)
+        .clean(&setup.workspace, &planned.disposable, |_| {
+            Ok::<_, Error>(Some("its process web runs".to_owned()))
+        })
         .unwrap();
-    assert!(cleaned.is_empty(), "{cleaned:?}");
-    assert!(outside.join("precious").exists());
+    assert_eq!(cleaned.busy.as_deref(), Some("its process web runs"));
+    assert!(cleaned.deleted.is_empty());
+    assert!(checkout.join("target/debug/app").exists());
+}
+
+#[test]
+fn a_failed_deletion_names_the_entry_that_failed_and_the_run_goes_on() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/locked/app"), 1024);
+    write_bytes(&checkout.join("target/loose/app"), 1024);
+    write_bytes(&checkout.join("web/node_modules/left-pad/index.js"), 1024);
+    let locked = checkout.join("target/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let planned = setup.usage();
+    let cleaned = setup.clean(&planned.disposable);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(cleaned.failed.len(), 1, "{cleaned:?}");
+    let failed = &cleaned.failed[0];
+    assert_eq!(failed.path, "target/");
+    assert_eq!(failed.failed, locked.join("app"));
+    assert!(failed.bytes > 0, "{cleaned:?}");
+    assert!(!checkout.join("target/loose").exists());
+    let deleted: Vec<&str> = cleaned
+        .deleted
+        .iter()
+        .map(|found| found.path.as_str())
+        .collect();
+    assert_eq!(deleted, ["web/node_modules/"]);
+}
+
+#[test]
+fn a_file_with_a_hard_link_outside_the_deleted_directory_frees_nothing() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    let store = setup.fixture.dir.path().join("store/package.js");
+    write_bytes(&store, 64 * 1024);
+    fs::create_dir_all(checkout.join("node_modules/package")).unwrap();
+    fs::hard_link(&store, checkout.join("node_modules/package/index.js")).unwrap();
+    let planned = setup.usage();
+    assert!(planned.disposable[0].bytes >= 64 * 1024, "{planned:?}");
+    let cleaned = setup.clean(&planned.disposable);
+    assert!(cleaned.deleted[0].bytes < 64 * 1024, "{cleaned:?}");
+    assert!(store.exists());
+}
+
+#[test]
+fn an_invalid_manifest_falls_back_to_the_built_in_set_with_a_warning() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write(checkout.join("mxv.toml"), "disposable = [\"*\"]\n");
+    write(checkout.join(".env"), "TOKEN=x");
+    let usage = setup.usage();
+    assert!(usage.disposable.is_empty(), "{usage:?}");
+    assert_eq!(usage.warnings.len(), 1, "{usage:?}");
+    assert!(usage.warnings[0].contains("mxv.toml"), "{usage:?}");
+}
+
+#[test]
+fn measuring_a_checkout_does_not_count_as_a_change_of_it() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write(checkout.join("notes.md"), "notes");
+    git(&checkout, &["add", "notes.md"]);
+    git(&checkout, &["commit", "--quiet", "-m", "Add notes"]);
+    let first = modified(&setup);
+    assert_eq!(modified(&setup), first);
 }

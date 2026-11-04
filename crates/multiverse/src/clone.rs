@@ -7,6 +7,12 @@
 //! first. When the file system cannot clone, such as HFS+ or a checkout on
 //! another volume, the clone fails and nothing is copied. Other systems
 //! clone nothing yet. A clone never falls back to a full copy.
+//!
+//! A clone copies symbolic links as they are. An absolute link inside a
+//! cloned `node_modules/`, such as one that a package manager wrote to a
+//! workspace package, still points into the repository's own checkout, so
+//! the new checkout reads that package from the repository until the next
+//! install rewrites the link.
 
 use std::fs;
 use std::io;
@@ -50,13 +56,23 @@ fn clone_directory(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// Reports whether `error` says that the file system cannot clone, such as
+/// `ENOTSUP` from `clonefile(2)` on HFS+ or `EXDEV` across volumes.
+fn cannot_clone(error: &io::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::ENOTSUP) {
+        return true;
+    }
+    matches!(
+        error.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::CrossesDevices
+    )
+}
+
 /// Returns the warning of a clone of `path` into `checkout` that failed
 /// with `error`.
 fn warning(checkout: &Path, path: &str, error: &io::Error) -> String {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::Unsupported | io::ErrorKind::CrossesDevices
-    ) {
+    if cannot_clone(error) {
         format!(
             "the file system of {} {UNSUPPORTED}, so mxv cloned no ignored directory and copied nothing",
             checkout.display()

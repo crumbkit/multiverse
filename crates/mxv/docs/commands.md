@@ -132,11 +132,13 @@ mxv show reading-list
 - `size`: The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed.
 - `disposable`: The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+- `warnings`: Why a checkout's disposable set holds fewer globs than its `mxv.toml` declares, such as an invalid manifest, or null.
 
 ### Columns that `--long` adds
 
 - `repositories`: The top-level directory of each repository that the workspace checks out.
-- `disposable_paths`: Each disposable path, with its checkout's name in front, such as `app: target/`.
+- `disposable_paths`: Each disposable path with its checkout and the bytes it takes.
+- `kept_paths`: Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.
 
 Effects: read-only, closed-world.
 
@@ -397,7 +399,7 @@ Effects: destructive, not idempotent, closed-world.
 
 Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces.
 
-A workspace is idle when none of its processes or containers run and no file of its checkout outside the disposable directories, and no commit or staged change, is newer than the idle age. The disposable directories are the ignored directories named target, node\_modules, dist, build and .cache, and the paths that the globs `disposable` of the checkout's mxv.toml and of the config file match while git reports them as ignored. The command deletes nothing else: no tracked file, no git data and no other ignored file. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
+A workspace is idle when none of its processes or containers run and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node\_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
 
 ### Arguments
 
@@ -420,14 +422,16 @@ mxv clean --all --dry-run
 
 - `name`: The workspace's name.
 - `state`: `cleaned` when the run deleted the workspace's disposable directories, `would_clean` on a dry run, or `kept`.
-- `freed`: The bytes that the deleted directories took on disk, or would free on a dry run, which is 0 for a workspace that the run kept.
+- `freed`: The bytes that the run freed, measured before and after each deletion, or the bytes that the disposable directories take on a dry run, which is 0 for a workspace that the run kept. A file with a hard link outside the deleted directory frees nothing.
 - `disposable`: The bytes that the workspace's disposable directories took on disk before the run.
-- `modified`: When a file of the workspace's checkouts outside the disposable directories, or a commit or staged change, last changed, or null when none exists.
-- `reason`: Why the run kept the workspace's disposable directories, or null.
+- `modified`: When a file or directory of the workspace's checkouts outside the disposable directories, or a commit or staged change, last changed, or null when none exists.
+- `reason`: Why the run kept the workspace's disposable directories, or some of them, or null.
+- `warnings`: Why a checkout's disposable set holds fewer globs than its `mxv.toml` declares, such as an invalid manifest, or null.
 
 ### Columns that `--long` adds
 
 - `paths`: Each disposable path that the run deleted, or would delete, with its checkout's name in front, such as `app: target/`.
+- `skipped`: Each path that the disposable set matches and that the run kept, with the reason, such as a directory that holds a `.git` entry.
 
 Effects: destructive, idempotent, closed-world.
 

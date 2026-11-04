@@ -718,3 +718,25 @@ fn a_clone_glob_that_leaves_the_repository_fails_as_invalid() {
         "{problem:?}"
     );
 }
+
+#[test]
+fn a_disposable_glob_that_could_match_any_ignored_path_fails_as_invalid_with_its_line() {
+    for glob in ["*", "**", "**/*", "*/", "?*", ".env"] {
+        let (line, problem) = problem(&format!("ports = []\ndisposable = [{glob:?}]\n"));
+        assert_eq!(line, Some(2), "{glob}");
+        let ManifestProblem::Invalid { message } = problem else {
+            panic!("{glob}: {problem:?}");
+        };
+        assert!(message.contains("directory"), "{message}");
+    }
+}
+
+#[test]
+fn a_clone_glob_that_could_match_any_ignored_directory_fails_as_invalid() {
+    let (line, problem) = problem("clone_on_new = [\"*/\"]\n");
+    assert_eq!(line, Some(1));
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
+    );
+}

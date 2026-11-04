@@ -17,6 +17,13 @@
 //! inside a directory that it names. A glob that is empty, starts with `/`,
 //! holds a `..`, `.` or empty component, or holds a NUL character is
 //! refused.
+//!
+//! A repository's own `mxv.toml` is not trusted to widen what mxv deletes,
+//! because a repository is shared and its manifest can change with a pull.
+//! Its globs, and every glob of directories to clone, must end with `/` and
+//! have a literal last name, as [`PathGlob::parse_directory`] checks. Only
+//! the person's config file may name files or use a wildcard in the last
+//! name.
 
 use std::fmt;
 
@@ -68,6 +75,13 @@ pub enum BadGlob {
     /// A glob of directories to clone names `target`, which a new
     /// workspace never clones.
     Target,
+    /// A glob from a repository's `mxv.toml`, or of directories to clone,
+    /// does not end with `/`, so it could name a file.
+    NotDirectory,
+    /// A glob from a repository's `mxv.toml`, or of directories to clone,
+    /// has a last component with `*` or `?`, so it could name any ignored
+    /// directory, such as one that holds a nested repository.
+    Wildcard,
 }
 
 impl fmt::Display for BadGlob {
@@ -85,6 +99,12 @@ impl fmt::Display for BadGlob {
             Self::Nul => "the glob holds a NUL character, which no path can hold",
             Self::Target => {
                 "a new workspace never clones `target`, because a build of the checkout's own sources writes it"
+            }
+            Self::NotDirectory => {
+                "the glob must name a directory and end with `/`, such as `web/test-results/`; only the config file may name files"
+            }
+            Self::Wildcard => {
+                "the glob must name a directory by a literal last name without `*` or `?`, such as `**/coverage/`; only the config file may use a wildcard there"
             }
         })
     }
@@ -129,15 +149,36 @@ impl PathGlob {
         })
     }
 
+    /// Returns the glob that `text` writes, for a repository's own
+    /// `mxv.toml`. A repository is not trusted to widen what mxv deletes, so
+    /// the glob must name directories by a literal last name. It refuses
+    /// what [`PathGlob::parse`] refuses, a glob that does not end with `/`,
+    /// and a glob whose last component holds `*` or `?`. Components before
+    /// the last may hold wildcards, as in `**/coverage/`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`BadGlob`] that names why the glob is refused.
+    pub fn parse_directory(text: &str) -> Result<Self, BadGlob> {
+        let glob = Self::parse(text)?;
+        if !glob.directory {
+            return Err(BadGlob::NotDirectory);
+        }
+        if glob.last_name().is_none() {
+            return Err(BadGlob::Wildcard);
+        }
+        Ok(glob)
+    }
+
     /// Returns the glob that `text` writes, for the directories that a new
-    /// workspace clones. It refuses what [`PathGlob::parse`] refuses, and a
-    /// glob whose last component is `target`.
+    /// workspace clones. It refuses what [`PathGlob::parse_directory`]
+    /// refuses, and a glob whose last component is `target`.
     ///
     /// # Errors
     ///
     /// Returns the [`BadGlob`] that names why the glob is refused.
     pub fn parse_clone(text: &str) -> Result<Self, BadGlob> {
-        let glob = Self::parse(text)?;
+        let glob = Self::parse_directory(text)?;
         if glob.last_name() == Some(CLONE_NEVER) {
             return Err(BadGlob::Target);
         }

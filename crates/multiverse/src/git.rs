@@ -439,21 +439,35 @@ impl Backend for Git {
         let status = run(
             checkout,
             [
+                // A status refreshes the index when it can, which would
+                // count as a change of the checkout. `--no-optional-locks`
+                // keeps it from writing anything.
+                "--no-optional-locks",
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=normal",
                 "--ignored=matching",
+                // `-z` ends each entry with NUL and never quotes a path,
+                // so a path with a space or a non-ASCII character keeps
+                // its name.
+                "-z",
             ],
             "status",
             LOCAL_DEADLINE,
         )?
         .ok("status", checkout)?;
         let mut changes = Changes::default();
-        for line in status.lines().filter(|line| !line.is_empty()) {
-            match line.strip_prefix("!! ") {
-                Some(path) => changes.ignored.push(path.to_owned()),
-                None => changes.changed.push(line.to_owned()),
+        let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+        while let Some(entry) = entries.next() {
+            if let Some(path) = entry.strip_prefix("!! ") {
+                changes.ignored.push(path.to_owned());
+                continue;
             }
+            // A rename or a copy names its source in the next entry.
+            if entry.starts_with(['R', 'C']) {
+                entries.next();
+            }
+            changes.changed.push(entry.to_owned());
         }
         Ok(changes)
     }

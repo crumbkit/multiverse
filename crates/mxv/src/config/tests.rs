@@ -182,3 +182,16 @@ fn an_idle_age_or_a_limit_without_a_unit_is_refused_with_its_line() {
     assert_eq!(line, Some(2));
     assert!(reason.contains("max_disposable"), "{reason}");
 }
+
+#[test]
+fn the_config_file_may_declare_file_globs_and_wildcard_names_as_disposable() {
+    let config = parsed("disposable = [\"*.log\", \"web/cov*/\"]\n").unwrap();
+    assert_eq!(config.disposable.len(), 2);
+}
+
+#[test]
+fn a_clone_glob_in_the_config_file_must_name_a_directory_by_a_literal_name() {
+    let (line, reason) = invalid("\nclone_on_new = [\"*/\"]\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("directory"), "{reason}");
+}

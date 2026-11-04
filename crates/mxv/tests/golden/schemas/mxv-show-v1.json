@@ -446,6 +446,31 @@
         "commit"
       ]
     },
+    "DisposablePathRow": {
+      "description": "A disposable path of a checkout and the bytes it takes, as `show\n--full` prints it.",
+      "type": "object",
+      "properties": {
+        "bytes": {
+          "description": "The bytes that the path takes on disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "checkout": {
+          "description": "The checkout's name, such as `app`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The path relative to the checkout, such as `target/`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkout",
+        "path",
+        "bytes"
+      ]
+    },
     "RootSource": {
       "description": "Where the workspace root came from.",
       "oneOf": [
@@ -488,7 +513,14 @@
           "minimum": 0
         },
         "disposable_paths": {
-          "description": "Each disposable path, with its checkout's name in front, such as\n`app: target/`.",
+          "description": "Each disposable path with its checkout and the bytes it takes.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DisposablePathRow"
+          }
+        },
+        "kept_paths": {
+          "description": "Each path that the disposable set matches and that mxv keeps, with\nthe reason, such as a directory that holds a `.git` entry.",
           "type": "array",
           "items": {
             "type": "string"
@@ -532,6 +564,13 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "warnings": {
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -542,7 +581,8 @@
         "root_source",
         "ports",
         "size",
-        "disposable"
+        "disposable",
+        "warnings"
       ]
     }
   }

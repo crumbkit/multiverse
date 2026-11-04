@@ -200,9 +200,12 @@ pub(crate) fn list(
     for workspace in &records.workspaces {
         let row = WorkspaceRow::from(workspace);
         rows.push(match &measure {
-            Some(workspaces) if rows.len() < shown => {
-                row.with_usage(&workspaces.disk_usage(workspace)?)
-            }
+            // A workspace that mxv cannot measure keeps its row with the
+            // failure as its problem, and the others are still measured.
+            Some(workspaces) if rows.len() < shown => match workspaces.disk_usage(workspace) {
+                Ok(usage) => row.with_usage(&usage),
+                Err(error) => row.with_problem(format!("mxv cannot measure it: {error}")),
+            },
             _ => row,
         });
     }
@@ -343,7 +346,14 @@ fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure 
             changes,
             allow,
         },
-        RemovalPlan::IgnoredFiles { paths, .. } => MxvFailure::IgnoredFiles { name, paths, allow },
+        RemovalPlan::IgnoredFiles {
+            paths, warnings, ..
+        } => MxvFailure::IgnoredFiles {
+            name,
+            paths,
+            warnings,
+            allow,
+        },
         RemovalPlan::StrayCommits {
             checkout, commits, ..
         } => MxvFailure::StrayCommits {

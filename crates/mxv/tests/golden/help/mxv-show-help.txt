@@ -38,9 +38,11 @@ Columns:
   size         The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed.
   disposable   The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes.
   ports        The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+  warnings     Why a checkout's disposable set holds fewer globs than its `mxv.toml` declares, such as an invalid manifest, or null.
 
 Columns that --long adds:
   repositories      The top-level directory of each repository that the workspace checks out.
-  disposable_paths  Each disposable path, with its checkout's name in front, such as `app: target/`.
+  disposable_paths  Each disposable path with its checkout and the bytes it takes.
+  kept_paths        Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.
 
 Effects: read-only, closed-world.

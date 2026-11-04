@@ -411,13 +411,13 @@
           "minimum": 0
         },
         "freed": {
-          "description": "The bytes that the deleted directories took on disk, or would free\non a dry run, which is 0 for a workspace that the run kept.",
+          "description": "The bytes that the run freed, measured before and after each\ndeletion, or the bytes that the disposable directories take on a dry\nrun, which is 0 for a workspace that the run kept. A file with a\nhard link outside the deleted directory frees nothing.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
         },
         "modified": {
-          "description": "When a file of the workspace's checkouts outside the disposable\ndirectories, or a commit or staged change, last changed, or null when\nnone exists.",
+          "description": "When a file or directory of the workspace's checkouts outside the\ndisposable directories, or a commit or staged change, last changed,\nor null when none exists.",
           "type": [
             "string",
             "null"
@@ -436,15 +436,29 @@
           }
         },
         "reason": {
-          "description": "Why the run kept the workspace's disposable directories, or null.",
+          "description": "Why the run kept the workspace's disposable directories, or some of\nthem, or null.",
           "type": [
             "string",
             "null"
           ]
         },
+        "skipped": {
+          "description": "Each path that the disposable set matches and that the run kept,\nwith the reason, such as a directory that holds a `.git` entry.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "state": {
           "description": "`cleaned` when the run deleted the workspace's disposable\ndirectories, `would_clean` on a dry run, or `kept`.",
           "$ref": "#/$defs/CleanState"
+        },
+        "warnings": {
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -453,7 +467,8 @@
         "freed",
         "disposable",
         "modified",
-        "reason"
+        "reason",
+        "warnings"
       ]
     },
     "CleanState": {

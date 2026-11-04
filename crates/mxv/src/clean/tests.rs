@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime};
 
-use super::{DEFAULT_IDLE, busy, over_limit};
+use super::{CleanSummary, DEFAULT_IDLE, busy, over_limit, within_limit_reason};
+use crate::units::Size;
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -57,4 +58,31 @@ fn over_the_limit_a_busy_or_empty_workspace_is_never_cleaned() {
     let now = SystemTime::now();
     let candidates = [(days_ago(now, 50), 90, false), (days_ago(now, 40), 0, true)];
     assert!(over_limit(&candidates, 90, 10).is_empty());
+}
+
+#[test]
+fn a_workspace_changed_after_the_current_time_is_busy_and_says_why() {
+    let now = SystemTime::now();
+    let reason = busy(&[], Some(now + DAY), now, Duration::ZERO).unwrap();
+    assert!(reason.contains("after the current time"), "{reason}");
+    assert!(!reason.contains("0s ago"), "{reason}");
+}
+
+#[test]
+fn a_workspace_kept_under_the_limit_says_whether_the_total_was_within_it() {
+    assert!(within_limit_reason(30, 40).contains("take 30 B, within the limit of 40 B"));
+    assert!(within_limit_reason(50, 40).contains("unchanged longer"));
+}
+
+#[test]
+fn a_dry_run_within_the_limit_says_that_mxv_would_delete_nothing() {
+    let summary = CleanSummary {
+        freed: Size(0),
+        disposable: Size(10),
+        limit: Some(Size(20)),
+        planned: true,
+    };
+    let text = summary.to_string();
+    assert!(text.contains("would delete nothing"), "{text}");
+    assert!(!text.contains("deleted nothing"), "{text}");
 }

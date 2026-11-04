@@ -212,6 +212,12 @@ impl WorkspaceRow {
         self.disposable = Some(Size(usage.disposable_bytes));
         self
     }
+
+    /// Returns the row with `problem`, such as a measurement that failed.
+    pub(crate) fn with_problem(mut self, problem: String) -> Self {
+        self.problem = problem;
+        self
+    }
 }
 
 /// One workspace, the workspace root that the run used and its sizes, as
@@ -228,9 +234,26 @@ pub(crate) struct ShowRow {
     /// The bytes that the workspace's disposable directories take on disk,
     /// such as `target/` and `node_modules/`, which `mxv clean` deletes.
     disposable: Size,
-    /// Each disposable path, with its checkout's name in front, such as
-    /// `app: target/`.
-    disposable_paths: Vec<String>,
+    /// Each disposable path with its checkout and the bytes it takes.
+    disposable_paths: Vec<DisposablePathRow>,
+    /// Each path that the disposable set matches and that mxv keeps, with
+    /// the reason, such as a directory that holds a `.git` entry.
+    kept_paths: Vec<String>,
+    /// Why a checkout's disposable set holds fewer globs than its
+    /// `mxv.toml` declares, such as an invalid manifest, or null.
+    warnings: Option<String>,
+}
+
+/// A disposable path of a checkout and the bytes it takes, as `show
+/// --full` prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct DisposablePathRow {
+    /// The checkout's name, such as `app`.
+    checkout: String,
+    /// The path relative to the checkout, such as `target/`.
+    path: String,
+    /// The bytes that the path takes on disk.
+    bytes: Size,
 }
 
 impl Row for ShowRow {
@@ -243,8 +266,10 @@ impl Row for ShowRow {
         "size",
         "disposable",
         "ports",
+        "warnings",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["repositories", "disposable_paths"];
+    const LONG_COLUMNS: &'static [&'static str] =
+        &["repositories", "disposable_paths", "kept_paths"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -260,8 +285,18 @@ impl ShowRow {
             disposable_paths: usage
                 .disposable
                 .iter()
-                .map(|found| format!("{}: {}", found.checkout, found.path))
+                .map(|found| DisposablePathRow {
+                    checkout: found.checkout.clone(),
+                    path: found.path.clone(),
+                    bytes: Size(found.bytes),
+                })
                 .collect(),
+            kept_paths: usage
+                .kept
+                .iter()
+                .map(|kept| format!("{}: {}, because {}", kept.checkout, kept.path, kept.reason))
+                .collect(),
+            warnings: joined(&usage.warnings),
         }
     }
 }
@@ -342,6 +377,9 @@ pub(crate) struct RemovalResult {
     /// The docker volumes that the removal deletes because of
     /// `--delete-volumes`, named and anonymous.
     volumes: Vec<String>,
+    /// Why a checkout's disposable set holds fewer globs than its
+    /// `mxv.toml` declares, such as an invalid manifest.
+    warnings: Vec<String>,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -466,6 +504,7 @@ impl RemovalResult {
             discarded: removal.discarded.clone(),
             containers: Vec::new(),
             volumes: Vec::new(),
+            warnings: removal.warnings.clone(),
             planned,
         }
     }
@@ -493,6 +532,9 @@ impl fmt::Display for RemovalResult {
         } else {
             ("removed", "deleted", "kept", "discarded")
         };
+        for warning in &self.warnings {
+            writeln!(formatter, "Warning: {warning}.")?;
+        }
         for path in &self.discarded {
             writeln!(formatter, "mxv {discards} {path}.")?;
         }
@@ -815,4 +857,10 @@ impl fmt::Display for StatusSummary {
             None => Ok(()),
         }
     }
+}
+
+/// Returns `texts` joined with `; `, or `None` when there are none, so an
+/// empty list prints as an empty cell.
+pub(crate) fn joined(texts: &[String]) -> Option<String> {
+    (!texts.is_empty()).then(|| texts.join("; "))
 }

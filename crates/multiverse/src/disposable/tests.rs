@@ -116,3 +116,58 @@ fn a_glob_of_directories_to_clone_refuses_target_and_accepts_node_modules() {
     );
     assert!(PathGlob::parse_clone("node_modules/").is_ok());
 }
+
+#[test]
+fn a_repository_glob_must_name_a_directory_by_a_literal_last_name() {
+    for text in [
+        "*",
+        "**",
+        "**/*",
+        "*/",
+        "?*",
+        "**/",
+        ".env",
+        "web/*.log",
+        "web/cov*/",
+    ] {
+        assert!(
+            PathGlob::parse_directory(text).is_err(),
+            "{text} should be refused"
+        );
+    }
+    for text in [
+        "web/test-results/",
+        "**/coverage/",
+        "coverage/",
+        "web/*/out/",
+    ] {
+        assert!(
+            PathGlob::parse_directory(text).is_ok(),
+            "{text} should be accepted"
+        );
+    }
+}
+
+#[test]
+fn a_repository_glob_without_a_trailing_slash_is_refused_as_not_a_directory() {
+    assert_eq!(
+        PathGlob::parse_directory("local.db"),
+        Err(BadGlob::NotDirectory)
+    );
+}
+
+#[test]
+fn a_repository_glob_whose_last_name_holds_a_wildcard_is_refused() {
+    assert_eq!(PathGlob::parse_directory("*/"), Err(BadGlob::Wildcard));
+    assert_eq!(PathGlob::parse_directory("**/"), Err(BadGlob::Wildcard));
+}
+
+#[test]
+fn a_clone_glob_follows_the_directory_rule() {
+    assert_eq!(PathGlob::parse_clone("*/"), Err(BadGlob::Wildcard));
+    assert_eq!(
+        PathGlob::parse_clone("node_modules"),
+        Err(BadGlob::NotDirectory)
+    );
+    assert!(PathGlob::parse_clone("web/node_modules/").is_ok());
+}

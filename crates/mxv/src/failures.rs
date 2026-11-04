@@ -143,6 +143,9 @@ pub(crate) enum MxvFailure {
         name: String,
         /// Each ignored path, with its checkout's name in front.
         paths: Vec<String>,
+        /// Why a checkout's disposable set holds fewer globs than its
+        /// `mxv.toml` declares, such as an invalid manifest.
+        warnings: Vec<String>,
         /// What the removal's flags allowed.
         allow: Allow,
     },
@@ -226,6 +229,22 @@ pub(crate) enum MxvFailure {
     NoLimit {
         /// The config file.
         path: PathBuf,
+    },
+    /// `mxv clean` could not delete every disposable path of a workspace.
+    /// It deleted the others and reports them.
+    PartlyCleaned {
+        /// The workspace's name.
+        name: String,
+        /// The first file or directory that could not be deleted.
+        path: PathBuf,
+        /// Each path that the run deleted, with its checkout's name in
+        /// front.
+        deleted: Vec<String>,
+        /// Each path whose deletion failed, with the entry that failed and
+        /// why.
+        failed: Vec<String>,
+        /// The bytes that the run freed in the workspace.
+        freed: u64,
     },
     /// A technical failure of the multiverse library.
     Library(Error),
@@ -373,6 +392,7 @@ impl Failure for MxvFailure {
             Self::BadConfig { .. } => &CONFIG_INVALID,
             Self::ConfigUnreadable { .. } => &CONFIG_UNREADABLE,
             Self::NoLimit { .. } => &CONFIG_NO_LIMIT,
+            Self::PartlyCleaned { .. } => &FILE_UNWRITABLE,
             Self::Library(error) => match error {
                 Error::RepositoryNotFound { .. } => &REPOSITORY_NOT_FOUND,
                 Error::NoOrigin { .. } => &REPOSITORY_NO_ORIGIN,
@@ -466,6 +486,10 @@ impl Failure for MxvFailure {
                 ),
                 None => format!("fix {}, which may set only {}", shown(path), settings()),
             }),
+            Self::PartlyCleaned { name, path, .. } => hint(format!(
+                "make {} deletable, or delete it yourself, and run `mxv clean {name}` again",
+                shown(path)
+            )),
             Self::NoLimit { path } => hint(format!(
                 "set `max_disposable = \"50GiB\"` in {}, or name the workspaces to clean, or pass `--all`",
                 shown(path)
@@ -500,10 +524,21 @@ impl Failure for MxvFailure {
                 Field::new("name", name),
                 Field::new("changes", FieldValue::list(changes.iter())),
             ],
-            Self::IgnoredFiles { name, paths, .. } => vec![
-                Field::new("name", name),
-                Field::new("paths", FieldValue::list(paths.iter())),
-            ],
+            Self::IgnoredFiles {
+                name,
+                paths,
+                warnings,
+                ..
+            } => {
+                let mut fields = vec![
+                    Field::new("name", name),
+                    Field::new("paths", FieldValue::list(paths.iter())),
+                ];
+                if !warnings.is_empty() {
+                    fields.push(Field::new("warnings", FieldValue::list(warnings.iter())));
+                }
+                fields
+            }
             Self::Locked {
                 name,
                 repository,
@@ -546,6 +581,19 @@ impl Failure for MxvFailure {
             Self::ConfigUnreadable { path, .. } | Self::NoLimit { path } => {
                 vec![Field::new("path", shown(path))]
             }
+            Self::PartlyCleaned {
+                name,
+                path,
+                deleted,
+                failed,
+                freed,
+            } => vec![
+                Field::new("name", name),
+                Field::new("path", shown(path)),
+                Field::new("deleted", FieldValue::list(deleted.iter())),
+                Field::new("failed", FieldValue::list(failed.iter())),
+                Field::new("freed", *freed),
+            ],
             Self::Library(error) => library_fields(error),
         }
     }
@@ -781,6 +829,11 @@ impl fmt::Display for MxvFailure {
                 "--over-limit needs a limit, and the config file {} sets no `max_disposable`",
                 shown(path)
             ),
+            Self::PartlyCleaned { name, path, .. } => write!(
+                formatter,
+                "mxv could not delete {} in the workspace {name}, and it deleted the workspace's other disposable paths",
+                shown(path)
+            ),
             Self::Library(error) => error.fmt(formatter),
         }
     }
@@ -805,6 +858,7 @@ impl std::error::Error for MxvFailure {
             | Self::NoHome
             | Self::RelativeRoot { .. }
             | Self::NoLimit { .. }
+            | Self::PartlyCleaned { .. }
             | Self::BadConfig { .. } => None,
         }
     }

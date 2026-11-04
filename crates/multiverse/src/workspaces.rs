@@ -153,8 +153,9 @@ pub struct Allow {
 /// `web/node_modules/`, or when a glob of the repository's manifest or of
 /// [`Workspaces::with_disposable`] matches it. Every other ignored path
 /// stops a removal unless the caller allows discarding changes, including
-/// `.env`, an ignored file named `build`, and an ignored file inside a
-/// tracked `dist/` directory, such as `tools/dist/prod.secret`.
+/// `.env`, an ignored file named `build`, an ignored file inside a
+/// tracked `dist/` directory, such as `tools/dist/prod.secret`, and a
+/// disposable directory that holds a `.git` entry at any depth.
 pub const DISPOSABLE: &[&str] = &["target", "node_modules", "dist", "build", ".cache"];
 
 /// Reports whether `fresh`, a new plan of the removal that the caller
@@ -193,6 +194,9 @@ pub struct Removal {
     /// because the caller allowed it, in the form of
     /// [`RemovalPlan::Dirty`] and [`RemovalPlan::IgnoredFiles`].
     pub discarded: Vec<String>,
+    /// Why a checkout's disposable set holds fewer globs than its
+    /// `mxv.toml` declares, such as an invalid manifest.
+    pub warnings: Vec<String>,
 }
 
 /// The outcome of [`Workspaces::remove`].
@@ -233,6 +237,9 @@ pub enum RemovalPlan {
         /// Each ignored path, with the checkout's name in front, such as
         /// `app: .env`.
         paths: Vec<String>,
+        /// Why a checkout's disposable set holds fewer globs than its
+        /// `mxv.toml` declares, such as an invalid manifest.
+        warnings: Vec<String>,
     },
     /// A checkout's `HEAD` holds commits that no branch holds, such as
     /// commits on a detached `HEAD`, and the caller did not allow deleting
@@ -355,16 +362,30 @@ impl<B: Backend> Workspaces<B> {
     /// Returns the disposable set of `checkout`: the built-in
     /// [`DISPOSABLE`] directories, the globs that the checkout's own
     /// `mxv.toml` declares, and the person's globs. A manifest that cannot
-    /// be read adds no globs, so fewer paths are disposable.
-    pub(crate) fn disposable_set(&self, checkout: &Checkout) -> DisposableSet {
-        let declared = Manifest::read(&checkout.path)
-            .ok()
-            .flatten()
-            .map(|manifest| manifest.disposable)
-            .unwrap_or_default();
-        DisposableSet::built_in()
-            .with(&declared)
-            .with(&self.disposable)
+    /// be read adds no globs, so fewer paths are disposable, and the
+    /// returned warning says so.
+    pub(crate) fn disposable_set(&self, checkout: &Checkout) -> (DisposableSet, Option<String>) {
+        let (declared, warning) = match Manifest::read(&checkout.path) {
+            Ok(manifest) => (
+                manifest
+                    .map(|manifest| manifest.disposable)
+                    .unwrap_or_default(),
+                None,
+            ),
+            Err(error) => (
+                Vec::new(),
+                Some(format!(
+                    "the mxv.toml of the checkout {} is invalid, so mxv uses only the built-in disposable set and the config file's globs there: {error}",
+                    checkout.name
+                )),
+            ),
+        };
+        (
+            DisposableSet::built_in()
+                .with(&declared)
+                .with(&self.disposable),
+            warning,
+        )
     }
 
     /// Returns every workspace, in name order, and a problem for each
@@ -590,6 +611,7 @@ impl<B: Backend> Workspaces<B> {
         let mut changes = Vec::new();
         let mut ignored = Vec::new();
         let mut disposables = Vec::new();
+        let mut warnings = Vec::new();
         for checkout in &workspace.checkouts {
             let source = checkout.source.is_dir();
             let entry = Entry::at(&checkout.path)?;
@@ -624,11 +646,16 @@ impl<B: Backend> Workspaces<B> {
             }
             let stray = if entry == Entry::Present {
                 let found = self.backend.changes(&checkout.path)?;
-                let set = self.disposable_set(checkout);
+                let (set, warning) = self.disposable_set(checkout);
+                warnings.extend(warning);
                 let named = |item: &String| format!("{}: {item}", checkout.name);
                 changes.extend(found.changed.iter().map(named));
                 for path in &found.ignored {
-                    if set.matches(path) {
+                    // A directory that holds a `.git` entry may hold a
+                    // repository with unpushed work, so it is never
+                    // deleted without the caller's leave.
+                    if set.matches(path) && crate::disk::nested_git(&checkout.path, path).is_none()
+                    {
                         disposables.push(named(path));
                     } else {
                         ignored.push(named(path));
@@ -692,6 +719,7 @@ impl<B: Backend> Workspaces<B> {
                 return Ok(RemovalPlan::IgnoredFiles {
                     workspace,
                     paths: ignored,
+                    warnings,
                 });
             }
         }
@@ -703,6 +731,7 @@ impl<B: Backend> Workspaces<B> {
             allow,
             disposable: disposables,
             discarded: changes,
+            warnings,
         }))
     }
 

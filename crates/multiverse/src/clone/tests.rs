@@ -136,3 +136,11 @@ fn a_directory_whose_parent_is_missing_from_the_checkout_is_not_cloned() {
     );
     assert!(!workspace.checkouts[0].path.join("scratch").exists());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_clone_that_fails_with_enotsup_warns_that_the_file_system_cannot_clone() {
+    let error = std::io::Error::from_raw_os_error(libc::ENOTSUP);
+    let text = super::warning(std::path::Path::new("/w/app"), "node_modules/", &error);
+    assert!(text.contains(super::UNSUPPORTED), "{text}");
+}

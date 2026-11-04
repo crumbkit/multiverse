@@ -103,6 +103,33 @@ fn an_ignored_file_and_an_ignored_directory_are_listed_apart_from_the_changes() 
 }
 
 #[test]
+fn a_path_with_a_space_or_a_non_ascii_character_is_listed_as_it_is_named() {
+    let fixture = fixture();
+    write(
+        fixture.clone.join(".git/info/exclude"),
+        "build output/\n*.log\n",
+    );
+    fs::create_dir_all(fixture.clone.join("build output")).unwrap();
+    write(fixture.clone.join("build output/app"), "binary");
+    write(fixture.clone.join("caf\u{e9}.log"), "log");
+    write(fixture.clone.join("my notes.md"), "notes");
+    let changes = Git.changes(&fixture.clone).unwrap();
+    assert_eq!(changes.ignored, ["build output/", "caf\u{e9}.log"]);
+    assert_eq!(changes.changed, ["?? my notes.md"]);
+}
+
+#[test]
+fn a_renamed_file_is_one_change() {
+    let fixture = fixture();
+    write(fixture.clone.join("README.md"), "readme");
+    git(&fixture.clone, &["add", "README.md"]);
+    git(&fixture.clone, &["commit", "--quiet", "-m", "Add a readme"]);
+    git(&fixture.clone, &["mv", "README.md", "READ ME.md"]);
+    let changes = Git.changes(&fixture.clone).unwrap();
+    assert_eq!(changes.changed, ["R  READ ME.md"]);
+}
+
+#[test]
 fn a_branch_counts_the_commits_that_its_base_does_not_hold() {
     let fixture = fixture();
     let base = "refs/remotes/origin/main";

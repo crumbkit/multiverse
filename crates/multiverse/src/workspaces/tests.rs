@@ -1044,3 +1044,33 @@ fn a_declared_glob_never_makes_a_directory_with_a_tracked_file_disposable() {
     };
     assert_eq!(paths, ["app: docs/build.log"]);
 }
+
+#[test]
+fn a_disposable_directory_that_holds_a_git_entry_stops_the_removal_unless_forced() {
+    let setup = setup();
+    ignore(&setup);
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    fs::create_dir_all(checkout.join("node_modules/fork/.git")).unwrap();
+    let plan = setup
+        .workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap();
+    let RemovalPlan::IgnoredFiles { paths, .. } = plan else {
+        panic!("{plan:?}");
+    };
+    assert_eq!(paths, ["app: node_modules/"]);
+}
+
+#[test]
+fn an_invalid_manifest_warns_in_the_removal_plan() {
+    let setup = setup();
+    ignore(&setup);
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    write(checkout.join("mxv.toml"), "disposable = [\"*\"]\n");
+    git(checkout, &["add", "mxv.toml"]);
+    git(checkout, &["commit", "--quiet", "-m", "Add a manifest"]);
+    let removal = ready(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.warnings.len(), 1, "{removal:?}");
+}
