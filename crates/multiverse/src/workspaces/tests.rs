@@ -668,9 +668,9 @@ fn a_checkout_locked_for_another_reason_stops_the_removal() {
     assert_eq!(reason, "on a USB disk");
 }
 
-/// A backend that runs git, and lets a test act at three points, as
+/// A backend that runs git, and lets a test act at four points, as
 /// another process might: before the fetch, after the checkout is added,
-/// and before a branch is deleted.
+/// before a branch is deleted, and before a checkout is removed.
 struct Scripted {
     /// Runs in the repository before the fetch.
     before_fetch: fn(&Path),
@@ -679,6 +679,10 @@ struct Scripted {
     after_add: fn(&Path, &Path) -> Option<Error>,
     /// Runs in the repository before a branch is deleted.
     before_delete: fn(&Path),
+    /// Runs with the checkout before `git worktree remove`, and returns the
+    /// error that the removal then fails with, if any, in place of running
+    /// it, as a `git worktree remove` that missed its deadline does.
+    before_remove: fn(&Path) -> Option<Error>,
 }
 
 impl std::fmt::Debug for Scripted {
@@ -739,6 +743,9 @@ impl Backend for Scripted {
         checkout: &Path,
         force: bool,
     ) -> Result<(), Error> {
+        if let Some(error) = (self.before_remove)(checkout) {
+            return Err(error);
+        }
         Git.remove_checkout(repository, checkout, force)
     }
     fn prune_checkouts(&self, repository: &Path) -> Result<(), Error> {
@@ -810,6 +817,7 @@ fn a_branch_that_another_process_creates_during_the_fetch_is_left_alone() {
             },
             after_add: |_, _| None,
             before_delete: |_| {},
+            before_remove: |_| None,
         },
     );
     let outcome = workspaces
@@ -857,6 +865,7 @@ fn a_checkout_left_locked_while_initializing_by_a_failed_add_is_unlocked_and_rem
                 })
             },
             before_delete: |_| {},
+            before_remove: |_| None,
         },
     );
     let result = workspaces.create(
@@ -906,6 +915,7 @@ fn a_branch_that_moves_while_the_removal_runs_is_kept_at_its_new_commit() {
                 );
                 git(repository, &["branch", "--force", "reading-list", "HEAD"]);
             },
+            before_remove: |_| None,
         },
     );
     let RemovalPlan::Ready(plan) = workspaces
@@ -1124,4 +1134,150 @@ fn the_removal_plan_marks_a_path_that_only_the_manifest_makes_disposable() {
         .with_disposable(vec![PathGlob::parse("coverage/").unwrap()]);
     let removal = ready(&setup, "reading-list", FORCE);
     assert_eq!(removal.manifest, ["app: data/"]);
+}
+
+/// Returns the failure of a `git worktree remove` in `checkout` that
+/// missed its deadline.
+fn timed_out(checkout: &Path) -> Error {
+    Error::TimedOut {
+        operation: "worktree remove",
+        dir: checkout.to_path_buf(),
+        deadline: std::time::Duration::from_millis(1),
+    }
+}
+
+/// Returns a backend that runs git and runs `before_remove` before each
+/// `git worktree remove`.
+fn removing(before_remove: fn(&Path) -> Option<Error>) -> Scripted {
+    Scripted {
+        before_fetch: |_| {},
+        after_add: |_, _| None,
+        before_delete: |_| {},
+        before_remove,
+    }
+}
+
+/// Reports whether the fixture's clone still holds the branch `branch`.
+fn has_branch(setup: &Setup, branch: &str) -> bool {
+    !git(&setup.fixture.clone, &["branch", "--list", branch]).is_empty()
+}
+
+#[test]
+fn the_disposable_directories_of_a_worktree_are_deleted_before_git_removes_it() {
+    let setup = setup();
+    ignore(&setup);
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    write(checkout.join("target/debug/mxv"), "binary");
+    let workspaces = scripted(
+        &setup,
+        removing(|checkout| {
+            assert!(
+                !checkout.join("target").exists(),
+                "git received the checkout with its target/"
+            );
+            None
+        }),
+    );
+    let RemovalPlan::Ready(removal) = workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap()
+    else {
+        panic!("the removal is refused");
+    };
+    assert_eq!(removal.checkouts[0].disposable, ["target/"]);
+    done(workspaces.remove(removal).unwrap());
+    assert!(!workspace.path.exists());
+}
+
+#[test]
+fn a_removal_whose_git_times_out_keeps_the_record_and_the_branch_and_runs_again() {
+    let setup = setup();
+    ignore(&setup);
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    write(checkout.join("target/debug/mxv"), "binary");
+    let workspaces = scripted(&setup, removing(|checkout| Some(timed_out(checkout))));
+    let RemovalPlan::Ready(removal) = workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap()
+    else {
+        panic!("the removal is refused");
+    };
+    let error = workspaces.remove(removal).unwrap_err();
+    assert!(matches!(error, Error::TimedOut { .. }), "{error:?}");
+    assert!(
+        setup
+            .workspaces
+            .find(&name("reading-list"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(has_branch(&setup, "reading-list"));
+    assert!(!checkout.join("target").exists());
+    done(
+        setup
+            .workspaces
+            .remove(ready(&setup, "reading-list", NOTHING))
+            .unwrap(),
+    );
+    assert!(!workspace.path.exists());
+    assert!(
+        setup
+            .workspaces
+            .find(&name("reading-list"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!has_branch(&setup, "reading-list"));
+}
+
+#[test]
+fn a_worktree_that_an_interrupted_removal_left_without_its_git_file_is_finished_when_forced() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    // A `git worktree remove` that stopped partway deleted the checkout's
+    // `.git` file and left other files behind.
+    let workspaces = scripted(
+        &setup,
+        removing(|checkout| {
+            fs::remove_file(checkout.join(".git")).unwrap();
+            Some(timed_out(checkout))
+        }),
+    );
+    write(checkout.join("notes.md"), "left behind");
+    let RemovalPlan::Ready(removal) = workspaces
+        .plan_removal(&name("reading-list"), FORCE)
+        .unwrap()
+    else {
+        panic!("the removal is refused");
+    };
+    assert!(workspaces.remove(removal).is_err());
+    assert!(
+        setup
+            .workspaces
+            .find(&name("reading-list"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(has_branch(&setup, "reading-list"));
+    let plan = setup
+        .workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap();
+    let RemovalPlan::Dirty { changes, .. } = plan else {
+        panic!("{plan:?}");
+    };
+    assert!(changes[0].contains("no .git"), "{changes:?}");
+    assert!(checkout.join("notes.md").exists());
+    let removal = ready(&setup, "reading-list", FORCE);
+    assert!(removal.checkouts[0].partial);
+    done(setup.workspaces.remove(removal).unwrap());
+    assert!(!workspace.path.exists());
+    let listed = git(&setup.fixture.clone, &["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("reading-list"), "{listed}");
+    assert!(!has_branch(&setup, "reading-list"));
 }

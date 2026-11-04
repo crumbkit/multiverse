@@ -118,6 +118,17 @@ pub struct CheckoutRemoval {
     /// `git worktree add` left it locked with the reason
     /// [`INITIALIZING`](crate::backend::INITIALIZING).
     pub unlock: bool,
+    /// The checkout's disposable directories, relative to the checkout,
+    /// such as `target/`. The removal deletes them by file descriptor
+    /// before it hands the checkout to git or deletes the clone, so no
+    /// deadline of git's covers the bulk of the deletion.
+    pub disposable: Vec<String>,
+    /// Whether the checkout is a worktree whose `.git` file is gone,
+    /// because an earlier removal stopped partway. Git can no longer read
+    /// it, so the removal deletes what is left by file descriptor and then
+    /// prunes the repository's entry, and only when the caller allowed
+    /// discarding changes.
+    pub partial: bool,
 }
 
 /// What removing a workspace does to a checkout's directory or to the
@@ -405,18 +416,85 @@ impl CloneRefusal {
     }
 }
 
-/// Deletes the clone at `checkout` and everything in it by file
-/// descriptor, as `mxv clean` deletes a disposable path, so a directory that
-/// another process swaps for a symbolic link is never followed and nothing
-/// outside the clone is touched. A clone that is already gone is no error.
+/// Reports whether the worktree `checkout`, whose directory exists, has
+/// lost its `.git` file, as a `git worktree remove` that stopped partway
+/// leaves it. Git cannot read such a checkout, so mxv cannot tell what is
+/// left in it.
+fn is_partial(checkout: &Checkout) -> Result<bool, Error> {
+    Ok(Entry::at(&checkout.path.join(".git"))? == Entry::Absent)
+}
+
+/// Returns the refusal of a removal of `workspace` without leave to
+/// discard changes, whose worktree named `checkout` [`is_partial`].
+fn partial_refusal(workspace: Workspace, checkout: &str) -> RemovalPlan {
+    RemovalPlan::Dirty {
+        changes: vec![format!(
+            "{checkout}: the checkout has no .git, because an earlier removal stopped partway, so mxv cannot tell what is left in it"
+        )],
+        workspace,
+    }
+}
+
+/// The suffix of the name under which mxv moves a clone aside before it
+/// deletes it, such as `.app.mxv-removing` beside `app`.
+const ASIDE_SUFFIX: &str = ".mxv-removing";
+
+/// Returns the path beside `checkout` under which [`delete_clone`] moves
+/// it before deleting it, or `None` for a path without a name.
+fn aside(checkout: &Path) -> Option<PathBuf> {
+    let name = checkout.file_name()?.to_str()?;
+    Some(checkout.with_file_name(format!(".{name}{ASIDE_SUFFIX}")))
+}
+
+/// Deletes the clone at `checkout` and everything in it. It first moves
+/// the clone aside, to the name that [`aside`] returns, in one rename, so
+/// a deletion that stops partway leaves no checkout behind that has lost
+/// its `.git`, and the next removal finds the clone gone and deletes what
+/// is left aside. It then deletes the moved clone as [`delete_directory`]
+/// does. A clone that is already gone is no error.
 fn delete_clone(checkout: &Path) -> Result<(), Error> {
+    let Some(aside) = aside(checkout) else {
+        return Err(Error::Unwritable {
+            path: checkout.to_path_buf(),
+            source: io::ErrorKind::InvalidInput.into(),
+        });
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "moving a clone aside to delete it writes no durable file, so it does not go through the store module (DUR-1)"
+    )]
+    let moved = fs::rename(checkout, &aside);
+    match moved {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::Unwritable {
+                path: checkout.to_path_buf(),
+                source,
+            });
+        }
+    }
+    delete_directory(&aside)
+}
+
+/// Deletes the directory `path` and everything in it by file descriptor,
+/// as `mxv clean` deletes a disposable path, so a directory that another
+/// process swaps for a symbolic link is never followed and nothing outside
+/// `path` is touched. No deadline covers it. A symbolic link at `path` is
+/// deleted itself, and a directory that is already gone is no error.
+fn delete_directory(path: &Path) -> Result<(), Error> {
     let unwritable = |source| Error::Unwritable {
-        path: checkout.to_path_buf(),
+        path: path.to_path_buf(),
         source,
     };
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(unwritable(source)),
+    }
     let (Some(parent), Some(name)) = (
-        checkout.parent(),
-        checkout.file_name().and_then(|name| name.to_str()),
+        path.parent(),
+        path.file_name().and_then(|name| name.to_str()),
     ) else {
         return Err(unwritable(io::ErrorKind::InvalidInput.into()));
     };
@@ -1115,8 +1193,14 @@ impl<B: Backend> Workspaces<B> {
                 }
                 unlock = true;
             }
-            let stray = if entry == Entry::Present {
-                self.sort(&workspace, checkout, &mut sorted)?;
+            let partial = entry == Entry::Present && is_partial(checkout)?;
+            if partial && !allow.discard_changes {
+                let checkout = checkout.name.clone();
+                return Ok(partial_refusal(workspace, &checkout));
+            }
+            let mut disposable = Vec::new();
+            let stray = if entry == Entry::Present && !partial {
+                disposable = self.sort(&workspace, checkout, &mut sorted)?;
                 self.backend.stray_commits(&checkout.path, "HEAD")?
             } else {
                 // The directory is gone, but until a prune the repository
@@ -1167,6 +1251,8 @@ impl<B: Backend> Workspaces<B> {
                 lost: Vec::new(),
                 stashes: Vec::new(),
                 unlock,
+                disposable,
+                partial,
             });
         }
         let Sorted {
@@ -1207,18 +1293,19 @@ impl<B: Backend> Workspaces<B> {
     /// Reads the changes of the checkout `checkout`, whose directory
     /// exists, and adds each to `sorted`: a change, a disposable path, a
     /// path that only the manifest makes disposable, or another ignored
-    /// path.
+    /// path. It returns the checkout's disposable paths, relative to it.
     fn sort(
         &self,
         workspace: &Workspace,
         checkout: &Checkout,
         sorted: &mut Sorted,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<String>, Error> {
         let found = self.backend.changes(&checkout.path)?;
         let (set, warning) = self.disposable_set(workspace, checkout);
         sorted.warnings.extend(warning);
         let named = |item: &String| format!("{}: {item}", checkout.name);
         sorted.changes.extend(found.changed.iter().map(named));
+        let mut own = Vec::new();
         for path in &found.ignored {
             // A directory that holds a `.git` entry may hold a repository
             // with unpushed work, so it is never deleted without the
@@ -1229,11 +1316,12 @@ impl<B: Backend> Workspaces<B> {
                     sorted.manifest.push(named(path));
                 }
                 sorted.disposables.push(named(path));
+                own.push(path.clone());
             } else {
                 sorted.ignored.push(named(path));
             }
         }
-        Ok(())
+        Ok(own)
     }
 
     /// Plans the removal of `checkout`, a clone, for
@@ -1265,6 +1353,8 @@ impl<B: Backend> Workspaces<B> {
             lost: Vec::new(),
             stashes: Vec::new(),
             unlock: false,
+            disposable: Vec::new(),
+            partial: false,
         };
         match entry {
             Entry::Link => return refused(CloneRefusal::Unowned(checkout.path.clone())),
@@ -1279,7 +1369,7 @@ impl<B: Backend> Workspaces<B> {
         if !allow.delete_unmerged {
             self.backend.refresh_origin(&checkout.path)?;
         }
-        self.sort(workspace, checkout, sorted)?;
+        planned.disposable = self.sort(workspace, checkout, sorted)?;
         let stashes = self.backend.stashes(&checkout.path)?;
         if !stashes.is_empty() && !allow.discard_changes {
             return refused(CloneRefusal::Stashed {
@@ -1309,6 +1399,23 @@ impl<B: Backend> Workspaces<B> {
         Ok(Ok(planned))
     }
 
+    /// Deletes the disposable directories `paths` of `checkout` by file
+    /// descriptor, with no deadline, before git or mxv deletes the rest of
+    /// the checkout. Each path must still pass the checks that `mxv clean`
+    /// makes after git's report. A path that fails them, such as one that
+    /// is gone or now holds a nested repository, is left to the deletion
+    /// of the checkout, which deletes or refuses it as before.
+    fn delete_disposable(&self, checkout: &Checkout, paths: &[String]) -> Result<(), Error> {
+        for path in paths {
+            if self.undeletable(checkout, path)?.is_some() {
+                continue;
+            }
+            crate::disk::remove_tree(&checkout.path, path)
+                .map_err(|(path, source)| Error::Unwritable { path, source })?;
+        }
+        Ok(())
+    }
+
     /// Carries out `confirmed`, which [`Workspaces::plan_removal`] returned
     /// and the caller confirmed. It plans the removal again first, because
     /// the workspace may have changed while the caller confirmed, and
@@ -1329,6 +1436,15 @@ impl<B: Backend> Workspaces<B> {
     /// `AGENTS.md`, the directory or the record cannot be removed. The
     /// steps before the failure stay done, and the record stays, so the
     /// caller can run the removal again.
+    ///
+    /// Each checkout's [`CheckoutRemoval::disposable`] directories are
+    /// deleted first, by file descriptor and with no deadline, so a large
+    /// `target/` never runs into the deadline of `git worktree remove`. A
+    /// clone is moved aside before it is deleted, and what an earlier
+    /// removal left aside is deleted first, so a removal that stopped
+    /// partway is finished by the next one. A worktree that is
+    /// [`CheckoutRemoval::partial`] is deleted by file descriptor and then
+    /// pruned from its repository.
     pub fn remove(&self, confirmed: Removal) -> Result<RemovalOutcome, Error> {
         let mut removal = match self.plan_removal(&confirmed.workspace.name, confirmed.allow)? {
             RemovalPlan::Ready(fresh) if !loses_more(&fresh, &confirmed) => fresh,
@@ -1336,6 +1452,13 @@ impl<B: Backend> Workspaces<B> {
         };
         for (planned, seen) in removal.checkouts.iter_mut().zip(&confirmed.checkouts) {
             let checkout = &planned.checkout;
+            // What an interrupted deletion of a clone left aside goes first.
+            if let Some(aside) = aside(&checkout.path) {
+                delete_directory(&aside)?;
+            }
+            if planned.directory == Fate::Removed && !planned.partial {
+                self.delete_disposable(checkout, &planned.disposable)?;
+            }
             if removal.workspace.kind == WorkspaceKind::Clone {
                 // The clone holds its branch, so deleting the clone deletes
                 // the branch, and nothing of the person's repository changes.
@@ -1350,6 +1473,12 @@ impl<B: Backend> Workspaces<B> {
                     .unlock_checkout(&checkout.source, &checkout.path)?;
             }
             match planned.directory {
+                Fate::Removed if planned.partial => {
+                    delete_directory(&checkout.path)?;
+                    if checkout.source.is_dir() {
+                        self.backend.prune_checkouts(&checkout.source)?;
+                    }
+                }
                 Fate::Removed => {
                     self.backend.remove_checkout(
                         &checkout.source,

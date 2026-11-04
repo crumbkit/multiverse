@@ -874,3 +874,49 @@ fn a_manifest_source_inside_a_repository_or_under_the_root_is_refused() {
         );
     }
 }
+
+#[test]
+fn a_clones_disposable_directories_are_planned_and_deleted_with_it() {
+    let setup = setup();
+    write(setup.fixture.clone.join(".git/info/exclude"), "target/\n");
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    fs::create_dir_all(checkout.join("target/debug")).unwrap();
+    write(checkout.join("target/debug/mxv"), "binary");
+    let RemovalPlan::Ready(planned) = plan(&setup, "reading-list", NOTHING) else {
+        panic!("the removal is refused");
+    };
+    assert_eq!(planned.checkouts[0].disposable, ["target/"]);
+    let removal = removed(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.directory, Fate::Removed);
+    assert!(!workspace.path.exists());
+}
+
+#[test]
+fn a_clone_whose_deletion_was_interrupted_is_finished_by_a_second_removal() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    // An interrupted removal moved the clone aside and deleted part of it,
+    // its `.git` among them, before it stopped.
+    let aside = workspace.path.join(".app.mxv-removing");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test moves the clone aside as an interrupted removal does"
+    )]
+    let moved = fs::rename(checkout, &aside);
+    moved.unwrap();
+    fs::remove_dir_all(aside.join(".git")).unwrap();
+    write(aside.join("left.txt"), "left behind");
+    let removal = removed(&setup, "reading-list", NOTHING);
+    assert_eq!(removal.checkouts[0].directory, Fate::Missing);
+    assert_eq!(removal.directory, Fate::Removed);
+    assert!(!workspace.path.exists());
+    assert!(
+        setup
+            .workspaces
+            .find(&name("reading-list"))
+            .unwrap()
+            .is_none()
+    );
+}

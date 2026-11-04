@@ -574,7 +574,11 @@ impl<B: Backend> Workspaces<B> {
     /// Returns why the disposable `path` of `checkout` fails the checks of
     /// [`Workspaces::clean`] that come after git's report, or `None` when
     /// it passes them.
-    fn undeletable(&self, checkout: &Checkout, path: &str) -> Result<Option<String>, Error> {
+    pub(crate) fn undeletable(
+        &self,
+        checkout: &Checkout,
+        path: &str,
+    ) -> Result<Option<String>, Error> {
         let target = absolute(&checkout.path, path);
         let Ok(metadata) = fs::symlink_metadata(&target) else {
             return Ok(Some("it is gone".to_owned()));
