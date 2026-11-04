@@ -79,8 +79,40 @@ everything they run today.
 ## The app manifest
 
 Each repository describes its app in its manifest. The fields below extend
-the `mxv.toml` that multiverse already reads; decision P11 asks whether they
-belong there or in a separate file.
+the `mxv.toml` that multiverse already reads (decision P11).
+
+### Which manifest is read
+
+multiverse sets up a workspace's manifest at `<root>/<name>/mxv.toml`, above
+the checkout, when it creates the workspace. It copies the file given with
+`mxv new --manifest <file>`, or else a template in
+`~/.config/mxv/templates/*.toml` whose origin URL matches the repository's
+origin. Otherwise the workspace has no manifest of its own.
+
+multiverse's own keys (`ports`, `disposable`, `clone_on_new`, and
+`processes` and `containers` until phase takes them over) come from exactly
+one file: the workspace's manifest if it exists, or else the `mxv.toml` at
+the root of the checkout. The two files are never merged, and `mxv status`
+and `mxv show` name the file used. multiverse checks that the file is valid
+TOML and passes every other table to phase untouched, so phase owns the
+schema of its own tables.
+
+phase reads each of its tables from one place:
+
+- `[app]`, `[release]`, `[build]`, `[process.*]`, `[permissions]` and
+  `[needs.*]` describe one app, and come from that app's repository. For an
+  app you are editing, phase reads the `mxv.toml` in its checkout. For an
+  app run from a release, phase reads the `mxv.toml` of the repository at
+  the release's tag. A workspace manifest cannot replace them, so the
+  permissions phase compares against your grants are always the ones the
+  app's publisher wrote.
+- `[service.*]` describes the workspace's shared services, and comes from
+  the workspace's manifest. A repository's `mxv.toml` can declare services
+  only while it is the workspace's sole manifest, which is the case for a
+  workspace with one checkout and no manifest of its own.
+
+Each table has one source, so nothing is merged. phase rejects a workspace
+manifest that contains an app's tables, and names the file and table.
 
 ```toml
 [app]
