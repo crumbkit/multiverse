@@ -72,3 +72,48 @@ fn an_image_reference_refuses_an_image_without_a_tag_or_tagged_latest() {
         Err(BadSourceText::Unpinned)
     );
 }
+
+#[test]
+fn a_version_starts_with_a_letter_or_a_digit() {
+    assert_eq!(".1".parse::<Version>(), Err(BadSourceText::BadStart));
+    assert_eq!("-rc".parse::<Version>(), Err(BadSourceText::BadStart));
+}
+
+#[test]
+fn a_github_repository_refuses_a_dot_or_two_dots_as_either_part() {
+    for text in ["./api", "../api", "crumbkit/.", "crumbkit/.."] {
+        assert_eq!(
+            text.parse::<GithubRepository>(),
+            Err(BadSourceText::NotOwnerAndName),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn an_image_digest_is_sha256_followed_by_64_lowercase_hex_digits() {
+    let digest = "0123456789abcdef".repeat(4);
+    assert!(
+        format!("postgres@sha256:{digest}")
+            .parse::<ImageReference>()
+            .is_ok()
+    );
+    assert!(
+        format!("postgres:17@sha256:{digest}")
+            .parse::<ImageReference>()
+            .is_ok()
+    );
+    for text in [
+        "postgres@sha256:abc".to_owned(),
+        format!("postgres@sha512:{digest}"),
+        format!("postgres@sha256:{}", digest.to_uppercase()),
+        "postgres@".to_owned(),
+        format!("@sha256:{digest}"),
+    ] {
+        assert_eq!(
+            text.parse::<ImageReference>(),
+            Err(BadSourceText::Unpinned),
+            "{text}"
+        );
+    }
+}

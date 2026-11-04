@@ -133,11 +133,15 @@ pub enum BadSourceText {
     Empty,
     /// The text holds more bytes than its limit.
     TooLong,
+    /// The text starts with a character other than an ASCII letter or digit.
+    BadStart,
     /// The text holds this character, which it never holds.
     BadCharacter(char),
-    /// A repository is not exactly `owner/name` with both parts non-empty.
+    /// A repository is not exactly `owner/name` with both parts non-empty
+    /// and neither part `.` or `..`.
     NotOwnerAndName,
-    /// An image has neither a digest nor a tag, or its tag is `latest`, so
+    /// An image has neither a digest of the form `@sha256:` and 64
+    /// lowercase hexadecimal digits nor a tag, or its tag is `latest`, so
     /// the image it names can change without the plan changing.
     Unpinned,
 }
@@ -147,6 +151,8 @@ impl fmt::Display for BadSourceText {
         match self {
             Self::Empty => formatter.write_str("the text is empty"),
             Self::TooLong => formatter.write_str("the text is longer than its limit"),
+            Self::BadStart => formatter
+                .write_str("the text starts with a character other than a letter or a digit"),
             Self::BadCharacter(character) => {
                 write!(formatter, "the text holds the character {character:?}")
             }
@@ -215,7 +221,7 @@ macro_rules! text_type {
 /// The version of a release, which is its git tag, such as `v1.2.0`.
 ///
 /// A version holds 1 to [`MOST_VERSION_BYTES`] ASCII letters, digits, `.`,
-/// `-`, `+` and `_`.
+/// `-`, `+` and `_`, and starts with a letter or a digit.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Version(String);
@@ -225,6 +231,9 @@ impl TryFrom<String> for Version {
 
     fn try_from(text: String) -> Result<Self, BadSourceText> {
         check_text(&text, MOST_VERSION_BYTES, ".-+_")?;
+        if !text.starts_with(|first: char| first.is_ascii_alphanumeric()) {
+            return Err(BadSourceText::BadStart);
+        }
         Ok(Self(text))
     }
 }
@@ -234,8 +243,8 @@ text_type!(Version);
 /// A GitHub repository, written `owner/name`, such as
 /// `crumbkit/example-api`.
 ///
-/// Each part holds ASCII letters, digits, `.`, `-` and `_`, and the whole
-/// holds at most [`MOST_REPOSITORY_BYTES`] bytes.
+/// Each part holds ASCII letters, digits, `.`, `-` and `_`, and is neither
+/// `.` nor `..`. The whole holds at most [`MOST_REPOSITORY_BYTES`] bytes.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct GithubRepository(String);
@@ -260,9 +269,7 @@ impl TryFrom<String> for GithubRepository {
     fn try_from(text: String) -> Result<Self, BadSourceText> {
         check_text(&text, MOST_REPOSITORY_BYTES, "./-_")?;
         match text.split_once('/') {
-            Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
-                Ok(Self(text))
-            }
+            Some((owner, name)) if is_part(owner) && is_part(name) => Ok(Self(text)),
             _ => Err(BadSourceText::NotOwnerAndName),
         }
     }
@@ -270,12 +277,29 @@ impl TryFrom<String> for GithubRepository {
 
 text_type!(GithubRepository);
 
+/// Reports whether `part` can be the owner or the name of a repository.
+fn is_part(part: &str) -> bool {
+    !part.is_empty() && part != "." && part != ".." && !part.contains('/')
+}
+
+/// Reports whether `digest` is `sha256:` followed by 64 lowercase
+/// hexadecimal digits.
+fn is_sha256_digest(digest: &str) -> bool {
+    digest.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .chars()
+                .all(|digit| matches!(digit, '0'..='9' | 'a'..='f'))
+    })
+}
+
 /// A container image that already exists, such as `postgres:17`.
 ///
 /// A reference holds 1 to [`MOST_IMAGE_BYTES`] bytes of ASCII letters,
-/// digits, `.`, `-`, `_`, `/`, `:` and `@`. It is pinned by a digest
-/// (`@sha256:…`) or by a tag other than `latest`, so the image a plan names
-/// changes only when the plan does.
+/// digits, `.`, `-`, `_`, `/`, `:` and `@`. It is pinned by a digest, which
+/// is `@sha256:` followed by 64 lowercase hexadecimal digits, or by a tag
+/// other than `latest`, so the image a plan names changes only when the
+/// plan does.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ImageReference(String);
@@ -285,8 +309,12 @@ impl TryFrom<String> for ImageReference {
 
     fn try_from(text: String) -> Result<Self, BadSourceText> {
         check_text(&text, MOST_IMAGE_BYTES, ".-_/:@")?;
-        if text.contains('@') {
-            return Ok(Self(text));
+        if let Some((name, digest)) = text.split_once('@') {
+            return if !name.is_empty() && is_sha256_digest(digest) {
+                Ok(Self(text))
+            } else {
+                Err(BadSourceText::Unpinned)
+            };
         }
         // The tag follows the last `:` of the last path segment. A `:` in an
         // earlier segment separates a registry's host from its port.
