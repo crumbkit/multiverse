@@ -232,7 +232,11 @@ the same access, and phase provisions nothing.
 4. phase starts the apps in dependency order. For each process it resolves
    the app's environment, generates the sandbox profile, starts a keeper,
    and waits for the readiness probe.
-5. phase writes the run record and returns a report.
+   Before it starts any process or container, phase writes the run
+   record with every object the plan will create, and it updates the
+   record as each keeper and container starts. See
+   [Lifecycle rules](#lifecycle-rules).
+5. phase returns a report.
 
 ## Engine
 
@@ -394,6 +398,8 @@ mxv phase sweep [--dry-run]          # stop what a crashed run left behind
 mxv phase reset SERVICE              # remove a shared service's data, after asking
 mxv phase plan check FILE            # validate a plan without running it
 mxv phase grants [APP]               # show and revoke granted permissions
+mxv phase grants approve APP         # grant an app's pending permission growth
+mxv phase exec APP -- COMMAND...     # run a command with the app's environment and sandbox
 ```
 
 Every command takes `--workspace DIR` and defaults to the workspace that
@@ -429,6 +435,96 @@ impl Phase {
 
 `mxv` links this library. Other hosts can link it too, giving phase their
 own plan and `EnvironmentSource`.
+
+## Lifecycle rules
+
+These rules come from the history of an earlier local runner, whose bugs
+and redesigns are the evidence for each one.
+
+### Records
+
+- phase writes the run record before it creates anything, naming each
+  planned keeper, process, container, network and volume, and updates it as
+  each one starts. Stopping writes `stopping` before it acts and `stopped`
+  only after it has checked that the object is gone. A crash at any point
+  leaves a record that names everything that may be running.
+- phase labels every container, network and volume with the workspace's
+  stable id and the path of its run record. `sweep` removes what the record
+  names; `sweep --all` also removes labelled objects whose workspace no
+  longer exists. When Docker does not answer, `sweep` and `status` fail
+  with an error; they never report that nothing is running.
+- Docker networks are recorded and removed like containers. A workspace
+  uses one network for all its containers, since host processes reach
+  containers through published ports.
+- The run record is keyed by the workspace's stable id, so moving or
+  renaming the workspace keeps it.
+- A run record that phase cannot read blocks only its own workspace. A
+  record written by a newer phase asks you to upgrade. `sweep --unreadable
+  [--dry-run]` removes the rest. A phase upgrade leaves running workspaces
+  running, and the next `up` adopts them.
+
+### Starting and stopping
+
+- Apps that do not depend on each other start at the same time. When one
+  fails, phase stops starting the others and reports which started.
+- `up` on a running workspace compares each process's recorded inputs (the
+  plan hash, the program's digest, and a keyed hash of its environment
+  values, never the values) with the new ones. It restarts a process whose
+  inputs changed and leaves the rest alone without probing them again.
+- `up` has separate deadlines for building and for readiness. When a
+  deadline cuts off a start or stop, phase reports the outcome as
+  uncertain and does not retry it.
+- macOS checks a newly written program the first time it runs, which can
+  take several seconds. phase runs each new program once with `--version`
+  or equivalent before starting it, or excludes that first launch from the
+  probe timeout.
+- Before it starts a process, phase checks that its port is free, and when
+  it is not, names the process that holds it.
+- A process can be a `oneshot`, such as a migration. It is ready when it
+  exits 0, and the processes that depend on it wait for that. It runs on
+  every `up` unless it declares `once = true`.
+- Ctrl-C during a foreground `up` stops what that `up` started. Status
+  shows each workspace as starting, running, partly running or stopped.
+
+### Restarts and expiring credentials
+
+- `AppliedEnvironment` reports the earliest time any of its values
+  expires. `status` shows a process whose credentials have expired.
+- A restart policy states whether a crash restart resolves the environment
+  again. The default resolves it again when a value has expired.
+- phase recreates a container to restart it; it never uses
+  `docker restart`, which keeps the environment the container was created
+  with.
+
+### Concurrency
+
+- `up`, `down` and `restart` take the workspace's lifecycle lock. `status`
+  and `logs` open records read-only, take no lock, and never hold one while
+  they stream, so they also work inside an agent's sandbox.
+- `exec` and the host program's tests wait for an `up` in progress to
+  finish, up to a deadline, before they run.
+
+### Logs
+
+- A keeper gives its app a file descriptor for the log file, not a pipe, so
+  the app keeps running and logging if the keeper dies.
+- Keeper logs have a maximum line length and rotate at a size limit. A slow
+  log reader never blocks supervision or Ctrl-C.
+
+### Shared service credentials
+
+- phase provisions roles through `docker exec` as the container's local
+  superuser, and sets each role's password on every `up`. Losing a stored
+  password therefore never makes a service's data unusable. `reset SERVICE`
+  removes the data and the stored passwords together.
+
+### Unattended runs
+
+- When an app's permissions grew and nobody is at a terminal, `up` refuses
+  that app with a stable error code and the permission difference.
+  `mxv phase grants approve APP` grants it.
+- `up --env KEY=VALUE` sets a value that is not a secret for one run. It
+  needs no grant, and the plan records the name only.
 
 ## Releases
 
@@ -467,4 +563,5 @@ Each decision states what this draft assumes until it is decided.
 | P10 | The trust model described above. | Decided 4 November 2026: as described in [Trust](#trust). |
 | P11 | Where an app's release, build and permission fields live: in `mxv.toml`, or in a separate file. | Decided 4 November 2026: in `mxv.toml`. |
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
+| P14 | Whether phase builds container images and runs host-built apps in containers with the checkout mounted, cache volumes and a run-as user, or leaves images to the host program. | Open. The draft keeps image building out of scope; a host program that runs its apps in containers would need it, or would pass phase a built image and mounts. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
