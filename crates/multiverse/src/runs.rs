@@ -16,8 +16,8 @@
 //!
 //! A container of the manifest has the record `<container>.container`,
 //! which holds the id of the container that `up` started; docker holds its
-//! state. The `docker` module describes the compose project and the labels
-//! that mxv checks before it acts on a recorded id. Its
+//! state. The `docker` module keeps that record, describes the compose
+//! project and checks the labels before it acts on a recorded id. Its
 //! log is `<container>.log` too, which a detached `docker logs --follow`
 //! appends to while the container runs, so the log outlives the container
 //! that `mxv down` removes. `<container>.follower` records the follower's
@@ -35,16 +35,17 @@ use rustix::process::Signal;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
-use crate::docker;
+use crate::docker::{
+    self, ContainerState, Lifecycle, OwnedContainer, ServiceName, Start, VolumeName,
+};
 use crate::error::Error;
-use crate::manifest::{LogPattern, Manifest, Process, ReadyCheck, Unit};
+use crate::manifest::{Container, LogPattern, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
 use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
-mod containers;
 #[cfg(test)]
 mod tests;
 
@@ -662,9 +663,7 @@ impl Runs {
             .iter()
             .any(|name| manifest.containers.contains_key(name))
         {
-            docker::check()?;
-            docker::check_compose()?;
-            Some(self.ensure_scope(&workspace.name)?)
+            Some(self.lifecycle(&workspace.name).prepare()?)
         } else {
             None
         };
@@ -722,8 +721,8 @@ impl Runs {
     fn roll_back(&self, name: &WorkspaceName, manifest: &Manifest, started: &[&String]) {
         for process in started.iter().rev() {
             if manifest.containers.contains_key(*process) {
-                if let Ok(Some(scope)) = self.scope(name) {
-                    let _ = self.remove_container(name, &scope, process);
+                if let Some(service) = service(process) {
+                    let _ = self.lifecycle(name).stop(&service);
                 }
                 continue;
             }
@@ -1017,9 +1016,9 @@ impl Runs {
                 || (!recorded.contains(process) && containers.contains(process));
             if is_container {
                 if containers.contains(process)
-                    && let Some(scope) = self.scope(&workspace.name)?
+                    && let Some(service) = service(process)
                 {
-                    self.remove_container(&workspace.name, &scope, process)?;
+                    self.lifecycle(&workspace.name).stop(&service)?;
                 }
                 results.push(Ok(self.container_status_of(
                     workspace,
@@ -1163,13 +1162,314 @@ impl Runs {
     /// Returns the docker errors of [`Runs::down`], and
     /// [`Error::Unwritable`] when the directory cannot be deleted.
     pub fn forget(&self, name: &WorkspaceName) -> Result<(), Error> {
-        self.remove_project(name)?;
+        self.lifecycle(name).stop_all()?;
         let dir = self.workspace_dir(name);
         match fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(Error::Unwritable { path: dir, source }),
         }
+    }
+}
+
+/// The containers of a workspace's app, which `Lifecycle` in the
+/// `docker` module starts, reports and stops. These methods put them among
+/// the workspace's processes and wait for their readiness.
+impl Runs {
+    /// Returns the containers of the workspace `name`.
+    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle {
+        Lifecycle::new(
+            &self.dir,
+            self.workspace_dir(name),
+            name,
+            self.grace,
+            self.lock_wait,
+        )
+    }
+
+    /// Returns the names of the containers that `manifest` declares, and
+    /// the containers of the workspace that the run records name.
+    fn containers(
+        &self,
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+    ) -> Result<BTreeSet<String>, Error> {
+        let mut names: BTreeSet<String> = manifest
+            .map(|manifest| manifest.containers.keys().cloned().collect())
+            .unwrap_or_default();
+        names.extend(self.existing_containers(&workspace.name)?);
+        Ok(names)
+    }
+
+    /// Returns the containers of the workspace `name` that have a record,
+    /// which `up` writes when it starts one and `down` deletes when it
+    /// removes it.
+    fn existing_containers(&self, name: &WorkspaceName) -> Result<BTreeSet<String>, Error> {
+        Ok(self
+            .lifecycle(name)
+            .recorded()?
+            .into_iter()
+            .map(|service| service.as_str().to_owned())
+            .collect())
+    }
+
+    /// Returns the containers of the workspace `name` that have a record,
+    /// in name order. It runs no docker command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when the run directory cannot be
+    /// read.
+    pub fn docker_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
+        Ok(self.existing_containers(name)?.into_iter().collect())
+    }
+
+    /// Returns the containers of the workspace `name` that run, in name
+    /// order.
+    fn running_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
+        Ok(self
+            .lifecycle(name)
+            .running()?
+            .into_iter()
+            .map(|service| service.as_str().to_owned())
+            .collect())
+    }
+
+    /// Returns the status of the container `container`, which docker
+    /// reports, as [`Lifecycle::status`] describes.
+    fn container_status(
+        &self,
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+        container: &str,
+    ) -> Result<ProcessStatus, Error> {
+        let state = match service(container) {
+            Some(service) => self.lifecycle(&workspace.name).status(&service)?,
+            None => None,
+        };
+        let state = state.map_or(ProcessState::Stopped, container_state);
+        Ok(self.container_status_of(workspace, manifest, container, state))
+    }
+
+    /// Returns the status of the container `container` in `state`.
+    fn container_status_of(
+        &self,
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+        container: &str,
+        state: ProcessState,
+    ) -> ProcessStatus {
+        let ports: BTreeMap<String, u16> = manifest
+            .and_then(|manifest| manifest.containers.get(container))
+            .map(|declared| {
+                declared
+                    .ports
+                    .iter()
+                    .filter_map(|published| {
+                        workspace
+                            .ports
+                            .get(&published.port)
+                            .map(|number| (published.port.clone(), *number))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ProcessStatus {
+            name: container.to_owned(),
+            kind: Kind::Container,
+            state,
+            ports,
+            log: self.log(&workspace.name, container),
+            group_alive: None,
+        }
+    }
+
+    /// Reports whether the container `container` of the workspace `name`
+    /// runs.
+    fn container_runs(&self, name: &WorkspaceName, container: &str) -> Result<bool, Error> {
+        match service(container) {
+            Some(service) => self.lifecycle(name).runs(&service),
+            None => Ok(false),
+        }
+    }
+
+    /// Reports whether the log of the container `container` may still
+    /// grow, as [`Lifecycle::writing`] describes.
+    fn container_writing(&self, name: &WorkspaceName, container: &str) -> Result<bool, Error> {
+        match service(container) {
+            Some(service) => self.lifecycle(name).writing(&service),
+            None => Ok(false),
+        }
+    }
+
+    /// Starts the container `name` of `manifest` and waits for its
+    /// readiness, as [`Runs::up`] describes, or makes sure that a container
+    /// that already runs has a log follower. It returns `None` when the
+    /// container is ready, and the outcome that stops `up` otherwise. When
+    /// a step after `docker compose up` fails, the container is removed
+    /// before the error returns.
+    fn start_container(
+        &self,
+        workspace: &Workspace,
+        scope: &docker::Scope,
+        manifest: &Manifest,
+        name: &str,
+        declared: &Container,
+    ) -> Result<Option<UpOutcome>, Error> {
+        let Some(service) = service(name) else {
+            return Ok(Some(UpOutcome::UnknownProcess(name.to_owned())));
+        };
+        let lifecycle = self.lifecycle(&workspace.name);
+        match lifecycle.start(scope, &manifest.containers, &service, &workspace.ports)? {
+            Start::Running => Ok(None),
+            Start::PortTaken { port, number } => Ok(Some(UpOutcome::PortTaken {
+                process: name.to_owned(),
+                port,
+                number,
+                holders: Vec::new(),
+            })),
+            Start::Gone => Ok(Some(self.exited(&workspace.name, name, None))),
+            Start::Started(container) => {
+                match self.wait_container(workspace, &lifecycle, declared, &container) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(error) => {
+                        let _ = lifecycle.stop(&service);
+                        Err(error)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the outcome of the container `name` that stopped before it
+    /// was ready, with docker's exit code `code`.
+    fn exited(&self, name: &WorkspaceName, container: &str, code: Option<i32>) -> UpOutcome {
+        let log = self.log(name, container);
+        // `docker logs` may not have copied the last lines yet.
+        pause(FOLLOW_INTERVAL);
+        UpOutcome::Exited {
+            process: container.to_owned(),
+            code,
+            signal: None,
+            tail: tail(&log, TAIL_LINES),
+            log,
+        }
+    }
+
+    /// Waits for the readiness of `container`, which `docker compose up`
+    /// just started for `declared`: its readiness port answers, or it runs
+    /// past the grace of a container without a readiness check. A
+    /// container that stops first, or misses its readiness timeout, ends
+    /// the wait with the outcome that stops `up`, and one that misses the
+    /// timeout is removed.
+    fn wait_container(
+        &self,
+        workspace: &Workspace,
+        lifecycle: &Lifecycle,
+        declared: &Container,
+        container: &OwnedContainer,
+    ) -> Result<Option<UpOutcome>, Error> {
+        let name = container.service().as_str();
+        let log = self.log(&workspace.name, name);
+        let ready_port = declared
+            .ready
+            .as_ref()
+            .and_then(|ready| match &ready.check {
+                ReadyCheck::Port(port) => Some(port),
+                ReadyCheck::Log(_) => None,
+            });
+        let port = ready_port.and_then(|ready_port| workspace.ports.get(ready_port).copied());
+        let timeout = declared
+            .ready
+            .as_ref()
+            .map_or(START_GRACE, |ready| ready.timeout);
+        let deadline = Instant::now() + timeout;
+        loop {
+            let state = docker::reinspect(container)?.map(|inspected| inspected.state);
+            if state != Some(ContainerState::Running) && state != Some(ContainerState::Created) {
+                let code = match state {
+                    Some(ContainerState::Exited(code)) => Some(code),
+                    _ => None,
+                };
+                return Ok(Some(self.exited(&workspace.name, name, code)));
+            }
+            if port.is_some_and(docker::answers) {
+                return Ok(None);
+            }
+            if Instant::now() >= deadline {
+                let Some(ready) = &declared.ready else {
+                    return Ok(None);
+                };
+                lifecycle.stop(container.service())?;
+                return Ok(Some(UpOutcome::NotReady {
+                    process: name.to_owned(),
+                    waited: Waited::Port {
+                        port: ready_port.cloned().unwrap_or_default(),
+                        number: port.unwrap_or_default(),
+                    },
+                    timeout: ready.timeout,
+                    tail: tail(&log, TAIL_LINES),
+                    log,
+                }));
+            }
+            pause(FOLLOW_INTERVAL);
+        }
+    }
+
+    /// Returns the volumes of the workspace `name` that a removal deletes:
+    /// the recorded volumes that docker still has, and the anonymous
+    /// volumes of its recorded containers. It runs no docker command for a
+    /// workspace without records of containers or volumes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
+    /// [`Error::DockerFailed`].
+    pub fn volumes(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
+        Ok(self
+            .lifecycle(name)
+            .volumes()?
+            .into_iter()
+            .map(|volume| volume.as_str().to_owned())
+            .collect())
+    }
+
+    /// Deletes the volumes `volumes` of the workspace `name`, which
+    /// [`Runs::volumes`] returned, after it checked the labels of each
+    /// named volume.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DockerForeign`], [`Error::DockerMissing`],
+    /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
+    pub fn delete_volumes(&self, name: &WorkspaceName, volumes: &[String]) -> Result<(), Error> {
+        // A name that no volume can have names no volume, as when docker
+        // finds no volume with it.
+        let volumes: Vec<VolumeName> = volumes
+            .iter()
+            .filter_map(|volume| VolumeName::new(volume).ok())
+            .collect();
+        self.lifecycle(name).delete_volumes(&volumes)
+    }
+}
+
+/// Returns the service name of the container `name`, or `None` for a name
+/// that no manifest container has.
+fn service(name: &str) -> Option<ServiceName> {
+    ServiceName::new(name).ok()
+}
+
+/// Returns the state that mxv reports for a container in `state`. The
+/// exit code is docker's, which mxv does not read as a signal.
+const fn container_state(state: ContainerState) -> ProcessState {
+    match state {
+        ContainerState::Running => ProcessState::Running { pid: None },
+        ContainerState::Created => ProcessState::Created,
+        ContainerState::Exited(code) => ProcessState::Exited {
+            code: Some(code),
+            signal: None,
+            reason: None,
+        },
     }
 }
 
