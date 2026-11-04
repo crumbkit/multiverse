@@ -43,6 +43,7 @@ use crate::workspaces::{Entry, Workspaces};
 #[cfg(test)]
 mod tests;
 mod tree;
+mod volume;
 
 pub(crate) use tree::keep_reason;
 

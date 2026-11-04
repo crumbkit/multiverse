@@ -542,9 +542,14 @@ repository at any depth, an entry named `.git` in any case or a directory
 that holds `HEAD`, `objects/` and `refs/`, is never disposable, because it
 may hold commits that exist nowhere else.
 
-mxv also keeps a directory that it cannot check in full. A directory that
-holds the mount point of another file system, such as a disk image mounted
-below `target/`, is kept, and its reason names the mount point. A directory
+mxv also keeps a directory that it cannot check in full. A disposable
+directory that is itself the mount point of another file system, or that
+holds one, such as a disk image mounted at or below `target/`, is kept, and
+its reason names the mount point. mxv compares each directory with the
+checkout's root. On macOS it compares the device numbers. On Linux it also
+compares the mount IDs that `statx` reports, so a bind mount of a directory
+on the same file system counts as another mount, and on a kernel older
+than 5.8, which reports no mount ID, the device numbers alone decide. A directory
 with an entry that mxv cannot read is kept, because mxv cannot tell whether
 the entry holds a repository. A directory more than 100 levels deep below
 the disposable path is kept, and its reason names the level where the check
@@ -640,7 +645,7 @@ each directory relative to its parent in the same way and deletes the
 directory's entries relative to it. A component that another process swaps
 for a symbolic link before or during the deletion is never followed:
 `clean` deletes the link or fails on it, and touches nothing outside the
-checkout. The deletion also refuses a directory on another file system and
+checkout. The deletion also refuses a directory on another file system or mount and
 a directory more than 100 levels below the path, and fails the path with
 `mxv::file::unwritable` while it deletes the path's other entries.
 

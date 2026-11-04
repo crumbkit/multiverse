@@ -9,8 +9,10 @@
 //! relative to its directory, as `std::fs::remove_dir_all` does. A path
 //! longer than `PATH_MAX` is never built, so a deep tree is read in full.
 //!
-//! A tree may not cross into another file system, such as a disk image
-//! mounted below `target/`, and may not be deeper than [`MOST_DEPTH`]
+//! The disposable path and every directory below it must lie on the same
+//! file system and mount as the checkout's root, as [`Volume`] compares
+//! them, so a disk image mounted at `target/` or below it is kept. A tree
+//! may not be deeper than [`MOST_DEPTH`]
 //! directories below the path. [`keep_reason`] finds both before anything
 //! is deleted, and [`remove`] refuses both again during the deletion.
 
@@ -20,8 +22,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 
-use rustix::fs::{AtFlags, CWD, Dev, Dir, FileType, Mode, OFlags, Stat, openat, statat, unlinkat};
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat, fstat, openat, statat, unlinkat,
+};
 use rustix::io::Errno;
+
+use super::volume::{self, Volume, Volumes};
 
 /// The most directories below a disposable path that mxv checks and
 /// deletes. A deeper tree is kept, and each directory open holds one file
@@ -38,8 +44,12 @@ fn directory_flags() -> OFlags {
 
 /// Opens the parent of `relative` below the checkout at `root`, one
 /// component at a time without following a symbolic link, and returns it
-/// with the last component's name.
-fn open_parent(root: &Path, relative: &Path) -> Result<(OwnedFd, OsString), Failure> {
+/// with the last component's name and the volume of the checkout's root.
+fn open_parent(
+    root: &Path,
+    relative: &Path,
+    volumes: Volumes,
+) -> Result<(OwnedFd, OsString, Volume), Failure> {
     let mut names: Vec<&OsStr> = Vec::new();
     for component in relative.components() {
         match component {
@@ -61,12 +71,14 @@ fn open_parent(root: &Path, relative: &Path) -> Result<(OwnedFd, OsString), Fail
     let mut at = root.to_path_buf();
     let mut fd = openat(CWD, root, directory_flags(), Mode::empty())
         .map_err(|error| (at.clone(), io::Error::from(error)))?;
+    let stat = fstat(&fd).map_err(|error| (at.clone(), io::Error::from(error)))?;
+    let root_volume = volumes(&fd, OsStr::new(""), &stat);
     for name in parents {
         at.push(name);
         fd = openat(&fd, *name, directory_flags(), Mode::empty())
             .map_err(|error| (at.clone(), io::Error::from(error)))?;
     }
-    Ok((fd, last.to_os_string()))
+    Ok((fd, last.to_os_string(), root_volume))
 }
 
 /// Returns the names of the entries of the open directory `fd`, without
@@ -87,34 +99,25 @@ fn is_directory(stat: &Stat) -> bool {
     FileType::from_raw_mode(stat.st_mode) == FileType::Directory
 }
 
-/// Returns the device of the entry of `stat`.
-fn device(stat: &Stat) -> Dev {
-    stat.st_dev
-}
-
 /// Returns why mxv keeps the disposable path `relative` of the checkout at
 /// `root`, or `None` when it may be deleted. A directory is kept when it
 /// holds a nested repository, an entry named `.git` in any case or a
 /// directory that holds `HEAD`, `objects/` and `refs/` as a bare repository
 /// does, at any depth. It is also kept when it holds the mount point of
-/// another file system, when it is deeper than [`MOST_DEPTH`], and when mxv
+/// another file system or is one itself, when it is deeper than [`MOST_DEPTH`], and when mxv
 /// cannot read all of it, because then mxv cannot tell what it holds. A
 /// file is never kept here.
 pub(crate) fn keep_reason(root: &Path, relative: &str) -> Option<String> {
-    keep_reason_on(root, relative, None)
+    keep_reason_with(root, relative, volume::of)
 }
 
-/// Returns what [`keep_reason`] returns, with `device` in place of the
-/// device of the path, so a test can treat every directory as a mount
+/// Returns what [`keep_reason`] returns, with `volumes` finding the volume
+/// of each directory, so a test can make a directory look like a mount
 /// point.
-pub(crate) fn keep_reason_on(
-    root: &Path,
-    relative: &str,
-    device_of_root: Option<Dev>,
-) -> Option<String> {
+pub(crate) fn keep_reason_with(root: &Path, relative: &str, volumes: Volumes) -> Option<String> {
     let body = relative.strip_suffix('/')?;
     let path = Path::new(body);
-    let (parent, name) = match open_parent(root, path) {
+    let (parent, name, root_volume) = match open_parent(root, path, volumes) {
         Ok(opened) => opened,
         Err((at, error)) => {
             return Some(format!("mxv cannot open {}: {error}", shown(root, &at)));
@@ -127,8 +130,16 @@ pub(crate) fn keep_reason_on(
     if !is_directory(&stat) {
         return None;
     }
-    let root_device = device_of_root.unwrap_or_else(|| device(&stat));
-    scan(&parent, &name, path, root_device, 0)
+    if !volumes(&parent, &name, &stat).same_file_system(root_volume) {
+        return Some(format!(
+            "it is the mount point of another file system at {body}/, which mxv leaves alone"
+        ));
+    }
+    let walk = Scan {
+        root_volume,
+        volumes,
+    };
+    walk.directory(&parent, &name, path, 0)
 }
 
 /// Returns `path`, which lies below `root`, relative to `root`.
@@ -143,73 +154,84 @@ fn shown(root: &Path, path: &Path) -> String {
 /// path `path` relative to the checkout, is kept, as [`keep_reason`]
 /// describes, where `depth` counts the directories above it below the
 /// disposable path.
-fn scan(
-    parent: &OwnedFd,
-    name: &OsStr,
-    path: &Path,
-    root_device: Dev,
-    depth: usize,
-) -> Option<String> {
-    let at = path.display();
-    if depth > MOST_DEPTH {
-        return Some(format!(
-            "it is deeper than {MOST_DEPTH} directories at {at}, so mxv cannot check all of it"
-        ));
-    }
-    let unreadable = |error: Errno| {
-        Some(format!(
-            "mxv cannot read {at}: {error}, so it cannot tell whether it holds a repository"
-        ))
-    };
-    let fd = match openat(parent, name, directory_flags(), Mode::empty()) {
-        Ok(fd) => fd,
-        Err(error) => return unreadable(error),
-    };
-    let entries = match names(&fd) {
-        Ok(entries) => entries,
-        Err(error) => return unreadable(error),
-    };
-    let kind = |entry: &str| statat(&fd, entry, AtFlags::SYMLINK_NOFOLLOW).ok();
-    let bare = kind("HEAD")
-        .is_some_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
-        && kind("objects").is_some_and(|stat| is_directory(&stat))
-        && kind("refs").is_some_and(|stat| is_directory(&stat));
-    if bare {
-        return Some(format!(
-            "it holds the repository {at}/, which may hold commits that exist nowhere else"
-        ));
-    }
-    for entry in &entries {
-        let child = path.join(entry);
-        if entry.eq_ignore_ascii_case(".git") {
+/// One check of a tree.
+struct Scan {
+    /// The volume of the checkout's root, which every directory below the
+    /// disposable path must share.
+    root_volume: Volume,
+    /// Finds the volume of a directory.
+    volumes: Volumes,
+}
+
+impl Scan {
+    fn directory(
+        &self,
+        parent: &OwnedFd,
+        name: &OsStr,
+        path: &Path,
+        depth: usize,
+    ) -> Option<String> {
+        let at = path.display();
+        if depth > MOST_DEPTH {
             return Some(format!(
-                "it holds the repository {}, which may hold commits that exist nowhere else",
-                child.display()
+                "it is deeper than {MOST_DEPTH} directories at {at}, so mxv cannot check all of it"
             ));
         }
-        let stat = match statat(&fd, entry, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(error) => {
+        let unreadable = |error: Errno| {
+            Some(format!(
+                "mxv cannot read {at}: {error}, so it cannot tell whether it holds a repository"
+            ))
+        };
+        let fd = match openat(parent, name, directory_flags(), Mode::empty()) {
+            Ok(fd) => fd,
+            Err(error) => return unreadable(error),
+        };
+        let entries = match names(&fd) {
+            Ok(entries) => entries,
+            Err(error) => return unreadable(error),
+        };
+        let kind = |entry: &str| statat(&fd, entry, AtFlags::SYMLINK_NOFOLLOW).ok();
+        let bare = kind("HEAD")
+            .is_some_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
+            && kind("objects").is_some_and(|stat| is_directory(&stat))
+            && kind("refs").is_some_and(|stat| is_directory(&stat));
+        if bare {
+            return Some(format!(
+                "it holds the repository {at}/, which may hold commits that exist nowhere else"
+            ));
+        }
+        for entry in &entries {
+            let child = path.join(entry);
+            if entry.eq_ignore_ascii_case(".git") {
                 return Some(format!(
-                    "mxv cannot read {}: {error}, so it cannot tell whether it holds a repository",
+                    "it holds the repository {}, which may hold commits that exist nowhere else",
                     child.display()
                 ));
             }
-        };
-        if !is_directory(&stat) {
-            continue;
+            let stat = match statat(&fd, entry, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(error) => {
+                    return Some(format!(
+                        "mxv cannot read {}: {error}, so it cannot tell whether it holds a repository",
+                        child.display()
+                    ));
+                }
+            };
+            if !is_directory(&stat) {
+                continue;
+            }
+            if !(self.volumes)(&fd, entry, &stat).same_file_system(self.root_volume) {
+                return Some(format!(
+                    "it holds {}, the mount point of another file system, which mxv leaves alone",
+                    child.display()
+                ));
+            }
+            if let Some(reason) = self.directory(&fd, entry, &child, depth + 1) {
+                return Some(reason);
+            }
         }
-        if device(&stat) != root_device {
-            return Some(format!(
-                "it holds {}, the mount point of another file system, which mxv leaves alone",
-                child.display()
-            ));
-        }
-        if let Some(reason) = scan(&fd, entry, &child, root_device, depth + 1) {
-            return Some(reason);
-        }
+        None
     }
-    None
 }
 
 /// Deletes the disposable path `relative` of the checkout at `root` and
@@ -222,28 +244,23 @@ pub(crate) fn remove(
     relative: &str,
     removed: &mut dyn FnMut(&Path),
 ) -> Result<(), Failure> {
-    remove_on(root, relative, None, removed)
+    remove_with(root, relative, volume::of, removed)
 }
 
-/// Deletes as [`remove`] does, with `device` in place of the device of the
-/// path, so a test can treat every directory as a mount point.
-pub(crate) fn remove_on(
+/// Deletes as [`remove`] does, with `volumes` finding the volume of each
+/// directory, so a test can make a directory look like a mount point.
+pub(crate) fn remove_with(
     root: &Path,
     relative: &str,
-    device_of_root: Option<Dev>,
+    volumes: Volumes,
     removed: &mut dyn FnMut(&Path),
 ) -> Result<(), Failure> {
     let body = relative.trim_end_matches('/');
-    let (parent, name) = open_parent(root, Path::new(body))?;
+    let (parent, name, root_volume) = open_parent(root, Path::new(body), volumes)?;
     let path = root.join(body);
-    let stat = match statat(&parent, &name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => stat,
-        Err(Errno::NOENT) => return Ok(()),
-        Err(error) => return Err((path, io::Error::from(error))),
-    };
-    let root_device = device_of_root.unwrap_or_else(|| device(&stat));
     let mut walk = Removal {
-        root_device,
+        root_volume,
+        volumes,
         removed,
     };
     walk.entry(&parent, &name, &path, 0)
@@ -251,9 +268,11 @@ pub(crate) fn remove_on(
 
 /// One deletion of a tree.
 struct Removal<'a> {
-    /// The device of the disposable path, which every directory below it
-    /// must share.
-    root_device: Dev,
+    /// The volume of the checkout's root, which the disposable path and
+    /// every directory below it must share.
+    root_volume: Volume,
+    /// Finds the volume of a directory.
+    volumes: Volumes,
     /// Called with each entry that the deletion removed.
     removed: &'a mut dyn FnMut(&Path),
 }
@@ -278,7 +297,7 @@ impl Removal<'_> {
         if !is_directory(&stat) {
             return self.unlink(dir, name, AtFlags::empty(), path);
         }
-        if device(&stat) != self.root_device {
+        if !(self.volumes)(dir, name, &stat).same_file_system(self.root_volume) {
             return Err((
                 path.to_path_buf(),
                 io::Error::other(

@@ -507,27 +507,84 @@ fn a_parent_component_swapped_during_the_deletion_leaves_the_link_target_alone()
     assert_eq!(left, 20, "the deletion followed the link into the decoy");
 }
 
+/// Returns the real volume of each directory, except that a directory
+/// named `mnt` looks like the mount point of another file system.
+fn mounted_at_mnt(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+    stat: &rustix::fs::Stat,
+) -> super::volume::Volume {
+    let real = super::volume::of(dir, name, stat);
+    if name == "mnt" {
+        super::volume::Volume {
+            mount: real.mount.map(|mount| mount.wrapping_add(1)),
+            device: if real.mount.is_some() {
+                real.device
+            } else {
+                rustix::fs::Dev::MAX
+            },
+        }
+    } else {
+        real
+    }
+}
+
+/// Returns the real volume of each directory, except that a directory
+/// named `target` looks like the mount point of another file system.
+fn mounted_at_target(
+    dir: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+    stat: &rustix::fs::Stat,
+) -> super::volume::Volume {
+    let real = super::volume::of(dir, name, stat);
+    if name == "target" {
+        super::volume::Volume {
+            device: rustix::fs::Dev::MAX,
+            mount: None,
+        }
+    } else {
+        real
+    }
+}
+
 #[test]
-fn a_directory_on_another_device_is_kept_and_never_deleted() {
+fn a_directory_on_another_file_system_below_the_path_is_kept_and_never_deleted() {
     let setup = setup();
     let checkout = setup.checkout();
     write_bytes(&checkout.join("target/mnt/image"), 16);
-    // A device that no directory has makes every directory below the path
-    // look like the mount point of another file system.
-    let reason =
-        super::tree::keep_reason_on(&checkout, "target/", Some(rustix::fs::Dev::MAX)).unwrap();
+    write_bytes(&checkout.join("target/debug/app"), 16);
+    let reason = super::tree::keep_reason_with(&checkout, "target/", mounted_at_mnt).unwrap();
     assert!(reason.contains("target/mnt"), "{reason}");
     assert!(reason.contains("mount point"), "{reason}");
-    let result = super::tree::remove_on(
-        &checkout,
-        "target/",
-        Some(rustix::fs::Dev::MAX),
-        &mut |_| {},
-    );
+    let result = super::tree::remove_with(&checkout, "target/", mounted_at_mnt, &mut |_| {});
+    let (failed, error) = result.unwrap_err();
+    assert_eq!(failed, checkout.join("target/mnt"));
+    assert!(error.to_string().contains("mount point"), "{error}");
+    assert!(checkout.join("target/mnt/image").exists());
+    assert!(!checkout.join("target/debug").exists());
+}
+
+#[test]
+fn a_disposable_path_that_is_itself_a_mount_point_is_kept_and_never_deleted() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/debug/app"), 16);
+    let reason = super::tree::keep_reason_with(&checkout, "target/", mounted_at_target).unwrap();
+    assert!(reason.contains("mount point"), "{reason}");
+    assert!(reason.contains("target/"), "{reason}");
+    let result = super::tree::remove_with(&checkout, "target/", mounted_at_target, &mut |_| {});
     let (failed, error) = result.unwrap_err();
     assert_eq!(failed, checkout.join("target"));
     assert!(error.to_string().contains("mount point"), "{error}");
-    assert!(checkout.join("target/mnt/image").exists());
+    assert!(checkout.join("target/debug/app").exists());
+}
+
+#[test]
+fn a_disposable_path_on_the_checkouts_own_file_system_is_not_kept_for_its_mount() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write_bytes(&checkout.join("target/debug/app"), 16);
+    assert_eq!(super::tree::keep_reason(&checkout, "target/"), None);
 }
 
 /// Creates `depth` directories named `name` inside each other below `dir`
