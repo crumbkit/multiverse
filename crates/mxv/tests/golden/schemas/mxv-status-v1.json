@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/status/v1",
+  "description": "Each process of the workspace's manifest in start order, then each other process that has run files, with its state.",
+  "type": "object",
+  "properties": {
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "code": {
+          "description": "The over-budget code, in the tool's spelling.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "budget"
+      ]
+    },
+    "data": {
+      "description": "The rows, in order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProcessRow"
+      }
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/status/v1"
+    }
+  },
+  "required": [
+    "schema",
+    "data"
+  ],
+  "$defs": {
+    "ProcessRow": {
+      "description": "One process of a workspace, as `up`, `down`, `restart` and `status`\nprint it.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "group_alive": {
+          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
+          "type": "boolean"
+        },
+        "log": {
+          "description": "The process's log file, which `mxv logs` prints.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The process's name in the manifest.",
+          "type": "string"
+        },
+        "pid": {
+          "description": "The process id, which is also its process group's id, while it\nruns.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ports": {
+          "description": "The ports that the process receives, as `VARIABLE=port`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "signal": {
+          "description": "The number of the signal that ended an exited process, such as 15\nfor SIGTERM, or null.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "state": {
+          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, or `stopped`.",
+          "$ref": "#/$defs/StateName"
+        }
+      },
+      "required": [
+        "name",
+        "state",
+        "pid",
+        "code",
+        "signal",
+        "group_alive",
+        "ports"
+      ]
+    },
+    "StateName": {
+      "description": "The state of a process, as a row prints it.",
+      "oneOf": [
+        {
+          "description": "The process runs.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "The process ended.",
+          "type": "string",
+          "const": "exited"
+        },
+        {
+          "description": "The process is not started.",
+          "type": "string",
+          "const": "stopped"
+        }
+      ]
+    }
+  }
+}

@@ -9,7 +9,9 @@ use multiverse::{
 use crate::cli::{CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
+use crate::processes;
 use crate::rows::{PlacedRow, RemovalResult, WorkspaceRow};
+use crate::run_failures::RunFailure;
 
 /// The document that `mxv new` prints.
 pub(crate) const NEW: Document<PlacedRow> = Document::new(
@@ -53,7 +55,7 @@ pub(crate) const REMOVE: Document<Prose<RemovalResult>> = Document::new(
 );
 
 /// Returns `text` as a workspace name.
-fn parse_name(text: &str) -> Result<WorkspaceName, MxvFailure> {
+pub(crate) fn parse_name(text: &str) -> Result<WorkspaceName, MxvFailure> {
     text.parse().map_err(|reason| MxvFailure::BadName {
         name: text.to_owned(),
         reason,
@@ -161,6 +163,19 @@ pub(crate) fn remove(
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {
     let name = parse_name(&args.name)?;
     let workspaces = workspaces(environment)?;
+    // Running processes stop the removal unless it is forced, and a forced
+    // removal stops them after the person confirms.
+    let mut running = Vec::new();
+    if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
+        running = processes::running(environment, &workspace)?;
+        if !running.is_empty() && !args.force {
+            return Err(RunFailure::Running {
+                workspace: name.to_string(),
+                processes: running,
+            }
+            .into());
+        }
+    }
     let allow = Allow {
         discard_changes: args.force,
         delete_unmerged: args.delete_unmerged,
@@ -179,8 +194,14 @@ pub(crate) fn remove(
         args.yes,
         &format!("Remove the workspace {name}, its checkouts and its record?"),
     )?;
+    if !running.is_empty() {
+        processes::stop_all(environment, &removal.workspace)?;
+    }
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
-        RemovalOutcome::Done(removed) => Ok(Prose::new(RemovalResult::new(&removed, false))),
+        RemovalOutcome::Done(removed) => {
+            processes::forget(environment, &name)?;
+            Ok(Prose::new(RemovalResult::new(&removed, false)))
+        }
         RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {
             name: name.to_string(),
             allow,

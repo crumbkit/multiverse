@@ -1,10 +1,14 @@
 //! The rows and results that the workspace verbs print.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crumbkit::Row;
 use multiverse::Error;
-use multiverse::{Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Removal, Workspace};
+use multiverse::{
+    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, ProcessState, ProcessStatus, Removal,
+    Workspace,
+};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -31,6 +35,9 @@ pub(crate) struct WorkspaceRow {
     /// with a problem names its record, without `.json`, in `name`, and
     /// leaves the other fields empty.
     problem: String,
+    /// The host port that the workspace holds for each named port of its
+    /// manifest, which the first `mxv up` allocates.
+    ports: BTreeMap<String, u16>,
 }
 
 /// One workspace and the workspace root that the run used, as `new` and
@@ -58,10 +65,14 @@ pub(crate) struct PlacedRow {
     repositories: Vec<String>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
+    /// The host port that the workspace holds for each named port of its
+    /// manifest, which the first `mxv up` allocates.
+    ports: BTreeMap<String, u16>,
 }
 
 impl Row for PlacedRow {
-    const COLUMNS: &'static [&'static str] = &["name", "branch", "path", "root", "root_source"];
+    const COLUMNS: &'static [&'static str] =
+        &["name", "branch", "path", "root", "root_source", "ports"];
     const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
@@ -80,6 +91,7 @@ impl PlacedRow {
             root_source: root.source,
             repositories: row.repositories,
             checkouts: row.checkouts,
+            ports: row.ports,
         }
     }
 }
@@ -106,7 +118,7 @@ pub(crate) struct CheckoutRow {
 }
 
 impl Row for WorkspaceRow {
-    const COLUMNS: &'static [&'static str] = &["name", "branch", "path", "problem"];
+    const COLUMNS: &'static [&'static str] = &["name", "branch", "path", "ports", "problem"];
     const PROBLEM: Option<&'static str> = Some("problem");
     const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
     // A person copies the name into the next command.
@@ -143,6 +155,7 @@ impl From<&Workspace> for WorkspaceRow {
                 .collect(),
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
+            ports: workspace.ports.clone(),
         }
     }
 }
@@ -168,6 +181,7 @@ impl WorkspaceRow {
             repositories: Vec::new(),
             checkouts: Vec::new(),
             problem: error.to_string(),
+            ports: BTreeMap::new(),
         }
     }
 }
@@ -446,6 +460,136 @@ fn commits(count: u32) -> String {
     } else {
         format!("{count} commits")
     }
+}
+
+/// One process of a workspace, as `up`, `down`, `restart` and `status`
+/// print it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ProcessRow {
+    /// The process's name in the manifest.
+    name: String,
+    /// `running`, `exited` when it ended on its own or something other
+    /// than `mxv down` stopped it, or `stopped`.
+    state: StateName,
+    /// The process id, which is also its process group's id, while it
+    /// runs.
+    pid: Option<u32>,
+    /// The exit code of an exited process, or null when a signal ended it
+    /// or it has not exited.
+    code: Option<i32>,
+    /// The number of the signal that ended an exited process, such as 15
+    /// for SIGTERM, or null.
+    signal: Option<i32>,
+    /// Whether the process group of an exited process still has a member,
+    /// such as a child it started in the background, which `mxv down`
+    /// stops.
+    group_alive: bool,
+    /// The ports that the process receives, as `VARIABLE=port`.
+    ports: Vec<String>,
+    /// The process's log file, which `mxv logs` prints.
+    log: String,
+}
+
+/// The state of a process, as a row prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StateName {
+    /// The process runs.
+    Running,
+    /// The process ended.
+    Exited,
+    /// The process is not started.
+    Stopped,
+}
+
+impl Row for ProcessRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "state",
+        "pid",
+        "code",
+        "signal",
+        "group_alive",
+        "ports",
+    ];
+    const LONG_COLUMNS: &'static [&'static str] = &["log"];
+    // A person copies the name into `mxv logs`.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
+
+    /// An exited process reports a problem unless it exited with code 0.
+    fn is_problem(&self) -> bool {
+        self.state == StateName::Exited && self.code != Some(0)
+    }
+}
+
+impl From<&ProcessStatus> for ProcessRow {
+    fn from(status: &ProcessStatus) -> Self {
+        let (state, pid, code, signal) = match status.state {
+            ProcessState::Running { pid } => (StateName::Running, Some(pid), None, None),
+            ProcessState::Exited { code, signal } => (StateName::Exited, None, code, signal),
+            ProcessState::Stopped => (StateName::Stopped, None, None, None),
+        };
+        Self {
+            name: status.name.clone(),
+            state,
+            pid,
+            code,
+            signal,
+            group_alive: status.group_alive,
+            ports: status
+                .ports
+                .iter()
+                .map(|(variable, number)| format!("{variable}={number}"))
+                .collect(),
+            log: status.log.display().to_string(),
+        }
+    }
+}
+
+/// One line of a process's log, as `mxv logs` prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LogLine {
+    /// The line's text, without its line feed.
+    line: String,
+}
+
+impl LogLine {
+    /// Returns the log line `line`.
+    pub(crate) const fn new(line: String) -> Self {
+        Self { line }
+    }
+}
+
+impl Row for LogLine {
+    const COLUMNS: &'static [&'static str] = &["line"];
+    const LINE: Option<&'static str> = Some("<LINE>");
+
+    fn text_line(&self) -> Option<String> {
+        Some(self.line.clone())
+    }
+}
+
+/// One named port of a workspace and the host port that it holds, as
+/// `mxv ports reset` prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct PortRow {
+    /// The port's name in the manifest.
+    name: String,
+    /// The host port that the workspace holds for it.
+    port: u16,
+}
+
+impl PortRow {
+    /// Returns the row of the port `name` and its host port `port`.
+    pub(crate) const fn new(name: String, port: u16) -> Self {
+        Self { name, port }
+    }
+}
+
+impl Row for PortRow {
+    const COLUMNS: &'static [&'static str] = &["name", "port"];
+    // A person copies the name into the next command.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 /// Returns why a branch counts as unmerged: the number of its commits that

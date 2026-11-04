@@ -4,6 +4,12 @@ mxv/new/v1                output  document  The workspace that the run created, 
 mxv/list/v1               output  document  One page of the workspaces, in name order, and the number of workspaces.
 mxv/show/v1               output  document  The workspaces with the given names, and a failure for each name that no workspace has.
 mxv/cd/v1                 output  document  The directory of the workspace, for `cd "$(mxv cd <NAME>)"`.
+mxv/up/v1                 output  document  The selected processes and their dependencies, in the order they started, each running.
+mxv/down/v1               output  document  The processes that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.
+mxv/restart/v1            output  document  The restarted processes and their dependencies, in the order they started, each running.
+mxv/status/v1             output  document  Each process of the workspace's manifest in start order, then each other process that has run files, with its state.
+mxv/logs/v1               output  stream    The last lines of a process's log, then with --follow each line that the process writes.
+mxv/ports-reset/v1        output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
 mxv/remove/v1             output  document  What the run removed, deleted and kept, or would on a dry run.
 mxv/commands-list/v1      output  document  One branch of the tool's commands with their arguments, examples and columns.
 mxv/schemas-list/v1       output  document  The JSON documents that the tool prints, with a description of each.

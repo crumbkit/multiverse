@@ -124,6 +124,16 @@
           "description": "The workspace's directory, which `mxv cd` prints.",
           "type": "string"
         },
+        "ports": {
+          "description": "The host port that the workspace holds for each named port of its\nmanifest, which the first `mxv up` allocates.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0
+          }
+        },
         "problem": {
           "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record, without `.json`, in `name`, and\nleaves the other fields empty.",
           "type": "string"
@@ -140,7 +150,8 @@
         "name",
         "branch",
         "path",
-        "problem"
+        "problem",
+        "ports"
       ]
     }
   }

@@ -65,9 +65,19 @@ mxv remove reading-list
   run mxv remove reading-list --json --yes
     exits 0
 
-mxv run
+mxv archive
   fails with mxv::command::unbuilt
   hint
+
+mxv status
+  fails with mxv::workspace::not_current
+  run mxv list
+    exits 0
+
+mxv status -w missing
+  fails with mxv::workspace::not_found
+  run mxv list
+    exits 0
 
 mxv remove changed --dry-run
   fails with mxv::workspace::dirty
@@ -101,5 +111,22 @@ codes that no start provokes:
   mxv::git::timed_out: Only a git command that runs past its deadline of 30, 120 or 600 seconds provokes it, which is longer than the check waits for a run.
   mxv::record::unreadable: Only a record directory without read permission provokes it, and the check's fixture copies keep the permissions readable.
   mxv::file::unwritable: Only a directory without write permission or a full disk provokes it, and the examples write nothing outside their fresh directories.
+  mxv::workspace::running: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::unknown_key: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::newer: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::port::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::reserved: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::invalid: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::unreadable: Only an mxv.toml without read permission provokes it, in a live checkout that the fixture cannot hold.
+  mxv::process::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::process::exited: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::process::not_ready: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::process::unstoppable: Only a process group that outlives SIGKILL provokes it, such as a process stuck in the kernel, which a test cannot make on demand.
+  mxv::port::taken: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::process::unstartable: Only a manifest process whose cwd is missing from a live checkout provokes it; the library's process tests provoke it.
+  mxv::process::table_unreadable: Only a PATH without ps, during a run that has started processes, provokes it, which the fixture cannot hold.
+  mxv::port::exhausted: Only a port range whose every port is held or taken provokes it.
+  mxv::workspace::busy: Only a second mxv command that runs while the first holds the workspace's lock provokes it; tests/processes.rs provokes it.
 
 codes whose recoveries the check did not follow, because no declared code spells them: 0

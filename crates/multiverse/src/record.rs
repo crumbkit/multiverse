@@ -1,6 +1,7 @@
 //! The record of a workspace, which the state store keeps as one JSON file
 //! for each workspace.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,12 @@ pub struct Workspace {
     pub path: PathBuf,
     /// The workspace's checkouts. A workspace made by `mxv new` has one.
     pub checkouts: Vec<Checkout>,
+    /// The host port that the workspace holds for each named port of its
+    /// manifest. The first `mxv up` allocates them, and every later one
+    /// reuses them. A record without ports leaves the key out, and a
+    /// record that an earlier version wrote reads as holding none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ports: BTreeMap<String, u16>,
 }
 
 impl Workspace {
@@ -69,6 +76,7 @@ impl Workspace {
             name,
             path,
             checkouts,
+            ports: BTreeMap::new(),
         }
     }
 
@@ -132,6 +140,9 @@ pub fn agents_text(workspace: &Workspace) -> String {
          - `mxv show {name}` prints this workspace's record.\n\
          - `mxv list` lists every workspace.\n\
          - `cd \"$(mxv cd {name})\"` returns to this directory.\n\
+         - `mxv up` starts the processes that the checkout's `mxv.toml` declares,\n\
+         \x20 `mxv status` reports them, and `mxv down` stops them. Run here, they\n\
+         \x20 work on this workspace; elsewhere, `-w {name}` names it.\n\
          - `mxv remove {name}` removes the checkouts, their branches when they are\n\
          \x20 merged, and the record. It refuses while a checkout has uncommitted\n\
          \x20 changes, untracked files, ignored files such as `.env`, or commits\n\

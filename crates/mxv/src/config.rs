@@ -1,16 +1,20 @@
 //! The person's config file, `$XDG_CONFIG_HOME/mxv/config.toml`, which can
-//! name the workspace root.
+//! name the workspace root and the range of host ports that `mxv up`
+//! allocates from.
 //!
-//! The file is TOML with one key, `root`, whose value is a string that is an
+//! The file is TOML with two optional keys. `root` is a string that is an
 //! absolute path, or a path that starts with `~/`, which starts at the home
-//! directory. mxv parses it strictly: any other key, a value of another
-//! type, a relative path or text that is not TOML fails with
-//! `mxv::config::invalid`, which names the file and the line.
+//! directory. `ports_range` is an array of two ports, the first and the
+//! last, such as `[20000, 29999]`, from 1024 to 32767 with the first no
+//! greater than the last. mxv parses the file strictly: any other key, a
+//! value of another type, a relative path or text that is not TOML fails
+//! with `mxv::config::invalid`, which names the file and the line.
 
 use std::io;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
-use toml::de::DeTable;
+use toml::de::{DeTable, DeValue};
 
 use crate::failures::MxvFailure;
 
@@ -23,7 +27,19 @@ pub(crate) struct Config {
     /// The workspace root that the file names, with a leading `~`
     /// expanded, or `None` when the file names none.
     pub(crate) root: Option<PathBuf>,
+    /// The host ports that `mxv up` allocates from, or `None` when the file
+    /// sets no range.
+    pub(crate) ports_range: Option<RangeInclusive<u16>>,
 }
+
+/// The lowest port that `ports_range` may hold. Ports below it are
+/// privileged on Unix.
+const LOWEST_PORT: u16 = 1024;
+
+/// The highest port that `ports_range` may hold. Ports above it fall in the
+/// ephemeral range of Linux, which starts at 32768, or of macOS, which
+/// starts at 49152, where outgoing connections take their ports.
+const HIGHEST_PORT: u16 = 32767;
 
 /// Reads the config file at `path`, with `~` meaning `home`. A missing
 /// file holds no settings.
@@ -48,8 +64,9 @@ pub(crate) fn read(path: &Path, home: &Path) -> Result<Config, MxvFailure> {
 /// # Errors
 ///
 /// Returns [`MxvFailure::BadConfig`] for text that is not TOML, a key other
-/// than `root`, a `root` that is not a string, and a `root` that is not an
-/// absolute path once `~` is expanded.
+/// than `root` and `ports_range`, a `root` that is not a string, a `root`
+/// that is not an absolute path once `~` is expanded, and a `ports_range`
+/// that is not two ports in order from 1024 to 32767.
 pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvFailure> {
     let bad = |at: Option<usize>, reason: String| MxvFailure::BadConfig {
         path: path.to_path_buf(),
@@ -66,39 +83,79 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
     for (key, value) in table.get_ref() {
         let at = Some(key.span().start);
         let name: &str = key.get_ref().as_ref();
-        if name != "root" {
-            return Err(bad(
-                at,
-                format!("the key {name:?} is not a setting; the only setting is `root`"),
-            ));
+        match name {
+            "root" => {
+                config.root = Some(root(value.get_ref(), home).map_err(|reason| bad(at, reason))?);
+            }
+            "ports_range" => {
+                config.ports_range =
+                    Some(ports_range(value.get_ref()).map_err(|reason| bad(at, reason))?);
+            }
+            _ => {
+                return Err(bad(
+                    at,
+                    format!(
+                        "the key {name:?} is not a setting; the settings are `root` and `ports_range`"
+                    ),
+                ));
+            }
         }
-        let Some(written) = value.get_ref().as_str() else {
-            return Err(bad(
-                at,
-                "`root` must be a string that holds an absolute path".to_owned(),
-            ));
-        };
-        if written.contains('\0') {
-            return Err(bad(
-                at,
-                "`root` holds a NUL character, which no path can hold".to_owned(),
-            ));
-        }
-        let expanded = expand(written, home).ok_or_else(|| {
-            bad(
-                at,
-                format!("`root` is {written:?}, and only `~` or `~/` may start a path"),
-            )
-        })?;
-        if !expanded.is_absolute() {
-            return Err(bad(
-                at,
-                format!("`root` is the relative path {written:?}, and it must be an absolute path"),
-            ));
-        }
-        config.root = Some(expanded);
     }
     Ok(config)
+}
+
+/// Returns the root that `value` names, with `~` meaning `home`, or the
+/// reason it is not an absolute path.
+fn root(value: &DeValue<'_>, home: &Path) -> Result<PathBuf, String> {
+    let Some(written) = value.as_str() else {
+        return Err("`root` must be a string that holds an absolute path".to_owned());
+    };
+    if written.contains('\0') {
+        return Err("`root` holds a NUL character, which no path can hold".to_owned());
+    }
+    let expanded = expand(written, home)
+        .ok_or_else(|| format!("`root` is {written:?}, and only `~` or `~/` may start a path"))?;
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "`root` is the relative path {written:?}, and it must be an absolute path"
+        ));
+    }
+    Ok(expanded)
+}
+
+/// Returns the range that `value` holds, or the reason it is not two
+/// ports in order from [`LOWEST_PORT`] to [`HIGHEST_PORT`].
+fn ports_range(value: &DeValue<'_>) -> Result<RangeInclusive<u16>, String> {
+    let shape = || {
+        format!(
+            "`ports_range` must be an array of two ports, the first and the last, such as [20000, 29999], from {LOWEST_PORT} to {HIGHEST_PORT}"
+        )
+    };
+    let ports: Vec<u16> = value
+        .as_array()
+        .ok_or_else(shape)?
+        .iter()
+        .map(|item| {
+            item.get_ref()
+                .as_integer()
+                .and_then(|integer| u16::from_str_radix(integer.as_str(), integer.radix()).ok())
+                .ok_or_else(shape)
+        })
+        .collect::<Result<_, _>>()?;
+    let [first, last] = ports.as_slice() else {
+        return Err(shape());
+    };
+    if first > last {
+        return Err(format!(
+            "`ports_range` starts at {first}, after its last port {last}"
+        ));
+    }
+    if *first < LOWEST_PORT || *last > HIGHEST_PORT {
+        return Err(format!(
+            "`ports_range` is {first} to {last}, and it must lie from {LOWEST_PORT} to {HIGHEST_PORT}, below the ephemeral ports that outgoing connections take"
+        ));
+    }
+    Ok(*first..=*last)
 }
 
 /// Returns `written` with a leading `~` or `~/` replaced by `home`, or

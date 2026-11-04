@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
-use crate::store::{Created, Store};
+use crate::store::{Created, Store, cap_log, lock, rotate_log};
 use crate::testing::write;
 
 fn workspace(name: &str) -> Workspace {
@@ -149,4 +150,67 @@ fn a_record_that_holds_another_name_than_its_file_is_refused() {
     let name: WorkspaceName = "app".parse().unwrap();
     let error = store.read(&name).unwrap_err();
     assert!(matches!(error, Error::MismatchedRecord { .. }), "{error:?}");
+}
+
+#[test]
+fn a_record_keeps_its_allocated_ports_and_a_record_without_ports_leaves_the_key_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut triage = workspace("triage");
+    store.create(&triage).unwrap();
+    let text = fs::read_to_string(store.path(&triage.name)).unwrap();
+    assert!(!text.contains("ports"), "{text}");
+    triage.ports.insert("api".to_owned(), 49_152);
+    store.update(&triage).unwrap();
+    assert_eq!(
+        store.read(&triage.name).unwrap().unwrap().ports["api"],
+        49_152
+    );
+}
+
+#[test]
+fn a_second_lock_of_a_held_file_waits_and_then_fails_with_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runs").join("triage").join(".lock");
+    let _held = lock(&path, Duration::ZERO).unwrap();
+    let started = Instant::now();
+    let second = lock(&path, Duration::from_millis(300));
+    assert!(matches!(second, Err(Error::Busy { .. })), "{second:?}");
+    assert!(started.elapsed() >= Duration::from_millis(300));
+}
+
+#[test]
+fn a_dropped_lock_lets_the_next_caller_take_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".lock");
+    drop(lock(&path, Duration::ZERO).unwrap());
+    assert!(lock(&path, Duration::ZERO).is_ok());
+}
+
+#[test]
+fn a_log_over_its_cap_is_copied_to_the_older_log_and_emptied_while_its_writer_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("web.log");
+    let older = dir.path().join("web.log.1");
+    let mut writer = crate::store::append_file(&log).unwrap();
+    std::io::Write::write_all(&mut writer, b"0123456789\n").unwrap();
+    cap_log(&log, &older, 100).unwrap();
+    assert!(!older.exists(), "a log under its cap stays");
+    cap_log(&log, &older, 5).unwrap();
+    assert_eq!(fs::read_to_string(&older).unwrap(), "0123456789\n");
+    std::io::Write::write_all(&mut writer, b"next\n").unwrap();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "next\n");
+}
+
+#[test]
+fn rotating_a_missing_log_succeeds_and_a_present_log_replaces_the_older_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("web.log");
+    let older = dir.path().join("web.log.1");
+    rotate_log(&log, &older).unwrap();
+    write(&older, "oldest\n");
+    write(&log, "previous\n");
+    rotate_log(&log, &older).unwrap();
+    assert_eq!(fs::read_to_string(&older).unwrap(), "previous\n");
+    assert!(!log.exists());
 }

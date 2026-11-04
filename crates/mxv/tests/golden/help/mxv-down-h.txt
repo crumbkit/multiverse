@@ -1,0 +1,18 @@
+Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+
+Usage: mxv down [OPTIONS] [PROCESS]...
+
+Arguments:
+  [PROCESS]...  The processes, which default to every process
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv down -w reading-list
+
+Effects: destructive, idempotent, closed-world.
+Writes: reports each item and exits 1 when any item fails.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv down --help` describes them.
+Next: mxv down --help explains each column.

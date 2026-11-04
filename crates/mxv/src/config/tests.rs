@@ -72,6 +72,39 @@ fn text_that_is_not_toml_is_refused_with_its_line() {
 }
 
 #[test]
+fn a_file_without_a_ports_range_sets_none() {
+    assert_eq!(parsed("root = \"/srv\"\n").unwrap().ports_range, None);
+}
+
+#[test]
+fn a_ports_range_of_two_ports_is_the_range_from_the_first_to_the_last() {
+    let config = parsed("ports_range = [23000, 23999]\n").unwrap();
+    assert_eq!(config.ports_range, Some(23000..=23999));
+}
+
+#[test]
+fn a_ports_range_that_is_not_two_ports_in_order_is_refused_with_its_line() {
+    for text in [
+        "\nports_range = [23999, 23000]\n",
+        "\nports_range = [23000]\n",
+        "\nports_range = \"23000-23999\"\n",
+        "\nports_range = [23000, 70000]\n",
+    ] {
+        let (line, reason) = invalid(text);
+        assert_eq!(line, Some(2), "{text}");
+        assert!(reason.contains("ports_range"), "{reason}");
+    }
+}
+
+#[test]
+fn a_ports_range_that_reaches_a_privileged_or_ephemeral_port_is_refused() {
+    let (_, reason) = invalid("ports_range = [80, 2000]\n");
+    assert!(reason.contains("1024"), "{reason}");
+    let (_, reason) = invalid("ports_range = [30000, 40000]\n");
+    assert!(reason.contains("32767"), "{reason}");
+}
+
+#[test]
 fn a_root_with_a_nul_character_is_refused_with_its_line() {
     let (line, reason) = invalid("\nroot = \"/srv/a\\u0000b\"\n");
     assert_eq!(line, Some(2));

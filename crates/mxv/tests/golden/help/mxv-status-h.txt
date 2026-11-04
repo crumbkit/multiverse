@@ -1,0 +1,14 @@
+Report whether each process of a workspace is running, exited or stopped
+
+Usage: mxv status [OPTIONS]
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv status -w reading-list
+
+Effects: read-only, closed-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv status --help` describes them.
+Next: mxv status --help explains each column.

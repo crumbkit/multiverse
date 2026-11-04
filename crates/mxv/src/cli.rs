@@ -9,6 +9,7 @@ use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, ViewFlags, Yes};
 use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
 
+use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::verbs::{CD, LIST, NEW, REMOVE, SHOW};
 
 /// Create, archive and restore task workspaces that span several git
@@ -35,14 +36,19 @@ pub struct Cli {
 pub const GUIDE: Guide = Guide::new()
     .root_verbs(
         &[
-            "new", "list", "show", "cd", "run", "archive", "restore", "remove",
+            "new", "list", "show", "cd", "up", "down", "restart", "status", "logs", "archive",
+            "restore", "remove",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
     )
     .groups(&[Group::new(
         &[],
         &[
-            Goal::new("Work in a workspace", &["new", "list", "show", "cd", "run"]),
+            Goal::new("Work in a workspace", &["new", "list", "show", "cd"]),
+            Goal::new(
+                "Run a workspace's app",
+                &["up", "down", "restart", "status", "logs", "ports"],
+            ),
             Goal::new("Put a workspace away", &["archive", "restore", "remove"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
@@ -62,10 +68,7 @@ pub const GUIDE: Guide = Guide::new()
             .effects(Effects::read_only())
             .document(LIST),
         Leaf::new(&["show"])
-            .examples(&[Example::new(
-                &["reading-list"],
-                "Show the workspace reading-list",
-            )])
+            .examples(&[Example::new(&["reading-list"], "Show the workspace reading-list")])
             .effects(Effects::read_only())
             .document(SHOW),
         Leaf::new(&["cd"])
@@ -75,10 +78,48 @@ pub const GUIDE: Guide = Guide::new()
             )])
             .effects(Effects::read_only())
             .document(CD),
-        Leaf::new(&["run"])
-            .examples(&[Example::new(&[], "Start the current app's processes")])
-            .effects(Effects::destructive().open_world())
-            .prints_no_result(),
+        Leaf::new(&["up"])
+            .examples(&[Example::new(
+                &["-w", "reading-list", "web"],
+                "Start the process web of the workspace reading-list and the processes it depends on",
+            )])
+            .effects(Effects::additive().idempotent().open_world().all_or_none())
+            .document(UP),
+        Leaf::new(&["down"])
+            .examples(&[Example::new(
+                &["-w", "reading-list"],
+                "Stop every process of the workspace reading-list",
+            )])
+            .effects(Effects::destructive().idempotent().per_item())
+            .document(DOWN),
+        Leaf::new(&["restart"])
+            .examples(&[Example::new(
+                &["-w", "reading-list", "web"],
+                "Stop the process web of the workspace reading-list and start it again",
+            )])
+            .effects(Effects::destructive().open_world().all_or_none())
+            .document(RESTART),
+        Leaf::new(&["status"])
+            .examples(&[Example::new(
+                &["-w", "reading-list"],
+                "Report the state of each process of the workspace reading-list",
+            )])
+            .effects(Effects::read_only())
+            .document(STATUS),
+        Leaf::new(&["logs"])
+            .examples(&[Example::new(
+                &["-w", "reading-list", "web", "--follow"],
+                "Print the last lines of the log of web, then each new line",
+            )])
+            .effects(Effects::read_only())
+            .stream(LOGS),
+        Leaf::new(&["ports", "reset"])
+            .examples(&[Example::new(
+                &["-w", "reading-list", "api"],
+                "Give the workspace reading-list a new host port for api",
+            )])
+            .effects(Effects::destructive().all_or_none())
+            .document(PORTS_RESET),
         Leaf::new(&["archive"])
             .examples(&[Example::new(
                 &["--dry-run"],
@@ -139,8 +180,16 @@ pub(crate) enum Verb {
     Show(ShowArgs),
     /// Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it.
     Cd(CdArgs),
-    /// Run an app's processes, or one command in the app's environment.
-    Run,
+    /// Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready.
+    Up(ProcessesArgs),
+    /// Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds.
+    Down(ProcessesArgs),
+    /// Stop a workspace's processes and start them again.
+    Restart(ProcessesArgs),
+    /// Report whether each process of a workspace is running, exited or stopped.
+    Status(StatusArgs),
+    /// Print the last lines of a process's log, and follow it with --follow.
+    Logs(LogsArgs),
     /// Archive a workspace, so restore can rebuild it at the same commits.
     Archive(WriteArgs),
     /// Rebuild an archived workspace at its archived commits.
@@ -150,6 +199,12 @@ pub(crate) enum Verb {
     // lines and `commands list` name only `remove`.
     #[command(alias = "rm")]
     Remove(RemoveArgs),
+    /// Manage the host ports that a workspace holds.
+    Ports {
+        /// What to do with the ports.
+        #[command(subcommand)]
+        command: PortsCommand,
+    },
     /// Explore mxv's commands.
     Commands {
         /// What to do with the commands.
@@ -176,6 +231,25 @@ pub(crate) enum Verb {
 pub(crate) enum CommandsCommand {
     /// List a branch of mxv's commands with their arguments, examples and columns.
     List(CommandsList),
+}
+
+/// The commands for a workspace's host ports.
+#[derive(Debug, Subcommand)]
+pub(crate) enum PortsCommand {
+    /// Give a stopped workspace new host ports, each different from the port it held.
+    Reset(PortsResetArgs),
+}
+
+/// The arguments of `mxv ports reset`.
+#[derive(Debug, Args)]
+pub(crate) struct PortsResetArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+
+    /// The ports of the manifest to reallocate, which default to every port
+    #[arg(value_name = "PORT")]
+    pub(crate) ports: Vec<String>,
 }
 
 /// The commands for the JSON documents that mxv prints.
@@ -248,7 +322,7 @@ pub(crate) struct RemoveArgs {
     /// The name of the workspace to remove
     pub(crate) name: String,
 
-    /// Discard uncommitted changes, untracked files and ignored files such as .env; an unmerged branch is still kept
+    /// Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes; an unmerged branch is still kept
     #[arg(long)]
     pub(crate) force: bool,
 
@@ -279,4 +353,44 @@ pub(crate) struct ShowArgs {
     /// The names of the workspaces to show, separated by spaces
     #[arg(required = true, value_name = "NAME", num_args = 1..=100)]
     pub(crate) names: Vec<String>,
+}
+
+/// The arguments of `mxv up`, `mxv down` and `mxv restart`.
+#[derive(Debug, Args)]
+pub(crate) struct ProcessesArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+
+    /// The processes, which default to every process
+    #[arg(value_name = "PROCESS")]
+    pub(crate) processes: Vec<String>,
+}
+
+/// The arguments of `mxv status`.
+#[derive(Debug, Args)]
+pub(crate) struct StatusArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+}
+
+/// The arguments of `mxv logs`.
+#[derive(Debug, Args)]
+pub(crate) struct LogsArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+
+    /// The process whose log to print
+    #[arg(value_name = "PROCESS")]
+    pub(crate) process: String,
+
+    /// Keep printing each line that the process writes, until interrupted
+    #[arg(short, long)]
+    pub(crate) follow: bool,
+
+    /// How many of the log's last lines to print first
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    pub(crate) lines: usize,
 }

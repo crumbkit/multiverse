@@ -7,7 +7,8 @@
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
 //!
-//! `new`, `list`, `show`, `cd` and `remove` are built. `run`, `archive` and
+//! `new`, `list`, `show`, `cd`, `remove` and the process verbs `up`,
+//! `down`, `restart`, `status` and `logs` are built. `archive` and
 //! `restore` are declared and fail with `mxv::command::unbuilt` until the
 //! pull request that builds each one.
 
@@ -15,7 +16,9 @@ mod cli;
 mod config;
 mod environment;
 mod failures;
+mod processes;
 mod rows;
+mod run_failures;
 #[cfg(test)]
 mod testing;
 mod unbuilt;
@@ -29,7 +32,9 @@ use crumbkit::Code;
 
 #[doc(hidden)]
 pub use crate::cli::{Cli, GUIDE};
-use crate::cli::{CommandsCommand, FiguresCommand, SchemasCommand, SelfCommand, Verb};
+use crate::cli::{
+    CommandsCommand, FiguresCommand, PortsCommand, SchemasCommand, SelfCommand, Verb,
+};
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
 #[doc(hidden)]
@@ -41,6 +46,16 @@ pub use crate::failures::{
     REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME,
     WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
     WORKSPACE_NOT_FOUND,
+};
+#[doc(hidden)]
+pub use crate::failures::{
+    PORT_EXHAUSTED, PROCESS_TABLE_UNREADABLE, PROCESS_UNSTARTABLE, WORKSPACE_BUSY,
+};
+#[doc(hidden)]
+pub use crate::run_failures::{
+    MANIFEST_INVALID, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNKNOWN_KEY,
+    MANIFEST_UNREADABLE, PORT_NOT_FOUND, PORT_TAKEN, PROCESS_EXITED, PROCESS_NOT_FOUND,
+    PROCESS_NOT_READY, PROCESS_UNSTOPPABLE, WORKSPACE_NOT_CURRENT, WORKSPACE_RUNNING,
 };
 #[doc(hidden)]
 pub use crate::unbuilt::UNBUILT;
@@ -55,6 +70,11 @@ pub const UNBUILT_CODES: &[&Code] = &[&UNBUILT];
 /// crumbkit-test's codes, recovery and twin checks.
 #[doc(hidden)]
 pub const CODES: &[&Code] = failures::CODES;
+
+/// Every failure code of the process verbs, which the tests pass to
+/// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
+#[doc(hidden)]
+pub const RUN_CODES: &[&Code] = run_failures::CODES;
 
 /// Parses `args`, runs the command with the variables of `environment` and
 /// returns the process's exit code. The first argument is the program's
@@ -94,7 +114,29 @@ where
             let result = verbs::remove(&mut output, environment, &args);
             return crumbkit::finish(output, verbs::REMOVE, result);
         }
-        Verb::Run => "run",
+        Verb::Up(args) => {
+            return crumbkit::finish(output, processes::UP, processes::up(environment, &args));
+        }
+        Verb::Down(args) => {
+            return crumbkit::finish(output, processes::DOWN, processes::down(environment, &args));
+        }
+        Verb::Restart(args) => {
+            let result = processes::restart(environment, &args);
+            return crumbkit::finish(output, processes::RESTART, result);
+        }
+        Verb::Status(args) => {
+            let result = processes::status(environment, &args);
+            return crumbkit::finish(output, processes::STATUS, result);
+        }
+        // `logs` prints a stream, so it opens the stream from `output`
+        // itself.
+        Verb::Logs(args) => return processes::logs(output, environment, &args),
+        Verb::Ports {
+            command: PortsCommand::Reset(args),
+        } => {
+            let result = processes::ports_reset(environment, &args);
+            return crumbkit::finish(output, processes::PORTS_RESET, result);
+        }
         Verb::Archive(_) => "archive",
         Verb::Restore(_) => "restore",
         // crumbkit's own commands read the command tree through

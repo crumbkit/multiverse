@@ -17,5 +17,13 @@ fn main() -> ExitCode {
         reason = "crates/mxv/src/main.rs reads the environment once, into a snapshot"
     )]
     let environment = mxv::Environment::read(|name| std::env::var_os(name), mxv::Bases::find());
+    // The current directory names the workspace that a process verb works
+    // in when the command line names none.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/main.rs reads the current directory once, into the snapshot"
+    )]
+    let current_dir = std::env::current_dir().ok();
+    let environment = environment.with_current_dir(current_dir);
     mxv::run(std::env::args_os(), &environment)
 }

@@ -43,9 +43,15 @@ wait-timeout = "0.2.1"
 # no features.
 etcetera = { version = "0.11.0", default-features = false }
 
-# toml parses the person's mxv config file. The workspace entry enables no
-# feature, and mxv enables only `parse`.
+# toml parses the person's mxv config file and the application manifest
+# `mxv.toml`. The workspace entry enables no feature, and each crate enables
+# the features its own code needs.
 toml = { version = "1.2.0", default-features = false }
+
+# rustix sends signals to the process groups of an app's processes and
+# checks whether a group still exists, without unsafe code. Only the
+# `process` feature is used.
+rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
 
 # crumbkit-usage keeps the `mxv` command's local usage log and adds
 # `self usage` and `self figures list` (CLI-7).

@@ -12,10 +12,15 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv list`](#mxv-list): List the workspaces
 - [`mxv show`](#mxv-show): Show workspaces by name, in the order given
 - [`mxv cd`](#mxv-cd): Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
-- [`mxv run`](#mxv-run): Run an app's processes, or one command in the app's environment
+- [`mxv up`](#mxv-up): Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
+- [`mxv down`](#mxv-down): Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+- [`mxv restart`](#mxv-restart): Stop a workspace's processes and start them again
+- [`mxv status`](#mxv-status): Report whether each process of a workspace is running, exited or stopped
+- [`mxv logs`](#mxv-logs): Print the last lines of a process's log, and follow it with --follow
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
+- [`mxv ports`](#mxv-ports): Manage the host ports that a workspace holds
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
 - [`mxv self`](#mxv-self): Review mxv's own use
@@ -55,6 +60,7 @@ mxv new triage --repo app --dry-run
 - `path`: The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
 - `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
 - `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+- `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 
 ### Columns that `--long` adds
 
@@ -84,6 +90,7 @@ mxv list
 - `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
 - `branch`: The branch that the workspace's checkouts were created on.
 - `path`: The workspace's directory, which `mxv cd` prints.
+- `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
 ### Columns that `--long` adds
@@ -115,6 +122,7 @@ mxv show reading-list
 - `path`: The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
 - `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
 - `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+- `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 
 ### Columns that `--long` adds
 
@@ -140,19 +148,171 @@ mxv cd reading-list
 
 Effects: read-only, closed-world.
 
-## `mxv run`
+## `mxv up`
 
-Run an app's processes, or one command in the app's environment
+Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PROCESS>`: The processes, which default to every process. Takes more than one value.
 
 ### Examples
 
-Start the current app's processes.
+Start the process web of the workspace reading-list and the processes it depends on.
 
 ```sh
-mxv run
+mxv up -w reading-list web
 ```
 
+### Columns
+
+- `name`: The process's name in the manifest.
+- `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
+- `pid`: The process id, which is also its process group's id, while it runs.
+- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
+- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `ports`: The ports that the process receives, as `VARIABLE=port`.
+
+### Columns that `--long` adds
+
+- `log`: The process's log file, which `mxv logs` prints.
+
+Effects: additive, idempotent, open-world.
+
+Writes: applies all items or none.
+
+## `mxv down`
+
+Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PROCESS>`: The processes, which default to every process. Takes more than one value.
+
+### Examples
+
+Stop every process of the workspace reading-list.
+
+```sh
+mxv down -w reading-list
+```
+
+### Columns
+
+- `name`: The process's name in the manifest.
+- `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
+- `pid`: The process id, which is also its process group's id, while it runs.
+- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
+- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `ports`: The ports that the process receives, as `VARIABLE=port`.
+
+### Columns that `--long` adds
+
+- `log`: The process's log file, which `mxv logs` prints.
+
+Effects: destructive, idempotent, closed-world.
+
+Writes: reports each item and exits 1 when any item fails.
+
+## `mxv restart`
+
+Stop a workspace's processes and start them again
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PROCESS>`: The processes, which default to every process. Takes more than one value.
+
+### Examples
+
+Stop the process web of the workspace reading-list and start it again.
+
+```sh
+mxv restart -w reading-list web
+```
+
+### Columns
+
+- `name`: The process's name in the manifest.
+- `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
+- `pid`: The process id, which is also its process group's id, while it runs.
+- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
+- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `ports`: The ports that the process receives, as `VARIABLE=port`.
+
+### Columns that `--long` adds
+
+- `log`: The process's log file, which `mxv logs` prints.
+
 Effects: destructive, not idempotent, open-world.
+
+Writes: applies all items or none.
+
+## `mxv status`
+
+Report whether each process of a workspace is running, exited or stopped
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+
+### Examples
+
+Report the state of each process of the workspace reading-list.
+
+```sh
+mxv status -w reading-list
+```
+
+### Columns
+
+- `name`: The process's name in the manifest.
+- `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, or `stopped`.
+- `pid`: The process id, which is also its process group's id, while it runs.
+- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited.
+- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
+- `group_alive`: Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops.
+- `ports`: The ports that the process receives, as `VARIABLE=port`.
+
+### Columns that `--long` adds
+
+- `log`: The process's log file, which `mxv logs` prints.
+
+Effects: read-only, closed-world.
+
+## `mxv logs`
+
+Print the last lines of a process's log, and follow it with --follow
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PROCESS>`: The process whose log to print. Required.
+- `-f`, `--follow`: Keep printing each line that the process writes, until interrupted
+- `--lines <N>`: How many of the log's last lines to print first. Default: `50`.
+
+### Examples
+
+Print the last lines of the log of web, then each new line.
+
+```sh
+mxv logs -w reading-list web --follow
+```
+
+### Columns
+
+- `line`: The line's text, without its line feed.
+
+Effects: read-only, closed-world.
+
+Output: one row per line as each arrives, and --json prints one JSON document per line.
+
+Text: one line per row, `<LINE>`; --fields prints a table.
 
 ## `mxv archive`
 
@@ -199,7 +359,7 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 ### Arguments
 
 - `<NAME>`: The name of the workspace to remove. Required.
-- `--force`: Discard uncommitted changes, untracked files and ignored files such as .env; an unmerged branch is still kept
+- `--force`: Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes; an unmerged branch is still kept
 - `--delete-unmerged`: Delete branches with unmerged commits, and commits on a detached HEAD
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
@@ -213,6 +373,40 @@ mxv remove reading-list --dry-run
 ```
 
 Effects: destructive, not idempotent, closed-world.
+
+## `mxv ports`
+
+Manage the host ports that a workspace holds
+
+### Commands
+
+- [`mxv ports reset`](#mxv-ports-reset): Give a stopped workspace new host ports, each different from the port it held
+
+## `mxv ports reset`
+
+Give a stopped workspace new host ports, each different from the port it held
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PORT>`: The ports of the manifest to reallocate, which default to every port. Takes more than one value.
+
+### Examples
+
+Give the workspace reading-list a new host port for api.
+
+```sh
+mxv ports reset -w reading-list api
+```
+
+### Columns
+
+- `name`: The port's name in the manifest.
+- `port`: The host port that the workspace holds for it.
+
+Effects: destructive, not idempotent, closed-world.
+
+Writes: applies all items or none.
 
 ## `mxv commands`
 

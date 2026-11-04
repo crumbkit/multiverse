@@ -1,0 +1,18 @@
+Stop a workspace's processes and start them again
+
+Usage: mxv restart [OPTIONS] [PROCESS]...
+
+Arguments:
+  [PROCESS]...  The processes, which default to every process
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv restart -w reading-list web
+
+Effects: destructive, not idempotent, open-world.
+Writes: applies all items or none.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv restart --help` describes them.
+Next: mxv restart --help explains each column.

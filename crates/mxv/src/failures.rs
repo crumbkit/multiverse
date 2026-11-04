@@ -62,6 +62,16 @@ pub const RECORD_NEWER: Code = Code::new("mxv", "record", "newer");
 pub const RECORD_MISMATCHED: Code = Code::new("mxv", "record", "mismatched");
 /// The code of a file or directory that cannot be written or removed.
 pub const FILE_UNWRITABLE: Code = Code::new("mxv", "file", "unwritable");
+/// The code of an app's process that cannot start, such as when its `cwd`
+/// does not exist.
+pub const PROCESS_UNSTARTABLE: Code = Code::new("mxv", "process", "unstartable");
+/// The code of a process table that `ps` cannot read.
+pub const PROCESS_TABLE_UNREADABLE: Code = Code::new("mxv", "process", "table_unreadable");
+/// The code of a port range whose every port is held by a workspace or taken.
+pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
+/// The code of a workspace whose lock another mxv command holds, such as an
+/// `mxv up` that still waits for a process to be ready.
+pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
 /// The code of an environment in which mxv finds no home directory, so it
 /// has no directory for the records, the config file or the default root.
 pub const ENVIRONMENT_NO_DIRECTORY: Code = Code::new("mxv", "environment", "no_directory");
@@ -226,6 +236,10 @@ pub(crate) const CODES: &[&Code] = &[
     &ENVIRONMENT_RELATIVE_ROOT,
     &CONFIG_INVALID,
     &CONFIG_UNREADABLE,
+    &PROCESS_UNSTARTABLE,
+    &PROCESS_TABLE_UNREADABLE,
+    &PORT_EXHAUSTED,
+    &WORKSPACE_BUSY,
 ];
 
 /// Returns `path` as text for a field or a hint.
@@ -313,6 +327,10 @@ impl Failure for MxvFailure {
                 Error::CorruptRecord { .. } => &RECORD_CORRUPT,
                 Error::NewerRecord { .. } => &RECORD_NEWER,
                 Error::MismatchedRecord { .. } => &RECORD_MISMATCHED,
+                Error::ProcessUnstartable { .. } => &PROCESS_UNSTARTABLE,
+                Error::ProcessTable { .. } => &PROCESS_TABLE_UNREADABLE,
+                Error::NoFreePort { .. } => &PORT_EXHAUSTED,
+                Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
@@ -510,6 +528,16 @@ fn library_recovery(error: &Error) -> Recovery {
             "make {} writable, and run the command again",
             shown(path)
         )),
+        Error::ProcessUnstartable { process, .. } => hint(format!(
+            "check that the cwd of {process} in mxv.toml exists in the checkout, and run the command again"
+        )),
+        Error::ProcessTable { .. } => hint("put ps on PATH, and run the command again"),
+        Error::NoFreePort { .. } => hint(
+            "widen `ports_range` in the config file, or remove workspaces that hold ports you no longer need",
+        ),
+        Error::Busy { .. } => hint(
+            "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a process to be ready, and run the command again",
+        ),
         _ => hint("run the command again"),
     }
 }
@@ -548,11 +576,13 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         }
         Error::StateUnreadable { path, .. }
         | Error::CorruptRecord { path, .. }
-        | Error::Unwritable { path, .. } => vec![Field::new("path", shown(path))],
+        | Error::Unwritable { path, .. }
+        | Error::Busy { path } => vec![Field::new("path", shown(path))],
         Error::NewerRecord { path, version } => vec![
             Field::new("path", shown(path)),
             Field::new("version", *version),
         ],
+        Error::ProcessUnstartable { process, .. } => vec![Field::new("process", process)],
         _ => Vec::new(),
     }
 }

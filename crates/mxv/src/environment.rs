@@ -2,9 +2,11 @@
 //! catalog that says what each one does (BASE-6, BASE-28).
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::ops::RangeInclusive;
+use std::path::{Path, PathBuf};
 
 use etcetera::BaseStrategy as _;
+use multiverse::DEFAULT_PORT_RANGE;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -45,7 +47,7 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "XDG_STATE_HOME",
-        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
+        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, and the run files and logs of each workspace's processes in `$XDG_STATE_HOME/mxv/runs/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
     },
     Variable {
         name: "MXV_ROOT",
@@ -112,6 +114,9 @@ pub struct Environment {
     root: Option<OsString>,
     /// The base directories, or `None` when no home directory was found.
     bases: Option<Bases>,
+    /// The directory that mxv started in, which names the current
+    /// workspace.
+    current_dir: Option<PathBuf>,
 }
 
 impl Environment {
@@ -120,12 +125,33 @@ impl Environment {
         Self {
             root: read("MXV_ROOT"),
             bases,
+            current_dir: None,
         }
     }
 
     /// Returns the base directories.
     fn bases(&self) -> Result<&Bases, MxvFailure> {
         self.bases.as_ref().ok_or(MxvFailure::NoHome)
+    }
+
+    /// Returns the snapshot with `dir` as the directory that mxv started
+    /// in.
+    #[must_use]
+    pub fn with_current_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.current_dir = dir;
+        self
+    }
+
+    /// Returns the directory that mxv started in, when `main` could read
+    /// it.
+    pub(crate) fn current_dir(&self) -> Option<&Path> {
+        self.current_dir.as_deref()
+    }
+
+    /// Returns the directory of the run files of the workspaces'
+    /// processes, `$XDG_STATE_HOME/mxv/runs`.
+    pub(crate) fn runs(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.bases()?.state.join("mxv").join("runs"))
     }
 
     /// Returns the directory of the workspace records,
@@ -137,6 +163,15 @@ impl Environment {
     /// Returns the path of the config file, `$XDG_CONFIG_HOME/mxv/config.toml`.
     pub(crate) fn config_file(&self) -> Result<PathBuf, MxvFailure> {
         Ok(self.bases()?.config.join("mxv").join("config.toml"))
+    }
+
+    /// Returns the host ports that `mxv up` allocates from: the config
+    /// file's `ports_range`, or else [`DEFAULT_PORT_RANGE`].
+    pub(crate) fn port_range(&self) -> Result<RangeInclusive<u16>, MxvFailure> {
+        let bases = self.bases()?;
+        Ok(config::read(&self.config_file()?, &bases.home)?
+            .ports_range
+            .unwrap_or(DEFAULT_PORT_RANGE))
     }
 
     /// Returns the directory that holds one directory for each workspace:

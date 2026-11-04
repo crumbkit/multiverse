@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/ports-reset/v1",
+  "description": "Each port of the workspace's manifest and the host port that it holds after the reset.",
+  "type": "object",
+  "properties": {
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "code": {
+          "description": "The over-budget code, in the tool's spelling.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "budget"
+      ]
+    },
+    "data": {
+      "description": "The rows, in order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PortRow"
+      }
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/ports-reset/v1"
+    }
+  },
+  "required": [
+    "schema",
+    "data"
+  ],
+  "$defs": {
+    "PortRow": {
+      "description": "One named port of a workspace and the host port that it holds, as\n`mxv ports reset` prints it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The port's name in the manifest.",
+          "type": "string"
+        },
+        "port": {
+          "description": "The host port that the workspace holds for it.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "port"
+      ]
+    }
+  }
+}

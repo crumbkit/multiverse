@@ -1,0 +1,45 @@
+Print the last lines of a process's log, and follow it with --follow
+
+Usage: mxv logs [OPTIONS] <PROCESS>
+
+Arguments:
+  <PROCESS>
+          The process whose log to print
+
+Options:
+  -w, --workspace <WORKSPACE>
+          The workspace, which defaults to the one that holds the current directory
+
+  -f, --follow
+          Keep printing each line that the process writes, until interrupted
+
+      --lines <N>
+          How many of the log's last lines to print first
+          
+          [default: 50]
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv logs -w reading-list web --follow
+          Print the last lines of the log of web, then each new line
+
+Columns:
+  line  The line's text, without its line feed.
+
+Effects: read-only, closed-world.
+Output: one row per line as each arrives, and --json prints one JSON document per line.
+Text: one line per row, <LINE>; --fields prints a table.
