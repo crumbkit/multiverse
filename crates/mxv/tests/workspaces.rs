@@ -587,3 +587,162 @@ fn remove_keeps_a_branch_whose_base_is_gone_and_reports_an_unknown_count() {
     assert!(!workspace.exists());
     assert!(!git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty());
 }
+
+/// Returns the words after `mxv` of `line`, a command line that mxv
+/// printed, such as `mxv remove notes --force --yes`, and fails the test
+/// when the line does not start with `mxv`.
+fn words(line: &str) -> Vec<&str> {
+    let mut words = line.split_whitespace();
+    assert_eq!(words.next(), Some("mxv"), "{line}");
+    words.collect()
+}
+
+/// Returns the text between the first pair of backticks in `text` that
+/// starts with `start`.
+fn quoted<'a>(text: &'a str, start: &str) -> &'a str {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|quoted| quoted.starts_with(start))
+        .unwrap_or_else(|| panic!("no `{start}...` in {text}"))
+}
+
+/// Runs the first alternative of the failure `document`, as written and
+/// without a terminal, and fails the test unless it exits with code 0.
+fn run_alternative(setup: &Setup, document: &Value) {
+    let call = document["alternatives"][0]["call"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no alternative call in {document}"));
+    let (exit, result) = setup.json(&words(call));
+    assert_eq!(exit, 0, "{call}: {result}");
+}
+
+#[test]
+fn the_steps_that_a_dirty_workspace_suggests_run_as_written_without_a_terminal() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    write(&workspace.join("app").join("notes.md"));
+    let (exit, document) = setup.json(&["remove", "reading-list"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::dirty");
+    let hint = document["recovery"]["text"].as_str().unwrap();
+    assert_eq!(quoted(hint, "mxv"), "mxv remove reading-list --yes");
+    assert_eq!(
+        document["alternatives"][0]["call"],
+        "mxv remove reading-list --force --yes"
+    );
+    run_alternative(&setup, &document);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn the_steps_that_an_ignored_file_suggests_run_as_written_without_a_terminal() {
+    let setup = Setup::new();
+    write_text(&setup.clone.join(".git/info/exclude"), ".env\n");
+    let workspace = created(&setup, "reading-list");
+    write(&workspace.join("app").join(".env"));
+    let (exit, document) = setup.json(&["remove", "reading-list"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::ignored_files");
+    let hint = document["recovery"]["text"].as_str().unwrap();
+    assert_eq!(quoted(hint, "mxv"), "mxv remove reading-list --yes");
+    assert_eq!(
+        document["alternatives"][0]["call"],
+        "mxv remove reading-list --force --yes"
+    );
+    run_alternative(&setup, &document);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn the_steps_that_unreachable_commits_suggest_keep_the_flags_given_and_run_as_written() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.join("app");
+    git(&checkout, &["switch", "--quiet", "--detach"]);
+    git(
+        &checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Lost"],
+    );
+    write(&checkout.join("notes.md"));
+    let (exit, document) = setup.json(&["remove", "reading-list", "--force"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::unreachable_commits");
+    let hint = document["recovery"]["text"].as_str().unwrap();
+    assert_eq!(quoted(hint, "mxv"), "mxv remove reading-list --force --yes");
+    assert_eq!(
+        document["alternatives"][0]["call"],
+        "mxv remove reading-list --force --delete-unmerged --yes"
+    );
+    run_alternative(&setup, &document);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn the_step_that_a_locked_checkout_suggests_after_unlocking_has_yes() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.join("app");
+    git(
+        &setup.clone,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "in use",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let (exit, document) = setup.json(&["remove", "reading-list"]);
+    assert_eq!(exit, 1, "{document}");
+    let hint = document["recovery"]["text"].as_str().unwrap();
+    git(
+        &setup.clone,
+        &["worktree", "unlock", checkout.to_str().unwrap()],
+    );
+    let line = quoted(hint, "mxv");
+    assert_eq!(line, "mxv remove reading-list --yes");
+    let (exit, result) = setup.json(&words(line));
+    assert_eq!(exit, 0, "{result}");
+}
+
+#[test]
+fn a_dry_run_names_the_removal_that_deletes_an_unmerged_branch_and_it_runs_as_written() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    git(
+        &workspace.join("app"),
+        &["commit", "--quiet", "--allow-empty", "-m", "Work"],
+    );
+    let (exit, text) = setup.text(&["remove", "reading-list", "--dry-run"]);
+    assert_eq!(exit, 0, "{text}");
+    let line = quoted(&text, "mxv");
+    assert_eq!(line, "mxv remove reading-list --delete-unmerged --yes");
+    let (exit, result) = setup.json(&words(line));
+    assert_eq!(exit, 0, "{result}");
+    assert_eq!(
+        result["data"]["checkouts"][0]["branch_fate"],
+        "deleted_unmerged"
+    );
+    assert!(git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty());
+}
+
+#[test]
+fn a_removal_that_keeps_an_unmerged_branch_names_the_git_command_that_deletes_it() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    git(
+        &workspace.join("app"),
+        &["commit", "--quiet", "--allow-empty", "-m", "Work"],
+    );
+    let (exit, text) = setup.text(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{text}");
+    let line = quoted(&text, "git");
+    assert_eq!(
+        line,
+        format!("git -C {} branch -D reading-list", setup.clone.display())
+    );
+    let words: Vec<&str> = line.split_whitespace().skip(1).collect();
+    git(&setup.root(), &words);
+    assert!(git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty());
+}

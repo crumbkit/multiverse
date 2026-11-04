@@ -111,6 +111,24 @@ never deletes an unmerged branch. The merge check reads the base as the
 repository last fetched it, so a branch that was merged by squashing reads as
 unmerged and is kept.
 
+Each refusal's hint names the `mxv remove` command to run after fixing the
+cause, and the refusals that a flag overrides also offer that command as an
+alternative, such as `mxv remove <name> --force --yes`. Each command keeps
+the flags that the refused run gave and has `--yes`, so it runs without a
+terminal. After a removal that kept an unmerged branch, the record is gone,
+so the result names the `git branch -D` command that deletes the branch; a
+dry run names the `mxv remove` command with `--delete-unmerged` instead.
+
+`mxv remove` checks the workspace again after the person confirms, because
+the workspace may change while mxv waits for the answer. When a new check
+refuses the removal, mxv reports that refusal and removes nothing. When the
+removal would lose more than mxv showed, such as a new untracked file under
+`--force` or a new commit on a detached `HEAD` under `--delete-unmerged`, it
+refuses with `mxv::workspace::changed`, whose recovery is the dry run that
+shows the new plan. mxv deletes a branch only while it still points at the
+commit that mxv checked. A branch that moved, such as one that gained a
+commit while mxv waited, stays, and the result reports `kept_moved`.
+
 mxv refuses with `mxv::checkout::unowned` when the workspace directory or a
 checkout directory is a symbolic link, or when git does not list a checkout
 directory as a worktree of its repository.

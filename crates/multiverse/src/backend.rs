@@ -83,12 +83,13 @@ pub trait Backend {
     /// holds branches but no default branch.
     fn base(&self, repository: &Path) -> Result<String, Error>;
 
-    /// Reports whether the repository has a local branch named `branch`.
+    /// Returns the commit that the local branch `branch` points at, or
+    /// `None` when the repository has no such branch.
     ///
     /// # Errors
     ///
     /// Returns the failure of the lookup.
-    fn has_branch(&self, repository: &Path, branch: &str) -> Result<bool, Error>;
+    fn branch_tip(&self, repository: &Path, branch: &str) -> Result<Option<String>, Error>;
 
     /// Creates the local branch `branch` at the commit that `base` names,
     /// in one step that fails when the branch already exists, so a branch
@@ -193,11 +194,4 @@ pub trait Backend {
     ///
     /// Returns the failure of the deletion, such as when the branch moved.
     fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error>;
-
-    /// Deletes the local branch `branch`, merged or not.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of the deletion.
-    fn delete_branch(&self, repository: &Path, branch: &str) -> Result<(), Error>;
 }

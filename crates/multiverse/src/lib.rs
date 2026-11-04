@@ -31,8 +31,8 @@ pub use crate::record::{
 };
 pub use crate::store::{Created, MOST_RECORD_BYTES, Records, Store};
 pub use crate::workspaces::{
-    Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, Mode, NewOutcome, Removal, RemovalPlan,
-    Workspaces,
+    Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, Mode, NewOutcome, Removal,
+    RemovalOutcome, RemovalPlan, Workspaces,
 };
 #[cfg(test)]
 mod testing;

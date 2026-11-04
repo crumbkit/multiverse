@@ -69,11 +69,30 @@ mxv run
   fails with mxv::command::unbuilt
   hint
 
+mxv remove changed --dry-run
+  fails with mxv::workspace::dirty
+  hint
+  run mxv remove changed --force --yes
+    exits 0
+
+mxv remove secret --dry-run
+  fails with mxv::workspace::ignored_files
+  hint
+  run mxv remove secret --force --yes
+    exits 0
+
+mxv remove detached --dry-run
+  fails with mxv::checkout::unreachable_commits
+  hint
+  run mxv remove detached --delete-unmerged --yes
+    exits 0
+
+mxv remove locked --dry-run
+  fails with mxv::checkout::locked
+  hint
+
 codes that no start provokes:
-  mxv::workspace::dirty: Only a live checkout with changes provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
-  mxv::workspace::ignored_files: Only a live checkout with an ignored file such as .env provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
-  mxv::checkout::unreachable_commits: Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
-  mxv::checkout::locked: Only a live checkout that git lists as locked provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
+  mxv::workspace::changed: Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.
   mxv::path::inaccessible: Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.
   mxv::environment::no_directory: Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.
   mxv::checkout::unowned: Only a checkout directory that git does not list provokes it, and the fixture's workspace has no checkout directory.

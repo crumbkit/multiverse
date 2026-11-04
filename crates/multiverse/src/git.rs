@@ -79,7 +79,7 @@ impl Finished {
             operation,
             dir: dir.to_path_buf(),
             code: self.status.code(),
-            message: message(&self.stderr),
+            message: explanation(self.status, &self.stderr),
         }
     }
 
@@ -121,6 +121,32 @@ fn message(stderr: &str) -> String {
         .collect();
     let start = kept.len().saturating_sub(MOST_QUOTED_LINES);
     kept.get(start..).unwrap_or_default().join(" / ")
+}
+
+/// Returns why a command with exit status `status` failed: [`message`]
+/// of its standard error, followed by the signal that ended it, if a signal
+/// did. A command that a signal ended may print nothing, so naming the
+/// signal keeps the failure from reading as empty.
+pub(crate) fn explanation(status: ExitStatus, stderr: &str) -> String {
+    let explained = message(stderr);
+    match signal(status) {
+        None => explained,
+        Some(signal) if explained.is_empty() => format!("git was ended by signal {signal}"),
+        Some(signal) => format!("{explained} (git was ended by signal {signal})"),
+    }
+}
+
+/// Returns the signal that ended a command, or `None` when it exited.
+#[cfg(unix)]
+fn signal(status: ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal()
+}
+
+/// Returns `None`, because only Unix ends a command with a signal.
+#[cfg(not(unix))]
+fn signal(_status: ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Runs `git -C <dir> <args>` as the module docs describe, and returns
@@ -306,7 +332,7 @@ impl Backend for Git {
         }
     }
 
-    fn has_branch(&self, repository: &Path, branch: &str) -> Result<bool, Error> {
+    fn branch_tip(&self, repository: &Path, branch: &str) -> Result<Option<String>, Error> {
         let reference = format!("refs/heads/{branch}");
         let found = run(
             repository,
@@ -314,7 +340,11 @@ impl Backend for Git {
             "rev-parse",
             LOCAL_DEADLINE,
         )?;
-        Ok(found.status.success())
+        Ok(found
+            .status
+            .success()
+            .then(|| trimmed(&found.stdout))
+            .filter(|tip| !tip.is_empty()))
     }
 
     fn create_branch(
@@ -345,7 +375,7 @@ impl Backend for Git {
         if created.status.success() {
             return Ok(Some(commit));
         }
-        if self.has_branch(repository, branch)? {
+        if self.branch_tip(repository, branch)?.is_some() {
             return Ok(None);
         }
         Err(created.failure("update-ref", repository))
@@ -511,17 +541,6 @@ impl Backend for Git {
             LOCAL_DEADLINE,
         )?
         .ok("update-ref -d", repository)
-        .map(drop)
-    }
-
-    fn delete_branch(&self, repository: &Path, branch: &str) -> Result<(), Error> {
-        run(
-            repository,
-            ["branch", "--quiet", "-D", branch],
-            "branch -D",
-            LOCAL_DEADLINE,
-        )?
-        .ok("branch -D", repository)
         .map(drop)
     }
 }

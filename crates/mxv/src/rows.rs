@@ -4,11 +4,12 @@ use std::fmt;
 
 use crumbkit::Row;
 use multiverse::Error;
-use multiverse::{BranchFate, Checkout, CheckoutRemoval, Fate, Removal, Workspace};
+use multiverse::{Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Removal, Workspace};
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::environment::{Root, RootSource};
+use crate::failures::remove_line;
 
 /// One workspace, as `list` prints it.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -212,15 +213,21 @@ pub(crate) struct CheckoutRemovalRow {
     checkout: DirectoryFate,
     /// The checkout's branch.
     branch: String,
+    /// The repository that holds the branch, for the text that says how to
+    /// delete a branch that the removal kept.
+    #[serde(skip)]
+    repository: String,
     /// What happens to the branch: `deleted` when its commits are all on
     /// its base, `kept_unmerged` when it holds other commits, which
     /// `--delete-unmerged` would delete, `deleted_unmerged` when
-    /// `--delete-unmerged` deletes such commits, or `missing` when it was
-    /// already gone.
+    /// `--delete-unmerged` deletes such commits, `kept_moved` when it
+    /// pointed at another commit when the removal came to delete it than
+    /// when mxv planned the removal, or `missing` when it was already gone.
     branch_fate: BranchState,
     /// The number of commits on the branch that are not on its base, or
     /// null when the base that the record names is gone, so the number is
-    /// unknown and the branch counts as unmerged.
+    /// unknown and the branch counts as unmerged, or when the branch moved
+    /// after mxv planned the removal.
     unmerged_commits: Option<u32>,
     /// The number of commits that the checkout's `HEAD` holds and no branch
     /// holds, such as commits on a detached `HEAD`, which
@@ -250,6 +257,9 @@ pub(crate) enum BranchState {
     KeptUnmerged,
     /// The branch is deleted with commits that are not on its base.
     DeletedUnmerged,
+    /// The branch stays, because it moved after mxv planned the removal,
+    /// so it may hold work that mxv did not show.
+    KeptMoved,
     /// The branch was already gone.
     Missing,
 }
@@ -270,6 +280,7 @@ fn branch_state(fate: BranchFate) -> (BranchState, Option<u32>) {
         BranchFate::Deleted => (BranchState::Deleted, Some(0)),
         BranchFate::KeptUnmerged { commits } => (BranchState::KeptUnmerged, commits),
         BranchFate::DeletedUnmerged { commits } => (BranchState::DeletedUnmerged, commits),
+        BranchFate::KeptMoved => (BranchState::KeptMoved, None),
         BranchFate::Missing => (BranchState::Missing, Some(0)),
     }
 }
@@ -282,6 +293,7 @@ impl From<&CheckoutRemoval> for CheckoutRemovalRow {
             path: removal.checkout.path.display().to_string(),
             checkout: removal.directory.into(),
             branch: removal.checkout.branch.clone(),
+            repository: removal.checkout.source.display().to_string(),
             branch_fate,
             unmerged_commits,
             stray_commits: removal.stray_commits,
@@ -359,9 +371,15 @@ impl fmt::Display for RemovalResult {
                 }
                 BranchState::KeptUnmerged => writeln!(
                     formatter,
-                    "mxv {keeps} the branch {}, because {}. `--delete-unmerged` deletes it.",
+                    "mxv {keeps} the branch {}, because {}. `{}` deletes it.",
                     checkout.branch,
-                    unmerged(checkout.unmerged_commits)
+                    unmerged(checkout.unmerged_commits),
+                    self.deletion(checkout)
+                )?,
+                BranchState::KeptMoved => writeln!(
+                    formatter,
+                    "mxv {keeps} the branch {}, because it moved after mxv planned the removal, so it may hold work that mxv did not show. `git -C {} log {}` shows its commits.",
+                    checkout.branch, checkout.repository, checkout.branch
                 )?,
                 BranchState::DeletedUnmerged => writeln!(
                     formatter,
@@ -394,6 +412,30 @@ impl fmt::Display for RemovalResult {
             "mxv {deletes} the record of the workspace {}.",
             self.name
         )
+    }
+}
+
+impl RemovalResult {
+    /// Returns the command line that deletes the branch of `checkout`,
+    /// which the removal keeps because it holds unmerged commits. Before the
+    /// removal, it is the same removal with `--delete-unmerged`. After it,
+    /// the record is gone, so it is the git command that deletes the
+    /// branch.
+    fn deletion(&self, checkout: &CheckoutRemovalRow) -> String {
+        if self.planned {
+            remove_line(
+                &self.name,
+                Allow {
+                    discard_changes: self.force,
+                    delete_unmerged: true,
+                },
+            )
+        } else {
+            format!(
+                "git -C {} branch -D {}",
+                checkout.repository, checkout.branch
+            )
+        }
     }
 }
 

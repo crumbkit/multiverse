@@ -2,7 +2,7 @@ use std::fs;
 
 use crate::backend::{Backend as _, Changes};
 use crate::error::Error;
-use crate::git::{Git, message};
+use crate::git::{Git, explanation, message};
 use crate::testing::{advance_origin, fixture, git, write};
 
 #[test]
@@ -164,7 +164,20 @@ fn a_branch_is_deleted_at_a_commit_only_while_it_still_points_there() {
         Git.delete_branch_at(&fixture.clone, "topic", &start)
             .is_err()
     );
-    assert!(Git.has_branch(&fixture.clone, "topic").unwrap());
+    let moved = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        Git.branch_tip(&fixture.clone, "topic").unwrap(),
+        Some(moved.trim().to_owned())
+    );
+}
+
+#[test]
+fn a_branch_that_does_not_exist_has_no_tip() {
+    let fixture = fixture();
+    assert_eq!(
+        Git.branch_tip(&fixture.clone, "no-such-branch").unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -218,6 +231,23 @@ fn a_failure_message_prefers_the_last_fatal_or_error_line() {
     assert_eq!(message(stderr), "fatal: the cause");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_failure_of_a_command_that_a_signal_ended_names_the_signal() {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::ExitStatus;
+    let killed = ExitStatus::from_raw(9);
+    assert_eq!(explanation(killed, ""), "git was ended by signal 9");
+    assert_eq!(
+        explanation(killed, "fatal: the cause\n"),
+        "fatal: the cause (git was ended by signal 9)"
+    );
+    assert_eq!(
+        explanation(ExitStatus::from_raw(1 << 8), "fatal: the cause\n"),
+        "fatal: the cause"
+    );
+}
+
 #[test]
 fn a_failure_message_without_a_fatal_line_quotes_the_last_lines_that_are_not_hints() {
     let stderr = "one\ntwo\nhint: skip\nthree\nfour\nfive\nsix\n\n";
@@ -255,7 +285,11 @@ fn a_symbolic_link_in_place_of_a_checkout_is_not_the_checkout() {
 fn a_failed_command_names_its_operation_and_the_last_line_of_its_error() {
     let fixture = fixture();
     let error = Git
-        .delete_branch(&fixture.clone, "no-such-branch")
+        .delete_branch_at(
+            &fixture.clone,
+            "no-such-branch",
+            "0123456789012345678901234567890123456789",
+        )
         .unwrap_err();
     let Error::CommandFailed {
         operation, message, ..
@@ -263,7 +297,7 @@ fn a_failed_command_names_its_operation_and_the_last_line_of_its_error() {
     else {
         panic!("{error:?}");
     };
-    assert_eq!(operation, "branch -D");
+    assert_eq!(operation, "update-ref -d");
     assert!(message.contains("no-such-branch"), "{message}");
 }
 

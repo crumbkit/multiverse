@@ -72,6 +72,10 @@ pub struct CheckoutRemoval {
     pub directory: Fate,
     /// What happens to the checkout's branch.
     pub branch: BranchFate,
+    /// The commit that the checkout's branch pointed at when the removal
+    /// was planned, or `None` when the branch was gone. The removal deletes
+    /// the branch only while it still points at this commit.
+    pub tip: Option<String>,
     /// The number of commits that the checkout's `HEAD` holds and no
     /// branch holds, such as commits on a detached `HEAD`, which the
     /// removal loses.
@@ -115,6 +119,10 @@ pub enum BranchFate {
         /// `None` when its base names no commit any more.
         commits: Option<u32>,
     },
+    /// The branch stays, because it pointed at another commit when the
+    /// removal came to delete it than when the removal was planned, so it
+    /// may hold work that the plan did not show.
+    KeptMoved,
     /// The branch, or its repository, was already gone.
     Missing,
 }
@@ -141,6 +149,23 @@ pub struct Allow {
 /// `build`, and an ignored file inside a tracked `dist/` directory, such as
 /// `tools/dist/prod.secret`.
 pub const DISPOSABLE: &[&str] = &["target", "node_modules", "dist", "build", ".cache"];
+
+/// Reports whether `fresh`, a new plan of the removal that the caller
+/// confirmed as `confirmed`, would lose more than `confirmed` showed: a
+/// different record, more commits that no branch holds in a checkout, or a
+/// change or ignored path to discard that `confirmed` did not list.
+fn loses_more(fresh: &Removal, confirmed: &Removal) -> bool {
+    fresh.workspace != confirmed.workspace
+        || fresh
+            .checkouts
+            .iter()
+            .zip(&confirmed.checkouts)
+            .any(|(now, seen)| now.stray_commits > seen.stray_commits)
+        || fresh
+            .discarded
+            .iter()
+            .any(|path| !confirmed.discarded.contains(path))
+}
 
 /// Reports whether `path`, as `git status` prints an ignored path, is in
 /// [`DISPOSABLE`].
@@ -169,6 +194,19 @@ pub struct Removal {
     /// because the caller allowed it, in the form of
     /// [`RemovalPlan::Dirty`] and [`RemovalPlan::IgnoredFiles`].
     pub discarded: Vec<String>,
+}
+
+/// The outcome of [`Workspaces::remove`].
+#[derive(Debug)]
+pub enum RemovalOutcome {
+    /// The removal ran, and holds what it did.
+    Done(Removal),
+    /// The workspace changed after the plan, so a new plan refuses the
+    /// removal or would lose more than the plan showed, and nothing was
+    /// removed. It holds the new plan. A new plan that is
+    /// [`RemovalPlan::Ready`] would lose more commits that no branch holds,
+    /// or discard more changes, than the plan that the caller confirmed.
+    Changed(RemovalPlan),
 }
 
 /// The outcome of [`Workspaces::plan_removal`].
@@ -352,7 +390,11 @@ impl<B: Backend> Workspaces<B> {
         if Entry::at(&path)? != Entry::Absent {
             return Ok(NewOutcome::PathTaken(path));
         }
-        if self.backend.has_branch(&repository.root, name.as_str())? {
+        if self
+            .backend
+            .branch_tip(&repository.root, name.as_str())?
+            .is_some()
+        {
             return Ok(NewOutcome::BranchTaken {
                 repository: repository.root,
                 branch: name.to_string(),
@@ -586,27 +628,30 @@ impl<B: Backend> Workspaces<B> {
             } else {
                 Fate::Missing
             };
-            let branch = if !source
-                || !self
-                    .backend
-                    .has_branch(&checkout.source, &checkout.branch)?
-            {
-                BranchFate::Missing
+            let tip = if source {
+                self.backend
+                    .branch_tip(&checkout.source, &checkout.branch)?
             } else {
-                let revision = format!("refs/heads/{}", checkout.branch);
-                match self
-                    .backend
-                    .unmerged_commits(&checkout.source, &revision, &checkout.base)?
-                {
-                    Some(0) => BranchFate::Deleted,
-                    commits if allow.delete_unmerged => BranchFate::DeletedUnmerged { commits },
-                    commits => BranchFate::KeptUnmerged { commits },
+                None
+            };
+            let branch = match &tip {
+                None => BranchFate::Missing,
+                Some(tip) => {
+                    match self
+                        .backend
+                        .unmerged_commits(&checkout.source, tip, &checkout.base)?
+                    {
+                        Some(0) => BranchFate::Deleted,
+                        commits if allow.delete_unmerged => BranchFate::DeletedUnmerged { commits },
+                        commits => BranchFate::KeptUnmerged { commits },
+                    }
                 }
             };
             checkouts.push(CheckoutRemoval {
                 checkout: checkout.clone(),
                 directory,
                 branch,
+                tip,
                 stray_commits: stray,
                 unlock,
             });
@@ -633,20 +678,32 @@ impl<B: Backend> Workspaces<B> {
         }))
     }
 
-    /// Carries out `removal`, which [`Workspaces::plan_removal`] returned:
-    /// it removes each checkout, deletes each branch that the plan deletes,
-    /// removes the workspace's `AGENTS.md` and directory, and deletes the
-    /// record. It returns what it did. The workspace's directory stays when
-    /// it still holds other files, and the result says so.
+    /// Carries out `confirmed`, which [`Workspaces::plan_removal`] returned
+    /// and the caller confirmed. It plans the removal again first, because
+    /// the workspace may have changed while the caller confirmed, and
+    /// returns [`RemovalOutcome::Changed`] without removing anything when
+    /// the new plan refuses the removal, or would lose commits that no
+    /// branch holds or discard changes that `confirmed` did not show.
+    /// Otherwise it removes each checkout, deletes each branch that the
+    /// plan deletes while the branch still points at the commit that the
+    /// plan saw, removes the workspace's `AGENTS.md` and directory, and
+    /// deletes the record. A branch that moved since the plan stays, as
+    /// [`BranchFate::KeptMoved`]. The workspace's directory stays when it
+    /// still holds other files. It returns what it did.
     ///
     /// # Errors
     ///
-    /// Returns the failures of the backend's removal commands, and
-    /// [`Error::Unwritable`] when `AGENTS.md`, the directory or the record
-    /// cannot be removed. The steps before the failure stay done, and the
-    /// record stays, so the caller can run the removal again.
-    pub fn remove(&self, mut removal: Removal) -> Result<Removal, Error> {
-        for planned in &removal.checkouts {
+    /// Returns the errors of [`Workspaces::plan_removal`], the failures of
+    /// the backend's removal commands, and [`Error::Unwritable`] when
+    /// `AGENTS.md`, the directory or the record cannot be removed. The
+    /// steps before the failure stay done, and the record stays, so the
+    /// caller can run the removal again.
+    pub fn remove(&self, confirmed: Removal) -> Result<RemovalOutcome, Error> {
+        let mut removal = match self.plan_removal(&confirmed.workspace.name, confirmed.allow)? {
+            RemovalPlan::Ready(fresh) if !loses_more(&fresh, &confirmed) => fresh,
+            plan => return Ok(RemovalOutcome::Changed(plan)),
+        };
+        for (planned, seen) in removal.checkouts.iter_mut().zip(&confirmed.checkouts) {
             let checkout = &planned.checkout;
             if planned.unlock {
                 self.backend
@@ -666,12 +723,29 @@ impl<B: Backend> Workspaces<B> {
                     }
                 }
             }
-            if matches!(
+            // The branch's fate is the one that the caller confirmed, at
+            // the commit that the caller saw.
+            planned.branch = seen.branch;
+            planned.tip.clone_from(&seen.tip);
+            let deletes = matches!(
                 planned.branch,
                 BranchFate::Deleted | BranchFate::DeletedUnmerged { .. }
-            ) {
+            );
+            let Some(tip) = planned.tip.as_deref().filter(|_| deletes) else {
+                continue;
+            };
+            if let Err(error) =
                 self.backend
-                    .delete_branch(&checkout.source, &checkout.branch)?;
+                    .delete_branch_at(&checkout.source, &checkout.branch, tip)
+            {
+                planned.branch = match self
+                    .backend
+                    .branch_tip(&checkout.source, &checkout.branch)?
+                {
+                    None => BranchFate::Missing,
+                    Some(now) if now != tip => BranchFate::KeptMoved,
+                    Some(_) => return Err(error),
+                };
             }
         }
         let agents = removal.workspace.agents_file();
@@ -697,6 +771,6 @@ impl<B: Backend> Workspaces<B> {
             }
         };
         self.store.delete(&removal.workspace.name)?;
-        Ok(removal)
+        Ok(RemovalOutcome::Done(removal))
     }
 }
