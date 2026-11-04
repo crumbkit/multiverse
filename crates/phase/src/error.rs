@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::env::EnvironmentError;
-use crate::name::{AppName, WorkspaceId};
+use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::record::DockerError;
 
 /// A failure of one of [`Phase`](crate::Phase)'s operations.
@@ -81,6 +81,29 @@ pub enum PhaseError {
         /// Docker's failure.
         source: DockerError,
     },
+    /// The keeper of a host process could not start, refused its
+    /// specification, or gave no handshake before the deadline, so the
+    /// process did not start.
+    #[non_exhaustive]
+    KeeperUnstartable {
+        /// The app.
+        app: AppName,
+        /// The process.
+        process: ProcessName,
+        /// Why, which holds no environment value.
+        reason: String,
+    },
+    /// The keeper of a host process started, and could not start the
+    /// process, for example because its program does not exist.
+    #[non_exhaustive]
+    ProcessUnstartable {
+        /// The app.
+        app: AppName,
+        /// The process.
+        process: ProcessName,
+        /// Why, which holds no environment value.
+        reason: String,
+    },
     /// phase tried to record a change to an object that the run record does
     /// not name, which is a fault in phase.
     #[non_exhaustive]
@@ -109,6 +132,8 @@ impl PhaseError {
                 source: DockerError::Refused { .. },
             } => "phase::docker::refused",
             Self::Docker { .. } => "phase::docker::unavailable",
+            Self::KeeperUnstartable { .. } => "phase::keeper::unstartable",
+            Self::ProcessUnstartable { .. } => "phase::process::unstartable",
             Self::Unplanned { .. } => "phase::record::unplanned",
         }
     }
@@ -195,6 +220,22 @@ impl fmt::Display for PhaseError {
             Self::Docker { .. } => {
                 formatter.write_str("Docker did not answer, so phase cannot tell what is running")
             }
+            Self::KeeperUnstartable {
+                app,
+                process,
+                reason,
+            } => write!(
+                formatter,
+                "the keeper of {app}/{process} could not start: {reason}"
+            ),
+            Self::ProcessUnstartable {
+                app,
+                process,
+                reason,
+            } => write!(
+                formatter,
+                "the process {app}/{process} could not start: {reason}"
+            ),
             Self::Unplanned { workspace, object } => write!(
                 formatter,
                 "the run record of the workspace {workspace} does not name {object}"
@@ -214,6 +255,8 @@ impl std::error::Error for PhaseError {
             | Self::RecordUnreadable { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
+            | Self::KeeperUnstartable { .. }
+            | Self::ProcessUnstartable { .. }
             | Self::Unplanned { .. } => None,
         }
     }

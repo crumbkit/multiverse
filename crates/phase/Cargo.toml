@@ -25,6 +25,9 @@ serde_json = { workspace = true }
 # `sweep` signals the process groups of recorded processes and checks
 # whether a group still has a member, without unsafe code.
 rustix = { workspace = true }
+# A keeper receives `TERM` and `INT` as messages on a thread of its own, so
+# it can stop its app's group before it exits.
+signal-hook = { workspace = true }
 
 # Linux reads a process's start in clock ticks from /proc, and the `param`
 # feature gives the number of ticks in a second.

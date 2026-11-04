@@ -246,18 +246,25 @@ impl Processes for System {
 /// Sends `signal` to `process` alone. On Linux it opens a pidfd, checks the
 /// start time again through the open pidfd's process, and signals the
 /// pidfd, so a pid that the system reuses after the check is never
-/// signalled. Elsewhere `kill(2)` signals the pid. There, if the recorded
+/// signalled. A Linux kernel older than 5.3 has no `pidfd_open` and fails
+/// it with ENOSYS, and there `kill(2)` signals the pid after the check.
+/// Elsewhere `kill(2)` signals the pid. There, if the recorded
 /// process ends and the system gives its pid to a new process between
 /// sweep's check and the signal, the new process receives the signal. The
 /// system hands out pids in order, so that needs the pid numbers to wrap
 /// around within that time.
 #[cfg(target_os = "linux")]
 fn signal_process(process: Pid, host: &HostProcess, signal: Signal) -> rustix::io::Result<()> {
-    let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())?;
+    let pidfd = match rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty()) {
+        Ok(pidfd) => Some(pidfd),
+        Err(rustix::io::Errno::NOSYS) => None,
+        Err(error) => return Err(error),
+    };
     match start_time(host.pid) {
-        Ok(Start::At(started)) if started == host.started_at_us => {
-            rustix::process::pidfd_send_signal(&pidfd, signal)
-        }
+        Ok(Start::At(started)) if started == host.started_at_us => match pidfd {
+            Some(pidfd) => rustix::process::pidfd_send_signal(&pidfd, signal),
+            None => rustix::process::kill_process(process, signal),
+        },
         _ => Err(rustix::io::Errno::SRCH),
     }
 }

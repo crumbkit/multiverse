@@ -6,7 +6,7 @@
 //! interval and pause here between polls.
 
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The interval at which phase polls a lock that another operation holds
 /// and a process that it has signalled.
@@ -25,4 +25,10 @@ pub(crate) fn pause(interval: Duration) {
 /// Returns the current time, against which a poll checks its deadline.
 pub(crate) fn now() -> Instant {
     Instant::now()
+}
+
+/// Returns the wall-clock time, against which phase compares a credential's
+/// expiry and stamps a diagnostic line.
+pub(crate) fn wall_now() -> SystemTime {
+    SystemTime::now()
 }

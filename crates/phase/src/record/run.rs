@@ -71,6 +71,11 @@ pub(crate) struct HostEntry {
     pub(crate) state: EntryState,
     /// The process, once it has started.
     pub(crate) host: Option<HostProcess>,
+    /// How many times the keeper has restarted the process since phase
+    /// started it, which `status` shows. It is 0 for a keeper, and a
+    /// record that lacks it reads as 0.
+    #[serde(default)]
+    pub(crate) restarts: u32,
 }
 
 /// A started host process.
@@ -327,6 +332,7 @@ impl RunRecord {
                 process: process.clone(),
                 state: EntryState::Planned,
                 host: None,
+                restarts: 0,
             });
         }
         self
@@ -483,6 +489,30 @@ impl RunRecord {
             }
             _ => return Err(unplanned()),
         }
+        Ok(())
+    }
+
+    /// Records that the keeper restarted the host process `key` as `host`,
+    /// after `restarts` restarts in all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process.
+    pub(crate) fn mark_restarted(
+        &mut self,
+        key: &ObjectKey,
+        host: HostProcess,
+        restarts: u32,
+    ) -> Result<(), Unplanned> {
+        let ObjectKey::Process(app, process) = key else {
+            return Err(Unplanned(key.clone()));
+        };
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(key.clone()))?;
+        entry.host = Some(host);
+        entry.state = EntryState::Running;
+        entry.restarts = restarts;
         Ok(())
     }
 

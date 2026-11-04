@@ -247,8 +247,57 @@ the same access, and phase provisions nothing.
 Each host process has a small keeper, a hidden `phase keep` subcommand of
 the same program. The keeper is the parent of exactly one app process. It
 holds only that process's environment, applies the sandbox, starts the
-process in its own process group, writes its log a line at a time, restarts
-it under its policy, and exits when the process is stopped.
+process in its own process group, gives it its log file as a file
+descriptor, restarts it under its policy, and exits when the process is
+stopped.
+
+The engine starts a keeper, and the keeper's first action is `setsid`, so
+it leads a session and a process group of its own, and a hangup or Ctrl-C
+at the engine's terminal never reaches it. The keeper's arguments name the
+workspace's stable id, the app, the process and the state directory, and
+hold no value. The keeper's environment and the app's hold only `PATH`,
+`HOME` and the process's resolved environment. The keeper's
+standard input carries a `phase/keeper/v1` specification with the command,
+directory, log, restart policy and stop handling. The keeper writes one
+handshake line to standard output once the process has started or failed
+to start, and the engine waits for that line until its deadline. The
+keeper records each start, restart count and stop of the process in the
+run record from a thread of its own, so waiting for the lifecycle lock
+never blocks supervision. It notes its start, restarts, resolve failures,
+record-write failures and exit in `<log dir>/<app>.<process>.keeper.log`,
+which never holds a value and also receives its standard error.
+
+The keeper's record notes are written asynchronously, after the keeper has
+acted, so the record can lag the process. The write-ahead writes are the
+engine's own, which it makes under the lifecycle lock before it acts. A
+crash between the keeper's action and its note still leaves the record
+naming the running pid, which `phase sweep` checks. A keeper's note applies
+only while the record names the keeper's own process, so it never
+overwrites a process that another operation recorded meanwhile.
+
+When the keeper's handshake misses the deadline or cannot be read, the
+engine sends the keeper `TERM`, so it stops any process it started, waits
+the process's grace and kill wait, and then kills the keeper's group. When
+the keeper's start of the process takes longer than that wait, the engine
+kills the keeper before it can stop the process, which then runs with no
+keeper and no entry in the run record. A stop request during a backoff or
+while the keeper resolves an environment ends the keeper without a
+restart, and a stop request while the keeper waits for its last record
+writes cuts that wait to two seconds.
+
+The library never reads the environment. The program that links phase
+reads its own environment in `main` into an opaque `KeeperEnvironment`,
+which shows no value, and passes it to the keeper, which keeps only the
+resolved names that its specification lists and sets them on the
+process's command.
+
+When a restart needs a fresh environment, the keeper resolves it through
+the `EnvironmentSource` that the program linking phase passes to it, and
+applies it to the restarted process. When resolving fails, the keeper
+notes it, waits the next backoff and tries again, up to the policy's most
+restarts, and then exits with status 3. The backoff starts again from its
+first wait after a run longer than its longest wait or a minute, whichever
+is longer.
 
 No long-lived process holds the secrets of every app. If a keeper is killed,
 its app process keeps running, and `phase sweep` or the next `phase up`

@@ -10,7 +10,9 @@
 //! process and its group to go. Then it sends `KILL` and waits again. A
 //! process that is still there after that is unstoppable, and the record
 //! keeps it. A process whose start time phase may not read, as inside a
-//! sandbox, is unknown, and the record keeps it unchanged. A Docker object
+//! sandbox, is unknown, and the record keeps it unchanged. So is a process
+//! recorded without a boot id on a system whose start times count from the
+//! boot, such as Linux. A Docker object
 //! is removed through [`Docker`], and when Docker does not answer, `sweep`
 //! fails and keeps the record.
 
@@ -261,10 +263,15 @@ impl Sweeper<'_, '_, '_> {
         if self.journal.is_some() {
             processes.reap(host.pid);
         }
-        if let Some(recorded) = &host.boot_id
-            && processes.boot_id()?.as_ref() != Some(recorded)
-        {
-            return Ok(Identity::Gone);
+        // A start time counts from the boot on a system that has a boot id,
+        // so a process recorded there without one cannot be matched, and
+        // phase leaves it alone.
+        match (&host.boot_id, processes.boot_id()?) {
+            (Some(recorded), current) if current.as_ref() != Some(recorded) => {
+                return Ok(Identity::Gone);
+            }
+            (None, Some(_)) => return Ok(Identity::Unknown),
+            _ => {}
         }
         Ok(match processes.start_time(host.pid)? {
             Start::At(started) if started == host.started_at_us => Identity::Ours,

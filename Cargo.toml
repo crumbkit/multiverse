@@ -74,6 +74,12 @@ reflink-copy = { version = "0.1.32", default-features = false }
 # link during the deletion.
 rustix = { version = "1.1.6", default-features = false, features = ["std", "process", "fs"] }
 
+# signal-hook turns a keeper's `TERM` and `INT` into messages that a thread
+# of the keeper reads, without unsafe code in phase. crumbkit-usage already
+# depends on it. The `iterator` feature gives the thread that reads them,
+# and it needs `channel`. Those two are the default features.
+signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
+
 # crumbkit-usage keeps the `mxv` command's local usage log and adds
 # `self usage` and `self figures list` (CLI-7).
 crumbkit-usage = "0.1.0"

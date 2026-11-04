@@ -3,6 +3,6 @@
 
 mod container;
 mod host;
-mod keeper;
+pub mod keeper;
 mod probe;
 mod restart;
