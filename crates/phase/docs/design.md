@@ -406,8 +406,15 @@ before starting anything, and names the variable and the resolver.
 
 starmap can keep 1Password values in a per-user agent that holds them in
 memory for a limited time after one unlock, so that starting another
-workspace does not ask for 1Password again. phase reaches it only through
-starmap's resolver, and treats its values like any other secret.
+workspace does not ask for 1Password again. mxv's `EnvironmentSource`
+builds its starmap context with starmap's `Agent` resolver, which asks the
+agent and falls back to reading 1Password directly. mxv passes the path of
+the `starmap` program so that the resolver can start the agent, and reads
+from 1Password directly when `starmap` is not installed. starmap never
+caches a value resolved in production mode, or one whose binding says
+`cache = false`. A keeper that resolves a fresh environment for a restart
+uses the same resolver, so its own environment keeps `TMPDIR` and
+`XDG_RUNTIME_DIR`, which locate the agent; the app does not inherit them.
 
 Any process running as the same user can read another process's environment
 on macOS. The keeper design limits how many processes hold a secret and for
@@ -446,6 +453,15 @@ The profile always denies an app the socket of starmap's secret agent and
 the 1Password and Keychain services. Only phase, outside the sandbox,
 resolves secrets, and an app receives only the values its own manifest
 declares.
+
+phase takes the agent's directory from
+`starmap_resolve::agent::AgentSocket::for_user()`, so it denies exactly the
+path the agent uses: `$TMPDIR/starmap-agent/` on macOS, resolved through
+`/private`, and `$XDG_RUNTIME_DIR/starmap-agent/` on Linux. On macOS the
+profile denies reading, writing and connecting to any socket below that
+directory. On Linux, Landlock grants no access below it. The rule is the
+control. An app also gets its own `TMPDIR`, which only changes the path it
+would compute.
 
 phase and multiverse will share one generator for Seatbelt profiles.
 
