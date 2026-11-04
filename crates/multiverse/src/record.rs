@@ -25,7 +25,7 @@ pub enum BackendKind {
 #[non_exhaustive]
 pub struct Checkout {
     /// The repository's name, which is the last component of `source` and
-    /// the name of the checkout's directory, such as `inbox`.
+    /// the name of the checkout's directory, such as `app`.
     pub name: String,
     /// The version-control system that made the checkout.
     pub backend: BackendKind,

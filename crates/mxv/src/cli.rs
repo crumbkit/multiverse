@@ -52,8 +52,8 @@ pub const GUIDE: Guide = Guide::new()
     .leaves(&[
         Leaf::new(&["new"])
             .examples(&[Example::new(
-                &["triage", "--repo", "inbox", "--dry-run"],
-                "Print the workspace that a checkout of the repository inbox would get",
+                &["triage", "--repo", "app", "--dry-run"],
+                "Print the workspace that a checkout of the repository app would get",
             )])
             .effects(Effects::additive().open_world())
             .document(NEW),

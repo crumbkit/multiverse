@@ -2,7 +2,9 @@
 //! documents they print.
 
 use crumbkit::{Batch, Call, Document, Listing, Output, Prose};
-use multiverse::{Allow, Git, Mode, NewOutcome, RemovalPlan, Store, WorkspaceName, Workspaces};
+use multiverse::{
+    Allow, Git, Mode, NewOutcome, RemovalOutcome, RemovalPlan, Store, WorkspaceName, Workspaces,
+};
 
 use crate::cli::{CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
 use crate::environment::Environment;
@@ -149,7 +151,9 @@ pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<Strin
 }
 
 /// Removes the workspace that `args` names, after the person confirms, or
-/// reports what removing it would do on a dry run.
+/// reports what removing it would do on a dry run. The removal plans again
+/// after the confirmation, and refuses when the workspace changed while
+/// mxv waited.
 pub(crate) fn remove(
     output: &mut Output,
     environment: &Environment,
@@ -157,54 +161,16 @@ pub(crate) fn remove(
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {
     let name = parse_name(&args.name)?;
     let workspaces = workspaces(environment)?;
-    let removal = match workspaces
-        .plan_removal(
-            &name,
-            Allow {
-                discard_changes: args.force,
-                delete_unmerged: args.delete_unmerged,
-            },
-        )
-        .map_err(MxvFailure::from)?
-    {
+    let allow = Allow {
+        discard_changes: args.force,
+        delete_unmerged: args.delete_unmerged,
+    };
+    let plan = workspaces
+        .plan_removal(&name, allow)
+        .map_err(MxvFailure::from)?;
+    let removal = match plan {
         RemovalPlan::Ready(removal) => removal,
-        RemovalPlan::NotFound => {
-            return Err(MxvFailure::NotFound {
-                name: name.to_string(),
-            }
-            .into());
-        }
-        RemovalPlan::Dirty { changes, .. } => {
-            return Err(MxvFailure::Dirty {
-                name: name.to_string(),
-                changes,
-            }
-            .into());
-        }
-        RemovalPlan::IgnoredFiles { paths, .. } => {
-            return Err(MxvFailure::IgnoredFiles {
-                name: name.to_string(),
-                paths,
-            }
-            .into());
-        }
-        RemovalPlan::StrayCommits {
-            checkout, commits, ..
-        } => {
-            return Err(MxvFailure::StrayCommits {
-                name: name.to_string(),
-                path: checkout,
-                commits,
-            }
-            .into());
-        }
-        RemovalPlan::Unowned { checkout, .. } => {
-            return Err(MxvFailure::Unowned {
-                name: name.to_string(),
-                path: checkout,
-            }
-            .into());
-        }
+        refused => return Err(refusal(&name, allow, refused).into()),
     };
     if output.is_dry_run() {
         return Ok(Prose::new(RemovalResult::new(&removal, true)));
@@ -213,6 +179,57 @@ pub(crate) fn remove(
         args.yes,
         &format!("Remove the workspace {name}, its checkouts and its record?"),
     )?;
-    let removed = workspaces.remove(removal).map_err(MxvFailure::from)?;
-    Ok(Prose::new(RemovalResult::new(&removed, false)))
+    match workspaces.remove(removal).map_err(MxvFailure::from)? {
+        RemovalOutcome::Done(removed) => Ok(Prose::new(RemovalResult::new(&removed, false))),
+        RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {
+            name: name.to_string(),
+            allow,
+        }
+        .into()),
+        RemovalOutcome::Changed(refused) => Err(refusal(&name, allow, refused).into()),
+    }
+}
+
+/// Returns the failure of a removal of the workspace `name` that `plan`
+/// refuses, where the removal's flags allowed what `allow` allows. A plan
+/// that is ready refuses nothing, and reads as a workspace that changed.
+fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure {
+    let name = name.to_string();
+    match plan {
+        RemovalPlan::Ready(_) => MxvFailure::Changed { name, allow },
+        RemovalPlan::NotFound => MxvFailure::NotFound { name },
+        RemovalPlan::Dirty { changes, .. } => MxvFailure::Dirty {
+            name,
+            changes,
+            allow,
+        },
+        RemovalPlan::IgnoredFiles { paths, .. } => MxvFailure::IgnoredFiles { name, paths, allow },
+        RemovalPlan::StrayCommits {
+            checkout, commits, ..
+        } => MxvFailure::StrayCommits {
+            name,
+            path: checkout,
+            commits,
+            allow,
+        },
+        RemovalPlan::Locked {
+            workspace,
+            checkout,
+            reason,
+        } => MxvFailure::Locked {
+            name,
+            repository: workspace
+                .checkouts
+                .iter()
+                .find(|listed| listed.path == checkout)
+                .map_or_else(|| checkout.clone(), |listed| listed.source.clone()),
+            path: checkout,
+            reason,
+            allow,
+        },
+        RemovalPlan::Unowned { checkout, .. } => MxvFailure::Unowned {
+            name,
+            path: checkout,
+        },
+    }
 }

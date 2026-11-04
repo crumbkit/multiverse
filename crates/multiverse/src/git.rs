@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::backend::{Backend, Changes, Repository};
+use crate::backend::{Backend, Changes, Listed, Repository};
 use crate::error::Error;
 
 #[cfg(test)]
@@ -79,7 +79,7 @@ impl Finished {
             operation,
             dir: dir.to_path_buf(),
             code: self.status.code(),
-            message: message(&self.stderr),
+            message: explanation(self.status, &self.stderr),
         }
     }
 
@@ -121,6 +121,32 @@ fn message(stderr: &str) -> String {
         .collect();
     let start = kept.len().saturating_sub(MOST_QUOTED_LINES);
     kept.get(start..).unwrap_or_default().join(" / ")
+}
+
+/// Returns why a command with exit status `status` failed: [`message`]
+/// of its standard error, followed by the signal that ended it, if a signal
+/// did. A command that a signal ended may print nothing, so naming the
+/// signal keeps the failure from reading as empty.
+pub(crate) fn explanation(status: ExitStatus, stderr: &str) -> String {
+    let explained = message(stderr);
+    match signal(status) {
+        None => explained,
+        Some(signal) if explained.is_empty() => format!("git was ended by signal {signal}"),
+        Some(signal) => format!("{explained} (git was ended by signal {signal})"),
+    }
+}
+
+/// Returns the signal that ended a command, or `None` when it exited.
+#[cfg(unix)]
+fn signal(status: ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal()
+}
+
+/// Returns `None`, because only Unix ends a command with a signal.
+#[cfg(not(unix))]
+fn signal(_status: ExitStatus) -> Option<i32> {
+    None
 }
 
 /// Runs `git -C <dir> <args>` as the module docs describe, and returns
@@ -306,7 +332,7 @@ impl Backend for Git {
         }
     }
 
-    fn has_branch(&self, repository: &Path, branch: &str) -> Result<bool, Error> {
+    fn branch_tip(&self, repository: &Path, branch: &str) -> Result<Option<String>, Error> {
         let reference = format!("refs/heads/{branch}");
         let found = run(
             repository,
@@ -314,7 +340,45 @@ impl Backend for Git {
             "rev-parse",
             LOCAL_DEADLINE,
         )?;
-        Ok(found.status.success())
+        Ok(found
+            .status
+            .success()
+            .then(|| trimmed(&found.stdout))
+            .filter(|tip| !tip.is_empty()))
+    }
+
+    fn create_branch(
+        &self,
+        repository: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<Option<String>, Error> {
+        let target = format!("{base}^{{commit}}");
+        let commit = run(
+            repository,
+            ["rev-parse", "--verify", "--quiet", target.as_str()],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-parse", repository)?;
+        let commit = trimmed(&commit);
+        let reference = format!("refs/heads/{branch}");
+        // An empty old value makes `update-ref` refuse when the reference
+        // already exists, so creating the branch and checking that it is
+        // new happen in one step.
+        let created = run(
+            repository,
+            ["update-ref", reference.as_str(), commit.as_str(), ""],
+            "update-ref",
+            LOCAL_DEADLINE,
+        )?;
+        if created.status.success() {
+            return Ok(Some(commit));
+        }
+        if self.branch_tip(repository, branch)?.is_some() {
+            return Ok(None);
+        }
+        Err(created.failure("update-ref", repository))
     }
 
     fn add_checkout(
@@ -322,7 +386,6 @@ impl Backend for Git {
         repository: &Path,
         checkout: &Path,
         branch: &str,
-        base: &str,
     ) -> Result<String, Error> {
         run(
             repository,
@@ -330,11 +393,8 @@ impl Backend for Git {
                 OsStr::new("worktree"),
                 OsStr::new("add"),
                 OsStr::new("--quiet"),
-                OsStr::new("--no-track"),
-                OsStr::new("-b"),
-                OsStr::new(branch),
                 checkout.as_os_str(),
-                OsStr::new(base),
+                OsStr::new(branch),
             ],
             "worktree add",
             CHECKOUT_DEADLINE,
@@ -345,7 +405,7 @@ impl Backend for Git {
         Ok(trimmed(&commit))
     }
 
-    fn owns_checkout(&self, repository: &Path, checkout: &Path) -> Result<bool, Error> {
+    fn listed_checkout(&self, repository: &Path, checkout: &Path) -> Result<Option<Listed>, Error> {
         let listed = run(
             repository,
             ["worktree", "list", "--porcelain"],
@@ -353,11 +413,22 @@ impl Backend for Git {
             LOCAL_DEADLINE,
         )?
         .ok("worktree list", repository)?;
-        let wanted = same_path(checkout);
-        Ok(listed
-            .lines()
-            .filter_map(|line| line.strip_prefix("worktree "))
-            .any(|listed| same_path(Path::new(listed)) == wanted))
+        Ok(find_listed(&listed, checkout))
+    }
+
+    fn unlock_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error> {
+        run(
+            repository,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("unlock"),
+                checkout.as_os_str(),
+            ],
+            "worktree unlock",
+            LOCAL_DEADLINE,
+        )?
+        .ok("worktree unlock", repository)
+        .map(drop)
     }
 
     fn changes(&self, checkout: &Path) -> Result<Changes, Error> {
@@ -419,7 +490,17 @@ impl Backend for Git {
         repository: &Path,
         revision: &str,
         base: &str,
-    ) -> Result<u32, Error> {
+    ) -> Result<Option<u32>, Error> {
+        let target = format!("{base}^{{commit}}");
+        let found = run(
+            repository,
+            ["rev-parse", "--verify", "--quiet", target.as_str()],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        if !found.status.success() {
+            return Ok(None);
+        }
         let range = format!("{base}..{revision}");
         let counted = run(
             repository,
@@ -428,16 +509,16 @@ impl Backend for Git {
             LOCAL_DEADLINE,
         )?
         .ok("rev-list", repository)?;
-        Ok(count(&counted))
+        Ok(Some(count(&counted)))
     }
 
-    fn stray_commits(&self, checkout: &Path) -> Result<u32, Error> {
+    fn stray_commits(&self, dir: &Path, revision: &str) -> Result<u32, Error> {
         let counted = run(
-            checkout,
+            dir,
             [
                 "rev-list",
                 "--count",
-                "HEAD",
+                revision,
                 "--not",
                 "--branches",
                 "--tags",
@@ -447,20 +528,48 @@ impl Backend for Git {
             "rev-list",
             LOCAL_DEADLINE,
         )?
-        .ok("rev-list", checkout)?;
+        .ok("rev-list", dir)?;
         Ok(count(&counted))
     }
 
-    fn delete_branch(&self, repository: &Path, branch: &str) -> Result<(), Error> {
+    fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error> {
+        let reference = format!("refs/heads/{branch}");
         run(
             repository,
-            ["branch", "--quiet", "-D", branch],
-            "branch -D",
+            ["update-ref", "-d", reference.as_str(), commit],
+            "update-ref -d",
             LOCAL_DEADLINE,
         )?
-        .ok("branch -D", repository)
+        .ok("update-ref -d", repository)
         .map(drop)
     }
+}
+
+/// Returns the entry for `checkout` in `listed`, the output of
+/// `git worktree list --porcelain`, which holds one block of lines for each
+/// checkout, separated by empty lines.
+fn find_listed(listed: &str, checkout: &Path) -> Option<Listed> {
+    let wanted = same_path(checkout);
+    listed.split("\n\n").find_map(|block| {
+        let mut lines = block.lines();
+        let path = lines.next()?.strip_prefix("worktree ")?;
+        if same_path(Path::new(path)) != wanted {
+            return None;
+        }
+        let mut entry = Listed::default();
+        for line in lines {
+            if let Some(head) = line.strip_prefix("HEAD ") {
+                entry.head = Some(head.to_owned());
+            } else if line == "detached" {
+                entry.detached = true;
+            } else if line == "locked" {
+                entry.locked = Some(String::new());
+            } else if let Some(reason) = line.strip_prefix("locked ") {
+                entry.locked = Some(reason.to_owned());
+            }
+        }
+        Some(entry)
+    })
 }
 
 /// Returns the number that `git rev-list --count` printed, or `u32::MAX`

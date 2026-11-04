@@ -70,3 +70,10 @@ fn text_that_is_not_toml_is_refused_with_its_line() {
     let (line, _) = invalid("root = \"/srv\"\nroot =\n");
     assert_eq!(line, Some(2));
 }
+
+#[test]
+fn a_root_with_a_nul_character_is_refused_with_its_line() {
+    let (line, reason) = invalid("\nroot = \"/srv/a\\u0000b\"\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("NUL"), "{reason}");
+}

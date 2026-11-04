@@ -8,7 +8,7 @@
 //! files.
 //!
 //! Each example runs in a fresh copy of a directory that the test builds
-//! with git: a bare `origin.git`, its clone `inbox`, a repository `plain`
+//! with git: a bare `origin.git`, its clone `app`, a repository `plain`
 //! without an origin, and a clone `fresh` of an origin without commits. Its
 //! XDG state starts as a copy of `tests/fixtures/xdg`, which holds the
 //! record of the workspace `reading-list`. That record names directories
@@ -21,6 +21,14 @@
 //! measures them before it replaces that path with its placeholder. `new`
 //! runs as a dry run, so the examples fetch nothing.
 //!
+//! The refusals of `remove` need live checkouts, which a record under
+//! `/home/agent` cannot name. The recovery and twin checks therefore also
+//! start from [`live_workspaces`], which creates real workspaces with the
+//! built binary in a temporary directory and an XDG fixture that holds
+//! their records. Each chain of those checks reads the records from a copy
+//! of that fixture, and acts on the real checkouts, so each refusal has a
+//! workspace of its own.
+//!
 //! `run`, `archive` and `restore` are declared before they are built. Each
 //! one fails with `mxv::command::unbuilt`, so its examples cannot run and a
 //! write verb has no document yet. The opt-outs below name each verb and
@@ -30,21 +38,21 @@
 
 use clap::CommandFactory as _;
 use crumbkit_test::{
-    Allow, Budgets, Examples, Failing, Pages, PathBudgets, Recoveries, Rule, Twin, Twins,
-    Unprovoked,
+    Allow, Budgets, Examples, Failing, Pages, PathBudgets, Recoveries, Rule, RuntimeFailing, Twin,
+    Twins, Unprovoked,
 };
 #[path = "support/git.rs"]
 mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    BRANCH_EXISTS, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES, CONFIG_INVALID,
-    CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
-    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, RECORD_CORRUPT,
-    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, UNBUILT,
-    UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_NOT_FOUND,
+    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES,
+    CONFIG_INVALID, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
+    ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE,
+    PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_CHANGED,
+    WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
 };
 use tempfile::TempDir;
 
@@ -113,14 +121,14 @@ const MISMATCHED_RECORD: Failing<'static> =
 /// `new` with a config file that sets an unknown key.
 const BAD_CONFIG: Failing<'static> = Failing::new(
     &CONFIG_INVALID,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-bad-config");
 
 /// `new` with a directory where the config file belongs.
 const UNREADABLE_CONFIG: Failing<'static> = Failing::new(
     &CONFIG_UNREADABLE,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-config-directory");
 
@@ -157,12 +165,12 @@ struct Repositories {
 }
 
 /// Returns a new directory of the repositories that the module docs name.
-/// The clone `inbox` also holds a branch named `taken`.
+/// The clone `app` also holds a branch named `taken`.
 fn repositories() -> Repositories {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let inbox = repository(&root);
-    git(&inbox, &["branch", "taken"]);
+    let app = repository(&root);
+    git(&app, &["branch", "taken"]);
     let plain = root.join("plain");
     std::fs::create_dir(&plain).unwrap();
     git(&plain, &["init", "--quiet"]);
@@ -304,19 +312,19 @@ const CD_MISSING: Failing<'static> = Failing::new(&WORKSPACE_NOT_FOUND, &["cd", 
 /// `new` of the name of the workspace in the fixture.
 const NEW_TAKEN_NAME: Failing<'static> = Failing::new(
     &WORKSPACE_EXISTS,
-    &["new", "reading-list", "--repo", "inbox", "--dry-run"],
+    &["new", "reading-list", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of a name with a slash.
 const NEW_BAD_NAME: Failing<'static> = Failing::new(
     &WORKSPACE_BAD_NAME,
-    &["new", "a/b", "--repo", "inbox", "--dry-run"],
+    &["new", "a/b", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of the name of a branch that the repository already has.
 const NEW_TAKEN_BRANCH: Failing<'static> = Failing::new(
     &BRANCH_EXISTS,
-    &["new", "taken", "--repo", "inbox", "--dry-run"],
+    &["new", "taken", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of a path that does not exist.
@@ -340,27 +348,27 @@ const NEW_EMPTY_ORIGIN: Failing<'static> = Failing::new(
 /// `new` with a relative `MXV_ROOT`.
 const NEW_RELATIVE_ROOT: Failing<'static> = Failing::new(
     &ENVIRONMENT_RELATIVE_ROOT,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .env(&[("MXV_ROOT", Some("work"))]);
 
 /// `new` of a name whose directory already exists under the default root.
 const NEW_TAKEN_DIRECTORY: Failing<'static> = Failing::new(
     &DIRECTORY_TAKEN,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-taken");
 
 /// `new` with a `PATH` that finds no git.
 const NEW_NO_GIT: Failing<'static> = Failing::new(
     &GIT_NOT_FOUND,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .env(&[("PATH", Some("/nonexistent"))]);
 
 /// The words of `new` that the fixture accepts, which each `new` line above
 /// differs from in one word.
-const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "inbox", "--dry-run"];
+const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "app", "--dry-run"];
 
 /// The command lines that start the recovery chains, one for each code that
 /// a command line provokes.
@@ -386,20 +394,14 @@ const STARTS: &[Failing<'static>] = &[
 
 /// The declared codes that no command line in this test provokes, because
 /// each needs a state that a fixed fixture cannot hold.
-/// `tests/workspaces.rs` provokes the refusals of `remove` with real
-/// checkouts.
 const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
-        &WORKSPACE_DIRTY,
-        "Only a live checkout with changes provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+        &WORKSPACE_CHANGED,
+        "Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.",
     ),
     Unprovoked::new(
-        &WORKSPACE_IGNORED_FILES,
-        "Only a live checkout with an ignored file such as .env provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
-    ),
-    Unprovoked::new(
-        &CHECKOUT_UNREACHABLE_COMMITS,
-        "Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+        &PATH_INACCESSIBLE,
+        "Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.",
     ),
     Unprovoked::new(
         &ENVIRONMENT_NO_DIRECTORY,
@@ -431,11 +433,124 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     ),
 ];
 
+/// The variables of the runs that create the live workspaces, beside the
+/// XDG directories: git without the person's configuration, with an author
+/// for the commits.
+const LIVE_ENV: &[(&str, &str)] = &[
+    ("PATH", support::PATH),
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_AUTHOR_NAME", "Test"),
+    ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
+    ("GIT_COMMITTER_NAME", "Test"),
+    ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+];
+
+/// Real workspaces of the clone `app` in a temporary directory, which
+/// [`live_workspaces`] creates, and the XDG fixture that holds their
+/// records.
+struct Live {
+    /// The temporary directory, which the test deletes when it drops.
+    _dir: TempDir,
+    /// The XDG fixture, whose `state` directory holds the records.
+    xdg: std::path::PathBuf,
+}
+
+/// Returns real workspaces, each in the state that one refusal of
+/// `remove` needs: `changed` has an untracked file, `secret` an ignored
+/// `.env`, `detached` a commit on a detached `HEAD`, `locked` a checkout
+/// that git lists as locked, and `clean` nothing that stops a removal.
+fn live_workspaces() -> Live {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let app = repository(&root);
+    write_text(&app.join(".git/info/exclude"), ".env\n");
+    let xdg = root.join("xdg");
+    for name in ["changed", "secret", "detached", "locked", "clean"] {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the fixture runs the built binary to create real workspaces"
+        )]
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"))
+            .args(["new", name, "--repo"])
+            .arg(&app)
+            .env_clear()
+            .envs(LIVE_ENV.iter().copied())
+            .env("HOME", root.join("home"))
+            .env("MXV_ROOT", root.join("workspaces"))
+            .env("XDG_CONFIG_HOME", xdg.join("config"))
+            .env("XDG_DATA_HOME", xdg.join("data"))
+            .env("XDG_STATE_HOME", xdg.join("state"))
+            .env("XDG_CACHE_HOME", xdg.join("cache"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mxv new {name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let checkout = |name: &str| root.join("workspaces").join(name).join("app");
+    write_text(&checkout("changed").join("notes.md"), "notes");
+    write_text(&checkout("secret").join(".env"), "TOKEN=1");
+    git(&checkout("detached"), &["switch", "--quiet", "--detach"]);
+    git(
+        &checkout("detached"),
+        &["commit", "--quiet", "--allow-empty", "-m", "Lost"],
+    );
+    git(
+        &app,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "in use",
+            checkout("locked").to_str().unwrap(),
+        ],
+    );
+    Live { _dir: dir, xdg }
+}
+
+/// Writes `text` to the file at `path`, as a person editing a file by hand
+/// would.
+fn write_text(path: &std::path::Path, text: &str) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture writes a file that a person would write by hand"
+    )]
+    std::fs::write(path, text).unwrap();
+}
+
+impl Live {
+    /// Returns the dry run of `remove` that fails with `code` on the
+    /// workspace `name`, with the records of the live workspaces.
+    fn line(&self, code: crumbkit::Code, name: &str) -> RuntimeFailing {
+        RuntimeFailing::new(code, ["remove", name, "--dry-run"]).xdg(&self.xdg)
+    }
+
+    /// Returns the refusals of `remove` that the live workspaces provoke.
+    fn refusals(&self) -> Vec<RuntimeFailing> {
+        vec![
+            self.line(WORKSPACE_DIRTY, "changed"),
+            self.line(WORKSPACE_IGNORED_FILES, "secret"),
+            self.line(CHECKOUT_UNREACHABLE_COMMITS, "detached"),
+            self.line(CHECKOUT_LOCKED, "locked"),
+        ]
+    }
+}
+
 #[test]
 fn every_recovery_leads_to_a_command_that_runs() {
     let repositories = repositories();
+    let live = live_workspaces();
+    let mut starts = STARTS.to_vec();
+    starts.extend(
+        live.refusals()
+            .into_iter()
+            .map(RuntimeFailing::into_failing),
+    );
     let recoveries = Recoveries::new(examples(&repositories.path), &[CODES, UNBUILT_CODES])
-        .starts(STARTS)
+        .starts(&starts)
         .unprovoked(UNPROVOKED);
     crumbkit_test::check_recoveries(&Cli::command(), &GUIDE, &recoveries, "tests/golden");
 }
@@ -453,7 +568,7 @@ const PAIRS: &[Twin<'static>] = &[
     Twin::variable(NEW_RELATIVE_ROOT, "MXV_ROOT"),
     Twin::new(
         NEW_TAKEN_DIRECTORY,
-        &["new", "sorting", "--repo", "inbox", "--dry-run"],
+        &["new", "sorting", "--repo", "app", "--dry-run"],
     ),
     Twin::variable(NEW_NO_GIT, "PATH"),
 ];
@@ -461,8 +576,15 @@ const PAIRS: &[Twin<'static>] = &[
 #[test]
 fn every_declared_code_has_a_twin_that_the_command_accepts() {
     let repositories = repositories();
+    let live = live_workspaces();
+    let mut pairs = PAIRS.to_vec();
+    pairs.extend(
+        live.refusals()
+            .into_iter()
+            .map(|refused| refused.twin(["remove", "clean", "--dry-run"])),
+    );
     let twins = Twins::new(examples(&repositories.path), &[CODES, UNBUILT_CODES])
-        .pairs(PAIRS)
+        .pairs(&pairs)
         .unprovoked(UNPROVOKED);
     crumbkit_test::check_twins(&Cli::command(), &GUIDE, &twins);
 }

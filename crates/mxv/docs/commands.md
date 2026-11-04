@@ -42,10 +42,10 @@ The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it i
 
 ### Examples
 
-Print the workspace that a checkout of the repository inbox would get.
+Print the workspace that a checkout of the repository app would get.
 
 ```sh
-mxv new triage --repo inbox --dry-run
+mxv new triage --repo app --dry-run
 ```
 
 ### Columns
@@ -84,7 +84,7 @@ mxv list
 - `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
 - `branch`: The branch that the workspace's checkouts were created on.
 - `path`: The workspace's directory, which `mxv cd` prints.
-- `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record file in `name` and leaves the other fields empty.
+- `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
 ### Columns that `--long` adds
 

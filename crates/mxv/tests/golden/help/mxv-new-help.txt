@@ -34,8 +34,8 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  mxv new triage --repo inbox --dry-run
-          Print the workspace that a checkout of the repository inbox would get
+  mxv new triage --repo app --dry-run
+          Print the workspace that a checkout of the repository app would get
 
 Columns:
   name         The workspace's name, which is also the name of its directory and of its checkouts' branch.

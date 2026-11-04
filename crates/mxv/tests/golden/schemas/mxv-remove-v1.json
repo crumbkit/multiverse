@@ -415,6 +415,11 @@
           "const": "deleted_unmerged"
         },
         {
+          "description": "The branch stays, because it moved after mxv planned the removal,\nso it may hold work that mxv did not show.",
+          "type": "string",
+          "const": "kept_moved"
+        },
+        {
           "description": "The branch was already gone.",
           "type": "string",
           "const": "missing"
@@ -430,7 +435,7 @@
           "type": "string"
         },
         "branch_fate": {
-          "description": "What happens to the branch: `deleted` when its commits are all on\nits base, `kept_unmerged` when it holds other commits, which\n`--delete-unmerged` would delete, `deleted_unmerged` when\n`--delete-unmerged` deletes such commits, or `missing` when it was\nalready gone.",
+          "description": "What happens to the branch: `deleted` when its commits are all on\nits base, `kept_unmerged` when it holds other commits, which\n`--delete-unmerged` would delete, `deleted_unmerged` when\n`--delete-unmerged` deletes such commits, `kept_moved` when it\npointed at another commit when the removal came to delete it than\nwhen mxv planned the removal, or `missing` when it was already gone.",
           "$ref": "#/$defs/BranchState"
         },
         "checkout": {
@@ -452,8 +457,11 @@
           "minimum": 0
         },
         "unmerged_commits": {
-          "description": "The number of commits on the branch that are not on its base.",
-          "type": "integer",
+          "description": "The number of commits on the branch that are not on its base, or\nnull when the base that the record names is gone, so the number is\nunknown and the branch counts as unmerged, or when the branch moved\nafter mxv planned the removal.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         }
@@ -508,14 +516,14 @@
           "$ref": "#/$defs/DirectoryFate"
         },
         "discarded": {
-          "description": "The changes and other ignored paths, such as `inbox: .env`, that\nthe removal discards because of `--force`.",
+          "description": "The changes and other ignored paths, such as `app: .env`, that\nthe removal discards because of `--force`.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "disposable": {
-          "description": "The ignored build directories, such as `inbox: target/`, that the\nremoval deletes without asking, because a build makes them again.",
+          "description": "The ignored build directories, such as `app: target/`, that the\nremoval deletes without asking, because a build makes them again.",
           "type": "array",
           "items": {
             "type": "string"

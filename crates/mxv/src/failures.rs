@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{BadName, Error};
+use multiverse::{Allow, BadName, Error};
 
 /// The code of a name that no workspace has.
 pub const WORKSPACE_NOT_FOUND: Code = Code::new("mxv", "workspace", "not_found");
@@ -19,9 +19,19 @@ pub const WORKSPACE_DIRTY: Code = Code::new("mxv", "workspace", "dirty");
 /// The code of a removal that ignored files outside the disposable set,
 /// such as `.env`, stop.
 pub const WORKSPACE_IGNORED_FILES: Code = Code::new("mxv", "workspace", "ignored_files");
+/// The code of a removal that stopped without removing anything, because
+/// the workspace changed while mxv waited for the confirmation, so the
+/// removal would lose more than mxv showed.
+pub const WORKSPACE_CHANGED: Code = Code::new("mxv", "workspace", "changed");
 /// The code of a removal that commits on no branch, such as commits on a
 /// detached `HEAD`, stop.
 pub const CHECKOUT_UNREACHABLE_COMMITS: Code = Code::new("mxv", "checkout", "unreachable_commits");
+/// The code of a removal that a checkout locked for a reason other than
+/// `initializing` stops.
+pub const CHECKOUT_LOCKED: Code = Code::new("mxv", "checkout", "locked");
+/// The code of a path that mxv cannot inspect, such as one below a
+/// directory it cannot search.
+pub const PATH_INACCESSIBLE: Code = Code::new("mxv", "path", "inaccessible");
 /// The code of a new workspace whose directory already exists.
 pub const DIRECTORY_TAKEN: Code = Code::new("mxv", "directory", "taken");
 /// The code of a checkout directory that its repository does not list.
@@ -89,6 +99,8 @@ pub(crate) enum MxvFailure {
         name: String,
         /// Each change, with its checkout's name in front.
         changes: Vec<String>,
+        /// What the removal's flags allowed.
+        allow: Allow,
     },
     /// A checkout holds ignored files outside the disposable set.
     IgnoredFiles {
@@ -96,6 +108,16 @@ pub(crate) enum MxvFailure {
         name: String,
         /// Each ignored path, with its checkout's name in front.
         paths: Vec<String>,
+        /// What the removal's flags allowed.
+        allow: Allow,
+    },
+    /// The workspace changed while mxv waited for the confirmation, so the
+    /// removal would lose more than mxv showed, and mxv removed nothing.
+    Changed {
+        /// The workspace's name.
+        name: String,
+        /// What the removal's flags allowed.
+        allow: Allow,
     },
     /// A checkout's `HEAD` holds commits that no branch holds.
     StrayCommits {
@@ -105,6 +127,21 @@ pub(crate) enum MxvFailure {
         path: PathBuf,
         /// The number of commits that removing the checkout would lose.
         commits: u32,
+        /// What the removal's flags allowed.
+        allow: Allow,
+    },
+    /// A checkout is locked for a reason other than `initializing`.
+    Locked {
+        /// The workspace's name.
+        name: String,
+        /// The checkout's repository.
+        repository: PathBuf,
+        /// The checkout's directory.
+        path: PathBuf,
+        /// The lock's reason.
+        reason: String,
+        /// What the removal's flags allowed.
+        allow: Allow,
     },
     /// The workspace's directory already exists.
     DirectoryTaken {
@@ -166,7 +203,10 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_BAD_NAME,
     &WORKSPACE_DIRTY,
     &WORKSPACE_IGNORED_FILES,
+    &WORKSPACE_CHANGED,
     &CHECKOUT_UNREACHABLE_COMMITS,
+    &CHECKOUT_LOCKED,
+    &PATH_INACCESSIBLE,
     &DIRECTORY_TAKEN,
     &CHECKOUT_UNOWNED,
     &BRANCH_EXISTS,
@@ -198,6 +238,51 @@ fn hint(text: impl Into<String>) -> Recovery {
     Recovery::Hint(text.into())
 }
 
+/// Returns the words after `mxv` of a removal of the workspace `name` with
+/// the flags that `allow` stands for, followed by `last`, such as
+/// `["remove", "notes", "--force", "--yes"]`.
+fn remove_words(name: &str, allow: Allow, last: &str) -> Vec<String> {
+    let mut words = vec!["remove".to_owned(), name.to_owned()];
+    if allow.discard_changes {
+        words.push("--force".to_owned());
+    }
+    if allow.delete_unmerged {
+        words.push("--delete-unmerged".to_owned());
+    }
+    words.push(last.to_owned());
+    words
+}
+
+/// Returns the command line of a removal of the workspace `name` that
+/// allows what `allow` allows and runs without asking, such as
+/// `mxv remove notes --force --yes`, for the text of a hint. A caller
+/// without a terminal cannot answer the question, so the line has `--yes`.
+pub(crate) fn remove_line(name: &str, allow: Allow) -> String {
+    format!("mxv {}", remove_words(name, allow, "--yes").join(" "))
+}
+
+/// Returns the recovery that runs the removal of the workspace `name` with
+/// the flags of `allow` and `--yes`.
+fn run_removal(name: &str, allow: Allow) -> Recovery {
+    Recovery::Run(Call::typed(remove_words(name, allow, "--yes")))
+}
+
+/// Returns `allow` with discarding changes allowed as well.
+const fn forced(allow: Allow) -> Allow {
+    Allow {
+        discard_changes: true,
+        ..allow
+    }
+}
+
+/// Returns `allow` with deleting unmerged commits allowed as well.
+const fn unmerged(allow: Allow) -> Allow {
+    Allow {
+        delete_unmerged: true,
+        ..allow
+    }
+}
+
 impl Failure for MxvFailure {
     fn code(&self) -> &'static Code {
         match self {
@@ -206,7 +291,9 @@ impl Failure for MxvFailure {
             Self::BadName { .. } => &WORKSPACE_BAD_NAME,
             Self::Dirty { .. } => &WORKSPACE_DIRTY,
             Self::IgnoredFiles { .. } => &WORKSPACE_IGNORED_FILES,
+            Self::Changed { .. } => &WORKSPACE_CHANGED,
             Self::StrayCommits { .. } => &CHECKOUT_UNREACHABLE_COMMITS,
+            Self::Locked { .. } => &CHECKOUT_LOCKED,
             Self::DirectoryTaken { .. } => &DIRECTORY_TAKEN,
             Self::Unowned { .. } => &CHECKOUT_UNOWNED,
             Self::BranchExists { .. } => &BRANCH_EXISTS,
@@ -226,6 +313,7 @@ impl Failure for MxvFailure {
                 Error::CorruptRecord { .. } => &RECORD_CORRUPT,
                 Error::NewerRecord { .. } => &RECORD_NEWER,
                 Error::MismatchedRecord { .. } => &RECORD_MISMATCHED,
+                Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
                 // mxv gives it a code of its own.
@@ -241,15 +329,35 @@ impl Failure for MxvFailure {
             Self::BadName { .. } => hint(
                 "use 1 to 64 letters, digits, '-', '_' and '.', starting with a letter or a digit",
             ),
-            Self::Dirty { name, .. } => hint(format!(
-                "commit, stash or delete the changes, or run `mxv remove {name} --force` to discard them with the workspace; `--force` keeps a branch with unmerged commits"
+            Self::Dirty { name, allow, .. } => hint(format!(
+                "commit, stash or delete the changes and run `{}` again; `--force` discards them with the workspace and keeps a branch with unmerged commits",
+                remove_line(name, *allow)
             )),
-            Self::IgnoredFiles { name, .. } => hint(format!(
-                "move the ignored files you want to keep out of the checkout, or run `mxv remove {name} --force` to delete them with the workspace"
+            Self::IgnoredFiles { name, allow, .. } => hint(format!(
+                "move the ignored files you want to keep out of the checkout and run `{}` again; `--force` deletes them with the workspace",
+                remove_line(name, *allow)
             )),
-            Self::StrayCommits { name, path, .. } => hint(format!(
-                "keep the commits on a branch with `git -C {} switch -c <BRANCH>`, or run `mxv remove {name} --delete-unmerged` to delete them",
-                shown(path)
+            Self::Changed { name, allow } => {
+                Recovery::Run(Call::typed(remove_words(name, *allow, "--dry-run")))
+            }
+            Self::Locked {
+                name,
+                repository,
+                path,
+                allow,
+                ..
+            } => hint(format!(
+                "when nothing else uses the checkout, run `git -C {} worktree unlock {}`, and then `{}` again",
+                shown(repository),
+                shown(path),
+                remove_line(name, *allow)
+            )),
+            Self::StrayCommits {
+                name, path, allow, ..
+            } => hint(format!(
+                "keep the commits on a branch with `git -C {} switch -c <BRANCH>` and run `{}` again; `--delete-unmerged` deletes them",
+                shown(path),
+                remove_line(name, *allow)
             )),
             Self::DirectoryTaken { path } => hint(format!(
                 "choose another name, or move {} out of the way",
@@ -285,23 +393,49 @@ impl Failure for MxvFailure {
         }
     }
 
+    fn alternatives(&self) -> Vec<Recovery> {
+        match self {
+            Self::Dirty { name, allow, .. } | Self::IgnoredFiles { name, allow, .. } => {
+                vec![run_removal(name, forced(*allow))]
+            }
+            Self::StrayCommits { name, allow, .. } => vec![run_removal(name, unmerged(*allow))],
+            _ => Vec::new(),
+        }
+    }
+
     fn fields(&self) -> Vec<Field<'_>> {
         match self {
-            Self::NotFound { name } | Self::Exists { name } | Self::BadName { name, .. } => {
+            Self::NotFound { name }
+            | Self::Exists { name }
+            | Self::BadName { name, .. }
+            | Self::Changed { name, .. } => {
                 vec![Field::new("name", name)]
             }
-            Self::Dirty { name, changes } => vec![
+            Self::Dirty { name, changes, .. } => vec![
                 Field::new("name", name),
                 Field::new("changes", FieldValue::list(changes.iter())),
             ],
-            Self::IgnoredFiles { name, paths } => vec![
+            Self::IgnoredFiles { name, paths, .. } => vec![
                 Field::new("name", name),
                 Field::new("paths", FieldValue::list(paths.iter())),
+            ],
+            Self::Locked {
+                name,
+                repository,
+                path,
+                reason,
+                ..
+            } => vec![
+                Field::new("name", name),
+                Field::new("repository", shown(repository)),
+                Field::new("path", shown(path)),
+                Field::new("reason", reason),
             ],
             Self::StrayCommits {
                 name,
                 path,
                 commits,
+                ..
             } => vec![
                 Field::new("name", name),
                 Field::new("path", shown(path)),
@@ -364,6 +498,10 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::NewerRecord { .. } => {
             hint("upgrade mxv to the version that wrote the record, or a later one")
         }
+        Error::Inaccessible { path, .. } => hint(format!(
+            "make the directories above {} searchable, and run the command again",
+            shown(path)
+        )),
         Error::MismatchedRecord { path, .. } => hint(format!(
             "rename {} to the name that it holds, or delete it, which makes mxv forget that workspace",
             shown(path)
@@ -404,6 +542,7 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("dir", shown(dir)),
             Field::new("seconds", deadline.as_secs()),
         ],
+        Error::Inaccessible { path, .. } => vec![Field::new("path", shown(path))],
         Error::MismatchedRecord { path, name } => {
             vec![Field::new("path", shown(path)), Field::new("name", name)]
         }
@@ -424,7 +563,7 @@ impl fmt::Display for MxvFailure {
             Self::NotFound { name } => write!(formatter, "no workspace is named {name}"),
             Self::Exists { name } => write!(formatter, "a workspace named {name} already exists"),
             Self::BadName { name, .. } => write!(formatter, "{name:?} is not a workspace name"),
-            Self::Dirty { name, changes } => write!(
+            Self::Dirty { name, changes, .. } => write!(
                 formatter,
                 "the workspace {name} has {} uncommitted or untracked {}",
                 changes.len(),
@@ -434,16 +573,29 @@ impl fmt::Display for MxvFailure {
                     "changes"
                 }
             ),
-            Self::IgnoredFiles { name, paths } => write!(
+            Self::IgnoredFiles { name, paths, .. } => write!(
                 formatter,
                 "the workspace {name} has {} ignored {} that mxv does not treat as disposable",
                 paths.len(),
                 if paths.len() == 1 { "path" } else { "paths" }
             ),
+            Self::Changed { name, .. } => write!(
+                formatter,
+                "the workspace {name} changed while mxv waited for the confirmation, so the removal would lose more than mxv showed, and mxv removed nothing"
+            ),
+            Self::Locked {
+                name, path, reason, ..
+            } => write!(
+                formatter,
+                "the checkout {} of the workspace {name} is locked: {}",
+                shown(path),
+                if reason.is_empty() { "git gives no reason" } else { reason }
+            ),
             Self::StrayCommits {
                 name,
                 path,
                 commits,
+                ..
             } => write!(
                 formatter,
                 "the checkout {} of the workspace {name} holds {commits} {} that no branch holds",
@@ -502,7 +654,9 @@ impl std::error::Error for MxvFailure {
             | Self::Unowned { .. }
             | Self::BranchExists { .. }
             | Self::IgnoredFiles { .. }
+            | Self::Changed { .. }
             | Self::StrayCommits { .. }
+            | Self::Locked { .. }
             | Self::NoHome
             | Self::RelativeRoot { .. }
             | Self::BadConfig { .. } => None,

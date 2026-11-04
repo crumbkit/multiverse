@@ -222,8 +222,8 @@ fn record_bytes(workspace: &Workspace, target: &Path) -> Result<Vec<u8>, Error> 
 
 /// Returns `found`, the record at `path`, when it holds the name `name`
 /// that its file is named for, and [`Error::MismatchedRecord`] otherwise,
-/// such as when a file system that ignores case opened `Inbox.json` for
-/// `inbox.json`.
+/// such as when a file system that ignores case opened `App.json` for
+/// `app.json`.
 fn matching(path: &Path, name: &str, found: Option<Workspace>) -> Result<Option<Workspace>, Error> {
     match found {
         Some(workspace) if workspace.name.as_str() != name => Err(Error::MismatchedRecord {

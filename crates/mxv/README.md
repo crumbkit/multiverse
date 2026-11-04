@@ -9,15 +9,15 @@ describes each one. [docs/commands.md](docs/commands.md) is the reference.
 
 ## Layout
 
-`mxv new reading-list --repo ~/Code/inbox` fetches `origin` in
-`~/Code/inbox`, and creates the workspace directory `<root>/reading-list`,
+`mxv new reading-list --repo ~/src/app` fetches `origin` in
+`~/src/app`, and creates the workspace directory `<root>/reading-list`,
 which is `~/.local/share/mxv/workspaces/reading-list` by default. That
 directory holds:
 
 - `AGENTS.md`, which tells an agent which repository and branch the
   workspace holds and how to list, resume and remove it. It sits above the
   checkout, so git never sees it.
-- `inbox/`, a git worktree of `~/Code/inbox` on the new branch
+- `app/`, a git worktree of `~/src/app` on the new branch
   `reading-list`, which starts at the freshly fetched default branch of
   `origin` (the branch that `origin/HEAD` names, or else `origin/main` or
   `origin/master`, recorded as a full reference such as
@@ -62,13 +62,17 @@ mxv keeps one JSON record for each workspace in
 `$XDG_STATE_HOME/mxv/workspaces/<name>.json`, which defaults to
 `~/.local/state/mxv/workspaces/<name>.json`. `mxv new` writes the record
 before it makes the checkout, so a run that stops partway leaves a record
-that `mxv remove` cleans up. When `git worktree add` fails partway, `mxv new`
-removes the checkout, the branch, `AGENTS.md` and the directory that the run
+that `mxv remove` cleans up. `mxv new` creates the branch in one step that
+fails when the branch already exists, so a branch that another process
+creates meanwhile is reported as `mxv::branch::exists` and left alone. When
+`git worktree add` fails partway, `mxv new` removes the checkout, unlocks it
+first if git left it locked, deletes the branch only while it still points
+where the run created it, removes the `AGENTS.md` and directory that the run
 created, and deletes the record once all of them are gone.
 
 `mxv list` lists the records it can read, and adds a row for each record it
 cannot read, such as one that is not JSON or that a newer mxv wrote. Such a
-row names the record file and says what is wrong in `problem`, and the run
+row names the record without `.json` and says what is wrong in `problem`, and the run
 exits with 1.
 
 ## Removing a workspace
@@ -81,21 +85,49 @@ deletes the record. It refuses, and changes nothing, in these cases:
   `mxv::workspace::dirty`, and `--force` discards the changes.
 - A checkout holds ignored files outside the disposable set, such as
   `.env`. The refusal is `mxv::workspace::ignored_files`, which lists the
-  paths, and `--force` deletes them. The disposable set is any ignored path
-  with a directory named `target`, `node_modules`, `dist`, `build` or
-  `.cache`, because a build makes those again. mxv deletes them without
-  asking and lists them in `disposable`.
+  paths, and `--force` deletes them. The disposable set is each directory
+  that git reports as ignored as a whole and whose own name is `target`,
+  `node_modules`, `dist`, `build` or `.cache`, such as `target/` or
+  `web/node_modules/`, because a build makes those again. mxv deletes them
+  without asking and lists them in `disposable`. An ignored file is never
+  disposable, even inside a tracked `dist/` directory.
 - A checkout's `HEAD` holds commits that no branch, tag or remote branch
   holds, such as commits on a detached `HEAD`. The refusal is
   `mxv::checkout::unreachable_commits`, and `--delete-unmerged` deletes the
-  commits.
+  commits. mxv also checks this when the checkout's directory is already
+  gone, from the `HEAD` that the repository still holds for it.
+- git lists a checkout as locked for a reason other than `initializing`.
+  The refusal is `mxv::checkout::locked`, and its hint names the
+  `git worktree unlock` command to run when nothing else uses the checkout.
+  A lock with the reason `initializing`, which a killed `git worktree add`
+  leaves, is removed without asking.
 
 A branch with commits that are not on its base stays, and the result reports
 `kept_unmerged` with the number of commits in `unmerged_commits`.
-`--delete-unmerged` deletes it and reports `deleted_unmerged`. `--force`
+`--delete-unmerged` deletes it and reports `deleted_unmerged`. When the
+base that the record names is gone, mxv cannot count the commits, so it
+treats the branch as unmerged and reports `unmerged_commits` as null. `--force`
 never deletes an unmerged branch. The merge check reads the base as the
 repository last fetched it, so a branch that was merged by squashing reads as
 unmerged and is kept.
+
+Each refusal's hint names the `mxv remove` command to run after fixing the
+cause, and the refusals that a flag overrides also offer that command as an
+alternative, such as `mxv remove <name> --force --yes`. Each command keeps
+the flags that the refused run gave and has `--yes`, so it runs without a
+terminal. After a removal that kept an unmerged branch, the record is gone,
+so the result names the `git branch -D` command that deletes the branch; a
+dry run names the `mxv remove` command with `--delete-unmerged` instead.
+
+`mxv remove` checks the workspace again after the person confirms, because
+the workspace may change while mxv waits for the answer. When a new check
+refuses the removal, mxv reports that refusal and removes nothing. When the
+removal would lose more than mxv showed, such as a new untracked file under
+`--force` or a new commit on a detached `HEAD` under `--delete-unmerged`, it
+refuses with `mxv::workspace::changed`, whose recovery is the dry run that
+shows the new plan. mxv deletes a branch only while it still points at the
+commit that mxv checked. A branch that moved, such as one that gained a
+commit while mxv waited, stays, and the result reports `kept_moved`.
 
 mxv refuses with `mxv::checkout::unowned` when the workspace directory or a
 checkout directory is a symbolic link, or when git does not list a checkout

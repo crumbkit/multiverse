@@ -125,7 +125,7 @@
           "type": "string"
         },
         "problem": {
-          "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record file in `name` and leaves the\nother fields empty.",
+          "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record, without `.json`, in `name`, and\nleaves the other fields empty.",
           "type": "string"
         },
         "repositories": {

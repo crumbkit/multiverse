@@ -4,11 +4,12 @@ use std::fmt;
 
 use crumbkit::Row;
 use multiverse::Error;
-use multiverse::{BranchFate, Checkout, CheckoutRemoval, Fate, Removal, Workspace};
+use multiverse::{Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Removal, Workspace};
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::environment::{Root, RootSource};
+use crate::failures::remove_line;
 
 /// One workspace, as `list` prints it.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -27,8 +28,8 @@ pub(crate) struct WorkspaceRow {
     checkouts: Vec<CheckoutRow>,
     /// Why mxv cannot read the workspace's record, such as a record that
     /// is not JSON or that a newer mxv wrote, or empty when it can. A row
-    /// with a problem names its record file in `name` and leaves the
-    /// other fields empty.
+    /// with a problem names its record, without `.json`, in `name`, and
+    /// leaves the other fields empty.
     problem: String,
 }
 
@@ -155,7 +156,7 @@ impl WorkspaceRow {
             | Error::NewerRecord { path, .. }
             | Error::MismatchedRecord { path, .. }
             | Error::StateUnreadable { path, .. } => path
-                .file_name()
+                .file_stem()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             _ => String::new(),
@@ -189,10 +190,10 @@ pub(crate) struct RemovalResult {
     /// Whether `--delete-unmerged` allowed deleting commits that no other
     /// branch holds.
     delete_unmerged: bool,
-    /// The ignored build directories, such as `inbox: target/`, that the
+    /// The ignored build directories, such as `app: target/`, that the
     /// removal deletes without asking, because a build makes them again.
     disposable: Vec<String>,
-    /// The changes and other ignored paths, such as `inbox: .env`, that
+    /// The changes and other ignored paths, such as `app: .env`, that
     /// the removal discards because of `--force`.
     discarded: Vec<String>,
     /// Whether the result reports a dry run, which changed nothing.
@@ -212,14 +213,22 @@ pub(crate) struct CheckoutRemovalRow {
     checkout: DirectoryFate,
     /// The checkout's branch.
     branch: String,
+    /// The repository that holds the branch, for the text that says how to
+    /// delete a branch that the removal kept.
+    #[serde(skip)]
+    repository: String,
     /// What happens to the branch: `deleted` when its commits are all on
     /// its base, `kept_unmerged` when it holds other commits, which
     /// `--delete-unmerged` would delete, `deleted_unmerged` when
-    /// `--delete-unmerged` deletes such commits, or `missing` when it was
-    /// already gone.
+    /// `--delete-unmerged` deletes such commits, `kept_moved` when it
+    /// pointed at another commit when the removal came to delete it than
+    /// when mxv planned the removal, or `missing` when it was already gone.
     branch_fate: BranchState,
-    /// The number of commits on the branch that are not on its base.
-    unmerged_commits: u32,
+    /// The number of commits on the branch that are not on its base, or
+    /// null when the base that the record names is gone, so the number is
+    /// unknown and the branch counts as unmerged, or when the branch moved
+    /// after mxv planned the removal.
+    unmerged_commits: Option<u32>,
     /// The number of commits that the checkout's `HEAD` holds and no branch
     /// holds, such as commits on a detached `HEAD`, which
     /// `--delete-unmerged` allowed the removal to delete.
@@ -248,6 +257,9 @@ pub(crate) enum BranchState {
     KeptUnmerged,
     /// The branch is deleted with commits that are not on its base.
     DeletedUnmerged,
+    /// The branch stays, because it moved after mxv planned the removal,
+    /// so it may hold work that mxv did not show.
+    KeptMoved,
     /// The branch was already gone.
     Missing,
 }
@@ -263,12 +275,13 @@ impl From<Fate> for DirectoryFate {
 }
 
 /// Returns the state of a branch and its number of unmerged commits.
-fn branch_state(fate: BranchFate) -> (BranchState, u32) {
+fn branch_state(fate: BranchFate) -> (BranchState, Option<u32>) {
     match fate {
-        BranchFate::Deleted => (BranchState::Deleted, 0),
+        BranchFate::Deleted => (BranchState::Deleted, Some(0)),
         BranchFate::KeptUnmerged { commits } => (BranchState::KeptUnmerged, commits),
         BranchFate::DeletedUnmerged { commits } => (BranchState::DeletedUnmerged, commits),
-        BranchFate::Missing => (BranchState::Missing, 0),
+        BranchFate::KeptMoved => (BranchState::KeptMoved, None),
+        BranchFate::Missing => (BranchState::Missing, Some(0)),
     }
 }
 
@@ -280,6 +293,7 @@ impl From<&CheckoutRemoval> for CheckoutRemovalRow {
             path: removal.checkout.path.display().to_string(),
             checkout: removal.directory.into(),
             branch: removal.checkout.branch.clone(),
+            repository: removal.checkout.source.display().to_string(),
             branch_fate,
             unmerged_commits,
             stray_commits: removal.stray_commits,
@@ -357,25 +371,21 @@ impl fmt::Display for RemovalResult {
                 }
                 BranchState::KeptUnmerged => writeln!(
                     formatter,
-                    "mxv {keeps} the branch {}, because it holds {} that {} not on its base. `--delete-unmerged` deletes it.",
+                    "mxv {keeps} the branch {}, because {}. `{}` deletes it.",
                     checkout.branch,
-                    commits(checkout.unmerged_commits),
-                    if checkout.unmerged_commits == 1 {
-                        "is"
-                    } else {
-                        "are"
-                    }
+                    unmerged(checkout.unmerged_commits),
+                    self.deletion(checkout)
+                )?,
+                BranchState::KeptMoved => writeln!(
+                    formatter,
+                    "mxv {keeps} the branch {}, because it moved after mxv planned the removal, so it may hold work that mxv did not show. `git -C {} log {}` shows its commits.",
+                    checkout.branch, checkout.repository, checkout.branch
                 )?,
                 BranchState::DeletedUnmerged => writeln!(
                     formatter,
-                    "mxv {deletes} the branch {} with {} that {} not on its base.",
+                    "mxv {deletes} the branch {}, although {}.",
                     checkout.branch,
-                    commits(checkout.unmerged_commits),
-                    if checkout.unmerged_commits == 1 {
-                        "is"
-                    } else {
-                        "are"
-                    }
+                    unmerged(checkout.unmerged_commits)
                 )?,
                 BranchState::Missing => writeln!(
                     formatter,
@@ -405,11 +415,45 @@ impl fmt::Display for RemovalResult {
     }
 }
 
+impl RemovalResult {
+    /// Returns the command line that deletes the branch of `checkout`,
+    /// which the removal keeps because it holds unmerged commits. Before the
+    /// removal, it is the same removal with `--delete-unmerged`. After it,
+    /// the record is gone, so it is the git command that deletes the
+    /// branch.
+    fn deletion(&self, checkout: &CheckoutRemovalRow) -> String {
+        if self.planned {
+            remove_line(
+                &self.name,
+                Allow {
+                    discard_changes: self.force,
+                    delete_unmerged: true,
+                },
+            )
+        } else {
+            format!(
+                "git -C {} branch -D {}",
+                checkout.repository, checkout.branch
+            )
+        }
+    }
+}
+
 /// Returns `count` commits as words, such as `1 commit` or `3 commits`.
 fn commits(count: u32) -> String {
     if count == 1 {
         "1 commit".to_owned()
     } else {
         format!("{count} commits")
+    }
+}
+
+/// Returns why a branch counts as unmerged: the number of its commits that
+/// are not on its base, or that its base is gone.
+fn unmerged(count: Option<u32>) -> String {
+    match count {
+        Some(1) => "it holds 1 commit that is not on its base".to_owned(),
+        Some(count) => format!("it holds {count} commits that are not on its base"),
+        None => "its base is gone, so mxv cannot tell whether its commits are merged".to_owned(),
     }
 }

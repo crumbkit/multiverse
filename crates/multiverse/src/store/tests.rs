@@ -11,9 +11,9 @@ fn workspace(name: &str) -> Workspace {
     let name: WorkspaceName = name.parse().unwrap();
     let path = PathBuf::from("/home/agent/mxv").join(name.as_str());
     let checkout = Checkout::new(
-        "inbox".to_owned(),
-        &PathBuf::from("/home/agent/code/inbox"),
-        path.join("inbox"),
+        "app".to_owned(),
+        &PathBuf::from("/home/agent/src/app"),
+        path.join("app"),
         name.to_string(),
         "refs/remotes/origin/main".to_owned(),
     );
@@ -50,32 +50,32 @@ fn a_created_record_reads_back_and_lists_in_name_order() {
 fn creating_a_name_that_exists_leaves_the_first_record() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    store.create(&workspace("inbox")).unwrap();
-    let mut second = workspace("inbox");
+    store.create(&workspace("app")).unwrap();
+    let mut second = workspace("app");
     second.path = PathBuf::from("/elsewhere");
     assert_eq!(store.create(&second).unwrap(), Created::Taken);
-    assert_eq!(store.read(&second.name).unwrap(), Some(workspace("inbox")));
+    assert_eq!(store.read(&second.name).unwrap(), Some(workspace("app")));
 }
 
 #[test]
 fn a_store_leaves_no_temporary_file_behind() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    store.create(&workspace("inbox")).unwrap();
-    store.update(&workspace("inbox")).unwrap();
+    store.create(&workspace("app")).unwrap();
+    store.update(&workspace("app")).unwrap();
     let names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
-    assert_eq!(names, ["inbox.json"]);
+    assert_eq!(names, ["app.json"]);
 }
 
 #[test]
 fn deleting_a_record_twice_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    let name: WorkspaceName = "inbox".parse().unwrap();
-    store.create(&workspace("inbox")).unwrap();
+    let name: WorkspaceName = "app".parse().unwrap();
+    store.create(&workspace("app")).unwrap();
     store.delete(&name).unwrap();
     store.delete(&name).unwrap();
     assert_eq!(store.read(&name).unwrap(), None);
@@ -86,10 +86,10 @@ fn a_record_of_a_newer_version_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     write(
-        dir.path().join("inbox.json"),
+        dir.path().join("app.json"),
         r#"{"version": 2, "future": true}"#,
     );
-    let error = store.read(&"inbox".parse().unwrap()).unwrap_err();
+    let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(
         matches!(error, Error::NewerRecord { version: 2, .. }),
         "{error:?}"
@@ -100,8 +100,8 @@ fn a_record_of_a_newer_version_is_refused() {
 fn a_record_that_is_not_json_is_corrupt() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    write(dir.path().join("inbox.json"), "not json");
-    let error = store.read(&"inbox".parse().unwrap()).unwrap_err();
+    write(dir.path().join("app.json"), "not json");
+    let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(matches!(error, Error::CorruptRecord { .. }), "{error:?}");
 }
 
@@ -109,11 +109,11 @@ fn a_record_that_is_not_json_is_corrupt() {
 fn a_record_whose_name_breaks_the_rules_is_corrupt() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    let text = serde_json::to_string(&workspace("inbox"))
+    let text = serde_json::to_string(&workspace("app"))
         .unwrap()
-        .replace("\"name\":\"inbox\",\"path\"", "\"name\":\"a/b\",\"path\"");
-    write(dir.path().join("inbox.json"), text);
-    let error = store.read(&"inbox".parse().unwrap()).unwrap_err();
+        .replace("\"name\":\"app\",\"path\"", "\"name\":\"a/b\",\"path\"");
+    write(dir.path().join("app.json"), text);
+    let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(matches!(error, Error::CorruptRecord { .. }), "{error:?}");
 }
 
@@ -145,8 +145,8 @@ fn a_record_that_holds_another_name_than_its_file_is_refused() {
     let store = Store::new(dir.path().to_path_buf());
     store.create(&workspace("reading-list")).unwrap();
     let text = fs::read_to_string(dir.path().join("reading-list.json")).unwrap();
-    write(dir.path().join("inbox.json"), text);
-    let name: WorkspaceName = "inbox".parse().unwrap();
+    write(dir.path().join("app.json"), text);
+    let name: WorkspaceName = "app".parse().unwrap();
     let error = store.read(&name).unwrap_err();
     assert!(matches!(error, Error::MismatchedRecord { .. }), "{error:?}");
 }
