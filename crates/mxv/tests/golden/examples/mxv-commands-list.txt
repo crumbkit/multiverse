@@ -1,6 +1,6 @@
 PATH                   ABOUT
 mxv                    Create, archive and restore task workspaces that span several git repositories
-mxv new                Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
+mxv new                Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin
 mxv list               List the workspaces
 mxv show               Show workspaces by name, in the order given
 mxv cd                 Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it

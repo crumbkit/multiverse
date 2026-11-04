@@ -26,6 +26,7 @@
 //!   leaves half made is reported by git's own error.
 
 use std::ffi::OsStr;
+use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -557,6 +558,185 @@ impl Backend for Git {
             LOCAL_DEADLINE,
         )?
         .ok("rev-list", dir)?;
+        Ok(count(&counted))
+    }
+
+    fn origin_url(&self, repository: &Path) -> Result<String, Error> {
+        let origin = run(
+            repository,
+            ["remote", "get-url", "origin"],
+            "remote get-url",
+            LOCAL_DEADLINE,
+        )?;
+        if !origin.status.success() {
+            return Err(Error::NoOrigin {
+                repository: repository.to_path_buf(),
+            });
+        }
+        Ok(trimmed(&origin.stdout))
+    }
+
+    fn prepare_mirror(&self, mirror: &Path) -> Result<(), Error> {
+        fs::create_dir_all(mirror).map_err(|source| Error::Unwritable {
+            path: mirror.to_path_buf(),
+            source,
+        })?;
+        if !mirror.join("HEAD").is_file() {
+            // An empty `--template=` copies no template, so the mirror has
+            // no hooks.
+            run(
+                mirror,
+                ["init", "--quiet", "--bare", "--template="],
+                "init --bare",
+                LOCAL_DEADLINE,
+            )?
+            .ok("init --bare", mirror)?;
+        }
+        for (key, value) in [
+            ("gc.auto", "0"),
+            ("gc.pruneExpire", "never"),
+            ("maintenance.auto", "false"),
+        ] {
+            run(mirror, ["config", key, value], "config", LOCAL_DEADLINE)?.ok("config", mirror)?;
+        }
+        Ok(())
+    }
+
+    fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error> {
+        let fetched = run(
+            mirror,
+            [
+                "fetch",
+                "--quiet",
+                "--prune",
+                "--no-auto-gc",
+                url,
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+            ],
+            "fetch mirror",
+            FETCH_DEADLINE,
+        )?;
+        if !fetched.status.success() {
+            return Err(Error::MirrorFetchFailed {
+                origin: url.to_owned(),
+                mirror: mirror.to_path_buf(),
+                message: explanation(fetched.status, &fetched.stderr),
+            });
+        }
+        let head = format!("refs/heads/{default}");
+        run(
+            mirror,
+            ["symbolic-ref", "HEAD", head.as_str()],
+            "symbolic-ref",
+            LOCAL_DEADLINE,
+        )?
+        .ok("symbolic-ref", mirror)
+        .map(drop)
+    }
+
+    fn clone_mirror(&self, mirror: &Path, checkout: &Path, url: &str) -> Result<(), Error> {
+        let parent = checkout.parent().unwrap_or(checkout);
+        run(
+            parent,
+            [
+                OsStr::new("clone"),
+                OsStr::new("--quiet"),
+                OsStr::new("--shared"),
+                OsStr::new("--no-checkout"),
+                OsStr::new("--template="),
+                OsStr::new("--"),
+                mirror.as_os_str(),
+                checkout.as_os_str(),
+            ],
+            "clone --shared",
+            CHECKOUT_DEADLINE,
+        )?
+        .ok("clone --shared", parent)?;
+        run(
+            checkout,
+            ["remote", "set-url", "origin", url],
+            "remote set-url",
+            LOCAL_DEADLINE,
+        )?
+        .ok("remote set-url", checkout)
+        .map(drop)
+    }
+
+    fn exclude_file(&self, repository: &Path) -> Result<PathBuf, Error> {
+        let path = run(
+            repository,
+            ["rev-parse", "--git-path", "info/exclude"],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-parse", repository)?;
+        // git prints the path relative to the directory it ran in, unless
+        // it is absolute.
+        Ok(repository.join(trimmed(&path)))
+    }
+
+    fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error> {
+        run(
+            checkout,
+            ["checkout", "--quiet", branch, "--"],
+            "checkout",
+            CHECKOUT_DEADLINE,
+        )?
+        .ok("checkout", checkout)?;
+        let commit = run(checkout, ["rev-parse", "HEAD"], "rev-parse", LOCAL_DEADLINE)?
+            .ok("rev-parse", checkout)?;
+        Ok(trimmed(&commit))
+    }
+
+    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
+        run(
+            checkout,
+            ["fetch", "--quiet", "--prune", "origin"],
+            "fetch origin",
+            FETCH_DEADLINE,
+        )?
+        .ok("fetch origin", checkout)
+        .map(drop)
+    }
+
+    fn unpushed_commits(&self, checkout: &Path) -> Result<u32, Error> {
+        let counted = run(
+            checkout,
+            [
+                "rev-list",
+                "--count",
+                "HEAD",
+                "--branches",
+                "--tags",
+                "--not",
+                "--remotes=origin",
+                "--",
+            ],
+            "rev-list",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-list", checkout)?;
+        Ok(count(&counted))
+    }
+
+    fn stashes(&self, checkout: &Path) -> Result<u32, Error> {
+        let found = run(
+            checkout,
+            ["rev-parse", "--verify", "--quiet", "refs/stash"],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        if !found.status.success() {
+            return Ok(0);
+        }
+        let counted = run(
+            checkout,
+            ["rev-list", "--walk-reflogs", "--count", "refs/stash", "--"],
+            "rev-list",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-list", checkout)?;
         Ok(count(&counted))
     }
 

@@ -8,7 +8,7 @@ Create, archive and restore task workspaces that span several git repositories
 
 ### Commands
 
-- [`mxv new`](#mxv-new): Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
+- [`mxv new`](#mxv-new): Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin
 - [`mxv list`](#mxv-list): List the workspaces
 - [`mxv show`](#mxv-show): Show workspaces by name, in the order given
 - [`mxv cd`](#mxv-cd): Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
@@ -36,7 +36,9 @@ Create, archive and restore task workspaces that span several git repositories
 
 ## `mxv new`
 
-Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin.
+Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin.
+
+The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG\_DATA\_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
 
 The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
@@ -68,6 +70,7 @@ mxv new triage --repo app --dry-run
 
 ### Columns that `--long` adds
 
+- `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: additive, not idempotent, open-world.
@@ -102,6 +105,7 @@ mxv list
 
 ### Columns that `--long` adds
 
+- `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: read-only, closed-world.
@@ -136,6 +140,7 @@ mxv show reading-list
 
 ### Columns that `--long` adds
 
+- `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 - `disposable_paths`: Each disposable path with its checkout and the bytes it takes.
 - `kept_paths`: Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.
@@ -379,9 +384,9 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 ### Arguments
 
 - `<NAME>`: The name of the workspace to remove. Required.
-- `--force`: Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+- `--force`: Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
 - `--delete-volumes`: Delete the workspace's docker volumes and the data in them
-- `--delete-unmerged`: Delete branches with unmerged commits, and commits on a detached HEAD
+- `--delete-unmerged`: Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 

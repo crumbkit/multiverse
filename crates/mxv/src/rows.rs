@@ -7,7 +7,7 @@ use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
     Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource, Fate, Kind,
-    ProcessState, ProcessStatus, Removal, Workspace,
+    ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -29,6 +29,11 @@ pub(crate) struct WorkspaceRow {
     /// The top-level directory of each repository that the workspace checks
     /// out.
     repositories: Vec<String>,
+    /// How the workspace's checkouts are made: `clone` for a clone with a
+    /// `.git` of its own, or `worktree` for a git worktree of the
+    /// repository, which mxv made before clones. Null in a row whose record
+    /// mxv cannot read.
+    kind: Option<KindRow>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
     /// Why mxv cannot read the workspace's record, such as a record that
@@ -72,6 +77,10 @@ pub(crate) struct PlacedRow {
     /// The top-level directory of each repository that the workspace checks
     /// out.
     repositories: Vec<String>,
+    /// How the workspace's checkouts are made: `clone` for a clone with a
+    /// `.git` of its own, or `worktree` for a git worktree of the
+    /// repository, which mxv made before clones.
+    kind: KindRow,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
     /// The host port that the workspace holds for each named port of its
@@ -79,10 +88,30 @@ pub(crate) struct PlacedRow {
     ports: BTreeMap<String, u16>,
 }
 
+/// How a workspace's checkouts are made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum KindRow {
+    /// A git worktree of the repository, which shares its `.git`.
+    Worktree,
+    /// A clone of a mirror of the repository's origin, with a `.git` of
+    /// its own.
+    Clone,
+}
+
+impl From<WorkspaceKind> for KindRow {
+    fn from(kind: WorkspaceKind) -> Self {
+        match kind {
+            WorkspaceKind::Worktree => Self::Worktree,
+            WorkspaceKind::Clone => Self::Clone,
+        }
+    }
+}
+
 impl Row for PlacedRow {
     const COLUMNS: &'static [&'static str] =
         &["name", "branch", "path", "root", "root_source", "ports"];
-    const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
+    const LONG_COLUMNS: &'static [&'static str] = &["kind", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -99,6 +128,7 @@ impl PlacedRow {
             root: root.path.display().to_string(),
             root_source: root.source,
             repositories: row.repositories,
+            kind: workspace.kind.into(),
             checkouts: row.checkouts,
             ports: row.ports,
         }
@@ -124,6 +154,9 @@ pub(crate) struct CheckoutRow {
     /// The commit that the branch started at, or null in a dry run, which
     /// does not fetch.
     commit: Option<String>,
+    /// The bare mirror whose objects a clone borrows, or null for a
+    /// worktree.
+    mirror: Option<String>,
 }
 
 impl Row for WorkspaceRow {
@@ -137,7 +170,7 @@ impl Row for WorkspaceRow {
         "problem",
     ];
     const PROBLEM: Option<&'static str> = Some("problem");
-    const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
+    const LONG_COLUMNS: &'static [&'static str] = &["kind", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -152,6 +185,10 @@ impl From<&Checkout> for CheckoutRow {
             branch: checkout.branch.clone(),
             base: checkout.base.clone(),
             commit: checkout.commit.clone(),
+            mirror: checkout
+                .mirror
+                .as_ref()
+                .map(|mirror| mirror.display().to_string()),
         }
     }
 }
@@ -170,6 +207,7 @@ impl From<&Workspace> for WorkspaceRow {
                 .iter()
                 .map(|checkout| checkout.source.display().to_string())
                 .collect(),
+            kind: Some(workspace.kind.into()),
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
             ports: workspace.ports.clone(),
@@ -198,6 +236,7 @@ impl WorkspaceRow {
             branch: String::new(),
             path: String::new(),
             repositories: Vec::new(),
+            kind: None,
             checkouts: Vec::new(),
             problem: error.to_string(),
             ports: BTreeMap::new(),
@@ -297,7 +336,7 @@ impl Row for ShowRow {
         "warnings",
     ];
     const LONG_COLUMNS: &'static [&'static str] =
-        &["repositories", "disposable_paths", "kept_paths"];
+        &["kind", "repositories", "disposable_paths", "kept_paths"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -359,7 +398,7 @@ impl Row for NewRow {
         "cloned",
         "clone_warning",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
+    const LONG_COLUMNS: &'static [&'static str] = &["kind", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }

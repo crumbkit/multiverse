@@ -70,7 +70,7 @@ fn store(environment: &Environment) -> Result<Store, MxvFailure> {
 
 /// Returns the workspaces whose records `environment` names, made by git.
 fn workspaces(environment: &Environment) -> Result<Workspaces<Git>, MxvFailure> {
-    Ok(Workspaces::new(store(environment)?, Git))
+    Ok(Workspaces::new(store(environment)?, Git).with_mirrors(environment.mirrors()?))
 }
 
 /// Returns the workspaces whose records `environment` names, made by git,
@@ -379,6 +379,22 @@ fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure 
             name,
             path: checkout,
             commits,
+            allow,
+        },
+        RemovalPlan::Unpushed {
+            checkout, commits, ..
+        } => MxvFailure::Unpushed {
+            name,
+            path: checkout,
+            commits,
+            allow,
+        },
+        RemovalPlan::Stashed {
+            checkout, stashes, ..
+        } => MxvFailure::Stashed {
+            name,
+            path: checkout,
+            stashes,
             allow,
         },
         RemovalPlan::Locked {

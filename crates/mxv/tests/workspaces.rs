@@ -108,6 +108,47 @@ fn created(setup: &Setup, name: &str) -> PathBuf {
     setup.workspace(name)
 }
 
+/// Makes the workspace `name` as mxv made workspaces before clones: its
+/// checkout `app` is a git worktree of the clone `app` on a new branch
+/// `name` from `origin/main`, and its record has version 1 and no `kind`.
+/// The workspaces `inbox-ingest` and `auth-tenants-users` of a person who
+/// used that mxv are such records. Returns the workspace's directory.
+fn worktrees(setup: &Setup, name: &str) -> PathBuf {
+    let workspace = setup.workspace(name);
+    let checkout = workspace.join("app");
+    fs::create_dir_all(&workspace).unwrap();
+    git(&setup.clone, &["branch", "--no-track", name, "origin/main"]);
+    git(
+        &setup.clone,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            checkout.to_str().unwrap(),
+            name,
+        ],
+    );
+    let commit = git(&checkout, &["rev-parse", "HEAD"]);
+    let record = serde_json::json!({
+        "version": 1,
+        "name": name,
+        "path": workspace,
+        "checkouts": [{
+            "name": "app",
+            "backend": "git",
+            "source": setup.clone,
+            "path": checkout,
+            "branch": name,
+            "base": "refs/remotes/origin/main",
+            "commit": commit.trim(),
+        }],
+    });
+    let records = setup.root().join("state").join("mxv").join("workspaces");
+    fs::create_dir_all(&records).unwrap();
+    write_text(&records.join(format!("{name}.json")), &record.to_string());
+    workspace
+}
+
 #[test]
 fn new_checks_out_the_repository_inside_the_workspace_directory_on_a_branch_of_the_workspaces_name()
 {
@@ -274,7 +315,7 @@ fn remove_refuses_a_workspace_with_an_uncommitted_change() {
 #[test]
 fn remove_keeps_a_branch_with_unmerged_commits_unless_forced() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     git(
         &workspace.join("app"),
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
@@ -292,7 +333,7 @@ fn remove_keeps_a_branch_with_unmerged_commits_unless_forced() {
 #[test]
 fn force_discards_changes_but_keeps_an_unmerged_branch() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     let checkout = workspace.join("app");
     git(
         &checkout,
@@ -355,7 +396,7 @@ fn remove_refuses_an_ignored_env_file_but_deletes_an_ignored_target_directory() 
 #[test]
 fn remove_refuses_commits_on_a_detached_head_unless_unmerged_commits_may_be_deleted() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     let checkout = workspace.join("app");
     git(&checkout, &["switch", "--quiet", "--detach"]);
     git(
@@ -547,7 +588,7 @@ fn empty_repository(root: &Path) -> PathBuf {
 #[test]
 fn remove_refuses_a_checkout_locked_for_another_reason_and_names_git_worktree_unlock() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     let checkout = workspace.join("app");
     git(
         &setup.clone,
@@ -572,7 +613,7 @@ fn remove_refuses_a_checkout_locked_for_another_reason_and_names_git_worktree_un
 #[test]
 fn remove_keeps_a_branch_whose_base_is_gone_and_reports_an_unknown_count() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     git(
         &setup.clone,
         &["update-ref", "-d", "refs/remotes/origin/main"],
@@ -657,7 +698,7 @@ fn the_steps_that_an_ignored_file_suggests_run_as_written_without_a_terminal() {
 #[test]
 fn the_steps_that_unreachable_commits_suggest_keep_the_flags_given_and_run_as_written() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     let checkout = workspace.join("app");
     git(&checkout, &["switch", "--quiet", "--detach"]);
     git(
@@ -681,7 +722,7 @@ fn the_steps_that_unreachable_commits_suggest_keep_the_flags_given_and_run_as_wr
 #[test]
 fn the_step_that_a_locked_checkout_suggests_after_unlocking_has_yes() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     let checkout = workspace.join("app");
     git(
         &setup.clone,
@@ -709,7 +750,7 @@ fn the_step_that_a_locked_checkout_suggests_after_unlocking_has_yes() {
 #[test]
 fn a_dry_run_names_the_removal_that_deletes_an_unmerged_branch_and_it_runs_as_written() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     git(
         &workspace.join("app"),
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
@@ -730,7 +771,7 @@ fn a_dry_run_names_the_removal_that_deletes_an_unmerged_branch_and_it_runs_as_wr
 #[test]
 fn a_removal_that_keeps_an_unmerged_branch_names_the_git_command_that_deletes_it() {
     let setup = Setup::new();
-    let workspace = created(&setup, "reading-list");
+    let workspace = worktrees(&setup, "reading-list");
     git(
         &workspace.join("app"),
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
@@ -745,4 +786,156 @@ fn a_removal_that_keeps_an_unmerged_branch_names_the_git_command_that_deletes_it
     let words: Vec<&str> = line.split_whitespace().skip(1).collect();
     git(&setup.root(), &words);
     assert!(git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty());
+}
+
+/// Returns every reference and worktree of the clone `app`, which a
+/// workspace of clones never changes.
+fn repository_state(setup: &Setup) -> String {
+    let refs = git(&setup.clone, &["for-each-ref"]);
+    let worktrees = git(&setup.clone, &["worktree", "list", "--porcelain"]);
+    format!("{refs}\n{worktrees}")
+}
+
+#[test]
+fn new_makes_a_clone_with_its_own_git_directory_whose_origin_is_the_repositorys_origin() {
+    let setup = Setup::new();
+    let before = repository_state(&setup);
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.join("app");
+    assert!(checkout.join(".git").is_dir());
+    let origin = git(&checkout, &["remote", "get-url", "origin"]);
+    assert_eq!(
+        Path::new(origin.trim()),
+        setup.root().join("origin.git").as_path()
+    );
+    assert_eq!(repository_state(&setup), before);
+    let (exit, shown) = setup.json(&["show", "reading-list", "--full"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert_eq!(shown["data"][0]["kind"], "clone", "{shown}");
+    let mirror = shown["data"][0]["checkouts"][0]["mirror"].as_str().unwrap();
+    let mirrors = setup.root().join("data").join("mxv").join("mirrors");
+    assert!(Path::new(mirror).starts_with(&mirrors), "{shown}");
+    assert!(Path::new(mirror).join("HEAD").is_file());
+}
+
+#[test]
+fn removing_a_clone_keeps_its_mirror_and_leaves_the_repository_as_it_was() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let before = repository_state(&setup);
+    let mirrors = setup.root().join("data").join("mxv").join("mirrors");
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["checkouts"][0]["branch_fate"], "deleted");
+    assert!(!workspace.exists());
+    assert!(fs::read_dir(&mirrors).unwrap().next().is_some());
+    assert_eq!(repository_state(&setup), before);
+}
+
+#[test]
+fn remove_refuses_a_clone_with_unpushed_commits_and_its_alternative_deletes_them() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    git(
+        &workspace.join("app"),
+        &["commit", "--quiet", "--allow-empty", "-m", "Work"],
+    );
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::unpushed_commits");
+    assert_eq!(document["fields"]["commits"], 1);
+    assert!(workspace.exists());
+    assert_eq!(
+        document["alternatives"][0]["call"],
+        "mxv remove reading-list --delete-unmerged --yes"
+    );
+    run_alternative(&setup, &document);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn remove_deletes_a_clone_whose_commits_are_pushed() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.join("app");
+    git(
+        &checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Work"],
+    );
+    git(&checkout, &["push", "--quiet", "origin", "reading-list"]);
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn remove_refuses_a_clone_with_a_stash_and_its_alternative_discards_it() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.join("app");
+    write(&checkout.join("notes.md"));
+    git(
+        &checkout,
+        &["stash", "push", "--quiet", "--include-untracked"],
+    );
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::stashes");
+    assert_eq!(document["fields"]["stashes"], 1);
+    assert_eq!(
+        document["alternatives"][0]["call"],
+        "mxv remove reading-list --force --yes"
+    );
+    run_alternative(&setup, &document);
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn new_fails_with_mirror_fetch_failed_when_the_origin_is_gone_and_leaves_nothing() {
+    let setup = Setup::new();
+    fs::remove_dir_all(setup.root().join("origin.git")).unwrap();
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::mirror::fetch_failed");
+    assert!(
+        document["fields"]["origin"]
+            .as_str()
+            .unwrap()
+            .ends_with("origin.git")
+    );
+    assert!(!setup.workspace("reading-list").exists());
+    let (_, listed) = setup.json(&["list"]);
+    assert_eq!(listed["total"], 0, "{listed}");
+}
+
+#[test]
+fn list_and_show_read_a_workspace_of_worktrees_beside_a_clone() {
+    let setup = Setup::new();
+    worktrees(&setup, "inbox-ingest");
+    created(&setup, "reading-list");
+    let (exit, listed) = setup.json(&["list", "--long"]);
+    assert_eq!(exit, 0, "{listed}");
+    let kinds: Vec<&Value> = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| &row["kind"])
+        .collect();
+    assert_eq!(kinds, ["worktree", "clone"], "{listed}");
+    let (exit, shown) = setup.json(&["show", "inbox-ingest", "--full"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert_eq!(shown["data"][0]["kind"], "worktree", "{shown}");
+    assert!(shown["data"][0]["checkouts"][0]["mirror"].is_null());
+}
+
+#[test]
+fn remove_of_a_workspace_of_worktrees_removes_the_worktree_and_its_merged_branch() {
+    let setup = Setup::new();
+    let workspace = worktrees(&setup, "auth-tenants-users");
+    let (exit, document) = setup.json(&["remove", "auth-tenants-users", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["checkouts"][0]["branch_fate"], "deleted");
+    assert!(!workspace.exists());
+    assert!(git(&setup.clone, &["branch", "--list", "auth-tenants-users"]).is_empty());
+    assert!(!git(&setup.clone, &["worktree", "list"]).contains("auth-tenants-users"));
 }

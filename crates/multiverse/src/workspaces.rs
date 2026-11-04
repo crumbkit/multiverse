@@ -3,15 +3,20 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::backend::{Backend, INITIALIZING};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
+use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
 use crate::manifest::Manifest;
+use crate::mirror::Origin;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace, agents_text};
+use crate::record::{Checkout, Workspace, WorkspaceKind, agents_text};
 use crate::store::{self, Created, Records, Store};
 
+#[cfg(test)]
+mod clone_tests;
 #[cfg(test)]
 mod tests;
 
@@ -43,7 +48,18 @@ pub struct Workspaces<B> {
     /// extend the built-in [`DISPOSABLE`] set and each repository's own
     /// globs in every checkout.
     pub(crate) disposable: Vec<PathGlob>,
+    /// The directory of the bare mirrors that the clones borrow objects
+    /// from, or `None`, in which case [`Workspaces::create`] makes git
+    /// worktrees of the person's repository as mxv did before clones.
+    pub(crate) mirrors: Option<PathBuf>,
+    /// How long [`Workspaces::create`] waits for the lock of a mirror that
+    /// another command fetches, which is [`MIRROR_WAIT`] outside the tests.
+    pub(crate) mirror_wait: Duration,
 }
+
+/// How long `create` waits for another command to finish with a mirror: a
+/// whole fetch and a clone without files, which is what the lock covers.
+pub const MIRROR_WAIT: Duration = FETCH_DEADLINE.saturating_add(LOCAL_DEADLINE);
 
 /// The outcome of [`Workspaces::create`].
 #[derive(Debug)]
@@ -260,6 +276,27 @@ pub enum RemovalPlan {
         /// The number of commits that removing the checkout would lose.
         commits: u32,
     },
+    /// A clone holds commits that no remote branch of its `origin` holds,
+    /// after a fetch, and the caller did not allow deleting unmerged
+    /// commits. Deleting the clone would lose them.
+    Unpushed {
+        /// The workspace's record.
+        workspace: Workspace,
+        /// The clone's directory.
+        checkout: PathBuf,
+        /// The number of commits that deleting the clone would lose.
+        commits: u32,
+    },
+    /// A clone holds stash entries, and the caller did not allow
+    /// discarding changes. Deleting the clone would lose them.
+    Stashed {
+        /// The workspace's record.
+        workspace: Workspace,
+        /// The clone's directory.
+        checkout: PathBuf,
+        /// The number of stash entries.
+        stashes: u32,
+    },
     /// A checkout is locked for a reason other than
     /// [`INITIALIZING`](crate::backend::INITIALIZING), so something else may
     /// still use it, such as a checkout on a removable disk.
@@ -281,6 +318,85 @@ pub enum RemovalPlan {
         /// The directory that the record names.
         checkout: PathBuf,
     },
+}
+
+/// The changes and ignored paths of a workspace's checkouts, sorted by what
+/// a removal does with them.
+#[derive(Debug, Default)]
+struct Sorted {
+    /// The uncommitted changes and untracked paths.
+    changes: Vec<String>,
+    /// The ignored paths outside the disposable set.
+    ignored: Vec<String>,
+    /// The disposable paths.
+    disposables: Vec<String>,
+    /// Why a checkout's disposable set holds fewer globs than its manifest
+    /// declares.
+    warnings: Vec<String>,
+    /// The disposable paths that only the manifest makes disposable.
+    manifest: Vec<String>,
+}
+
+/// Why a clone cannot be removed without the caller's leave.
+#[derive(Debug)]
+enum CloneRefusal {
+    /// The directory is not the workspace's clone.
+    Unowned(PathBuf),
+    /// The clone holds commits that `origin` does not hold.
+    Unpushed {
+        /// The clone's directory.
+        checkout: PathBuf,
+        /// The number of such commits.
+        commits: u32,
+    },
+    /// The clone holds stash entries.
+    Stashed {
+        /// The clone's directory.
+        checkout: PathBuf,
+        /// The number of stash entries.
+        stashes: u32,
+    },
+}
+
+impl CloneRefusal {
+    /// Returns the plan that refuses the removal of `workspace`.
+    fn plan(self, workspace: Workspace) -> RemovalPlan {
+        match self {
+            Self::Unowned(checkout) => RemovalPlan::Unowned {
+                workspace,
+                checkout,
+            },
+            Self::Unpushed { checkout, commits } => RemovalPlan::Unpushed {
+                workspace,
+                checkout,
+                commits,
+            },
+            Self::Stashed { checkout, stashes } => RemovalPlan::Stashed {
+                workspace,
+                checkout,
+                stashes,
+            },
+        }
+    }
+}
+
+/// Deletes the clone at `checkout` and everything in it by file
+/// descriptor, as `mxv clean` deletes a disposable path, so a directory that
+/// another process swaps for a symbolic link is never followed and nothing
+/// outside the clone is touched. A clone that is already gone is no error.
+fn delete_clone(checkout: &Path) -> Result<(), Error> {
+    let unwritable = |source| Error::Unwritable {
+        path: checkout.to_path_buf(),
+        source,
+    };
+    let (Some(parent), Some(name)) = (
+        checkout.parent(),
+        checkout.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return Err(unwritable(io::ErrorKind::InvalidInput.into()));
+    };
+    crate::disk::remove_tree(parent, &format!("{name}/"))
+        .map_err(|(path, source)| Error::Unwritable { path, source })
 }
 
 /// Whether something is at `path`, without following a symbolic link.
@@ -328,6 +444,9 @@ struct Made {
     branches: Vec<String>,
     /// Whether the run wrote `AGENTS.md`.
     agents: bool,
+    /// The number of checkouts, in the record's order, whose clone the run
+    /// started, which may have left a directory behind.
+    clones: usize,
 }
 
 /// How [`Workspaces::make`] ended without an error.
@@ -355,7 +474,18 @@ impl<B: Backend> Workspaces<B> {
             store,
             backend,
             disposable: Vec::new(),
+            mirrors: None,
+            mirror_wait: MIRROR_WAIT,
         }
+    }
+
+    /// Returns the workspaces with `dir` as the directory of the bare
+    /// mirrors, so [`Workspaces::create`] makes each checkout a clone of a
+    /// mirror there, with a `.git` of its own.
+    #[must_use]
+    pub fn with_mirrors(mut self, dir: PathBuf) -> Self {
+        self.mirrors = Some(dir);
+        self
     }
 
     /// Returns the workspaces with `globs`, the globs of disposable paths
@@ -416,8 +546,18 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Creates the workspace `name` in the directory `<root>/<name>`, with
-    /// one checkout of the repository at `repository`, on a new branch `name` from the freshly fetched
-    /// default branch of `origin`.
+    /// one checkout of the repository at `repository`, on a new branch
+    /// `name` from the freshly fetched default branch of `origin`.
+    ///
+    /// With [`Workspaces::with_mirrors`], the checkout is a clone. `create`
+    /// takes the lock of the origin's mirror, makes the mirror when it does
+    /// not exist, fetches it from the origin, and clones it with
+    /// `--shared`, all under the lock, and then sets the clone's `origin`
+    /// to the origin itself and checks out the branch. The default branch
+    /// is the one that the person's repository names as `origin/HEAD`, and
+    /// the person's repository is only read. Without mirrors, the checkout
+    /// is a git worktree of the person's repository, as mxv made them
+    /// before clones.
     ///
     /// It writes the record before it makes the checkout, so a run that
     /// stops partway leaves a record that [`Workspaces::remove`] can clean
@@ -429,8 +569,11 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// Returns [`Error::RepositoryNotFound`] or [`Error::NoOrigin`] for a
     /// path that is not a repository with an `origin`, the failures of the
-    /// fetch and the checkout, and [`Error::Unwritable`] when a directory,
-    /// the record or `AGENTS.md` cannot be written.
+    /// fetch and the checkout, [`Error::MirrorBusy`] when another command
+    /// holds the mirror's lock for longer than [`MIRROR_WAIT`],
+    /// [`Error::MirrorFetchFailed`] when the mirror's fetch fails, and
+    /// [`Error::Unwritable`] when a directory, the record or `AGENTS.md`
+    /// cannot be written.
     pub fn create(
         &self,
         root: &Path,
@@ -446,6 +589,9 @@ impl<B: Backend> Workspaces<B> {
         if Entry::at(&path)? != Entry::Absent {
             return Ok(NewOutcome::PathTaken(path));
         }
+        // A clone's branch lives in the clone, and a branch of the same
+        // name in the person's repository would still be confusing once
+        // either is pushed, so both kinds refuse it.
         if self
             .backend
             .branch_tip(&repository.root, name.as_str())?
@@ -455,6 +601,9 @@ impl<B: Backend> Workspaces<B> {
                 repository: repository.root,
                 branch: name.to_string(),
             });
+        }
+        if let Some(mirrors) = &self.mirrors {
+            return self.create_clone(root, name, &repository, path, mirrors, mode);
         }
         if mode == Mode::Change {
             self.backend.fetch(&repository.root)?;
@@ -467,7 +616,7 @@ impl<B: Backend> Workspaces<B> {
             name.to_string(),
             base,
         );
-        let mut workspace = Workspace::new(name.clone(), path, vec![checkout]);
+        let mut workspace = Workspace::new(name.clone(), path, vec![checkout]).of_worktrees();
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -489,6 +638,146 @@ impl<B: Backend> Workspaces<B> {
                 Err(error)
             }
         }
+    }
+
+    /// Creates the workspace `name` of [`Workspaces::create`] as a clone of
+    /// the mirror of `repository`'s origin below `mirrors`.
+    fn create_clone(
+        &self,
+        root: &Path,
+        name: &WorkspaceName,
+        repository: &crate::backend::Repository,
+        path: PathBuf,
+        mirrors: &Path,
+        mode: Mode,
+    ) -> Result<NewOutcome, Error> {
+        let url = self.backend.origin_url(&repository.root)?;
+        let origin = Origin::parse(&url, &repository.root).ok_or_else(|| Error::NoOrigin {
+            repository: repository.root.clone(),
+        })?;
+        let base = self.backend.base(&repository.root)?;
+        let mut checkout = Checkout::new(
+            repository.name.clone(),
+            &repository.root,
+            path.join(&repository.name),
+            name.to_string(),
+            base,
+        );
+        checkout.mirror = Some(mirrors.join(&origin.key));
+        let mut workspace = Workspace::new(name.clone(), path, vec![checkout]);
+        if mode == Mode::DryRun {
+            return Ok(NewOutcome::Planned(workspace));
+        }
+        if self.store.create(&workspace)? == Created::Taken {
+            return Ok(self.store.read(name)?.map_or(
+                NewOutcome::PathTaken(workspace.path.clone()),
+                NewOutcome::NameTaken,
+            ));
+        }
+        let mut made = Made::default();
+        match self.make_clones(root, &mut workspace, &origin.url, &mut made) {
+            Ok(()) => Ok(NewOutcome::Created(workspace)),
+            Err(error) => {
+                self.undo(&workspace, &made);
+                Err(error)
+            }
+        }
+    }
+
+    /// Makes the directory, the clones and the `AGENTS.md` of `workspace`,
+    /// whose record the store already holds, and writes the record again
+    /// with each checkout's commit. It notes in `made` each thing it
+    /// creates.
+    fn make_clones(
+        &self,
+        root: &Path,
+        workspace: &mut Workspace,
+        url: &str,
+        made: &mut Made,
+    ) -> Result<(), Error> {
+        let unwritable = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| Error::Unwritable { path, source }
+        };
+        fs::create_dir_all(root).map_err(unwritable(root))?;
+        fs::create_dir(&workspace.path).map_err(unwritable(&workspace.path))?;
+        made.directory = true;
+        for checkout in &mut workspace.checkouts {
+            let Some(mirror) = checkout.mirror.clone() else {
+                continue;
+            };
+            let default = checkout
+                .base
+                .strip_prefix("refs/remotes/origin/")
+                .unwrap_or(&checkout.base)
+                .to_owned();
+            {
+                let _lock = self.lock_mirror(&mirror)?;
+                self.backend.prepare_mirror(&mirror)?;
+                self.backend.fetch_mirror(&mirror, url, &default)?;
+                made.clones += 1;
+                self.backend.clone_mirror(&mirror, &checkout.path, url)?;
+            }
+            self.copy_excludes(checkout)?;
+            if self
+                .backend
+                .create_branch(&checkout.path, &checkout.branch, &checkout.base)?
+                .is_none()
+            {
+                return Err(Error::CommandFailed {
+                    operation: "update-ref",
+                    dir: checkout.path.clone(),
+                    code: None,
+                    message: format!(
+                        "the new clone already holds a branch named {}",
+                        checkout.branch
+                    ),
+                });
+            }
+            let commit = self
+                .backend
+                .switch_branch(&checkout.path, &checkout.branch)?;
+            checkout.commit = Some(commit);
+        }
+        made.agents = true;
+        store::replace_file(&workspace.agents_file(), agents_text(workspace).as_bytes())?;
+        self.store.update(workspace)?;
+        Ok(())
+    }
+
+    /// Copies the `info/exclude` file of the person's repository into the
+    /// clone of `checkout`, so a path that the person ignores there, such as
+    /// `.env`, stays ignored in the clone, as it was in a worktree, which
+    /// shared the file. A repository without the file copies nothing.
+    fn copy_excludes(&self, checkout: &Checkout) -> Result<(), Error> {
+        let from = self.backend.exclude_file(&checkout.source)?;
+        let rules = match fs::read(&from) {
+            Ok(rules) => rules,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => return Err(Error::StateUnreadable { path: from, source }),
+        };
+        let to = self.backend.exclude_file(&checkout.path)?;
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir).map_err(|source| Error::Unwritable {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+        }
+        store::replace_file(&to, &rules)
+    }
+
+    /// Takes the lock of the mirror at `mirror`, which sits beside it as
+    /// `<mirror>.lock`, waiting up to `mirror_wait` for another command to
+    /// release it.
+    fn lock_mirror(&self, mirror: &Path) -> Result<store::Lock, Error> {
+        let mut lock = mirror.as_os_str().to_owned();
+        lock.push(".lock");
+        store::lock(Path::new(&lock), self.mirror_wait).map_err(|error| match error {
+            Error::Busy { .. } => Error::MirrorBusy {
+                mirror: mirror.to_path_buf(),
+            },
+            other => other,
+        })
     }
 
     /// Makes the directory, the checkouts and the `AGENTS.md` of
@@ -541,6 +830,9 @@ impl<B: Backend> Workspaces<B> {
     /// step succeeded, so `mxv remove` can finish a cleanup that failed.
     fn undo(&self, workspace: &Workspace, made: &Made) {
         let mut clean = true;
+        for checkout in workspace.checkouts.iter().take(made.clones) {
+            clean &= delete_clone(&checkout.path).is_ok();
+        }
         for (checkout, start) in workspace.checkouts.iter().zip(&made.branches) {
             if let Ok(Some(listed)) = self
                 .backend
@@ -616,12 +908,15 @@ impl<B: Backend> Workspaces<B> {
             Entry::Absent => Fate::Missing,
         };
         let mut checkouts = Vec::new();
-        let mut changes = Vec::new();
-        let mut ignored = Vec::new();
-        let mut disposables = Vec::new();
-        let mut warnings = Vec::new();
-        let mut manifest = Vec::new();
+        let mut sorted = Sorted::default();
         for checkout in &workspace.checkouts {
+            if workspace.kind == WorkspaceKind::Clone {
+                match self.plan_clone(checkout, allow, &mut sorted)? {
+                    Ok(planned) => checkouts.push(planned),
+                    Err(refusal) => return Ok(refusal.plan(workspace)),
+                }
+                continue;
+            }
             let source = checkout.source.is_dir();
             let entry = Entry::at(&checkout.path)?;
             if entry == Entry::Link {
@@ -654,26 +949,7 @@ impl<B: Backend> Workspaces<B> {
                 unlock = true;
             }
             let stray = if entry == Entry::Present {
-                let found = self.backend.changes(&checkout.path)?;
-                let (set, warning) = self.disposable_set(checkout);
-                warnings.extend(warning);
-                let named = |item: &String| format!("{}: {item}", checkout.name);
-                changes.extend(found.changed.iter().map(named));
-                for path in &found.ignored {
-                    // A directory that holds a `.git` entry may hold a
-                    // repository with unpushed work, so it is never
-                    // deleted without the caller's leave.
-                    let source = set.source(path);
-                    if source.is_some() && crate::disk::keep_reason(&checkout.path, path).is_none()
-                    {
-                        if source == Some(DisposableSource::Manifest) {
-                            manifest.push(named(path));
-                        }
-                        disposables.push(named(path));
-                    } else {
-                        ignored.push(named(path));
-                    }
-                }
+                self.sort(checkout, &mut sorted)?;
                 self.backend.stray_commits(&checkout.path, "HEAD")?
             } else {
                 // The directory is gone, but until a prune the repository
@@ -724,6 +1000,13 @@ impl<B: Backend> Workspaces<B> {
                 unlock,
             });
         }
+        let Sorted {
+            mut changes,
+            mut ignored,
+            disposables,
+            warnings,
+            manifest,
+        } = sorted;
         if !allow.discard_changes {
             if !changes.is_empty() {
                 return Ok(RemovalPlan::Dirty { workspace, changes });
@@ -747,6 +1030,100 @@ impl<B: Backend> Workspaces<B> {
             manifest,
             warnings,
         }))
+    }
+
+    /// Reads the changes of the checkout `checkout`, whose directory
+    /// exists, and adds each to `sorted`: a change, a disposable path, a
+    /// path that only the manifest makes disposable, or another ignored
+    /// path.
+    fn sort(&self, checkout: &Checkout, sorted: &mut Sorted) -> Result<(), Error> {
+        let found = self.backend.changes(&checkout.path)?;
+        let (set, warning) = self.disposable_set(checkout);
+        sorted.warnings.extend(warning);
+        let named = |item: &String| format!("{}: {item}", checkout.name);
+        sorted.changes.extend(found.changed.iter().map(named));
+        for path in &found.ignored {
+            // A directory that holds a `.git` entry may hold a repository
+            // with unpushed work, so it is never deleted without the
+            // caller's leave.
+            let source = set.source(path);
+            if source.is_some() && crate::disk::keep_reason(&checkout.path, path).is_none() {
+                if source == Some(DisposableSource::Manifest) {
+                    sorted.manifest.push(named(path));
+                }
+                sorted.disposables.push(named(path));
+            } else {
+                sorted.ignored.push(named(path));
+            }
+        }
+        Ok(())
+    }
+
+    /// Plans the removal of `checkout`, a clone, for
+    /// [`Workspaces::plan_removal`], and adds its changes to `sorted`.
+    ///
+    /// A clone's branch and commits live only in its own `.git`, so
+    /// deleting the clone loses each commit that `origin` does not hold.
+    /// Unless `allow` permits deleting unmerged commits, the plan first
+    /// fetches the clone's `origin`, deleting the remote branches that
+    /// `origin` no longer has, and then refuses a clone with commits that
+    /// no remote branch holds. It refuses a clone with stashes unless
+    /// `allow` permits discarding changes. A directory whose `.git` is not
+    /// a directory of its own is not the workspace's clone.
+    fn plan_clone(
+        &self,
+        checkout: &Checkout,
+        allow: Allow,
+        sorted: &mut Sorted,
+    ) -> Result<Result<CheckoutRemoval, CloneRefusal>, Error> {
+        let entry = Entry::at(&checkout.path)?;
+        let refused = |refusal| Ok(Err(refusal));
+        let mut planned = CheckoutRemoval {
+            checkout: checkout.clone(),
+            directory: Fate::Missing,
+            branch: BranchFate::Missing,
+            tip: None,
+            stray_commits: 0,
+            unlock: false,
+        };
+        match entry {
+            Entry::Link => return refused(CloneRefusal::Unowned(checkout.path.clone())),
+            Entry::Absent => return Ok(Ok(planned)),
+            Entry::Present => {}
+        }
+        let dot_git = checkout.path.join(".git");
+        let owned = Entry::at(&dot_git)? == Entry::Present && dot_git.is_dir();
+        if !owned {
+            return refused(CloneRefusal::Unowned(checkout.path.clone()));
+        }
+        if !allow.delete_unmerged {
+            self.backend.refresh_origin(&checkout.path)?;
+        }
+        self.sort(checkout, sorted)?;
+        let stashes = self.backend.stashes(&checkout.path)?;
+        if stashes > 0 && !allow.discard_changes {
+            return refused(CloneRefusal::Stashed {
+                checkout: checkout.path.clone(),
+                stashes,
+            });
+        }
+        let unpushed = self.backend.unpushed_commits(&checkout.path)?;
+        if unpushed > 0 && !allow.delete_unmerged {
+            return refused(CloneRefusal::Unpushed {
+                checkout: checkout.path.clone(),
+                commits: unpushed,
+            });
+        }
+        planned.directory = Fate::Removed;
+        planned.stray_commits = unpushed;
+        planned.branch = if unpushed == 0 {
+            BranchFate::Deleted
+        } else {
+            BranchFate::DeletedUnmerged {
+                commits: Some(unpushed),
+            }
+        };
+        Ok(Ok(planned))
     }
 
     /// Carries out `confirmed`, which [`Workspaces::plan_removal`] returned
@@ -776,6 +1153,15 @@ impl<B: Backend> Workspaces<B> {
         };
         for (planned, seen) in removal.checkouts.iter_mut().zip(&confirmed.checkouts) {
             let checkout = &planned.checkout;
+            if removal.workspace.kind == WorkspaceKind::Clone {
+                // The clone holds its branch, so deleting the clone deletes
+                // the branch, and nothing of the person's repository changes.
+                if planned.directory == Fate::Removed {
+                    delete_clone(&checkout.path)?;
+                }
+                planned.branch = seen.branch;
+                continue;
+            }
             if planned.unlock {
                 self.backend
                     .unlock_checkout(&checkout.source, &checkout.path)?;

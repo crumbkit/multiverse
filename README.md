@@ -1,8 +1,8 @@
 # multiverse
 
 multiverse creates task workspaces that span several git repositories. A
-workspace holds one git worktree for each repository, branched from the
-latest main, an `AGENTS.md` that tells an agent how to work there, and a
+workspace holds one clone for each repository, with a `.git` of its own,
+branched from the latest main, an `AGENTS.md` that tells an agent how to work there, and a
 record from which an archived workspace can be restored.
 
 The repository holds three crates:

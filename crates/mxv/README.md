@@ -1,30 +1,75 @@
 # mxv
 
 mxv is the command of [multiverse](../multiverse). It creates task
-workspaces that span several git repositories, with one git worktree for
-each repository. A workspace holds one repository for now.
+workspaces that span several git repositories, with one clone for each
+repository. A workspace holds one repository for now.
 
 `mxv commands list` lists every command, and `mxv <command> --help`
 describes each one. [docs/commands.md](docs/commands.md) is the reference.
 
 ## Layout
 
-`mxv new reading-list --repo ~/src/app` fetches `origin` in
-`~/src/app`, and creates the workspace directory `<root>/reading-list`,
-which is `~/.local/share/mxv/workspaces/reading-list` by default. That
-directory holds:
+`mxv new reading-list --repo ~/src/app` fetches the origin of `~/src/app`
+into mxv's mirror of it, and creates the workspace directory
+`<root>/reading-list`, which is `~/.local/share/mxv/workspaces/reading-list`
+by default. That directory holds:
 
 - `AGENTS.md`, which tells an agent which repository and branch the
   workspace holds and how to list, resume and remove it. It sits above the
   checkout, so git never sees it.
-- `app/`, a git worktree of `~/src/app` on the new branch
+- `app/`, a clone of the origin of `~/src/app` on the new branch
   `reading-list`, which starts at the freshly fetched default branch of
-  `origin` (the branch that `origin/HEAD` names, or else `origin/main` or
+  `origin` and tracks no upstream. The default branch is the one that
+  `origin/HEAD` names in `~/src/app`, or else `origin/main` or
   `origin/master`, recorded as a full reference such as
-  `refs/remotes/origin/main`) and tracks no upstream.
+  `refs/remotes/origin/main`.
 
 A later workspace with several repositories holds one such directory for
 each repository, beside the one `AGENTS.md`.
+
+## Clones and mirrors
+
+Each checkout is a clone with a `.git` of its own, so an agent that works
+in one workspace cannot change the person's repository or another
+workspace. The clone has its own branches, config and hooks. It starts with
+no hooks and with git's default config, and its `origin` is the origin of
+the person's repository, so `git push` and `git fetch` in the clone go
+there and use the person's own credential helper, as any git command does.
+`mxv new` only reads the person's repository: it reads the origin's URL,
+the default branch and the repository's `.git/info/exclude`, which it
+copies into the clone so that a path ignored there, such as `.env`, stays
+ignored. It adds no worktree and no branch to the person's repository.
+
+A clone borrows the objects of a bare mirror of the origin through
+`git clone --shared`, so a new workspace does not download the whole
+history again. mxv keeps one mirror for each origin in
+`$XDG_DATA_HOME/mxv/mirrors`, which is `~/.local/share/mxv/mirrors` by
+default. A mirror's path below that directory is the origin's host and
+path, such as `github.com/acme/app.git`, so an `https` URL and an `ssh` URL
+of the same repository share a mirror, and an origin that is a path on
+this machine has a mirror below `local/`. `mxv new` takes the mirror's
+lock, makes the mirror when it does not exist, fetches every branch and tag
+of the origin into it, deletes the mirror's branches that the origin no
+longer has, and clones it, all under the lock. Another `mxv new` of the same
+origin waits up to 150 seconds for the lock, which covers a whole fetch,
+and then fails with `mxv::mirror::locked`. A fetch that fails, such as one
+whose credentials the origin refuses, fails with `mxv::mirror::fetch_failed`
+and leaves no workspace behind.
+
+A clone breaks when its mirror loses an object that the clone borrows. mxv
+therefore sets `gc.auto=0`, `gc.pruneExpire=never` and
+`maintenance.auto=false` on each mirror, never runs `git gc` or
+`git prune` in it, and never deletes a mirror, not even when `mxv remove`
+removes the last workspace that uses it. A mirror holds only the origin's
+branches and tags, so it grows only as the origin grows. Do not run
+`git gc` in a mirror yourself.
+
+A workspace that an mxv before clones made holds a git worktree of the
+person's repository instead. Its record has no `kind`, and `mxv show
+--long` reports its `kind` as `worktree`. Every command keeps working on
+such a workspace as it did, and `mxv remove` removes it as
+[Removing a workspace](#removing-a-workspace) describes for worktrees. mxv
+does not convert it to a clone.
 
 ## The workspace root
 
@@ -78,15 +123,17 @@ and `show`, `cd` and `remove` still find each workspace where it was created.
 
 mxv keeps one JSON record for each workspace in
 `$XDG_STATE_HOME/mxv/workspaces/<name>.json`, which defaults to
-`~/.local/state/mxv/workspaces/<name>.json`. `mxv new` writes the record
-before it makes the checkout, so a run that stops partway leaves a record
-that `mxv remove` cleans up. `mxv new` creates the branch in one step that
-fails when the branch already exists, so a branch that another process
-creates meanwhile is reported as `mxv::branch::exists` and left alone. When
-`git worktree add` fails partway, `mxv new` removes the checkout, unlocks it
-first if git left it locked, deletes the branch only while it still points
-where the run created it, removes the `AGENTS.md` and directory that the run
-created, and deletes the record once all of them are gone.
+`~/.local/state/mxv/workspaces/<name>.json`. A record of a workspace of
+clones has version 2 and the `kind` `clone`, and names each clone's mirror
+in `mirror`. A record of a workspace of worktrees has version 1 and no
+`kind`, so an mxv from before clones still reads it, and refuses a record of
+clones as one that a newer mxv wrote. `mxv new` writes the record before it
+makes the checkout, so a run that stops partway leaves a record that
+`mxv remove` cleans up. When the fetch, the clone or the checkout fails,
+`mxv new` deletes the clone, the `AGENTS.md` and the directory that the run
+created, and deletes the record once all of them are gone. `mxv new`
+refuses with `mxv::branch::exists` when the person's repository already has
+a local branch with the workspace's name.
 
 `mxv list` lists the records it can read, and adds a row for each record it
 cannot read, such as one that is not JSON or that a newer mxv wrote. Such a
@@ -415,7 +462,11 @@ lock when its command ends, so a crashed mxv leaves no lock behind.
 
 `mxv remove <name>` removes each checkout, deletes each branch whose commits
 are all on its base, removes the workspace directory and `AGENTS.md`, and
-deletes the record. It refuses, and changes nothing, in these cases:
+deletes the record. A clone holds its own branch, so removing the clone
+deletes the branch with it, and the person's repository is not touched.
+mxv deletes a clone by file descriptor, as `mxv clean` deletes a disposable
+path, so a directory in it that another process swaps for a symbolic link
+is never followed. It refuses, and changes nothing, in these cases:
 
 - The workspace's processes or containers run. The refusal is
   `mxv::workspace::running`, and `--force` stops them before it removes
@@ -456,18 +507,36 @@ deletes the record. It refuses, and changes nothing, in these cases:
   nothing. The result lists such paths in `manifest_paths`. When a checkout's `mxv.toml` is invalid,
   mxv uses the built-in set and the config file's globs for it, and the
   result, or the refusal's `warnings` field, says so.
-- A checkout's `HEAD` holds commits that no branch, tag or remote branch
+- A clone holds commits that no remote branch of its `origin` holds. Before
+  it counts them, mxv fetches the clone's `origin` and deletes the remote
+  branches that the origin no longer has, so a commit counts as pushed only
+  while the origin still holds it. The count includes the clone's `HEAD`,
+  branches and tags. The refusal is `mxv::checkout::unpushed_commits`, and
+  `--delete-unmerged` deletes the commits with the clone; it also skips the
+  fetch, so a removal with it works offline. When the fetch fails, the
+  removal fails with `mxv::git::failed` and changes nothing.
+- A clone holds stash entries. The refusal is `mxv::checkout::stashes`, and
+  `--force` deletes them with the clone.
+- A worktree's `HEAD` holds commits that no branch, tag or remote branch
   holds, such as commits on a detached `HEAD`. The refusal is
   `mxv::checkout::unreachable_commits`, and `--delete-unmerged` deletes the
   commits. mxv also checks this when the checkout's directory is already
   gone, from the `HEAD` that the repository still holds for it.
-- git lists a checkout as locked for a reason other than `initializing`.
+- git lists a worktree as locked for a reason other than `initializing`.
   The refusal is `mxv::checkout::locked`, and its hint names the
   `git worktree unlock` command to run when nothing else uses the checkout.
   A lock with the reason `initializing`, which a killed `git worktree add`
   leaves, is removed without asking.
 
-A branch with commits that are not on its base stays, and the result reports
+A clone's branch is deleted with the clone, and the result reports
+`deleted`, or `deleted_unmerged` with `--delete-unmerged` when it held
+unpushed commits. A branch that was merged into the origin's default branch
+by squashing, and then deleted on the origin, holds commits that no remote
+branch holds any more, so mxv counts them as unpushed and refuses the
+removal. This is the safe side of the check, and `--delete-unmerged`
+removes such a clone once you know that the work was merged.
+
+A worktree's branch with commits that are not on its base stays, and the result reports
 `kept_unmerged` with the number of commits in `unmerged_commits`.
 `--delete-unmerged` deletes it and reports `deleted_unmerged`. When the
 base that the record names is gone, mxv cannot count the commits, so it
@@ -495,8 +564,9 @@ commit that mxv checked. A branch that moved, such as one that gained a
 commit while mxv waited, stays, and the result reports `kept_moved`.
 
 mxv refuses with `mxv::checkout::unowned` when the workspace directory or a
-checkout directory is a symbolic link, or when git does not list a checkout
-directory as a worktree of its repository.
+checkout directory is a symbolic link, when git does not list a worktree's
+directory as a worktree of its repository, or when a clone's `.git` is not a
+directory of its own.
 
 ## Disk space
 

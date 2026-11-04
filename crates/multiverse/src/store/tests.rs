@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace};
+use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::store::{Created, Store, cap_log, lock, rotate_log};
 use crate::testing::write;
 
@@ -88,12 +88,79 @@ fn a_record_of_a_newer_version_is_refused() {
     let store = Store::new(dir.path().to_path_buf());
     write(
         dir.path().join("app.json"),
-        r#"{"version": 2, "future": true}"#,
+        r#"{"version": 3, "future": true}"#,
     );
     let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(
-        matches!(error, Error::NewerRecord { version: 2, .. }),
+        matches!(error, Error::NewerRecord { version: 3, .. }),
         "{error:?}"
+    );
+}
+
+/// A record as mxv wrote it before workspaces of clones, with no `kind`
+/// and no `mirror`.
+const WORKTREE_RECORD: &str = r#"{
+  "version": 1,
+  "name": "inbox-ingest",
+  "path": "/home/agent/mxv/inbox-ingest",
+  "checkouts": [
+    {
+      "name": "app",
+      "backend": "git",
+      "source": "/home/agent/src/app",
+      "path": "/home/agent/mxv/inbox-ingest/app",
+      "branch": "inbox-ingest",
+      "base": "refs/remotes/origin/main",
+      "commit": "0123456789abcdef0123456789abcdef01234567"
+    }
+  ],
+  "ports": {"web": 41000}
+}"#;
+
+#[test]
+fn a_record_without_a_kind_reads_as_a_workspace_of_worktrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    write(dir.path().join("inbox-ingest.json"), WORKTREE_RECORD);
+    let found = store
+        .read(&"inbox-ingest".parse().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.kind, WorkspaceKind::Worktree);
+    assert_eq!(found.version, 1);
+    assert_eq!(found.checkouts[0].mirror, None);
+    assert_eq!(found.ports.get("web"), Some(&41000));
+}
+
+#[test]
+fn a_record_of_worktrees_written_again_keeps_version_one_and_no_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    write(dir.path().join("inbox-ingest.json"), WORKTREE_RECORD);
+    let mut found = store
+        .read(&"inbox-ingest".parse().unwrap())
+        .unwrap()
+        .unwrap();
+    found.ports.insert("api".to_owned(), 41001);
+    store.update(&found).unwrap();
+    let text = fs::read_to_string(dir.path().join("inbox-ingest.json")).unwrap();
+    assert!(text.contains("\"version\": 1"), "{text}");
+    assert!(!text.contains("kind"), "{text}");
+    assert!(!text.contains("mirror"), "{text}");
+}
+
+#[test]
+fn a_record_of_clones_has_version_two_and_its_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let workspace = workspace("app");
+    assert_eq!(store.create(&workspace).unwrap(), Created::Written);
+    let text = fs::read_to_string(dir.path().join("app.json")).unwrap();
+    assert!(text.contains("\"version\": 2"), "{text}");
+    assert!(text.contains("\"kind\": \"clone\""), "{text}");
+    assert_eq!(
+        store.read(&"app".parse().unwrap()).unwrap(),
+        Some(workspace)
     );
 }
 

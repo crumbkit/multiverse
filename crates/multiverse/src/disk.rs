@@ -47,6 +47,13 @@ mod volume;
 
 pub(crate) use tree::keep_reason;
 
+/// Deletes the directory `relative`, such as `app/`, of the directory
+/// `root` and everything below it by file descriptor, as [`tree`]
+/// describes.
+pub(crate) fn remove_tree(root: &Path, relative: &str) -> Result<(), tree::Failure> {
+    tree::remove(root, relative, &mut |_| {})
+}
+
 /// The files of a checkout's git directory that a commit, a checkout or a
 /// staged change writes.
 const GIT_FILES: &[&str] = &["HEAD", "index", "logs/HEAD"];
