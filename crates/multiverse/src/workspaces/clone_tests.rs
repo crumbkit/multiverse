@@ -381,3 +381,260 @@ fn a_new_clone_ignores_what_the_persons_repository_excludes_outside_gitignore() 
     let status = git(checkout, &["status", "--porcelain", "--ignored"]);
     assert_eq!(status, "!! .env\n");
 }
+
+#[test]
+fn a_commit_that_only_the_reflog_holds_counts_as_unpushed() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    git(&checkout, &["checkout", "--quiet", "--detach"]);
+    commit(&checkout, "Left behind");
+    git(&checkout, &["checkout", "--quiet", "reading-list"]);
+    let refused = plan(&setup, "reading-list", NOTHING);
+    assert!(
+        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_commit_that_a_branch_reset_left_in_its_reflog_counts_as_unpushed() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    commit(&checkout, "Undone");
+    git(&checkout, &["reset", "--quiet", "--hard", "HEAD~1"]);
+    let refused = plan(&setup, "reading-list", NOTHING);
+    assert!(
+        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_tag_that_origin_holds_on_a_commit_no_branch_holds_is_not_unpushed() {
+    let setup = setup();
+    let person = &setup.fixture.clone;
+    git(person, &["checkout", "--quiet", "--detach"]);
+    commit(person, "Released");
+    git(person, &["tag", "--annotate", "--message", "Release", "v1"]);
+    git(person, &["push", "--quiet", "origin", "v1"]);
+    git(person, &["checkout", "--quiet", "main"]);
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    assert!(!git(&checkout, &["tag", "--list", "v1"]).trim().is_empty());
+    removed(&setup, "reading-list", NOTHING);
+    assert!(!checkout.exists());
+}
+
+#[test]
+fn a_local_tag_that_origin_does_not_hold_counts_as_unpushed() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    git(&checkout, &["checkout", "--quiet", "--detach"]);
+    commit(&checkout, "Tagged");
+    git(&checkout, &["tag", "local"]);
+    git(&checkout, &["checkout", "--quiet", "reading-list"]);
+    git(&checkout, &["reflog", "expire", "--expire=now", "--all"]);
+    let refused = plan(&setup, "reading-list", NOTHING);
+    assert!(
+        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_note_that_origin_does_not_hold_counts_as_unpushed() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    git(
+        &checkout,
+        &["notes", "add", "--message", "Reviewed", "HEAD"],
+    );
+    let refused = plan(&setup, "reading-list", NOTHING);
+    assert!(
+        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
+        "{refused:?}"
+    );
+    git(&checkout, &["push", "--quiet", "origin", "refs/notes/*"]);
+    removed(&setup, "reading-list", NOTHING);
+}
+
+#[test]
+fn a_commit_in_a_submodule_that_its_origin_does_not_hold_counts_as_unpushed() {
+    let setup = setup();
+    let root = setup.fixture.dir.path().canonicalize().unwrap();
+    git(&root, &["init", "--quiet", "--bare", "library.git"]);
+    let library = root.join("library");
+    git(&root, &["clone", "--quiet", "library.git", "library"]);
+    commit(&library, "Library");
+    git(&library, &["push", "--quiet", "origin", "HEAD"]);
+    let person = &setup.fixture.clone;
+    let url = root.join("library.git");
+    git(
+        person,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "add",
+            url.to_str().unwrap(),
+            "library",
+        ],
+    );
+    git(person, &["commit", "--quiet", "-m", "Add the library"]);
+    git(person, &["push", "--quiet", "origin", "main"]);
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    git(
+        &checkout,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "update",
+            "--init",
+        ],
+    );
+    removed(&setup, "reading-list", NOTHING);
+    let workspace = created(&setup, "second");
+    let checkout = workspace.checkouts[0].path.clone();
+    git(
+        &checkout,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "update",
+            "--init",
+        ],
+    );
+    commit(&checkout.join("library"), "Only here");
+    let refused = plan(&setup, "second", NOTHING);
+    assert!(
+        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_stash_added_after_the_plan_stops_a_forced_removal() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    write(checkout.join("notes.md"), "first");
+    git(
+        &checkout,
+        &["stash", "push", "--quiet", "--include-untracked"],
+    );
+    let RemovalPlan::Ready(confirmed) = plan(&setup, "reading-list", FORCE) else {
+        panic!("the forced removal is refused");
+    };
+    assert_eq!(confirmed.checkouts[0].stashes.len(), 1);
+    git(&checkout, &["stash", "drop", "--quiet"]);
+    write(checkout.join("notes.md"), "second");
+    git(
+        &checkout,
+        &["stash", "push", "--quiet", "--include-untracked"],
+    );
+    let outcome = setup.workspaces.remove(confirmed).unwrap();
+    assert!(matches!(outcome, RemovalOutcome::Changed(_)), "{outcome:?}");
+    assert!(checkout.exists());
+}
+
+#[test]
+fn a_commit_made_after_the_plan_stops_a_removal_of_unmerged_commits() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    commit(&checkout, "Seen");
+    let RemovalPlan::Ready(confirmed) = plan(&setup, "reading-list", UNMERGED) else {
+        panic!("the removal is refused");
+    };
+    git(&checkout, &["reset", "--quiet", "--hard", "HEAD~1"]);
+    git(&checkout, &["reflog", "expire", "--expire=now", "--all"]);
+    commit(&checkout, "Unseen");
+    let outcome = setup.workspaces.remove(confirmed).unwrap();
+    assert!(matches!(outcome, RemovalOutcome::Changed(_)), "{outcome:?}");
+}
+
+#[test]
+fn a_removal_that_cannot_reach_origin_says_so() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.checkouts[0].path.clone();
+    git(
+        &checkout,
+        &["remote", "set-url", "origin", "/nonexistent/origin.git"],
+    );
+    let error = setup
+        .workspaces
+        .plan_removal(&name("reading-list"), NOTHING)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::OriginFetchFailed { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_fetch_failure_never_shows_the_credentials_of_the_origin_url() {
+    let setup = setup();
+    git(
+        &setup.fixture.clone,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "http://someone:s3cr3t-token@127.0.0.1:9/app.git",
+        ],
+    );
+    let error = setup
+        .workspaces
+        .create(
+            &setup.root,
+            &name("reading-list"),
+            &setup.fixture.clone,
+            Mode::Change,
+        )
+        .unwrap_err();
+    let Error::MirrorFetchFailed { ref origin, .. } = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(origin, "http://127.0.0.1:9/app.git");
+    assert!(!error.to_string().contains("s3cr3t"), "{error}");
+    assert!(!format!("{error:?}").contains("s3cr3t"), "{error:?}");
+}
+
+#[test]
+fn a_held_mirror_lock_is_announced_once_before_waiting() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NOTICES: AtomicUsize = AtomicUsize::new(0);
+    fn notice(_mirror: &Path, _wait: Duration) {
+        NOTICES.fetch_add(1, Ordering::SeqCst);
+    }
+    let mut setup = setup();
+    setup.workspaces.mirror_wait = Duration::from_millis(50);
+    let first = created(&setup, "reading-list");
+    assert_eq!(NOTICES.load(Ordering::SeqCst), 0);
+    let mirror = first.checkouts[0].mirror.clone().unwrap();
+    let mut lock = mirror.into_os_string();
+    lock.push(".lock");
+    let _held = store::lock(Path::new(&lock), Duration::ZERO).unwrap();
+    let workspaces = setup.workspaces.with_mirror_notice(notice);
+    let error = workspaces
+        .create(
+            &setup.root,
+            &name("inbox"),
+            &setup.fixture.clone,
+            Mode::Change,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::MirrorBusy { .. }), "{error:?}");
+    assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
+}

@@ -55,6 +55,10 @@ pub struct Workspaces<B> {
     /// How long [`Workspaces::create`] waits for the lock of a mirror that
     /// another command fetches, which is [`MIRROR_WAIT`] outside the tests.
     pub(crate) mirror_wait: Duration,
+    /// What [`Workspaces::create`] calls, with the mirror and how long it
+    /// waits, when another command holds the lock of a mirror, so a person
+    /// at a terminal learns why the command pauses.
+    pub(crate) mirror_notice: Option<fn(&Path, Duration)>,
 }
 
 /// How long `create` waits for another command to finish with a mirror: a
@@ -100,8 +104,15 @@ pub struct CheckoutRemoval {
     pub tip: Option<String>,
     /// The number of commits that the checkout's `HEAD` holds and no
     /// branch holds, such as commits on a detached `HEAD`, which the
-    /// removal loses.
+    /// removal loses. For a clone, it is the number of commits that
+    /// `origin` does not hold, which `lost` lists.
     pub stray_commits: u32,
+    /// The commits of a clone that `origin` does not hold, which the
+    /// removal loses, or none for a worktree.
+    pub lost: Vec<String>,
+    /// The commit of each stash entry of a clone, which the removal
+    /// deletes, or none for a worktree.
+    pub stashes: Vec<String>,
     /// Whether the removal unlocks the checkout first, because a killed
     /// `git worktree add` left it locked with the reason
     /// [`INITIALIZING`](crate::backend::INITIALIZING).
@@ -176,15 +187,23 @@ pub const DISPOSABLE: &[&str] = &["target", "node_modules", "dist", "build", ".c
 
 /// Reports whether `fresh`, a new plan of the removal that the caller
 /// confirmed as `confirmed`, would lose more than `confirmed` showed: a
-/// different record, more commits that no branch holds in a checkout, or a
-/// change or ignored path to discard that `confirmed` did not list.
+/// different record, more commits that no branch holds in a checkout, a
+/// clone's commit or stash that `confirmed` did not list, or a change or
+/// ignored path to discard that `confirmed` did not list.
 fn loses_more(fresh: &Removal, confirmed: &Removal) -> bool {
     fresh.workspace != confirmed.workspace
         || fresh
             .checkouts
             .iter()
             .zip(&confirmed.checkouts)
-            .any(|(now, seen)| now.stray_commits > seen.stray_commits)
+            .any(|(now, seen)| {
+                now.stray_commits > seen.stray_commits
+                    || now.lost.iter().any(|commit| !seen.lost.contains(commit))
+                    || now
+                        .stashes
+                        .iter()
+                        .any(|stash| !seen.stashes.contains(stash))
+            })
         || fresh
             .discarded
             .iter()
@@ -476,6 +495,7 @@ impl<B: Backend> Workspaces<B> {
             disposable: Vec::new(),
             mirrors: None,
             mirror_wait: MIRROR_WAIT,
+            mirror_notice: None,
         }
     }
 
@@ -485,6 +505,16 @@ impl<B: Backend> Workspaces<B> {
     #[must_use]
     pub fn with_mirrors(mut self, dir: PathBuf) -> Self {
         self.mirrors = Some(dir);
+        self
+    }
+
+    /// Returns the workspaces with `notice`, which [`Workspaces::create`]
+    /// calls once, with the mirror's directory and how long it will wait,
+    /// before it waits for another command to release the lock of a
+    /// mirror.
+    #[must_use]
+    pub fn with_mirror_notice(mut self, notice: fn(&Path, Duration)) -> Self {
+        self.mirror_notice = Some(notice);
         self
     }
 
@@ -772,12 +802,21 @@ impl<B: Backend> Workspaces<B> {
     fn lock_mirror(&self, mirror: &Path) -> Result<store::Lock, Error> {
         let mut lock = mirror.as_os_str().to_owned();
         lock.push(".lock");
-        store::lock(Path::new(&lock), self.mirror_wait).map_err(|error| match error {
+        let busy = |error| match error {
             Error::Busy { .. } => Error::MirrorBusy {
                 mirror: mirror.to_path_buf(),
             },
             other => other,
-        })
+        };
+        match store::lock(Path::new(&lock), Duration::ZERO) {
+            Err(Error::Busy { .. }) => {
+                if let Some(notice) = self.mirror_notice {
+                    notice(mirror, self.mirror_wait);
+                }
+                store::lock(Path::new(&lock), self.mirror_wait).map_err(busy)
+            }
+            other => other.map_err(busy),
+        }
     }
 
     /// Makes the directory, the checkouts and the `AGENTS.md` of
@@ -997,6 +1036,8 @@ impl<B: Backend> Workspaces<B> {
                 branch,
                 tip,
                 stray_commits: stray,
+                lost: Vec::new(),
+                stashes: Vec::new(),
                 unlock,
             });
         }
@@ -1084,6 +1125,8 @@ impl<B: Backend> Workspaces<B> {
             branch: BranchFate::Missing,
             tip: None,
             stray_commits: 0,
+            lost: Vec::new(),
+            stashes: Vec::new(),
             unlock: false,
         };
         match entry {
@@ -1101,13 +1144,14 @@ impl<B: Backend> Workspaces<B> {
         }
         self.sort(checkout, sorted)?;
         let stashes = self.backend.stashes(&checkout.path)?;
-        if stashes > 0 && !allow.discard_changes {
+        if !stashes.is_empty() && !allow.discard_changes {
             return refused(CloneRefusal::Stashed {
                 checkout: checkout.path.clone(),
-                stashes,
+                stashes: count(&stashes),
             });
         }
-        let unpushed = self.backend.unpushed_commits(&checkout.path)?;
+        let lost = self.backend.unpushed_commits(&checkout.path)?;
+        let unpushed = count(&lost);
         if unpushed > 0 && !allow.delete_unmerged {
             return refused(CloneRefusal::Unpushed {
                 checkout: checkout.path.clone(),
@@ -1116,6 +1160,8 @@ impl<B: Backend> Workspaces<B> {
         }
         planned.directory = Fate::Removed;
         planned.stray_commits = unpushed;
+        planned.lost = lost;
+        planned.stashes = stashes;
         planned.branch = if unpushed == 0 {
             BranchFate::Deleted
         } else {
@@ -1230,4 +1276,10 @@ impl<B: Backend> Workspaces<B> {
         self.store.delete(&removal.workspace.name)?;
         Ok(RemovalOutcome::Done(removal))
     }
+}
+
+/// Returns the number of `items`, which is never more than a `u32` holds in
+/// practice, and saturates when it is.
+fn count(items: &[String]) -> u32 {
+    u32::try_from(items.len()).unwrap_or(u32::MAX)
 }

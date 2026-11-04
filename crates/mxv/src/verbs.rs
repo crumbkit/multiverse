@@ -126,7 +126,10 @@ pub(crate) fn new(
         Mode::Change
     };
     let root = environment.root()?;
-    let workspaces = workspaces(environment)?;
+    let mut workspaces = workspaces(environment)?;
+    if output.progress_allowed() {
+        workspaces = workspaces.with_mirror_notice(crate::mirror_wait_notice);
+    }
     match workspaces.create(&root.path, &name, &args.repo, mode)? {
         NewOutcome::Created(workspace) | NewOutcome::Planned(workspace) => {
             let cloned = if args.no_clone {
@@ -321,7 +324,7 @@ pub(crate) fn remove(
         }
         .into());
     }
-    let question = if from_manifest {
+    let mut question = if from_manifest {
         format!(
             "Remove the workspace {name}, its checkouts and its record? It deletes {}, which only the repository's mxv.toml declares disposable.",
             removal.manifest.join(", ")
@@ -329,6 +332,17 @@ pub(crate) fn remove(
     } else {
         format!("Remove the workspace {name}, its checkouts and its record?")
     };
+    let stashes: usize = removal
+        .checkouts
+        .iter()
+        .map(|checkout| checkout.stashes.len())
+        .sum();
+    if stashes > 0 {
+        question.push_str(&format!(
+            " It deletes {} of the workspace's clones.",
+            crate::rows::stashes(u32::try_from(stashes).unwrap_or(u32::MAX))
+        ));
+    }
     output.confirm(args.yes, &question)?;
     if !running.is_empty() {
         processes::stop_all(environment, &removal.workspace)?;

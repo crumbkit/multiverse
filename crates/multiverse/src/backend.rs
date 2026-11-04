@@ -260,30 +260,34 @@ pub trait Backend {
     /// Returns the failure of the checkout.
     fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error>;
 
-    /// Updates the remote branches of the clone at `checkout` from its
-    /// `origin`, and deletes those that the origin no longer has, so a
-    /// commit counts as pushed only while the origin still holds it.
+    /// Updates the remote branches, and a copy of the tags and notes, of
+    /// the clone at `checkout` and of each submodule it has initialised
+    /// from their `origin`, and deletes those that the origin no longer
+    /// has, so a commit counts as pushed only while the origin still holds
+    /// it.
     ///
     /// # Errors
     ///
-    /// Returns the failure of the fetch.
+    /// Returns [`Error::OriginFetchFailed`] when a fetch fails.
     fn refresh_origin(&self, checkout: &Path) -> Result<(), Error>;
 
-    /// Returns the number of commits that the clone at `checkout` holds in
-    /// its `HEAD`, branches or tags and that no remote branch of `origin`
-    /// holds. Deleting the clone loses them.
+    /// Returns the commits that the clone at `checkout`, or a submodule it
+    /// has initialised, holds in its `HEAD`, branches, tags or notes, or in
+    /// the reflog of its `HEAD` or of a branch, and that no branch, tag or
+    /// note of `origin` holds. Deleting the clone loses them.
     ///
     /// # Errors
     ///
-    /// Returns the failure of the count.
-    fn unpushed_commits(&self, checkout: &Path) -> Result<u32, Error>;
+    /// Returns the failure of the listing.
+    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error>;
 
-    /// Returns the number of stash entries of the clone at `checkout`.
+    /// Returns the commit of each stash entry of the clone at `checkout`,
+    /// newest first.
     ///
     /// # Errors
     ///
-    /// Returns the failure of the count.
-    fn stashes(&self, checkout: &Path) -> Result<u32, Error>;
+    /// Returns the failure of the listing.
+    fn stashes(&self, checkout: &Path) -> Result<Vec<String>, Error>;
 
     /// Deletes the local branch `branch` only while it still points at
     /// `commit`, so a branch that moved since is kept.

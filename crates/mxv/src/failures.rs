@@ -31,6 +31,10 @@ pub const CHECKOUT_UNREACHABLE_COMMITS: Code = Code::new("mxv", "checkout", "unr
 pub const CHECKOUT_UNPUSHED_COMMITS: Code = Code::new("mxv", "checkout", "unpushed_commits");
 /// The code of a removal that a clone's stash entries stop.
 pub const CHECKOUT_STASHES: Code = Code::new("mxv", "checkout", "stashes");
+/// The code of a removal that cannot fetch a clone's `origin`, such as on
+/// a machine that is offline, so mxv cannot tell which commits the origin
+/// holds.
+pub const CHECKOUT_ORIGIN_UNREACHABLE: Code = Code::new("mxv", "checkout", "origin_unreachable");
 /// The code of a mirror whose lock another mxv command holds for longer
 /// than mxv waits, such as a `mxv new` that still fetches it.
 pub const MIRROR_LOCKED: Code = Code::new("mxv", "mirror", "locked");
@@ -324,6 +328,7 @@ pub(crate) const CODES: &[&Code] = &[
     &GIT_TIMED_OUT,
     &MIRROR_LOCKED,
     &MIRROR_FETCH_FAILED,
+    &CHECKOUT_ORIGIN_UNREACHABLE,
     &RECORD_UNREADABLE,
     &RECORD_CORRUPT,
     &RECORD_NEWER,
@@ -461,6 +466,7 @@ impl Failure for MxvFailure {
                 Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
+                Error::OriginFetchFailed { .. } => &CHECKOUT_ORIGIN_UNREACHABLE,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
                 Error::DockerComposeMissing { .. } => &DOCKER_COMPOSE_MISSING,
@@ -760,7 +766,11 @@ fn library_recovery(error: &Error) -> Recovery {
             "wait for the other mxv command that fetches the mirror to finish, such as another `mxv new` of the same repository, and run the command again",
         ),
         Error::MirrorFetchFailed { origin, .. } => hint(format!(
-            "check that `git ls-remote {origin}` works with your network and credentials, and run the command again"
+            "check that the machine is online and that `git ls-remote {origin}` works with your credentials, and run the command again"
+        )),
+        Error::OriginFetchFailed { checkout, .. } => hint(format!(
+            "check that the machine is online and that `git -C {} fetch origin` works with your credentials, and run the command again; `--delete-unmerged` removes the workspace without the fetch, and deletes the commits that origin does not hold",
+            shown(checkout)
         )),
         Error::Busy { .. } => hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a process to be ready, and run the command again",
@@ -824,6 +834,10 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::Unwritable { path, .. }
         | Error::Busy { path } => vec![Field::new("path", shown(path))],
         Error::MirrorBusy { mirror } => vec![Field::new("mirror", shown(mirror))],
+        Error::OriginFetchFailed { checkout, message } => vec![
+            Field::new("checkout", shown(checkout)),
+            Field::new("message", message),
+        ],
         Error::MirrorFetchFailed {
             origin,
             mirror,

@@ -776,10 +776,10 @@ impl Backend for Scripted {
     fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
         Git.refresh_origin(checkout)
     }
-    fn unpushed_commits(&self, checkout: &Path) -> Result<u32, Error> {
+    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
         Git.unpushed_commits(checkout)
     }
-    fn stashes(&self, checkout: &Path) -> Result<u32, Error> {
+    fn stashes(&self, checkout: &Path) -> Result<Vec<String>, Error> {
         Git.stashes(checkout)
     }
     fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error> {

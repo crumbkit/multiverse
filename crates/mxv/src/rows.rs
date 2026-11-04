@@ -489,6 +489,9 @@ pub(crate) struct CheckoutRemovalRow {
     /// holds, such as commits on a detached `HEAD`, which
     /// `--delete-unmerged` allowed the removal to delete.
     stray_commits: u32,
+    /// The number of stash entries of a clone, which `--force` allowed
+    /// the removal to delete, or 0 for a worktree.
+    stashes: u32,
 }
 
 /// What `mxv remove` does to a directory.
@@ -553,6 +556,7 @@ impl From<&CheckoutRemoval> for CheckoutRemovalRow {
             branch_fate,
             unmerged_commits,
             stray_commits: removal.stray_commits,
+            stashes: u32::try_from(removal.stashes.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -644,6 +648,14 @@ impl fmt::Display for RemovalResult {
                     checkout.path
                 )?,
             }
+            if checkout.stashes > 0 {
+                writeln!(
+                    formatter,
+                    "mxv {deletes} {} from the checkout {}.",
+                    stashes(checkout.stashes),
+                    checkout.path
+                )?;
+            }
             if checkout.stray_commits > 0 {
                 writeln!(
                     formatter,
@@ -727,6 +739,15 @@ impl RemovalResult {
 }
 
 /// Returns `count` commits as words, such as `1 commit` or `3 commits`.
+/// Returns `count` stash entries in words, such as `1 stash entry`.
+pub(crate) fn stashes(count: u32) -> String {
+    if count == 1 {
+        "1 stash entry".to_owned()
+    } else {
+        format!("{count} stash entries")
+    }
+}
+
 fn commits(count: u32) -> String {
     if count == 1 {
         "1 commit".to_owned()

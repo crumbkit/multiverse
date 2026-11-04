@@ -46,23 +46,43 @@ history again. mxv keeps one mirror for each origin in
 `$XDG_DATA_HOME/mxv/mirrors`, which is `~/.local/share/mxv/mirrors` by
 default. A mirror's path below that directory is the origin's host and
 path, such as `github.com/acme/app.git`, so an `https` URL and an `ssh` URL
-of the same repository share a mirror, and an origin that is a path on
-this machine has a mirror below `local/`. `mxv new` takes the mirror's
+of the same repository share a mirror. The host is in lower case and keeps
+its port only when the port is not the scheme's default, so
+`ssh://git@github.com:22/acme/app` and `git@github.com:acme/app` share a
+mirror. The path keeps its case, because some hosts tell `Acme/App` and
+`acme/app` apart, so two spellings of one repository on a host that does
+not have two mirrors. An origin that is a path on this machine has a
+mirror below `local/`, named by the path with each symbolic link resolved
+and with `.git` added, so `/srv/app` and `/srv/app.git` have mirrors of
+their own. `mxv new` takes the mirror's
 lock, makes the mirror when it does not exist, fetches every branch and tag
 of the origin into it, deletes the mirror's branches that the origin no
 longer has, and clones it, all under the lock. Another `mxv new` of the same
 origin waits up to 150 seconds for the lock, which covers a whole fetch,
 and then fails with `mxv::mirror::locked`. A fetch that fails, such as one
-whose credentials the origin refuses, fails with `mxv::mirror::fetch_failed`
-and leaves no workspace behind.
+whose credentials the origin refuses or one on a machine that is offline,
+fails with `mxv::mirror::fetch_failed` and leaves no workspace behind. At
+a terminal, `mxv new` prints a line on standard error when it has to wait
+for the lock.
+
+A user name and password in an origin URL, such as
+`https://someone:token@example.com/app.git`, never appear in mxv's output.
+mxv leaves them out of each URL it prints in a failure, in text and in
+JSON, and out of each line of git's standard error that it quotes. The
+clone's `origin` keeps the URL as the person's repository has it, so
+`git push` in the clone works as it does there.
 
 A clone breaks when its mirror loses an object that the clone borrows. mxv
 therefore sets `gc.auto=0`, `gc.pruneExpire=never` and
 `maintenance.auto=false` on each mirror, never runs `git gc` or
 `git prune` in it, and never deletes a mirror, not even when `mxv remove`
 removes the last workspace that uses it. A mirror holds only the origin's
-branches and tags, so it grows only as the origin grows. Do not run
-`git gc` in a mirror yourself.
+branches and tags, so it grows only as the origin grows. Never run
+`git gc`, `git prune`, `git repack -d` or `git maintenance` inside
+`~/.local/share/mxv/mirrors` yourself. A command such as
+`git gc --prune=now` deletes objects that no branch of the mirror holds
+but that a clone still borrows, such as the commits of a branch that the
+origin deleted, and every clone that borrows them breaks.
 
 A workspace that an mxv before clones made holds a git worktree of the
 person's repository instead. Its record has no `kind`, and `mxv show
@@ -507,16 +527,30 @@ is never followed. It refuses, and changes nothing, in these cases:
   nothing. The result lists such paths in `manifest_paths`. When a checkout's `mxv.toml` is invalid,
   mxv uses the built-in set and the config file's globs for it, and the
   result, or the refusal's `warnings` field, says so.
-- A clone holds commits that no remote branch of its `origin` holds. Before
-  it counts them, mxv fetches the clone's `origin` and deletes the remote
-  branches that the origin no longer has, so a commit counts as pushed only
-  while the origin still holds it. The count includes the clone's `HEAD`,
-  branches and tags. The refusal is `mxv::checkout::unpushed_commits`, and
-  `--delete-unmerged` deletes the commits with the clone; it also skips the
-  fetch, so a removal with it works offline. When the fetch fails, the
-  removal fails with `mxv::git::failed` and changes nothing.
+- A clone holds commits that no branch, tag or note of its `origin` holds.
+  Before it counts them, mxv fetches the clone's `origin`: its branches go
+  to the remote branches, and a copy of its tags and notes goes below
+  `refs/mxv/origin/` in the clone. The fetch deletes what the origin no
+  longer has, so a commit counts as pushed only while the origin still
+  holds it. The count includes the commits of the clone's `HEAD`,
+  branches, tags and notes, and the commits that only the reflog of `HEAD`
+  or of a branch still holds, such as a commit made on a detached `HEAD`
+  before switching back to the branch, or one that `git reset` undid. A
+  tag that the origin also holds counts as pushed. Each submodule that the
+  clone has initialised, whose git directory git keeps below
+  `.git/modules`, is fetched and counted the same way, because its commits
+  are deleted with the clone. The refusal is
+  `mxv::checkout::unpushed_commits`, and `--delete-unmerged` deletes the
+  commits with the clone. It also skips the fetch, so a removal with it
+  works offline.
+- The fetch of a clone's `origin`, or of a submodule's, fails, such as on a
+  machine that is offline. The failure is
+  `mxv::checkout::origin_unreachable`, it changes nothing, and its hint
+  says to go online and run the command again, or to pass
+  `--delete-unmerged` to remove the workspace without the fetch.
 - A clone holds stash entries. The refusal is `mxv::checkout::stashes`, and
-  `--force` deletes them with the clone.
+  `--force` deletes them with the clone. The prompt says how many stash
+  entries the removal deletes.
 - A worktree's `HEAD` holds commits that no branch, tag or remote branch
   holds, such as commits on a detached `HEAD`. The refusal is
   `mxv::checkout::unreachable_commits`, and `--delete-unmerged` deletes the
@@ -534,7 +568,16 @@ unpushed commits. A branch that was merged into the origin's default branch
 by squashing, and then deleted on the origin, holds commits that no remote
 branch holds any more, so mxv counts them as unpushed and refuses the
 removal. This is the safe side of the check, and `--delete-unmerged`
-removes such a clone once you know that the work was merged.
+removes such a clone once you know that the work was merged. The reflog
+leads to the same refusal when the origin's history was rewritten: a
+commit that the clone once fetched or pulled, and that a force-push then
+removed from the origin, stays in the clone's reflog and counts as
+unpushed.
+
+When the person confirmed a removal at the prompt, mxv plans it again
+before it deletes anything, and stops with `mxv::workspace::changed` when
+a clone holds a commit or a stash entry that the confirmed plan did not
+list, even when the numbers are the same.
 
 A worktree's branch with commits that are not on its base stays, and the result reports
 `kept_unmerged` with the number of commits in `unmerged_commits`.

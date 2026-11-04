@@ -37,6 +37,7 @@ use wait_timeout::ChildExt as _;
 
 use crate::backend::{Backend, Changes, Listed, Repository};
 use crate::error::Error;
+use crate::mirror::redacted;
 
 #[cfg(test)]
 mod tests;
@@ -94,6 +95,55 @@ impl Finished {
     }
 }
 
+/// The refspec that copies the tags of a clone's `origin` into a namespace
+/// of their own, so a tag counts as pushed only while `origin` holds it.
+const ORIGIN_TAGS: &str = "+refs/tags/*:refs/mxv/origin/tags/*";
+
+/// The refspec that copies the notes of a clone's `origin` into a
+/// namespace of their own, so a note counts as pushed only while `origin`
+/// holds it.
+const ORIGIN_NOTES: &str = "+refs/notes/*:refs/mxv/origin/notes/*";
+
+/// Returns the git directory of the clone at `checkout`, followed by the
+/// git directory of each submodule that the clone has initialised, which
+/// git keeps below `.git/modules`, at any depth. A submodule's commits
+/// live only in its git directory, so deleting the clone loses them too.
+fn git_dirs(checkout: &Path) -> Result<Vec<PathBuf>, Error> {
+    let mut dirs = vec![checkout.to_path_buf()];
+    let mut pending = vec![checkout.join(".git").join("modules")];
+    while let Some(dir) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(Error::Inaccessible { path: dir, source }),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::Inaccessible {
+                path: dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let is_dir = entry
+                .file_type()
+                .map_err(|source| Error::Inaccessible {
+                    path: path.clone(),
+                    source,
+                })?
+                .is_dir();
+            if !is_dir {
+                continue;
+            }
+            if path.join("HEAD").is_file() && path.join("objects").is_dir() {
+                pending.push(path.join("modules"));
+                dirs.push(path);
+            } else {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(dirs)
+}
+
 /// The most lines of standard error that a failure quotes when git printed
 /// no `fatal:` or `error:` line.
 const MOST_QUOTED_LINES: usize = 5;
@@ -129,7 +179,7 @@ fn message(stderr: &str) -> String {
 /// did. A command that a signal ended may print nothing, so naming the
 /// signal keeps the failure from reading as empty.
 pub(crate) fn explanation(status: ExitStatus, stderr: &str) -> String {
-    let explained = message(stderr);
+    let explained = redacted(&message(stderr));
     match signal(status) {
         None => explained,
         Some(signal) if explained.is_empty() => format!("git was ended by signal {signal}"),
@@ -619,7 +669,7 @@ impl Backend for Git {
         )?;
         if !fetched.status.success() {
             return Err(Error::MirrorFetchFailed {
-                origin: url.to_owned(),
+                origin: redacted(url),
                 mirror: mirror.to_path_buf(),
                 message: explanation(fetched.status, &fetched.stderr),
             });
@@ -690,37 +740,83 @@ impl Backend for Git {
     }
 
     fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
-        run(
-            checkout,
-            ["fetch", "--quiet", "--prune", "origin"],
-            "fetch origin",
-            FETCH_DEADLINE,
-        )?
-        .ok("fetch origin", checkout)
-        .map(drop)
+        for dir in git_dirs(checkout)? {
+            let fetched = run(
+                &dir,
+                [
+                    "fetch",
+                    "--quiet",
+                    "--prune",
+                    "--no-tags",
+                    "--no-auto-gc",
+                    "origin",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                    ORIGIN_TAGS,
+                    ORIGIN_NOTES,
+                ],
+                "fetch origin",
+                FETCH_DEADLINE,
+            )?;
+            if !fetched.status.success() {
+                return Err(Error::OriginFetchFailed {
+                    checkout: dir,
+                    message: explanation(fetched.status, &fetched.stderr),
+                });
+            }
+        }
+        Ok(())
     }
 
-    fn unpushed_commits(&self, checkout: &Path) -> Result<u32, Error> {
-        let counted = run(
-            checkout,
-            [
+    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+        let mut unpushed = Vec::new();
+        for dir in git_dirs(checkout)? {
+            let branches = run(
+                &dir,
+                ["for-each-ref", "--format=%(refname)", "refs/heads"],
+                "for-each-ref",
+                LOCAL_DEADLINE,
+            )?
+            .ok("for-each-ref", &dir)?;
+            let mut logged: Vec<String> = vec!["log".into(), "-g".into(), "--format=%H".into()];
+            logged.push("HEAD".into());
+            logged.extend(branches.lines().map(str::to_owned));
+            logged.push("--".into());
+            let reflogs = run(&dir, &logged, "log -g", LOCAL_DEADLINE)?.ok("log -g", &dir)?;
+            let mut held: Vec<&str> = reflogs.lines().filter(|line| !line.is_empty()).collect();
+            held.sort_unstable();
+            held.dedup();
+            let mut listed: Vec<String> = [
                 "rev-list",
-                "--count",
+                "--ignore-missing",
                 "HEAD",
                 "--branches",
                 "--tags",
-                "--not",
-                "--remotes=origin",
-                "--",
-            ],
-            "rev-list",
-            LOCAL_DEADLINE,
-        )?
-        .ok("rev-list", checkout)?;
-        Ok(count(&counted))
+                "--glob=refs/notes/*",
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            listed.extend(held.iter().map(|commit| (*commit).to_owned()));
+            listed.extend(
+                [
+                    "--not",
+                    "--remotes=origin",
+                    "--glob=refs/mxv/origin/*",
+                    "--",
+                ]
+                .map(str::to_owned),
+            );
+            let commits = run(&dir, &listed, "rev-list", LOCAL_DEADLINE)?.ok("rev-list", &dir)?;
+            unpushed.extend(
+                commits
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        Ok(unpushed)
     }
 
-    fn stashes(&self, checkout: &Path) -> Result<u32, Error> {
+    fn stashes(&self, checkout: &Path) -> Result<Vec<String>, Error> {
         let found = run(
             checkout,
             ["rev-parse", "--verify", "--quiet", "refs/stash"],
@@ -728,16 +824,20 @@ impl Backend for Git {
             LOCAL_DEADLINE,
         )?;
         if !found.status.success() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
-        let counted = run(
+        let listed = run(
             checkout,
-            ["rev-list", "--walk-reflogs", "--count", "refs/stash", "--"],
+            ["rev-list", "--walk-reflogs", "refs/stash", "--"],
             "rev-list",
             LOCAL_DEADLINE,
         )?
         .ok("rev-list", checkout)?;
-        Ok(count(&counted))
+        Ok(listed
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error> {

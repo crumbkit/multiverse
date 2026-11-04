@@ -38,15 +38,25 @@ impl Origin {
     /// Returns the origin `url` of the repository at `repository`, or
     /// `None` when the URL names no repository path.
     ///
-    /// The key is the URL's host in lower case, with its port when it has
-    /// one, followed by its path, ending in `.git`. A user name and a
-    /// scheme are left out, so `https://github.com/acme/app`,
-    /// `git@github.com:acme/app.git` and `ssh://git@github.com/acme/app`
-    /// share the key `github.com/acme/app.git`. A local path, or a
-    /// `file://` URL, has the key `local/` followed by its absolute path.
-    /// Each component is encoded as [`encoded`] describes, so no key can
-    /// leave the mirror directory and two different URLs never share a
-    /// key.
+    /// The key of a remote URL is its host in lower case, with its port
+    /// when the port is not the scheme's default, followed by its path,
+    /// ending in `.git`. A user name, a password and a scheme are left
+    /// out, so `https://github.com/acme/app`,
+    /// `git@github.com:acme/app.git` and
+    /// `ssh://git@github.com:22/acme/app` share the key
+    /// `github.com/acme/app.git`. The path keeps its case, because some
+    /// hosts tell `Acme/App` and `acme/app` apart.
+    ///
+    /// A local path, or a `file://` URL, has the key `local/` followed by
+    /// its absolute path with each link resolved, and `.git` added to its
+    /// last component, so `/srv/app` and `/srv/app.git`, which are
+    /// different repositories, have mirrors of their own.
+    ///
+    /// Each component is encoded as [`encoded`] describes, and a component
+    /// before the last that ends in `.git` or `.lock` has its last `.`
+    /// encoded too, so no key can leave the mirror directory, two
+    /// different URLs never share a key, and no mirror or mirror lock lies
+    /// inside another mirror's path.
     pub(crate) fn parse(url: &str, repository: &Path) -> Option<Self> {
         let url = url.trim();
         if url.is_empty() {
@@ -54,31 +64,25 @@ impl Origin {
         }
         let (host, path, url) = if let Some((scheme, rest)) = url.split_once("://") {
             if scheme.eq_ignore_ascii_case("file") {
-                (None, rest.to_owned(), url.to_owned())
+                (None, resolved(Path::new(rest))?, url.to_owned())
             } else {
                 let (authority, path) = rest.split_once('/')?;
-                let host = authority
-                    .rsplit_once('@')
-                    .map_or(authority, |(_, host)| host);
                 (
-                    Some(host.to_ascii_lowercase()),
+                    Some(host_of(authority, default_port(scheme))),
                     path.to_owned(),
                     url.to_owned(),
                 )
             }
         } else if let Some((authority, path)) = scp_like(url) {
-            let host = authority
-                .rsplit_once('@')
-                .map_or(authority, |(_, host)| host);
             (
-                Some(host.to_ascii_lowercase()),
+                Some(host_of(authority, None)),
                 path.to_owned(),
                 url.to_owned(),
             )
         } else {
             let absolute = lexical(&repository.join(url));
             let text = absolute.to_str()?.to_owned();
-            (None, text.clone(), text)
+            (None, resolved(&absolute)?, text)
         };
         let mut components: Vec<String> = path
             .split('/')
@@ -86,17 +90,97 @@ impl Origin {
             .map(str::to_owned)
             .collect();
         let last = components.pop()?;
-        let last = last.strip_suffix(".git").unwrap_or(&last).to_owned();
+        let last = if host.is_some() {
+            last.strip_suffix(".git").unwrap_or(&last).to_owned()
+        } else {
+            last
+        };
         if last.is_empty() {
             return None;
         }
-        components.push(format!("{last}.git"));
         let mut key = PathBuf::from(host.map_or_else(|| LOCAL.to_owned(), |host| encoded(&host)));
         for component in &components {
-            key.push(encoded(component));
+            key.push(directory(component));
         }
+        key.push(format!("{}.git", encoded(&last)));
         Some(Self { url, key })
     }
+}
+
+/// Returns `url` with the user name and password of each `scheme://`
+/// URL in it left out, such as `https://example.com/app.git` for
+/// `https://someone:token@example.com/app.git`, so a credential that a
+/// URL carries never reaches a message, a record or a result. A URL in
+/// git's scp-like form, such as `git@github.com:acme/app`, cannot carry a
+/// password and is left as it is.
+pub(crate) fn redacted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find("://") {
+        let (before, after) = rest.split_at(index + 3);
+        out.push_str(before);
+        let end = after
+            .find(|character: char| {
+                character == '/'
+                    || character.is_whitespace()
+                    || character == '\''
+                    || character == '"'
+            })
+            .unwrap_or(after.len());
+        let authority = after.get(..end).unwrap_or_default();
+        match authority.rfind('@') {
+            Some(at) => out.push_str(authority.get(at + 1..).unwrap_or_default()),
+            None => out.push_str(authority),
+        }
+        rest = after.get(end..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Returns the host of `authority` in lower case, without its user name
+/// and password, and without its port when the port is `default`.
+fn host_of(authority: &str, default: Option<&str>) -> String {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .to_ascii_lowercase();
+    match (host.rsplit_once(':'), default) {
+        (Some((name, port)), Some(default)) if port == default => name.to_owned(),
+        _ => host,
+    }
+}
+
+/// Returns the port that a URL with `scheme` uses when it names none.
+fn default_port(scheme: &str) -> Option<&'static str> {
+    match scheme.to_ascii_lowercase().as_str() {
+        "ssh" | "git+ssh" | "ssh+git" => Some("22"),
+        "https" => Some("443"),
+        "http" => Some("80"),
+        "git" => Some("9418"),
+        _ => None,
+    }
+}
+
+/// Returns `path` with each link resolved when it exists, or as its text
+/// says when it does not, as text.
+fn resolved(path: &Path) -> Option<String> {
+    let path = path.canonicalize().unwrap_or_else(|_| lexical(path));
+    path.to_str().map(str::to_owned)
+}
+
+/// Returns `component`, a directory above a mirror, encoded as
+/// [`encoded`] describes, with the last `.` of a `.git` or `.lock` ending
+/// encoded as well, so the directory is never a mirror or a mirror's
+/// lock.
+fn directory(component: &str) -> String {
+    let text = encoded(component);
+    for ending in [".git", ".lock"] {
+        if let Some(stem) = text.strip_suffix(ending) {
+            return format!("{stem}%2E{}", ending.get(1..).unwrap_or_default());
+        }
+    }
+    text
 }
 
 /// Returns the host and path of a URL in git's scp-like form, such as

@@ -886,6 +886,12 @@ fn remove_refuses_a_clone_with_a_stash_and_its_alternative_discards_it() {
         document["alternatives"][0]["call"],
         "mxv remove reading-list --force --yes"
     );
+    let (exit, text) = setup.text(&["remove", "reading-list", "--force", "--dry-run"]);
+    assert_eq!(exit, 0, "{text}");
+    assert!(
+        text.contains("mxv would delete 1 stash entry from the checkout"),
+        "{text}"
+    );
     run_alternative(&setup, &document);
     assert!(!workspace.exists());
 }
@@ -906,6 +912,54 @@ fn new_fails_with_mirror_fetch_failed_when_the_origin_is_gone_and_leaves_nothing
     assert!(!setup.workspace("reading-list").exists());
     let (_, listed) = setup.json(&["list"]);
     assert_eq!(listed["total"], 0, "{listed}");
+}
+
+#[test]
+fn remove_fails_as_origin_unreachable_offline_and_delete_unmerged_skips_the_fetch() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    fs::remove_dir_all(setup.root().join("origin.git")).unwrap();
+    let (exit, document) = setup.json(&["remove", "reading-list", "--dry-run"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::origin_unreachable");
+    assert!(
+        document["recovery"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("--delete-unmerged"),
+        "{document}"
+    );
+    assert!(workspace.exists());
+    let (exit, document) = setup.json(&["remove", "reading-list", "--delete-unmerged", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!workspace.exists());
+}
+
+#[test]
+fn a_failed_fetch_never_prints_the_credentials_of_the_origin_url() {
+    let setup = Setup::new();
+    let token = "s3cr3t-token";
+    let url = format!("http://someone:{token}@127.0.0.1:9/app.git");
+    git(
+        &setup.root().join("app"),
+        &["remote", "set-url", "origin", &url],
+    );
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::mirror::fetch_failed");
+    assert_eq!(document["fields"]["origin"], "http://127.0.0.1:9/app.git");
+    assert!(!document.to_string().contains(token), "{document}");
+    let output = setup
+        .command(&["new", "reading-list", "--repo", "app"])
+        .output()
+        .unwrap();
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(printed.contains("127.0.0.1:9"), "{printed}");
+    assert!(!printed.contains(token), "{printed}");
 }
 
 #[test]

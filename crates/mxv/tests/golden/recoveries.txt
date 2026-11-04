@@ -120,6 +120,7 @@ mxv remove stashed --dry-run
 codes that no start provokes:
   mxv::mirror::locked: Only a mirror whose lock another mxv command holds for longer than mxv waits provokes it, which is longer than the check waits for a run; the library's workspace tests provoke it with a short wait.
   mxv::mirror::fetch_failed: Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.
+  mxv::checkout::origin_unreachable: Only a clone whose origin cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.
   mxv::workspace::changed: Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.
   mxv::path::inaccessible: Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.
   mxv::environment::no_directory: Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.
