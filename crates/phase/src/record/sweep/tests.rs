@@ -1,12 +1,18 @@
 use std::time::Duration;
 
-use super::{Waits, sweep};
+use rustix::process::Signal;
+
+use super::{Reach, Waits, sweep};
 use crate::record::docker::{Docker, DockerKind, Unreachable};
+use crate::record::process::{Processes, Start, System};
 use crate::record::run::{
     EntryState, HostProcess, NetworkId, ObjectKey, RunRecord, Started, VolumeLifetime,
 };
 use crate::record::store::{Journal, RunStore};
-use crate::record::testing::{FakeDocker, Spawned, app, empty_record, process, workspace};
+use crate::record::testing::{
+    FakeDocker, FakeProcesses, Spawned, alive, app, empty_record, host_at, process, recorded,
+    workspace,
+};
 use crate::record::{ContainerId, DockerName, Handle, ObjectKind, Role, SweepOutcome, Swept};
 
 const WAITS: Waits = Waits {
@@ -49,8 +55,30 @@ fn record(store: &RunStore, planned: RunRecord, started: Vec<(ObjectKey, Started
     }
 }
 
+/// Returns the real process table with `docker`.
+fn real(docker: &dyn Docker) -> Reach<'_> {
+    Reach {
+        docker,
+        processes: &System,
+    }
+}
+
+/// Returns the fake process table `processes` with no Docker.
+fn fake(processes: &dyn Processes) -> Reach<'_> {
+    Reach {
+        docker: &Unreachable,
+        processes,
+    }
+}
+
+/// Waits that end quickly, for the fake process table.
+const QUICK: Waits = Waits {
+    lock: Duration::from_millis(50),
+    kill: Duration::from_millis(20),
+};
+
 fn run(store: &RunStore, dry_run: bool, docker: &dyn Docker) -> Swept {
-    sweep(store, &workspace(), dry_run, docker, WAITS).unwrap()
+    sweep(store, &workspace(), dry_run, real(docker), WAITS).unwrap()
 }
 
 fn outcome_of(swept: &Swept, role: Role) -> SweepOutcome {
@@ -68,7 +96,7 @@ fn sweep_stops_a_recorded_host_process_and_removes_the_record() {
     let store = RunStore::new(state.path());
     let mut sleeper = Spawned::sleeper();
     let host = sleeper.host();
-    record_host(&store, host);
+    record_host(&store, host.clone());
 
     let swept = run(&store, false, &Unreachable);
 
@@ -114,7 +142,7 @@ fn sweep_kills_a_process_that_ignores_term_once_the_kill_wait_passes() {
         ..WAITS
     };
 
-    let swept = sweep(&store, &workspace(), false, &Unreachable, waits).unwrap();
+    let swept = sweep(&store, &workspace(), false, real(&Unreachable), waits).unwrap();
 
     assert!(!stubborn.running());
     assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
@@ -172,7 +200,7 @@ fn sweep_fails_as_busy_while_another_operation_holds_the_lock() {
     record_host(&store, sleeper.host());
     let _held = store.lock(&workspace(), WAITS.lock).unwrap();
 
-    let error = sweep(&store, &workspace(), false, &Unreachable, WAITS).unwrap_err();
+    let error = sweep(&store, &workspace(), false, real(&Unreachable), WAITS).unwrap_err();
 
     assert_eq!(error.code(), "phase::lock::busy");
     assert!(sleeper.running());
@@ -302,12 +330,12 @@ fn sweep_fails_when_docker_does_not_answer_and_keeps_the_record() {
         ..running_docker()
     };
 
-    let error = sweep(&store, &workspace(), false, &docker, WAITS).unwrap_err();
+    let error = sweep(&store, &workspace(), false, real(&docker), WAITS).unwrap_err();
 
     assert_eq!(error.code(), "phase::docker::unavailable");
     let kept = store.read(&workspace()).unwrap().unwrap();
     assert_eq!(kept.containers[0].state, EntryState::Running);
-    assert!(sweep(&store, &workspace(), true, &docker, WAITS).is_err());
+    assert!(sweep(&store, &workspace(), true, real(&docker), WAITS).is_err());
 }
 
 #[test]
@@ -347,5 +375,207 @@ fn a_dry_run_reports_the_docker_objects_it_would_remove_and_removes_none() {
 
     assert!(docker.removed.borrow().is_empty());
     assert_eq!(swept.items[0].outcome, SweepOutcome::WouldStop);
+    assert!(store.read(&workspace()).unwrap().is_some());
+}
+
+/// Writes a record whose `api/server` keeper is `keeper` and whose process
+/// is `server`.
+fn record_both(store: &RunStore, keeper: HostProcess, server_host: HostProcess) {
+    let keeper_key = ObjectKey::Keeper(app("api"), process("server"));
+    record(
+        store,
+        empty_record().host_process(&app("api"), &process("server")),
+        vec![
+            (keeper_key, Started::Host(keeper)),
+            (server(), Started::Host(server_host)),
+        ],
+    );
+}
+
+#[test]
+fn sweep_stops_keepers_before_their_processes() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_both(&store, host_at(100, 1), host_at(200, 2));
+    let processes = FakeProcesses::default()
+        .with(200, Start::At(2), Some(Signal::TERM))
+        .with(100, Start::At(1), Some(Signal::TERM));
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(100, Signal::TERM), (200, Signal::TERM)]
+    );
+    assert_eq!(outcome_of(&swept, Role::Keeper), SweepOutcome::Stopped);
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
+}
+
+#[test]
+fn a_process_that_survives_kill_is_unstoppable_and_stays_recorded_as_stopping() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_host(&store, host_at(200, 2));
+    let processes = FakeProcesses::default().with(200, Start::At(2), None);
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unstoppable);
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(200, Signal::TERM), (200, Signal::KILL)]
+    );
+    let kept = store.read(&workspace()).unwrap().unwrap();
+    assert_eq!(kept.state(&server()), Some(EntryState::Stopping));
+}
+
+#[test]
+fn a_process_whose_start_time_phase_may_not_read_is_unknown_and_left_alone() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_host(&store, host_at(200, 2));
+    let processes = FakeProcesses::default().with(200, Start::Unreadable, Some(Signal::TERM));
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unknown);
+    assert!(processes.signals.borrow().is_empty());
+    let kept = store.read(&workspace()).unwrap().unwrap();
+    assert_eq!(kept.state(&server()), Some(EntryState::Running));
+}
+
+#[test]
+fn a_process_recorded_in_an_earlier_boot_is_gone_even_when_its_pid_and_start_match() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let earlier = HostProcess {
+        boot_id: Some("earlier-boot".to_owned()),
+        ..host_at(200, 2)
+    };
+    record_host(&store, earlier);
+    let processes = FakeProcesses {
+        boot_id: Some("this-boot".to_owned()),
+        ..FakeProcesses::default().with(200, Start::At(2), Some(Signal::TERM))
+    };
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Gone);
+    assert!(processes.signals.borrow().is_empty());
+    assert_eq!(store.read(&workspace()).unwrap(), None);
+}
+
+#[test]
+fn sweep_kills_the_members_of_a_group_whose_leader_has_already_ended() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut leader = Spawned::shell_lines("sleep 30 & echo $!; echo ready", 2);
+    let orphan: u32 = leader.lines[0].parse().unwrap();
+    let ended = host_at(leader.pid(), 0);
+    leader.wait_for_exit();
+    assert!(alive(orphan));
+    record_host(&store, ended);
+
+    let swept = run(&store, false, &Unreachable);
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
+    assert!(!alive(orphan));
+}
+
+#[test]
+fn sweep_signals_only_the_process_when_it_does_not_lead_its_group() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut leader = Spawned::shell_lines(
+        "sleep 30 & echo $!; echo ready; while :; do sleep 1; done",
+        2,
+    );
+    let member: u32 = leader.lines[0].parse().unwrap();
+    record_host(&store, recorded(member, leader.pid()));
+
+    let swept = run(&store, false, &Unreachable);
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
+    assert!(!alive(member));
+    assert!(leader.running());
+}
+
+#[test]
+fn a_dry_run_does_not_reap_an_ended_child() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let sleeper = Spawned::sleeper();
+    record_host(&store, sleeper.host());
+    let pid = rustix::process::Pid::from_raw(i32::try_from(sleeper.pid()).unwrap()).unwrap();
+    System.signal(&sleeper.host(), Signal::KILL).unwrap();
+    // `NOWAIT` waits for the child to end and leaves it unreaped.
+    rustix::process::waitid(
+        rustix::process::WaitId::Pid(pid),
+        rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+    )
+    .unwrap();
+
+    run(&store, true, &Unreachable);
+
+    let waited = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG);
+    assert!(matches!(waited, Ok(Some(_))), "{waited:?}");
+}
+
+#[test]
+fn a_sweep_of_a_workspace_with_no_record_creates_no_lock_file() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+
+    let swept = run(&store, false, &Unreachable);
+
+    assert_eq!(swept, Swept::default());
+    assert!(!state.path().join("runs/0b9f3c8e.lock").exists());
+}
+
+#[test]
+fn a_container_found_by_its_name_must_carry_this_workspaces_label() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let planned = empty_record().container(
+        &app("db"),
+        &process("server"),
+        name("mxv-0b9f3c8e-db-server-1"),
+    );
+    record(&store, planned, Vec::new());
+    let docker = FakeDocker::default().labelled(
+        DockerKind::Container,
+        "mxv-0b9f3c8e-db-server-1",
+        &container_id(),
+        Some("someone-else"),
+    );
+
+    let swept = run(&store, false, &docker);
+
+    assert_eq!(swept.items[0].outcome, SweepOutcome::Gone);
+    assert!(docker.removed.borrow().is_empty());
+    assert_eq!(docker.objects.borrow().len(), 1);
+}
+
+#[test]
+fn a_removal_that_docker_refuses_fails_with_its_own_code_and_keeps_the_record() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(&store, docker_run(), started_docker_objects());
+    let docker = FakeDocker {
+        refuses: true,
+        ..running_docker()
+    };
+
+    let error = sweep(&store, &workspace(), false, real(&docker), WAITS).unwrap_err();
+
+    assert_eq!(error.code(), "phase::docker::refused");
+    assert!(error.to_string().contains("refused"), "{error}");
+    let unavailable = FakeDocker {
+        down: true,
+        ..running_docker()
+    };
+    let down = sweep(&store, &workspace(), false, real(&unavailable), WAITS).unwrap_err();
+    assert_eq!(down.code(), "phase::docker::unavailable");
+    assert!(down.to_string().contains("did not answer"), "{down}");
     assert!(store.read(&workspace()).unwrap().is_some());
 }

@@ -74,7 +74,8 @@ pub enum PhaseError {
         /// What failed.
         message: String,
     },
-    /// Docker did not answer, so phase cannot tell what is running.
+    /// A Docker call failed: Docker did not answer, so phase cannot tell
+    /// what is running, or it answered and refused.
     #[non_exhaustive]
     Docker {
         /// Docker's failure.
@@ -104,6 +105,9 @@ impl PhaseError {
             Self::NewerRecord { .. } => "phase::record::newer",
             Self::StateUnwritable { .. } => "phase::state::unwritable",
             Self::ProcessTable { .. } => "phase::process_table",
+            Self::Docker {
+                source: DockerError::Refused { .. },
+            } => "phase::docker::refused",
             Self::Docker { .. } => "phase::docker::unavailable",
             Self::Unplanned { .. } => "phase::record::unplanned",
         }
@@ -180,9 +184,17 @@ impl fmt::Display for PhaseError {
                 write!(formatter, "phase cannot write {}", path.display())
             }
             Self::ProcessTable { message } => {
-                write!(formatter, "phase cannot read the process table: {message}")
+                write!(
+                    formatter,
+                    "phase cannot read or signal processes: {message}"
+                )
             }
-            Self::Docker { .. } => formatter.write_str("Docker did not answer"),
+            Self::Docker {
+                source: DockerError::Refused { .. },
+            } => formatter.write_str("Docker refused to remove an object of the run"),
+            Self::Docker { .. } => {
+                formatter.write_str("Docker did not answer, so phase cannot tell what is running")
+            }
             Self::Unplanned { workspace, object } => write!(
                 formatter,
                 "the run record of the workspace {workspace} does not name {object}"

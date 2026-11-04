@@ -11,6 +11,7 @@
 use rustix::process::{Pid, Signal};
 
 use crate::error::PhaseError;
+use crate::record::run::HostProcess;
 
 #[cfg(target_os = "macos")]
 mod darwin;
@@ -149,50 +150,146 @@ fn pid_of(pid: u32) -> Option<Pid> {
     i32::try_from(pid).ok().and_then(Pid::from_raw)
 }
 
-/// Reaps `pid` when it is an ended child of this process, because an
-/// unreaped child keeps its pid and stays a member of its group. A pid that
-/// is not this process's child is left alone.
-pub(crate) fn reap(pid: u32) {
-    if let Some(process) = pid_of(pid) {
-        let _ = rustix::process::waitpid(Some(process), rustix::process::WaitOptions::NOHANG);
+/// The calls that `sweep` makes on the process table, behind a trait so
+/// that tests can supply processes that a real system cannot, such as one
+/// that survives `KILL`. [`System`] is the real one.
+pub(crate) trait Processes {
+    /// Returns what the process table holds at `pid`, as [`start_time`]
+    /// says.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::ProcessTable`] when the table cannot be read.
+    fn start_time(&self, pid: u32) -> Result<Start, PhaseError>;
+
+    /// Returns the id of the current boot on Linux, or `None` on a system
+    /// whose start times do not depend on the boot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::ProcessTable`] when the id cannot be read.
+    fn boot_id(&self) -> Result<Option<String>, PhaseError>;
+
+    /// Reports whether the process group `group` still has a member. A
+    /// group that phase may not signal still exists.
+    fn group_exists(&self, group: u32) -> bool;
+
+    /// Reaps `pid` when it is an ended child of this process, because an
+    /// unreaped child keeps its pid and stays a member of its group. A pid
+    /// that is not this process's child is left alone.
+    fn reap(&self, pid: u32);
+
+    /// Sends `signal` to the recorded process `host`: to its group when it
+    /// leads its group, and to the process alone otherwise, so phase never
+    /// signals a group that it did not create. A process that has already
+    /// gone is no failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::ProcessTable`] when the signal cannot be sent
+    /// for another reason, such as EPERM.
+    fn signal(&self, host: &HostProcess, signal: Signal) -> Result<(), PhaseError>;
+}
+
+/// The process table of this machine.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct System;
+
+impl Processes for System {
+    fn start_time(&self, pid: u32) -> Result<Start, PhaseError> {
+        start_time(pid)
+    }
+
+    fn boot_id(&self) -> Result<Option<String>, PhaseError> {
+        boot_id()
+    }
+
+    fn group_exists(&self, group: u32) -> bool {
+        let Some(group) = pid_of(group) else {
+            return false;
+        };
+        match rustix::process::test_kill_process_group(group) {
+            Ok(()) => true,
+            Err(error) => error != rustix::io::Errno::SRCH,
+        }
+    }
+
+    fn reap(&self, pid: u32) {
+        if let Some(process) = pid_of(pid) {
+            let _ = rustix::process::waitpid(Some(process), rustix::process::WaitOptions::NOHANG);
+        }
+    }
+
+    fn signal(&self, host: &HostProcess, signal: Signal) -> Result<(), PhaseError> {
+        let Some(process) = pid_of(host.pid) else {
+            return Ok(());
+        };
+        // A group keeps its id while it has a member. Between sweep's check
+        // and this signal, the id can name another group only if every
+        // member ended and a new process took the id in that time.
+        let sent = if host.group == host.pid {
+            rustix::process::kill_process_group(process, signal)
+        } else {
+            signal_process(process, host, signal)
+        };
+        match sent {
+            Ok(()) => Ok(()),
+            Err(error) if error == rustix::io::Errno::SRCH => Ok(()),
+            Err(error) => Err(table(format!(
+                "cannot send {signal:?} to the process {}: {error}",
+                host.pid
+            ))),
+        }
     }
 }
 
-/// Reports whether the process group `group` still has a member. A group
-/// that phase may not signal still exists.
-pub(crate) fn group_exists(group: u32) -> bool {
-    let Some(group) = pid_of(group) else {
-        return false;
-    };
-    match rustix::process::test_kill_process_group(group) {
-        Ok(()) => true,
-        Err(error) => error != rustix::io::Errno::SRCH,
+/// Sends `signal` to `process` alone. On Linux it opens a pidfd, checks the
+/// start time again through the open pidfd's process, and signals the
+/// pidfd, so a pid that the system reuses after the check is never
+/// signalled. Elsewhere `kill(2)` signals the pid. There, if the recorded
+/// process ends and the system gives its pid to a new process between
+/// sweep's check and the signal, the new process receives the signal. The
+/// system hands out pids in order, so that needs the pid numbers to wrap
+/// around within that time.
+#[cfg(target_os = "linux")]
+fn signal_process(process: Pid, host: &HostProcess, signal: Signal) -> rustix::io::Result<()> {
+    let pidfd = rustix::process::pidfd_open(process, rustix::process::PidfdFlags::empty())?;
+    match start_time(host.pid) {
+        Ok(Start::At(started)) if started == host.started_at_us => {
+            rustix::process::pidfd_send_signal(&pidfd, signal)
+        }
+        _ => Err(rustix::io::Errno::SRCH),
     }
 }
 
-/// Sends `signal` to the process group `group` when `group` is `pid`, so
-/// the recorded process leads the group, and to the process `pid` alone
-/// otherwise, so phase never signals a group that it did not create. A
-/// process that has already gone is no failure.
-///
-/// # Errors
-///
-/// Returns [`PhaseError::ProcessTable`] when `kill(2)` fails for another
-/// reason, such as EPERM.
-pub(crate) fn signal(pid: u32, group: u32, signal: Signal) -> Result<(), PhaseError> {
-    let Some(process) = pid_of(pid) else {
-        return Ok(());
-    };
-    let sent = if group == pid {
-        rustix::process::kill_process_group(process, signal)
-    } else {
-        rustix::process::kill_process(process, signal)
-    };
-    match sent {
-        Ok(()) => Ok(()),
-        Err(error) if error == rustix::io::Errno::SRCH => Ok(()),
-        Err(error) => Err(table(format!(
-            "cannot send {signal:?} to the process {pid}: {error}"
-        ))),
-    }
+/// Sends `signal` to `process` alone, as the Linux version says.
+#[cfg(not(target_os = "linux"))]
+fn signal_process(process: Pid, _host: &HostProcess, signal: Signal) -> rustix::io::Result<()> {
+    rustix::process::kill_process(process, signal)
+}
+
+/// Returns the id of the current boot from
+/// `/proc/sys/kernel/random/boot_id`, which changes at every boot, so a
+/// start time since boot from an earlier boot is never matched.
+#[cfg(target_os = "linux")]
+fn boot_id() -> Result<Option<String>, PhaseError> {
+    use std::io::Read as _;
+
+    let path = "/proc/sys/kernel/random/boot_id";
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(128).read_to_string(&mut text))
+        .map_err(|error| table(format!("cannot read {path}: {error}")))?;
+    Ok(Some(text.trim().to_owned()))
+}
+
+/// Returns `None`: macOS gives start times since the epoch, which do not
+/// depend on the boot.
+#[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Linux version of boot_id can fail, and both share one signature"
+)]
+const fn boot_id() -> Result<Option<String>, PhaseError> {
+    Ok(None)
 }

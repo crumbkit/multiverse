@@ -46,9 +46,13 @@ impl Failure {
 pub(super) fn bsd_info(pid: i32) -> Result<[u8; BSDINFO_BYTES], Failure> {
     let mut info = [0_u8; BSDINFO_BYTES];
     let size = i32::try_from(BSDINFO_BYTES).unwrap_or(i32::MAX);
-    // SAFETY: `info` is a live, writable buffer of `BSDINFO_BYTES` bytes,
-    // and the kernel writes at most the size it is given.
+    // SAFETY: `__error` returns the calling thread's errno, which this
+    // thread may write. `info` is a live, writable buffer of
+    // `BSDINFO_BYTES` bytes, and the kernel writes at most the size it is
+    // given. errno is cleared first, so a failure that sets no errno reads
+    // as errno 0 and never as a stale ESRCH or EPERM.
     let written = unsafe {
+        *libc::__error() = 0;
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,

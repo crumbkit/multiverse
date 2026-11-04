@@ -12,8 +12,9 @@ use crate::name::{AppName, WorkspaceId};
 use crate::plan::Plan;
 use crate::record::Swept;
 use crate::record::docker::Unreachable;
+use crate::record::process::System;
 use crate::record::store::RunStore;
-use crate::record::sweep::{self, Waits};
+use crate::record::sweep::{self, Reach, Waits};
 use crate::report::Report;
 use crate::select::Selection;
 use crate::status::Status;
@@ -244,11 +245,14 @@ impl Phase {
     /// `sweep` takes the workspace's lifecycle lock, waiting up to the lock
     /// wait. It stops a host process only when the process's pid and start
     /// time both match the record, and reports
-    /// [`SweepOutcome::PidReused`] when another process has the pid. It
-    /// sends `TERM` to the process's group, waits up to the kill wait, then
-    /// sends `KILL` and waits again. It removes the record's containers,
-    /// networks and run volumes, and leaves volumes that hold the
-    /// workspace's data.
+    /// [`SweepOutcome::PidReused`] when another process has the pid. When
+    /// phase may not read the process that has the pid, as inside a
+    /// sandbox, it reports [`SweepOutcome::Unknown`] and leaves the process
+    /// and its record entry alone. It sends `TERM` to the process's group
+    /// when the process leads its group, and to the process alone
+    /// otherwise, waits up to the kill wait, then sends `KILL` and waits
+    /// again. It removes the record's containers, networks and run volumes,
+    /// and leaves volumes that hold the workspace's data.
     ///
     /// With `dry_run`, `sweep` reads the record without the lock, reports
     /// what it would stop, and changes nothing.
@@ -259,12 +263,13 @@ impl Phase {
     /// for all of the lock wait, [`PhaseError::RecordUnreadable`] or
     /// [`PhaseError::NewerRecord`] when the record cannot be used,
     /// [`PhaseError::Docker`] when the record names a Docker object and
-    /// Docker does not answer, [`PhaseError::ProcessTable`] when the process
-    /// table cannot be read, and [`PhaseError::StateUnwritable`] when the
+    /// Docker does not answer or refuses, [`PhaseError::ProcessTable`] when
+    /// phase cannot read or signal processes, and [`PhaseError::StateUnwritable`] when the
     /// record cannot be written. A failed sweep keeps the record, with each
     /// object's state as far as the sweep got.
     ///
     /// [`SweepOutcome::PidReused`]: crate::SweepOutcome::PidReused
+    /// [`SweepOutcome::Unknown`]: crate::SweepOutcome::Unknown
     pub fn sweep(&self, workspace: &WorkspaceId, dry_run: bool) -> Result<Swept, PhaseError> {
         // The container module supplies the Docker that runs `docker` when
         // it lands. Until then a record that names a Docker object makes
@@ -274,7 +279,11 @@ impl Phase {
             lock: self.lock_wait,
             kill: self.kill_wait,
         };
-        sweep::sweep(&store, workspace, dry_run, &Unreachable, waits)
+        let reach = Reach {
+            docker: &Unreachable,
+            processes: &System,
+        };
+        sweep::sweep(&store, workspace, dry_run, reach, waits)
     }
 
     /// Runs `run`, as separate values that no shell reads, with the

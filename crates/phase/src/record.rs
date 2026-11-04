@@ -328,6 +328,10 @@ pub enum SweepOutcome {
     /// The pid is in use by a process with another start time, so it is not
     /// the recorded process, and `sweep` left it alone.
     PidReused,
+    /// phase may not read the process that has the pid, as inside a
+    /// sandbox, so it cannot tell whether that is the recorded process.
+    /// `sweep` left it alone, and the run record keeps it unchanged.
+    Unknown,
     /// It was still there after `KILL` and the kill wait, or after Docker
     /// removed it, so the run record keeps it and `sweep` can try again.
     Unstoppable,

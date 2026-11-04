@@ -74,16 +74,61 @@ pub(crate) struct HostEntry {
 }
 
 /// A started host process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "HostFields")]
 pub(crate) struct HostProcess {
-    /// The process id.
+    /// The process id, which is greater than 1.
     pub(crate) pid: u32,
     /// The start time that phase read when the process started, which
     /// [`crate::record::process::start_time`] describes.
     pub(crate) started_at_us: u64,
-    /// The id of the process's group.
+    /// The id of the process's group, which is greater than 0.
     pub(crate) group: u32,
+    /// The id of the boot in which the process started, on Linux, where
+    /// the start time counts from the boot. It is `None` on macOS.
+    pub(crate) boot_id: Option<String>,
+}
+
+/// The fields of a [`HostProcess`] as the record holds them, before phase
+/// checks them.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFields {
+    /// The process id.
+    pid: u32,
+    /// The start time.
+    started_at_us: u64,
+    /// The group id.
+    group: u32,
+    /// The boot id.
+    boot_id: Option<String>,
+}
+
+/// The record names pid 0 or 1, or group 0, which phase never starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BadHostProcess;
+
+impl fmt::Display for BadHostProcess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .write_str("a recorded process has a pid greater than 1 and a group greater than 0")
+    }
+}
+
+impl TryFrom<HostFields> for HostProcess {
+    type Error = BadHostProcess;
+
+    fn try_from(fields: HostFields) -> Result<Self, BadHostProcess> {
+        if fields.pid <= 1 || fields.group == 0 {
+            return Err(BadHostProcess);
+        }
+        Ok(Self {
+            pid: fields.pid,
+            started_at_us: fields.started_at_us,
+            group: fields.group,
+            boot_id: fields.boot_id,
+        })
+    }
 }
 
 /// A container process.

@@ -18,13 +18,13 @@
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::clock::{POLL_INTERVAL, pause};
+use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::record::run::{EntryState, ObjectKey, RUN_VERSION, RunRecord, Started, Unplanned};
@@ -166,14 +166,21 @@ impl RunStore {
             record.workspace,
             std::process::id()
         ));
+        // A temporary file that a crashed write of this process id left is
+        // removed, so `create_new` below never meets it.
+        match fs::remove_file(&temp) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(unwritable(&temp, error)),
+        }
         #[expect(
             clippy::disallowed_methods,
             reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
         )]
         let opened = OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .custom_flags(no_follow())
             .mode(0o600)
             .open(&temp);
         let written =
@@ -191,8 +198,7 @@ impl RunStore {
             let _ = fs::remove_file(&temp);
             return Err(unwritable(&target, error));
         }
-        self.sync_dir();
-        Ok(())
+        self.sync_dir()
     }
 
     /// Deletes the record of `workspace`. Deleting a record that does not
@@ -209,10 +215,7 @@ impl RunStore {
     ) -> Result<(), PhaseError> {
         let path = self.path(workspace);
         match fs::remove_file(&path) {
-            Ok(()) => {
-                self.sync_dir();
-                Ok(())
-            }
+            Ok(()) => self.sync_dir(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(PhaseError::StateUnwritable { path, source }),
         }
@@ -246,7 +249,9 @@ impl RunStore {
             path: path.clone(),
             source,
         })?;
-        let deadline = Instant::now() + wait;
+        let deadline = now() + wait;
+        // Another process releases a `flock` with no event that this
+        // process can wait on, so the lock polls (BASE-11).
         loop {
             #[expect(
                 clippy::disallowed_methods,
@@ -260,7 +265,7 @@ impl RunStore {
                     return Err(PhaseError::StateUnwritable { path, source });
                 }
             }
-            if Instant::now() >= deadline {
+            if now() >= deadline {
                 return Err(PhaseError::Busy {
                     workspace: workspace.clone(),
                     waited: wait,
@@ -271,25 +276,53 @@ impl RunStore {
     }
 
     /// Creates the records directory with mode 0700 when it does not
-    /// exist.
+    /// exist, and narrows the mode of one that grants its group or others
+    /// any access to 0700. It refuses a records directory that is a
+    /// symbolic link or no directory.
     fn create_dir(&self) -> Result<(), PhaseError> {
+        let unwritable = |source| PhaseError::StateUnwritable {
+            path: self.dir.clone(),
+            source,
+        };
         DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&self.dir)
+            .map_err(unwritable)?;
+        let metadata = fs::symlink_metadata(&self.dir).map_err(unwritable)?;
+        if !metadata.is_dir() {
+            return Err(unwritable(io::Error::other(
+                "the records directory is a symbolic link or no directory",
+            )));
+        }
+        if metadata.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))
+                .map_err(unwritable)?;
+        }
+        Ok(())
+    }
+
+    /// Syncs the records directory, so a rename or a removal in it
+    /// survives a power loss.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
+    /// opened or synced.
+    fn sync_dir(&self) -> Result<(), PhaseError> {
+        File::open(&self.dir)
+            .and_then(|handle| handle.sync_all())
             .map_err(|source| PhaseError::StateUnwritable {
                 path: self.dir.clone(),
                 source,
             })
     }
+}
 
-    /// Syncs the records directory, so a rename or a removal in it
-    /// survives a power loss.
-    fn sync_dir(&self) {
-        if let Ok(handle) = File::open(&self.dir) {
-            let _ = handle.sync_all();
-        }
-    }
+/// Returns the `O_NOFOLLOW` flag, so the store never writes through a
+/// symbolic link that stands where its temporary file goes.
+fn no_follow() -> i32 {
+    i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).unwrap_or(0)
 }
 
 /// The write-ahead journal of one workspace's run, which the engine keeps

@@ -25,6 +25,7 @@ fn host() -> HostProcess {
         pid: 4242,
         started_at_us: 1_793_000_000_000_000,
         group: 4242,
+        boot_id: None,
     }
 }
 
@@ -258,4 +259,97 @@ fn finishing_removes_the_record_only_when_everything_is_stopped() {
     journal.stopped(&keeper).unwrap();
     assert!(journal.finish().unwrap());
     assert_eq!(store.read(&workspace()).unwrap(), None);
+}
+
+fn set_mode(path: &std::path::Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn a_records_directory_that_others_may_read_is_narrowed_to_its_owner() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let runs = state.path().join("runs");
+    fs::create_dir(&runs).unwrap();
+    set_mode(&runs, 0o755);
+
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+
+    assert_eq!(
+        fs::metadata(&runs).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[test]
+fn a_records_directory_that_is_a_symbolic_link_is_refused() {
+    let state = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), state.path().join("runs")).unwrap();
+    let store = RunStore::new(state.path());
+
+    let error = store.lock(&workspace(), SHORT).unwrap_err();
+
+    assert_eq!(error.code(), "phase::state::unwritable");
+}
+
+#[test]
+fn a_write_never_follows_a_symbolic_link_left_where_its_temporary_file_goes() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let lock = store.lock(&workspace(), SHORT).unwrap();
+    let target = state.path().join("target");
+    write_file(&target, "untouched");
+    let temp = state
+        .path()
+        .join(format!("runs/.0b9f3c8e.json.{}.tmp", std::process::id()));
+    std::os::unix::fs::symlink(&target, &temp).unwrap();
+
+    store.write(&planned(), &lock).unwrap();
+
+    assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+    assert_eq!(on_disk(&store), planned());
+    assert!(!temp.exists());
+}
+
+#[test]
+fn a_directory_that_cannot_be_synced_fails_a_write_and_a_removal() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let lock = store.lock(&workspace(), SHORT).unwrap();
+    let runs = state.path().join("runs");
+    // Without read permission the directory cannot be opened to sync it,
+    // while files in it can still be created, renamed and removed.
+    set_mode(&runs, 0o300);
+
+    let written = store.write(&planned(), &lock);
+    let removed = store.remove(&workspace(), &lock);
+    set_mode(&runs, 0o700);
+
+    assert_eq!(written.unwrap_err().code(), "phase::state::unwritable");
+    assert_eq!(removed.unwrap_err().code(), "phase::state::unwritable");
+}
+
+#[test]
+fn a_record_that_names_pid_1_or_group_0_is_unreadable() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    drop(journal);
+    let text = fs::read_to_string(store.path(&workspace())).unwrap();
+
+    for (from, to) in [
+        ("\"pid\": 4242", "\"pid\": 1"),
+        ("\"group\": 4242", "\"group\": 0"),
+    ] {
+        assert!(text.contains(from), "{text}");
+        write_file(&store.path(&workspace()), &text.replace(from, to));
+
+        let error = store.read(&workspace()).unwrap_err();
+
+        assert_eq!(error.code(), "phase::record::unreadable", "{to}");
+    }
 }

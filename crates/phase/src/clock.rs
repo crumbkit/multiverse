@@ -6,7 +6,7 @@
 //! interval and pause here between polls.
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The interval at which phase polls a lock that another operation holds
 /// and a process that it has signalled.
@@ -20,4 +20,9 @@ pub(crate) fn pause(interval: Duration) {
         reason = "crates/phase/src/clock.rs is the clock owner, and it paces polls of sources that have no event (BASE-11)"
     )]
     thread::sleep(interval);
+}
+
+/// Returns the current time, against which a poll checks its deadline.
+pub(crate) fn now() -> Instant {
+    Instant::now()
 }

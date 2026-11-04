@@ -305,8 +305,14 @@ the record has a state: `planned`, `running`, `stopping` or `stopped`.
 
 A process's start time is in microseconds: since the Unix epoch on macOS,
 where `proc_pidinfo` reports it, and since boot on Linux, where
-`/proc/<pid>/stat` reports it in clock ticks. phase only compares a start
-time with one it read on the same machine.
+`/proc/<pid>/stat` reports it in clock ticks. On Linux the record also holds
+the boot id from `/proc/sys/kernel/random/boot_id`, and a process recorded
+in an earlier boot is gone. phase only compares a start time with one it
+read on the same machine.
+
+When phase may not read the process that has a recorded pid, as inside an
+agent's sandbox, `sweep` reports the process as unknown, leaves it alone,
+and keeps its entry unchanged.
 
 Each volume in the record has a lifetime. A `run` volume, such as a scratch
 cache, belongs to one run, and `sweep` removes it. A `workspace` volume
@@ -316,11 +322,22 @@ it; only `reset` removes it.
 `sweep` stops keepers first, so no keeper restarts its process, then host
 processes, containers, networks and volumes. For a host process it sends
 `TERM` to the process group when the process leads its group, and to the
-process alone otherwise. It waits up to the kill wait, sends `KILL`, and
+process alone otherwise. On Linux it signals a single process through a
+pidfd after checking the start time again. It waits up to the kill wait, sends `KILL`, and
 waits again. A process that is still there is reported as unstoppable, and
 the record keeps it. `sweep` removes the record once every object in it is
 stopped. `sweep --dry-run` reads the record without the lock and changes
 nothing.
+
+`sweep` finds a container or network whose id the record does not hold yet
+by its name, and only when it carries phase's workspace label with the
+workspace's stable id. When Docker does not answer, `sweep` fails with
+`phase::docker::unavailable`; when Docker refuses a removal, it fails with
+`phase::docker::refused`. Either way the record keeps what is left.
+
+A keeper that started but whose pid phase had not yet recorded when it
+crashed is missing from the record. A later change will let `sweep` find
+such keepers by their command line, which names the workspace's stable id.
 
 ### Status and logs
 
