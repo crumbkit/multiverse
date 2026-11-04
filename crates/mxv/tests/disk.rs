@@ -168,7 +168,7 @@ fn remove_deletes_a_directory_that_the_config_file_declares_disposable() {
 }
 
 #[test]
-fn remove_deletes_a_directory_that_the_checkouts_manifest_declares_disposable() {
+fn remove_with_force_deletes_a_directory_that_the_checkouts_manifest_declares_disposable() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_text(
@@ -181,7 +181,13 @@ fn remove_deletes_a_directory_that_the_checkouts_manifest_declares_disposable() 
         &["commit", "--quiet", "-m", "Declare test results"],
     );
     write_text(&checkout.join("web/test-results/report.html"), "<p>ok</p>");
-    let (exit, document) = setup.json(&["remove", "reading-list", "--yes", "--delete-unmerged"]);
+    let (exit, document) = setup.json(&[
+        "remove",
+        "reading-list",
+        "--force",
+        "--yes",
+        "--delete-unmerged",
+    ]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"]["disposable"][0], "app: web/test-results/");
     assert!(!checkout.exists());
@@ -526,9 +532,87 @@ fn a_path_that_cannot_be_deleted_in_full_fails_its_workspace_and_names_the_entry
     assert_eq!(failure["code"], "mxv::file::unwritable", "{document}");
     let path = failure["fields"]["path"].as_str().unwrap();
     assert!(path.ends_with("target/locked/app"), "{document}");
+    let hint = failure["recovery"]["text"].as_str().unwrap();
+    assert!(
+        hint.contains(&format!("directory {} write", locked.display())),
+        "{hint}"
+    );
     assert_eq!(
         failure["fields"]["deleted"][0], "app: web/node_modules/",
         "{document}"
     );
     assert!(!checkout.join("web/node_modules").exists());
+}
+
+#[test]
+fn remove_with_yes_refuses_a_path_that_only_the_manifest_declares_disposable() {
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    git(&checkout, &["add", "mxv.toml"]);
+    git(
+        &checkout,
+        &["commit", "--quiet", "-m", "Declare data disposable"],
+    );
+    write_text(
+        &setup.clone.join(".git/info/exclude"),
+        ".env\ntarget/\nnode_modules/\ndata/\n",
+    );
+    write_text(&checkout.join("data/pg.db"), "rows");
+    let (exit, document) = setup.json(&["remove", "reading-list", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        document["data"]["manifest_paths"][0], "app: data/",
+        "{document}"
+    );
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::workspace::ignored_files",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["paths"][0], "app: data/", "{document}");
+    assert!(
+        document["message"].as_str().unwrap().contains("mxv.toml"),
+        "{document}"
+    );
+    assert!(checkout.join("data/pg.db").exists());
+    let (exit, document) = setup.json(&["remove", "reading-list", "--force", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!checkout.exists());
+}
+
+#[test]
+fn show_and_clean_mark_a_path_that_only_the_manifest_declares_disposable() {
+    let setup = Setup::new();
+    let checkout = setup.created("reading-list");
+    write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    write_text(
+        &setup.clone.join(".git/info/exclude"),
+        ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
+    );
+    write_text(&checkout.join("data/pg.db"), "rows");
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let (_, shown) = setup.json(&["show", "reading-list"]);
+    let paths = shown["data"][0]["disposable_paths"].as_array().unwrap();
+    let source = |path: &str| {
+        paths
+            .iter()
+            .find(|found| found["path"] == path)
+            .map(|found| found["source"].clone())
+            .unwrap()
+    };
+    assert_eq!(source("data/"), "manifest", "{shown}");
+    assert_eq!(source("target/"), "built_in", "{shown}");
+    let (_, document) = setup.json(&["clean", "--all", "--idle", "0s", "--dry-run"]);
+    assert_eq!(
+        document["data"][0]["manifest_paths"][0], "app: data/",
+        "{document}"
+    );
+    let output = setup
+        .command(&["clean", "--all", "--idle", "0s"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(checkout.join("data/pg.db").exists(), "{stderr}");
 }

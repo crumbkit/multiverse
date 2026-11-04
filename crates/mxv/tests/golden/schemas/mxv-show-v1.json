@@ -463,12 +463,17 @@
         "path": {
           "description": "The path relative to the checkout, such as `target/`.",
           "type": "string"
+        },
+        "source": {
+          "description": "What made the path disposable: `built_in` for a name such as\n`target`, `config` for a glob of the config file, or `manifest` for\na glob of the repository's own `mxv.toml` and nothing else.",
+          "$ref": "#/$defs/SourceRow"
         }
       },
       "required": [
         "checkout",
         "path",
-        "bytes"
+        "bytes",
+        "source"
       ]
     },
     "RootSource": {
@@ -583,6 +588,26 @@
         "size",
         "disposable",
         "warnings"
+      ]
+    },
+    "SourceRow": {
+      "description": "What made a path disposable.",
+      "oneOf": [
+        {
+          "description": "One of mxv's built-in directory names, such as `target`.",
+          "type": "string",
+          "const": "built_in"
+        },
+        {
+          "description": "A glob of the person's config file.",
+          "type": "string",
+          "const": "config"
+        },
+        {
+          "description": "A glob of the repository's own `mxv.toml`, and nothing else.",
+          "type": "string",
+          "const": "manifest"
+        }
       ]
     }
   }

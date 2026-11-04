@@ -149,6 +149,17 @@ pub(crate) enum MxvFailure {
         /// What the removal's flags allowed.
         allow: Allow,
     },
+    /// The removal would delete paths that only the repository's own
+    /// `mxv.toml` declares disposable, and `--yes` without `--force` gave
+    /// no person a chance to confirm them.
+    ManifestDisposable {
+        /// The workspace's name.
+        name: String,
+        /// Each such path, with its checkout's name in front.
+        paths: Vec<String>,
+        /// What the removal's flags allowed.
+        allow: Allow,
+    },
     /// The workspace changed while mxv waited for the confirmation, so the
     /// removal would lose more than mxv showed, and mxv removed nothing.
     Changed {
@@ -380,7 +391,7 @@ impl Failure for MxvFailure {
             Self::Exists { .. } => &WORKSPACE_EXISTS,
             Self::BadName { .. } => &WORKSPACE_BAD_NAME,
             Self::Dirty { .. } => &WORKSPACE_DIRTY,
-            Self::IgnoredFiles { .. } => &WORKSPACE_IGNORED_FILES,
+            Self::IgnoredFiles { .. } | Self::ManifestDisposable { .. } => &WORKSPACE_IGNORED_FILES,
             Self::Changed { .. } => &WORKSPACE_CHANGED,
             Self::StrayCommits { .. } => &CHECKOUT_UNREACHABLE_COMMITS,
             Self::Locked { .. } => &CHECKOUT_LOCKED,
@@ -440,6 +451,9 @@ impl Failure for MxvFailure {
                 "move the ignored files you want to keep out of the checkout and run `{}` again; `--force` deletes them with the workspace",
                 remove_line(name, *allow)
             )),
+            Self::ManifestDisposable { name, .. } => hint(format!(
+                "check that the paths hold nothing you want to keep, then answer the prompt of `mxv remove {name}` at a terminal, or pass `--force`, which deletes them with the workspace"
+            )),
             Self::Changed { name, allow } => {
                 Recovery::Run(Call::typed(remove_words(name, *allow, "--dry-run")))
             }
@@ -486,8 +500,11 @@ impl Failure for MxvFailure {
                 ),
                 None => format!("fix {}, which may set only {}", shown(path), settings()),
             }),
+            // Deleting an entry needs write permission on the directory
+            // that holds it, so the hint names that directory.
             Self::PartlyCleaned { name, path, .. } => hint(format!(
-                "make {} deletable, or delete it yourself, and run `mxv clean {name}` again",
+                "give the directory {} write permission, or delete {} yourself, and run `mxv clean {name}` again",
+                shown(path.parent().unwrap_or(path)),
                 shown(path)
             )),
             Self::NoLimit { path } => hint(format!(
@@ -504,7 +521,9 @@ impl Failure for MxvFailure {
 
     fn alternatives(&self) -> Vec<Recovery> {
         match self {
-            Self::Dirty { name, allow, .. } | Self::IgnoredFiles { name, allow, .. } => {
+            Self::Dirty { name, allow, .. }
+            | Self::IgnoredFiles { name, allow, .. }
+            | Self::ManifestDisposable { name, allow, .. } => {
                 vec![run_removal(name, forced(*allow))]
             }
             Self::StrayCommits { name, allow, .. } => vec![run_removal(name, unmerged(*allow))],
@@ -523,6 +542,10 @@ impl Failure for MxvFailure {
             Self::Dirty { name, changes, .. } => vec![
                 Field::new("name", name),
                 Field::new("changes", FieldValue::list(changes.iter())),
+            ],
+            Self::ManifestDisposable { name, paths, .. } => vec![
+                Field::new("name", name),
+                Field::new("paths", FieldValue::list(paths.iter())),
             ],
             Self::IgnoredFiles {
                 name,
@@ -767,6 +790,11 @@ impl fmt::Display for MxvFailure {
                 paths.len(),
                 if paths.len() == 1 { "path" } else { "paths" }
             ),
+            Self::ManifestDisposable { name, paths, .. } => write!(
+                formatter,
+                "the removal of the workspace {name} would delete {}, which only the repository's mxv.toml declares disposable, and --yes alone does not delete such paths",
+                paths.join(", ")
+            ),
             Self::Changed { name, .. } => write!(
                 formatter,
                 "the workspace {name} changed while mxv waited for the confirmation, so the removal would lose more than mxv showed, and mxv removed nothing"
@@ -852,6 +880,7 @@ impl std::error::Error for MxvFailure {
             | Self::Unowned { .. }
             | Self::BranchExists { .. }
             | Self::IgnoredFiles { .. }
+            | Self::ManifestDisposable { .. }
             | Self::Changed { .. }
             | Self::StrayCommits { .. }
             | Self::Locked { .. }

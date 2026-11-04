@@ -13,7 +13,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use crumbkit::{Age, Batch, Document, Output, Row};
-use multiverse::{DisposablePath, Error, Git, KeptPath, Workspace, Workspaces};
+use multiverse::{DisposablePath, DisposableSource, Error, Git, KeptPath, Workspace, Workspaces};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -85,6 +85,9 @@ pub(crate) struct CleanRow {
     /// Each path that the disposable set matches and that the run kept,
     /// with the reason, such as a directory that holds a `.git` entry.
     skipped: Vec<String>,
+    /// The paths of `paths` that only the repository's own `mxv.toml`
+    /// declares disposable, which the prompt named.
+    manifest_paths: Vec<String>,
 }
 
 impl Row for CleanRow {
@@ -97,7 +100,7 @@ impl Row for CleanRow {
         "reason",
         "warnings",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["paths", "skipped"];
+    const LONG_COLUMNS: &'static [&'static str] = &["paths", "skipped", "manifest_paths"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -180,6 +183,11 @@ impl Candidate {
                 Vec::new()
             },
             skipped: self.kept.iter().map(kept_text).collect(),
+            manifest_paths: if deletes {
+                from_manifest(&self.paths)
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -188,6 +196,41 @@ impl Candidate {
 /// `app: target/`.
 fn named(found: &DisposablePath) -> String {
     format!("{}: {}", found.checkout, found.path)
+}
+
+/// Returns each path of `paths` that only the repository's own `mxv.toml`
+/// makes disposable, with its checkout's name in front.
+fn from_manifest(paths: &[DisposablePath]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|found| found.source == DisposableSource::Manifest)
+        .map(named)
+        .collect()
+}
+
+/// Returns the question that `clean` asks before it deletes the paths of
+/// `picked`, which names each path that only a repository's `mxv.toml`
+/// makes disposable, with its workspace.
+fn question(picked: &[&Candidate]) -> String {
+    let mut question = format!(
+        "Delete the disposable directories of {}?",
+        workspaces_text(picked.len())
+    );
+    let declared: Vec<String> = picked
+        .iter()
+        .flat_map(|candidate| {
+            from_manifest(&candidate.paths)
+                .into_iter()
+                .map(|path| format!("{path} in {}", candidate.workspace.name))
+        })
+        .collect();
+    if !declared.is_empty() {
+        question.push_str(&format!(
+            " This deletes {}, which only the repository's mxv.toml declares disposable.",
+            declared.join(", ")
+        ));
+    }
+    question
 }
 
 /// Returns `kept` with its checkout's name in front and its reason, such
@@ -425,6 +468,7 @@ fn clean_one(
     }
     let mut row = candidate.row(CleanState::Cleaned, None, now);
     row.freed = Size(freed);
+    row.manifest_paths = from_manifest(&cleaned.deleted);
     row.paths = deleted;
     row.warnings = joined(&cleaned.warnings);
     let mut kept = candidate.kept.clone();
@@ -500,13 +544,14 @@ pub(crate) fn clean(
     };
     let planned = output.is_dry_run();
     if !planned && !picked.is_empty() {
-        output.confirm(
-            args.yes,
-            &format!(
-                "Delete the disposable directories of {}?",
-                workspaces_text(picked.len())
-            ),
-        )?;
+        let chosen: Vec<&Candidate> = picked
+            .iter()
+            .filter_map(|index| match entries.get(*index) {
+                Some(Ok(candidate)) => Some(candidate),
+                _ => None,
+            })
+            .collect();
+        output.confirm(args.yes, &question(&chosen))?;
     }
     let mut batch = Batch::new(&["clean"], "names", &keys);
     let mut freed: u64 = 0;

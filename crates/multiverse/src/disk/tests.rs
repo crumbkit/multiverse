@@ -11,6 +11,7 @@ use crate::store::Store;
 use crate::testing::{Fixture, fixture, git, write};
 use crate::workspaces::{Mode, NewOutcome, Workspaces};
 
+use crate::disposable::DisposableSource;
 use crate::error::Error;
 
 use super::{Cleaned, DiskUsage, DisposablePath};
@@ -372,4 +373,90 @@ fn measuring_a_checkout_does_not_count_as_a_change_of_it() {
     git(&checkout, &["commit", "--quiet", "-m", "Add notes"]);
     let first = modified(&setup);
     assert_eq!(modified(&setup), first);
+}
+
+#[test]
+fn a_directory_swapped_for_a_symbolic_link_during_the_deletion_is_never_followed() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    let tree = checkout.join("target/b");
+    for index in 0..20 {
+        write_bytes(&tree.join(format!("file-{index}")), 16);
+    }
+    let decoy = setup.fixture.dir.path().join("decoy");
+    for index in 0..20 {
+        // The same names, so a deletion by path through the link would
+        // find and delete them.
+        write_bytes(&decoy.join(format!("file-{index}")), 16);
+    }
+    let mut swapped = false;
+    let result = super::remove_tree_with(&checkout.join("target"), &mut |_| {
+        if !swapped {
+            swapped = true;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the test swaps a directory for a link, as another process would"
+            )]
+            fs::rename(&tree, checkout.join("target/b.old")).unwrap();
+            std::os::unix::fs::symlink(&decoy, &tree).unwrap();
+        }
+    });
+    assert!(swapped);
+    assert!(result.is_err(), "{result:?}");
+    let left = fs::read_dir(&decoy).unwrap().count();
+    assert_eq!(left, 20, "the deletion followed the link into the decoy");
+}
+
+#[test]
+fn a_git_entry_in_any_case_marks_a_nested_repository() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    fs::create_dir_all(checkout.join("node_modules/fork/.GIT")).unwrap();
+    let usage = setup.usage();
+    assert!(usage.disposable.is_empty(), "{usage:?}");
+    assert!(usage.kept[0].reason.contains(".GIT"), "{usage:?}");
+}
+
+#[test]
+fn a_directory_that_looks_like_a_bare_repository_is_kept() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    let bare = checkout.join("target/mirror.git");
+    git(
+        &checkout,
+        &["init", "--quiet", "--bare", "target/mirror.git"],
+    );
+    assert!(bare.join("HEAD").exists());
+    let usage = setup.usage();
+    assert!(usage.disposable.is_empty(), "{usage:?}");
+    assert!(
+        usage.kept[0].reason.contains("target/mirror.git/"),
+        "{usage:?}"
+    );
+}
+
+#[test]
+fn the_disk_usage_marks_a_path_that_only_the_manifest_makes_disposable() {
+    let setup = setup();
+    let checkout = setup.checkout();
+    write(
+        setup.fixture.clone.join(".git/info/exclude"),
+        ".env\ntarget/\nnode_modules/\ndata/\n",
+    );
+    write(checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
+    write_bytes(&checkout.join("data/pg.db"), 1024);
+    write_bytes(&checkout.join("target/debug/app"), 1024);
+    let usage = setup.usage();
+    let sources: Vec<(&str, DisposableSource)> = usage
+        .disposable
+        .iter()
+        .map(|found| (found.path.as_str(), found.source))
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            ("data/", DisposableSource::Manifest),
+            ("target/", DisposableSource::BuiltIn)
+        ]
+    );
 }

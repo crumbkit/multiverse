@@ -1,4 +1,4 @@
-use super::{BadGlob, DisposableSet, PathGlob};
+use super::{BadGlob, DisposableSet, DisposableSource, PathGlob};
 
 fn glob(text: &str) -> PathGlob {
     PathGlob::parse(text).unwrap()
@@ -94,7 +94,8 @@ fn the_built_in_set_holds_the_build_directories_at_any_depth() {
 
 #[test]
 fn a_declared_glob_extends_the_built_in_set() {
-    let set = DisposableSet::built_in().with(&[glob("web/test-results/")]);
+    let set =
+        DisposableSet::built_in().with(&[glob("web/test-results/")], DisposableSource::Config);
     assert!(set.matches("web/test-results/"));
     assert!(set.matches("target/"));
     assert!(!set.matches("test-results/"));
@@ -170,4 +171,21 @@ fn a_clone_glob_follows_the_directory_rule() {
         Err(BadGlob::NotDirectory)
     );
     assert!(PathGlob::parse_clone("web/node_modules/").is_ok());
+}
+
+#[test]
+fn a_path_that_only_the_manifest_declares_comes_from_the_manifest() {
+    let set = DisposableSet::built_in()
+        .with(
+            &[glob("data/"), glob("coverage/")],
+            DisposableSource::Manifest,
+        )
+        .with(&[glob("coverage/")], DisposableSource::Config);
+    assert_eq!(set.source("data/"), Some(DisposableSource::Manifest));
+    assert_eq!(set.source("coverage/"), Some(DisposableSource::Config));
+    assert_eq!(
+        set.source("web/node_modules/"),
+        Some(DisposableSource::BuiltIn)
+    );
+    assert_eq!(set.source(".env"), None);
 }

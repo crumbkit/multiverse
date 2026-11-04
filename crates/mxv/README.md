@@ -445,9 +445,15 @@ deletes the record. It refuses, and changes nothing, in these cases:
   without asking and lists them in `disposable`. A tracked file is never
   disposable, and neither is an ignored file inside a directory that holds
   tracked files, such as an ignored file in a tracked `dist/` directory.
-  A disposable directory that holds a `.git` entry at any depth, such as a
-  nested repository with unpushed commits, also stops the removal and is
-  listed with the ignored paths. When a checkout's `mxv.toml` is invalid,
+  A disposable directory that holds a nested repository at any depth, such
+  as one with unpushed commits, also stops the removal and is listed with
+  the ignored paths. A nested repository is an entry named `.git` in any
+  case, or a directory that holds `HEAD`, `objects/` and `refs/`, as a bare
+  repository does. A path that only the repository's own `mxv.toml` makes
+  disposable, such as `data/`, is deleted only when the person confirms it
+  at the prompt, which names it, or passes `--force`. With `--yes` alone,
+  the removal refuses with `mxv::workspace::ignored_files` and changes
+  nothing. The result lists such paths in `manifest_paths`. When a checkout's `mxv.toml` is invalid,
   mxv uses the built-in set and the config file's globs for it, and the
   result, or the refusal's `warnings` field, says so.
 - A checkout's `HEAD` holds commits that no branch, tag or remote branch
@@ -503,8 +509,10 @@ repository.
 
 `mxv show` prints each workspace's `size`, the bytes its directory takes on
 disk, and `disposable`, the bytes its disposable paths take. `--long` and
-`--full` add `disposable_paths`, each disposable path with its checkout and
-its size, and `kept_paths`, each path that the disposable set matches and
+`--full` add `disposable_paths`, each disposable path with its checkout, its
+size and its `source`: `built_in` for a built-in name, `config` for a glob
+of the config file, or `manifest` for a glob of the repository's own
+`mxv.toml` and nothing else. They also add `kept_paths`, each path that the disposable set matches and
 that mxv keeps, with the reason. A size counts the blocks the file system
 allocated, so a sparse file counts only what it holds. A file with several
 hard links counts once, and mxv never follows a symbolic link. A
@@ -529,9 +537,10 @@ that the repository's `mxv.toml` and the config file declare in
 `disposable`. The globs from both add to the built-in set, and a glob from
 either applies to every checkout of that repository. A path is disposable
 only while `git status` reports it as ignored and a glob matches it, so a
-tracked file is never disposable. A directory that holds a `.git` entry at
-any depth is never disposable, because a nested repository may hold
-commits that exist nowhere else.
+tracked file is never disposable. A directory that holds a nested
+repository at any depth, an entry named `.git` in any case or a directory
+that holds `HEAD`, `objects/` and `refs/`, is never disposable, because it
+may hold commits that exist nowhere else.
 
 A glob is a path relative to the repository's root, written as `git status`
 prints it:
@@ -555,7 +564,12 @@ does not let it widen what `clean` and `remove` delete. Each glob in
 `?`, such as `web/test-results/` or `**/coverage/`. A glob such as `*`,
 `**/*`, `*/` or `.env` fails with `mxv::manifest::invalid` and its line.
 Only the person's own config file may declare a glob that names files, such
-as `*.log`, or a wildcard in the last name. Any glob that is empty, starts
+as `*.log`, or a wildcard in the last name. A literal directory name in
+`mxv.toml` can still name a directory that holds data, such as `data/`, so
+mxv marks each path that only the manifest makes disposable. `show` gives
+it the source `manifest`, the prompts of `clean` and `remove` name it and
+say that it comes from the repository's `mxv.toml`, and `remove --yes`
+refuses it without `--force`. Any glob that is empty, starts
 with `/`, or holds a `..`, `.` or empty component fails, with
 `mxv::manifest::invalid` in `mxv.toml` or `mxv::config::invalid` in the
 config file, and the failure names the glob's line.
@@ -602,12 +616,20 @@ fails a check stays and is listed in `skipped`. When another mxv command
 holds the lock for more than 5 seconds, the workspace is kept with that
 reason.
 
+`clean` deletes by file descriptor, as Rust's `std::fs::remove_dir_all`
+does. It opens each directory relative to its parent with `O_NOFOLLOW` and
+deletes the directory's entries relative to it. A directory that another
+process swaps for a symbolic link during the deletion is never followed:
+`clean` deletes the link or fails on it, and touches nothing outside the
+checkout.
+
 A workspace that mxv cannot find, read or measure fails alone, the other
 workspaces are still cleaned, and `clean` exits with 1. When a path cannot
 be deleted in full, such as a directory without write permission, `clean`
 goes on with the path's other entries and with the workspace's other paths.
 The workspace then fails with `mxv::file::unwritable`, whose `path` names
-the first entry that could not be deleted, `deleted` lists the paths that
+the first entry that could not be deleted, and whose hint names the
+directory that needs write permission, `deleted` lists the paths that
 were deleted, and `freed` gives the bytes freed.
 
 `freed` is measured, from each path's size before and after its deletion.

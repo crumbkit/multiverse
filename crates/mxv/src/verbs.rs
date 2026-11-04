@@ -307,10 +307,29 @@ pub(crate) fn remove(
             RemovalResult::new(&removal, true).with_docker(containers, names),
         ));
     }
-    output.confirm(
-        args.yes,
-        &format!("Remove the workspace {name}, its checkouts and its record?"),
-    )?;
+    // A repository's own mxv.toml is shared, so the paths that only it
+    // makes disposable are deleted only when a person confirms them at the
+    // prompt, or when `--force` allows discarding them.
+    let from_manifest = !args.force && !removal.manifest.is_empty();
+    // `Yes` hides its flag, and only its default holds no `--yes`.
+    let passed_yes = args.yes != crumbkit::Yes::default();
+    if from_manifest && passed_yes {
+        return Err(MxvFailure::ManifestDisposable {
+            name: name.to_string(),
+            paths: removal.manifest.clone(),
+            allow,
+        }
+        .into());
+    }
+    let question = if from_manifest {
+        format!(
+            "Remove the workspace {name}, its checkouts and its record? It deletes {}, which only the repository's mxv.toml declares disposable.",
+            removal.manifest.join(", ")
+        )
+    } else {
+        format!("Remove the workspace {name}, its checkouts and its record?")
+    };
+    output.confirm(args.yes, &question)?;
     if !running.is_empty() {
         processes::stop_all(environment, &removal.workspace)?;
     }

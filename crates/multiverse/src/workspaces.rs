@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::backend::{Backend, INITIALIZING};
-use crate::disposable::{DisposableSet, PathGlob};
+use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
@@ -173,6 +173,10 @@ fn loses_more(fresh: &Removal, confirmed: &Removal) -> bool {
             .discarded
             .iter()
             .any(|path| !confirmed.discarded.contains(path))
+        || fresh
+            .manifest
+            .iter()
+            .any(|path| !confirmed.manifest.contains(path))
 }
 
 /// What removing a workspace does, or did.
@@ -194,6 +198,10 @@ pub struct Removal {
     /// because the caller allowed it, in the form of
     /// [`RemovalPlan::Dirty`] and [`RemovalPlan::IgnoredFiles`].
     pub discarded: Vec<String>,
+    /// The paths of `disposable` that only a glob of the repository's own
+    /// `mxv.toml` makes disposable, which a caller deletes only after the
+    /// person confirms them or allows discarding changes.
+    pub manifest: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
     /// `mxv.toml` declares, such as an invalid manifest.
     pub warnings: Vec<String>,
@@ -382,8 +390,8 @@ impl<B: Backend> Workspaces<B> {
         };
         (
             DisposableSet::built_in()
-                .with(&declared)
-                .with(&self.disposable),
+                .with(&declared, DisposableSource::Manifest)
+                .with(&self.disposable, DisposableSource::Config),
             warning,
         )
     }
@@ -612,6 +620,7 @@ impl<B: Backend> Workspaces<B> {
         let mut ignored = Vec::new();
         let mut disposables = Vec::new();
         let mut warnings = Vec::new();
+        let mut manifest = Vec::new();
         for checkout in &workspace.checkouts {
             let source = checkout.source.is_dir();
             let entry = Entry::at(&checkout.path)?;
@@ -654,8 +663,11 @@ impl<B: Backend> Workspaces<B> {
                     // A directory that holds a `.git` entry may hold a
                     // repository with unpushed work, so it is never
                     // deleted without the caller's leave.
-                    if set.matches(path) && crate::disk::nested_git(&checkout.path, path).is_none()
-                    {
+                    let source = set.source(path);
+                    if source.is_some() && crate::disk::nested_git(&checkout.path, path).is_none() {
+                        if source == Some(DisposableSource::Manifest) {
+                            manifest.push(named(path));
+                        }
                         disposables.push(named(path));
                     } else {
                         ignored.push(named(path));
@@ -731,6 +743,7 @@ impl<B: Backend> Workspaces<B> {
             allow,
             disposable: disposables,
             discarded: changes,
+            manifest,
             warnings,
         }))
     }

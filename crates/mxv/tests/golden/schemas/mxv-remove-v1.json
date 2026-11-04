@@ -540,6 +540,13 @@
           "description": "Whether `--force` allowed discarding uncommitted changes, untracked\nfiles and ignored files.",
           "type": "boolean"
         },
+        "manifest_paths": {
+          "description": "The paths of `disposable` that only the repository's own `mxv.toml`\ndeclares disposable, which mxv deletes only after the person\nconfirmed them at the prompt or passed `--force`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "name": {
           "description": "The workspace's name.",
           "type": "string"
@@ -574,6 +581,7 @@
         "discarded",
         "containers",
         "volumes",
+        "manifest_paths",
         "warnings"
       ]
     }

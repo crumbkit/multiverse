@@ -432,6 +432,7 @@ mxv clean --all --dry-run
 
 - `paths`: Each disposable path that the run deleted, or would delete, with its checkout's name in front, such as `app: target/`.
 - `skipped`: Each path that the disposable set matches and that the run kept, with the reason, such as a directory that holds a `.git` entry.
+- `manifest_paths`: The paths of `paths` that only the repository's own `mxv.toml` declares disposable, which the prompt named.
 
 Effects: destructive, idempotent, closed-world.
 

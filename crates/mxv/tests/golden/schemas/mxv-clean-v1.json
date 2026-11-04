@@ -416,6 +416,13 @@
           "format": "uint64",
           "minimum": 0
         },
+        "manifest_paths": {
+          "description": "The paths of `paths` that only the repository's own `mxv.toml`\ndeclares disposable, which the prompt named.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "modified": {
           "description": "When a file or directory of the workspace's checkouts outside the\ndisposable directories, or a commit or staged change, last changed,\nor null when none exists.",
           "type": [

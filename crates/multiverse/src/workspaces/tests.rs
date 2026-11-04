@@ -1074,3 +1074,27 @@ fn an_invalid_manifest_warns_in_the_removal_plan() {
     let removal = ready(&setup, "reading-list", NOTHING);
     assert_eq!(removal.warnings.len(), 1, "{removal:?}");
 }
+
+#[test]
+fn the_removal_plan_marks_a_path_that_only_the_manifest_makes_disposable() {
+    let mut setup = setup();
+    write(
+        setup.fixture.clone.join(".git/info/exclude"),
+        "data/\ncoverage/\ntarget/\nmxv.toml\n",
+    );
+    let workspace = created(&setup, "reading-list");
+    let checkout = &workspace.checkouts[0].path;
+    write(
+        checkout.join("mxv.toml"),
+        "disposable = [\"data/\", \"coverage/\"]\n",
+    );
+    for dir in ["data", "coverage", "target"] {
+        fs::create_dir_all(checkout.join(dir)).unwrap();
+        write(checkout.join(dir).join("file"), "");
+    }
+    setup.workspaces = setup
+        .workspaces
+        .with_disposable(vec![PathGlob::parse("coverage/").unwrap()]);
+    let removal = ready(&setup, "reading-list", FORCE);
+    assert_eq!(removal.manifest, ["app: data/"]);
+}

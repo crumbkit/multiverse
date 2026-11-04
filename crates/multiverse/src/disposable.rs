@@ -273,6 +273,20 @@ fn chars_match(pattern: &[char], name: &[char]) -> bool {
     }
 }
 
+/// What made a path disposable, from the most trusted source to the least.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum DisposableSource {
+    /// One of mxv's built-in [`DISPOSABLE`] directory names.
+    BuiltIn,
+    /// A glob of the person's config file.
+    Config,
+    /// A glob of the repository's own `mxv.toml` and nothing else. A
+    /// repository is shared, so `mxv remove` deletes such a path only after
+    /// the person confirms it at the prompt or passes `--force`.
+    Manifest,
+}
+
 /// The globs that name a checkout's disposable paths: the built-in
 /// [`DISPOSABLE`] directories at any depth, and the globs that the
 /// repository's manifest and the person's config file declare.
@@ -282,8 +296,8 @@ fn chars_match(pattern: &[char], name: &[char]) -> bool {
 /// file inside a directory that holds tracked files, is never disposable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisposableSet {
-    /// The globs.
-    globs: Vec<PathGlob>,
+    /// The globs, each with where it came from.
+    globs: Vec<(PathGlob, DisposableSource)>,
 }
 
 impl DisposableSet {
@@ -295,14 +309,16 @@ impl DisposableSet {
             globs: DISPOSABLE
                 .iter()
                 .filter_map(|name| PathGlob::parse(&format!("{name}/")).ok())
+                .map(|glob| (glob, DisposableSource::BuiltIn))
                 .collect(),
         }
     }
 
-    /// Returns the set with `globs` added.
+    /// Returns the set with `globs`, which came from `source`, added.
     #[must_use]
-    pub fn with(mut self, globs: &[PathGlob]) -> Self {
-        self.globs.extend(globs.iter().cloned());
+    pub fn with(mut self, globs: &[PathGlob], source: DisposableSource) -> Self {
+        self.globs
+            .extend(globs.iter().cloned().map(|glob| (glob, source)));
         self
     }
 
@@ -310,6 +326,18 @@ impl DisposableSet {
     /// is disposable.
     #[must_use]
     pub fn matches(&self, path: &str) -> bool {
-        self.globs.iter().any(|glob| glob.matches(path))
+        self.source(path).is_some()
+    }
+
+    /// Returns the most trusted source of a glob that matches `path`, or
+    /// `None` when no glob matches it. A path that a built-in name or the
+    /// config file matches never counts as coming from the manifest.
+    #[must_use]
+    pub fn source(&self, path: &str) -> Option<DisposableSource> {
+        self.globs
+            .iter()
+            .filter(|(glob, _)| glob.matches(path))
+            .map(|(_, source)| *source)
+            .min()
     }
 }

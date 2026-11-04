@@ -6,8 +6,8 @@ use std::fmt;
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
-    Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, Fate, Kind, ProcessState,
-    ProcessStatus, Removal, Workspace,
+    Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource, Fate, Kind,
+    ProcessState, ProcessStatus, Removal, Workspace,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -254,6 +254,34 @@ pub(crate) struct DisposablePathRow {
     path: String,
     /// The bytes that the path takes on disk.
     bytes: Size,
+    /// What made the path disposable: `built_in` for a name such as
+    /// `target`, `config` for a glob of the config file, or `manifest` for
+    /// a glob of the repository's own `mxv.toml` and nothing else.
+    source: SourceRow,
+}
+
+/// What made a path disposable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceRow {
+    /// One of mxv's built-in directory names, such as `target`.
+    BuiltIn,
+    /// A glob of the person's config file.
+    Config,
+    /// A glob of the repository's own `mxv.toml`, and nothing else.
+    Manifest,
+}
+
+impl From<DisposableSource> for SourceRow {
+    fn from(source: DisposableSource) -> Self {
+        match source {
+            DisposableSource::BuiltIn => Self::BuiltIn,
+            DisposableSource::Config => Self::Config,
+            // A source that a later library adds counts as the least
+            // trusted one.
+            _ => Self::Manifest,
+        }
+    }
 }
 
 impl Row for ShowRow {
@@ -289,6 +317,7 @@ impl ShowRow {
                     checkout: found.checkout.clone(),
                     path: found.path.clone(),
                     bytes: Size(found.bytes),
+                    source: found.source.into(),
                 })
                 .collect(),
             kept_paths: usage
@@ -377,6 +406,10 @@ pub(crate) struct RemovalResult {
     /// The docker volumes that the removal deletes because of
     /// `--delete-volumes`, named and anonymous.
     volumes: Vec<String>,
+    /// The paths of `disposable` that only the repository's own `mxv.toml`
+    /// declares disposable, which mxv deletes only after the person
+    /// confirmed them at the prompt or passed `--force`.
+    manifest_paths: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
     /// `mxv.toml` declares, such as an invalid manifest.
     warnings: Vec<String>,
@@ -504,6 +537,7 @@ impl RemovalResult {
             discarded: removal.discarded.clone(),
             containers: Vec::new(),
             volumes: Vec::new(),
+            manifest_paths: removal.manifest.clone(),
             warnings: removal.warnings.clone(),
             planned,
         }
@@ -539,10 +573,17 @@ impl fmt::Display for RemovalResult {
             writeln!(formatter, "mxv {discards} {path}.")?;
         }
         for path in &self.disposable {
-            writeln!(
-                formatter,
-                "mxv {deletes} the ignored build directory {path}."
-            )?;
+            if self.manifest_paths.contains(path) {
+                writeln!(
+                    formatter,
+                    "mxv {deletes} the ignored directory {path}, which only the repository's mxv.toml declares disposable."
+                )?;
+            } else {
+                writeln!(
+                    formatter,
+                    "mxv {deletes} the ignored build directory {path}."
+                )?;
+            }
         }
         for container in &self.containers {
             writeln!(formatter, "mxv {removes} the docker container {container}.")?;
