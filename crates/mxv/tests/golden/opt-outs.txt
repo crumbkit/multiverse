@@ -88,7 +88,7 @@ twins/no-twin: mxv new triage --repo app --dry-run
 
 mxv declares 2 customisations.
 
-root-verbs: mxv new, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove
+root-verbs: mxv new, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove, mxv clean
   Declares: Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
 

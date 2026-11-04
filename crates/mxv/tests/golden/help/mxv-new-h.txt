@@ -7,6 +7,7 @@ Arguments:
 
 Options:
       --repo <PATH>  The git repository to check out, or any directory inside it
+      --no-clone     Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
       --dry-run      Report what the command would change, and change nothing
   -h, --help         Print help (see more with '--help')
 

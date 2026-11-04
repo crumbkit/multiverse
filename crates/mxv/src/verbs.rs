@@ -1,24 +1,25 @@
 //! The workspace verbs `new`, `list`, `show`, `cd` and `remove`, and the
-//! documents they print.
+//! documents they print. `clean` lives in its own module.
 
 use crumbkit::{Batch, Call, Document, Listing, Output, Prose};
 use multiverse::{
-    Allow, Git, Mode, NewOutcome, RemovalOutcome, RemovalPlan, Store, WorkspaceName, Workspaces,
+    Allow, Cloned, DEFAULT_CLONE_ON_NEW, Git, Manifest, Mode, NewOutcome, PathGlob, RemovalOutcome,
+    RemovalPlan, Store, Workspace, WorkspaceName, Workspaces,
 };
 
 use crate::cli::{CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
-use crate::rows::{PlacedRow, RemovalResult, WorkspaceRow};
+use crate::rows::{NewRow, RemovalResult, ShowRow, WorkspaceRow};
 use crate::run_failures::RunFailure;
 
 /// The document that `mxv new` prints.
-pub(crate) const NEW: Document<PlacedRow> = Document::new(
+pub(crate) const NEW: Document<NewRow> = Document::new(
     "mxv",
     "new",
     1,
-    "The workspace that the run created, or would create on a dry run.",
+    "The workspace that the run created, or would create on a dry run, and the ignored directories that it cloned into the checkout.",
 );
 
 /// The document that `mxv list` prints.
@@ -31,11 +32,11 @@ pub(crate) const LIST: Document<Listing<WorkspaceRow>> = Document::new(
 .when_empty("no workspace exists yet, and `mxv new <NAME> --repo <PATH>` creates one");
 
 /// The document that `mxv show` prints.
-pub(crate) const SHOW: Document<Batch<PlacedRow, MxvFailure>> = Document::new(
+pub(crate) const SHOW: Document<Batch<ShowRow, MxvFailure>> = Document::new(
     "mxv",
     "show",
     1,
-    "The workspaces with the given names, and a failure for each name that no workspace has.",
+    "The workspaces with the given names and their sizes on disk, and a failure for each name that no workspace has.",
 );
 
 /// The document that `mxv cd` prints.
@@ -72,12 +73,52 @@ fn workspaces(environment: &Environment) -> Result<Workspaces<Git>, MxvFailure> 
     Ok(Workspaces::new(store(environment)?, Git))
 }
 
+/// Returns the workspaces whose records `environment` names, made by git,
+/// with the disposable globs of the config file.
+pub(crate) fn configured(environment: &Environment) -> Result<Workspaces<Git>, MxvFailure> {
+    Ok(workspaces(environment)?.with_disposable(environment.config()?.disposable))
+}
+
+/// Returns the globs of the ignored directories that `new` clones from the
+/// repository at `source`: the config file's `clone_on_new`, or else
+/// [`DEFAULT_CLONE_ON_NEW`], and the `clone_on_new` of the repository's
+/// manifest. A manifest that does not parse adds nothing, and its error
+/// becomes the warning that the result returns.
+fn clone_globs(
+    environment: &Environment,
+    source: &std::path::Path,
+) -> Result<(Vec<PathGlob>, Option<String>), MxvFailure> {
+    let mut globs = match environment.config()?.clone_on_new {
+        Some(globs) => globs,
+        None => DEFAULT_CLONE_ON_NEW
+            .iter()
+            .filter_map(|text| PathGlob::parse_clone(text).ok())
+            .collect(),
+    };
+    match Manifest::read(source) {
+        Ok(manifest) => globs.extend(
+            manifest
+                .map(|manifest| manifest.clone_on_new)
+                .unwrap_or_default(),
+        ),
+        Err(error) => {
+            return Ok((
+                globs,
+                Some(format!(
+                    "mxv cloned only the directories that the config file names, because the repository's manifest does not parse: {error}"
+                )),
+            ));
+        }
+    }
+    Ok((globs, None))
+}
+
 /// Creates the workspace that `args` names, or plans it on a dry run.
 pub(crate) fn new(
     output: &Output,
     environment: &Environment,
     args: &NewArgs,
-) -> Result<PlacedRow, MxvFailure> {
+) -> Result<NewRow, MxvFailure> {
     let name = parse_name(&args.name)?;
     let mode = if output.is_dry_run() {
         Mode::DryRun
@@ -85,9 +126,15 @@ pub(crate) fn new(
         Mode::Change
     };
     let root = environment.root()?;
-    match workspaces(environment)?.create(&root.path, &name, &args.repo, mode)? {
+    let workspaces = workspaces(environment)?;
+    match workspaces.create(&root.path, &name, &args.repo, mode)? {
         NewOutcome::Created(workspace) | NewOutcome::Planned(workspace) => {
-            Ok(PlacedRow::new(&workspace, &root))
+            let cloned = if args.no_clone {
+                Cloned::default()
+            } else {
+                clone_into(environment, &workspaces, &workspace, mode)?
+            };
+            Ok(NewRow::new(&workspace, &root, cloned))
         }
         NewOutcome::NameTaken(_) => Err(MxvFailure::Exists {
             name: name.to_string(),
@@ -99,19 +146,69 @@ pub(crate) fn new(
     }
 }
 
+/// Clones the ignored directories of the repository of `workspace` that
+/// the config file and the manifest name into its checkout, or names them
+/// on a dry run. The workspace exists by then, so a failure of the cloning
+/// becomes the warning of the result.
+fn clone_into(
+    environment: &Environment,
+    workspaces: &Workspaces<Git>,
+    workspace: &Workspace,
+    mode: Mode,
+) -> Result<Cloned, MxvFailure> {
+    let Some(source) = workspace
+        .checkouts
+        .first()
+        .map(|checkout| checkout.source.clone())
+    else {
+        return Ok(Cloned::default());
+    };
+    let (globs, warning) = clone_globs(environment, &source)?;
+    let mut cloned = workspaces
+        .clone_ignored(workspace, &globs, mode)
+        .unwrap_or_else(|error| {
+            let mut failed = Cloned::default();
+            failed.warning = Some(format!("mxv cloned no ignored directory: {error}"));
+            failed
+        });
+    if cloned.warning.is_none() {
+        cloned.warning = warning;
+    }
+    Ok(cloned)
+}
+
 /// Returns the first page of the workspaces: a row for each record that
-/// mxv cannot read, first, and then the workspaces in name order.
+/// mxv cannot read, first, and then the workspaces in name order. With
+/// `--sizes`, each workspace's row on the page holds its sizes, and only
+/// the workspaces on the page are measured.
 pub(crate) fn list(
     environment: &Environment,
     args: &ListArgs,
 ) -> Result<Listing<WorkspaceRow>, MxvFailure> {
     let records = store(environment)?.list()?;
-    let rows = records
+    let measure = if args.sizes {
+        Some(configured(environment)?)
+    } else {
+        None
+    };
+    let shown = args.page.limit().unwrap_or(usize::MAX);
+    let mut rows: Vec<WorkspaceRow> = records
         .problems
         .iter()
         .map(WorkspaceRow::unreadable)
-        .chain(records.workspaces.iter().map(WorkspaceRow::from))
         .collect();
+    for workspace in &records.workspaces {
+        let row = WorkspaceRow::from(workspace);
+        rows.push(match &measure {
+            // A workspace that mxv cannot measure keeps its row with the
+            // failure as its problem, and the others are still measured.
+            Some(workspaces) if rows.len() < shown => match workspaces.disk_usage(workspace) {
+                Ok(usage) => row.with_usage(&usage),
+                Err(error) => row.with_problem(format!("mxv cannot measure it: {error}")),
+            },
+            _ => row,
+        });
+    }
     Ok(args.page.first_of(rows).described("workspaces").next(
         Call::new(&["show"]).arg("names"),
         "takes up to 100 names in one call.",
@@ -123,18 +220,17 @@ pub(crate) fn list(
 pub(crate) fn show(
     environment: &Environment,
     args: &ShowArgs,
-) -> Result<Batch<PlacedRow, MxvFailure>, MxvFailure> {
-    let store = store(environment)?;
+) -> Result<Batch<ShowRow, MxvFailure>, MxvFailure> {
+    let workspaces = configured(environment)?;
     let root = environment.root()?;
     let mut batch = Batch::new(&["show"], "names", &args.names);
     for text in &args.names {
         let found = parse_name(text).and_then(|name| {
-            store
-                .read(&name)?
-                .map(|workspace| PlacedRow::new(&workspace, &root))
-                .ok_or(MxvFailure::NotFound {
-                    name: name.to_string(),
-                })
+            let workspace = workspaces.find(&name)?.ok_or(MxvFailure::NotFound {
+                name: name.to_string(),
+            })?;
+            let usage = workspaces.disk_usage(&workspace)?;
+            Ok(ShowRow::new(&workspace, &root, &usage))
         });
         batch.push(found);
     }
@@ -162,7 +258,7 @@ pub(crate) fn remove(
     args: &RemoveArgs,
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {
     let name = parse_name(&args.name)?;
-    let workspaces = workspaces(environment)?;
+    let workspaces = configured(environment)?;
     // Running processes stop the removal unless it is forced, and a forced
     // removal stops them after the person confirms.
     let allow = Allow {
@@ -211,10 +307,29 @@ pub(crate) fn remove(
             RemovalResult::new(&removal, true).with_docker(containers, names),
         ));
     }
-    output.confirm(
-        args.yes,
-        &format!("Remove the workspace {name}, its checkouts and its record?"),
-    )?;
+    // A repository's own mxv.toml is shared, so the paths that only it
+    // makes disposable are deleted only when a person confirms them at the
+    // prompt, or when `--force` allows discarding them.
+    let from_manifest = !args.force && !removal.manifest.is_empty();
+    // `Yes` hides its flag, and only its default holds no `--yes`.
+    let passed_yes = args.yes != crumbkit::Yes::default();
+    if from_manifest && passed_yes {
+        return Err(MxvFailure::ManifestDisposable {
+            name: name.to_string(),
+            paths: removal.manifest.clone(),
+            allow,
+        }
+        .into());
+    }
+    let question = if from_manifest {
+        format!(
+            "Remove the workspace {name}, its checkouts and its record? It deletes {}, which only the repository's mxv.toml declares disposable.",
+            removal.manifest.join(", ")
+        )
+    } else {
+        format!("Remove the workspace {name}, its checkouts and its record?")
+    };
+    output.confirm(args.yes, &question)?;
     if !running.is_empty() {
         processes::stop_all(environment, &removal.workspace)?;
     }
@@ -250,7 +365,14 @@ fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure 
             changes,
             allow,
         },
-        RemovalPlan::IgnoredFiles { paths, .. } => MxvFailure::IgnoredFiles { name, paths, allow },
+        RemovalPlan::IgnoredFiles {
+            paths, warnings, ..
+        } => MxvFailure::IgnoredFiles {
+            name,
+            paths,
+            warnings,
+            allow,
+        },
         RemovalPlan::StrayCommits {
             checkout, commits, ..
         } => MxvFailure::StrayCommits {

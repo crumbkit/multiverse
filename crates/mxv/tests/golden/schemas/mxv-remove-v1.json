@@ -540,6 +540,13 @@
           "description": "Whether `--force` allowed discarding uncommitted changes, untracked\nfiles and ignored files.",
           "type": "boolean"
         },
+        "manifest_paths": {
+          "description": "The paths of `disposable` that only the repository's own `mxv.toml`\ndeclares disposable, which mxv deletes only after the person\nconfirmed them at the prompt or passed `--force`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "name": {
           "description": "The workspace's name.",
           "type": "string"
@@ -550,6 +557,13 @@
         },
         "volumes": {
           "description": "The docker volumes that the removal deletes because of\n`--delete-volumes`, named and anonymous.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest.",
           "type": "array",
           "items": {
             "type": "string"
@@ -566,7 +580,9 @@
         "disposable",
         "discarded",
         "containers",
-        "volumes"
+        "volumes",
+        "manifest_paths",
+        "warnings"
       ]
     }
   }

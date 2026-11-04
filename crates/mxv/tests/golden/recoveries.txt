@@ -79,6 +79,10 @@ mxv status -w missing
   run mxv list
     exits 0
 
+mxv clean --over-limit --dry-run
+  fails with mxv::config::no_limit
+  hint
+
 mxv remove changed --dry-run
   fails with mxv::workspace::dirty
   hint

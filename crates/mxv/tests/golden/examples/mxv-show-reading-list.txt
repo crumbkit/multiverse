@@ -1,2 +1,2 @@
-NAME          BRANCH        PATH                          ROOT             ROOT_SOURCE  PORTS
-reading-list  reading-list  /home/agent/mxv/reading-list  /home/agent/mxv  config       {}
+NAME          BRANCH        PATH                          ROOT             ROOT_SOURCE  SIZE  DISPOSABLE  PORTS
+reading-list  reading-list  /home/agent/mxv/reading-list  /home/agent/mxv  config       0 B   0 B         {}

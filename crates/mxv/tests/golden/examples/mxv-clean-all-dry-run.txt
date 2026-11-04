@@ -1,0 +1,2 @@
+NAME          STATE  FREED  DISPOSABLE  REASON
+reading-list  kept   0 B    0 B         it holds no disposable directory

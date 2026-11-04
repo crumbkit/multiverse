@@ -1,22 +1,41 @@
 //! The person's config file, `$XDG_CONFIG_HOME/mxv/config.toml`, which can
-//! name the workspace root and the range of host ports that `mxv up`
-//! allocates from.
+//! name the workspace root, the range of host ports that `mxv up`
+//! allocates from, and how mxv treats the disk that build output takes.
 //!
-//! The file is TOML with two optional keys. `root` is a string that is an
-//! absolute path, or a path that starts with `~/`, which starts at the home
-//! directory. `ports_range` is an array of two ports, the first and the
-//! last, such as `[20000, 29999]`, from 1024 to 32767 with the first no
-//! greater than the last. mxv parses the file strictly: any other key, a
-//! value of another type, a relative path or text that is not TOML fails
-//! with `mxv::config::invalid`, which names the file and the line.
+//! The file is TOML with these optional keys.
+//!
+//! - `root` is a string that is an absolute path, or a path that starts
+//!   with `~/`, which starts at the home directory.
+//! - `ports_range` is an array of two ports, the first and the last, such
+//!   as `[20000, 29999]`, from 1024 to 32767 with the first no greater than
+//!   the last.
+//! - `disposable` is an array of globs relative to a repository's root,
+//!   such as `[".venv/"]`, which extend the built-in disposable directories
+//!   in every workspace.
+//! - `clone_on_new` is an array of globs of the ignored directories that
+//!   `mxv new` clones from the repository into the new checkout. It
+//!   replaces the default `["node_modules/"]`, so `[]` clones nothing.
+//! - `clean_idle` is how long a checkout must go unmodified before
+//!   `mxv clean` treats it as idle, such as `"7d"`.
+//! - `max_disposable` is the size that `mxv clean --over-limit` keeps the
+//!   disposable directories of every workspace under, such as `"50GiB"`.
+//!
+//! mxv parses the file strictly: any other key, a value of another type, a
+//! relative path, a glob that is absolute or holds `..`, a `clone_on_new`
+//! glob that names `target`, or text that is not TOML fails with
+//! `mxv::config::invalid`, which names the file and the line.
 
 use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use multiverse::{BadGlob, PathGlob};
+use toml::Spanned;
 use toml::de::{DeTable, DeValue};
 
 use crate::failures::MxvFailure;
+use crate::units::{parse_age, parse_size};
 
 #[cfg(test)]
 mod tests;
@@ -30,6 +49,19 @@ pub(crate) struct Config {
     /// The host ports that `mxv up` allocates from, or `None` when the file
     /// sets no range.
     pub(crate) ports_range: Option<RangeInclusive<u16>>,
+    /// The person's globs of disposable paths, which extend the built-in
+    /// set in every workspace.
+    pub(crate) disposable: Vec<PathGlob>,
+    /// The globs of the ignored directories that `mxv new` clones, or
+    /// `None` when the file names none and the default applies.
+    pub(crate) clone_on_new: Option<Vec<PathGlob>>,
+    /// How long a checkout must go unmodified before `mxv clean` treats it
+    /// as idle, or `None` for the default.
+    pub(crate) clean_idle: Option<Duration>,
+    /// The bytes that `mxv clean --over-limit` keeps the disposable
+    /// directories of every workspace under, or `None` when the file sets
+    /// no limit.
+    pub(crate) max_disposable: Option<u64>,
 }
 
 /// The lowest port that `ports_range` may hold. Ports below it are
@@ -91,17 +123,86 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
                 config.ports_range =
                     Some(ports_range(value.get_ref()).map_err(|reason| bad(at, reason))?);
             }
+            "disposable" => {
+                config.disposable = globs(name, value, PathGlob::parse, &bad)?;
+            }
+            "clone_on_new" => {
+                config.clone_on_new = Some(globs(name, value, PathGlob::parse_clone, &bad)?);
+            }
+            "clean_idle" => {
+                config.clean_idle =
+                    Some(unit(name, value.get_ref(), parse_age).map_err(|reason| bad(at, reason))?);
+            }
+            "max_disposable" => {
+                config.max_disposable = Some(
+                    unit(name, value.get_ref(), parse_size).map_err(|reason| bad(at, reason))?,
+                );
+            }
             _ => {
                 return Err(bad(
                     at,
                     format!(
-                        "the key {name:?} is not a setting; the settings are `root` and `ports_range`"
+                        "the key {name:?} is not a setting; the settings are {}",
+                        SETTINGS.join(", ")
                     ),
                 ));
             }
         }
     }
     Ok(config)
+}
+
+/// The keys that the config file may set, as a failure names them.
+pub(crate) const SETTINGS: &[&str] = &[
+    "`root`",
+    "`ports_range`",
+    "`disposable`",
+    "`clone_on_new`",
+    "`clean_idle`",
+    "`max_disposable`",
+];
+
+/// Returns the globs of the array `value` of the key `key`, each read with
+/// `parse`, or the failure that `bad` builds at the line of the value or
+/// of the glob at fault.
+fn globs(
+    key: &str,
+    value: &Spanned<DeValue<'_>>,
+    parse: fn(&str) -> Result<PathGlob, BadGlob>,
+    bad: &impl Fn(Option<usize>, String) -> MxvFailure,
+) -> Result<Vec<PathGlob>, MxvFailure> {
+    let shape = || {
+        bad(
+            Some(value.span().start),
+            format!("`{key}` must be an array of globs, such as [\"web/test-results/\"]"),
+        )
+    };
+    let items = value.get_ref().as_array().ok_or_else(shape)?;
+    items
+        .iter()
+        .map(|item| {
+            let text = item.get_ref().as_str().ok_or_else(shape)?;
+            parse(text).map_err(|reason| {
+                bad(
+                    Some(item.span().start),
+                    format!("the `{key}` glob {text:?} is refused: {reason}"),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Returns the value of the key `key`, a string that `parse` reads, or the
+/// reason it is not one.
+fn unit<T>(
+    key: &str,
+    value: &DeValue<'_>,
+    parse: fn(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("`{key}` must be a string, such as \"7d\" or \"50GiB\""))?;
+    parse(text).map_err(|reason| format!("`{key}` is refused: {reason}"))
 }
 
 /// Returns the root that `value` names, with `~` meaning `home`, or the

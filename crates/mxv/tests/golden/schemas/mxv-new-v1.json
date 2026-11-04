@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/new/v1",
-  "description": "The workspace that the run created, or would create on a dry run.",
+  "description": "The workspace that the run created, or would create on a dry run, and the ignored directories that it cloned into the checkout.",
   "type": "object",
   "properties": {
     "data": {
-      "$ref": "#/$defs/PlacedRow"
+      "$ref": "#/$defs/NewRow"
     },
     "dry_run": {
       "description": "Present, and true, when the run was a dry run that changed nothing.",
@@ -67,8 +67,8 @@
         "commit"
       ]
     },
-    "PlacedRow": {
-      "description": "One workspace and the workspace root that the run used, as `new` and\n`show` print it.",
+    "NewRow": {
+      "description": "The workspace that `new` created, or would create on a dry run, and the\nignored directories that it cloned into the checkout.",
       "type": "object",
       "properties": {
         "branch": {
@@ -80,6 +80,20 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/CheckoutRow"
+          }
+        },
+        "clone_warning": {
+          "description": "Why `new` cloned fewer directories than the globs name, such as a\nfile system that cannot clone, or null. `new` never copies the\ndirectories in full.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cloned": {
+          "description": "Each ignored directory of the repository that `new` cloned into the\ncheckout, or would clone on a dry run, with the checkout's name in\nfront, such as `app: web/node_modules/`. A clone shares its disk\nwith the repository's copy until a file in either changes.",
+          "type": "array",
+          "items": {
+            "type": "string"
           }
         },
         "name": {
@@ -122,7 +136,9 @@
         "path",
         "root",
         "root_source",
-        "ports"
+        "ports",
+        "cloned",
+        "clone_warning"
       ]
     },
     "RootSource": {

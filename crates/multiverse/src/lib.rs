@@ -16,6 +16,9 @@
 
 mod backend;
 mod clock;
+mod clone;
+mod disk;
+mod disposable;
 mod docker;
 mod error;
 mod git;
@@ -32,6 +35,11 @@ mod workspaces;
 
 pub use crate::backend::{Backend, Changes, INITIALIZING, Listed, Repository};
 pub use crate::clock::FOLLOW_INTERVAL;
+pub use crate::clone::{Cloned, UNSUPPORTED};
+pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};
+pub use crate::disposable::{
+    BadGlob, CLONE_NEVER, DEFAULT_CLONE_ON_NEW, DisposableSet, DisposableSource, PathGlob,
+};
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::manifest::{

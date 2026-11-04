@@ -6,14 +6,15 @@ use std::fmt;
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
-    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Kind, ProcessState, ProcessStatus, Removal,
-    Workspace,
+    Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource, Fate, Kind,
+    ProcessState, ProcessStatus, Removal, Workspace,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::environment::{Root, RootSource};
 use crate::failures::remove_line;
+use crate::units::Size;
 
 /// One workspace, as `list` prints it.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -38,6 +39,14 @@ pub(crate) struct WorkspaceRow {
     /// The host port that the workspace holds for each named port of its
     /// manifest, which the first `mxv up` allocates.
     ports: BTreeMap<String, u16>,
+    /// The bytes that the workspace's directory takes on disk, with each
+    /// file that has several hard links counted once and no symbolic link
+    /// followed, or null when `--sizes` was not given.
+    size: Option<Size>,
+    /// The bytes that the workspace's disposable directories take on disk,
+    /// such as `target/` and `node_modules/`, which `mxv clean` deletes, or
+    /// null when `--sizes` was not given.
+    disposable: Option<Size>,
 }
 
 /// One workspace and the workspace root that the run used, as `new` and
@@ -118,7 +127,15 @@ pub(crate) struct CheckoutRow {
 }
 
 impl Row for WorkspaceRow {
-    const COLUMNS: &'static [&'static str] = &["name", "branch", "path", "ports", "problem"];
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "branch",
+        "path",
+        "size",
+        "disposable",
+        "ports",
+        "problem",
+    ];
     const PROBLEM: Option<&'static str> = Some("problem");
     const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
     // A person copies the name into the next command.
@@ -156,6 +173,8 @@ impl From<&Workspace> for WorkspaceRow {
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
             ports: workspace.ports.clone(),
+            size: None,
+            disposable: None,
         }
     }
 }
@@ -182,6 +201,177 @@ impl WorkspaceRow {
             checkouts: Vec::new(),
             problem: error.to_string(),
             ports: BTreeMap::new(),
+            size: None,
+            disposable: None,
+        }
+    }
+
+    /// Returns the row with the sizes of `usage`.
+    pub(crate) const fn with_usage(mut self, usage: &DiskUsage) -> Self {
+        self.size = Some(Size(usage.bytes));
+        self.disposable = Some(Size(usage.disposable_bytes));
+        self
+    }
+
+    /// Returns the row with `problem`, such as a measurement that failed.
+    pub(crate) fn with_problem(mut self, problem: String) -> Self {
+        self.problem = problem;
+        self
+    }
+}
+
+/// One workspace, the workspace root that the run used and its sizes, as
+/// `show` prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ShowRow {
+    /// The workspace and the root.
+    #[serde(flatten)]
+    placed: PlacedRow,
+    /// The bytes that the workspace's directory takes on disk, with each
+    /// file that has several hard links counted once and no symbolic link
+    /// followed.
+    size: Size,
+    /// The bytes that the workspace's disposable directories take on disk,
+    /// such as `target/` and `node_modules/`, which `mxv clean` deletes.
+    disposable: Size,
+    /// Each disposable path with its checkout and the bytes it takes.
+    disposable_paths: Vec<DisposablePathRow>,
+    /// Each path that the disposable set matches and that mxv keeps, with
+    /// the reason, such as a directory that holds a `.git` entry.
+    kept_paths: Vec<String>,
+    /// Why a checkout's disposable set holds fewer globs than its
+    /// `mxv.toml` declares, such as an invalid manifest, or null.
+    warnings: Option<String>,
+}
+
+/// A disposable path of a checkout and the bytes it takes, as `show
+/// --full` prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct DisposablePathRow {
+    /// The checkout's name, such as `app`.
+    checkout: String,
+    /// The path relative to the checkout, such as `target/`.
+    path: String,
+    /// The bytes that the path takes on disk.
+    bytes: Size,
+    /// What made the path disposable: `built_in` for a name such as
+    /// `target`, `config` for a glob of the config file, or `manifest` for
+    /// a glob of the repository's own `mxv.toml` and nothing else.
+    source: SourceRow,
+}
+
+/// What made a path disposable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SourceRow {
+    /// One of mxv's built-in directory names, such as `target`.
+    BuiltIn,
+    /// A glob of the person's config file.
+    Config,
+    /// A glob of the repository's own `mxv.toml`, and nothing else.
+    Manifest,
+}
+
+impl From<DisposableSource> for SourceRow {
+    fn from(source: DisposableSource) -> Self {
+        match source {
+            DisposableSource::BuiltIn => Self::BuiltIn,
+            DisposableSource::Config => Self::Config,
+            // A source that a later library adds counts as the least
+            // trusted one.
+            _ => Self::Manifest,
+        }
+    }
+}
+
+impl Row for ShowRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "branch",
+        "path",
+        "root",
+        "root_source",
+        "size",
+        "disposable",
+        "ports",
+        "warnings",
+    ];
+    const LONG_COLUMNS: &'static [&'static str] =
+        &["repositories", "disposable_paths", "kept_paths"];
+    // A person copies the name into the next command.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
+}
+
+impl ShowRow {
+    /// Returns the row of `workspace` with `root`, the root that the run
+    /// used, and the sizes of `usage`.
+    pub(crate) fn new(workspace: &Workspace, root: &Root, usage: &DiskUsage) -> Self {
+        Self {
+            placed: PlacedRow::new(workspace, root),
+            size: Size(usage.bytes),
+            disposable: Size(usage.disposable_bytes),
+            disposable_paths: usage
+                .disposable
+                .iter()
+                .map(|found| DisposablePathRow {
+                    checkout: found.checkout.clone(),
+                    path: found.path.clone(),
+                    bytes: Size(found.bytes),
+                    source: found.source.into(),
+                })
+                .collect(),
+            kept_paths: usage
+                .kept
+                .iter()
+                .map(|kept| format!("{}: {}, because {}", kept.checkout, kept.path, kept.reason))
+                .collect(),
+            warnings: joined(&usage.warnings),
+        }
+    }
+}
+
+/// The workspace that `new` created, or would create on a dry run, and the
+/// ignored directories that it cloned into the checkout.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct NewRow {
+    /// The workspace and the root.
+    #[serde(flatten)]
+    placed: PlacedRow,
+    /// Each ignored directory of the repository that `new` cloned into the
+    /// checkout, or would clone on a dry run, with the checkout's name in
+    /// front, such as `app: web/node_modules/`. A clone shares its disk
+    /// with the repository's copy until a file in either changes.
+    cloned: Vec<String>,
+    /// Why `new` cloned fewer directories than the globs name, such as a
+    /// file system that cannot clone, or null. `new` never copies the
+    /// directories in full.
+    clone_warning: Option<String>,
+}
+
+impl Row for NewRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "name",
+        "branch",
+        "path",
+        "root",
+        "root_source",
+        "ports",
+        "cloned",
+        "clone_warning",
+    ];
+    const LONG_COLUMNS: &'static [&'static str] = &["repositories"];
+    // A person copies the name into the next command.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
+}
+
+impl NewRow {
+    /// Returns the row of `workspace` with `root`, the root that the run
+    /// used, and the directories that `cloned` names.
+    pub(crate) fn new(workspace: &Workspace, root: &Root, cloned: Cloned) -> Self {
+        Self {
+            placed: PlacedRow::new(workspace, root),
+            cloned: cloned.paths,
+            clone_warning: cloned.warning,
         }
     }
 }
@@ -216,6 +406,13 @@ pub(crate) struct RemovalResult {
     /// The docker volumes that the removal deletes because of
     /// `--delete-volumes`, named and anonymous.
     volumes: Vec<String>,
+    /// The paths of `disposable` that only the repository's own `mxv.toml`
+    /// declares disposable, which mxv deletes only after the person
+    /// confirmed them at the prompt or passed `--force`.
+    manifest_paths: Vec<String>,
+    /// Why a checkout's disposable set holds fewer globs than its
+    /// `mxv.toml` declares, such as an invalid manifest.
+    warnings: Vec<String>,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -340,6 +537,8 @@ impl RemovalResult {
             discarded: removal.discarded.clone(),
             containers: Vec::new(),
             volumes: Vec::new(),
+            manifest_paths: removal.manifest.clone(),
+            warnings: removal.warnings.clone(),
             planned,
         }
     }
@@ -367,14 +566,24 @@ impl fmt::Display for RemovalResult {
         } else {
             ("removed", "deleted", "kept", "discarded")
         };
+        for warning in &self.warnings {
+            writeln!(formatter, "Warning: {warning}.")?;
+        }
         for path in &self.discarded {
             writeln!(formatter, "mxv {discards} {path}.")?;
         }
         for path in &self.disposable {
-            writeln!(
-                formatter,
-                "mxv {deletes} the ignored build directory {path}."
-            )?;
+            if self.manifest_paths.contains(path) {
+                writeln!(
+                    formatter,
+                    "mxv {deletes} the ignored directory {path}, which only the repository's mxv.toml declares disposable."
+                )?;
+            } else {
+                writeln!(
+                    formatter,
+                    "mxv {deletes} the ignored build directory {path}."
+                )?;
+            }
         }
         for container in &self.containers {
             writeln!(formatter, "mxv {removes} the docker container {container}.")?;
@@ -689,4 +898,10 @@ impl fmt::Display for StatusSummary {
             None => Ok(()),
         }
     }
+}
+
+/// Returns `texts` joined with `; `, or `None` when there are none, so an
+/// empty list prints as an empty cell.
+pub(crate) fn joined(texts: &[String]) -> Option<String> {
+    (!texts.is_empty()).then(|| texts.join("; "))
 }

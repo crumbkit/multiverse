@@ -528,6 +528,12 @@ pub(crate) fn running(
     Ok(Runs::new(environment.runs()?).running(workspace)?)
 }
 
+/// Takes the lock of the workspace `name`, which `up` and `down` also
+/// take, so `mxv clean` deletes nothing while they start or stop it.
+pub(crate) fn lock(environment: &Environment, name: &WorkspaceName) -> Result<Lock, MxvFailure> {
+    Ok(Runs::new(environment.runs()?).lock(name)?)
+}
+
 /// Stops every process of `workspace` and deletes its run files and logs,
 /// for `mxv remove --force`.
 pub(crate) fn stop_all(

@@ -103,6 +103,33 @@ fn an_ignored_file_and_an_ignored_directory_are_listed_apart_from_the_changes() 
 }
 
 #[test]
+fn a_path_with_a_space_or_a_non_ascii_character_is_listed_as_it_is_named() {
+    let fixture = fixture();
+    write(
+        fixture.clone.join(".git/info/exclude"),
+        "build output/\n*.log\n",
+    );
+    fs::create_dir_all(fixture.clone.join("build output")).unwrap();
+    write(fixture.clone.join("build output/app"), "binary");
+    write(fixture.clone.join("caf\u{e9}.log"), "log");
+    write(fixture.clone.join("my notes.md"), "notes");
+    let changes = Git.changes(&fixture.clone).unwrap();
+    assert_eq!(changes.ignored, ["build output/", "caf\u{e9}.log"]);
+    assert_eq!(changes.changed, ["?? my notes.md"]);
+}
+
+#[test]
+fn a_renamed_file_is_one_change() {
+    let fixture = fixture();
+    write(fixture.clone.join("README.md"), "readme");
+    git(&fixture.clone, &["add", "README.md"]);
+    git(&fixture.clone, &["commit", "--quiet", "-m", "Add a readme"]);
+    git(&fixture.clone, &["mv", "README.md", "READ ME.md"]);
+    let changes = Git.changes(&fixture.clone).unwrap();
+    assert_eq!(changes.changed, ["R  READ ME.md"]);
+}
+
+#[test]
 fn a_branch_counts_the_commits_that_its_base_does_not_hold() {
     let fixture = fixture();
     let base = "refs/remotes/origin/main";
@@ -360,4 +387,20 @@ fn an_origin_with_branches_but_no_default_branch_has_no_default_branch() {
     );
     let error = Git.base(&fixture.clone).unwrap_err();
     assert!(matches!(error, Error::NoDefaultBranch { .. }), "{error:?}");
+}
+
+#[test]
+fn a_path_tracks_a_file_only_when_the_repository_tracks_that_file_or_one_below_it() {
+    let fixture = fixture();
+    write(fixture.clone.join(".git/info/exclude"), "dist/\ntarget/\n");
+    fs::create_dir_all(fixture.clone.join("dist")).unwrap();
+    write(fixture.clone.join("dist/kept.txt"), "tracked");
+    git(&fixture.clone, &["add", "--force", "dist/kept.txt"]);
+    fs::create_dir_all(fixture.clone.join("target")).unwrap();
+    write(fixture.clone.join("target/out"), "built");
+    write(fixture.clone.join("a*b"), "a file whose name holds a star");
+    assert!(Git.tracks(&fixture.clone, "dist/").unwrap());
+    assert!(Git.tracks(&fixture.clone, "dist/kept.txt").unwrap());
+    assert!(!Git.tracks(&fixture.clone, "target/").unwrap());
+    assert!(!Git.tracks(&fixture.clone, "*").unwrap());
 }
