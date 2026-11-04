@@ -427,6 +427,21 @@ app's `[permissions]` and allows:
   external hosts through an allowlist proxy that phase runs outside the
   sandbox.
 
+The profile never lets an app write these paths, even when they lie inside
+a directory it may otherwise write:
+
+- the workspace directory `<root>/<workspace>/` outside the app's own
+  checkout, including the workspace manifest `mxv.toml` and `AGENTS.md`.
+  multiverse and phase trust that manifest as written by the person: phase
+  reads shared services and workspace-declared apps from it with the person
+  as their publisher, and multiverse deletes its `disposable` globs without
+  asking;
+- multiverse's state and data directories, including its workspace records
+  and the mirrors in `~/.local/share/mxv/mirrors` that clones borrow
+  objects from;
+- phase's own state directory, including run records and granted
+  permissions, so that an app cannot grant itself more.
+
 The profile always denies an app the socket of starmap's secret agent and
 the 1Password and Keychain services. Only phase, outside the sandbox,
 resolves secrets, and an app receives only the values its own manifest
