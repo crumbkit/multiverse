@@ -35,6 +35,8 @@ pub const PROCESS_NOT_FOUND: Code = Code::new("mxv", "process", "not_found");
 pub const PROCESS_EXITED: Code = Code::new("mxv", "process", "exited");
 /// The code of a process that missed its readiness timeout.
 pub const PROCESS_NOT_READY: Code = Code::new("mxv", "process", "not_ready");
+/// The code of a process whose readiness port another program answered.
+pub const PROCESS_FOREIGN_LISTENER: Code = Code::new("mxv", "process", "foreign_listener");
 /// The code of a process group that outlived SIGKILL.
 pub const PROCESS_UNSTOPPABLE: Code = Code::new("mxv", "process", "unstoppable");
 /// The code of a stored port that something outside the workspace holds.
@@ -56,6 +58,7 @@ pub(crate) const CODES: &[&Code] = &[
     &PROCESS_NOT_FOUND,
     &PROCESS_EXITED,
     &PROCESS_NOT_READY,
+    &PROCESS_FOREIGN_LISTENER,
     &PROCESS_UNSTOPPABLE,
     &PORT_TAKEN,
     &PORT_NOT_FOUND,
@@ -133,6 +136,17 @@ pub(crate) enum RunFailure {
         /// The last lines of its log.
         tail: LogTail,
     },
+    /// Another program answered on a process's readiness port.
+    ForeignListener {
+        /// The workspace's name.
+        workspace: String,
+        /// The process.
+        process: String,
+        /// The port's name.
+        port: String,
+        /// The host port.
+        number: u16,
+    },
     /// A process group outlived SIGKILL.
     Unstoppable {
         /// The process.
@@ -190,6 +204,7 @@ impl Failure for RunFailure {
             Self::UnknownProcess { .. } => &PROCESS_NOT_FOUND,
             Self::Exited { .. } => &PROCESS_EXITED,
             Self::NotReady { .. } => &PROCESS_NOT_READY,
+            Self::ForeignListener { .. } => &PROCESS_FOREIGN_LISTENER,
             Self::Unstoppable { .. } => &PROCESS_UNSTOPPABLE,
             Self::PortTaken { .. } => &PORT_TAKEN,
             Self::UnknownPort { .. } => &PORT_NOT_FOUND,
@@ -246,6 +261,14 @@ impl Failure for RunFailure {
                 workspace, process, ..
             } => hint(format!(
                 "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
+            )),
+            Self::ForeignListener {
+                workspace,
+                process,
+                number,
+                ..
+            } => hint(format!(
+                "find the program that listens on port {number} with `lsof -nP -iTCP:{number} -sTCP:LISTEN` and stop it, or make {process} listen on the port it receives, and run `mxv up -w {workspace} {process}` again"
             )),
             Self::Unstoppable { pid, .. } => hint(format!(
                 "find the process group {pid} with `ps -g {pid}` and stop it by hand"
@@ -335,6 +358,17 @@ impl Failure for RunFailure {
                 ]);
                 fields
             }
+            Self::ForeignListener {
+                workspace,
+                process,
+                port,
+                number,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("process", process),
+                Field::new("port", port),
+                Field::new("number", *number),
+            ],
             Self::Unstoppable { process, pid } => {
                 vec![Field::new("process", process), Field::new("pid", *pid)]
             }
@@ -445,6 +479,15 @@ impl fmt::Display for RunFailure {
                     "the process {process} was not ready within {seconds} seconds, so mxv stopped it"
                 ),
             },
+            Self::ForeignListener {
+                process,
+                port,
+                number,
+                ..
+            } => write!(
+                formatter,
+                "a connection to {port} (port {number}) succeeded, and no process of {process}'s group listens on it, so another program holds the port and mxv stopped {process}"
+            ),
             Self::Unstoppable { process, pid } => write!(
                 formatter,
                 "the process group {pid} of {process} still runs after SIGKILL"

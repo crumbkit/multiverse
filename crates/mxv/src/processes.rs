@@ -239,6 +239,17 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             tail: LogTail::new(tail),
         }
         .into()),
+        UpOutcome::ForeignListener {
+            process,
+            port,
+            number,
+        } => Err(RunFailure::ForeignListener {
+            workspace,
+            process,
+            port,
+            number,
+        }
+        .into()),
         UpOutcome::NotReady {
             process,
             waited,

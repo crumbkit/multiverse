@@ -191,6 +191,17 @@ pub enum UpOutcome {
         /// The last lines of its log.
         tail: Vec<String>,
     },
+    /// The readiness port of a process accepted a connection, and no member
+    /// of the process's group listens on it, so another program answered
+    /// and `up` stopped the process.
+    ForeignListener {
+        /// The process.
+        process: String,
+        /// The port's name.
+        port: String,
+        /// The host port.
+        number: u16,
+    },
     /// A process ran past its readiness timeout before its readiness check
     /// passed, so `up` stopped it.
     NotReady {
@@ -739,7 +750,28 @@ impl Runs {
             .as_mut()
             .map(|(follower, pattern)| (follower, *pattern));
         match wait_ready(&mut launched, number, watch, timeout)? {
-            Readiness::Ready => Ok(None),
+            Readiness::Ready => {
+                // The port that answered must be the process's own, or the
+                // process would count as ready while another program
+                // serves its port.
+                if let (Some(listen), Some(number)) = (&declared.listen, number)
+                    && declared
+                        .ready
+                        .as_ref()
+                        .is_some_and(|ready| ready.check == ReadyCheck::Port(listen.clone()))
+                    && process::group_listens(launched.pid(), number)? == Some(false)
+                {
+                    launched.kill();
+                    let _ = fs::remove_file(self.file(name, process, "json"));
+                    let _ = fs::remove_file(&exit_file);
+                    return Ok(Some(UpOutcome::ForeignListener {
+                        process: process.to_owned(),
+                        port: listen.clone(),
+                        number,
+                    }));
+                }
+                Ok(None)
+            }
             Readiness::Ended(shell) => {
                 // The shell is reaped. Its group keeps its id only while a
                 // descendant remains, so the signal goes only to a group

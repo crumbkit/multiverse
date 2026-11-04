@@ -311,7 +311,14 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   standard error appended to its log. When a process exits before it is
   ready, `up` fails with `mxv::process::exited` and the log's last 20 lines;
   when it misses its timeout, `up` stops it and fails with
-  `mxv::process::not_ready`. A failed `up` stops the processes it started
+  `mxv::process::not_ready`. When the readiness port is the listen port
+  and it accepts a connection, `up` also checks that a member of the
+  process's group holds the listening socket, through `/proc` on Linux and
+  `lsof` on macOS. When none does, another program answered on the port,
+  so `up` stops the process and fails with
+  `mxv::process::foreign_listener`. A process that hands its port to a
+  program in another process group, such as a wrapper around `docker run
+  -p`, fails this check. A failed `up` stops the processes it started
   before the failure. `up` also drops the ports of names that the manifest
   no longer declares, once no running process received them, so a port
   that the manifest renames stays with its old listener until `down`.
@@ -323,10 +330,8 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   second case the group holds the children that an exited process left
   behind. When another process has taken the recorded id, `down` signals
   nothing and deletes the record. `running`, `remove` and `logs -f` apply
-  the same rule. On macOS the start time has a resolution of one second,
-  so a process that takes the id within the second that the original
-  started in reads as the original. A descendant that leaves its process
-  group is not reached.
+  the same rule. A descendant that leaves its process group is not
+  reached.
 - `mxv restart` stops the named processes, or every process, and starts them
   again.
 - `mxv status` reports each process as `running`, `exited` with its code,
@@ -334,7 +339,10 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   lists its process id with the start time that `up` recorded, so a reused
   id reads as exited. The start time does not depend on the time zone: on
   Linux it is the boot-relative start time in `/proc/<pid>/stat`, and on
-  macOS it is what `ps` prints in UTC. The shell records a program that a
+  macOS it is the start that `proc_pidinfo` reports to the microsecond.
+  Run records that an earlier mxv wrote on macOS hold the start time that
+  `ps` printed, so their processes read as exited, and `down` deletes their
+  records without signalling them. The shell records a program that a
   signal ended as code 128 plus the signal's number, so `status` reports a
   code from 129 to 192 as `code` null and `signal` set; a program that
   exits with such a code by itself reads the same way. A process that

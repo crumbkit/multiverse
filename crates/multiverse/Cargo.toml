@@ -25,5 +25,9 @@ rustix = { workspace = true }
 # `ready = { log = "..." }` compiles its pattern with regex.
 regex = { workspace = true }
 
+# macOS reads a process's start time with proc_pidinfo through libproc.
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -809,16 +809,6 @@ fn run_is_no_longer_a_command() {
     assert_eq!(exit, 2);
 }
 
-/// Returns once more than a second has passed. `ps` prints a start time to
-/// the second on macOS, so two processes that start within one second have
-/// the same recorded start time.
-fn after_a_second() {
-    let deadline = Instant::now() + Duration::from_millis(1100);
-    while Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-}
-
 /// Rewrites the pid of the run record of `process` in the workspace `name`
 /// to `pid`, as a record left behind looks once another process took its
 /// id.
@@ -845,7 +835,6 @@ fn down_leaves_alone_a_group_whose_leader_took_the_pid_of_a_stale_record() {
     let (exit, document) = setup.json(&["up", "-w", "reading-list"]);
     assert_eq!(exit, 0, "{document}");
     let other = row(&document, "api")["pid"].as_u64().unwrap();
-    after_a_second();
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
     for () in waiting() {
@@ -888,7 +877,6 @@ fn a_stale_record_does_not_count_as_running_for_remove_or_logs_follow() {
     );
     let (_, document) = setup.json(&["up", "-w", "reading-list"]);
     let other = row(&document, "api")["pid"].as_u64().unwrap();
-    after_a_second();
     setup.json(&["up", "-w", "triage"]);
     for () in waiting() {
         if row(&setup.json(&["status", "-w", "triage"]).1, "short")["state"] == "exited" {
@@ -1090,5 +1078,39 @@ fn a_worker_that_writes_no_matching_log_line_fails_up_as_not_ready_with_the_patt
     assert_eq!(
         setup.states("triage"),
         [("worker".to_owned(), "stopped".to_owned())]
+    );
+}
+
+#[test]
+fn up_fails_with_foreign_listener_when_another_program_answers_on_the_listen_port() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "ports = [\"api\"]\n[processes.server]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\nports = { PORT = \"api\" }\nlisten = \"api\"\nready = { timeout_seconds = 20 }\n",
+    );
+    let record = setup.root().join("state/mxv/runs/triage/server.json");
+    std::thread::scope(|scope| {
+        let up = scope.spawn(|| setup.json(&["up", "-w", "triage"]));
+        while !record.exists() && !up.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(record.exists(), "up ended first: {:?}", up.join().unwrap());
+        // The test itself is the other program: it is in no group of the
+        // workspace, and it listens on the port that `server` should.
+        let port = setup.port("triage", "api");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let (exit, document) = up.join().unwrap();
+        drop(listener);
+        assert_eq!(exit, 1, "{document}");
+        assert_eq!(
+            document["code"], "mxv::process::foreign_listener",
+            "{document}"
+        );
+        assert_eq!(document["fields"]["port"], "api");
+        assert_eq!(document["fields"]["number"], port);
+    });
+    assert_eq!(
+        setup.states("triage"),
+        [("server".to_owned(), "stopped".to_owned())]
     );
 }

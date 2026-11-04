@@ -53,6 +53,12 @@ toml = { version = "1.2.0", default-features = false }
 # classes and the search optimisations, and `std` is all it needs besides.
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode", "perf"] }
 
+# libproc reads a process's start time on macOS with proc_pidinfo, to the
+# microsecond, without unsafe code in mxv. It has no features. Its build
+# script runs bindgen, which needs the libclang that Xcode's command line
+# tools install.
+libproc = { version = "0.14.11", default-features = false }
+
 # rustix sends signals to the process groups of an app's processes and
 # checks whether a group still exists, without unsafe code. Only the
 # `process` feature is used.
