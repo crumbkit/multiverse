@@ -10,6 +10,8 @@
 
 #[path = "support/git.rs"]
 mod support;
+#[path = "support/ports.rs"]
+mod test_ports;
 
 use std::fs;
 use std::net::{Ipv4Addr, TcpListener};
@@ -21,6 +23,7 @@ use snapbox::cmd::Command;
 use tempfile::TempDir;
 
 use crate::support::{GIT_ENV, PATH, repository};
+use crate::test_ports::PortBlock;
 
 /// How long a test runs `mxv status` or `mxv logs` again and again while
 /// it waits for a process to end or print. A count of runs is no bound,
@@ -70,17 +73,30 @@ fn group_exists(pid: u64) -> bool {
 }
 
 /// A temporary directory with a repository, a workspace root and a state
-/// directory.
+/// directory, whose config file makes `mxv up` allocate from a block of
+/// ports that no other running test uses.
 struct Setup {
     /// The temporary directory.
     dir: TempDir,
+    /// The block of ports that the config file names.
+    ports: PortBlock,
 }
 
 impl Setup {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         repository(&dir.path().canonicalize().unwrap());
-        Self { dir }
+        let ports = PortBlock::claim();
+        let setup = Self { dir, ports };
+        setup.write_config(&setup.ports.config_line());
+        setup
+    }
+
+    /// Writes `text` as the config file `$XDG_CONFIG_HOME/mxv/config.toml`.
+    fn write_config(&self, text: &str) {
+        let config = self.root().join("config/mxv/config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        write(&config, text);
     }
 
     fn root(&self) -> PathBuf {
@@ -149,6 +165,16 @@ impl Setup {
         (
             output.status.code().unwrap(),
             String::from_utf8(output.stdout).unwrap(),
+        )
+    }
+
+    /// Runs `mxv` with `args` in the temporary directory, and returns the
+    /// exit code and standard error.
+    fn errors(&self, args: &[&str]) -> (i32, String) {
+        let output = self.command_in(&self.root(), args).output().unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
         )
     }
 
@@ -440,6 +466,12 @@ fn a_second_command_on_a_workspace_fails_with_busy_while_up_waits_for_readiness(
         while !record.exists() && !up.is_finished() {
             std::thread::yield_now();
         }
+        if !record.exists() {
+            panic!(
+                "up ended before it wrote the run record: {:?}",
+                up.join().unwrap()
+            );
+        }
         let (down_exit, down) = setup.json(&["down", "-w", "triage"]);
         let (up_exit, up) = up.join().unwrap();
         assert_eq!(down_exit, 1, "down: {down}\nup: {up}");
@@ -455,6 +487,7 @@ fn a_second_command_on_a_workspace_fails_with_busy_while_up_waits_for_readiness(
 #[test]
 fn up_allocates_ports_from_20000_to_29999_by_default() {
     let setup = Setup::new();
+    setup.write_config("");
     setup.workspace("triage", &server_and_worker());
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
@@ -464,9 +497,7 @@ fn up_allocates_ports_from_20000_to_29999_by_default() {
 #[test]
 fn up_allocates_ports_from_the_config_files_ports_range() {
     let setup = Setup::new();
-    let config = setup.root().join("config/mxv/config.toml");
-    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    write(&config, "ports_range = [24000, 24049]\n");
+    setup.write_config("ports_range = [24000, 24049]\n");
     setup.workspace("triage", &server_and_worker());
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
@@ -597,12 +628,15 @@ fn a_process_without_ready_that_exits_within_the_grace_fails_up_as_exited() {
 #[test]
 fn a_process_that_a_signal_ended_reports_no_code_and_the_signal() {
     let setup = Setup::new();
-    setup.workspace(
+    // The process signals itself only once the file `go` exists, which the
+    // test writes after `up` has returned, so `up` never sees it end.
+    let checkout = setup.workspace(
         "triage",
-        "[processes.doomed]\nargv = [\"sh\", \"-c\", \"sleep 1; kill -TERM $$\"]\n",
+        "[processes.doomed]\nargv = [\"sh\", \"-c\", \"while [ ! -e go ]; do sleep 0.05; done; kill -TERM $$\"]\n",
     );
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
+    write(&checkout.join("go"), "");
     for () in waiting() {
         let (_, status) = setup.json(&["status", "-w", "triage"]);
         if row(&status, "doomed")["state"] == "exited" {
@@ -887,6 +921,16 @@ fn down_and_status_work_from_the_run_records_when_the_manifest_does_not_parse() 
     let (exit, status) = setup.json(&["status", "-w", "triage"]);
     assert_eq!(exit, 0, "{status}");
     assert_eq!(row(&status, "api")["state"], "running");
+    let fallback = status["summary"]["manifest_error"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(fallback.contains("mxv.toml"), "{status}");
+    let (exit, text) = setup.text(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{text}");
+    assert!(
+        text.contains("the processes come from the run records"),
+        "{text}"
+    );
     let (exit, document) = setup.json(&["down", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
     assert!(!group_exists(pid), "down left the process running");
@@ -957,4 +1001,41 @@ fn a_port_that_the_manifest_renames_stays_with_the_workspace_until_its_listener_
     assert_eq!(exit, 0, "{document}");
     let (_, shown) = setup.json(&["show", "triage"]);
     assert!(shown["data"][0]["ports"].get("api").is_none(), "{shown}");
+}
+
+#[test]
+fn group_alive_is_null_while_the_process_runs() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        row(&document, "api")["group_alive"],
+        Value::Null,
+        "{document}"
+    );
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(row(&document, "api")["group_alive"], false, "{document}");
+}
+
+#[test]
+fn up_in_text_prints_the_last_lines_of_the_log_of_a_process_that_exited_before_it_was_ready() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.build]\nargv = [\"sh\", \"-c\", \"echo compiling; echo 'error: cannot find value x'; exit 101\"]\n",
+    );
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{errors}");
+    let compiling = errors
+        .find("compiling")
+        .unwrap_or_else(|| panic!("{errors}"));
+    let error = errors
+        .find("error: cannot find value x")
+        .unwrap_or_else(|| panic!("{errors}"));
+    assert!(compiling < error, "{errors}");
 }

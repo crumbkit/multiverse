@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/status/v1",
-  "description": "Each process of the workspace's manifest in start order, then each other process that has run files, with its state.",
+  "description": "Each process of the workspace's manifest in start order, then each other process that has run files, with its state, and the manifest's error when it does not parse.",
   "type": "object",
   "properties": {
     "cut": {
@@ -25,7 +25,7 @@
       ]
     },
     "data": {
-      "description": "The rows, in order.",
+      "description": "The rows of the page, up to the limit.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/ProcessRow"
@@ -38,11 +38,25 @@
     "schema": {
       "description": "The id of this document.",
       "const": "mxv/status/v1"
+    },
+    "summary": {
+      "$ref": "#/$defs/StatusSummary"
+    },
+    "total": {
+      "description": "The number of rows that matched, of which data holds one page. It is absent when the tool did not count the rows.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "description": "True when the document leaves out rows that matched, because of the limit or the output budget, and false when data holds every row.",
+      "type": "boolean"
     }
   },
   "required": [
     "schema",
-    "data"
+    "data",
+    "truncated",
+    "summary"
   ],
   "$defs": {
     "KindName": {
@@ -73,8 +87,11 @@
           "format": "int32"
         },
         "group_alive": {
-          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
-          "type": "boolean"
+          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops. It is null while the process runs.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "kind": {
           "description": "`process` or `container`.",
@@ -151,6 +168,22 @@
           "type": "string",
           "const": "stopped"
         }
+      ]
+    },
+    "StatusSummary": {
+      "description": "What `mxv status` says above its rows: whether the manifest parsed.",
+      "type": "object",
+      "properties": {
+        "manifest_error": {
+          "description": "The manifest's error when it does not parse, in which case the rows\ncome from the run records alone, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "manifest_error"
       ]
     }
   }

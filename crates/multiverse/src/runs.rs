@@ -148,9 +148,10 @@ pub struct ProcessStatus {
     /// Its log file.
     pub log: PathBuf,
     /// Whether its process group still has a member although the process
-    /// itself has exited, such as a child it started in the background.
-    /// `mxv down` stops that group.
-    pub group_alive: bool,
+    /// itself has exited, such as a child it started in the background,
+    /// which `mxv down` stops. It is `None` while the process runs, because
+    /// the process itself is then a member.
+    pub group_alive: Option<bool>,
 }
 
 /// The outcome of [`Runs::up`].
@@ -518,8 +519,11 @@ impl Runs {
                 .unwrap_or_default(),
         };
         let state = self.state(&workspace.name, process)?;
-        let group_alive = matches!(state, ProcessState::Exited { .. })
-            && self.group_lives(&workspace.name, process)?;
+        let group_alive = match state {
+            ProcessState::Running { .. } => None,
+            ProcessState::Exited { .. } => Some(self.group_lives(&workspace.name, process)?),
+            ProcessState::Stopped | ProcessState::Created => Some(false),
+        };
         Ok(ProcessStatus {
             name: process.to_owned(),
             kind: Kind::Process,

@@ -73,8 +73,11 @@
           "format": "int32"
         },
         "group_alive": {
-          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
-          "type": "boolean"
+          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops. It is null while the process runs.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "kind": {
           "description": "`process` or `container`.",

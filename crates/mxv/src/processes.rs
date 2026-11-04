@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use crumbkit::{Batch, Document, Output, Stream};
+use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::{
     DownOutcome, Follower, Lock, Manifest, ProcessStatus, Runs, Store, Unstoppable, UpOutcome,
     Workspace, WorkspaceName, tail,
@@ -18,8 +18,8 @@ use multiverse::{
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
-use crate::rows::{LogLine, PortRow, ProcessRow};
-use crate::run_failures::RunFailure;
+use crate::rows::{LogLine, PortRow, ProcessRow, StatusSummary};
+use crate::run_failures::{LogTail, RunFailure};
 use crate::verbs;
 
 /// The document that `mxv up` prints.
@@ -47,12 +47,13 @@ pub(crate) const RESTART: Document<Vec<ProcessRow>> = Document::new(
 );
 
 /// The document that `mxv status` prints.
-pub(crate) const STATUS: Document<Vec<ProcessRow>> = Document::new(
+pub(crate) const STATUS: Document<Listing<ProcessRow, StatusSummary>> = Document::new(
     "mxv",
     "status",
     1,
-    "Each process of the workspace's manifest in start order, then each other process that has run files, with its state.",
-);
+    "Each process of the workspace's manifest in start order, then each other process that has run files, with its state, and the manifest's error when it does not parse.",
+)
+.when_empty("the workspace has no manifest that declares processes, and no process has run files");
 
 /// The document that `mxv logs` prints.
 pub(crate) const LOGS: Document<Stream<LogLine>> = Document::new(
@@ -161,6 +162,15 @@ fn lenient_manifest(workspace: &Workspace) -> Option<Manifest> {
     Manifest::read(checkout(workspace)).ok().flatten()
 }
 
+/// Returns the workspace's manifest as [`lenient_manifest`] does, and the
+/// manifest's error as text when it does not parse.
+fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<String>) {
+    match Manifest::read(checkout(workspace)) {
+        Ok(manifest) => (manifest, None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
 /// Returns the workspace's manifest, or the failure of a checkout without
 /// one.
 fn required_manifest(workspace: &Workspace) -> Result<Manifest, RunFailure> {
@@ -226,7 +236,7 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             code,
             signal,
             log: log.into_boxed_path(),
-            tail: tail.into_boxed_slice(),
+            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::NotReady {
@@ -243,7 +253,7 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             seconds: timeout.as_secs(),
             log: log.into_boxed_path(),
-            tail: tail.into_boxed_slice(),
+            tail: LogTail::new(tail),
         }
         .into()),
     }
@@ -343,14 +353,15 @@ pub(crate) fn restart(
 pub(crate) fn status(
     environment: &Environment,
     args: &StatusArgs,
-) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+) -> Result<Listing<ProcessRow, StatusSummary>, crumbkit::Error> {
     let context = context(environment, args.workspace.as_ref(), &[])?;
-    let manifest = lenient_manifest(&context.workspace);
+    let (manifest, error) = manifest_or_error(&context.workspace);
     let statuses = context
         .runs
         .status(&context.workspace, manifest.as_ref())
         .map_err(MxvFailure::from)?;
-    Ok(statuses.iter().map(ProcessRow::from).collect())
+    let rows = statuses.iter().map(ProcessRow::from).collect();
+    Ok(Listing::from_all(rows, None).summary(StatusSummary::new(error)))
 }
 
 /// Prints the last lines of the log of the process that `args` names, and

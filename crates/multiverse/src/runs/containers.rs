@@ -317,7 +317,7 @@ impl Runs {
             state,
             ports,
             log: self.log(&workspace.name, container),
-            group_alive: false,
+            group_alive: None,
         }
     }
 
