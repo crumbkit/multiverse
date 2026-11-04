@@ -53,9 +53,10 @@ pub(super) fn group_members(group: i32) -> io::Result<Vec<i32>> {
         // of `size` bytes, and the kernel writes at most `size` bytes.
         unsafe { libc::proc_listpids(PROC_PGRP_ONLY, group.cast_unsigned(), buffer, size) }
     })?;
-    Ok(bytes
-        .chunks_exact(4)
-        .filter_map(|id| id.try_into().ok().map(i32::from_ne_bytes))
+    let (ids, _) = bytes.as_chunks::<4>();
+    Ok(ids
+        .iter()
+        .map(|id| i32::from_ne_bytes(*id))
         .filter(|id| *id > 0)
         .collect())
 }

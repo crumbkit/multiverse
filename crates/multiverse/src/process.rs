@@ -447,8 +447,10 @@ fn macos_group_listens(group: u32, port: u16) -> Result<bool, Error> {
 pub(crate) fn socket_descriptors(list: &[u8]) -> Vec<i32> {
     /// `PROX_FDTYPE_SOCKET` of `<sys/proc_info.h>`.
     const PROX_FDTYPE_SOCKET: i32 = 2;
-    list.chunks_exact(8)
-        .filter(|entry| read_i32(entry, 4) == Some(PROX_FDTYPE_SOCKET))
+    let (entries, _) = list.as_chunks::<8>();
+    entries
+        .iter()
+        .filter(|entry| read_i32(*entry, 4) == Some(PROX_FDTYPE_SOCKET))
         .filter_map(|entry| read_i32(entry, 0))
         .collect()
 }
