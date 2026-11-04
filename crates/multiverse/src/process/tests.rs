@@ -11,12 +11,13 @@ use crate::process::{
     launch, listen_holder, listening_inodes, signal, socket_descriptors, socket_listens_on,
     start_time, stat_field, stat_start_time,
 };
+use crate::redacted::Redacted;
 
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|word| (*word).to_owned()).collect()
 }
 
-fn started(dir: &Path, words: &[&str], env: &[(String, String)]) -> crate::process::Launched {
+fn started(dir: &Path, words: &[&str], env: &[(String, Redacted)]) -> crate::process::Launched {
     let argv = argv(words);
     launch(&Launch {
         name: "test",
@@ -42,7 +43,10 @@ fn wait_for_end(launched: &mut crate::process::Launched) -> Option<i32> {
 fn a_launched_process_appends_its_output_to_its_log_and_records_its_exit_code() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path().join("test.log"), "earlier\n");
-    let env = [("GREETING".to_owned(), "hello world".to_owned())];
+    let env = [(
+        "GREETING".to_owned(),
+        Redacted::new("hello world".to_owned()),
+    )];
     let mut launched = started(
         dir.path(),
         &["sh", "-c", "echo \"$GREETING\"; echo oops >&2; exit 3"],

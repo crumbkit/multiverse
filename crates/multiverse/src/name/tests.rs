@@ -58,3 +58,22 @@ fn a_name_with_an_uppercase_letter_is_refused_so_names_never_alias_on_a_case_ins
 fn head_is_refused_before_any_record_is_written() {
     assert!(parse("HEAD").is_err());
 }
+
+#[test]
+fn a_unit_name_holds_letters_digits_dashes_and_underscores_and_starts_with_a_letter_or_a_digit() {
+    for good in ["api", "web-1", "a_b", "0db", &"a".repeat(64)] {
+        assert!(super::is_unit_name(good), "{good:?}");
+    }
+    for bad in [
+        "",
+        "-api",
+        "_api",
+        "a.b",
+        "a b",
+        "a/b",
+        "Ä",
+        &"a".repeat(65),
+    ] {
+        assert!(!super::is_unit_name(bad), "{bad:?}");
+    }
+}

@@ -24,16 +24,14 @@ mod name;
 mod ports;
 mod process;
 mod record;
+mod redacted;
+mod run_files;
 mod runs;
 mod store;
 mod workspaces;
 
 pub use crate::backend::{Backend, Changes, INITIALIZING, Listed, Repository};
 pub use crate::clock::FOLLOW_INTERVAL;
-pub use crate::docker::{
-    CONTAINER_LABEL, DOCKER_DEADLINE, PULL_DEADLINE, STORE_LABEL, Scope, VOLUME_LABEL,
-    WORKSPACE_LABEL,
-};
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::manifest::{
@@ -46,10 +44,12 @@ pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::record::{
     AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
 };
+pub use crate::redacted::Redacted;
+pub use crate::run_files::RUN_VERSION;
 pub use crate::runs::{
     DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES,
-    MOST_TAIL_BYTES, ProcessState, ProcessStatus, RUN_VERSION, Runs, START_GRACE, STOP_GRACE,
-    TAIL_LINES, Unstoppable, UpOutcome, Waited, tail,
+    MOST_TAIL_BYTES, ProcessState, ProcessStatus, Runs, START_GRACE, STOP_GRACE, TAIL_LINES,
+    Unstoppable, UpOutcome, Volumes, Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::workspaces::{

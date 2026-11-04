@@ -625,3 +625,25 @@ fn a_log_pattern_that_is_not_a_regular_expression_fails_with_its_line() {
         "{problem:?}"
     );
 }
+
+#[test]
+fn the_env_values_of_processes_and_containers_print_as_redacted_and_render_for_the_environment() {
+    let manifest = parse(
+        "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nenv = { TOKEN = \"s3cret-{port.api}\" }\n[containers.db]\nimage = \"busybox:1.37.0\"\nenv = { PASSWORD = \"hunter2-secret\" }\n",
+    )
+    .unwrap();
+    let printed = format!("{manifest:?}");
+    assert!(!printed.contains("s3cret"), "{printed}");
+    assert!(!printed.contains("hunter2"), "{printed}");
+    assert!(printed.contains("<redacted>"), "{printed}");
+    let token = &manifest.processes["a"].env["TOKEN"];
+    assert_eq!(format!("{token:?}"), "<redacted>");
+    let ports = BTreeMap::from([("api".to_owned(), 24001)]);
+    let rendered = token.render(&ports);
+    assert_eq!(format!("{rendered:?}"), "<redacted>");
+    assert_eq!(rendered.reveal(), "s3cret-24001");
+    assert_eq!(
+        manifest.containers["db"].env["PASSWORD"].reveal(),
+        "hunter2-secret"
+    );
+}

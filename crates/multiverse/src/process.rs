@@ -65,6 +65,7 @@ use std::time::Duration;
 use rustix::process::{Pid, Signal};
 
 use crate::error::Error;
+use crate::redacted::Redacted;
 use crate::store;
 
 #[cfg(target_os = "macos")]
@@ -101,8 +102,8 @@ pub(crate) struct Launch<'a> {
     /// The directory the process starts in.
     pub(crate) cwd: &'a Path,
     /// The variables the process receives on top of the caller's
-    /// environment.
-    pub(crate) env: &'a [(String, String)],
+    /// environment. Their values are read only to build that environment.
+    pub(crate) env: &'a [(String, Redacted)],
     /// The log file that standard output and standard error append to.
     pub(crate) log: &'a Path,
     /// The file that the script writes the exit code to.
@@ -199,7 +200,12 @@ pub(crate) fn launch(launch: &Launch<'_>) -> Result<Launched, Error> {
         .arg(launch.exit_file)
         .args(launch.argv)
         .current_dir(launch.cwd)
-        .envs(launch.env.iter().map(|(name, value)| (name, value)))
+        .envs(
+            launch
+                .env
+                .iter()
+                .map(|(name, value)| (name, value.reveal())),
+        )
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(errors)

@@ -4,18 +4,32 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 
-use crate::docker::{
-    ContainerState, Scope, UpFailure, compose_env, compose_file, message, up_failure,
-};
+use crate::docker::command::message;
+use crate::docker::compose::{UpFailure, compose_env, compose_file, up_failure};
+use crate::docker::names::{ContainerId, Scope, ServiceName, StoreId, VolumeKey, VolumeName};
+use crate::docker::objects::{ContainerState, mint_anonymous, mint_container, mint_volume};
+use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
+use crate::runs::container_specs;
 
 /// A store id of the tests.
 const STORE: &str = "0123456789abcdef0123456789abcdef";
 
+/// A container id of the tests.
+const ID: &str = "4f1c0a8e9b7d6c5a4f1c0a8e9b7d6c5a4f1c0a8e9b7d6c5a4f1c0a8e9b7d6c5a";
+
+fn service(name: &str) -> ServiceName {
+    ServiceName::new(name).unwrap()
+}
+
+fn key(name: &str) -> VolumeKey {
+    VolumeKey::new(name).unwrap()
+}
+
 fn scope(workspace: &str) -> Scope {
     Scope::new(
-        STORE,
+        &StoreId::new(STORE).unwrap(),
         &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
     )
 }
@@ -23,15 +37,15 @@ fn scope(workspace: &str) -> Scope {
 #[test]
 fn two_workspaces_whose_names_join_alike_never_share_a_container_or_volume_name() {
     assert_ne!(
-        scope("reading-list").container_name("db"),
-        scope("reading").container_name("list-db")
+        scope("reading-list").container_name(&service("db")),
+        scope("reading").container_name(&service("list-db"))
     );
     assert_eq!(
-        scope("reading-list").container_name("db"),
+        scope("reading-list").container_name(&service("db")),
         "mxv-01234567-reading-list.db"
     );
     assert_eq!(
-        scope("reading-list").volume_name("data"),
+        scope("reading-list").volume_name(&key("data")),
         "mxv-01234567-reading-list.data"
     );
 }
@@ -39,16 +53,16 @@ fn two_workspaces_whose_names_join_alike_never_share_a_container_or_volume_name(
 #[test]
 fn two_stores_give_one_workspace_name_different_container_and_volume_names() {
     let other = Scope::new(
-        "fedcba9876543210fedcba9876543210",
+        &StoreId::new("fedcba9876543210fedcba9876543210").unwrap(),
         &WorkspaceName::try_from("reading-list".to_owned()).unwrap(),
     );
     assert_ne!(
-        other.container_name("db"),
-        scope("reading-list").container_name("db")
+        other.container_name(&service("db")),
+        scope("reading-list").container_name(&service("db"))
     );
     assert_ne!(
-        other.volume_name("data"),
-        scope("reading-list").volume_name("data")
+        other.volume_name(&key("data")),
+        scope("reading-list").volume_name(&key("data"))
     );
 }
 
@@ -85,7 +99,8 @@ env = { TOKEN = "other" }
     .unwrap();
     let scope = scope("reading-list");
     let ports = BTreeMap::from([("dynamodb".to_owned(), 24001)]);
-    let file = compose_file(&scope, &manifest.containers, &ports);
+    let specs = container_specs(&manifest.containers);
+    let file = compose_file(&scope, &specs, &ports);
     let labels = |label: &str, object: &str| json!({"mxv.store": STORE, "mxv.workspace": "reading-list", label: object});
     assert_eq!(
         file,
@@ -124,15 +139,12 @@ env = { TOKEN = "other" }
     );
     assert!(!file.to_string().contains("s3cret"));
     assert_eq!(
-        compose_env(&manifest.containers, "dynamodb"),
-        [
-            ("MXV_ENV_1_0".to_owned(), "eu-west-1".to_owned()),
-            ("MXV_ENV_1_1".to_owned(), "s3cret$x".to_owned()),
-        ]
+        compose_env(&specs, &service("dynamodb")).exposed(),
+        [("MXV_ENV_1_0", "eu-west-1"), ("MXV_ENV_1_1", "s3cret$x")]
     );
     assert_eq!(
-        compose_env(&manifest.containers, "cache"),
-        [("MXV_ENV_0_0".to_owned(), "other".to_owned())]
+        compose_env(&specs, &service("cache")).exposed(),
+        [("MXV_ENV_0_0", "other")]
     );
 }
 
@@ -169,12 +181,12 @@ fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_dot()
     // A project name never holds `.`, so `mxv-01234567-release_d2.db` is
     // only the workspace `release.2` with the container `db`.
     assert_eq!(
-        scope("release.2").container_name("db"),
+        scope("release.2").container_name(&service("db")),
         "mxv-01234567-release_d2.db"
     );
     assert_ne!(
-        scope("release.2").container_name("db"),
-        scope("release").container_name("2-db")
+        scope("release.2").container_name(&service("db")),
+        scope("release").container_name(&service("2-db"))
     );
 }
 
@@ -217,4 +229,206 @@ fn a_compose_up_that_finds_no_free_address_pool_says_so() {
         UpFailure::NoAddressPool
     );
     assert_eq!(up_failure("Error manifest unknown\n"), UpFailure::Other);
+}
+
+#[test]
+fn a_service_name_is_a_manifest_name_and_never_holds_a_dot() {
+    for good in ["db", "web-1", "a_b", "0cache"] {
+        assert_eq!(ServiceName::new(good).unwrap(), good);
+    }
+    for bad in ["", "-db", "_db", "a.b", "a b", "db/1", "Ä", &"a".repeat(65)] {
+        assert!(ServiceName::new(bad).is_err(), "{bad:?}");
+    }
+    assert!(ServiceName::new(&"a".repeat(64)).is_ok());
+}
+
+#[test]
+fn a_volume_name_is_a_name_that_docker_accepts_and_never_reads_as_an_option() {
+    for good in [
+        "mxv-01234567-reading-list.data",
+        "0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675",
+        "ab",
+    ] {
+        assert_eq!(VolumeName::new(good).unwrap(), good);
+    }
+    for bad in ["", "a", "-ab", "--help", ".ab", "a b", "a/b", "a:b"] {
+        assert!(VolumeName::new(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_container_id_is_64_lowercase_hex_digits() {
+    assert_eq!(ContainerId::new(ID).unwrap(), ID);
+    for bad in [
+        "",
+        "4f1c0a8e9b7d",
+        &ID.to_uppercase(),
+        &format!("{ID}0"),
+        &format!("-{}", &ID[1..]),
+        &format!("g{}", &ID[1..]),
+        "mxv-01234567-reading-list.db",
+    ] {
+        assert!(ContainerId::new(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// Returns what `docker container inspect` prints for a container whose
+/// labels print as `labels`.
+fn printed_container(labels: &str) -> String {
+    format!(
+        "{labels}\n{ID}\nexited 3\n2026-11-04T10:00:00.000000000Z\nmxv-01234567-reading-list.data 0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675 \n"
+    )
+}
+
+#[test]
+fn a_container_handle_is_minted_for_labels_that_name_its_store_workspace_and_service() {
+    let scope = scope("reading-list");
+    let inspected = mint_container(
+        &scope,
+        &service("db"),
+        ID,
+        &printed_container(&format!("{STORE}\treading-list\tdb")),
+    )
+    .unwrap();
+    assert_eq!(inspected.container.service(), &service("db"));
+    assert_eq!(inspected.container.id(), &ContainerId::new(ID).unwrap());
+    assert_eq!(inspected.state, ContainerState::Exited(3));
+    assert_eq!(inspected.started, "2026-11-04T10:00:00.000000000Z");
+    let anonymous: Vec<&VolumeName> = inspected
+        .anonymous
+        .iter()
+        .map(|volume| volume.name())
+        .collect();
+    assert_eq!(
+        anonymous,
+        [
+            &VolumeName::new("0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675")
+                .unwrap()
+        ]
+    );
+}
+
+#[test]
+fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_service() {
+    let scope = scope("reading-list");
+    for labels in [
+        "\t\t".to_owned(),
+        format!("{STORE}\treading-list\tcache"),
+        format!("{STORE}\treading\tdb"),
+        "fedcba9876543210fedcba9876543210\treading-list\tdb".to_owned(),
+    ] {
+        let minted = mint_container(
+            &scope,
+            &service("db"),
+            "mxv-01234567-reading-list.db",
+            &printed_container(&labels),
+        );
+        assert!(
+            matches!(
+                &minted,
+                Err(Error::DockerForeign { kind: "container", name })
+                    if name == "mxv-01234567-reading-list.db"
+            ),
+            "{labels:?}: {minted:?}"
+        );
+    }
+}
+
+#[test]
+fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
+    let printed = format!("{STORE}\treading-list\tdb\nnot-an-id\nrunning 0\n\n\n");
+    let minted = mint_container(&scope("reading-list"), &service("db"), ID, &printed);
+    assert!(
+        matches!(
+            &minted,
+            Err(Error::DockerFailed {
+                operation: "container inspect",
+                ..
+            })
+        ),
+        "{minted:?}"
+    );
+}
+
+#[test]
+fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_store_workspace_and_volume() {
+    let scope = scope("reading-list");
+    let name = scope.volume_name(&key("data"));
+    assert!(mint_volume(&scope, &name, &format!("{STORE}\treading-list\tdata\n")).is_ok());
+    for labels in [
+        "\t\t\n".to_owned(),
+        format!("{STORE}\treading-list\tother\n"),
+        format!("{STORE}\treading\tdata\n"),
+        "fedcba9876543210fedcba9876543210\treading-list\tdata\n".to_owned(),
+    ] {
+        let minted = mint_volume(&scope, &name, &labels);
+        assert!(
+            matches!(
+                &minted,
+                Err(Error::DockerForeign { kind: "volume", name })
+                    if name == "mxv-01234567-reading-list.data"
+            ),
+            "{labels:?}: {minted:?}"
+        );
+    }
+}
+
+#[test]
+fn no_named_volume_handle_is_minted_for_a_volume_without_a_name_of_the_scope() {
+    let scope = scope("reading-list");
+    for name in [
+        "0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675",
+        "mxv-01234567-reading.data",
+        "mxv-fedcba98-reading-list.data",
+    ] {
+        let name = VolumeName::new(name).unwrap();
+        // Labels that would name the volume do not make another volume
+        // the scope's.
+        let minted = mint_volume(&scope, &name, &format!("{STORE}\treading-list\tdata\n"));
+        assert!(
+            matches!(&minted, Err(Error::DockerForeign { kind: "volume", .. })),
+            "{name}: {minted:?}"
+        );
+    }
+}
+
+#[test]
+fn an_anonymous_volume_handle_is_minted_only_for_a_volume_with_dockers_anonymous_label() {
+    let name = VolumeName::new("0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675")
+        .unwrap();
+    assert_eq!(mint_anonymous(&name, "anonymous\n").unwrap().name(), &name);
+    for printed in ["", "\n", "named\n"] {
+        assert!(
+            matches!(
+                mint_anonymous(&name, printed),
+                Err(Error::DockerForeign { kind: "volume", .. })
+            ),
+            "{printed:?}"
+        );
+    }
+}
+
+#[test]
+fn a_store_id_is_32_lowercase_hex_digits() {
+    assert_eq!(StoreId::new(STORE).unwrap(), STORE);
+    for bad in [
+        "",
+        "01234567",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef0123456789abcdef0",
+        "-123456789abcdef0123456789abcdef",
+        "../456789abcdef0123456789abcdef0",
+    ] {
+        assert!(StoreId::new(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_volume_key_follows_the_rule_of_a_service_name() {
+    for good in ["data", "pg-data", "a_b"] {
+        assert_eq!(VolumeKey::new(good).unwrap(), good);
+    }
+    for bad in ["", "-data", "a.b", "a b", "a/b", &"a".repeat(65)] {
+        assert!(VolumeKey::new(bad).is_err(), "{bad:?}");
+    }
 }
