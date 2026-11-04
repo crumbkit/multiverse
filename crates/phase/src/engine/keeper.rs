@@ -138,7 +138,6 @@ use crate::env::EnvironmentSource;
 mod args;
 mod environment;
 mod logfile;
-mod policy;
 mod recorder;
 mod sandbox;
 #[cfg_attr(
