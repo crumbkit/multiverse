@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use super::probe::ProbeCheck;
+use super::probe::{BadLogPattern, LogPattern, ProbeCheck, is_sendable_path};
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, ProcessKind, ProcessPlan, RunnerKind};
 use crate::name::{AppName, PortName, ProcessName};
@@ -172,7 +172,7 @@ pub enum ProcessProblem {
     #[non_exhaustive]
     BadVariableName(String),
     /// The ready timeout is zero or longer than
-    /// [`MOST_READY_TIMEOUT`](super::MOST_READY_TIMEOUT).
+    /// [`MOST_READY_TIMEOUT`].
     ReadyTimeoutOutOfRange,
     /// The process, or its probe, names a port its app does not have.
     #[non_exhaustive]
@@ -187,8 +187,17 @@ pub enum ProcessProblem {
     HttpProbeWithoutPort,
     /// The HTTP probe's path does not start with `/`.
     HttpPathWithoutSlash,
+    /// The HTTP probe's path holds a space, a control character, a
+    /// character outside ASCII or `#`, so phase cannot send it as written.
+    HttpPathUnsendable,
     /// The log probe's pattern is empty.
     EmptyLogPattern,
+    /// The log probe's pattern is not a regular expression.
+    #[non_exhaustive]
+    BadLogPattern {
+        /// The regular expression compiler's one-line reason.
+        reason: String,
+    },
     /// The command probe's command is empty.
     EmptyProbeCommand,
     /// The probe's period or timeout is zero.
@@ -365,7 +374,14 @@ impl fmt::Display for ProcessProblem {
             Self::HttpPathWithoutSlash => {
                 formatter.write_str("its http probe's path does not start with `/`")
             }
+            Self::HttpPathUnsendable => formatter.write_str(
+                "its http probe's path holds a space, a control character, a character outside ASCII or `#`",
+            ),
             Self::EmptyLogPattern => formatter.write_str("its log probe's pattern is empty"),
+            Self::BadLogPattern { reason } => write!(
+                formatter,
+                "its log probe's pattern is not a regular expression: {reason}"
+            ),
             Self::EmptyProbeCommand => formatter.write_str("its probe's command is empty"),
             Self::ZeroProbeTime => formatter.write_str("its probe's period or timeout is zero"),
             Self::OneshotWithProbe => formatter.write_str("it is a oneshot with a probe"),
@@ -698,14 +714,18 @@ fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
         ProbeCheck::Http { path } if !path.starts_with('/') => {
             Err(ProcessProblem::HttpPathWithoutSlash)
         }
+        ProbeCheck::Http { path } if !is_sendable_path(path) => {
+            Err(ProcessProblem::HttpPathUnsendable)
+        }
         ProbeCheck::Tcp { port } if !app.ports.contains_key(port) => {
             Err(ProcessProblem::UnknownPort(port.clone()))
         }
-        ProbeCheck::Log { pattern } if pattern.is_empty() => Err(ProcessProblem::EmptyLogPattern),
+        ProbeCheck::Log { pattern } => match LogPattern::new(pattern) {
+            Ok(_) => Ok(()),
+            Err(BadLogPattern::Empty) => Err(ProcessProblem::EmptyLogPattern),
+            Err(BadLogPattern::Invalid(reason)) => Err(ProcessProblem::BadLogPattern { reason }),
+        },
         ProbeCheck::Command { run } if run.is_empty() => Err(ProcessProblem::EmptyProbeCommand),
-        ProbeCheck::Http { .. }
-        | ProbeCheck::Tcp { .. }
-        | ProbeCheck::Log { .. }
-        | ProbeCheck::Command { .. } => Ok(()),
+        ProbeCheck::Http { .. } | ProbeCheck::Tcp { .. } | ProbeCheck::Command { .. } => Ok(()),
     }
 }

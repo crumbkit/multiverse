@@ -25,6 +25,7 @@ use super::{
     Launch, run, spawn,
 };
 use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::engine::restart::Ended;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
@@ -399,6 +400,12 @@ fn group_of(pid: u32) -> u32 {
 
 fn alive(host: &HostProcess) -> bool {
     System.start_time(host.pid).unwrap() == Start::At(host.started_at_us)
+}
+
+#[test]
+fn a_keeper_exits_completed_or_failed_as_its_app_ended() {
+    assert_eq!(KeeperExit::from(Ended::Completed), KeeperExit::Completed);
+    assert_eq!(KeeperExit::from(Ended::Failed), KeeperExit::Failed);
 }
 
 #[test]

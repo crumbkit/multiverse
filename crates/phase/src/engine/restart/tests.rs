@@ -2,9 +2,8 @@ use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    AfterExit, HEALTHY_RUN, after_exit, backoff_delay, needs_environment, streak_after_run,
+    AfterExit, Ended, HEALTHY_RUN, after_exit, backoff_delay, needs_environment, streak_after_run,
 };
-use crate::engine::keeper::KeeperExit;
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits};
 
 fn limits(max: Option<u32>, resolve: Resolve) -> RestartLimits {
@@ -34,11 +33,11 @@ fn the_backoff_doubles_from_the_first_wait_up_to_the_longest() {
 fn the_policy_no_leaves_an_ended_process_ended_with_its_outcome() {
     assert_eq!(
         after_exit(&Restart::No, false, 0),
-        AfterExit::Leave(KeeperExit::Completed)
+        AfterExit::Leave(Ended::Completed)
     );
     assert_eq!(
         after_exit(&Restart::No, true, 0),
-        AfterExit::Leave(KeeperExit::Failed)
+        AfterExit::Leave(Ended::Failed)
     );
 }
 
@@ -55,7 +54,7 @@ fn on_failure_restarts_a_failed_process_and_leaves_one_that_exited_cleanly() {
     );
     assert_eq!(
         after_exit(&restart, false, 0),
-        AfterExit::Leave(KeeperExit::Completed)
+        AfterExit::Leave(Ended::Completed)
     );
 }
 
@@ -79,11 +78,11 @@ fn a_policy_stops_restarting_once_it_reaches_its_most_restarts() {
     ));
     assert_eq!(
         after_exit(&restart, true, 2),
-        AfterExit::Leave(KeeperExit::Failed)
+        AfterExit::Leave(Ended::Failed)
     );
     assert_eq!(
         after_exit(&restart, false, 2),
-        AfterExit::Leave(KeeperExit::Completed)
+        AfterExit::Leave(Ended::Completed)
     );
 }
 

@@ -21,14 +21,14 @@ use signal_hook::iterator::Signals;
 
 use crate::clock::{POLL_INTERVAL, now, pause, wall_now};
 use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
-use crate::engine::keeper::policy::{
-    AfterExit, after_exit, backoff_delay, needs_environment, streak_after_run,
-};
 use crate::engine::keeper::recorder::{RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::apply_sandbox;
 use crate::engine::keeper::spec::{Handshake, KeeperSpec, StartedApp, read_spec, write_handshake};
 use crate::engine::keeper::{
     EXIT_RECORD_WAIT, KeeperArgs, KeeperEnvironment, KeeperExit, RESOLVE_WAIT,
+};
+use crate::engine::restart::{
+    AfterExit, after_exit, backoff_delay, needs_environment, streak_after_run,
 };
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::plan::restart::StopSignal;
@@ -328,7 +328,7 @@ impl Supervisor<'_> {
                 AfterExit::Leave(_) if unresolved => {
                     return Some(KeeperExit::EnvironmentUnresolved);
                 }
-                AfterExit::Leave(exit) => return Some(exit),
+                AfterExit::Leave(ended) => return Some(ended.into()),
                 AfterExit::Restart { backoff, resolve } => (backoff, resolve),
             };
             if let Some(ran) = ran.take() {

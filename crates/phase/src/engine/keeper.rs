@@ -133,12 +133,12 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use crate::engine::restart::Ended;
 use crate::env::EnvironmentSource;
 
 mod args;
 mod environment;
 mod logfile;
-mod policy;
 mod recorder;
 mod sandbox;
 #[cfg_attr(
@@ -238,6 +238,15 @@ impl KeeperExit {
             Self::EnvironmentUnresolved => 3,
             Self::BadInput => 64,
             Self::Unstartable => 69,
+        }
+    }
+}
+
+impl From<Ended> for KeeperExit {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::Completed => Self::Completed,
+            Ended::Failed => Self::Failed,
         }
     }
 }

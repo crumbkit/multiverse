@@ -28,6 +28,10 @@ rustix = { workspace = true }
 # A keeper receives `TERM` and `INT` as messages on a thread of its own, so
 # it can stop its app's group before it exits.
 signal-hook = { workspace = true }
+# A plan compiles each log probe's regular expression, and the probe matches
+# each new line of a process's log against it, with the same compiler and
+# features as mxv's own log readiness check.
+regex = { workspace = true }
 
 # Linux reads a process's start in clock ticks from /proc, and the `param`
 # feature gives the number of ticks in a second.

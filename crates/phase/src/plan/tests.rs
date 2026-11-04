@@ -228,6 +228,30 @@ fn a_plan_refuses_an_http_probe_path_without_a_leading_slash() {
 }
 
 #[test]
+fn a_plan_refuses_an_http_probe_path_that_cannot_be_sent_as_written() {
+    for path in ["/a b", "/a\r\nX: 1", "/caf\u{e9}", "/page#top", "/\u{7f}"] {
+        let mut api = host_app("api");
+        api.processes[0].ready = Some(Probe::new(ProbeCheck::http(path.to_owned())));
+
+        assert_eq!(
+            process_problem(api),
+            ProcessProblem::HttpPathUnsendable,
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_accepts_an_http_probe_path_with_a_query() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::http(
+        "/health?deep=1&x=%20".to_owned(),
+    )));
+
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
 fn a_plan_refuses_a_tcp_probe_on_a_port_the_app_lacks() {
     let mut api = host_app("api");
     api.processes[0].ready = Some(Probe::new(ProbeCheck::Tcp {
@@ -370,6 +394,34 @@ fn a_plan_refuses_a_log_probe_with_an_empty_pattern() {
     }));
 
     assert_eq!(process_problem(api), ProcessProblem::EmptyLogPattern);
+}
+
+#[test]
+fn a_plan_refuses_a_log_probe_whose_pattern_is_not_a_regular_expression() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("ready (".to_owned())));
+
+    let ProcessProblem::BadLogPattern { reason } = process_problem(api) else {
+        panic!("the plan was refused for another reason");
+    };
+    assert!(!reason.is_empty());
+    assert!(!reason.contains('\n'), "{reason}");
+}
+
+#[test]
+fn a_plan_read_from_json_refuses_a_log_probe_whose_pattern_is_not_a_regular_expression() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("ready".to_owned())));
+    let mut json = serde_json::to_value(plan(vec![api]).unwrap()).unwrap();
+    json["apps"][0]["processes"][0]["ready"]["check"]["log"]["pattern"] = "ready (".into();
+
+    let refused = serde_json::from_value::<Plan>(json).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("its log probe's pattern is not a regular expression"),
+        "{refused}"
+    );
 }
 
 #[test]
