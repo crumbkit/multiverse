@@ -113,7 +113,7 @@ secrets = ["STRIPE_KEY"]
 runner = "container"
 image = "postgres:17"
 ready = { tcp = "pg" }
-env = ["POSTGRES_PASSWORD"]               # names only; values come from starmap
+env = ["POSTGRES_PASSWORD"]               # names only; values come from starmap at start
 ```
 
 The environment variables an app reads are declared by starmap, not here.
@@ -164,11 +164,17 @@ A process with no readiness probe is ready as soon as it starts.
 ### Containers
 
 Each container app is one Docker Compose project, and each of its processes
-is one Compose service. The Compose file lists environment variables by name
-only. phase sets their values on the one `docker compose up` child process
-and drops them when it exits, so no value is written to a file. The Docker
-engine still keeps the values in the container's configuration for the
-container's life, where `docker inspect` shows them; every way of passing an
+is one Compose service. The Compose file holds no value. It maps each of a
+service's environment variables to a private reference, such as
+`DATABASE_URL: "${MXV_ENV_db_1:-}"`, and phase sets the `MXV_ENV_*` values
+only on that service's `docker compose up` child process, which drops them
+when it exits. phase does not list a variable by its bare name, because
+Compose would then read it from the child's own environment, and a
+container variable named `PATH` or `DOCKER_HOST` would change which docker
+program or daemon the child uses. multiverse uses the same rule
+(crumbkit/multiverse#6), so its code can move into phase. The Docker engine
+still keeps the values in the container's configuration for the container's
+life, where `docker inspect` shows them; every way of passing an
 environment variable to a container does this. Docker's restart policy
 restarts container processes.
 
@@ -332,7 +338,7 @@ Each decision states what this draft assumes until it is decided.
 | # | Decision | Draft assumes |
 | --- | --- | --- |
 | P1 | What restarts a crashed host process: a keeper per process, one supervisor per workspace, or nothing until the next restart. | Decided 4 November 2026: a keeper per process. |
-| P2 | How phase runs containers: Docker Compose with one project per app, or the Docker Engine API directly. | Decided 4 November 2026: Docker Compose, one project per app, with environment variables listed by name only. |
+| P2 | How phase runs containers: Docker Compose with one project per app, or the Docker Engine API directly. | Decided 4 November 2026: Docker Compose, one project per app, with no environment variable value in the Compose file. Each variable maps to a private `MXV_ENV_*` reference set only on that service's compose child, as in crumbkit/multiverse#6. |
 | P3 | How a container receives a secret. | The Compose file lists the name; the value is set on the `docker compose up` child only. |
 | P4 | How workspaces avoid each other on the network: allocated ports on 127.0.0.1, or one loopback address per workspace. | Allocated ports on 127.0.0.1 from multiverse's ledger. |
 | P5 | How `mxv` uses phase: by linking the library, or by running a `phase` program and reading its JSON. | Linking the library; JSON for reading state. |
