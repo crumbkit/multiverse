@@ -125,15 +125,15 @@ pub enum SourceProblem {
     /// The checkout's directory is a relative path.
     #[non_exhaustive]
     RelativeCheckout(PathBuf),
-    /// The build's output is absolute or leaves the checkout.
+    /// The build's output is empty, absolute or leaves the checkout.
     #[non_exhaustive]
     OutputOutsideCheckout(PathBuf),
-    /// The release's program is absolute or leaves the asset.
+    /// The release's program is empty, absolute or leaves the asset.
     #[non_exhaustive]
     BinaryOutsideAsset(PathBuf),
-    /// The release's asset name holds a `/`.
+    /// The release's asset name is empty, `.` or `..`, or holds a `/`.
     #[non_exhaustive]
-    AssetWithSlash(String),
+    BadAssetName(String),
 }
 
 /// What is wrong with an app's container options.
@@ -304,7 +304,9 @@ impl fmt::Display for SourceProblem {
                     path.display()
                 )
             }
-            Self::AssetWithSlash(asset) => write!(formatter, "the asset {asset:?} holds a `/`"),
+            Self::BadAssetName(asset) => {
+                write!(formatter, "the asset name {asset:?} does not name a file")
+            }
         }
     }
 }
@@ -550,18 +552,19 @@ fn check_source(source: &Source) -> Result<(), SourceProblem> {
                 return Err(SourceProblem::RelativeCheckout(dir.clone()));
             }
             match build {
-                Some(build) if !stays_inside(&build.output) => {
+                Some(build) if !names_file_inside(&build.output) => {
                     Err(SourceProblem::OutputOutsideCheckout(build.output.clone()))
                 }
                 Some(_) | None => Ok(()),
             }
         }
         Source::Release { spec, .. } => {
-            if !stays_inside(&spec.binary) {
+            if !names_file_inside(&spec.binary) {
                 return Err(SourceProblem::BinaryOutsideAsset(spec.binary.clone()));
             }
-            if spec.asset.contains('/') {
-                return Err(SourceProblem::AssetWithSlash(spec.asset.clone()));
+            let asset = spec.asset.as_str();
+            if asset.is_empty() || asset == "." || asset == ".." || asset.contains('/') {
+                return Err(SourceProblem::BadAssetName(spec.asset.clone()));
             }
             Ok(())
         }
@@ -607,6 +610,15 @@ fn check_container(app: &AppPlan) -> Result<(), ContainerProblem> {
 fn stays_inside(path: &Path) -> bool {
     path.components()
         .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+/// Reports whether `path` stays within the directory it is relative to and
+/// names something below it, which `.` and an empty path do not.
+fn names_file_inside(path: &Path) -> bool {
+    stays_inside(path)
+        && path
+            .components()
+            .any(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Checks one process against its app.

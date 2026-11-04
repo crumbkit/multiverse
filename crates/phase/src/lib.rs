@@ -50,8 +50,9 @@ pub use crate::plan::restart::{
     LimitsWithoutRestart, Resolve, Restart, RestartLimits, Stop, StopSignal,
 };
 pub use crate::plan::{
-    AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, Permissions, Plan,
-    PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind, SourceProblem,
+    AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, OnceWithoutOneshot,
+    Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind,
+    SourceProblem,
 };
 pub use crate::record::{BadContainerId, ContainerId, Handle, SweepOutcome, Swept, SweptItem};
 pub use crate::report::{AppOutcome, AppReport, Report, StartProblem};

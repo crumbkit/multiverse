@@ -314,7 +314,9 @@ apply values to a `Command` but cannot return a value. It has no `Debug`,
 The plan names each process's variables and holds no value, literal or
 secret. The host program's `EnvironmentSource` supplies every value, and
 mxv's renders its manifest's literal values and their `{port.NAME}`
-placeholders before phase sees them.
+placeholders before phase sees them. phase resolves each process's
+environment separately, so two processes of one app can receive different
+values for one name, such as `PORT`.
 
 A secret value takes only these paths:
 
@@ -426,7 +428,7 @@ pub enum Source { Release { version: Version, spec: ReleaseSpec }, Checkout { di
 pub enum RunnerKind { Host, Container }
 
 pub trait EnvironmentSource {
-    fn resolve(&self, app: &AppName, deadline: Instant)
+    fn resolve(&self, app: &AppName, process: &ProcessName, deadline: Instant)
         -> Result<Box<dyn AppliedEnvironment>, EnvironmentError>;
 }
 

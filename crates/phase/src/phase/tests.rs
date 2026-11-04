@@ -8,7 +8,7 @@ use crate::cancel::Cancel;
 use crate::env::{EnvironmentError, EnvironmentSource};
 use crate::error::{Operation, PhaseError};
 use crate::logs::{LineSink, LogLine, LogRequest};
-use crate::name::{AppName, WorkspaceId};
+use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::Plan;
 use crate::select::Selection;
 
@@ -18,6 +18,7 @@ impl EnvironmentSource for Unused {
     fn resolve(
         &self,
         app: &AppName,
+        _process: &ProcessName,
         _deadline: Instant,
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
         Err(EnvironmentError::new(

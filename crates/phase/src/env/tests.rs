@@ -115,3 +115,57 @@ fn an_environment_error_names_the_variable_and_the_resolver() {
     assert_eq!(error.variable(), "STRIPE_KEY");
     assert_eq!(error.resolver(), "1password");
 }
+
+/// A source that gives each process of an app its own `PORT`, as mxv does
+/// when two processes listen on different named ports.
+struct PerProcess;
+
+impl super::EnvironmentSource for PerProcess {
+    fn resolve(
+        &self,
+        _app: &crate::name::AppName,
+        process: &crate::name::ProcessName,
+        _deadline: std::time::Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        let port = if process.as_str() == "server" {
+            "41000"
+        } else {
+            "41001"
+        };
+        Ok(Box::new(Fixed(BTreeMap::from([(
+            "PORT".to_owned(),
+            port.to_owned(),
+        )]))))
+    }
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test builds Commands that it never starts"
+)]
+fn two_processes_of_one_app_receive_different_values_for_one_name() {
+    use super::EnvironmentSource;
+    let deadline = std::time::Instant::now();
+    let app = "api".parse().unwrap();
+    let mut server = Command::new("server");
+    let mut admin = Command::new("admin");
+
+    PerProcess
+        .resolve(&app, &"server".parse().unwrap(), deadline)
+        .unwrap()
+        .apply(&mut server);
+    PerProcess
+        .resolve(&app, &"admin".parse().unwrap(), deadline)
+        .unwrap()
+        .apply(&mut admin);
+
+    assert_eq!(
+        envs(&server),
+        vec![(OsStr::new("PORT"), Some(OsStr::new("41000")))]
+    );
+    assert_eq!(
+        envs(&admin),
+        vec![(OsStr::new("PORT"), Some(OsStr::new("41001")))]
+    );
+}

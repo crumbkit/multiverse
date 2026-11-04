@@ -19,11 +19,14 @@ use crate::source::Source;
 mod check;
 pub(crate) mod container;
 pub(crate) mod probe;
+mod process_file;
 pub(crate) mod restart;
 
 use check::check_apps;
 pub use check::{ContainerProblem, PlanError, ProcessProblem, SourceProblem};
 use container::ContainerOptions;
+pub use process_file::OnceWithoutOneshot;
+use process_file::ProcessFile;
 
 #[cfg(test)]
 mod tests;
@@ -216,8 +219,10 @@ impl AppPlan {
 }
 
 /// Whether a process keeps running or runs to completion.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+///
+/// In JSON a process writes its kind as `"kind": "long-running"` or
+/// `"kind": "oneshot"`, and a oneshot writes `"once"` beside it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProcessKind {
     /// The process runs until phase stops it, and its probe says when it is
     /// ready.
@@ -245,13 +250,12 @@ impl ProcessKind {
 
 /// One process of an app.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ProcessFile", into = "ProcessFile")]
 #[non_exhaustive]
 pub struct ProcessPlan {
     /// The process's name, which is unique within the app.
     pub name: ProcessName,
     /// Whether the process keeps running or runs to completion.
-    #[serde(default)]
     pub kind: ProcessKind,
     /// The command, as separate values that no shell reads. For a host
     /// process it is the program and its arguments, such as `npm run dev`,
@@ -262,51 +266,38 @@ pub struct ProcessPlan {
     pub run: Vec<String>,
     /// The processes of the same app that must be ready, or for a oneshot
     /// must have completed, before this one starts.
-    #[serde(default)]
     pub depends: Vec<ProcessName>,
     /// The directory the process starts in, relative to the app's checkout
     /// or release directory, or `None` for that directory itself. It never
     /// leaves that directory.
-    #[serde(default)]
     pub cwd: Option<PathBuf>,
     /// The names of the variables the process receives. The plan holds no
     /// value: the [`EnvironmentSource`](crate::EnvironmentSource) supplies
     /// every value, literal or secret. A host process also inherits `PATH`
     /// and `HOME` from the program that calls phase, and no other variable
-    /// of its environment.
-    #[serde(default)]
+    /// of its environment, so the source supplies any other inherited
+    /// variable the app relies on, such as `LANG`.
     pub env: BTreeSet<String>,
     /// The app port the process listens on, or `None`.
-    #[serde(default)]
     pub port: Option<PortName>,
     /// For a container process, the port inside the container that each of
     /// the app's named ports publishes on 127.0.0.1. A host process leaves
     /// it empty.
-    #[serde(default)]
     pub publish: BTreeMap<PortName, NonZeroU16>,
     /// For a container process, the workspace's volumes it mounts, each at
     /// an absolute path inside the container, such as a database's data. A
     /// host process leaves it empty.
-    #[serde(default)]
     pub volumes: BTreeMap<VolumeName, PathBuf>,
     /// The check that tells phase the process is ready, or `None` when the
     /// process is ready as soon as it starts. A oneshot process has none.
-    #[serde(default)]
     pub ready: Option<Probe>,
     /// How long phase waits for the process to become ready, or for a
     /// oneshot to complete, before the start fails. It is more than zero
     /// and at most [`MOST_READY_TIMEOUT`].
-    #[serde(
-        default = "default_ready_timeout",
-        rename = "ready_timeout_ms",
-        with = "crate::millis"
-    )]
     pub ready_timeout: Duration,
     /// When phase restarts the process.
-    #[serde(default)]
     pub restart: Restart,
     /// How phase stops the process.
-    #[serde(default)]
     pub stop: Stop,
 }
 

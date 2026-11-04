@@ -562,7 +562,7 @@ fn a_plan_refuses_a_release_asset_name_with_a_slash() {
 
     assert_eq!(
         source_problem(api),
-        SourceProblem::AssetWithSlash("dist/api.tar.gz".into())
+        SourceProblem::BadAssetName("dist/api.tar.gz".into())
     );
 }
 
@@ -670,7 +670,7 @@ fn a_probe_read_from_json_takes_the_defaults_it_omits() {
 }
 
 #[test]
-fn a_plan_writes_its_waits_in_milliseconds_and_a_process_kind_under_its_own_tag() {
+fn a_plan_writes_its_waits_in_milliseconds_and_a_process_kind_as_plain_fields() {
     let mut api = host_app("api");
     let mut migrate = ProcessPlan::new("migrate".parse().unwrap(), vec!["{program}".into()]);
     migrate.kind = ProcessKind::oneshot(true);
@@ -683,8 +683,78 @@ fn a_plan_writes_its_waits_in_milliseconds_and_a_process_kind_under_its_own_tag(
     assert_eq!(server["ready"]["timeout_ms"], 1000);
     assert_eq!(server["ready_timeout_ms"], 60_000);
     assert_eq!(server["stop"]["grace_ms"], 10_000);
+    assert_eq!(migrate["kind"], "oneshot");
+    assert_eq!(migrate["once"], true);
+    assert_eq!(server["kind"], "long-running");
+    assert!(server.get("once").is_none());
+}
+
+#[test]
+fn a_plan_refuses_an_asset_named_dot_dot_dot_or_nothing() {
+    for asset in [".", "..", ""] {
+        let mut spec = release_spec();
+        spec.asset = asset.into();
+        let mut api = host_app("api");
+        api.source = release(spec);
+
+        assert_eq!(
+            source_problem(api),
+            SourceProblem::BadAssetName(asset.into()),
+            "{asset:?}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_refuses_an_empty_release_program_path() {
+    let mut spec = release_spec();
+    spec.binary = PathBuf::new();
+    let mut api = host_app("api");
+    api.source = release(spec);
+
     assert_eq!(
-        migrate["kind"],
-        serde_json::json!({"type": "oneshot", "once": true})
+        source_problem(api),
+        SourceProblem::BinaryOutsideAsset(PathBuf::new())
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_empty_build_output_path() {
+    let mut api = host_app("api");
+    api.source = Source::checkout(
+        PathBuf::from("/workspaces/reading-list/api"),
+        Some(BuildSpec::new(vec!["make".into()], PathBuf::from("."))),
+    );
+
+    assert_eq!(
+        source_problem(api),
+        SourceProblem::OutputOutsideCheckout(PathBuf::from("."))
+    );
+}
+
+#[test]
+fn a_process_read_from_json_refuses_once_on_a_long_running_process() {
+    let one = plan(vec![host_app("api")]).unwrap();
+    let mut json = serde_json::to_value(&one).unwrap();
+    json["apps"][0]["processes"][0]["once"] = true.into();
+
+    assert!(serde_json::from_value::<Plan>(json).is_err());
+}
+
+#[test]
+fn a_oneshot_read_from_json_without_once_runs_on_every_up() {
+    let one = plan(vec![host_app("api")]).unwrap();
+    let mut json = serde_json::to_value(&one).unwrap();
+    json["apps"][0]["processes"][0]["kind"] = "oneshot".into();
+    json["apps"][0]["processes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("ready");
+
+    let read: Plan = serde_json::from_value(json).unwrap();
+
+    assert_eq!(
+        read.apps()[0].processes[0].kind,
+        ProcessKind::Oneshot { once: false }
     );
 }

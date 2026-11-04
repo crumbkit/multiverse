@@ -19,14 +19,23 @@ use std::fmt;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
 
-use crate::name::AppName;
+use crate::name::{AppName, ProcessName};
 
 #[cfg(test)]
 mod tests;
 
-/// Resolves an app's environment, including its secrets.
+/// Resolves the environment of each process of an app, including its
+/// secrets.
+///
+/// The source supplies every value a process receives, literal or secret,
+/// because the plan holds names only. Two processes of one app can receive
+/// different values for one name, such as `PORT`. A host process inherits
+/// only `PATH` and `HOME` from the program that calls phase, so the source
+/// also supplies any other inherited variable an app relies on, such as
+/// `LANG`.
 pub trait EnvironmentSource {
-    /// Resolves every variable that `app` reads, before `deadline`.
+    /// Resolves every variable that `process` of `app` receives, before
+    /// `deadline`.
     ///
     /// # Errors
     ///
@@ -36,11 +45,12 @@ pub trait EnvironmentSource {
     fn resolve(
         &self,
         app: &AppName,
+        process: &ProcessName,
         deadline: Instant,
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError>;
 }
 
-/// The resolved environment of one app, which can list its variables' names
+/// The resolved environment of one process, which can list its variables' names
 /// and apply their values to a `Command`, and can never return a value.
 ///
 /// A `Box<dyn AppliedEnvironment>` cannot be formatted:
