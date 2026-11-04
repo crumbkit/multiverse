@@ -7,11 +7,16 @@
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
 //!
-//! The workspace verbs are declared and not built yet. Each one fails with
-//! `mxv::command::unbuilt` until the pull request that builds it.
+//! `new`, `list`, `show`, `cd` and `remove` are built. `run`, `archive` and
+//! `restore` are declared and fail with `mxv::command::unbuilt` until the
+//! pull request that builds each one.
 
 mod cli;
+mod environment;
+mod failures;
+mod rows;
 mod unbuilt;
+mod verbs;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -23,23 +28,39 @@ use crumbkit::Code;
 pub use crate::cli::{Cli, GUIDE};
 use crate::cli::{CommandsCommand, FiguresCommand, SchemasCommand, SelfCommand, Verb};
 #[doc(hidden)]
+pub use crate::environment::{Environment, VARIABLES, Variable};
+#[doc(hidden)]
+pub use crate::failures::{
+    BRANCH_EXISTS, CHECKOUT_UNOWNED, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY, FILE_UNWRITABLE,
+    GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, RECORD_CORRUPT, RECORD_NEWER, RECORD_UNREADABLE,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
+    WORKSPACE_NOT_FOUND,
+};
+#[doc(hidden)]
 pub use crate::unbuilt::UNBUILT;
 use crate::unbuilt::{UNBUILT_RESULT, fail};
 
-/// Every failure code that mxv declares, which the tests pass to
+/// The failure code of the unbuilt verbs, which the tests pass to
+/// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
+#[doc(hidden)]
+pub const UNBUILT_CODES: &[&Code] = &[&UNBUILT];
+
+/// Every failure code of the workspace verbs, which the tests pass to
 /// crumbkit-test's codes, recovery and twin checks.
 #[doc(hidden)]
-pub const CODES: &[&Code] = &[&UNBUILT];
+pub const CODES: &[&Code] = failures::CODES;
 
-/// Parses `args`, runs the command and returns the process's exit code. The
-/// first argument is the program's name.
+/// Parses `args`, runs the command with the variables of `environment` and
+/// returns the process's exit code. The first argument is the program's
+/// name.
 ///
 /// `crumbkit::parse_from` prints help or a refused command line and returns
 /// the exit code. `crumbkit::finish` prints the result or the failure in
 /// the format that the output flags choose, and returns the exit code.
 #[doc(hidden)]
 #[must_use]
-pub fn run<I, T>(args: I) -> ExitCode
+pub fn run<I, T>(args: I, environment: &Environment) -> ExitCode
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -49,14 +70,28 @@ where
         Err(stop) => return stop.exit_code(),
     };
     let verb = match cli.verb {
-        Verb::New(_) => "new",
-        Verb::List(_) => "list",
-        Verb::Show(_) => "show",
-        Verb::Cd => "cd",
+        Verb::New(args) => {
+            let result = verbs::new(&output, environment, &args);
+            return crumbkit::finish(output, verbs::NEW, result);
+        }
+        Verb::List(args) => {
+            return crumbkit::finish(output, verbs::LIST, verbs::list(environment, &args));
+        }
+        Verb::Show(args) => {
+            return crumbkit::finish(output, verbs::SHOW, verbs::show(environment, &args));
+        }
+        Verb::Cd(args) => {
+            return crumbkit::finish(output, verbs::CD, verbs::cd(environment, &args));
+        }
+        // `remove` reads `--dry-run` and asks for confirmation through
+        // `&mut output`, so it runs before `finish`.
+        Verb::Remove(args) => {
+            let result = verbs::remove(&mut output, environment, &args);
+            return crumbkit::finish(output, verbs::REMOVE, result);
+        }
         Verb::Run => "run",
         Verb::Archive(_) => "archive",
         Verb::Restore(_) => "restore",
-        Verb::Remove(_) => "remove",
         // crumbkit's own commands read the command tree through
         // `&mut output`, so each runs before `finish` takes `output`.
         Verb::Commands {

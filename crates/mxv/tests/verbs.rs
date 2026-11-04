@@ -1,5 +1,5 @@
-//! End-to-end tests of the workspace verbs, which are declared before they
-//! are built. Each test runs the built `mxv` binary in an empty directory.
+//! End-to-end tests of the workspace verbs that are declared before they are
+//! built. Each test runs the built `mxv` binary in an empty directory.
 
 #![cfg(test)]
 
@@ -7,16 +7,7 @@ use serde_json::Value;
 use snapbox::cmd::Command;
 
 /// Each root verb with the fewest words that its arguments accept.
-const VERBS: &[&[&str]] = &[
-    &["new"],
-    &["list"],
-    &["show", "reading-list"],
-    &["cd"],
-    &["run"],
-    &["archive"],
-    &["restore"],
-    &["remove"],
-];
+const VERBS: &[&[&str]] = &[&["run"], &["archive"], &["restore"]];
 
 /// Runs `mxv` with `args` and `--json` in an empty directory, and returns
 /// the exit code and the JSON document that it printed.
@@ -46,8 +37,8 @@ fn every_unbuilt_verb_fails_with_the_unbuilt_code_and_names_itself() {
 
 #[test]
 fn rm_is_a_hidden_alias_of_remove() {
-    let (_, document) = run_json(&["rm"]);
-    assert_eq!(document["fields"]["command"], "remove");
+    let (_, document) = run_json(&["rm", "reading-list", "--yes"]);
+    assert_eq!(document["code"], "mxv::workspace::not_found");
     let (_, commands) = run_json(&["commands", "list"]);
     let listed = commands.to_string();
     assert!(listed.contains("\"mxv remove\""));

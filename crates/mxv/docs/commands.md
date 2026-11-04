@@ -8,14 +8,14 @@ Create, archive and restore task workspaces that span several git repositories
 
 ### Commands
 
-- [`mxv new`](#mxv-new): Create a workspace with one git worktree for each repository
-- [`mxv list`](#mxv-list): List the live workspaces
-- [`mxv show`](#mxv-show): Show live workspaces by name, in the order given
-- [`mxv cd`](#mxv-cd): Print the directory of a workspace or of one of its apps
+- [`mxv new`](#mxv-new): Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
+- [`mxv list`](#mxv-list): List the workspaces
+- [`mxv show`](#mxv-show): Show workspaces by name, in the order given
+- [`mxv cd`](#mxv-cd): Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
 - [`mxv run`](#mxv-run): Run an app's processes, or one command in the app's environment
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
-- [`mxv remove`](#mxv-remove): Delete a live or archived workspace
+- [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
 - [`mxv self`](#mxv-self): Review mxv's own use
@@ -30,26 +30,37 @@ Create, archive and restore task workspaces that span several git repositories
 
 ## `mxv new`
 
-Create a workspace with one git worktree for each repository
+Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
 
 ### Arguments
 
+- `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
+- `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
 - `--dry-run`: Report what the command would change, and change nothing
-- `--yes`: Proceed without asking for confirmation
 
 ### Examples
 
-Create a workspace.
+Print the workspace that a checkout of the repository inbox would get.
 
 ```sh
-mxv new
+mxv new triage --repo inbox --dry-run
 ```
+
+### Columns
+
+- `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
+- `branch`: The branch that the workspace's checkouts were created on.
+- `path`: The workspace's directory, which `mxv cd` prints.
+
+### Columns that `--long` adds
+
+- `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: additive, not idempotent, open-world.
 
 ## `mxv list`
 
-List the live workspaces
+List the workspaces
 
 ### Arguments
 
@@ -58,17 +69,27 @@ List the live workspaces
 
 ### Examples
 
-List the first page of live workspaces.
+List the first page of workspaces.
 
 ```sh
 mxv list
 ```
 
+### Columns
+
+- `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
+- `branch`: The branch that the workspace's checkouts were created on.
+- `path`: The workspace's directory, which `mxv cd` prints.
+
+### Columns that `--long` adds
+
+- `repositories`: The top-level directory of each repository that the workspace checks out.
+
 Effects: read-only, closed-world.
 
 ## `mxv show`
 
-Show live workspaces by name, in the order given
+Show workspaces by name, in the order given
 
 ### Arguments
 
@@ -82,18 +103,32 @@ Show the workspace reading-list.
 mxv show reading-list
 ```
 
+### Columns
+
+- `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
+- `branch`: The branch that the workspace's checkouts were created on.
+- `path`: The workspace's directory, which `mxv cd` prints.
+
+### Columns that `--long` adds
+
+- `repositories`: The top-level directory of each repository that the workspace checks out.
+
 Effects: read-only, closed-world.
 
 ## `mxv cd`
 
-Print the directory of a workspace or of one of its apps
+Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
+
+### Arguments
+
+- `<NAME>`: The name of the workspace. Required.
 
 ### Examples
 
-Print the directory of the current workspace.
+Print the directory of the workspace reading-list.
 
 ```sh
-mxv cd
+mxv cd reading-list
 ```
 
 Effects: read-only, closed-world.
@@ -152,19 +187,21 @@ Effects: additive, not idempotent, open-world.
 
 ## `mxv remove`
 
-Delete a live or archived workspace
+Remove a workspace's checkouts, its merged branches, its directory and its record
 
 ### Arguments
 
+- `<NAME>`: The name of the workspace to remove. Required.
+- `--force`: Remove checkouts with uncommitted or untracked changes, and delete unmerged branches
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 
 ### Examples
 
-Print what removing would delete.
+Print what removing the workspace reading-list would delete.
 
 ```sh
-mxv remove --dry-run
+mxv remove reading-list --dry-run
 ```
 
 Effects: destructive, not idempotent, closed-world.

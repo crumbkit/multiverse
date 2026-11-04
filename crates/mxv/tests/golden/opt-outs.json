@@ -3,46 +3,6 @@
   "data": [
     {
       "rule": "examples/run",
-      "applies_to": "mxv new",
-      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
-      "costs": [
-        "The examples are not run, so help can show an example that fails.",
-        "The command's output weight counts 0 bytes, so its path weight is too low."
-      ],
-      "budget": null
-    },
-    {
-      "rule": "examples/run",
-      "applies_to": "mxv list",
-      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
-      "costs": [
-        "The examples are not run, so help can show an example that fails.",
-        "The command's output weight counts 0 bytes, so its path weight is too low."
-      ],
-      "budget": null
-    },
-    {
-      "rule": "examples/run",
-      "applies_to": "mxv show",
-      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
-      "costs": [
-        "The examples are not run, so help can show an example that fails.",
-        "The command's output weight counts 0 bytes, so its path weight is too low."
-      ],
-      "budget": null
-    },
-    {
-      "rule": "examples/run",
-      "applies_to": "mxv cd",
-      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
-      "costs": [
-        "The examples are not run, so help can show an example that fails.",
-        "The command's output weight counts 0 bytes, so its path weight is too low."
-      ],
-      "budget": null
-    },
-    {
-      "rule": "examples/run",
       "applies_to": "mxv run",
       "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
       "costs": [
@@ -64,16 +24,6 @@
     {
       "rule": "examples/run",
       "applies_to": "mxv restore",
-      "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
-      "costs": [
-        "The examples are not run, so help can show an example that fails.",
-        "The command's output weight counts 0 bytes, so its path weight is too low."
-      ],
-      "budget": null
-    },
-    {
-      "rule": "examples/run",
-      "applies_to": "mxv remove",
       "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
       "costs": [
         "The examples are not run, so help can show an example that fails.",
@@ -103,16 +53,6 @@
     },
     {
       "rule": "guide/document",
-      "applies_to": "mxv new",
-      "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
-      "costs": [
-        "Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.",
-        "An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change."
-      ],
-      "budget": null
-    },
-    {
-      "rule": "guide/document",
       "applies_to": "mxv archive",
       "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
       "costs": [
@@ -132,16 +72,6 @@
       "budget": null
     },
     {
-      "rule": "guide/document",
-      "applies_to": "mxv remove",
-      "reason": "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.",
-      "costs": [
-        "Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.",
-        "An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change."
-      ],
-      "budget": null
-    },
-    {
       "rule": "effects/yes",
       "applies_to": "mxv run",
       "reason": "run starts only the app that the person names and stops it on Ctrl-C, so it asks no question first.",
@@ -152,8 +82,26 @@
     },
     {
       "rule": "twins/no-twin",
-      "applies_to": "mxv new",
+      "applies_to": "mxv run",
       "reason": "Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.",
+      "costs": [
+        "No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "twins/no-twin",
+      "applies_to": "mxv show reading-list",
+      "reason": "The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.",
+      "costs": [
+        "No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "twins/no-twin",
+      "applies_to": "mxv show reading-list",
+      "reason": "The corrupt record causes the failure, and every word of the command line that names it reads the same record.",
       "costs": [
         "No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason."
       ],

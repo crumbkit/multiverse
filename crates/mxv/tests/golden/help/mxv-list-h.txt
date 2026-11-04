@@ -1,4 +1,4 @@
-List the live workspaces
+List the workspaces
 
 Usage: mxv list [OPTIONS]
 
@@ -12,3 +12,4 @@ Examples:
 
 Effects: read-only, closed-world.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv list --help` describes them.
+Next: mxv list --help explains each column.

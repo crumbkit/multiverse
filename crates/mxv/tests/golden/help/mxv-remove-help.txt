@@ -1,8 +1,15 @@
-Delete a live or archived workspace
+Remove a workspace's checkouts, its merged branches, its directory and its record
 
-Usage: mxv remove [OPTIONS]
+Usage: mxv remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          The name of the workspace to remove
 
 Options:
+      --force
+          Remove checkouts with uncommitted or untracked changes, and delete unmerged branches
+
       --dry-run
           Report what the command would change, and change nothing
 
@@ -12,15 +19,6 @@ Options:
       --json
           Print the result as a JSON document. The default prints text.
 
-      --fields <FIELD>
-          Print only these comma-separated fields, in this order. The default prints the compact columns.
-
-      --long
-          Add the long columns after the compact ones. The default prints only the compact columns.
-
-      --full
-          With --json, print every field of every row. The default prints only the fields of the columns.
-
       --no-input
           Fail instead of asking a question
 
@@ -28,7 +26,7 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  mxv remove --dry-run
-          Print what removing would delete
+  mxv remove reading-list --dry-run
+          Print what removing the workspace reading-list would delete
 
 Effects: destructive, not idempotent, closed-world.

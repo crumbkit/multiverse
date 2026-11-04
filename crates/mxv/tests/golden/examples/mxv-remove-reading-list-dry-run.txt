@@ -1,0 +1,4 @@
+The checkout /home/agent/mxv/reading-list/inbox was already gone.
+The branch reading-list was already gone.
+The directory /home/agent/mxv/reading-list was already gone.
+mxv would delete the record of the workspace reading-list.

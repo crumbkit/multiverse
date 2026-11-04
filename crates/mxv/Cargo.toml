@@ -42,6 +42,13 @@ clap = { workspace = true, features = [
     "color",
 ] }
 crumbkit-usage = { workspace = true }
+# multiverse holds the workspace operations, their records and the git
+# backend that the verbs run.
+multiverse = { path = "../multiverse", version = "0.0.0" }
+# schemars and serde describe and write the JSON documents that the verbs
+# print.
+schemars = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 crumbkit-test = { workspace = true }

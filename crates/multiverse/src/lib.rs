@@ -1,9 +1,37 @@
 //! multiverse creates task workspaces that span several git repositories.
 //!
-//! A workspace holds one git worktree for each repository, branched from
-//! the latest main, an `AGENTS.md` that tells an agent how to work there,
-//! and a record from which an archived workspace can be restored. The `mxv`
+//! A workspace holds one checkout for each repository, branched from the
+//! freshly fetched default branch of its `origin`, an `AGENTS.md` that
+//! tells an agent how to work there, and a record in a [`Store`]. The `mxv`
 //! command is built on this library.
 //!
-//! The library holds no API yet. Each item arrives with the command that
-//! first needs it.
+//! [`Workspaces`] holds the operations. It makes checkouts through a
+//! [`Backend`], and [`Git`] is the one backend, which runs `git worktree`.
+//! A workspace named `reading-list` with a checkout of the repository
+//! `inbox` lives at `<root>/reading-list/inbox`, with its `AGENTS.md` at
+//! `<root>/reading-list/AGENTS.md`, outside the checkout.
+//!
+//! The library reads no environment variable. Its caller passes the root
+//! directory of the workspaces and the directory of the store.
+
+mod backend;
+mod error;
+mod git;
+mod name;
+mod record;
+mod store;
+mod workspaces;
+
+pub use crate::backend::{Backend, Repository};
+pub use crate::error::Error;
+pub use crate::git::{FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
+pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
+pub use crate::record::{
+    AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
+};
+pub use crate::store::{Created, MOST_RECORD_BYTES, Store};
+pub use crate::workspaces::{
+    BranchFate, CheckoutRemoval, Fate, Mode, NewOutcome, Removal, RemovalPlan, Workspaces,
+};
+#[cfg(test)]
+mod testing;

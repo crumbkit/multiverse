@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/new/v1",
+  "description": "The workspace that the run created, or would create on a dry run.",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/WorkspaceRow"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/new/v1"
+    }
+  },
+  "required": [
+    "schema",
+    "data"
+  ],
+  "$defs": {
+    "CheckoutRow": {
+      "description": "One checkout of a workspace.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "The version-control system that made the checkout, which is `git`.",
+          "type": "string"
+        },
+        "base": {
+          "description": "The remote branch that the branch started from, such as `origin/main`.",
+          "type": "string"
+        },
+        "branch": {
+          "description": "The branch that the checkout was created on.",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit that the branch started at, or null in a dry run, which\ndoes not fetch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The repository's name, which names the checkout's directory.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The checkout's directory.",
+          "type": "string"
+        },
+        "source": {
+          "description": "The repository's top-level directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "backend",
+        "source",
+        "path",
+        "branch",
+        "base",
+        "commit"
+      ]
+    },
+    "WorkspaceRow": {
+      "description": "One workspace, as `new`, `list` and `show` print it.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "description": "The branch that the workspace's checkouts were created on.",
+          "type": "string"
+        },
+        "checkouts": {
+          "description": "The workspace's checkouts, one for each repository.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckoutRow"
+          }
+        },
+        "name": {
+          "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The workspace's directory, which `mxv cd` prints.",
+          "type": "string"
+        },
+        "repositories": {
+          "description": "The top-level directory of each repository that the workspace checks\nout.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "branch",
+        "path"
+      ]
+    }
+  }
+}

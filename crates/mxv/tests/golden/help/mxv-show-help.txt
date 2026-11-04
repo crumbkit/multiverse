@@ -1,4 +1,4 @@
-Show live workspaces by name, in the order given
+Show workspaces by name, in the order given
 
 Usage: mxv show [OPTIONS] <NAME>...
 
@@ -28,5 +28,13 @@ Options:
 Examples:
   mxv show reading-list
           Show the workspace reading-list
+
+Columns:
+  name    The workspace's name, which is also the name of its directory and of its checkouts' branch.
+  branch  The branch that the workspace's checkouts were created on.
+  path    The workspace's directory, which `mxv cd` prints.
+
+Columns that --long adds:
+  repositories  The top-level directory of each repository that the workspace checks out.
 
 Effects: read-only, closed-world.

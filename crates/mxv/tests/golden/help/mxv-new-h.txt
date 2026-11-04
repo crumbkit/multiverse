@@ -1,14 +1,18 @@
-Create a workspace with one git worktree for each repository
+Create a workspace with a git worktree of a repository, on a new branch from the freshly fetched origin
 
-Usage: mxv new [OPTIONS]
+Usage: mxv new [OPTIONS] --repo <PATH> <NAME>
+
+Arguments:
+  <NAME>  The workspace's name, which also names its directory and its branch
 
 Options:
-      --dry-run  Report what the command would change, and change nothing
-      --yes      Proceed without asking for confirmation
-  -h, --help     Print help (see more with '--help')
+      --repo <PATH>  The git repository to check out, or any directory inside it
+      --dry-run      Report what the command would change, and change nothing
+  -h, --help         Print help (see more with '--help')
 
 Examples:
-  mxv new
+  mxv new triage --repo inbox --dry-run
 
 Effects: additive, not idempotent, open-world.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv new --help` describes them.
+Next: mxv new --help explains each column.
