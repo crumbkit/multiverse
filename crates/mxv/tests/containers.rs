@@ -74,6 +74,21 @@ fn docker_installed(test: &str) -> bool {
     installed
 }
 
+/// Returns docker's configuration directory as the person who runs the
+/// tests has it, which holds the CLI plugins that a per-user install of
+/// docker, such as Docker Desktop's, puts there. mxv runs with a
+/// temporary `HOME`, so without it docker would find no `compose` plugin.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test hands mxv the docker configuration of the person who runs it"
+)]
+fn docker_config() -> PathBuf {
+    std::env::var_os("DOCKER_CONFIG").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".docker"),
+        PathBuf::from,
+    )
+}
+
 /// A temporary directory with a repository, a workspace root and a state
 /// directory, and one workspace whose containers and volumes it removes
 /// when it drops. It finds them only by its own store id, so it never
@@ -135,6 +150,7 @@ impl Setup {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("MXV_ROOT", root.join("workspaces"))
+            .env("DOCKER_CONFIG", docker_config())
     }
 
     /// Runs `mxv` with `args` and `--json`, and returns the exit code and
@@ -179,11 +195,19 @@ impl Setup {
         Some(record["id"].as_str().unwrap().to_owned())
     }
 
+    /// Returns the name of the workspace's Compose project,
+    /// `mxv-<id8>-<workspace>`, where the workspace's `_` reads `__` and
+    /// its `.` reads `_d`.
+    fn project(&self) -> String {
+        let id = self.store_id().unwrap();
+        let workspace = self.name.replace('_', "__").replace('.', "_d");
+        format!("mxv-{}-{workspace}", &id[..8])
+    }
+
     /// Returns the docker name of the container or volume `object` of the
     /// workspace.
     fn docker_name(&self, object: &str) -> String {
-        let id = self.store_id().unwrap();
-        format!("mxv-{}-{}.{object}", &id[..8], self.name)
+        format!("{}.{object}", self.project())
     }
 
     /// Returns the `docker ps` and `docker volume ls` filters of the
@@ -220,25 +244,40 @@ impl Setup {
         printed.lines().map(str::to_owned).collect()
     }
 
-    /// Returns the anonymous volumes that `down` recorded.
+    /// Returns the volumes that the run records name.
     fn anonymous_volumes(&self) -> Vec<String> {
         let path = self
             .root()
-            .join(format!("state/mxv/runs/{}/.anonymous-volumes", self.name));
+            .join(format!("state/mxv/runs/{}/.volumes", self.name));
         fs::read_to_string(path)
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|record| serde_json::from_value(record["volumes"].clone()).ok())
             .unwrap_or_default()
     }
 
-    /// Removes the containers and volumes that carry the setup's store id,
-    /// and the anonymous volumes that `down` recorded.
+    /// Returns the names of the workspace's networks that docker lists.
+    fn networks(&self) -> Vec<String> {
+        let Some(filters) = self.filters() else {
+            return Vec::new();
+        };
+        let mut args = vec!["network", "ls", "--format", "{{.Name}}"];
+        args.extend(filters.iter().map(String::as_str));
+        let (_, printed) = docker(&args);
+        printed.lines().map(str::to_owned).collect()
+    }
+
+    /// Removes the containers, volumes and networks that carry the setup's
+    /// store id, and the anonymous volumes that `down` recorded.
     fn clean_docker(&self) {
         for container in self.containers() {
             let _ = docker(&["rm", "--force", "--volumes", &container]);
         }
         for volume in self.volumes().into_iter().chain(self.anonymous_volumes()) {
             let _ = docker(&["volume", "rm", &volume]);
+        }
+        for network in self.networks() {
+            let _ = docker(&["network", "rm", &network]);
         }
     }
 }
@@ -688,7 +727,7 @@ fn a_failed_docker_run_names_the_container_and_dockers_own_message() {
     let (exit, document) = setup.json(&["up", "-w", "mxvtest-no-image"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::docker::failed", "{document}");
-    assert_eq!(document["fields"]["operation"], "run");
+    assert_eq!(document["fields"]["operation"], "compose up");
     assert_eq!(document["fields"]["container"], "web");
     let message = document["fields"]["message"].as_str().unwrap();
     assert!(
@@ -785,36 +824,6 @@ fn down_keeps_a_containers_anonymous_volumes_until_remove_delete_volumes() {
 }
 
 #[test]
-fn status_reports_a_container_that_docker_created_and_did_not_start_as_created() {
-    if !docker_runs("status_reports_a_container_that_docker_created") {
-        return;
-    }
-    let setup = Setup::new("mxvtest-created", &web());
-    setup.json(&["up", "-w", "mxvtest-created"]);
-    setup.json(&["down", "-w", "mxvtest-created"]);
-    let id = setup.store_id().unwrap();
-    let (created, _) = docker(&[
-        "create",
-        "--name",
-        &setup.docker_name("web"),
-        "--label",
-        &format!("mxv.store={id}"),
-        "--label",
-        "mxv.workspace=mxvtest-created",
-        "--label",
-        "mxv.container=web",
-        IMAGE,
-        "true",
-    ]);
-    assert!(created);
-    let (_, status) = setup.json(&["status", "-w", "mxvtest-created"]);
-    assert_eq!(row(&status, "web")["state"], "created", "{status}");
-    let (exit, document) = setup.json(&["down", "-w", "mxvtest-created"]);
-    assert_eq!(exit, 0, "{document}");
-    assert!(setup.containers().is_empty());
-}
-
-#[test]
 fn a_container_that_exits_with_137_reports_code_137_and_no_signal() {
     if !docker_runs("a_container_that_exits_with_137") {
         return;
@@ -829,4 +838,114 @@ fn a_container_that_exits_with_137_reports_code_137_and_no_signal() {
     let (_, status) = setup.json(&["status", "-w", "mxvtest-137"]);
     assert_eq!(row(&status, "web")["code"], 137, "{status}");
     assert_eq!(row(&status, "web")["signal"], Value::Null, "{status}");
+}
+
+#[test]
+fn up_runs_the_containers_as_one_compose_project_whose_file_names_the_variables_only() {
+    if !docker_runs("up_runs_the_containers_as_one_compose_project") {
+        return;
+    }
+    let manifest = web().replace(
+        "ports = { 80 = \"web\" }",
+        "env = { TOKEN = \"t0ken-value-$HOME\" }\nports = { 80 = \"web\" }",
+    );
+    let setup = Setup::new("mxvtest-compose", &manifest);
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-compose"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, labels) = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{index .Config.Labels \"com.docker.compose.project\"}} {{index .Config.Labels \"mxv.container\"}}",
+        &setup.docker_name("web"),
+    ]);
+    assert_eq!(labels, format!("{} web", setup.project()));
+    let (_, env) = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{range .Config.Env}}{{println .}}{{end}}",
+        &setup.docker_name("web"),
+    ]);
+    assert!(
+        env.lines().any(|line| line == "TOKEN=t0ken-value-$HOME"),
+        "{env}"
+    );
+    let state = setup.root().join("state");
+    let compose = setup
+        .root()
+        .join("state/mxv/runs/mxvtest-compose/compose.yaml");
+    let text = fs::read_to_string(&compose).unwrap();
+    assert!(text.contains("\"TOKEN\""), "{text}");
+    assert!(!text.contains("t0ken-value"), "{text}");
+    for file in files(&state) {
+        let bytes = fs::read(&file).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("t0ken-value"),
+            "{} holds the value",
+            file.display()
+        );
+    }
+    assert!(!files(&setup.checkout()).iter().any(|file| {
+        file.file_name()
+            .is_some_and(|name| name.to_string_lossy().contains("compose"))
+    }));
+    assert_eq!(setup.networks(), [format!("{}_default", setup.project())]);
+    assert_eq!(setup.volumes(), [setup.docker_name("srv")]);
+}
+
+/// Returns every file under `dir`, at any depth.
+fn files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(files(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[test]
+fn up_with_containers_fails_as_compose_missing_when_docker_has_no_compose() {
+    if !docker_installed("up_with_containers_fails_as_compose_missing") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-no-compose", &web());
+    let (_, real) = {
+        let output = Command::new("sh")
+            .args(["-c", "command -v docker"])
+            .env("PATH", PATH)
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )
+    };
+    let bin = setup.root().join("fake-bin");
+    fs::create_dir(&bin).unwrap();
+    let fake = bin.join("docker");
+    write(
+        &fake,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = compose ]; then echo \"docker: unknown command: docker compose\" >&2; exit 1; fi\nexec '{real}' \"$@\"\n"
+        ),
+    );
+    let made = Command::new("chmod")
+        .args(["+x", &fake.display().to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let path = format!("{}:{PATH}", bin.display());
+    let args = ["up", "-w", "mxvtest-no-compose"];
+    let (exit, document) = setup.json_with(setup.command(&path, &args), &args);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::docker::compose_missing",
+        "{document}"
+    );
 }

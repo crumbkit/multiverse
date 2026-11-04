@@ -216,7 +216,7 @@ pub(crate) fn remove(
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
         RemovalOutcome::Done(removed) => {
             processes::forget(environment, &name)?;
-            processes::delete_volumes(environment, &volumes)?;
+            processes::delete_volumes(environment, &name, &volumes)?;
             Ok(Prose::new(
                 RemovalResult::new(&removed, false).with_docker(containers, volumes),
             ))

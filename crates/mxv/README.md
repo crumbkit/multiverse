@@ -187,52 +187,69 @@ Processes and containers share one set of names, and either may depend on
 the other. A process receives a container's host port through its own
 `ports`, as `api` receives `DYNAMODB_PORT` above.
 
+mxv runs a workspace's containers as one Docker Compose project, so it
+needs docker's `compose` plugin; without it `up` fails with
+`mxv::docker::compose_missing`. Each container of the manifest is one
+service of the project. mxv writes the project's compose file to
+`$XDG_STATE_HOME/mxv/runs/<workspace>/compose.yaml`, never into the
+checkout, and starts one service at a time with `docker compose up`. The
+compose file names each of a container's variables and refers to its value
+by a variable of the `docker compose` process, so a value such as a token
+is in no file: only that process's environment and the container hold it.
+
 One docker daemon may serve several mxv state directories, such as two
 checkouts that run mxv's tests at once, and each may have a workspace with
 the same name. So each state directory has a store id: a random 32-digit hex
 number that mxv writes to `$XDG_STATE_HOME/mxv/runs/.store-id` when the
-directory's first container starts. mxv labels each container and volume
-with `mxv.store=<id>`, `mxv.workspace=<workspace>`, and
-`mxv.container=<name>` or `mxv.volume=<volume>`. It names each container
-`mxv-<id8>-<workspace>.<name>` and each volume
-`mxv-<id8>-<workspace>.<volume>`, where `<id8>` is the first 8 digits of the
-store id. A container or volume name never holds `.`, so the last `.`
-separates it from the workspace's name.
+directory's first container starts. The project of a workspace is
+`mxv-<id8>-<workspace>`, where `<id8>` is the first 8 digits of the store
+id. A project name allows only lowercase letters, digits, `-` and `_`, so
+the workspace's `_` is written `__` and its `.` is written `_d`. Each
+container is named `<project>.<name>`, each named volume
+`<project>.<volume>`, and the project's network `<project>_default`. mxv
+labels each container, volume and network with `mxv.store=<id>`,
+`mxv.workspace=<workspace>`, and `mxv.container=<name>`,
+`mxv.volume=<volume>` or `mxv.network=default`, beside the labels that
+Compose adds. mxv publishes each port on 127.0.0.1 only.
 
-mxv lists a workspace's containers and volumes only by the store and
-workspace labels together. Before it stops, removes, adopts or reuses a
-container or volume that has one of its names, it reads the object's
-labels. When they do not name this store, workspace and object, mxv leaves
-the object alone and fails with `mxv::docker::foreign_object`, whose fields
-name the object's kind and name. mxv publishes each port on 127.0.0.1 only.
+The run records say which docker objects belong to a workspace:
+`<container>.container` holds the id of the container that `up` started,
+and `.volumes` names the named volumes of its containers and the anonymous
+volumes of their images. Before it stops, removes, adopts or reuses a
+container, volume or network, mxv reads the object's labels. When they do
+not name this store, workspace and object, mxv leaves the object alone and
+fails with `mxv::docker::foreign_object`, whose fields name the object's
+kind and name. Because the records name the containers, `status` and
+`down` find a container that the manifest no longer declares. `status`,
+`down` and `logs` run docker only for a workspace with a container record,
+and `remove` only for one with a container or volume record, so a missing
+docker or a daemon that does not answer never stops a workspace that has
+never run a container.
 
-A workspace runs docker only once it has run a container. The first `up`
-that starts one writes `$XDG_STATE_HOME/mxv/runs/<workspace>/.containers`.
-After that, `status`, `down`, `logs`, `remove` and `up` ask docker for the
-workspace's containers by their labels, whatever the manifest declares, so
-`down` stops a container that the manifest no longer declares. A workspace
-without that file never runs docker, so a missing docker or a daemon that
-does not answer never stops it.
-
-- `mxv up` checks that docker answers, then that each published port is
-  free, removes a stopped container of its own with the same name, creates
-  the missing volumes and runs the container detached. Docker pulls the
-  image when it is missing. `docker run` has a deadline of 10 minutes for
-  the pull, and each other docker command one of 30 seconds. A container
-  with a readiness port is ready when that port answers. Docker's port
-  proxy accepts a connection before anything in the container listens and
-  then closes it, so mxv counts the port as answering only when a
-  connection stays open for 0.3 seconds or the container sends data. A
-  container without a readiness port is ready once it has run for half a
-  second. When the container stops first, `up` fails with
-  `mxv::process::exited` and its exit code; when it misses its timeout, or
-  a step after `docker run` fails, `up` removes it. A failed `up` removes
-  the containers it started before the failure, as it stops processes.
-- `mxv down` stops each container with `docker stop`, which sends SIGTERM
-  and then SIGKILL after 10 seconds, and removes it. Its named volumes and
-  the anonymous volumes of its image stay, with their data. mxv records the
-  anonymous volumes in `$XDG_STATE_HOME/mxv/runs/<workspace>/.anonymous-volumes`,
-  so `mxv remove --delete-volumes` deletes them with the named ones.
+- `mxv up` checks that docker and its compose plugin answer, then that
+  each published port is free and that each named volume is missing or
+  carries the workspace's labels. It removes a stopped container of its
+  own with the same name, writes the compose file, and runs `docker
+  compose up --detach --no-deps` for the container, then records its id.
+  Docker pulls the image when it is missing. `docker compose up` has a
+  deadline of 10 minutes for the pull, and each other docker command one
+  of 30 seconds. A container with a readiness port is ready when that port
+  answers. Docker's port proxy accepts a connection before anything in the
+  container listens and then closes it, so mxv counts the port as
+  answering only when a connection stays open for 0.3 seconds or the
+  container sends data. A container without a readiness port is ready once
+  it has run for half a second. When the container stops first, `up` fails
+  with `mxv::process::exited` and its exit code; when it misses its
+  timeout, or a step after `docker compose up` fails, `up` removes it. A
+  failed `up` removes the containers it started before the failure, as it
+  stops processes.
+- `mxv down` stops each recorded container with `docker stop`, which sends
+  SIGTERM and then SIGKILL after 10 seconds, removes it and deletes its
+  record. Its named volumes and the anonymous volumes of its image stay,
+  with their data, and mxv adds the anonymous volumes to `.volumes`, so
+  `mxv remove --delete-volumes` deletes them with the named ones. Once no
+  container of the workspace has a record, `down` removes the project's
+  network.
 - `mxv status` reports a container's state as docker reports it, with
   `kind` set to `container` and `pid` null: `running`, `exited`, or
   `created` for a container that docker created and did not start. An
@@ -252,7 +269,7 @@ command fails with `mxv::docker::not_found`. When docker's daemon does not
 answer, it fails with `mxv::docker::unavailable`; `down` and `remove
 --force` fail too, so they never report a workspace as stopped while its
 containers may still run. A docker command that fails, such as a `docker
-run` whose image cannot be pulled, fails with `mxv::docker::failed`, whose
+compose up` whose image cannot be pulled, fails with `mxv::docker::failed`, whose
 fields name the operation, the container, and the line of docker's error
 output that starts with `docker:` or `Error`, or else its last line.
 

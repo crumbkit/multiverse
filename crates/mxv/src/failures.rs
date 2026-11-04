@@ -75,10 +75,13 @@ pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
 /// The code of a manifest that declares containers on a machine without a
 /// `docker` program on `PATH`.
 pub const DOCKER_NOT_FOUND: Code = Code::new("mxv", "docker", "not_found");
+/// The code of a docker without its `compose` plugin, which mxv needs to
+/// start containers.
+pub const DOCKER_COMPOSE_MISSING: Code = Code::new("mxv", "docker", "compose_missing");
 /// The code of a docker daemon that does not answer.
 pub const DOCKER_UNAVAILABLE: Code = Code::new("mxv", "docker", "unavailable");
 /// The code of a docker command that failed or missed its deadline, such as
-/// a `docker run` whose image cannot be pulled.
+/// a `docker compose up` whose image cannot be pulled.
 pub const DOCKER_FAILED: Code = Code::new("mxv", "docker", "failed");
 /// The code of a docker container or volume that has a name of mxv's and
 /// lacks the labels of this state directory and workspace, which mxv
@@ -253,6 +256,7 @@ pub(crate) const CODES: &[&Code] = &[
     &PORT_EXHAUSTED,
     &WORKSPACE_BUSY,
     &DOCKER_NOT_FOUND,
+    &DOCKER_COMPOSE_MISSING,
     &DOCKER_UNAVAILABLE,
     &DOCKER_FAILED,
     &DOCKER_FOREIGN_OBJECT,
@@ -359,6 +363,7 @@ impl Failure for MxvFailure {
                 Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
+                Error::DockerComposeMissing { .. } => &DOCKER_COMPOSE_MISSING,
                 Error::DockerUnavailable { .. } => &DOCKER_UNAVAILABLE,
                 Error::DockerFailed { .. } => &DOCKER_FAILED,
                 Error::DockerForeign { .. } => &DOCKER_FOREIGN_OBJECT,
@@ -571,6 +576,9 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::DockerMissing { .. } => hint(
             "install docker and put it on PATH, and run the command again; a workspace that has run containers needs docker until `mxv remove` removes it",
         ),
+        Error::DockerComposeMissing { .. } => hint(
+            "install the docker compose plugin, such as with Docker Desktop or your package manager's docker-compose-plugin, and run the command again",
+        ),
         Error::DockerUnavailable { .. } => hint(
             "start the docker daemon, such as by opening Docker Desktop, and run the command again",
         ),
@@ -625,7 +633,9 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("version", *version),
         ],
         Error::ProcessUnstartable { process, .. } => vec![Field::new("process", process)],
-        Error::DockerUnavailable { message } => vec![Field::new("message", message)],
+        Error::DockerUnavailable { message } | Error::DockerComposeMissing { message } => {
+            vec![Field::new("message", message)]
+        }
         Error::DockerFailed {
             operation,
             container,

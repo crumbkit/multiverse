@@ -141,6 +141,12 @@ pub enum Error {
         /// Why the program could not start.
         source: io::Error,
     },
+    /// The `docker` program runs, and its `compose` plugin, which starts
+    /// the containers, is not installed.
+    DockerComposeMissing {
+        /// The line of docker's standard error that says what failed.
+        message: String,
+    },
     /// The `docker` program runs, and its daemon does not answer.
     DockerUnavailable {
         /// The line of docker's standard error that says what failed.
@@ -156,10 +162,11 @@ pub enum Error {
         /// The line of docker's standard error that says what failed.
         message: String,
     },
-    /// A docker container or volume has a name of mxv's, and its labels do
-    /// not name this store, workspace and object, so mxv leaves it alone.
+    /// A docker container, volume or network has a name of mxv's, or is
+    /// one that mxv recorded, and its labels do not name this store,
+    /// workspace and object, so mxv leaves it alone.
     DockerForeign {
-        /// `container` or `volume`.
+        /// `container`, `volume` or `network`.
         kind: &'static str,
         /// The object's docker name.
         name: String,
@@ -258,6 +265,13 @@ impl fmt::Display for Error {
             Self::DockerMissing { .. } => {
                 formatter.write_str("the manifest declares containers, and docker is not installed")
             }
+            Self::DockerComposeMissing { message } => {
+                formatter.write_str("docker runs, and its compose plugin is not installed")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
             Self::DockerUnavailable { message } => {
                 formatter.write_str("the docker daemon does not answer")?;
                 if !message.is_empty() {
@@ -309,6 +323,7 @@ impl std::error::Error for Error {
             | Self::ProcessTable { .. }
             | Self::Busy { .. }
             | Self::DockerUnavailable { .. }
+            | Self::DockerComposeMissing { .. }
             | Self::DockerFailed { .. }
             | Self::DockerForeign { .. } => None,
         }

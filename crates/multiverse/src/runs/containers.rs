@@ -1,18 +1,24 @@
 //! The containers of a workspace's app: the store id and the scope of the
-//! workspace's containers, starting one, waiting for its readiness,
-//! following its log, and reporting its state and volumes.
+//! workspace's containers, starting one with Docker Compose, waiting for
+//! its readiness, following its log, and reporting its state and volumes.
 //!
-//! A workspace calls docker only once it has run a container. The first
-//! `up` that starts one writes `<runs>/<workspace>/.containers`, and every
-//! later command of the workspace asks docker for its containers whatever
-//! the manifest declares, so a container that the manifest dropped while
-//! it ran is still found, reported and stopped. A workspace without the
-//! file has no container, so its commands never run docker, and a missing
-//! docker or a daemon that does not answer does not stop them. For a
-//! workspace with the file, either one fails the command.
+//! The run records say which docker objects belong to a workspace.
+//! `<container>.container` holds the id of the container that `up`
+//! started, and `.volumes` names the volumes that its containers mounted,
+//! named and anonymous. `compose.yaml` is the compose file of the
+//! workspace's project, which holds no value of a container's variables.
+//! Every command acts on the recorded ids and names after it checked their
+//! labels, so a container that the manifest dropped while it ran is still
+//! found, reported and stopped. `status`, `down` and `logs` run docker only
+//! for a workspace with a container record, and `remove` only for one with
+//! a container or volume record, so a missing docker or a daemon that does
+//! not answer does not stop a workspace that has never run a container. For
+//! a workspace with records, either one fails the command.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::hash::{BuildHasher as _, RandomState};
+use std::io;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -34,13 +40,15 @@ use crate::store;
 /// The file in the runs directory that holds the store id.
 const STORE_ID_FILE: &str = ".store-id";
 
-/// The file in a workspace's run directory that says it has run a
-/// container.
-const CONTAINERS_FILE: &str = ".containers";
+/// The extension of the file that records a container's id.
+const CONTAINER_EXTENSION: &str = "container";
 
-/// The file in a workspace's run directory that names the anonymous
-/// volumes of the containers that `down` removed.
-const ANONYMOUS_FILE: &str = ".anonymous-volumes";
+/// The file in a workspace's run directory that names the volumes of its
+/// containers.
+const VOLUMES_FILE: &str = ".volumes";
+
+/// The compose file of a workspace's project, in its run directory.
+const COMPOSE_FILE: &str = "compose.yaml";
 
 /// The store id file: the id of the state directory, which labels its
 /// containers and volumes.
@@ -53,6 +61,36 @@ struct StoreId {
 }
 
 impl Versioned for StoreId {
+    fn version(&self) -> Option<u32> {
+        Some(self.version)
+    }
+}
+
+/// The record of a container that `up` started.
+#[derive(Debug, Serialize, Deserialize)]
+struct ContainerRecord {
+    /// The file's version, which is [`RUN_VERSION`].
+    version: u32,
+    /// The container's id.
+    id: String,
+}
+
+impl Versioned for ContainerRecord {
+    fn version(&self) -> Option<u32> {
+        Some(self.version)
+    }
+}
+
+/// The record of the volumes of a workspace's containers.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct VolumesRecord {
+    /// The file's version, which is [`RUN_VERSION`].
+    version: u32,
+    /// The volumes' docker names.
+    volumes: BTreeSet<String>,
+}
+
+impl Versioned for VolumesRecord {
     fn version(&self) -> Option<u32> {
         Some(self.version)
     }
@@ -99,27 +137,19 @@ impl Runs {
     }
 
     /// Returns the scope of the containers of the workspace `name`, or
-    /// `None` when the workspace has never run a container.
+    /// `None` before the store's first container started.
     pub(super) fn scope(&self, name: &WorkspaceName) -> Result<Option<Scope>, Error> {
-        if !self.workspace_dir(name).join(CONTAINERS_FILE).exists() {
-            return Ok(None);
-        }
         Ok(self.store_id()?.map(|id| Scope::new(&id, name)))
     }
 
     /// Returns the scope of the containers of the workspace `name`, and
-    /// records that the workspace runs containers.
+    /// writes the store id when the store has none.
     pub(super) fn ensure_scope(&self, name: &WorkspaceName) -> Result<Scope, Error> {
-        let id = self.ensure_store_id()?;
-        let marker = self.workspace_dir(name).join(CONTAINERS_FILE);
-        if !marker.exists() {
-            store::replace_file(&marker, b"")?;
-        }
-        Ok(Scope::new(&id, name))
+        Ok(Scope::new(&self.ensure_store_id()?, name))
     }
 
     /// Returns the names of the containers that `manifest` declares, and
-    /// the containers of the workspace that docker lists.
+    /// the containers of the workspace that the run records name.
     pub(super) fn containers(
         &self,
         workspace: &Workspace,
@@ -132,28 +162,71 @@ impl Runs {
         Ok(names)
     }
 
-    /// Returns the containers of the workspace `name` that exist, running
-    /// or stopped, as docker lists them by their labels.
+    /// Returns the containers of the workspace `name` that have a record,
+    /// which `up` writes when it starts one and `down` deletes when it
+    /// removes it.
     pub(super) fn existing_containers(
         &self,
         name: &WorkspaceName,
     ) -> Result<BTreeSet<String>, Error> {
-        match self.scope(name)? {
-            Some(scope) => Ok(docker::listed(&scope)?.into_iter().collect()),
-            None => Ok(BTreeSet::new()),
+        let dir = self.workspace_dir(name);
+        let unreadable = |source| Error::StateUnreadable {
+            path: dir.clone(),
+            source,
+        };
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            Err(error) => return Err(unreadable(error)),
+        };
+        let mut names = BTreeSet::new();
+        for entry in entries {
+            let path = entry.map_err(unreadable)?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == CONTAINER_EXTENSION)
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && !stem.starts_with('.')
+            {
+                names.insert(stem.to_owned());
+            }
         }
+        Ok(names)
     }
 
-    /// Returns the containers of the workspace `name` that docker lists,
-    /// running or stopped, in name order. It returns none for a workspace
-    /// that has never run a container.
+    /// Returns the containers of the workspace `name` that have a record,
+    /// in name order. It runs no docker command.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
-    /// [`Error::DockerFailed`].
+    /// Returns [`Error::StateUnreadable`] when the run directory cannot be
+    /// read.
     pub fn docker_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
         Ok(self.existing_containers(name)?.into_iter().collect())
+    }
+
+    /// Returns the recorded id of the container `container`.
+    fn container_id(&self, name: &WorkspaceName, container: &str) -> Result<Option<String>, Error> {
+        let record: Option<ContainerRecord> =
+            read_json(&self.file(name, container, CONTAINER_EXTENSION))?;
+        Ok(record.map(|record| record.id))
+    }
+
+    /// Returns the scope and what docker reports about the recorded
+    /// container `container`, or `None` when it has no record or docker no
+    /// longer has it.
+    fn inspect_recorded(
+        &self,
+        name: &WorkspaceName,
+        container: &str,
+    ) -> Result<Option<(Scope, Inspected)>, Error> {
+        let Some(id) = self.container_id(name, container)? else {
+            return Ok(None);
+        };
+        let Some(scope) = self.scope(name)? else {
+            return Ok(None);
+        };
+        Ok(docker::inspect(&scope, container, &id)?.map(|inspected| (scope, inspected)))
     }
 
     /// Reports whether the container `container` of the workspace `name`
@@ -163,15 +236,15 @@ impl Runs {
         name: &WorkspaceName,
         container: &str,
     ) -> Result<bool, Error> {
-        let Some(scope) = self.scope(name)? else {
-            return Ok(false);
-        };
         Ok(matches!(
-            docker::inspect(&scope, container)?,
-            Some(Inspected {
-                state: ContainerState::Running,
-                ..
-            })
+            self.inspect_recorded(name, container)?,
+            Some((
+                _,
+                Inspected {
+                    state: ContainerState::Running,
+                    ..
+                }
+            ))
         ))
     }
 
@@ -197,11 +270,7 @@ impl Runs {
         manifest: Option<&Manifest>,
         container: &str,
     ) -> Result<ProcessStatus, Error> {
-        let inspected = match self.scope(&workspace.name)? {
-            Some(scope) => docker::inspect(&scope, container)?.map(|inspected| (scope, inspected)),
-            None => None,
-        };
-        let state = match &inspected {
+        let state = match self.inspect_recorded(&workspace.name, container)? {
             None => ProcessState::Stopped,
             Some((scope, inspected)) => {
                 if inspected.state == ContainerState::Running
@@ -211,7 +280,7 @@ impl Runs {
                         Duration::ZERO,
                     )
                 {
-                    self.follow_logs(scope, container, inspected, true)?;
+                    self.follow_logs(&scope, container, &inspected, true)?;
                 }
                 container_state(inspected.state)
             }
@@ -252,21 +321,22 @@ impl Runs {
         }
     }
 
-    /// Starts one container and waits for its readiness, as
-    /// [`Runs::up`] describes, or makes sure that a container that already
-    /// runs has a log follower. It returns `None` when the container is
-    /// ready, and the outcome that stops `up` otherwise. When a step after
-    /// `docker run` fails, it removes the container before it returns the
-    /// error.
+    /// Starts the container `name` of `manifest` and waits for its
+    /// readiness, as [`Runs::up`] describes, or makes sure that a container
+    /// that already runs has a log follower. It returns `None` when the
+    /// container is ready, and the outcome that stops `up` otherwise. When
+    /// a step after `docker compose up` fails, it removes the container
+    /// before it returns the error.
     pub(super) fn start_container(
         &self,
         workspace: &Workspace,
         scope: &Scope,
+        manifest: &Manifest,
         name: &str,
         declared: &Container,
     ) -> Result<Option<UpOutcome>, Error> {
-        match docker::inspect(scope, name)? {
-            Some(inspected) if inspected.state == ContainerState::Running => {
+        match self.inspect_recorded(&workspace.name, name)? {
+            Some((_, inspected)) if inspected.state == ContainerState::Running => {
                 if !self.follower_alive(&workspace.name, name)? {
                     self.follow_logs(scope, name, &inspected, true)?;
                 }
@@ -275,12 +345,16 @@ impl Runs {
             // A container that exited on its own, or that docker created
             // without starting, still holds its name, so it is removed
             // before the new one starts.
-            Some(_) => {
-                self.remove_container(&workspace.name, scope, name)?;
-            }
-            None => {}
+            Some(_) => self.remove_container(&workspace.name, scope, name)?,
+            None => self.forget_container(&workspace.name, name)?,
         }
-        let mut host_ports = Vec::new();
+        // A container of the scope that has the name and no record, such
+        // as one that an earlier `up` started before it was stopped, is
+        // removed too. One with other labels fails as foreign.
+        let named = scope.container_name(name);
+        if let Some(anonymous) = docker::remove(scope, name, &named, self.grace)? {
+            self.record_volumes(&workspace.name, anonymous)?;
+        }
         for published in &declared.ports {
             let Some(number) = workspace.ports.get(&published.port).copied() else {
                 continue;
@@ -293,17 +367,54 @@ impl Runs {
                     holders: Vec::new(),
                 }));
             }
-            host_ports.push(number);
         }
+        for volume in declared.volumes.keys() {
+            docker::check_volume(scope, volume)?;
+        }
+        self.record_volumes(
+            &workspace.name,
+            declared
+                .volumes
+                .keys()
+                .map(|volume| scope.volume_name(volume)),
+        )?;
         let log = self.log(&workspace.name, name);
         store::rotate_log(&log, &self.file(&workspace.name, name, "log.1"))?;
-        docker::start(&docker::Run {
+        let dir = self.workspace_dir(&workspace.name);
+        let file = dir.join(COMPOSE_FILE);
+        write_json(
+            &file,
+            &docker::compose_file(scope, &manifest.containers, &workspace.ports),
+        )?;
+        let started = docker::compose_up(
             scope,
+            &dir,
+            &file,
             name,
-            container: declared,
-            host_ports: &host_ports,
-        })?;
-        match self.wait_container(workspace, scope, name, declared) {
+            &docker::compose_env(&manifest.containers, name),
+        );
+        // `compose up` may have created the container before it failed, so
+        // the container is recorded and removed whatever it reported.
+        let recorded = docker::inspect(scope, name, &named).and_then(|inspected| {
+            if let Some(inspected) = &inspected {
+                write_json(
+                    &self.file(&workspace.name, name, CONTAINER_EXTENSION),
+                    &ContainerRecord {
+                        version: RUN_VERSION,
+                        id: inspected.id.clone(),
+                    },
+                )?;
+            }
+            Ok(inspected)
+        });
+        if let Err(error) = started {
+            let _ = self.remove_container(&workspace.name, scope, name);
+            return Err(error);
+        }
+        let Some(inspected) = recorded? else {
+            return Ok(Some(self.exited(&workspace.name, name, None)));
+        };
+        match self.wait_container(workspace, scope, name, declared, &inspected) {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 let _ = self.remove_container(&workspace.name, scope, name);
@@ -312,19 +423,33 @@ impl Runs {
         }
     }
 
-    /// Follows the log of the container `name` that `docker run` just
-    /// started, and waits for its readiness.
+    /// Returns the outcome of the container `name` that stopped before it
+    /// was ready, with docker's exit code `code`.
+    fn exited(&self, name: &WorkspaceName, container: &str, code: Option<i32>) -> UpOutcome {
+        let log = self.log(name, container);
+        // `docker logs` may not have copied the last lines yet.
+        pause(FOLLOW_INTERVAL);
+        UpOutcome::Exited {
+            process: container.to_owned(),
+            code,
+            signal: None,
+            tail: tail(&log, TAIL_LINES),
+            log,
+        }
+    }
+
+    /// Follows the log of the container `name` that `docker compose up`
+    /// just started, and waits for its readiness.
     fn wait_container(
         &self,
         workspace: &Workspace,
         scope: &Scope,
         name: &str,
         declared: &Container,
+        inspected: &Inspected,
     ) -> Result<Option<UpOutcome>, Error> {
         let log = self.log(&workspace.name, name);
-        if let Some(inspected) = docker::inspect(scope, name)? {
-            self.follow_logs(scope, name, &inspected, false)?;
-        }
+        self.follow_logs(scope, name, inspected, false)?;
         let port = declared
             .ready
             .as_ref()
@@ -335,21 +460,14 @@ impl Runs {
             .map_or(START_GRACE, |ready| ready.timeout);
         let deadline = Instant::now() + timeout;
         loop {
-            let state = docker::inspect(scope, name)?.map(|inspected| inspected.state);
+            let state =
+                docker::inspect(scope, name, &inspected.id)?.map(|inspected| inspected.state);
             if state != Some(ContainerState::Running) && state != Some(ContainerState::Created) {
                 let code = match state {
                     Some(ContainerState::Exited(code)) => Some(code),
                     _ => None,
                 };
-                // `docker logs` may not have copied the last lines yet.
-                pause(FOLLOW_INTERVAL);
-                return Ok(Some(UpOutcome::Exited {
-                    process: name.to_owned(),
-                    code,
-                    signal: None,
-                    tail: tail(&log, TAIL_LINES),
-                    log,
-                }));
+                return Ok(Some(self.exited(&workspace.name, name, code)));
             }
             if port.is_some_and(docker::answers) {
                 return Ok(None);
@@ -372,27 +490,67 @@ impl Runs {
         }
     }
 
-    /// Stops and removes the container `container` of `scope`, and
+    /// Adds `volumes` to the record of the workspace's volumes.
+    fn record_volumes(
+        &self,
+        name: &WorkspaceName,
+        volumes: impl IntoIterator<Item = String>,
+    ) -> Result<(), Error> {
+        let path = self.workspace_dir(name).join(VOLUMES_FILE);
+        let mut record: VolumesRecord = read_json(&path)?.unwrap_or_default();
+        let before = record.volumes.len();
+        record.volumes.extend(volumes);
+        if record.volumes.len() == before {
+            return Ok(());
+        }
+        record.version = RUN_VERSION;
+        write_json(&path, &record)
+    }
+
+    /// Stops and removes the recorded container `container` of `scope`,
     /// records its anonymous volumes, which stay until `mxv remove
-    /// --delete-volumes`.
+    /// --delete-volumes`, and deletes its record. When no container of the
+    /// workspace has a record left, it removes the project's network.
     pub(super) fn remove_container(
         &self,
         name: &WorkspaceName,
         scope: &Scope,
         container: &str,
     ) -> Result<(), Error> {
-        if let Some(anonymous) = docker::remove(scope, container, self.grace)?
-            && !anonymous.is_empty()
+        if let Some(id) = self.container_id(name, container)?
+            && let Some(anonymous) = docker::remove(scope, container, &id, self.grace)?
         {
-            let path = self.workspace_dir(name).join(ANONYMOUS_FILE);
-            let mut recorded: BTreeSet<String> = read_json(&path)?.unwrap_or_default();
-            let before = recorded.len();
-            recorded.extend(anonymous);
-            if recorded.len() != before {
-                write_json(&path, &recorded)?;
-            }
+            self.record_volumes(name, anonymous)?;
         }
+        self.forget_container(name, container)?;
+        if self.existing_containers(name)?.is_empty() {
+            docker::remove_network(scope)?;
+        }
+        Ok(())
+    }
+
+    /// Deletes the record and the follower record of the container
+    /// `container`.
+    fn forget_container(&self, name: &WorkspaceName, container: &str) -> Result<(), Error> {
+        remove_if_present(&self.file(name, container, CONTAINER_EXTENSION))?;
         remove_if_present(&self.file(name, container, "follower"))
+    }
+
+    /// Removes the recorded containers of the workspace `name` and its
+    /// project's network, for `forget`. A workspace without a compose file
+    /// has never started a container, so this runs no docker command for
+    /// it.
+    pub(super) fn remove_project(&self, name: &WorkspaceName) -> Result<(), Error> {
+        if !self.workspace_dir(name).join(COMPOSE_FILE).exists() {
+            return Ok(());
+        }
+        let Some(scope) = self.scope(name)? else {
+            return Ok(());
+        };
+        for container in self.existing_containers(name)? {
+            self.remove_container(name, &scope, &container)?;
+        }
+        docker::remove_network(&scope)
     }
 
     /// Reports whether the log follower of the container `container` runs.
@@ -448,39 +606,54 @@ impl Runs {
     }
 
     /// Returns the volumes of the workspace `name` that a removal deletes:
-    /// the named volumes that docker lists by their labels, the anonymous
-    /// volumes of its containers, and the anonymous volumes that `down`
-    /// recorded. It returns none for a workspace that has never run a
-    /// container.
+    /// the recorded volumes that docker still has, and the anonymous
+    /// volumes of its recorded containers. It runs no docker command for a
+    /// workspace without records of containers or volumes.
     ///
     /// # Errors
     ///
     /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
     /// [`Error::DockerFailed`].
     pub fn volumes(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
+        let record: Option<VolumesRecord> =
+            read_json(&self.workspace_dir(name).join(VOLUMES_FILE))?;
+        let containers = self.existing_containers(name)?;
+        if record.is_none() && containers.is_empty() {
+            return Ok(Vec::new());
+        }
         let Some(scope) = self.scope(name)? else {
             return Ok(Vec::new());
         };
-        let mut volumes: BTreeSet<String> = docker::volumes(&scope)?.into_iter().collect();
-        for container in docker::listed(&scope)? {
-            if let Some(inspected) = docker::inspect(&scope, &container)? {
+        let mut volumes = BTreeSet::new();
+        for volume in record.map(|record| record.volumes).unwrap_or_default() {
+            if docker::volume_exists(&scope, &volume)? {
+                volumes.insert(volume);
+            }
+        }
+        for container in containers {
+            if let Some((_, inspected)) = self.inspect_recorded(name, &container)? {
                 volumes.extend(inspected.anonymous);
             }
         }
-        let recorded: Option<BTreeSet<String>> =
-            read_json(&self.workspace_dir(name).join(ANONYMOUS_FILE))?;
-        volumes.extend(recorded.unwrap_or_default());
         Ok(volumes.into_iter().collect())
     }
 
-    /// Deletes the volumes `volumes`, which [`Runs::volumes`] returned.
+    /// Deletes the volumes `volumes` of the workspace `name`, which
+    /// [`Runs::volumes`] returned, after it checked the labels of each
+    /// named volume.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
-    /// [`Error::DockerFailed`].
-    pub fn delete_volumes(&self, volumes: &[String]) -> Result<(), Error> {
-        docker::remove_volumes(volumes)
+    /// Returns [`Error::DockerForeign`], [`Error::DockerMissing`],
+    /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
+    pub fn delete_volumes(&self, name: &WorkspaceName, volumes: &[String]) -> Result<(), Error> {
+        if volumes.is_empty() {
+            return Ok(());
+        }
+        match self.scope(name)? {
+            Some(scope) => docker::remove_volumes(&scope, volumes),
+            None => Ok(()),
+        }
     }
 }
 

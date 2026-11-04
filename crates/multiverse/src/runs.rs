@@ -14,8 +14,10 @@
 //! `mxv down` deletes the run record and the exit file and keeps both
 //! logs; `mxv remove` deletes the whole directory.
 //!
-//! A container of the manifest has no run record: docker holds its state,
-//! and mxv finds it by its labels, as the `docker` module describes. Its
+//! A container of the manifest has the record `<container>.container`,
+//! which holds the id of the container that `up` started; docker holds its
+//! state. The `docker` module describes the compose project and the labels
+//! that mxv checks before it acts on a recorded id. Its
 //! log is `<container>.log` too, which a detached `docker logs --follow`
 //! appends to while the container runs, so the log outlives the container
 //! that `mxv down` removes. `<container>.follower` records the follower's
@@ -116,7 +118,7 @@ pub enum ProcessState {
         signal: Option<i32>,
     },
     /// docker created the container and has not started it, such as when
-    /// `docker run` stopped between the two steps.
+    /// `docker compose up` stopped between creating and starting it.
     Created,
     /// The process has not started since the last `mxv down`, or never.
     Stopped,
@@ -572,6 +574,7 @@ impl Runs {
             .any(|name| manifest.containers.contains_key(name))
         {
             docker::check()?;
+            docker::check_compose()?;
             Some(self.ensure_scope(&workspace.name)?)
         } else {
             None
@@ -585,10 +588,10 @@ impl Runs {
                     if self.container_runs(&workspace.name, process)? {
                         // A container that runs is left as it is, apart
                         // from a log follower that it may have lost.
-                        self.start_container(workspace, scope, process, declared)?;
+                        self.start_container(workspace, scope, manifest, process, declared)?;
                         continue;
                     }
-                    self.start_container(workspace, scope, process, declared)
+                    self.start_container(workspace, scope, manifest, process, declared)
                 }
                 (Some(Unit::Container(_)), None) => {
                     return Ok(UpOutcome::UnknownProcess(process.clone()));
@@ -956,11 +959,7 @@ impl Runs {
     /// Returns the docker errors of [`Runs::down`], and
     /// [`Error::Unwritable`] when the directory cannot be deleted.
     pub fn forget(&self, name: &WorkspaceName) -> Result<(), Error> {
-        if let Some(scope) = self.scope(name)? {
-            for container in docker::listed(&scope)? {
-                self.remove_container(name, &scope, &container)?;
-            }
-        }
+        self.remove_project(name)?;
         let dir = self.workspace_dir(name);
         match fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),

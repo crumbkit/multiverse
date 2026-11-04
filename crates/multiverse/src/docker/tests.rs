@@ -1,6 +1,10 @@
 use std::path::Path;
 
-use crate::docker::{Run, Scope, message, run_args};
+use std::collections::BTreeMap;
+
+use serde_json::json;
+
+use crate::docker::{ContainerState, Scope, compose_env, compose_file, message};
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 
@@ -57,63 +61,117 @@ fn a_scope_owns_only_objects_whose_labels_name_its_store_workspace_and_object() 
 }
 
 #[test]
-fn docker_run_publishes_on_the_loopback_address_labels_the_container_and_mounts_named_volumes() {
+fn the_compose_file_publishes_on_the_loopback_address_labels_every_object_and_holds_no_value_of_a_variable()
+ {
     let manifest = Manifest::parse(
         r#"
-ports = ["dynamodb"]
+ports = ["dynamodb", "unused"]
 
 [containers.dynamodb]
 image = "amazon/dynamodb-local:2.5.4"
-command = ["-jar", "DynamoDBLocal.jar", "-dbPath", "/data"]
-env = { AWS_REGION = "eu-west-1" }
+command = ["sh", "-c", "echo $HOME"]
+env = { AWS_REGION = "eu-west-1", TOKEN = "s3cret$x" }
 ports = { 8000 = "dynamodb" }
 volumes = { data = "/data" }
+
+[containers.cache]
+image = "busybox:1.37.0"
+env = { TOKEN = "other" }
 "#,
         Path::new("/repo/mxv.toml"),
     )
     .unwrap();
-    let args = run_args(&Run {
-        scope: &scope("reading-list"),
-        name: "dynamodb",
-        container: &manifest.containers["dynamodb"],
-        host_ports: &[24001],
-    });
+    let scope = scope("reading-list");
+    let ports = BTreeMap::from([("dynamodb".to_owned(), 24001)]);
+    let file = compose_file(&scope, &manifest.containers, &ports);
+    let labels = |label: &str, object: &str| json!({"mxv.store": STORE, "mxv.workspace": "reading-list", label: object});
     assert_eq!(
-        args,
+        file,
+        json!({
+            "services": {
+                "cache": {
+                    "image": "busybox:1.37.0",
+                    "container_name": "mxv-01234567-reading-list.cache",
+                    "labels": labels("mxv.container", "cache"),
+                    "environment": {"TOKEN": "${MXV_ENV_0_0:-}"},
+                    "ports": [],
+                    "volumes": [],
+                },
+                "dynamodb": {
+                    "image": "amazon/dynamodb-local:2.5.4",
+                    "container_name": "mxv-01234567-reading-list.dynamodb",
+                    "labels": labels("mxv.container", "dynamodb"),
+                    "command": ["sh", "-c", "echo $$HOME"],
+                    "environment": {
+                        "AWS_REGION": "${MXV_ENV_1_0:-}",
+                        "TOKEN": "${MXV_ENV_1_1:-}",
+                    },
+                    "ports": ["127.0.0.1:24001:8000/tcp"],
+                    "volumes": [{"type": "volume", "source": "data", "target": "/data"}],
+                },
+            },
+            "volumes": {
+                "data": {
+                    "name": "mxv-01234567-reading-list.data",
+                    "labels": labels("mxv.volume", "data"),
+                },
+            },
+            "networks": {"default": {"labels": labels("mxv.network", "default")}},
+        })
+    );
+    assert!(!file.to_string().contains("s3cret"));
+    assert_eq!(
+        compose_env(&manifest.containers, "dynamodb"),
         [
-            "run",
-            "--detach",
-            "--name",
-            "mxv-01234567-reading-list.dynamodb",
-            "--label",
-            "mxv.store=0123456789abcdef0123456789abcdef",
-            "--label",
-            "mxv.workspace=reading-list",
-            "--label",
-            "mxv.container=dynamodb",
-            "--publish",
-            "127.0.0.1:24001:8000/tcp",
-            "--env",
-            "AWS_REGION=eu-west-1",
-            "--mount",
-            "type=volume,source=mxv-01234567-reading-list.data,target=/data",
-            "--",
-            "amazon/dynamodb-local:2.5.4",
-            "-jar",
-            "DynamoDBLocal.jar",
-            "-dbPath",
-            "/data",
+            ("MXV_ENV_1_0".to_owned(), "eu-west-1".to_owned()),
+            ("MXV_ENV_1_1".to_owned(), "s3cret$x".to_owned()),
         ]
+    );
+    assert_eq!(
+        compose_env(&manifest.containers, "cache"),
+        [("MXV_ENV_0_0".to_owned(), "other".to_owned())]
     );
 }
 
 #[test]
-fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_last_dot() {
-    // A container name never holds `.`, so `mxv-01234567-release.2.db` is
+fn a_workspace_name_with_an_underscore_or_a_dot_gives_a_project_name_that_compose_accepts_and_no_other_workspace_shares()
+ {
+    assert_eq!(scope("reading-list").project(), "mxv-01234567-reading-list");
+    assert_eq!(scope("release.2").project(), "mxv-01234567-release_d2");
+    assert_eq!(scope("release_d2").project(), "mxv-01234567-release__d2");
+    assert_eq!(scope("a_b").project(), "mxv-01234567-a__b");
+    assert_eq!(
+        scope("reading-list").network_name(),
+        "mxv-01234567-reading-list_default"
+    );
+}
+
+#[test]
+fn docker_states_parse_into_running_created_or_exited_with_dockers_code() {
+    assert_eq!(
+        ContainerState::parse("running 0\n"),
+        ContainerState::Running
+    );
+    assert_eq!(ContainerState::parse("paused 0"), ContainerState::Running);
+    assert_eq!(
+        ContainerState::parse("restarting 1"),
+        ContainerState::Running
+    );
+    assert_eq!(ContainerState::parse("created 0"), ContainerState::Created);
+    assert_eq!(
+        ContainerState::parse("exited 137"),
+        ContainerState::Exited(137)
+    );
+    assert_eq!(ContainerState::parse("dead 3"), ContainerState::Exited(3));
+}
+
+#[test]
+fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_dot() {
+    // A project name never holds `.`, so `mxv-01234567-release_d2.db` is
     // only the workspace `release.2` with the container `db`.
     assert_eq!(
         scope("release.2").container_name("db"),
-        "mxv-01234567-release.2.db"
+        "mxv-01234567-release_d2.db"
     );
     assert_ne!(
         scope("release.2").container_name("db"),
