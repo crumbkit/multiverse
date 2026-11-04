@@ -27,7 +27,9 @@ use crate::engine::keeper::policy::{
 use crate::engine::keeper::recorder::{RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::apply_sandbox;
 use crate::engine::keeper::spec::{Handshake, KeeperSpec, StartedApp, read_spec, write_handshake};
-use crate::engine::keeper::{EXIT_RECORD_WAIT, KeeperArgs, KeeperExit, RESOLVE_WAIT};
+use crate::engine::keeper::{
+    EXIT_RECORD_WAIT, KeeperArgs, KeeperEnvironment, KeeperExit, RESOLVE_WAIT,
+};
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::plan::restart::StopSignal;
 use crate::record::process::{Processes, Start, System};
@@ -40,12 +42,15 @@ enum Event {
     Ended(Option<ExitStatus>),
     /// The keeper received `TERM` or `INT`.
     Stop,
+    /// The record writer wrote every change and ended.
+    Recorded,
 }
 
 /// Runs the keeper in a session of its own, as
 /// [`crate::engine::keeper::run`] says.
 pub(crate) fn run(
     args: &KeeperArgs,
+    environment: KeeperEnvironment,
     source: &dyn EnvironmentSource,
     input: impl Read,
     output: impl Write,
@@ -64,13 +69,14 @@ pub(crate) fn run(
         );
         return KeeperExit::BadInput;
     }
-    keep(args, source, input, output)
+    keep(args, environment, source, input, output)
 }
 
 /// Runs the keeper in the session it has, which a test can call within its
 /// own process.
 pub(crate) fn keep(
     args: &KeeperArgs,
+    mut environment: KeeperEnvironment,
     source: &dyn EnvironmentSource,
     input: impl Read,
     output: impl Write,
@@ -82,6 +88,7 @@ pub(crate) fn keep(
             return KeeperExit::BadInput;
         }
     };
+    environment.retain(&spec.resolved);
     let diagnostics = Diagnostics::open(&diagnostic_log(&spec.log, args.app(), args.process()));
     diagnostics.note(&format!(
         "keeper {} started for {}/{} in group {}",
@@ -90,7 +97,7 @@ pub(crate) fn keep(
         args.process(),
         keeper_group()
     ));
-    let exit = start_and_supervise(args, source, &spec, &diagnostics, output);
+    let exit = start_and_supervise(args, &environment, source, &spec, &diagnostics, output);
     diagnostics.note(&format!("keeper exits with {exit:?} ({})", exit.code()));
     exit
 }
@@ -99,6 +106,7 @@ pub(crate) fn keep(
 /// supervises the app.
 fn start_and_supervise(
     args: &KeeperArgs,
+    environment: &KeeperEnvironment,
     source: &dyn EnvironmentSource,
     spec: &KeeperSpec,
     diagnostics: &Diagnostics,
@@ -120,9 +128,13 @@ fn start_and_supervise(
             return KeeperExit::Unstartable;
         }
     };
-    let recorder = Recorder::start(args, diagnostics.clone());
+    let recorded = sender.clone();
+    let recorder = Recorder::start(args, diagnostics.clone(), move || {
+        let _ = recorded.send(Event::Recorded);
+    });
     let mut supervisor = Supervisor {
         args,
+        environment,
         source,
         spec,
         log,
@@ -132,15 +144,37 @@ fn start_and_supervise(
         diagnostics,
     };
     let exit = supervisor.supervise(output);
-    // A stop request usually comes from a `down`, which holds the lifecycle
-    // lock and records the stop itself, so the keeper waits only briefly.
-    // Otherwise nothing else records how the app ended.
-    recorder.finish(if exit == KeeperExit::Stopped {
-        EXIT_RECORD_WAIT
-    } else {
-        RECORD_LOCK_WAIT
-    });
+    let Supervisor { events, .. } = supervisor;
+    recorder.close();
+    await_records(&events, exit, diagnostics);
     exit
+}
+
+/// Waits for the record writer to write its last changes. A stop request
+/// usually comes from a `down`, which holds the lifecycle lock and records
+/// the stop itself, so after one the keeper waits at most
+/// [`EXIT_RECORD_WAIT`]. After any other end nothing else records how the
+/// app ended, so the keeper waits as long as the writer waits for the
+/// lock, until a stop request cuts the wait to [`EXIT_RECORD_WAIT`].
+fn await_records(events: &Receiver<Event>, exit: KeeperExit, diagnostics: &Diagnostics) {
+    diagnostics.note("the keeper waits for its last record writes");
+    let mut deadline = now()
+        + if exit == KeeperExit::Stopped {
+            EXIT_RECORD_WAIT
+        } else {
+            RECORD_LOCK_WAIT
+        };
+    loop {
+        match events.recv_timeout(deadline.saturating_duration_since(now())) {
+            Ok(Event::Recorded) | Err(RecvTimeoutError::Disconnected) => return,
+            Ok(Event::Stop) => deadline = deadline.min(now() + EXIT_RECORD_WAIT),
+            Ok(Event::Ended(_)) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                diagnostics.note("the keeper exits before its last record writes");
+                return;
+            }
+        }
+    }
 }
 
 /// Returns the keeper's process group.
@@ -176,6 +210,8 @@ struct App {
 struct Supervisor<'a> {
     /// The keeper's arguments, which name the app and the process.
     args: &'a KeeperArgs,
+    /// The resolved values that the engine gave the keeper.
+    environment: &'a KeeperEnvironment,
     /// The source of a fresh environment.
     source: &'a dyn EnvironmentSource,
     /// The specification.
@@ -254,9 +290,8 @@ impl Supervisor<'_> {
             }
             previous = Some(app.host.clone());
             let began = now();
-            let status = match self.next_event() {
-                Event::Stop => return self.stop(&app),
-                Event::Ended(status) => status,
+            let Some(status) = self.app_ended() else {
+                return self.stop(&app);
             };
             self.diagnostics.note(&match status {
                 Some(status) => format!("the app ended with {status}"),
@@ -315,6 +350,8 @@ impl Supervisor<'_> {
             if !needs_environment(resolve, wall_now(), runs.expires_at) {
                 return None;
             }
+            self.diagnostics
+                .note("the keeper resolves a fresh environment");
             let resolved =
                 self.source
                     .resolve(self.args.app(), self.args.process(), now() + RESOLVE_WAIT);
@@ -373,18 +410,9 @@ impl Supervisor<'_> {
             .envs(&self.spec.inherited);
         match fresh {
             Some(fresh) => fresh.apply(&mut command),
-            None => {
-                for name in &self.spec.resolved {
-                    #[expect(
-                        clippy::disallowed_methods,
-                        reason = "the keeper passes on the resolved values that the engine gave it in its own environment"
-                    )]
-                    let value = std::env::var_os(name);
-                    if let Some(value) = value {
-                        command.env(name, value);
-                    }
-                }
-            }
+            None => self
+                .environment
+                .apply_named(&self.spec.resolved, &mut command),
         }
         apply_sandbox(&mut command);
         #[expect(
@@ -425,10 +453,18 @@ impl Supervisor<'_> {
         })
     }
 
-    /// Returns the next event. The supervisor holds a sender, so the
-    /// channel never closes, and a closed channel reads as a stop request.
-    fn next_event(&self) -> Event {
-        self.events.recv().unwrap_or(Event::Stop)
+    /// Waits for the running app to end and returns its status, which is
+    /// `None` when it could not be read, or returns `None` when a stop
+    /// request comes first. The supervisor holds a sender, so the channel
+    /// never closes, and a closed channel reads as a stop request.
+    fn app_ended(&self) -> Option<Option<ExitStatus>> {
+        loop {
+            match self.events.recv() {
+                Ok(Event::Ended(status)) => return Some(status),
+                Ok(Event::Recorded) => {}
+                Ok(Event::Stop) | Err(_) => return None,
+            }
+        }
     }
 
     /// Stops the running `app` after a stop request.
@@ -480,7 +516,7 @@ impl Supervisor<'_> {
                 .recv_timeout(deadline.saturating_duration_since(now()))
             {
                 Ok(Event::Ended(_)) => return true,
-                Ok(Event::Stop) => {}
+                Ok(Event::Stop | Event::Recorded) => {}
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return false,
             }
         }
@@ -492,7 +528,7 @@ impl Supervisor<'_> {
         loop {
             match self.events.try_recv() {
                 Ok(Event::Stop) | Err(mpsc::TryRecvError::Disconnected) => return true,
-                Ok(Event::Ended(_)) => {}
+                Ok(Event::Ended(_) | Event::Recorded) => {}
                 Err(mpsc::TryRecvError::Empty) => return false,
             }
         }
@@ -507,7 +543,7 @@ impl Supervisor<'_> {
                 .recv_timeout(deadline.saturating_duration_since(now()))
             {
                 Ok(Event::Stop) => return true,
-                Ok(Event::Ended(_)) => {}
+                Ok(Event::Ended(_) | Event::Recorded) => {}
                 Err(RecvTimeoutError::Timeout) => return false,
                 Err(RecvTimeoutError::Disconnected) => return true,
             }

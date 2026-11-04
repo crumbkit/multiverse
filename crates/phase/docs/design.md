@@ -277,9 +277,19 @@ overwrites a process that another operation recorded meanwhile.
 
 When the keeper's handshake misses the deadline or cannot be read, the
 engine sends the keeper `TERM`, so it stops any process it started, waits
-the process's grace and kill wait, and then kills the keeper's group. A
-stop request during a backoff or while the keeper resolves an environment
-ends the keeper without a restart.
+the process's grace and kill wait, and then kills the keeper's group. When
+the keeper's start of the process takes longer than that wait, the engine
+kills the keeper before it can stop the process, which then runs with no
+keeper and no entry in the run record. A stop request during a backoff or
+while the keeper resolves an environment ends the keeper without a
+restart, and a stop request while the keeper waits for its last record
+writes cuts that wait to two seconds.
+
+The library never reads the environment. The program that links phase
+reads its own environment in `main` into an opaque `KeeperEnvironment`,
+which shows no value, and passes it to the keeper, which keeps only the
+resolved names that its specification lists and sets them on the
+process's command.
 
 When a restart needs a fresh environment, the keeper resolves it through
 the `EnvironmentSource` that the program linking phase passes to it, and

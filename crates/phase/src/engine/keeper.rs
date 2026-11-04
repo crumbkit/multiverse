@@ -8,8 +8,9 @@
 //!
 //! The program that links phase, such as mxv, calls [`run`] from its
 //! hidden `phase keep` subcommand, with the arguments that follow the
-//! subcommand parsed by [`KeeperArgs::parse`], its standard input and its
-//! standard output. The engine starts a keeper with the `spawn` module's
+//! subcommand parsed by [`KeeperArgs::parse`], a [`KeeperEnvironment`]
+//! that `main` built from its own environment, its standard input and its
+//! standard output. `main` stays the only reader of the environment. The engine starts a keeper with the `spawn` module's
 //! `spawn`, which is the only code that builds the keeper's command line.
 //!
 //! # Starting the keeper (PROC-2)
@@ -37,7 +38,12 @@
 //!   deadline passes or the handshake cannot be read, the keeper may
 //!   already have started the app, so the engine sends the keeper `TERM`,
 //!   which makes it stop the app, waits the app's grace and kill wait, and
-//!   then kills the keeper and its group.
+//!   then kills the keeper and its group. A window remains. When the
+//!   keeper's start of the app takes longer than that wait, the engine
+//!   kills the keeper before it can stop the app. The app then keeps
+//!   running in its own group with no keeper, and since the engine never
+//!   received its pid, the run record does not name it and phase does not
+//!   stop it.
 //! - End: the keeper's first action is `setsid`, so it leads a session and
 //!   a group of its own. A keeper that cannot start a session refuses its
 //!   specification and exits with [`KeeperExit::BadInput`]. It outlives
@@ -62,8 +68,10 @@
 //!   and `HOME` from the specification. It then sets either the fresh
 //!   environment it resolved for a restart, or the values of the names
 //!   that the specification lists as resolved, which the keeper holds in
-//!   its own environment. The specification refuses any inherited variable
-//!   other than `PATH` and `HOME`. The sandbox will later give the app its
+//!   the [`KeeperEnvironment`] that `main` passed it. The specification
+//!   refuses any inherited variable other than `PATH` and `HOME`, and any
+//!   resolved name that is empty, holds `=` or NUL, or is `PATH` or
+//!   `HOME`. The sandbox will later give the app its
 //!   own `TMPDIR`.
 //! - Streams and deadline: standard input is empty. Standard output and
 //!   standard error are the app's log file, opened with `O_APPEND`, which
@@ -110,7 +118,8 @@
 //! request, it waits at most [`EXIT_RECORD_WAIT`] for its last writes,
 //! because the operation that stops it holds the lock and records the stop
 //! itself. After any other end, nothing else records it, so the keeper
-//! waits as long as the writer waits for the lock.
+//! waits as long as the writer waits for the lock, unless a stop request
+//! comes meanwhile, which cuts the wait to [`EXIT_RECORD_WAIT`].
 //!
 //! A restart that cannot start the app counts as a failed run under the
 //! backoff. Only a failure of the first start makes the keeper exit with
@@ -127,6 +136,7 @@ use std::time::Duration;
 use crate::env::EnvironmentSource;
 
 mod args;
+mod environment;
 mod logfile;
 mod policy;
 mod recorder;
@@ -146,6 +156,7 @@ mod supervise;
 mod tests;
 
 pub use args::{BadKeeperArgs, KeeperArgs};
+pub use environment::KeeperEnvironment;
 #[cfg_attr(
     not(test),
     expect(
@@ -240,16 +251,19 @@ impl From<KeeperExit> for ExitCode {
 /// Runs the keeper that `args` names: starts a session of its own, reads
 /// its specification from `input`, starts the app, writes the handshake
 /// line to `output`, and supervises the app until it is stopped or its
-/// policy leaves it ended. When a restart needs a fresh environment, the
-/// keeper resolves it through `source`. The program that links phase
-/// passes its own environment source, its standard input and its standard
-/// output, and returns the result from `main` as its exit status.
+/// policy leaves it ended. The app's first start receives the resolved
+/// values that `environment` holds. When a restart needs a fresh
+/// environment, the keeper resolves it through `source`. The program that
+/// links phase passes the environment it read in `main`, its own
+/// environment source, its standard input and its standard output, and
+/// returns the result from `main` as its exit status.
 #[must_use]
 pub fn run(
     args: &KeeperArgs,
+    environment: KeeperEnvironment,
     source: &dyn EnvironmentSource,
     input: impl Read,
     output: impl Write,
 ) -> KeeperExit {
-    supervise::run(args, source, input, output)
+    supervise::run(args, environment, source, input, output)
 }

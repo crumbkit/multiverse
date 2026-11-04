@@ -16,11 +16,13 @@ use std::time::{Duration, Instant, SystemTime};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
+use super::EXIT_RECORD_WAIT;
 use super::spawn::{command_line, read_handshake};
 use super::spec::{Handshake, NotInherited, read_spec, write_handshake};
 use super::supervise::keep;
 use super::{
-    BadKeeperArgs, KeeperArgs, KeeperCommand, KeeperExit, KeeperSpec, Kept, Launch, run, spawn,
+    BadKeeperArgs, KeeperArgs, KeeperCommand, KeeperEnvironment, KeeperExit, KeeperSpec, Kept,
+    Launch, run, spawn,
 };
 use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
@@ -52,6 +54,11 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
     let keeper_args = KeeperArgs::parse(args.into_iter().skip(at + 1)).unwrap();
     #[expect(
         clippy::disallowed_methods,
+        reason = "the test binary runs as a keeper, and reads its environment as the main of the program that links phase does"
+    )]
+    let environment = KeeperEnvironment::from_vars(std::env::vars_os());
+    #[expect(
+        clippy::disallowed_methods,
         reason = "the test binary runs as a keeper, which writes its handshake to standard output"
     )]
     let stdout = std::io::stdout();
@@ -64,7 +71,13 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
         clippy::disallowed_methods,
         reason = "the test binary runs as a keeper, which reads its specification from standard input"
     )]
-    let exit = run(&keeper_args, &Source, std::io::stdin().lock(), output);
+    let exit = run(
+        &keeper_args,
+        environment,
+        &Source,
+        std::io::stdin().lock(),
+        output,
+    );
     #[expect(
         clippy::disallowed_methods,
         reason = "the test binary runs as a keeper, whose exit status the engine reads"
@@ -466,6 +479,7 @@ fn a_keeper_refuses_a_specification_it_cannot_read() {
 
     let exit = keep(
         &fixture.args(),
+        KeeperEnvironment::from_vars([]),
         &Source,
         b"{\"schema\": \"phase/keeper/v9\"}".as_slice(),
         &mut output,
@@ -814,14 +828,21 @@ fn a_stop_request_while_the_keeper_resolves_an_environment_leaves_the_app_stoppe
     let restart = Restart::on_failure(limits(Some(3), Duration::from_millis(10), Resolve::Always));
     let spec = fixture.spec("echo run; exit 1", restart, Stop::default());
     let mut running = fixture.start(&spec).unwrap();
-    eventually("the keeper's note of the restart", || {
-        fixture.diagnostics_text().contains("restart 1 follows")
+    eventually("the keeper's note that it resolves", || {
+        fixture
+            .diagnostics_text()
+            .contains("the keeper resolves a fresh environment\n")
     });
 
     running.signal_keeper(Signal::TERM);
 
     assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
     assert_eq!(fixture.log_text(), "run\n");
+    assert!(
+        fixture
+            .diagnostics_text()
+            .contains("while the keeper resolved")
+    );
 }
 
 #[test]
@@ -906,4 +927,50 @@ fn a_specification_cannot_be_made_to_inherit_a_variable_other_than_path_and_home
         .unwrap_err();
 
     assert_eq!(refused, NotInherited("TMPDIR".to_owned()));
+}
+
+#[test]
+fn a_stop_request_cuts_short_the_keepers_wait_for_its_last_record_writes() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("echo run; exit 1", Restart::No, Stop::default());
+    let store = RunStore::new(&fixture.dir);
+    let held = Journal::open(&store, &workspace(), PATIENCE).unwrap();
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the keeper's wait for its record writes", || {
+        fixture
+            .diagnostics_text()
+            .contains("the keeper waits for its last record writes")
+    });
+    let asked = Instant::now();
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
+    assert!(asked.elapsed() < EXIT_RECORD_WAIT + Duration::from_secs(5));
+    drop(held);
+}
+
+#[test]
+fn a_specification_whose_resolved_names_are_not_variable_names_is_refused() {
+    let fixture = Fixture::new();
+    for name in ["", "A=B", "A\0B", "PATH", "HOME"] {
+        let mut spec = fixture.spec("true", Restart::No, Stop::default());
+        spec.resolved.insert(name.to_owned());
+        let bytes = serde_json::to_vec(&spec).unwrap();
+
+        let refused = read_spec(bytes.as_slice());
+
+        assert!(refused.is_err(), "{name:?} was accepted");
+    }
+}
+
+#[test]
+fn a_keeper_environment_shows_its_names_and_no_value() {
+    let environment =
+        KeeperEnvironment::from_vars([(OsString::from("GREETING"), OsString::from("hello"))]);
+
+    let shown = format!("{environment:?}");
+
+    assert!(shown.contains("GREETING"));
+    assert!(!shown.contains("hello"));
 }

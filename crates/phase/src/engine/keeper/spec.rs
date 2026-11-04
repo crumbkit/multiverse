@@ -161,6 +161,23 @@ impl KeeperSpec {
     }
 }
 
+/// Returns why `resolved` holds a name that is not a variable the keeper
+/// may pass on: an empty name, a name that holds `=` or NUL, or `PATH` or
+/// `HOME`, which the specification sets itself.
+fn check_resolved(resolved: &BTreeSet<String>) -> Result<(), String> {
+    for name in resolved {
+        if name.is_empty() || name.contains(['=', '\0']) {
+            return Err(format!("the resolved name {name:?} is not a variable name"));
+        }
+        if INHERITED.contains(&name.as_str()) {
+            return Err(format!(
+                "the resolved name {name} is one the specification sets itself"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Reads a specification of at most [`MOST_SPEC_BYTES`] bytes from
 /// `input`.
 ///
@@ -185,6 +202,7 @@ pub(crate) fn read_spec(input: impl Read) -> Result<KeeperSpec, String> {
         return Err("the specification's command is empty".to_owned());
     }
     check_inherited(&spec.inherited).map_err(|error| error.to_string())?;
+    check_resolved(&spec.resolved)?;
     Ok(spec)
 }
 

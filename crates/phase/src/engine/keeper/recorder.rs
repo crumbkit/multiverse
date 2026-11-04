@@ -73,16 +73,18 @@ impl Note {
 pub(crate) struct Recorder {
     /// The changes to write, in order.
     notes: Sender<Note>,
-    /// A message when the thread has written every change and ended.
-    done: Receiver<()>,
 }
 
 impl Recorder {
     /// Starts the writer of the run record that `args` names, which notes
-    /// each failed write in `diagnostics`.
-    pub(crate) fn start(args: &KeeperArgs, diagnostics: Diagnostics) -> Self {
+    /// each failed write in `diagnostics` and calls `finished` once it has
+    /// written every change after [`Recorder::close`].
+    pub(crate) fn start(
+        args: &KeeperArgs,
+        diagnostics: Diagnostics,
+        finished: impl FnOnce() + Send + 'static,
+    ) -> Self {
         let (notes, queue) = mpsc::channel();
-        let (finished, done) = mpsc::channel();
         let store = RunStore::new(args.state_dir());
         let workspace = args.workspace().clone();
         let key = ObjectKey::Process(args.app().clone(), args.process().clone());
@@ -90,9 +92,9 @@ impl Recorder {
             while let Ok(note) = queue.recv() {
                 write(&store, &workspace, &key, note, &queue, &diagnostics);
             }
-            let _ = finished.send(());
+            finished();
         });
-        Self { notes, done }
+        Self { notes }
     }
 
     /// Records that the app started as `host`.
@@ -116,10 +118,10 @@ impl Recorder {
         let _ = self.notes.send(Note::Stopped(host));
     }
 
-    /// Waits at most `wait` for the writer to write every change.
-    pub(crate) fn finish(self, wait: Duration) {
+    /// Tells the writer that no change follows, so it ends once it has
+    /// written the changes it holds.
+    pub(crate) fn close(self) {
         drop(self.notes);
-        let _ = self.done.recv_timeout(wait);
     }
 }
 

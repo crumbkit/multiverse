@@ -218,7 +218,9 @@ fn keeper_command(launch: &Launch<'_>, stderr: Stdio) -> Command {
 
 /// Ends a keeper that may have started its app: it sends the keeper `TERM`,
 /// waits the app's grace and kill wait for the keeper to stop the app and
-/// exit, and then kills the keeper.
+/// exit, and then kills the keeper. A keeper whose start of the app takes
+/// longer than that wait is killed before it can stop the app, which then
+/// runs on with no keeper and no entry in the run record.
 #[expect(
     clippy::disallowed_types,
     reason = "crates/phase/src/engine/keeper/spawn.rs holds the keeper it started (PROC-1)"
