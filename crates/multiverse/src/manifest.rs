@@ -1,20 +1,31 @@
 //! The manifest `mxv.toml` at a repository's root, which declares the
-//! application's named ports and the processes that `mxv up` starts.
+//! application's named ports and the processes and containers that
+//! `mxv up` starts.
 //!
 //! The manifest is parsed strictly: a key that the schema does not declare
 //! fails with [`ManifestProblem::UnknownKey`], which names the key and its
-//! line. The top-level sections `containers`, `secrets` and `actions` are
-//! reserved for later versions and fail with [`ManifestProblem::Reserved`].
+//! line. The top-level sections `secrets` and `actions` are reserved for
+//! later versions and fail with [`ManifestProblem::Reserved`].
+//!
+//! Processes and containers share one set of names, and either may depend
+//! on the other.
 //!
 //! ```toml
-//! ports = ["api", "web"]
+//! ports = ["api", "web", "dynamodb"]
+//!
+//! [containers.dynamodb]
+//! image = "amazon/dynamodb-local:2.5.4"
+//! command = ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+//! ports = { 8000 = "dynamodb" }
+//! volumes = { data = "/data" }
 //!
 //! [processes.api]
 //! argv = ["cargo", "run", "--bin", "api"]
 //! env = { RUST_LOG = "info" }
-//! ports = { PORT = "api" }
+//! ports = { PORT = "api", DYNAMODB_PORT = "dynamodb" }
 //! listen = "api"
 //! ready = { timeout_seconds = 120 }
+//! depends_on = ["dynamodb"]
 //!
 //! [processes.web]
 //! argv = ["npm", "run", "dev"]
@@ -58,6 +69,9 @@ pub const MOST_READY_SECONDS: u64 = 3600;
 /// [`ManifestProblem::Newer`].
 pub const MANIFEST_VERSION: u64 = 1;
 
+/// The most bytes of an image reference.
+const MOST_IMAGE_BYTES: usize = 255;
+
 /// The most bytes of a process or port name.
 const MOST_NAME_BYTES: usize = 64;
 
@@ -70,6 +84,76 @@ pub struct Manifest {
     pub ports: Vec<String>,
     /// The processes, by name.
     pub processes: BTreeMap<String, Process>,
+    /// The containers, by name. No container has the name of a process.
+    pub containers: BTreeMap<String, Container>,
+}
+
+/// One process or container of a manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unit<'a> {
+    /// A process.
+    Process(&'a Process),
+    /// A container.
+    Container(&'a Container),
+}
+
+impl<'a> Unit<'a> {
+    /// Returns the processes and containers that start, and are ready,
+    /// before this one.
+    #[must_use]
+    pub fn depends_on(self) -> &'a [String] {
+        match self {
+            Unit::Process(process) => &process.depends_on,
+            Unit::Container(container) => &container.depends_on,
+        }
+    }
+
+    /// Returns the readiness check, or `None`.
+    #[must_use]
+    pub const fn ready(self) -> Option<&'a Ready> {
+        match self {
+            Unit::Process(process) => process.ready.as_ref(),
+            Unit::Container(container) => container.ready.as_ref(),
+        }
+    }
+}
+
+/// One container of a manifest, which `mxv up` runs with the docker CLI.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Container {
+    /// The image, pinned by a tag other than `latest` or by a digest.
+    pub image: String,
+    /// The arguments that replace the image's command, or `None` to keep
+    /// it.
+    pub command: Option<Vec<String>>,
+    /// The variables that the container receives.
+    pub env: BTreeMap<String, String>,
+    /// The container ports that mxv publishes on the loopback address, in
+    /// the order of their container port.
+    pub ports: Vec<Published>,
+    /// The named volumes that the container mounts: each key names a
+    /// volume, which belongs to the workspace, and each value is the
+    /// absolute path it mounts at inside the container.
+    pub volumes: BTreeMap<String, String>,
+    /// The check that tells `mxv up` the container is ready, or `None`
+    /// when it counts as started once it has run for a short grace period.
+    /// A container that publishes one port and has no `ready` table is
+    /// ready when that port answers.
+    pub ready: Option<Ready>,
+    /// The processes and containers that start, and are ready, before this
+    /// one.
+    pub depends_on: Vec<String>,
+}
+
+/// A container port that mxv publishes as a named port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Published {
+    /// The TCP port inside the container.
+    pub container: u16,
+    /// The port of [`Manifest::ports`] that it is published on.
+    pub port: String,
 }
 
 /// One process of a manifest.
@@ -202,8 +286,9 @@ struct RawManifest {
     /// The processes.
     #[serde(default)]
     processes: BTreeMap<Spanned<String>, RawProcess>,
-    /// Reserved for containers.
-    containers: Option<Spanned<IgnoredAny>>,
+    /// The containers.
+    #[serde(default)]
+    containers: BTreeMap<Spanned<String>, RawContainer>,
     /// Reserved for secrets.
     secrets: Option<Spanned<IgnoredAny>>,
     /// Reserved for actions.
@@ -226,6 +311,30 @@ struct RawProcess {
     ports: BTreeMap<Spanned<String>, Spanned<String>>,
     /// The port that the process listens on.
     listen: Option<Spanned<String>>,
+    /// The readiness check.
+    ready: Option<RawReady>,
+    /// The dependencies.
+    #[serde(default)]
+    depends_on: Vec<Spanned<String>>,
+}
+
+/// One container as TOML holds it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawContainer {
+    /// The image.
+    image: Spanned<String>,
+    /// The arguments that replace the image's command.
+    command: Option<Vec<String>>,
+    /// The variables.
+    #[serde(default)]
+    env: BTreeMap<Spanned<String>, String>,
+    /// The published ports, from container port to port name.
+    #[serde(default)]
+    ports: BTreeMap<Spanned<String>, Spanned<String>>,
+    /// The volumes, from volume name to mount path.
+    #[serde(default)]
+    volumes: BTreeMap<Spanned<String>, Spanned<String>>,
     /// The readiness check.
     ready: Option<RawReady>,
     /// The dependencies.
@@ -432,11 +541,7 @@ impl Manifest {
                 _ => {}
             }
         }
-        for (section, value) in [
-            ("containers", &raw.containers),
-            ("secrets", &raw.secrets),
-            ("actions", &raw.actions),
-        ] {
+        for (section, value) in [("secrets", &raw.secrets), ("actions", &raw.actions)] {
             if let Some(value) = value {
                 return Err(errors.at(
                     Some(&value.span()),
@@ -468,8 +573,22 @@ impl Manifest {
         let names: BTreeSet<&str> = raw
             .processes
             .keys()
+            .chain(raw.containers.keys())
             .map(|name| name.get_ref().as_str())
             .collect();
+        if let Some(name) = raw.containers.keys().find(|name| {
+            raw.processes
+                .keys()
+                .any(|process| process.get_ref() == name.get_ref())
+        }) {
+            return Err(errors.invalid(
+                &name.span(),
+                format!(
+                    "`{}` is both a process and a container, and they share one set of names",
+                    name.get_ref()
+                ),
+            ));
+        }
         let mut processes = BTreeMap::new();
         let mut listeners: BTreeMap<String, String> = BTreeMap::new();
         for (name, raw_process) in &raw.processes {
@@ -488,42 +607,81 @@ impl Manifest {
             }
             processes.insert(name.get_ref().clone(), process);
         }
-        let manifest = Self { ports, processes };
+        let mut containers = BTreeMap::new();
+        for (name, raw_container) in &raw.containers {
+            let container = check_container(&errors, name, raw_container, &ports, &names)?;
+            for (published, key) in container.ports.iter().zip(raw_container.ports.values()) {
+                if let Some(other) = listeners.get(&published.port) {
+                    return Err(errors.invalid(
+                        &key.span(),
+                        format!(
+                            "`{other}` and `{}` both listen on the port `{}`, which has at most one listener",
+                            name.get_ref(),
+                            published.port
+                        ),
+                    ));
+                }
+                listeners.insert(published.port.clone(), name.get_ref().clone());
+            }
+            containers.insert(name.get_ref().clone(), container);
+        }
+        let manifest = Self {
+            ports,
+            processes,
+            containers,
+        };
         if let Some(name) = manifest.cycle() {
             let span = raw
                 .processes
                 .keys()
+                .chain(raw.containers.keys())
                 .find(|key| key.get_ref() == &name)
                 .map(Spanned::span);
             return Err(errors.at(
                 span.as_ref(),
                 ManifestProblem::Invalid {
-                    message: format!(
-                        "the process `{name}` depends on itself through a dependency cycle"
-                    ),
+                    message: format!("`{name}` depends on itself through a dependency cycle"),
                 },
             ));
         }
         Ok(manifest)
     }
 
-    /// Returns the processes that `mxv up` starts for `names`, in the
-    /// order it starts them: each process after its dependencies, and
-    /// processes that do not depend on each other in name order. Empty
-    /// `names` select every process.
+    /// Returns the process or container `name`, or `None`.
+    #[must_use]
+    pub fn unit(&self, name: &str) -> Option<Unit<'_>> {
+        self.processes
+            .get(name)
+            .map(Unit::Process)
+            .or_else(|| self.containers.get(name).map(Unit::Container))
+    }
+
+    /// Returns the names of every process and container, in name order.
+    fn names(&self) -> BTreeSet<&String> {
+        self.processes
+            .keys()
+            .chain(self.containers.keys())
+            .collect()
+    }
+
+    /// Returns the processes and containers that `mxv up` starts for
+    /// `names`, in the order it starts them: each one after its
+    /// dependencies, and those that do not depend on each other in name
+    /// order. Empty `names` select every process and container.
     ///
     /// # Errors
     ///
-    /// Returns the first name that the manifest declares no process for.
+    /// Returns the first name that the manifest declares no process or
+    /// container for.
     pub fn start_order(&self, names: &[String]) -> Result<Vec<String>, String> {
         let selected: Vec<&String> = if names.is_empty() {
-            self.processes.keys().collect()
+            self.names().into_iter().collect()
         } else {
             names.iter().collect()
         };
         let mut order = Vec::new();
         for name in selected {
-            if !self.processes.contains_key(name) {
+            if self.unit(name).is_none() {
                 return Err(name.clone());
             }
             self.visit(name, &mut order, &mut Vec::new());
@@ -539,8 +697,8 @@ impl Manifest {
             return;
         }
         path.push(name.to_owned());
-        if let Some(process) = self.processes.get(name) {
-            for dependency in &process.depends_on {
+        if let Some(unit) = self.unit(name) {
+            for dependency in unit.depends_on() {
                 self.visit(dependency, order, path);
             }
         }
@@ -551,8 +709,8 @@ impl Manifest {
     /// Returns a process that depends on itself, directly or through other
     /// processes, or `None`.
     fn cycle(&self) -> Option<String> {
-        self.processes
-            .keys()
+        self.names()
+            .into_iter()
             .find(|name| self.reaches(name, name, &mut BTreeSet::new()))
             .cloned()
     }
@@ -560,10 +718,10 @@ impl Manifest {
     /// Reports whether `target` is a dependency of `from`, directly or
     /// through other processes.
     fn reaches<'a>(&'a self, from: &'a str, target: &str, seen: &mut BTreeSet<&'a str>) -> bool {
-        let Some(process) = self.processes.get(from) else {
+        let Some(unit) = self.unit(from) else {
             return false;
         };
-        process.depends_on.iter().any(|dependency| {
+        unit.depends_on().iter().any(|dependency| {
             dependency == target
                 || (seen.insert(dependency.as_str()) && self.reaches(dependency, target, seen))
         })
@@ -657,18 +815,7 @@ fn check_process(
     };
     let ready = match &raw.ready {
         Some(ready) => {
-            let timeout = match &ready.timeout_seconds {
-                Some(seconds) if (1..=MOST_READY_SECONDS).contains(seconds.get_ref()) => {
-                    Duration::from_secs(*seconds.get_ref())
-                }
-                Some(seconds) => {
-                    return Err(errors.invalid(
-                        &seconds.span(),
-                        format!("timeout_seconds of `{process}` is not between 1 and {MOST_READY_SECONDS}"),
-                    ));
-                }
-                None => DEFAULT_READY_TIMEOUT,
-            };
+            let timeout = ready_timeout(errors, process, ready)?;
             let port = match &ready.port {
                 Some(port) => {
                     let port_name = declared(port)?;
@@ -700,19 +847,7 @@ fn check_process(
             timeout: DEFAULT_READY_TIMEOUT,
         }),
     };
-    let mut depends_on = Vec::new();
-    for dependency in &raw.depends_on {
-        if !names.contains(dependency.get_ref().as_str()) {
-            return Err(errors.invalid(
-                &dependency.span(),
-                format!(
-                    "the process `{process}` depends on `{}`, which the manifest does not declare",
-                    dependency.get_ref()
-                ),
-            ));
-        }
-        depends_on.push(dependency.get_ref().clone());
-    }
+    let depends_on = check_dependencies(errors, process, &raw.depends_on, names)?;
     Ok(Process {
         argv: raw.argv.get_ref().clone(),
         cwd,
@@ -741,4 +876,210 @@ fn check_variable(
             ),
         ))
     }
+}
+
+/// Returns the timeout of the readiness check `ready` of `unit`.
+fn ready_timeout(
+    errors: &Errors<'_>,
+    unit: &str,
+    ready: &RawReady,
+) -> Result<Duration, ManifestError> {
+    match &ready.timeout_seconds {
+        Some(seconds) if (1..=MOST_READY_SECONDS).contains(seconds.get_ref()) => {
+            Ok(Duration::from_secs(*seconds.get_ref()))
+        }
+        Some(seconds) => Err(errors.invalid(
+            &seconds.span(),
+            format!("timeout_seconds of `{unit}` is not between 1 and {MOST_READY_SECONDS}"),
+        )),
+        None => Ok(DEFAULT_READY_TIMEOUT),
+    }
+}
+
+/// Checks that each of the `dependencies` of `unit` names a process or
+/// container of `names`, and returns them.
+fn check_dependencies(
+    errors: &Errors<'_>,
+    unit: &str,
+    dependencies: &[Spanned<String>],
+    names: &BTreeSet<&str>,
+) -> Result<Vec<String>, ManifestError> {
+    let mut depends_on = Vec::new();
+    for dependency in dependencies {
+        if !names.contains(dependency.get_ref().as_str()) {
+            return Err(errors.invalid(
+                &dependency.span(),
+                format!(
+                    "`{unit}` depends on `{}`, which the manifest does not declare",
+                    dependency.get_ref()
+                ),
+            ));
+        }
+        depends_on.push(dependency.get_ref().clone());
+    }
+    Ok(depends_on)
+}
+
+/// Reports whether `image` is pinned: it carries a digest, or a tag other
+/// than `latest`. A tag follows the last `:` after the last `/`, because a
+/// registry's host may carry a port, as in `localhost:5000/busybox`.
+fn is_pinned(image: &str) -> bool {
+    if image.contains('@') {
+        return true;
+    }
+    let last = image.rsplit('/').next().unwrap_or(image);
+    last.rsplit_once(':')
+        .is_some_and(|(_, tag)| !tag.is_empty() && tag != "latest")
+}
+
+/// Reports whether `image` holds only the characters of an image
+/// reference and does not start with `-`, so docker never reads it as an
+/// option.
+fn is_image(image: &str) -> bool {
+    image.len() <= MOST_IMAGE_BYTES
+        && image
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && image
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-/:@".contains(character))
+}
+
+/// Checks one raw container against the declared `ports` and the `names`
+/// of processes and containers, and returns it.
+fn check_container(
+    errors: &Errors<'_>,
+    name: &Spanned<String>,
+    raw: &RawContainer,
+    ports: &[String],
+    names: &BTreeSet<&str>,
+) -> Result<Container, ManifestError> {
+    let container = name.get_ref();
+    if !is_name(container) {
+        return Err(errors.invalid(
+            &name.span(),
+            format!("`{container}` is not a container name, which holds 1 to 64 letters, digits, '-' and '_'"),
+        ));
+    }
+    let image = raw.image.get_ref();
+    if !is_image(image) {
+        return Err(errors.invalid(
+            &raw.image.span(),
+            format!("the image `{image}` of `{container}` is not an image reference"),
+        ));
+    }
+    if !is_pinned(image) {
+        return Err(errors.invalid(
+            &raw.image.span(),
+            format!(
+                "the image `{image}` of `{container}` is not pinned; pin it with a tag other than `latest`, or with a digest"
+            ),
+        ));
+    }
+    let mut env = BTreeMap::new();
+    for (variable, value) in &raw.env {
+        check_variable(errors, container, variable)?;
+        env.insert(variable.get_ref().clone(), value.clone());
+    }
+    let mut published = Vec::new();
+    for (key, port) in &raw.ports {
+        let number = key
+            .get_ref()
+            .parse::<u16>()
+            .ok()
+            .filter(|number| *number > 0)
+            .ok_or_else(|| {
+                errors.invalid(
+                    &key.span(),
+                    format!(
+                        "`{}` of `{container}` is not a container port, which is a number from 1 to 65535",
+                        key.get_ref()
+                    ),
+                )
+            })?;
+        if !ports.contains(port.get_ref()) {
+            return Err(errors.invalid(
+                &port.span(),
+                format!(
+                    "the container `{container}` publishes the port `{}`, which `ports` does not declare",
+                    port.get_ref()
+                ),
+            ));
+        }
+        published.push(Published {
+            container: number,
+            port: port.get_ref().clone(),
+        });
+    }
+    published.sort_by_key(|published| published.container);
+    let mut volumes = BTreeMap::new();
+    for (volume, path) in &raw.volumes {
+        if !is_name(volume.get_ref()) {
+            return Err(errors.invalid(
+                &volume.span(),
+                format!(
+                    "`{}` of `{container}` is not a volume name, which holds 1 to 64 letters, digits, '-' and '_'",
+                    volume.get_ref()
+                ),
+            ));
+        }
+        let mount = path.get_ref();
+        if !mount.starts_with('/') || mount.contains([':', ',']) {
+            return Err(errors.invalid(
+                &path.span(),
+                format!(
+                    "the volume `{}` of `{container}` mounts at `{mount}`, which is not an absolute path without ':' or ','",
+                    volume.get_ref()
+                ),
+            ));
+        }
+        volumes.insert(volume.get_ref().clone(), mount.clone());
+    }
+    let only = match published.as_slice() {
+        [one] => Some(one.port.clone()),
+        _ => None,
+    };
+    let ready = match &raw.ready {
+        Some(ready) => {
+            let timeout = ready_timeout(errors, container, ready)?;
+            let port = match &ready.port {
+                Some(port) => {
+                    if !published.iter().any(|published| &published.port == port.get_ref()) {
+                        return Err(errors.invalid(
+                            &port.span(),
+                            format!(
+                                "the readiness port `{}` of `{container}` is not a port it publishes",
+                                port.get_ref()
+                            ),
+                        ));
+                    }
+                    port.get_ref().clone()
+                }
+                None => only.clone().ok_or_else(|| {
+                    errors.invalid(
+                        &raw.image.span(),
+                        format!(
+                            "the `ready` table of `{container}` names no port, and the container does not publish exactly one port to default to"
+                        ),
+                    )
+                })?,
+            };
+            Some(Ready { port, timeout })
+        }
+        None => only.map(|port| Ready {
+            port,
+            timeout: DEFAULT_READY_TIMEOUT,
+        }),
+    };
+    let depends_on = check_dependencies(errors, container, &raw.depends_on, names)?;
+    Ok(Container {
+        image: image.clone(),
+        command: raw.command.clone(),
+        env,
+        ports: published,
+        volumes,
+        ready,
+        depends_on,
+    })
 }

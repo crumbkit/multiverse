@@ -400,12 +400,27 @@
     "failures"
   ],
   "$defs": {
+    "KindName": {
+      "description": "Whether a row is a process or a container.",
+      "oneOf": [
+        {
+          "description": "A process that mxv starts on the host.",
+          "type": "string",
+          "const": "process"
+        },
+        {
+          "description": "A container that mxv runs with docker.",
+          "type": "string",
+          "const": "container"
+        }
+      ]
+    },
     "ProcessRow": {
-      "description": "One process of a workspace, as `up`, `down`, `restart` and `status`\nprint it.",
+      "description": "One process or container of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
       "type": "object",
       "properties": {
         "code": {
-          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited.",
+          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited. A container's code is the one docker reports,\nsuch as 137 for a container that SIGKILL ended.",
           "type": [
             "integer",
             "null"
@@ -416,16 +431,20 @@
           "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops.",
           "type": "boolean"
         },
+        "kind": {
+          "description": "`process` or `container`.",
+          "$ref": "#/$defs/KindName"
+        },
         "log": {
           "description": "The process's log file, which `mxv logs` prints.",
           "type": "string"
         },
         "name": {
-          "description": "The process's name in the manifest.",
+          "description": "The process's or container's name in the manifest.",
           "type": "string"
         },
         "pid": {
-          "description": "The process id, which is also its process group's id, while it\nruns.",
+          "description": "The process id, which is also its process group's id, while a\nprocess runs, and null for a container.",
           "type": [
             "integer",
             "null"
@@ -434,7 +453,7 @@
           "minimum": 0
         },
         "ports": {
-          "description": "The ports that the process receives, as `VARIABLE=port`.",
+          "description": "The ports that a process receives, as `VARIABLE=port`, or that a\ncontainer publishes, as `port-name=port`.",
           "type": "array",
           "items": {
             "type": "string"
@@ -449,12 +468,13 @@
           "format": "int32"
         },
         "state": {
-          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, or `stopped`.",
+          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, or `stopped`.",
           "$ref": "#/$defs/StateName"
         }
       },
       "required": [
         "name",
+        "kind",
         "state",
         "pid",
         "code",
@@ -475,6 +495,11 @@
           "description": "The process ended.",
           "type": "string",
           "const": "exited"
+        },
+        {
+          "description": "docker created the container and did not start it.",
+          "type": "string",
+          "const": "created"
         },
         {
           "description": "The process is not started.",

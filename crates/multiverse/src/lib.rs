@@ -16,6 +16,7 @@
 
 mod backend;
 mod clock;
+mod docker;
 mod error;
 mod git;
 mod manifest;
@@ -29,11 +30,15 @@ mod workspaces;
 
 pub use crate::backend::{Backend, Changes, INITIALIZING, Listed, Repository};
 pub use crate::clock::FOLLOW_INTERVAL;
+pub use crate::docker::{
+    CONTAINER_LABEL, DOCKER_DEADLINE, PULL_DEADLINE, STORE_LABEL, Scope, VOLUME_LABEL,
+    WORKSPACE_LABEL,
+};
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::manifest::{
-    DEFAULT_READY_TIMEOUT, MANIFEST_FILE, MANIFEST_VERSION, MOST_MANIFEST_BYTES,
-    MOST_READY_SECONDS, Manifest, ManifestError, ManifestProblem, Process, Ready,
+    Container, DEFAULT_READY_TIMEOUT, MANIFEST_FILE, MANIFEST_VERSION, MOST_MANIFEST_BYTES,
+    MOST_READY_SECONDS, Manifest, ManifestError, ManifestProblem, Process, Published, Ready, Unit,
 };
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::ports::DEFAULT_PORT_RANGE;
@@ -41,7 +46,7 @@ pub use crate::record::{
     AGENTS_FILE, BackendKind, Checkout, RECORD_VERSION, Workspace, agents_text,
 };
 pub use crate::runs::{
-    DownOutcome, Follower, KILL_WAIT, MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES,
+    DownOutcome, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES,
     ProcessState, ProcessStatus, RUN_VERSION, Runs, START_GRACE, STOP_GRACE, TAIL_LINES,
     Unstoppable, UpOutcome, tail,
 };

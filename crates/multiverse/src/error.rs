@@ -135,6 +135,48 @@ pub enum Error {
         /// Which range was searched.
         source: io::Error,
     },
+    /// The manifest declares containers, and no `docker` program is on
+    /// `PATH`.
+    DockerMissing {
+        /// Why the program could not start.
+        source: io::Error,
+    },
+    /// The `docker` program runs, and its `compose` plugin, which starts
+    /// the containers, is not installed.
+    DockerComposeMissing {
+        /// The line of docker's standard error that says what failed.
+        message: String,
+    },
+    /// docker has no free address pool for a network, so it cannot
+    /// connect a container.
+    DockerNoAddressPool {
+        /// The line of docker's standard error that says what failed.
+        message: String,
+    },
+    /// The `docker` program runs, and its daemon does not answer.
+    DockerUnavailable {
+        /// The line of docker's standard error that says what failed.
+        message: String,
+    },
+    /// A docker command failed or missed its deadline.
+    DockerFailed {
+        /// The docker command, such as `run`.
+        operation: &'static str,
+        /// The manifest name of the container that the command worked on,
+        /// when it worked on one.
+        container: Option<String>,
+        /// The line of docker's standard error that says what failed.
+        message: String,
+    },
+    /// A docker container or volume has a name of mxv's, or is one that
+    /// mxv recorded, and its labels do not name this store, workspace and
+    /// object, so mxv leaves it alone.
+    DockerForeign {
+        /// `container` or `volume`.
+        kind: &'static str,
+        /// The object's docker name.
+        name: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -226,6 +268,48 @@ impl fmt::Display for Error {
             Self::NoFreePort { source } => {
                 write!(formatter, "cannot find a free port: {source}")
             }
+            Self::DockerMissing { .. } => {
+                formatter.write_str("the manifest declares containers, and docker is not installed")
+            }
+            Self::DockerComposeMissing { message } => {
+                formatter.write_str("docker runs, and its compose plugin is not installed")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
+            Self::DockerNoAddressPool { message } => {
+                formatter.write_str("docker has no free address pool for a container's network")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
+            Self::DockerUnavailable { message } => {
+                formatter.write_str("the docker daemon does not answer")?;
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
+            Self::DockerFailed {
+                operation,
+                container,
+                message,
+            } => {
+                write!(formatter, "docker {operation} failed")?;
+                if let Some(container) = container {
+                    write!(formatter, " for the container {container}")?;
+                }
+                if !message.is_empty() {
+                    write!(formatter, ": {message}")?;
+                }
+                Ok(())
+            }
+            Self::DockerForeign { kind, name } => write!(
+                formatter,
+                "the docker {kind} {name} has a name of mxv's, and its labels name another mxv state directory or none, so mxv leaves it alone"
+            ),
         }
     }
 }
@@ -238,7 +322,8 @@ impl std::error::Error for Error {
             | Self::Unwritable { source, .. }
             | Self::ProcessUnstartable { source, .. }
             | Self::NoFreePort { source }
-            | Self::Inaccessible { source, .. } => Some(source),
+            | Self::Inaccessible { source, .. }
+            | Self::DockerMissing { source } => Some(source),
             Self::CorruptRecord { source, .. } => Some(source),
             Self::RepositoryNotFound { .. }
             | Self::NoOrigin { .. }
@@ -249,7 +334,12 @@ impl std::error::Error for Error {
             | Self::MismatchedRecord { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
-            | Self::Busy { .. } => None,
+            | Self::Busy { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. } => None,
         }
     }
 }

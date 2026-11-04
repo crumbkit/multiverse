@@ -6,7 +6,7 @@ use std::fmt;
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
-    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, ProcessState, ProcessStatus, Removal,
+    Allow, BranchFate, Checkout, CheckoutRemoval, Fate, Kind, ProcessState, ProcessStatus, Removal,
     Workspace,
 };
 use schemars::JsonSchema;
@@ -210,6 +210,12 @@ pub(crate) struct RemovalResult {
     /// The changes and other ignored paths, such as `app: .env`, that
     /// the removal discards because of `--force`.
     discarded: Vec<String>,
+    /// The workspace's docker containers, running or stopped, that the
+    /// removal removes.
+    containers: Vec<String>,
+    /// The docker volumes that the removal deletes because of
+    /// `--delete-volumes`, named and anonymous.
+    volumes: Vec<String>,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -332,8 +338,18 @@ impl RemovalResult {
             delete_unmerged: removal.allow.delete_unmerged,
             disposable: removal.disposable.clone(),
             discarded: removal.discarded.clone(),
+            containers: Vec::new(),
+            volumes: Vec::new(),
             planned,
         }
+    }
+
+    /// Returns this result with the docker containers that the removal
+    /// removes and the volumes that it deletes.
+    pub(crate) fn with_docker(mut self, containers: Vec<String>, volumes: Vec<String>) -> Self {
+        self.containers = containers;
+        self.volumes = volumes;
+        self
     }
 }
 
@@ -358,6 +374,15 @@ impl fmt::Display for RemovalResult {
             writeln!(
                 formatter,
                 "mxv {deletes} the ignored build directory {path}."
+            )?;
+        }
+        for container in &self.containers {
+            writeln!(formatter, "mxv {removes} the docker container {container}.")?;
+        }
+        for volume in &self.volumes {
+            writeln!(
+                formatter,
+                "mxv {deletes} the docker volume {volume} and the data in it."
             )?;
         }
         for checkout in &self.checkouts {
@@ -462,20 +487,24 @@ fn commits(count: u32) -> String {
     }
 }
 
-/// One process of a workspace, as `up`, `down`, `restart` and `status`
-/// print it.
+/// One process or container of a workspace, as `up`, `down`, `restart`
+/// and `status` print it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ProcessRow {
-    /// The process's name in the manifest.
+    /// The process's or container's name in the manifest.
     name: String,
+    /// `process` or `container`.
+    kind: KindName,
     /// `running`, `exited` when it ended on its own or something other
-    /// than `mxv down` stopped it, or `stopped`.
+    /// than `mxv down` stopped it, `created` for a container that docker
+    /// created and did not start, or `stopped`.
     state: StateName,
-    /// The process id, which is also its process group's id, while it
-    /// runs.
+    /// The process id, which is also its process group's id, while a
+    /// process runs, and null for a container.
     pid: Option<u32>,
     /// The exit code of an exited process, or null when a signal ended it
-    /// or it has not exited.
+    /// or it has not exited. A container's code is the one docker reports,
+    /// such as 137 for a container that SIGKILL ended.
     code: Option<i32>,
     /// The number of the signal that ended an exited process, such as 15
     /// for SIGTERM, or null.
@@ -484,10 +513,21 @@ pub(crate) struct ProcessRow {
     /// such as a child it started in the background, which `mxv down`
     /// stops.
     group_alive: bool,
-    /// The ports that the process receives, as `VARIABLE=port`.
+    /// The ports that a process receives, as `VARIABLE=port`, or that a
+    /// container publishes, as `port-name=port`.
     ports: Vec<String>,
     /// The process's log file, which `mxv logs` prints.
     log: String,
+}
+
+/// Whether a row is a process or a container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum KindName {
+    /// A process that mxv starts on the host.
+    Process,
+    /// A container that mxv runs with docker.
+    Container,
 }
 
 /// The state of a process, as a row prints it.
@@ -498,6 +538,8 @@ pub(crate) enum StateName {
     Running,
     /// The process ended.
     Exited,
+    /// docker created the container and did not start it.
+    Created,
     /// The process is not started.
     Stopped,
 }
@@ -505,6 +547,7 @@ pub(crate) enum StateName {
 impl Row for ProcessRow {
     const COLUMNS: &'static [&'static str] = &[
         "name",
+        "kind",
         "state",
         "pid",
         "code",
@@ -525,12 +568,17 @@ impl Row for ProcessRow {
 impl From<&ProcessStatus> for ProcessRow {
     fn from(status: &ProcessStatus) -> Self {
         let (state, pid, code, signal) = match status.state {
-            ProcessState::Running { pid } => (StateName::Running, Some(pid), None, None),
+            ProcessState::Running { pid } => (StateName::Running, pid, None, None),
             ProcessState::Exited { code, signal } => (StateName::Exited, None, code, signal),
+            ProcessState::Created => (StateName::Created, None, None, None),
             ProcessState::Stopped => (StateName::Stopped, None, None, None),
         };
         Self {
             name: status.name.clone(),
+            kind: match status.kind {
+                Kind::Process => KindName::Process,
+                Kind::Container => KindName::Container,
+            },
             state,
             pid,
             code,

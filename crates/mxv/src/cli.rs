@@ -322,9 +322,13 @@ pub(crate) struct RemoveArgs {
     /// The name of the workspace to remove
     pub(crate) name: String,
 
-    /// Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes; an unmerged branch is still kept
+    /// Discard uncommitted changes, untracked files and ignored files such as .env, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
     #[arg(long)]
     pub(crate) force: bool,
+
+    /// Delete the workspace's docker volumes and the data in them
+    #[arg(long)]
+    pub(crate) delete_volumes: bool,
 
     /// Delete branches with unmerged commits, and commits on a detached HEAD
     #[arg(long)]

@@ -53,16 +53,18 @@ mod support;
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
     BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES,
-    CONFIG_INVALID, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
-    ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE,
-    MANIFEST_INVALID, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNKNOWN_KEY,
-    MANIFEST_UNREADABLE, PATH_INACCESSIBLE, PORT_EXHAUSTED, PORT_NOT_FOUND, PORT_TAKEN,
-    PROCESS_EXITED, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE,
-    PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER,
-    RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    CONFIG_INVALID, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, DOCKER_ADDRESS_POOLS_EXHAUSTED,
+    DOCKER_COMPOSE_MISSING, DOCKER_FAILED, DOCKER_FOREIGN_OBJECT, DOCKER_NOT_FOUND,
+    DOCKER_UNAVAILABLE, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE,
+    GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, MANIFEST_INVALID, MANIFEST_NEWER,
+    MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE,
+    PATH_INACCESSIBLE, PORT_EXHAUSTED, PORT_NOT_FOUND, PORT_TAKEN, PROCESS_EXITED,
+    PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE, PROCESS_UNSTARTABLE,
+    PROCESS_UNSTOPPABLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
     REPOSITORY_NOT_FOUND, RUN_CODES, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_BUSY,
     WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 use tempfile::TempDir;
 
@@ -70,6 +72,9 @@ use crate::support::{git, repository};
 
 /// The reason that an unbuilt verb's examples do not run.
 const NO_RUN: &str = "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.";
+
+/// The reason that a code of the container verbs is unprovoked here.
+const DOCKER: &str = "Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.";
 
 /// The reason that a process verb's examples do not run.
 const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.";
@@ -467,6 +472,25 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
         "Only a directory without write permission or a full disk provokes it, and the examples write nothing outside their fresh directories.",
     ),
     Unprovoked::new(&WORKSPACE_RUNNING, LIVE),
+    Unprovoked::new(&WORKSPACE_VOLUMES, DOCKER),
+    Unprovoked::new(
+        &DOCKER_NOT_FOUND,
+        "Only a live checkout whose mxv.toml declares containers, on a PATH without docker, provokes it; tests/containers.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &DOCKER_UNAVAILABLE,
+        "Only a docker daemon that does not answer provokes it, which the fixture cannot hold; tests/containers.rs provokes it with a docker that cannot reach its daemon.",
+    ),
+    Unprovoked::new(
+        &DOCKER_ADDRESS_POOLS_EXHAUSTED,
+        "Only a docker daemon whose address pools are used up provokes it, which a test cannot make without changing the daemon; the library's docker tests read docker's message for it.",
+    ),
+    Unprovoked::new(
+        &DOCKER_COMPOSE_MISSING,
+        "Only a docker without its compose plugin provokes it; tests/containers.rs provokes it with a docker whose compose command fails.",
+    ),
+    Unprovoked::new(&DOCKER_FAILED, DOCKER),
+    Unprovoked::new(&DOCKER_FOREIGN_OBJECT, DOCKER),
     Unprovoked::new(&MANIFEST_NOT_FOUND, LIVE),
     Unprovoked::new(&MANIFEST_UNKNOWN_KEY, LIVE),
     Unprovoked::new(&MANIFEST_NEWER, LIVE),

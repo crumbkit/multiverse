@@ -13,6 +13,16 @@
 //! process that started at another time, has exited without a code.
 //! `mxv down` deletes the run record and the exit file and keeps both
 //! logs; `mxv remove` deletes the whole directory.
+//!
+//! A container of the manifest has the record `<container>.container`,
+//! which holds the id of the container that `up` started; docker holds its
+//! state. The `docker` module describes the compose project and the labels
+//! that mxv checks before it acts on a recorded id. Its
+//! log is `<container>.log` too, which a detached `docker logs --follow`
+//! appends to while the container runs, so the log outlives the container
+//! that `mxv down` removes. `<container>.follower` records the follower's
+//! process id, so `up` and `status` start a new follower when the old one
+//! has ended and the container runs, such as after a restart outside mxv.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -25,14 +35,16 @@ use rustix::process::Signal;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
+use crate::docker;
 use crate::error::Error;
-use crate::manifest::{Manifest, Process};
+use crate::manifest::{Manifest, Process, Unit};
 use crate::name::WorkspaceName;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
 use crate::process::{self, Launch, Launched};
 use crate::record::Workspace;
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
+mod containers;
 #[cfg(test)]
 mod tests;
 
@@ -73,46 +85,62 @@ const MOST_RUN_BYTES: u64 = 64 * 1024;
 
 /// The run record of one started process.
 #[derive(Debug, Serialize, Deserialize)]
-struct RunRecord {
+pub(super) struct RunRecord {
     /// The record's version, which is [`RUN_VERSION`].
-    version: u32,
+    pub(super) version: u32,
     /// The process id, which is also the id of its process group.
-    pid: u32,
+    pub(super) pid: u32,
     /// The process's start time as `ps` printed it, which tells the
     /// process from a later one that reuses its id.
-    started: String,
+    pub(super) started: String,
     /// The ports that the process received, by variable name.
-    ports: BTreeMap<String, u16>,
+    pub(super) ports: BTreeMap<String, u16>,
 }
 
 /// The state of one process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessState {
-    /// The process runs.
+    /// The process or container runs.
     Running {
-        /// Its process id, which is also its process group's id.
-        pid: u32,
+        /// The process id of a process, which is also its process group's
+        /// id, or `None` for a container.
+        pid: Option<u32>,
     },
     /// The process ended on its own, or something other than `mxv down`
     /// stopped it.
     Exited {
-        /// Its exit code, or `None` when a signal ended it.
+        /// Its exit code, or `None` when a signal ended a process. A
+        /// container's code is the one docker reports.
         code: Option<i32>,
-        /// The signal that ended it, when the shell recorded one. The shell
+        /// The signal that ended a process, when the shell recorded one. The shell
         /// records a program that a signal ended as code 128 plus the
         /// signal's number, so a code from 129 to 192 reads as that signal.
         signal: Option<i32>,
     },
+    /// docker created the container and has not started it, such as when
+    /// `docker compose up` stopped between creating and starting it.
+    Created,
     /// The process has not started since the last `mxv down`, or never.
     Stopped,
 }
 
-/// One process of a workspace and its state.
+/// Whether a name of the manifest is a process or a container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A process that mxv starts on the host.
+    Process,
+    /// A container that mxv runs with docker.
+    Container,
+}
+
+/// One process or container of a workspace and its state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProcessStatus {
-    /// The process's name.
+    /// The process's or container's name.
     pub name: String,
+    /// Whether it is a process or a container.
+    pub kind: Kind,
     /// Its state.
     pub state: ProcessState,
     /// The host ports it receives, by variable name.
@@ -327,31 +355,7 @@ impl Runs {
 
     /// Returns the run record of `process`, or `None`.
     fn record(&self, name: &WorkspaceName, process: &str) -> Result<Option<RunRecord>, Error> {
-        let path = self.file(name, process, "json");
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(Error::StateUnreadable { path, source }),
-        };
-        let mut bytes = Vec::new();
-        file.take(MOST_RUN_BYTES)
-            .read_to_end(&mut bytes)
-            .map_err(|source| Error::StateUnreadable {
-                path: path.clone(),
-                source,
-            })?;
-        let record: RunRecord =
-            serde_json::from_slice(&bytes).map_err(|source| Error::CorruptRecord {
-                path: path.clone(),
-                source,
-            })?;
-        if record.version > RUN_VERSION {
-            return Err(Error::NewerRecord {
-                path,
-                version: record.version,
-            });
-        }
-        Ok(Some(record))
+        read_json(&self.file(name, process, "json"))
     }
 
     /// Returns the state of `process` from its run files.
@@ -364,7 +368,9 @@ impl Runs {
             return Ok(exited(code));
         }
         if process::start_time(record.pid)?.as_deref() == Some(record.started.as_str()) {
-            return Ok(ProcessState::Running { pid: record.pid });
+            return Ok(ProcessState::Running {
+                pid: Some(record.pid),
+            });
         }
         // The shell writes the exit file before it exits, so a process that
         // ended between the two reads above has its code by now.
@@ -386,11 +392,12 @@ impl Runs {
         workspace: &Workspace,
         manifest: Option<&Manifest>,
     ) -> Result<Vec<ProcessStatus>, Error> {
-        let names = self.known(workspace, manifest)?;
+        let containers = self.containers(workspace, manifest)?;
+        let names = self.known(workspace, manifest, &containers)?;
         self.cap_logs(&workspace.name, &names)?;
         names
             .iter()
-            .map(|process| self.process_status(workspace, manifest, process))
+            .map(|process| self.unit_status(workspace, manifest, &containers, process))
             .collect()
     }
 
@@ -409,6 +416,21 @@ impl Runs {
         Ok(())
     }
 
+    /// Returns the status of the process or container `name`.
+    fn unit_status(
+        &self,
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+        containers: &BTreeSet<String>,
+        name: &str,
+    ) -> Result<ProcessStatus, Error> {
+        if containers.contains(name) {
+            self.container_status(workspace, manifest, name)
+        } else {
+            self.process_status(workspace, manifest, name)
+        }
+    }
+
     /// Reports whether `process` of the workspace `name` runs, or has left
     /// a process group with members behind, so its log may still grow.
     ///
@@ -416,13 +438,18 @@ impl Runs {
     ///
     /// Returns the errors of [`Runs::status`].
     pub fn writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+        if self.record(name, process)?.is_none() {
+            return self.container_writing(name, process);
+        }
         Ok(
             matches!(self.state(name, process)?, ProcessState::Running { .. })
                 || self.group_lives(name, process)?,
         )
     }
 
-    /// Returns the names of the processes of `workspace` that run.
+    /// Returns the names of the processes and containers of `workspace`
+    /// that run: the processes in name order, then the containers in name
+    /// order.
     ///
     /// # Errors
     ///
@@ -438,6 +465,7 @@ impl Runs {
                 running.push(process);
             }
         }
+        running.extend(self.running_containers(&workspace.name)?);
         Ok(running)
     }
 
@@ -451,19 +479,25 @@ impl Runs {
         }
     }
 
-    /// Returns the manifest's processes in start order, then the other
-    /// processes that run records name.
+    /// Returns the manifest's processes and containers in start order,
+    /// then the other processes that run records name and the other
+    /// `containers`.
     fn known(
         &self,
         workspace: &Workspace,
         manifest: Option<&Manifest>,
+        containers: &BTreeSet<String>,
     ) -> Result<Vec<String>, Error> {
         let mut names = manifest
             .and_then(|manifest| manifest.start_order(&[]).ok())
             .unwrap_or_default();
-        for process in self.recorded(&workspace.name)? {
-            if !names.contains(&process) {
-                names.push(process);
+        for name in self
+            .recorded(&workspace.name)?
+            .into_iter()
+            .chain(containers.iter().cloned())
+        {
+            if !names.contains(&name) {
+                names.push(name);
             }
         }
         Ok(names)
@@ -488,6 +522,7 @@ impl Runs {
             && self.group_lives(&workspace.name, process)?;
         Ok(ProcessStatus {
             name: process.to_owned(),
+            kind: Kind::Process,
             state,
             ports,
             log: self.log(&workspace.name, process),
@@ -534,33 +569,59 @@ impl Runs {
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
         };
         self.cap_logs(&workspace.name, &order)?;
+        let scope = if order
+            .iter()
+            .any(|name| manifest.containers.contains_key(name))
+        {
+            docker::check()?;
+            docker::check_compose()?;
+            Some(self.ensure_scope(&workspace.name)?)
+        } else {
+            None
+        };
         self.assign_ports(store, workspace, manifest, &BTreeSet::new())?;
         let mut started = Vec::new();
         for process in &order {
-            let Some(declared) = manifest.processes.get(process) else {
-                return Ok(UpOutcome::UnknownProcess(process.clone()));
+            let started_one = match (manifest.unit(process), &scope) {
+                (None, _) => return Ok(UpOutcome::UnknownProcess(process.clone())),
+                (Some(Unit::Container(declared)), Some(scope)) => {
+                    if self.container_runs(&workspace.name, process)? {
+                        // A container that runs is left as it is, apart
+                        // from a log follower that it may have lost.
+                        self.start_container(workspace, scope, manifest, process, declared)?;
+                        continue;
+                    }
+                    self.start_container(workspace, scope, manifest, process, declared)
+                }
+                (Some(Unit::Container(_)), None) => {
+                    return Ok(UpOutcome::UnknownProcess(process.clone()));
+                }
+                (Some(Unit::Process(declared)), _) => {
+                    if matches!(
+                        self.state(&workspace.name, process)?,
+                        ProcessState::Running { .. }
+                    ) {
+                        continue;
+                    }
+                    self.start(workspace, checkout, process, declared)
+                }
             };
-            if matches!(
-                self.state(&workspace.name, process)?,
-                ProcessState::Running { .. }
-            ) {
-                continue;
-            }
-            match self.start(workspace, checkout, process, declared) {
+            match started_one {
                 Ok(None) => started.push(process),
                 Ok(Some(outcome)) => {
-                    self.roll_back(&workspace.name, &started);
+                    self.roll_back(&workspace.name, manifest, &started);
                     return Ok(outcome);
                 }
                 Err(error) => {
-                    self.roll_back(&workspace.name, &started);
+                    self.roll_back(&workspace.name, manifest, &started);
                     return Err(error);
                 }
             }
         }
+        let containers: BTreeSet<String> = manifest.containers.keys().cloned().collect();
         let mut statuses = Vec::new();
         for process in &order {
-            statuses.push(self.process_status(workspace, Some(manifest), process)?);
+            statuses.push(self.unit_status(workspace, Some(manifest), &containers, process)?);
         }
         Ok(UpOutcome::Up(statuses))
     }
@@ -569,8 +630,14 @@ impl Runs {
     /// their start order, and deletes their run records, so a failed `up`
     /// leaves no process of its own running. Each step is best effort,
     /// because the caller reports the failure that stopped `up`.
-    fn roll_back(&self, name: &WorkspaceName, started: &[&String]) {
+    fn roll_back(&self, name: &WorkspaceName, manifest: &Manifest, started: &[&String]) {
         for process in started.iter().rev() {
+            if manifest.containers.contains_key(*process) {
+                if let Ok(Some(scope)) = self.scope(name) {
+                    let _ = self.remove_container(name, &scope, process);
+                }
+                continue;
+            }
             if let Ok(Some(record)) = self.record(name, process) {
                 self.stop_group(record.pid);
             }
@@ -695,14 +762,7 @@ impl Runs {
             started,
             ports,
         };
-        let path = self.file(name, process, "json");
-        let mut bytes =
-            serde_json::to_vec_pretty(&record).map_err(|source| Error::CorruptRecord {
-                path: path.clone(),
-                source,
-            })?;
-        bytes.push(b'\n');
-        store::replace_file(&path, &bytes)
+        write_json(&self.file(name, process, "json"), &record)
     }
 
     /// Stops the processes `names` of `workspace`, or every process that a
@@ -725,13 +785,14 @@ impl Runs {
         manifest: Option<&Manifest>,
         names: &[String],
     ) -> Result<DownOutcome, Error> {
-        let known = self.known(workspace, manifest)?;
+        let containers = self.existing_containers(&workspace.name)?;
+        let known = self.known(workspace, manifest, &containers)?;
         self.cap_logs(&workspace.name, &known)?;
         let recorded = self.recorded(&workspace.name)?;
         let targets: Vec<&String> = if names.is_empty() {
             known
                 .iter()
-                .filter(|process| recorded.contains(process))
+                .filter(|process| recorded.contains(process) || containers.contains(*process))
                 .collect()
         } else {
             if let Some(unknown) = names.iter().find(|name| !known.contains(name)) {
@@ -747,6 +808,23 @@ impl Runs {
             // A record whose pid now names another process's group is
             // stale: its group is gone, so `down` drops the record and
             // signals nothing.
+            let is_container = manifest
+                .is_some_and(|manifest| manifest.containers.contains_key(process))
+                || (!recorded.contains(process) && containers.contains(process));
+            if is_container {
+                if containers.contains(process)
+                    && let Some(scope) = self.scope(&workspace.name)?
+                {
+                    self.remove_container(&workspace.name, &scope, process)?;
+                }
+                results.push(Ok(self.container_status_of(
+                    workspace,
+                    manifest,
+                    process,
+                    ProcessState::Stopped,
+                )));
+                continue;
+            }
             if let Some(record) = self.record(&workspace.name, process)?
                 && owns_group(&record)?
                 && !self.stop_group(record.pid)
@@ -871,13 +949,17 @@ impl Runs {
         Ok(Ok(()))
     }
 
-    /// Deletes every run file and log of the workspace `name`. Deleting
-    /// files that do not exist succeeds.
+    /// Removes the stopped containers of the workspace `name`, and deletes
+    /// every run file and log of it. Deleting files that do not exist
+    /// succeeds. The workspace's volumes stay; [`Runs::delete_volumes`]
+    /// deletes them.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unwritable`] when the directory cannot be deleted.
+    /// Returns the docker errors of [`Runs::down`], and
+    /// [`Error::Unwritable`] when the directory cannot be deleted.
     pub fn forget(&self, name: &WorkspaceName) -> Result<(), Error> {
+        self.remove_project(name)?;
         let dir = self.workspace_dir(name);
         match fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),
@@ -931,7 +1013,7 @@ fn wait_ready(launched: &mut Launched, port: Option<u16>, timeout: Duration) -> 
 /// group is the one `up` started even after its leader exited. A process
 /// with the recorded id and another start time took a free id after the
 /// group ended, so the group is not ours.
-fn owns_group(record: &RunRecord) -> Result<bool, Error> {
+pub(super) fn owns_group(record: &RunRecord) -> Result<bool, Error> {
     Ok(match process::start_time(record.pid)? {
         Some(started) => started == record.started,
         None => process::group_exists(record.pid),
@@ -972,8 +1054,83 @@ fn code_and_signal(code: Option<i32>) -> (Option<i32>, Option<i32>) {
     }
 }
 
+/// A run file in JSON whose version mxv checks.
+pub(super) trait Versioned {
+    /// The file's version, or `None` for a file without one.
+    fn version(&self) -> Option<u32>;
+}
+
+impl Versioned for RunRecord {
+    fn version(&self) -> Option<u32> {
+        Some(self.version)
+    }
+}
+
+impl Versioned for BTreeSet<String> {
+    fn version(&self) -> Option<u32> {
+        None
+    }
+}
+
+/// Reads the run file at `path` in JSON, or returns `None` when it does
+/// not exist. It reads at most [`MOST_RUN_BYTES`] bytes.
+///
+/// # Errors
+///
+/// Returns [`Error::StateUnreadable`], [`Error::CorruptRecord`] for a file
+/// that does not parse, and [`Error::NewerRecord`] for a version above
+/// [`RUN_VERSION`].
+pub(super) fn read_json<T: for<'de> Deserialize<'de> + Versioned>(
+    path: &Path,
+) -> Result<Option<T>, Error> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::StateUnreadable {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MOST_RUN_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|source| Error::StateUnreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let value: T = serde_json::from_slice(&bytes).map_err(|source| Error::CorruptRecord {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if let Some(version) = value.version()
+        && version > RUN_VERSION
+    {
+        return Err(Error::NewerRecord {
+            path: path.to_path_buf(),
+            version,
+        });
+    }
+    Ok(Some(value))
+}
+
+/// Writes `value` in JSON to the run file at `path`, replacing it whole.
+///
+/// # Errors
+///
+/// Returns [`Error::Unwritable`] when the file cannot be written.
+pub(super) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|source| Error::CorruptRecord {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    bytes.push(b'\n');
+    store::replace_file(path, &bytes)
+}
+
 /// Deletes the file at `path`, and succeeds when it does not exist.
-fn remove_if_present(path: &Path) -> Result<(), Error> {
+pub(super) fn remove_if_present(path: &Path) -> Result<(), Error> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
