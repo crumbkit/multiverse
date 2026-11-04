@@ -781,6 +781,30 @@ checkout directory is a symbolic link, when git does not list a worktree's
 directory as a worktree of its repository, or when a clone's `.git` is not a
 directory of its own.
 
+A checkout's disposable directories, such as a large `target/`, are deleted
+first, by file descriptor and with no deadline, as `mxv clean` deletes them.
+Each must still pass `clean`'s checks at that moment. Only then does mxv
+hand a worktree to `git worktree remove`, or delete a clone. Git's commands
+keep their deadlines, so `git worktree remove` has 30 seconds for the
+checkout's other files, and a checkout whose other files take longer fails
+with `mxv::git::timed_out`.
+
+A removal that fails or stops partway keeps the record, and keeps each
+branch that it had not deleted yet, so `mxv remove` can run again:
+
+- A clone is moved aside to `.<name>.mxv-removing` in the workspace
+  directory in one rename before mxv deletes it. A deletion that stops
+  partway leaves only that directory, and the next removal deletes it.
+- A worktree that `git worktree remove` left partly deleted, with its
+  `.git` file still in place, is checked again as any checkout is. A
+  tracked file that git had already deleted counts as a change, as git
+  counts it, so the next removal needs `--force`.
+- A worktree whose `.git` file git had already deleted cannot be read by
+  git, so mxv cannot tell what is left in it. Without `--force`, the
+  removal refuses with `mxv::workspace::dirty`, which says so. With
+  `--force`, mxv deletes what is left by file descriptor and runs
+  `git worktree prune`, which drops the repository's entry for it.
+
 ## Disk space
 
 Build output, such as Rust's `target/` and Node's `node_modules/`, takes
