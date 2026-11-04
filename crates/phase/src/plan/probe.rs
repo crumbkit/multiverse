@@ -55,11 +55,19 @@ pub struct Probe {
     pub check: ProbeCheck,
     /// The time between the start of one attempt and the start of the next.
     /// It is greater than zero.
-    #[serde(default = "default_period")]
+    #[serde(
+        default = "default_period",
+        rename = "period_ms",
+        with = "crate::millis"
+    )]
     pub period: Duration,
     /// How long one attempt may take before it counts as a failure. It is
     /// greater than zero.
-    #[serde(default = "default_timeout")]
+    #[serde(
+        default = "default_timeout",
+        rename = "timeout_ms",
+        with = "crate::millis"
+    )]
     pub timeout: Duration,
     /// The consecutive successful attempts that make the process ready.
     #[serde(default = "default_success_threshold")]
@@ -88,14 +96,17 @@ impl Probe {
 /// What one attempt of a probe checks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum ProbeCheck {
     /// An HTTP `GET` of `path` on the process's own port on 127.0.0.1
     /// returns a 2xx status. The process has a port.
+    #[non_exhaustive]
     Http {
         /// The request path, which starts with `/`.
         path: String,
     },
     /// A TCP connection to the named port of the app on 127.0.0.1 succeeds.
+    #[non_exhaustive]
     Tcp {
         /// One of the app's ports.
         port: PortName,
@@ -104,6 +115,7 @@ pub enum ProbeCheck {
     /// after phase started it. A process that listens on no port, such as a
     /// worker that reads a queue, uses it. The plan holds the pattern's
     /// text, and the engine's probe module compiles it.
+    #[non_exhaustive]
     Log {
         /// The regular expression. It is not empty.
         pattern: String,
@@ -112,8 +124,37 @@ pub enum ProbeCheck {
     /// environment, as separate values that no shell reads. For a host
     /// process it runs on the host, and for a container process it runs
     /// inside the process's container through `docker exec`.
+    #[non_exhaustive]
     Command {
         /// The program and its arguments. It is not empty.
         run: Vec<String>,
     },
+}
+
+impl ProbeCheck {
+    /// Returns the check that `GET path` on the process's port returns a
+    /// 2xx status.
+    #[must_use]
+    pub const fn http(path: String) -> Self {
+        Self::Http { path }
+    }
+
+    /// Returns the check that a TCP connection to the app's `port` succeeds.
+    #[must_use]
+    pub const fn tcp(port: PortName) -> Self {
+        Self::Tcp { port }
+    }
+
+    /// Returns the check that the process writes a log line matching
+    /// `pattern`.
+    #[must_use]
+    pub const fn log(pattern: String) -> Self {
+        Self::Log { pattern }
+    }
+
+    /// Returns the check that the command `run` exits with status 0.
+    #[must_use]
+    pub const fn command(run: Vec<String>) -> Self {
+        Self::Command { run }
+    }
 }

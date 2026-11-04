@@ -17,6 +17,7 @@ mod tests;
 
 /// The status of a workspace's processes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Status {
     /// The document's version. A reader refuses any other.
@@ -65,9 +66,6 @@ pub enum WorkspaceState {
     Stopped,
 }
 
-// Only phase builds a status row, so it has no constructor. It is
-// non-exhaustive because LIB-9 says adding a field to an exhaustive public
-// type breaks every dependant that builds or matches it.
 /// The status of one process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -80,7 +78,8 @@ pub struct StatusRow {
     pub runner: RunnerKind,
     /// Where its program came from.
     pub source: SourceSummary,
-    /// What the process is doing.
+    /// What the process is doing. In JSON its fields sit beside the row's.
+    #[serde(flatten)]
     pub state: ProcessState,
     /// Its pid or container id, or `None` when it is not running.
     pub handle: Option<Handle>,
@@ -99,22 +98,53 @@ pub struct StatusRow {
     pub log: Option<PathBuf>,
 }
 
+impl StatusRow {
+    /// Returns the row of `process` of `app`, which runs with `runner` from
+    /// `source` and is in `state`, with no handle, address, times, restarts
+    /// or log.
+    #[must_use]
+    pub const fn new(
+        app: AppName,
+        process: ProcessName,
+        runner: RunnerKind,
+        source: SourceSummary,
+        state: ProcessState,
+    ) -> Self {
+        Self {
+            app,
+            process,
+            runner,
+            source,
+            state,
+            handle: None,
+            address: None,
+            started_at_ms: None,
+            expires_at_ms: None,
+            restarts: 0,
+            log: None,
+        }
+    }
+}
+
 /// Where a running process's program came from, without the details of its
 /// build or verification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum SourceSummary {
     /// A published release of this version.
+    #[non_exhaustive]
     Release {
         /// The version.
         version: Version,
     },
     /// The checkout in this directory.
+    #[non_exhaustive]
     Checkout {
         /// The checkout's directory.
         dir: PathBuf,
     },
     /// This container image.
+    #[non_exhaustive]
     Image {
         /// The image.
         image: ImageReference,
@@ -153,8 +183,18 @@ pub enum ProcessState {
     /// A oneshot process exited with status 0.
     Completed,
     /// The process exited and phase will not restart it.
+    #[non_exhaustive]
     Exited {
         /// The exit status, or `None` when a signal ended the process.
         code: Option<i32>,
     },
+}
+
+impl ProcessState {
+    /// Returns the state of a process that exited with `code`, or with
+    /// `None` when a signal ended it, and that phase will not restart.
+    #[must_use]
+    pub const fn exited(code: Option<i32>) -> Self {
+        Self::Exited { code }
+    }
 }

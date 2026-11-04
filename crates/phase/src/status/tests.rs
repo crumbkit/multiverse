@@ -3,27 +3,40 @@ use std::path::PathBuf;
 use super::{ProcessState, SourceSummary, Status, StatusRow, WorkspaceState};
 use crate::plan::RunnerKind;
 use crate::record::Handle;
+use crate::source::Source;
+
+fn checkout() -> SourceSummary {
+    SourceSummary::from(&Source::checkout(
+        PathBuf::from("/workspaces/reading-list/api"),
+        None,
+    ))
+}
 
 fn status() -> Status {
     let mut status = Status::new(
         "reading-list".parse().unwrap(),
         WorkspaceState::PartlyRunning,
     );
-    status.rows.push(StatusRow {
-        app: "api".parse().unwrap(),
-        process: "server".parse().unwrap(),
-        runner: RunnerKind::Host,
-        source: SourceSummary::Checkout {
-            dir: PathBuf::from("/workspaces/reading-list/api"),
-        },
-        state: ProcessState::Ready,
-        handle: Some(Handle::Pid(4242)),
-        address: Some("127.0.0.1:41000".parse().unwrap()),
-        started_at_ms: Some(1_793_000_000_000),
-        expires_at_ms: None,
-        restarts: 1,
-        log: Some(PathBuf::from("/state/api/server.log")),
-    });
+    let mut server = StatusRow::new(
+        "api".parse().unwrap(),
+        "server".parse().unwrap(),
+        RunnerKind::Host,
+        checkout(),
+        ProcessState::Ready,
+    );
+    server.handle = Some(Handle::pid(4242, 1_793_000_000_000_000));
+    server.address = Some("127.0.0.1:41000".parse().unwrap());
+    server.started_at_ms = Some(1_793_000_000_000);
+    server.restarts = 1;
+    server.log = Some(PathBuf::from("/state/api/server.log"));
+    status.rows.push(server);
+    status.rows.push(StatusRow::new(
+        "api".parse().unwrap(),
+        "migrate".parse().unwrap(),
+        RunnerKind::Host,
+        checkout(),
+        ProcessState::exited(Some(1)),
+    ));
     status
 }
 
@@ -40,6 +53,40 @@ fn a_status_document_names_its_schema_and_the_workspace_state() {
     assert_eq!(json["schema"], "phase/status/v1");
     assert_eq!(json["state"], "partly-running");
     assert_eq!(json["rows"][0]["address"], "127.0.0.1:41000");
+}
+
+#[test]
+fn a_status_row_holds_its_state_and_exit_code_beside_its_other_fields() {
+    let json = serde_json::to_value(status()).unwrap();
+    assert_eq!(json["rows"][0]["state"], "ready");
+    assert_eq!(json["rows"][1]["state"], "exited");
+    assert_eq!(json["rows"][1]["code"], 1);
+}
+
+#[test]
+fn a_status_row_names_a_process_by_its_pid_and_start_time() {
+    let json = serde_json::to_value(status()).unwrap();
+    assert_eq!(
+        json["rows"][0]["handle"],
+        serde_json::json!({"kind": "pid", "pid": 4242, "started_at_us": 1_793_000_000_000_000_u64})
+    );
+}
+
+#[test]
+fn a_new_status_row_has_no_handle_address_times_restarts_or_log() {
+    let row = StatusRow::new(
+        "api".parse().unwrap(),
+        "server".parse().unwrap(),
+        RunnerKind::Host,
+        checkout(),
+        ProcessState::Starting,
+    );
+    assert_eq!(row.handle, None);
+    assert_eq!(row.address, None);
+    assert_eq!(row.started_at_ms, None);
+    assert_eq!(row.expires_at_ms, None);
+    assert_eq!(row.restarts, 0);
+    assert_eq!(row.log, None);
 }
 
 #[test]

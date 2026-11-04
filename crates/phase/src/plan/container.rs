@@ -34,6 +34,7 @@ pub struct ContainerOptions {
 /// A host directory mounted into a container.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct BindMount {
     /// The absolute path of the host directory.
     pub source: PathBuf,
@@ -41,4 +42,17 @@ pub struct BindMount {
     pub target: PathBuf,
     /// Whether the container may only read the directory.
     pub read_only: bool,
+}
+
+impl BindMount {
+    /// Returns the mount of the host directory `source` at `target` inside
+    /// the container, which the container may only read when `read_only`.
+    #[must_use]
+    pub const fn new(source: PathBuf, target: PathBuf, read_only: bool) -> Self {
+        Self {
+            source,
+            target,
+            read_only,
+        }
+    }
 }

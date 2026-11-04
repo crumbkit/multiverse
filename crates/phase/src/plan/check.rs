@@ -16,11 +16,13 @@ use crate::source::Source;
 #[non_exhaustive]
 pub enum PlanError {
     /// Two apps have this name.
+    #[non_exhaustive]
     DuplicateApp {
         /// The name.
         app: AppName,
     },
     /// Two processes of the app have this name.
+    #[non_exhaustive]
     DuplicateProcess {
         /// The app.
         app: AppName,
@@ -28,6 +30,7 @@ pub enum PlanError {
         process: ProcessName,
     },
     /// The app depends on an app that the plan lacks.
+    #[non_exhaustive]
     UnknownDependency {
         /// The app.
         app: AppName,
@@ -36,6 +39,7 @@ pub enum PlanError {
     },
     /// The apps depend on each other in a cycle, so none of them can start
     /// first.
+    #[non_exhaustive]
     DependencyCycle {
         /// The apps of the cycle, in dependency order, ending with the app
         /// it starts with.
@@ -43,6 +47,7 @@ pub enum PlanError {
     },
     /// The processes of the app depend on each other in a cycle, so none of
     /// them can start first.
+    #[non_exhaustive]
     ProcessCycle {
         /// The app.
         app: AppName,
@@ -51,6 +56,7 @@ pub enum PlanError {
         processes: Vec<ProcessName>,
     },
     /// The app's source cannot be used.
+    #[non_exhaustive]
     BadSource {
         /// The app.
         app: AppName,
@@ -59,6 +65,7 @@ pub enum PlanError {
     },
     /// The app's source does not suit its runner: a host app runs from an
     /// image, or a container app runs from a release or a checkout.
+    #[non_exhaustive]
     RunnerMismatch {
         /// The app.
         app: AppName,
@@ -66,6 +73,7 @@ pub enum PlanError {
         runner: RunnerKind,
     },
     /// The app's permissions let it listen on a port it does not have.
+    #[non_exhaustive]
     UnknownPort {
         /// The app.
         app: AppName,
@@ -74,6 +82,7 @@ pub enum PlanError {
     },
     /// An `up --env` override names a variable that a process cannot
     /// receive.
+    #[non_exhaustive]
     BadOverride {
         /// The app.
         app: AppName,
@@ -82,6 +91,7 @@ pub enum PlanError {
     },
     /// An `up --env` override names a variable that the app's permissions
     /// name as a secret. An override is never a secret.
+    #[non_exhaustive]
     SecretOverride {
         /// The app.
         app: AppName,
@@ -89,6 +99,7 @@ pub enum PlanError {
         name: String,
     },
     /// The app's container options cannot be used.
+    #[non_exhaustive]
     BadContainer {
         /// The app.
         app: AppName,
@@ -96,6 +107,7 @@ pub enum PlanError {
         problem: ContainerProblem,
     },
     /// A process of the app cannot run as planned.
+    #[non_exhaustive]
     BadProcess {
         /// The app.
         app: AppName,
@@ -111,12 +123,16 @@ pub enum PlanError {
 #[non_exhaustive]
 pub enum SourceProblem {
     /// The checkout's directory is a relative path.
+    #[non_exhaustive]
     RelativeCheckout(PathBuf),
     /// The build's output is absolute or leaves the checkout.
+    #[non_exhaustive]
     OutputOutsideCheckout(PathBuf),
     /// The release's program is absolute or leaves the asset.
+    #[non_exhaustive]
     BinaryOutsideAsset(PathBuf),
     /// The release's asset name holds a `/`.
+    #[non_exhaustive]
     AssetWithSlash(String),
 }
 
@@ -127,9 +143,11 @@ pub enum ContainerProblem {
     /// A host app has container options.
     OnHostApp,
     /// A bind mount's host directory is a relative path.
+    #[non_exhaustive]
     RelativeHostPath(PathBuf),
     /// A bind mount or cache volume is mounted at a relative path inside the
     /// container.
+    #[non_exhaustive]
     RelativeContainerPath(PathBuf),
     /// The run-as user is empty.
     EmptyUser,
@@ -148,18 +166,22 @@ pub enum ProcessProblem {
     /// without a build, so it has no program.
     ProgramWithoutBuild,
     /// The process depends on a process its app does not have.
+    #[non_exhaustive]
     UnknownDependency(ProcessName),
     /// The process receives a variable whose name a process cannot receive.
+    #[non_exhaustive]
     BadVariableName(String),
     /// The ready timeout is zero or longer than
     /// [`MOST_READY_TIMEOUT`](super::MOST_READY_TIMEOUT).
     ReadyTimeoutOutOfRange,
     /// The process, or its probe, names a port its app does not have.
+    #[non_exhaustive]
     UnknownPort(PortName),
     /// A host process publishes a port or mounts a volume, which only a
     /// container process does.
     ContainerFieldOnHost,
     /// A volume is mounted at a relative path inside the container.
+    #[non_exhaustive]
     RelativeContainerPath(PathBuf),
     /// The process has an HTTP probe but no port.
     HttpProbeWithoutPort,

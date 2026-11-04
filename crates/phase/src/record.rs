@@ -15,15 +15,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, ProcessName};
 
-/// How phase finds a running process: by pid for a host process, or by
-/// container id for a container process.
+#[cfg(test)]
+mod tests;
+
+/// How phase finds a running process: by pid and start time for a host
+/// process, or by container id for a container process.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum Handle {
-    /// A host process's pid.
-    Pid(u32),
-    /// A container's immutable id.
-    Container(ContainerId),
+    /// A host process, which phase matches by its pid and its start time
+    /// together, so a reused pid is never mistaken for it.
+    #[non_exhaustive]
+    Pid {
+        /// The process id.
+        pid: u32,
+        /// When the process started, in microseconds since the Unix epoch.
+        started_at_us: u64,
+    },
+    /// A container, by its immutable id.
+    #[non_exhaustive]
+    Container {
+        /// The container's id.
+        id: ContainerId,
+    },
+}
+
+impl Handle {
+    /// Returns the handle of the host process `pid` that started at
+    /// `started_at_us` microseconds since the Unix epoch.
+    #[must_use]
+    pub const fn pid(pid: u32, started_at_us: u64) -> Self {
+        Self::Pid { pid, started_at_us }
+    }
+
+    /// Returns the handle of the container `id`.
+    #[must_use]
+    pub const fn container(id: ContainerId) -> Self {
+        Self::Container { id }
+    }
 }
 
 /// The immutable id of a Docker container: 64 lowercase hexadecimal digits.
@@ -73,23 +103,27 @@ impl From<ContainerId> for String {
     }
 }
 
-// Only phase builds a sweep result, so it has no constructor. It is
-// non-exhaustive because LIB-9 says adding a field to an exhaustive public
-// type breaks every dependant that builds or matches it.
 /// What `sweep` found and did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Swept {
     /// One entry per process or container that the run record names.
     pub items: Vec<SweptItem>,
 }
 
-// Only phase builds a swept item, so it has no constructor. It is
-// non-exhaustive because LIB-9 says adding a field to an exhaustive public
-// type breaks every dependant that builds or matches it.
+impl Swept {
+    /// Returns the result of a sweep that found `items`.
+    #[must_use]
+    pub const fn new(items: Vec<SweptItem>) -> Self {
+        Self { items }
+    }
+}
+
 /// One process or container that the run record names, and what `sweep`
 /// did to it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SweptItem {
     /// The app.
@@ -100,6 +134,25 @@ pub struct SweptItem {
     pub handle: Handle,
     /// What `sweep` did.
     pub outcome: SweepOutcome,
+}
+
+impl SweptItem {
+    /// Returns the item for `process` of `app`, found by `handle`, to which
+    /// `sweep` did `outcome`.
+    #[must_use]
+    pub const fn new(
+        app: AppName,
+        process: ProcessName,
+        handle: Handle,
+        outcome: SweepOutcome,
+    ) -> Self {
+        Self {
+            app,
+            process,
+            handle,
+            outcome,
+        }
+    }
 }
 
 /// What `sweep` did to one recorded process or container.

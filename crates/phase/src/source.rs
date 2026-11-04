@@ -28,6 +28,7 @@ pub const MOST_IMAGE_BYTES: usize = 255;
 pub enum Source {
     /// A published release, which phase downloads, verifies and keeps in a
     /// content-addressed cache. A host app uses it.
+    #[non_exhaustive]
     Release {
         /// The release's version, which is its tag.
         version: Version,
@@ -36,6 +37,7 @@ pub enum Source {
     },
     /// The workspace's checkout of the app's repository. A host app uses
     /// it, and its processes start in the checkout.
+    #[non_exhaustive]
     Checkout {
         /// The checkout's absolute directory.
         dir: PathBuf,
@@ -47,10 +49,33 @@ pub enum Source {
     },
     /// A container image that already exists. A container app uses it, and
     /// each of the app's processes runs this image. phase builds no image.
+    #[non_exhaustive]
     Image {
         /// The image, pinned by a tag other than `latest` or by a digest.
         image: ImageReference,
     },
+}
+
+impl Source {
+    /// Returns the source of a release of `version`, found and verified as
+    /// `spec` says.
+    #[must_use]
+    pub const fn release(version: Version, spec: ReleaseSpec) -> Self {
+        Self::Release { version, spec }
+    }
+
+    /// Returns the source of the checkout in `dir`, built as `build` says,
+    /// or not built when `build` is `None`.
+    #[must_use]
+    pub const fn checkout(dir: PathBuf, build: Option<BuildSpec>) -> Self {
+        Self::Checkout { dir, build }
+    }
+
+    /// Returns the source of the container image `image`.
+    #[must_use]
+    pub const fn image(image: ImageReference) -> Self {
+        Self::Image { image }
+    }
 }
 
 /// Where a release's asset is and how phase verifies it.
@@ -136,6 +161,7 @@ pub enum BadSourceText {
     /// The text starts with a character other than an ASCII letter or digit.
     BadStart,
     /// The text holds this character, which it never holds.
+    #[non_exhaustive]
     BadCharacter(char),
     /// A repository is not exactly `owner/name` with both parts non-empty
     /// and neither part `.` or `..`.

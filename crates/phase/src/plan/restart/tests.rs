@@ -20,9 +20,7 @@ fn a_backoff_refuses_a_first_wait_longer_than_the_longest() {
 
 #[test]
 fn a_backoff_read_from_json_goes_through_its_check() {
-    let refused = serde_json::from_str::<Backoff>(
-        r#"{"first":{"secs":5,"nanos":0},"most":{"secs":1,"nanos":0}}"#,
-    );
+    let refused = serde_json::from_str::<Backoff>(r#"{"first_ms":5000,"most_ms":1000}"#);
     assert!(refused.is_err());
 }
 
@@ -51,4 +49,12 @@ fn a_restart_policy_read_from_json_takes_the_limits_it_omits() {
 fn a_restart_policy_refuses_a_field_it_does_not_know() {
     assert!(serde_json::from_str::<Restart>(r#"{"policy":"no","max":3}"#).is_err());
     assert!(serde_json::from_str::<Restart>(r#"{"policy":"always","maximum":3}"#).is_err());
+}
+
+#[test]
+fn a_restart_policy_writes_its_waits_in_milliseconds() {
+    let json = serde_json::to_value(Restart::on_failure(RestartLimits::default())).unwrap();
+
+    assert_eq!(json["backoff"]["first_ms"], 1000);
+    assert_eq!(json["backoff"]["most_ms"], 30_000);
 }

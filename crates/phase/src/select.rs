@@ -15,7 +15,16 @@ pub enum Selection {
     /// Every app of the workspace.
     All,
     /// Only these targets. An empty list selects nothing.
+    #[non_exhaustive]
     Only(Vec<Target>),
+}
+
+impl Selection {
+    /// Returns the selection of only `targets`.
+    #[must_use]
+    pub const fn only(targets: Vec<Target>) -> Self {
+        Self::Only(targets)
+    }
 }
 
 /// One app, or one process of an app, written `APP` or `APP/PROCESS`.
@@ -41,8 +50,10 @@ impl fmt::Display for Target {
 #[non_exhaustive]
 pub enum BadTarget {
     /// The part before the `/` is not a valid app name.
+    #[non_exhaustive]
     App(BadName),
     /// The part after the `/` is not a valid process name.
+    #[non_exhaustive]
     Process(BadName),
 }
 

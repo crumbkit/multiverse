@@ -217,7 +217,7 @@ impl AppPlan {
 
 /// Whether a process keeps running or runs to completion.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ProcessKind {
     /// The process runs until phase stops it, and its probe says when it is
     /// ready.
@@ -226,11 +226,21 @@ pub enum ProcessKind {
     /// The process runs to completion, such as a migration. It is ready when
     /// it exits with status 0, and the processes that depend on it wait for
     /// that.
+    #[non_exhaustive]
     Oneshot {
         /// Whether the process runs only on the first `up` of the
         /// workspace. When it is false, the process runs on every `up`.
         once: bool,
     },
+}
+
+impl ProcessKind {
+    /// Returns the kind of a process that runs to completion, only on the
+    /// first `up` when `once` is true.
+    #[must_use]
+    pub const fn oneshot(once: bool) -> Self {
+        Self::Oneshot { once }
+    }
 }
 
 /// One process of an app.
@@ -286,7 +296,11 @@ pub struct ProcessPlan {
     /// How long phase waits for the process to become ready, or for a
     /// oneshot to complete, before the start fails. It is more than zero
     /// and at most [`MOST_READY_TIMEOUT`].
-    #[serde(default = "default_ready_timeout")]
+    #[serde(
+        default = "default_ready_timeout",
+        rename = "ready_timeout_ms",
+        with = "crate::millis"
+    )]
     pub ready_timeout: Duration,
     /// When phase restarts the process.
     #[serde(default)]

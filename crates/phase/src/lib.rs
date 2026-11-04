@@ -20,6 +20,7 @@ mod engine;
 mod env;
 mod error;
 mod logs;
+mod millis;
 mod name;
 mod phase;
 mod plan;
@@ -53,7 +54,7 @@ pub use crate::plan::{
     PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind, SourceProblem,
 };
 pub use crate::record::{BadContainerId, ContainerId, Handle, SweepOutcome, Swept, SweptItem};
-pub use crate::report::{AppOutcome, AppReport, Report};
+pub use crate::report::{AppOutcome, AppReport, Report, StartProblem};
 pub use crate::select::{BadTarget, Selection, Target};
 pub use crate::source::{
     BadSourceText, BuildSpec, GithubRepository, ImageReference, MOST_IMAGE_BYTES,

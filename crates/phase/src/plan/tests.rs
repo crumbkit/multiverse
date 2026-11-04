@@ -668,3 +668,23 @@ fn a_probe_read_from_json_takes_the_defaults_it_omits() {
         })
     );
 }
+
+#[test]
+fn a_plan_writes_its_waits_in_milliseconds_and_a_process_kind_under_its_own_tag() {
+    let mut api = host_app("api");
+    let mut migrate = ProcessPlan::new("migrate".parse().unwrap(), vec!["{program}".into()]);
+    migrate.kind = ProcessKind::oneshot(true);
+    api.processes.push(migrate);
+    let json = serde_json::to_value(plan(vec![api]).unwrap()).unwrap();
+    let server = &json["apps"][0]["processes"][0];
+    let migrate = &json["apps"][0]["processes"][1];
+
+    assert_eq!(server["ready"]["period_ms"], 10_000);
+    assert_eq!(server["ready"]["timeout_ms"], 1000);
+    assert_eq!(server["ready_timeout_ms"], 60_000);
+    assert_eq!(server["stop"]["grace_ms"], 10_000);
+    assert_eq!(
+        migrate["kind"],
+        serde_json::json!({"type": "oneshot", "once": true})
+    );
+}

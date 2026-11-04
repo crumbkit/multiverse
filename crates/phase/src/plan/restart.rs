@@ -30,9 +30,25 @@ pub enum Restart {
     No,
     /// phase restarts the process when it exits with a status other than 0
     /// or is ended by a signal that phase did not send.
+    #[non_exhaustive]
     OnFailure(RestartLimits),
     /// phase restarts the process whenever it exits, until phase stops it.
+    #[non_exhaustive]
     Always(RestartLimits),
+}
+
+impl Restart {
+    /// Returns the policy that restarts a failed process within `limits`.
+    #[must_use]
+    pub const fn on_failure(limits: RestartLimits) -> Self {
+        Self::OnFailure(limits)
+    }
+
+    /// Returns the policy that restarts an exited process within `limits`.
+    #[must_use]
+    pub const fn always(limits: RestartLimits) -> Self {
+        Self::Always(limits)
+    }
 }
 
 /// The JSON form of a [`Restart`]. A reader refuses an unknown field, and
@@ -104,6 +120,7 @@ impl std::error::Error for LimitsWithoutRestart {}
 /// the environment again first.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct RestartLimits {
     /// The most restarts after which phase leaves the process stopped, or
     /// `None` when phase restarts it without limit.
@@ -189,8 +206,10 @@ impl Default for Backoff {
 #[serde(deny_unknown_fields)]
 struct BackoffFile {
     /// The wait before the first restart.
+    #[serde(rename = "first_ms", with = "crate::millis")]
     first: Duration,
     /// The longest wait.
+    #[serde(rename = "most_ms", with = "crate::millis")]
     most: Duration,
 }
 
@@ -237,11 +256,13 @@ impl std::error::Error for BadBackoff {}
 /// How phase stops a process: it sends `signal` to the process group, and
 /// sends `KILL` when the process has not exited after `grace`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Stop {
     /// The signal that asks the process to stop.
     pub signal: StopSignal,
     /// How long phase waits after the signal before it sends `KILL`.
+    #[serde(rename = "grace_ms", with = "crate::millis")]
     pub grace: Duration,
 }
 

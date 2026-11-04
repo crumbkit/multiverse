@@ -10,12 +10,14 @@ use crate::name::AppName;
 #[non_exhaustive]
 pub enum PhaseError {
     /// The operation is declared but phase does not carry it out yet.
+    #[non_exhaustive]
     NotBuilt {
         /// The operation.
         operation: Operation,
     },
     /// A resolver could not supply a value of the app's environment, so
     /// phase started nothing.
+    #[non_exhaustive]
     Environment {
         /// The app.
         app: AppName,

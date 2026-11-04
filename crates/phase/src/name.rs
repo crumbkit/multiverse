@@ -24,8 +24,10 @@ pub enum BadName {
     /// The text starts with a character other than an ASCII letter or digit.
     BadStart,
     /// The text holds this character, which the name never holds.
+    #[non_exhaustive]
     BadCharacter(char),
     /// The text holds this uppercase letter, and the name is lowercase.
+    #[non_exhaustive]
     Uppercase(char),
     /// The text holds `..`, or ends with `.` or `.lock`, which git refuses
     /// in a branch name.
