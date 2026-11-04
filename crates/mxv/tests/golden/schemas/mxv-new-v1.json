@@ -193,6 +193,13 @@
         "root_source": {
           "description": "Where the root came from: `env` for `MXV_ROOT`, `config` for the\nconfig file's `root`, or `default` for\n`$XDG_DATA_HOME/mxv/workspaces`.",
           "$ref": "#/$defs/RootSource"
+        },
+        "warnings": {
+          "description": "The sentences, joined with `; `, for each template that `new`\nskipped because it cannot use it, and for each table of the copied\nmanifest that mxv ignores although its name is close to one of\nmxv's own, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -205,7 +212,8 @@
         "ports",
         "cloned",
         "clone_warning",
-        "manifest_from"
+        "manifest_from",
+        "warnings"
       ]
     },
     "RootSource": {

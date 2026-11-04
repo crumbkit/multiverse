@@ -178,6 +178,17 @@ pub enum Error {
         /// The templates that list it, in name order.
         templates: Vec<PathBuf>,
     },
+    /// A file that `--manifest` names could have been written by a
+    /// repository or an agent, because it lies inside a git work tree or
+    /// under the root of the workspaces, so mxv does not trust it as a
+    /// workspace manifest.
+    ManifestUntrusted {
+        /// The file, as the person named it.
+        path: PathBuf,
+        /// Where it lies, in a clause, such as `it lies inside the git work
+        /// tree /home/someone/app`.
+        reason: String,
+    },
     /// Every port of the port range is held by a workspace or taken.
     NoFreePort {
         /// Which range was searched.
@@ -269,12 +280,18 @@ impl Error {
 }
 
 impl Error {
-    /// Writes the text of a template that mxv cannot use.
+    /// Writes the text of a template or a `--manifest` file that mxv
+    /// cannot use.
     fn fmt_template(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TemplateInvalid { path, message } => write!(
                 formatter,
                 "the template {} cannot be used: {message}",
+                path.display()
+            ),
+            Self::ManifestUntrusted { path, reason } => write!(
+                formatter,
+                "mxv does not copy {} as a workspace manifest, because {reason}, where a repository or an agent could have written it",
                 path.display()
             ),
             Self::TemplateAmbiguous { origin, templates } => write!(
@@ -384,9 +401,9 @@ impl fmt::Display for Error {
             Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::OriginFetchFailed { .. } => self.fmt_fetch(formatter),
-            Self::TemplateInvalid { .. } | Self::TemplateAmbiguous { .. } => {
-                self.fmt_template(formatter)
-            }
+            Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. } => self.fmt_template(formatter),
             Self::NoFreePort { source } => {
                 write!(formatter, "cannot find a free port: {source}")
             }
@@ -463,6 +480,7 @@ impl std::error::Error for Error {
             | Self::OriginFetchFailed { .. }
             | Self::TemplateInvalid { .. }
             | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
             | Self::DockerUnavailable { .. }
             | Self::DockerComposeMissing { .. }
             | Self::DockerNoAddressPool { .. }

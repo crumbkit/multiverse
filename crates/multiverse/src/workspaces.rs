@@ -14,7 +14,7 @@ use crate::mirror::Origin;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind, agents_text};
 use crate::store::{self, Created, Records, Store};
-use crate::template::Template;
+use crate::template::Found as FoundTemplate;
 
 #[cfg(test)]
 mod clone_tests;
@@ -239,8 +239,13 @@ pub struct Removal {
     /// person confirms them or allows discarding changes.
     pub manifest: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
-    /// `mxv.toml` declares, such as an invalid manifest.
+    /// `mxv.toml` declares, such as an invalid manifest, or why its paths
+    /// wait for a confirmation.
     pub warnings: Vec<String>,
+    /// The workspace manifest, [`Workspace::manifest_file`], which the
+    /// removal deletes, or `None` when the workspace has none. A person may
+    /// have edited it by hand, so the removal names it.
+    pub workspace_manifest: Option<PathBuf>,
 }
 
 /// The outcome of [`Workspaces::remove`].
@@ -545,16 +550,26 @@ impl<B: Backend> Workspaces<B> {
         checkout: &Checkout,
     ) -> (DisposableSet, Option<String>) {
         let inputs = workspace.manifest_inputs_for(Some(checkout));
-        let source = match inputs.source() {
-            ManifestSource::Workspace => DisposableSource::Workspace,
-            _ => DisposableSource::Manifest,
+        // Only a workspace manifest that no repository can have written
+        // counts like the config file. One that is a link counts like the
+        // repository's own, whose paths wait for a confirmation.
+        let linked = inputs.source() == ManifestSource::Workspace && !workspace.manifest_trusted();
+        let source = if inputs.source() == ManifestSource::Workspace && !linked {
+            DisposableSource::Workspace
+        } else {
+            DisposableSource::Manifest
         };
         let (declared, warning) = match workspace.manifest_for(Some(checkout)) {
             Ok(manifest) => (
                 manifest
                     .map(|manifest| manifest.disposable)
                     .unwrap_or_default(),
-                None,
+                linked.then(|| {
+                    format!(
+                        "the workspace manifest {} is a symbolic link or a hard link of another file, so mxv deletes the paths it declares disposable only after a confirmation, as it does for a repository's mxv.toml",
+                        workspace.manifest_file().display()
+                    )
+                }),
             ),
             Err(error) => (
                 Vec::new(),
@@ -632,8 +647,9 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Returns the template in `templates` for the origin of the
-    /// repository at `repository`, as [`find_template`] describes, or
-    /// `None` when no template lists it.
+    /// repository at `repository`, as [`find_template`] describes, and the
+    /// templates it skipped. `root` is the root of the workspaces, under
+    /// which no template may lie.
     ///
     /// # Errors
     ///
@@ -642,10 +658,57 @@ impl<B: Backend> Workspaces<B> {
     /// [`find_template`].
     ///
     /// [`find_template`]: crate::find_template
-    pub fn template(&self, templates: &Path, repository: &Path) -> Result<Option<Template>, Error> {
+    pub fn template(
+        &self,
+        templates: &Path,
+        repository: &Path,
+        root: &Path,
+    ) -> Result<FoundTemplate, Error> {
         let repository = self.backend.repository(repository)?;
         let url = self.backend.origin_url(&repository.root)?;
-        crate::template::find(templates, &url, &repository.root)
+        crate::template::find(templates, &url, &repository.root, root)
+    }
+
+    /// Checks that `path`, a file that the person names to copy as a
+    /// workspace manifest, is the person's own. A workspace manifest's
+    /// `disposable` globs are deleted without asking, so mxv refuses a file
+    /// that a repository or an agent could have written: one that lies,
+    /// once symbolic links are resolved, under `root`, the root of the
+    /// workspaces, or inside a git work tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ManifestUntrusted`] for such a file, and the errors
+    /// of git other than [`Error::RepositoryNotFound`] and
+    /// [`Error::NoOrigin`].
+    pub fn check_manifest_source(&self, path: &Path, root: &Path) -> Result<(), Error> {
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let untrusted = |reason: String| Error::ManifestUntrusted {
+            path: path.to_path_buf(),
+            reason,
+        };
+        if resolved.starts_with(&root) {
+            return Err(untrusted(format!(
+                "it lies under the root of the workspaces {}",
+                root.display()
+            )));
+        }
+        let Some(dir) = resolved.parent() else {
+            return Ok(());
+        };
+        match self.backend.repository(dir) {
+            Ok(repository) => Err(untrusted(format!(
+                "it lies inside the git work tree {}",
+                repository.root.display()
+            ))),
+            Err(Error::NoOrigin { repository }) => Err(untrusted(format!(
+                "it lies inside the git work tree {}",
+                repository.display()
+            ))),
+            Err(Error::RepositoryNotFound { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Creates the workspace as [`Workspaces::create`] does, and writes
@@ -1126,6 +1189,8 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         changes.append(&mut ignored);
+        let workspace_manifest =
+            Some(workspace.manifest_file()).filter(|path| fs::symlink_metadata(path).is_ok());
         Ok(RemovalPlan::Ready(Removal {
             workspace,
             checkouts,
@@ -1135,6 +1200,7 @@ impl<B: Backend> Workspaces<B> {
             discarded: changes,
             manifest,
             warnings,
+            workspace_manifest,
         }))
     }
 
@@ -1324,8 +1390,10 @@ impl<B: Backend> Workspaces<B> {
         }
         let manifest = removal.workspace.manifest_file();
         match fs::remove_file(&manifest) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(()) => removal.workspace_manifest = Some(manifest),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                removal.workspace_manifest = None;
+            }
             Err(source) => {
                 return Err(Error::Unwritable {
                     path: manifest,

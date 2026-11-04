@@ -11,6 +11,16 @@
 //!
 //! The two files are never merged. Paths in either, such as a process's
 //! `cwd` or a `disposable` glob, are relative to the checkout.
+//!
+//! The workspace manifest is trusted as the person's own, because only
+//! the person writes `<workspace>/`: mxv copies the file there, and a
+//! sandbox that runs agents in the checkout must not let them write the
+//! workspace's directory. Its `disposable` globs then count like the
+//! config file's, which [`Workspace::manifest_trusted`] decides. A file
+//! that is a symbolic link, or a hard link of another file, could be the
+//! repository's, so it is read but not trusted. A record whose checkout
+//! holds the workspace manifest's path has none, as
+//! [`Workspace::checkout_holds_manifest_file`] reports.
 //! [`ManifestInputs`] names both files, for a tool that reads them as
 //! separate inputs even when the workspace manifest wins.
 
@@ -92,7 +102,8 @@ impl Workspace {
     /// or for [`Workspace::manifest_checkout`] when `checkout` is `None`.
     #[must_use]
     pub fn manifest_inputs_for(&self, checkout: Option<&Checkout>) -> ManifestInputs {
-        let workspace = Some(self.manifest_file()).filter(|path| exists(path));
+        let workspace = Some(self.manifest_file())
+            .filter(|path| exists(path) && !self.checkout_holds_manifest_file());
         let repository = checkout
             .or_else(|| self.manifest_checkout())
             .map(|checkout| checkout.path.join(MANIFEST_FILE))
@@ -101,6 +112,21 @@ impl Workspace {
             workspace,
             repository,
         }
+    }
+
+    /// Reports whether the workspace manifest is the person's own: it
+    /// exists, no checkout holds its path, and it is a regular file with
+    /// no other hard link, so no repository can have written it. Only a
+    /// trusted workspace manifest's `disposable` globs are deleted without
+    /// asking.
+    #[must_use]
+    pub fn manifest_trusted(&self) -> bool {
+        if self.checkout_holds_manifest_file() {
+            return false;
+        }
+        fs::symlink_metadata(self.manifest_file()).is_ok_and(|metadata| {
+            metadata.file_type().is_file() && crate::disk::links(&metadata) == 1
+        })
     }
 
     /// Returns the workspace's manifest files that exist, as separate

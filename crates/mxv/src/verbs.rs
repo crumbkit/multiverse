@@ -93,13 +93,17 @@ struct Copied {
 /// Returns the workspace manifest that `new` copies: the `--manifest`
 /// file when `args` names one, or else the template in
 /// `$XDG_CONFIG_HOME/mxv/templates` that lists the repository's origin,
-/// or else none.
+/// or else none. It also returns the warnings to report: the templates
+/// that it skipped, and the tables of the copied manifest that mxv
+/// ignores although their names are close to its own. `root` is the
+/// root of the workspaces.
 fn copied(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     args: &NewArgs,
-) -> Result<Option<Copied>, crumbkit::Error> {
-    if let Some(file) = &args.manifest {
+    root: &std::path::Path,
+) -> Result<(Option<Copied>, Vec<String>), crumbkit::Error> {
+    let (copied, mut warnings) = if let Some(file) = &args.manifest {
         // A relative path is shown from the current directory, as the
         // shell that typed it reads it.
         let from = match environment.current_dir() {
@@ -107,16 +111,27 @@ fn copied(
             _ => file.clone(),
         };
         let text = Manifest::read_named(&from).map_err(RunFailure::Manifest)?;
-        return Ok(Some(Copied { from, text }));
+        workspaces
+            .check_manifest_source(&from, root)
+            .map_err(MxvFailure::from)?;
+        (Some(Copied { from, text }), Vec::new())
+    } else {
+        let templates = environment.templates()?;
+        let found = workspaces
+            .template(&templates, &args.repo, root)
+            .map_err(MxvFailure::from)?;
+        let copied = found.template.map(|template| Copied {
+            from: template.path,
+            text: template.text,
+        });
+        (copied, found.skipped)
+    };
+    if let Some(copied) = &copied
+        && let Ok(manifest) = Manifest::parse(&copied.text, &copied.from)
+    {
+        warnings.extend(manifest.warnings);
     }
-    let templates = environment.templates()?;
-    let template = workspaces
-        .template(&templates, &args.repo)
-        .map_err(MxvFailure::from)?;
-    Ok(template.map(|template| Copied {
-        from: template.path,
-        text: template.text,
-    }))
+    Ok((copied, warnings))
 }
 
 /// Returns the globs of the ignored directories that `new` clones from the
@@ -177,7 +192,7 @@ pub(crate) fn new(
     if output.progress_allowed() {
         workspaces = workspaces.with_mirror_notice(crate::mirror_wait_notice);
     }
-    let copied = copied(environment, &workspaces, args)?;
+    let (copied, warnings) = copied(environment, &workspaces, args, &root.path)?;
     let text = copied.as_ref().map(|copied| copied.text.as_str());
     let outcome = workspaces
         .create_with_manifest(&root.path, &name, &args.repo, mode, text)
@@ -190,7 +205,7 @@ pub(crate) fn new(
                 clone_into(environment, &workspaces, &workspace, mode, copied.as_ref())?
             };
             let from = copied.as_ref().map(|copied| copied.from.as_path());
-            Ok(NewRow::new(&workspace, &root, cloned, from))
+            Ok(NewRow::new(&workspace, &root, cloned, from).with_warnings(&warnings))
         }
         NewOutcome::NameTaken(_) => Err(MxvFailure::Exists {
             name: name.to_string(),
@@ -288,7 +303,15 @@ pub(crate) fn show(
                 name: name.to_string(),
             })?;
             let usage = workspaces.disk_usage(&workspace)?;
-            Ok(ShowRow::new(&workspace, &root, &usage))
+            // The disk usage already warns about a manifest that cannot be
+            // read, so only a manifest that parses adds its own warnings.
+            let warnings = workspace
+                .manifest()
+                .ok()
+                .flatten()
+                .map(|manifest| manifest.warnings)
+                .unwrap_or_default();
+            Ok(ShowRow::new(&workspace, &root, &usage).with_warnings(&warnings))
         });
         batch.push(found);
     }
@@ -379,13 +402,22 @@ pub(crate) fn remove(
         }
         .into());
     }
+    // A person may have edited the workspace manifest by hand, so the
+    // question names it.
+    let parts = match &removal.workspace_manifest {
+        Some(path) => format!(
+            "its checkouts, its workspace manifest {} and its record",
+            path.display()
+        ),
+        None => "its checkouts and its record".to_owned(),
+    };
     let mut question = if from_manifest {
         format!(
-            "Remove the workspace {name}, its checkouts and its record? It deletes {}, which only the repository's mxv.toml declares disposable.",
+            "Remove the workspace {name}, {parts}? It deletes {}, which only the repository's mxv.toml declares disposable.",
             removal.manifest.join(", ")
         )
     } else {
-        format!("Remove the workspace {name}, its checkouts and its record?")
+        format!("Remove the workspace {name}, {parts}?")
     };
     let stashes: usize = removal
         .checkouts

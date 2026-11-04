@@ -8,13 +8,15 @@ use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
     Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource, Fate, Kind,
-    MANIFEST_FILE, ManifestSource, ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
+    MANIFEST_FILE, Manifest, ManifestSource, ProcessState, ProcessStatus, Removal, Workspace,
+    WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::environment::{Root, RootSource};
 use crate::failures::remove_line;
+use crate::run_failures::RunFailure;
 use crate::units::Size;
 
 /// One workspace, as `list` prints it.
@@ -336,7 +338,9 @@ pub(crate) struct ShowRow {
     /// the reason, such as a directory that holds a `.git` entry.
     kept_paths: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
-    /// `mxv.toml` declares, such as an invalid manifest, or null.
+    /// `mxv.toml` declares, such as an invalid manifest, or why its paths
+    /// wait for a confirmation, and each table of the manifest that mxv
+    /// ignores although its name is close to one of mxv's own, or null.
     warnings: Option<String>,
 }
 
@@ -434,6 +438,14 @@ impl ShowRow {
             warnings: joined(&usage.warnings),
         }
     }
+
+    /// Returns the row with `warnings` after the warnings it holds.
+    pub(crate) fn with_warnings(mut self, warnings: &[String]) -> Self {
+        let mut all: Vec<String> = self.warnings.into_iter().collect();
+        all.extend_from_slice(warnings);
+        self.warnings = joined(&all);
+        self
+    }
 }
 
 /// The workspace that `new` created, or would create on a dry run, and the
@@ -456,6 +468,11 @@ pub(crate) struct NewRow {
     /// `--manifest` file, or the template whose `[template]` table lists
     /// the repository's origin, or null when it copied none.
     manifest_from: Option<String>,
+    /// The sentences, joined with `; `, for each template that `new`
+    /// skipped because it cannot use it, and for each table of the copied
+    /// manifest that mxv ignores although its name is close to one of
+    /// mxv's own, or null.
+    warnings: Option<String>,
 }
 
 impl Row for NewRow {
@@ -470,6 +487,7 @@ impl Row for NewRow {
         "clone_warning",
         "manifest",
         "manifest_from",
+        "warnings",
     ];
     const LONG_COLUMNS: &'static [&'static str] = &["kind", "manifest_path", "repositories"];
     // A person copies the name into the next command.
@@ -507,7 +525,14 @@ impl NewRow {
             cloned: cloned.paths,
             clone_warning: cloned.warning,
             manifest_from: copied.map(|path| path.display().to_string()),
+            warnings: None,
         }
+    }
+
+    /// Returns the row with `warnings`.
+    pub(crate) fn with_warnings(mut self, warnings: &[String]) -> Self {
+        self.warnings = joined(warnings);
+        self
     }
 }
 
@@ -546,8 +571,12 @@ pub(crate) struct RemovalResult {
     /// confirmed them at the prompt or passed `--force`.
     manifest_paths: Vec<String>,
     /// Why a checkout's disposable set holds fewer globs than its
-    /// `mxv.toml` declares, such as an invalid manifest.
+    /// `mxv.toml` declares, such as an invalid manifest, or why its paths
+    /// wait for a confirmation.
     warnings: Vec<String>,
+    /// The workspace manifest that the removal deletes, which a person may
+    /// have edited by hand, or null when the workspace has none.
+    manifest_deleted: Option<String>,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -678,6 +707,10 @@ impl RemovalResult {
             volumes: Vec::new(),
             manifest_paths: removal.manifest.clone(),
             warnings: removal.warnings.clone(),
+            manifest_deleted: removal
+                .workspace_manifest
+                .as_ref()
+                .map(|path| path.display().to_string()),
             planned,
         }
     }
@@ -726,6 +759,9 @@ impl fmt::Display for RemovalResult {
         }
         for container in &self.containers {
             writeln!(formatter, "mxv {removes} the docker container {container}.")?;
+        }
+        if let Some(path) = &self.manifest_deleted {
+            writeln!(formatter, "mxv {deletes} the workspace manifest {path}.")?;
         }
         for volume in &self.volumes {
             writeln!(
@@ -1026,7 +1062,8 @@ fn unmerged(count: Option<u32>) -> String {
     }
 }
 
-/// What `mxv status` says above its rows: whether the manifest parsed.
+/// What `mxv status` says above its rows: which manifest the workspace
+/// reads, whether it could be read, and its warnings.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct StatusSummary {
     /// Which manifest the workspace's commands read: `workspace` for the
@@ -1036,26 +1073,45 @@ pub(crate) struct StatusSummary {
     /// The path of the manifest that the workspace's commands read, or
     /// null when they read none.
     manifest_path: Option<String>,
-    /// The manifest's error when it does not parse, in which case the rows
-    /// come from the run records alone, or null.
+    /// The manifest's error when it cannot be read or does not parse, in
+    /// which case the rows come from the run records alone, or null.
     manifest_error: Option<String>,
+    /// The code of `manifest_error`, such as `mxv::manifest::unreadable`
+    /// for a symbolic link that leads nowhere, which `mxv up` fails with,
+    /// or null.
+    manifest_error_code: Option<String>,
+    /// One sentence for each table of the manifest that mxv ignores
+    /// although its name is close to one of mxv's own, such as
+    /// `[proceses.web]`.
+    warnings: Vec<String>,
 }
 
 impl StatusSummary {
-    /// Returns the summary of a status of `workspace`, whose manifest
-    /// failed with `error`, or parsed or is missing when `error` is `None`.
-    pub(crate) fn new(workspace: &Workspace, manifest_error: Option<String>) -> Self {
+    /// Returns the summary of a status of `workspace`, whose manifest is
+    /// `manifest`, or failed with `error`.
+    pub(crate) fn new(
+        workspace: &Workspace,
+        manifest: Option<&Manifest>,
+        error: Option<&RunFailure>,
+    ) -> Self {
         let inputs = workspace.manifest_inputs();
         Self {
             manifest: inputs.source().into(),
             manifest_path: inputs.chosen().map(|path| path.display().to_string()),
-            manifest_error,
+            manifest_error: error.map(ToString::to_string),
+            manifest_error_code: error.map(|error| {
+                let code = crumbkit::Failure::code(error);
+                format!("{}::{}::{}", code.component(), code.area(), code.reason())
+            }),
+            warnings: manifest
+                .map(|manifest| manifest.warnings.clone())
+                .unwrap_or_default(),
         }
     }
 }
 
-/// Prints which manifest the workspace reads, and one more line when the
-/// manifest does not parse.
+/// Prints which manifest the workspace reads, one more line when the
+/// manifest cannot be read or does not parse, and a line for each warning.
 impl fmt::Display for StatusSummary {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (&self.manifest, &self.manifest_path) {
@@ -1067,13 +1123,16 @@ impl fmt::Display for StatusSummary {
             }
             _ => formatter.write_str("The workspace has no manifest.")?,
         }
-        match &self.manifest_error {
-            Some(error) => write!(
+        if let Some(error) = &self.manifest_error {
+            write!(
                 formatter,
-                "\nThe manifest does not parse, so the processes come from the run records: {error}"
-            ),
-            None => Ok(()),
+                "\nThe manifest cannot be used, so the processes come from the run records: {error}"
+            )?;
         }
+        for warning in &self.warnings {
+            write!(formatter, "\nWarning: {warning}.")?;
+        }
+        Ok(())
     }
 }
 

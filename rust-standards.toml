@@ -60,7 +60,9 @@ requirement = """
 - `list --long`, `show --long` and `status` name the manifest used, as `workspace`, `repository` or `none`, with its path.
 - mxv checks that the whole file is valid TOML, reads only its own top-level keys, and leaves any other top-level table or array of tables untouched. An unknown top-level key that is not a table, and an unknown key inside one of mxv's own tables, still fail.
 - The library returns both paths as separate inputs, through `Workspace::manifest_inputs`, for a tool that reads both even when the workspace manifest wins.
-- The workspace manifest's `disposable` globs count as the person's own, as the config file's do, and keep the manifest's rule that each names a directory.
+- The workspace manifest's `disposable` globs count as the person's own, as the config file's do, and keep the manifest's rule that each names a directory, only while the file is a regular file with one link and no checkout holds its path. A symbolic link or a hard link there is read, and its globs count as the repository's. A sandbox must not let agents write `<root>/<name>/`.
+- `--manifest` refuses a file inside a git work tree or under the workspace root with `mxv::manifest::untrusted`, and a template must be a regular file outside the workspace root. A malformed template fails `new` only when the origins it lists include the repository's, and is otherwise skipped with a warning.
+- A top-level table whose name is close to one of mxv's own, and phase's `[process.*]`, parse with a warning, which `up` prints on standard error and `status`, `show` and `new` put in `warnings`.
 """
 reason = "Luke and phase agreed the rule, and crates/phase/docs/design.md describes the same lookup in \"Which manifest is read\". A workspace manifest lets a person run an app that a repository declares differently, or not at all, without changing the shared repository. Reading one file keeps it clear which keys apply, and passing other tables through lets phase own the schema of its own tables in the same file."
 realizations = [

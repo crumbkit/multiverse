@@ -47,7 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -109,6 +109,10 @@ pub struct Manifest {
     /// `mxv new` clones from the repository into a new checkout, on top of
     /// the ones that the config file names.
     pub clone_on_new: Vec<PathGlob>,
+    /// One sentence for each top-level table that mxv ignores although
+    /// its name is close to one of mxv's own, such as `[proceses.web]`,
+    /// or is phase's `[process.*]`, with the file and line in front.
+    pub warnings: Vec<String>,
 }
 
 /// One process or container of a manifest.
@@ -592,15 +596,31 @@ impl Errors<'_> {
     }
 }
 
+/// The top-level tables of phase, which reads the same `mxv.toml`. mxv
+/// never warns about them, except `process`, which phase uses for what
+/// mxv calls `processes`.
+const PHASE_TABLES: &[&str] = &[
+    "app",
+    "release",
+    "build",
+    "process",
+    "permissions",
+    "needs",
+    "service",
+];
+
 /// Checks that `text` is valid TOML and that each top-level key that mxv
 /// does not read holds a table or an array of tables, such as the `[app]`,
 /// `[service.web]` or `[[release]]` of another tool that shares the file,
 /// which mxv leaves alone. Any other unknown top-level key fails with
-/// [`ManifestProblem::UnknownKey`]. A table named like one of mxv's own,
-/// such as `[process.api]`, is another tool's, because phase declares its
-/// processes there.
-fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<(), ManifestError> {
+/// [`ManifestProblem::UnknownKey`].
+///
+/// It returns a warning for each such table whose name is close to one of
+/// mxv's own, which [`near_miss`] decides, and for phase's `[process.*]`,
+/// so a misspelt table never silently declares nothing.
+fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<Vec<String>, ManifestError> {
     let table = toml::de::DeTable::parse(text).map_err(|error| errors.of_toml(&error))?;
+    let mut warnings = Vec::new();
     for (key, value) in table.get_ref() {
         let name = key.get_ref().as_ref();
         if OWN_KEYS.contains(&name) {
@@ -624,8 +644,59 @@ fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<(), ManifestError>
                 },
             ));
         }
+        let place = format!("{}:{}", errors.path.display(), errors.line(&key.span()));
+        if name == "process" {
+            warnings.push(format!(
+                "{place}: mxv ignores the table `[process.*]`, which is phase's, and runs only the processes of `[processes.*]`"
+            ));
+        } else if !PHASE_TABLES.contains(&name)
+            && let Some(meant) = near_miss(name)
+        {
+            warnings.push(format!(
+                "{place}: mxv ignores the table `[{name}]`, whose name is close to mxv's `{meant}`, and reads nothing from it"
+            ));
+        }
     }
-    Ok(())
+    Ok(warnings)
+}
+
+/// Returns the key of mxv's own that `name` is likely a misspelling of:
+/// one that differs from `name` only in case, or by a trailing `s`, or by
+/// at most two inserted, deleted or replaced characters.
+fn near_miss(name: &str) -> Option<&'static str> {
+    let lower = name.to_ascii_lowercase();
+    OWN_KEYS.iter().copied().find(|own| {
+        lower == *own
+            || format!("{lower}s") == *own
+            || lower == format!("{own}s")
+            || edit_distance(&lower, own) <= 2
+    })
+}
+
+/// Returns the number of characters that must be inserted, deleted or
+/// replaced to turn `from` into `to`.
+fn edit_distance(from: &str, to: &str) -> usize {
+    let to: Vec<char> = to.chars().collect();
+    // `previous` holds the distances from the characters of `from` read so
+    // far to each prefix of `to`.
+    let mut previous: Vec<usize> = (0..=to.len()).collect();
+    for (row, left) in from.chars().enumerate() {
+        let mut current = vec![row.saturating_add(1)];
+        for (pair, right) in previous.windows(2).zip(&to) {
+            let [diagonal, above] = pair else {
+                continue;
+            };
+            let beside = current.last().copied().unwrap_or(usize::MAX);
+            current.push(
+                diagonal
+                    .saturating_add(usize::from(left != *right))
+                    .min(above.saturating_add(1))
+                    .min(beside.saturating_add(1)),
+            );
+        }
+        previous = current;
+    }
+    previous.last().copied().unwrap_or_default()
 }
 
 /// Returns the key of serde's message about an unknown field, such as
@@ -732,7 +803,23 @@ impl Manifest {
         };
         let file = match File::open(&path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A symbolic link that leads nowhere is a file that cannot be
+            // read, so the next manifest never takes its place.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::read_link(&path) {
+                Ok(target) => {
+                    return Err(ManifestError {
+                        path,
+                        line: None,
+                        problem: ManifestProblem::Unreadable {
+                            message: format!(
+                                "it is a symbolic link to {}, which does not exist",
+                                target.display()
+                            ),
+                        },
+                    });
+                }
+                Err(_) => return Ok(None),
+            },
             Err(error) => return Err(unreadable(error)),
         };
         let mut text = String::new();
@@ -787,7 +874,7 @@ impl Manifest {
     /// problem it finds.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ManifestError> {
         let errors = Errors { path, text };
-        check_top_level(&errors, text)?;
+        let warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         if let Some(version) = &raw.version {
             match *version.get_ref() {
@@ -922,6 +1009,7 @@ impl Manifest {
             containers,
             disposable: globs(&raw.disposable, PathGlob::parse_directory, "disposable")?,
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
+            warnings,
         };
         if let Some(name) = manifest.cycle() {
             let span = raw

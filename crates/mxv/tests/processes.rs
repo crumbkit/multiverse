@@ -1246,3 +1246,72 @@ fn up_starts_the_processes_of_the_workspace_manifest_and_never_the_checkouts() {
         .collect();
     assert_eq!(names, ["server", "worker"]);
 }
+
+#[test]
+fn up_warns_about_a_misspelt_table_and_a_manifest_that_declares_nothing() {
+    let setup = Setup::new();
+    setup.workspace("triage", "[proceses.web]\nargv = [\"true\"]\n");
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{errors}");
+    assert!(
+        errors.contains(
+            "mxv ignores the table `[proceses]`, whose name is close to mxv's `processes`"
+        ),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("declares no processes and no containers, so mxv started nothing"),
+        "{errors}"
+    );
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    let warnings = status["summary"]["warnings"].to_string();
+    assert!(warnings.contains("[proceses]"), "{status}");
+}
+
+#[test]
+fn up_warns_that_phases_process_table_is_not_mxvs() {
+    let setup = Setup::new();
+    setup.workspace("triage", "[process.web]\nargv = [\"true\"]\n");
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{errors}");
+    assert!(
+        errors.contains("mxv ignores the table `[process.*]`, which is phase's, and runs only the processes of `[processes.*]`"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn a_dangling_link_at_the_workspace_manifest_is_unreadable_and_named() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &server_and_worker());
+    let link = checkout.parent().unwrap().join("mxv.toml");
+    std::os::unix::fs::symlink(setup.root().join("gone.toml"), &link).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::unreadable", "{document}");
+    assert!(document.to_string().contains("gone.toml"), "{document}");
+    assert!(!document.to_string().contains("neither"), "{document}");
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    assert_eq!(
+        status["summary"]["manifest_error_code"], "mxv::manifest::unreadable",
+        "{status}"
+    );
+    assert!(
+        status["summary"]["manifest_error"]
+            .as_str()
+            .unwrap()
+            .contains("gone.toml"),
+        "{status}"
+    );
+    let (exit, shown) = setup.json(&["show", "triage"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert!(
+        shown["data"][0]["warnings"]
+            .as_str()
+            .unwrap()
+            .contains("gone.toml"),
+        "{shown}"
+    );
+}

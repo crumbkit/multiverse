@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::lookup::ManifestSource;
+use crate::manifest::ManifestProblem;
 use crate::record::{Checkout, Workspace};
 use crate::testing::write;
 
@@ -77,4 +78,81 @@ fn a_cwd_in_the_workspace_manifest_is_relative_to_the_checkout() {
     );
     let manifest = workspace.manifest().unwrap().unwrap();
     assert_eq!(manifest.processes["web"].cwd, Path::new("web"));
+}
+
+#[test]
+fn a_dangling_link_at_the_workspace_manifest_fails_as_unreadable_and_names_the_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(workspace.path.join("app/mxv.toml"), "ports = [\"api\"]\n");
+    std::os::unix::fs::symlink(dir.path().join("gone.toml"), workspace.manifest_file()).unwrap();
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(error.path, workspace.manifest_file());
+    let ManifestProblem::Unreadable { message } = &error.problem else {
+        panic!("{error:?}");
+    };
+    assert!(message.contains("gone.toml"), "{message}");
+}
+
+#[test]
+fn a_regular_workspace_manifest_is_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(workspace.manifest_file(), "disposable = [\"data/\"]\n");
+    assert!(workspace.manifest_trusted());
+}
+
+#[test]
+fn a_workspace_manifest_that_links_to_the_checkouts_is_read_and_not_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(
+        workspace.path.join("app/mxv.toml"),
+        "disposable = [\"data/\"]\n",
+    );
+    std::os::unix::fs::symlink("app/mxv.toml", workspace.manifest_file()).unwrap();
+    assert_eq!(
+        workspace.manifest_inputs().source(),
+        ManifestSource::Workspace
+    );
+    assert_eq!(workspace.manifest().unwrap().unwrap().disposable.len(), 1);
+    assert!(!workspace.manifest_trusted());
+}
+
+#[test]
+fn a_workspace_manifest_with_a_second_hard_link_is_not_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(
+        workspace.path.join("app/mxv.toml"),
+        "disposable = [\"data/\"]\n",
+    );
+    fs::hard_link(
+        workspace.path.join("app/mxv.toml"),
+        workspace.manifest_file(),
+    )
+    .unwrap();
+    assert!(!workspace.manifest_trusted());
+}
+
+#[test]
+fn a_record_whose_checkout_holds_the_workspace_manifests_path_has_no_workspace_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reading-list");
+    fs::create_dir_all(&path).unwrap();
+    // An old record whose checkout is the workspace's directory itself.
+    let checkout = Checkout::new(
+        "app".to_owned(),
+        &dir.path().join("source"),
+        path.clone(),
+        "reading-list".to_owned(),
+        "refs/remotes/origin/main".to_owned(),
+    );
+    let workspace = Workspace::new("reading-list".parse().unwrap(), path, vec![checkout]);
+    write(workspace.manifest_file(), "disposable = [\"data/\"]\n");
+    assert!(workspace.checkout_holds_manifest_file());
+    let inputs = workspace.manifest_inputs();
+    assert_eq!(inputs.workspace, None);
+    assert_eq!(inputs.source(), ManifestSource::Repository);
+    assert!(!workspace.manifest_trusted());
 }

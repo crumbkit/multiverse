@@ -104,6 +104,46 @@ fn a_table_named_like_one_of_mxvs_own_belongs_to_another_tool() {
 }
 
 #[test]
+fn phases_process_table_parses_with_a_warning_that_mxv_runs_another_table() {
+    let manifest = parse("ports = []\n\n[process.api]\nargv = [\"true\"]\n").unwrap();
+    assert_eq!(
+        manifest.warnings,
+        [
+            "/repo/mxv.toml:3: mxv ignores the table `[process.*]`, which is phase's, and runs only the processes of `[processes.*]`"
+        ]
+    );
+}
+
+#[test]
+fn a_misspelt_name_of_one_of_mxvs_tables_parses_with_a_warning_that_names_it() {
+    for (written, meant) in [
+        ("proceses", "processes"),
+        ("Processes", "processes"),
+        ("container", "containers"),
+        ("disposible", "disposable"),
+        ("PORTS", "ports"),
+    ] {
+        let manifest = parse(&format!("[{written}.web]\nx = 1\n")).unwrap();
+        assert_eq!(
+            manifest.warnings,
+            [format!(
+                "/repo/mxv.toml:1: mxv ignores the table `[{written}]`, whose name is close to mxv's `{meant}`, and reads nothing from it"
+            )],
+            "{written}"
+        );
+    }
+}
+
+#[test]
+fn the_tables_of_phase_and_of_other_tools_parse_without_a_warning() {
+    let manifest = parse(
+        "[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[permissions]\na = 1\n[needs.db]\na = 1\n[service.web]\na = 1\n[deploy]\na = 1\n",
+    )
+    .unwrap();
+    assert_eq!(manifest.warnings, Vec::<String>::new());
+}
+
+#[test]
 fn a_file_that_is_not_toml_fails_even_inside_another_tools_table() {
     let (line, problem) = problem("ports = []\n[app]\nname = \n");
     assert_eq!(line, Some(3));

@@ -629,7 +629,7 @@
           "minimum": 0
         },
         "warnings": {
-          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or null.",
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or why its paths\nwait for a confirmation, and each table of the manifest that mxv\nignores although its name is close to one of mxv's own, or null.",
           "type": [
             "string",
             "null"

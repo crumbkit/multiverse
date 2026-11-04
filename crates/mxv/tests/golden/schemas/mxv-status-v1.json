@@ -199,7 +199,7 @@
       ]
     },
     "StatusSummary": {
-      "description": "What `mxv status` says above its rows: whether the manifest parsed.",
+      "description": "What `mxv status` says above its rows: which manifest the workspace\nreads, whether it could be read, and its warnings.",
       "type": "object",
       "properties": {
         "manifest": {
@@ -207,7 +207,14 @@
           "$ref": "#/$defs/ManifestRow"
         },
         "manifest_error": {
-          "description": "The manifest's error when it does not parse, in which case the rows\ncome from the run records alone, or null.",
+          "description": "The manifest's error when it cannot be read or does not parse, in\nwhich case the rows come from the run records alone, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest_error_code": {
+          "description": "The code of `manifest_error`, such as `mxv::manifest::unreadable`\nfor a symbolic link that leads nowhere, which `mxv up` fails with,\nor null.",
           "type": [
             "string",
             "null"
@@ -219,12 +226,21 @@
             "string",
             "null"
           ]
+        },
+        "warnings": {
+          "description": "One sentence for each table of the manifest that mxv ignores\nalthough its name is close to one of mxv's own, such as\n`[proceses.web]`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
         "manifest",
         "manifest_path",
-        "manifest_error"
+        "manifest_error",
+        "manifest_error_code",
+        "warnings"
       ]
     }
   }

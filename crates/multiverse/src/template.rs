@@ -19,18 +19,34 @@
 //!
 //! An origin is written as a URL that git accepts, such as
 //! `https://github.com/acme/app` or `git@github.com:acme/app.git`, or as a
-//! host and path without a scheme, such as `github.com/acme/app`. Origins
-//! are compared by their normalised form, the key of their mirror, so the
-//! `https` and `ssh` forms of a repository match each other. `[template]`
-//! holds only `origins`, and mxv removes the table, from its header to the
-//! next table header, when it copies the template.
+//! host and path without a scheme, such as `github.com/acme/app` or
+//! `github.com:443/acme/app`, where digits after the colon are a port.
+//! Origins are compared by their normalised form, the key of their
+//! mirror, so the `https` and `ssh` forms of a repository match each
+//! other. The host is compared in lower case, and the path as written, so
+//! `github.com/Acme/app` does not match `github.com/acme/app`.
+//!
+//! `[template]` holds only `origins`. When mxv copies the template, it
+//! removes the table's header and keys, from the header to the next table
+//! header, and keeps every comment and blank line.
+//!
+//! A template is the person's own, like the config file, so its
+//! `disposable` globs are deleted without asking once it is copied. mxv
+//! therefore reads only a template that is a regular file, never a
+//! symbolic link, and that lies outside the root of the workspaces, where
+//! a checkout could write it.
+//!
+//! A template that mxv cannot use, such as one that is not TOML, is never
+//! copied. When the origins it lists can be read and include the
+//! repository's, `mxv new` fails, because the person meant it for the
+//! repository. Otherwise mxv skips it and returns a warning that names it.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
-use crate::manifest::Manifest;
+use crate::manifest::{MOST_MANIFEST_BYTES, Manifest};
 use crate::mirror::{Origin, redacted};
 
 #[cfg(test)]
@@ -49,6 +65,18 @@ pub struct Template {
     pub text: String,
 }
 
+/// What [`find`] found in the directory of templates.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Found {
+    /// The one template whose `[template]` table lists the origin, or
+    /// `None`.
+    pub template: Option<Template>,
+    /// One sentence for each template that mxv cannot use and skipped,
+    /// because the origins it lists cannot be read or do not include the
+    /// repository's.
+    pub skipped: Vec<String>,
+}
+
 /// One template file as mxv read it.
 struct Read {
     /// The file.
@@ -59,26 +87,55 @@ struct Read {
     text: String,
 }
 
+/// A template that mxv cannot use.
+struct Fault {
+    /// Why, as the error that names the file.
+    error: Error,
+    /// The normalised origins that the template lists, when they can be
+    /// read in spite of the fault.
+    keys: Option<Vec<PathBuf>>,
+}
+
 /// Returns the template in `dir` whose `[template]` table lists `url`, the
-/// origin of the repository at `repository`, or `None` when `dir` holds no
-/// such template or does not exist. mxv reads each `*.toml` file in `dir`,
-/// in name order, and ignores every other entry.
+/// origin of the repository at `repository`, and the templates it skipped.
+/// It finds none when `dir` holds no such template or does not exist.
+/// mxv reads each `*.toml` file in `dir`, in name order, and ignores every
+/// other entry. `root` is the root of the workspaces, under which no
+/// template may lie.
 ///
 /// # Errors
 ///
-/// Returns [`Error::TemplateInvalid`] for a template that cannot be read,
-/// is not a manifest with a valid `[template]` table, or has a `[template]`
-/// table that mxv cannot remove cleanly, whether or not it matches, and
+/// Returns [`Error::TemplateInvalid`] for a template that lists the origin
+/// and cannot be used: one that is not a manifest with a valid
+/// `[template]` table, has a `[template]` table that mxv cannot remove
+/// cleanly, is a symbolic link, or lies under `root`. It returns
 /// [`Error::TemplateAmbiguous`] when more than one template matches.
-pub fn find(dir: &Path, url: &str, repository: &Path) -> Result<Option<Template>, Error> {
+pub fn find(dir: &Path, url: &str, repository: &Path, root: &Path) -> Result<Found, Error> {
     let Some(origin) = Origin::parse(url, repository) else {
-        return Ok(None);
+        return Ok(Found::default());
     };
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut matched: Vec<Read> = Vec::new();
+    let mut skipped = Vec::new();
     for path in files(dir)? {
-        let read = read(&path, dir)?;
-        if read.keys.contains(&origin.key) {
-            matched.push(read);
+        match read(&path, dir, &root) {
+            Ok(read) if read.keys.contains(&origin.key) => matched.push(read),
+            Ok(_) => {}
+            Err(fault)
+                if fault
+                    .keys
+                    .as_ref()
+                    .is_some_and(|keys| keys.contains(&origin.key)) =>
+            {
+                return Err(fault.error);
+            }
+            Err(fault) => skipped.push(match fault.error {
+                Error::TemplateInvalid { path, message } => format!(
+                    "mxv skipped the template {}, which it cannot use: {message}",
+                    path.display()
+                ),
+                other => format!("mxv skipped a template: {other}"),
+            }),
         }
     }
     if matched.len() > 1 {
@@ -87,10 +144,13 @@ pub fn find(dir: &Path, url: &str, repository: &Path) -> Result<Option<Template>
             templates: matched.into_iter().map(|read| read.path).collect(),
         });
     }
-    Ok(matched.pop().map(|read| Template {
-        path: read.path,
-        text: read.text,
-    }))
+    Ok(Found {
+        template: matched.pop().map(|read| Template {
+            path: read.path,
+            text: read.text,
+        }),
+        skipped,
+    })
 }
 
 /// Returns the `*.toml` files in `dir`, in name order, or none when `dir`
@@ -133,24 +193,54 @@ fn invalid(path: &Path, message: impl Into<String>) -> Error {
 }
 
 /// Reads the template at `path`, whose relative local origins are relative
-/// to `dir`.
-fn read(path: &Path, dir: &Path) -> Result<Read, Error> {
-    let text = Manifest::read_text(path)
-        .map_err(|error| invalid(path, error.to_string()))?
-        .ok_or_else(|| invalid(path, "the template disappeared while mxv read it"))?;
-    let origins = origins(path, &text)?;
+/// to `dir`, and which must lie outside `root`.
+fn read(path: &Path, dir: &Path, root: &Path) -> Result<Read, Fault> {
+    let unknown = |error| Fault { error, keys: None };
+    let text = text(path).map_err(unknown)?;
+    // The origins are read before anything else is checked, so a template
+    // that is meant for the repository fails rather than being skipped.
+    let keys = listed(&text, dir);
+    let known = |error| Fault {
+        error,
+        keys: keys.clone(),
+    };
+    Manifest::parse(&text, path).map_err(|error| known(invalid(path, error.to_string())))?;
+    let origins = origins(path, &text).map_err(known)?;
     let mut keys = Vec::new();
     for written in &origins {
         let url = as_url(written);
         let origin = Origin::parse(&url, dir).ok_or_else(|| {
-            invalid(
+            unknown(invalid(
                 path,
                 format!("the origin `{written}` of the [template] table names no repository"),
-            )
+            ))
         })?;
         keys.push(origin.key);
     }
-    let stripped = strip(path, &text)?;
+    let known = |error| Fault {
+        error,
+        keys: Some(keys.clone()),
+    };
+    let linked = !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file());
+    if linked {
+        return Err(known(invalid(
+            path,
+            "the template is a symbolic link, and mxv copies only a template that is a regular file, so no repository can have written it",
+        )));
+    }
+    if path
+        .canonicalize()
+        .is_ok_and(|resolved| resolved.starts_with(root))
+    {
+        return Err(known(invalid(
+            path,
+            format!(
+                "the template lies under the root of the workspaces {}, where a checkout could write it",
+                root.display()
+            ),
+        )));
+    }
+    let stripped = strip(path, &text).map_err(known)?;
     Ok(Read {
         path: path.to_path_buf(),
         keys,
@@ -158,14 +248,57 @@ fn read(path: &Path, dir: &Path) -> Result<Read, Error> {
     })
 }
 
+/// Returns the text of the template at `path`, which must be at most
+/// [`MOST_MANIFEST_BYTES`] long.
+fn text(path: &Path) -> Result<String, Error> {
+    let size = fs::metadata(path)
+        .map_err(|error| invalid(path, error.to_string()))?
+        .len();
+    if size > MOST_MANIFEST_BYTES {
+        return Err(invalid(
+            path,
+            format!("the template is larger than {MOST_MANIFEST_BYTES} bytes"),
+        ));
+    }
+    fs::read_to_string(path).map_err(|error| invalid(path, error.to_string()))
+}
+
+/// Returns the normalised origins that the `[template]` table of `text`
+/// lists, when the table can be read as a list of strings that each name
+/// a repository, whatever else is wrong with the template.
+fn listed(text: &str, dir: &Path) -> Option<Vec<PathBuf>> {
+    let table: toml::Table = text.parse().ok()?;
+    let toml::Value::Table(template) = table.get(TEMPLATE_TABLE)? else {
+        return None;
+    };
+    let toml::Value::Array(listed) = template.get("origins")? else {
+        return None;
+    };
+    listed
+        .iter()
+        .map(|item| {
+            let written = item.as_str()?.trim();
+            Origin::parse(&as_url(written), dir).map(|origin| origin.key)
+        })
+        .collect()
+}
+
 /// Returns `written`, an origin of a template, as a URL: as it is when it
 /// has a scheme, is in git's scp-like form or is an absolute path, and
 /// with `https://` in front when it is a host and a path, such as
-/// `github.com/acme/app`.
+/// `github.com/acme/app` or `github.com:443/acme/app`.
 fn as_url(written: &str) -> String {
-    let scp_like = written
-        .find(':')
-        .is_some_and(|colon| written.find('/').is_none_or(|slash| colon < slash));
+    // `host:443/path` names a port, and `host:team/app` is git's
+    // scp-like form.
+    let scp_like = written.find(':').is_some_and(|colon| {
+        let slash = written.find('/');
+        let port = written
+            .get(colon.saturating_add(1)..slash.unwrap_or(written.len()))
+            .is_some_and(|between| {
+                !between.is_empty() && between.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        slash.is_none_or(|slash| colon < slash) && !port
+    });
     if written.contains("://") || scp_like || written.starts_with('/') || written.starts_with('.') {
         written.to_owned()
     } else {
@@ -217,7 +350,7 @@ fn is_template_header(line: &str) -> bool {
 
 /// Returns `text`, the template at `path`, without its `[template]` table:
 /// each line from the table's header to the next header of another
-/// table. The result must hold every other key of `text` and nothing of
+/// table, except comments and blank lines. The result must hold every other key of `text` and nothing of
 /// the table, or the template fails as invalid.
 fn strip(path: &Path, text: &str) -> Result<String, Error> {
     let mut kept = String::with_capacity(text.len());
@@ -232,7 +365,10 @@ fn strip(path: &Path, text: &str) -> Result<String, Error> {
         if inside && line.trim_start().starts_with('[') {
             inside = false;
         }
-        if !inside {
+        // A comment or a blank line changes no key, so it is kept, as is
+        // a comment above the next table's header.
+        let trimmed = line.trim_start();
+        if !inside || trimmed.is_empty() || trimmed.starts_with('#') {
             kept.push_str(line);
         }
     }

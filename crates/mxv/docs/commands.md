@@ -70,6 +70,7 @@ mxv new triage --repo app --dry-run
 - `clone_warning`: Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
 - `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace.
 - `manifest_from`: The file that `new` copied into the workspace manifest: the `--manifest` file, or the template whose `[template]` table lists the repository's origin, or null when it copied none.
+- `warnings`: The sentences, joined with `; `, for each template that `new` skipped because it cannot use it, and for each table of the copied manifest that mxv ignores although its name is close to one of mxv's own, or null.
 
 ### Columns that `--long` adds
 
@@ -142,7 +143,7 @@ mxv show reading-list
 - `size`: The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed.
 - `disposable`: The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
-- `warnings`: Why a checkout's disposable set holds fewer globs than its `mxv.toml` declares, such as an invalid manifest, or null.
+- `warnings`: Why a checkout's disposable set holds fewer globs than its `mxv.toml` declares, such as an invalid manifest, or why its paths wait for a confirmation, and each table of the manifest that mxv ignores although its name is close to one of mxv's own, or null.
 
 ### Columns that `--long` adds
 

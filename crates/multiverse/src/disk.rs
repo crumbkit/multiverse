@@ -242,14 +242,14 @@ fn on_disk(metadata: &Metadata) -> u64 {
 
 /// Returns the number of hard links of the entry of `metadata`.
 #[cfg(unix)]
-fn links(metadata: &Metadata) -> u64 {
+pub(crate) fn links(metadata: &Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt as _;
     metadata.nlink()
 }
 
 /// Returns 1, where hard links are not counted.
 #[cfg(not(unix))]
-fn links(_metadata: &Metadata) -> u64 {
+pub(crate) fn links(_metadata: &Metadata) -> u64 {
     1
 }
 

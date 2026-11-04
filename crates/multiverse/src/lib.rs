@@ -70,7 +70,9 @@ pub use crate::runs::{
     Unstoppable, UpOutcome, Volumes, Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
-pub use crate::template::{TEMPLATE_TABLE, Template, find as find_template};
+pub use crate::template::{
+    Found as FoundTemplate, TEMPLATE_TABLE, Template, find as find_template,
+};
 pub use crate::workspaces::{
     Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode, NewOutcome, Removal,
     RemovalOutcome, RemovalPlan, Workspaces,

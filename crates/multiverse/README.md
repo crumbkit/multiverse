@@ -16,8 +16,13 @@ person's repository, and the library still lists and removes it. `Manifest` pars
 manifest that a workspace uses, the workspace manifest at
 `<workspace>/mxv.toml` or else the checkout's `mxv.toml`, and
 `Workspace::manifest_inputs` returns both paths as separate inputs for a
-tool that reads them both. `find_template` picks the template of
-workspace manifests that lists a repository's origin. `Runs` starts, stops and reports the processes it declares,
+tool that reads them both. `Workspace::manifest_trusted` reports whether
+the workspace manifest is a regular file that no repository can have
+written, which is the only case in which its `disposable` globs count as
+the person's own. `find_template` picks the template of workspace
+manifests that lists a repository's origin, and
+`Workspaces::check_manifest_source` refuses a `--manifest` file inside a
+git work tree or under the workspace root. `Runs` starts, stops and reports the processes it declares,
 with a host port for each named port that the workspace's record keeps. The
 process supervision uses Unix process groups and signals, so it runs on
 Linux and macOS. The library reads no environment

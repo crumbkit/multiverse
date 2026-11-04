@@ -38,6 +38,9 @@ pub const CHECKOUT_ORIGIN_UNREACHABLE: Code = Code::new("mxv", "checkout", "orig
 /// The code of a template of workspace manifests that mxv cannot use, such
 /// as one without a valid `[template]` table.
 pub const TEMPLATE_INVALID: Code = Code::new("mxv", "template", "invalid");
+/// The code of a `--manifest` file that a repository or an agent could
+/// have written, so mxv does not copy it as a workspace manifest.
+pub const MANIFEST_UNTRUSTED: Code = Code::new("mxv", "manifest", "untrusted");
 /// The code of a repository whose origin more than one template lists.
 pub const TEMPLATE_AMBIGUOUS: Code = Code::new("mxv", "template", "ambiguous");
 /// The code of a mirror whose lock another mxv command holds for longer
@@ -336,6 +339,7 @@ pub(crate) const CODES: &[&Code] = &[
     &CHECKOUT_ORIGIN_UNREACHABLE,
     &TEMPLATE_INVALID,
     &TEMPLATE_AMBIGUOUS,
+    &MANIFEST_UNTRUSTED,
     &RECORD_UNREADABLE,
     &RECORD_CORRUPT,
     &RECORD_NEWER,
@@ -476,6 +480,7 @@ impl Failure for MxvFailure {
                 Error::OriginFetchFailed { .. } => &CHECKOUT_ORIGIN_UNREACHABLE,
                 Error::TemplateInvalid { .. } => &TEMPLATE_INVALID,
                 Error::TemplateAmbiguous { .. } => &TEMPLATE_AMBIGUOUS,
+                Error::ManifestUntrusted { .. } => &MANIFEST_UNTRUSTED,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 Error::DockerMissing { .. } => &DOCKER_NOT_FOUND,
                 Error::DockerComposeMissing { .. } => &DOCKER_COMPOSE_MISSING,
@@ -784,6 +789,10 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::TemplateAmbiguous { origin, .. } => hint(format!(
             "list {origin} in the [template] table of one template only, or pass `--manifest <FILE>` to choose the file, and run the command again"
         )),
+        Error::ManifestUntrusted { path, .. } => hint(format!(
+            "read {}, copy it to a file of your own outside every git repository and outside the workspaces' root, such as a template in the config directory's `mxv/templates`, and pass that file to `--manifest`",
+            shown(path)
+        )),
         Error::OriginFetchFailed { checkout, .. } => hint(format!(
             "check that the machine is online and that `git -C {} fetch origin` works with your credentials, and run the command again; `--delete-unmerged` removes the workspace without the fetch, and deletes the commits that origin does not hold",
             shown(checkout)
@@ -853,6 +862,10 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         Error::TemplateInvalid { path, message } => vec![
             Field::new("path", shown(path)),
             Field::new("message", message),
+        ],
+        Error::ManifestUntrusted { path, reason } => vec![
+            Field::new("path", shown(path)),
+            Field::new("reason", reason),
         ],
         Error::TemplateAmbiguous { origin, templates } => vec![
             Field::new("origin", origin),

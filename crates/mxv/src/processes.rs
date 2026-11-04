@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::{
-    DownOutcome, Follower, Lock, Manifest, ProcessStatus, Runs, Store, Unstoppable, UpOutcome,
-    Volumes, Workspace, WorkspaceName, tail,
+    DownOutcome, Follower, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable,
+    UpOutcome, Volumes, Workspace, WorkspaceName, tail,
 };
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
@@ -165,12 +165,31 @@ fn lenient_manifest(workspace: &Workspace) -> Option<Manifest> {
 }
 
 /// Returns the workspace's manifest as [`lenient_manifest`] does, and the
-/// manifest's error as text when it does not parse.
-fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<String>) {
+/// manifest's error when it cannot be read or does not parse.
+fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<ManifestError>) {
     match workspace.manifest() {
         Ok(manifest) => (manifest, None),
-        Err(error) => (None, Some(error.to_string())),
+        Err(error) => (None, Some(error)),
     }
+}
+
+/// Returns the warnings that `up` and `restart` print for `manifest`, the
+/// manifest of `workspace`: each table that mxv ignores although its name
+/// is close to one of its own, and a manifest that declares nothing to
+/// start.
+fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
+    let mut warnings = manifest.warnings.clone();
+    if manifest.processes.is_empty() && manifest.containers.is_empty() {
+        let path = workspace
+            .manifest_inputs()
+            .chosen()
+            .map_or_else(|| workspace.manifest_file(), Path::to_path_buf);
+        warnings.push(format!(
+            "the manifest {} declares no processes and no containers, so mxv started nothing",
+            path.display()
+        ));
+    }
+    warnings
 }
 
 /// Returns the workspace's manifest, or the failure of a checkout without
@@ -196,6 +215,7 @@ pub(crate) fn up(
 /// of the first one that does not start.
 fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let manifest = required_manifest(&context.workspace)?;
+    crate::warn(&start_warnings(&context.workspace, &manifest));
     let checkout = checkout(&context.workspace).to_path_buf();
     let workspace = context.workspace.name.to_string();
     let outcome = context
@@ -396,7 +416,11 @@ pub(crate) fn status(
         .status(&context.workspace, manifest.as_ref())
         .map_err(MxvFailure::from)?;
     let rows = statuses.iter().map(ProcessRow::from).collect();
-    Ok(Listing::from_all(rows, None).summary(StatusSummary::new(&context.workspace, error)))
+    Ok(Listing::from_all(rows, None).summary(StatusSummary::new(
+        &context.workspace,
+        manifest.as_ref(),
+        error.map(RunFailure::Manifest).as_ref(),
+    )))
 }
 
 /// Prints the last lines of the log of the process that `args` names, and

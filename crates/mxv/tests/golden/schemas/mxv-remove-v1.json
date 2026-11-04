@@ -547,6 +547,13 @@
           "description": "Whether `--force` allowed discarding uncommitted changes, untracked\nfiles and ignored files.",
           "type": "boolean"
         },
+        "manifest_deleted": {
+          "description": "The workspace manifest that the removal deletes, which a person may\nhave edited by hand, or null when the workspace has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "manifest_paths": {
           "description": "The paths of `disposable` that only the repository's own `mxv.toml`\ndeclares disposable, which mxv deletes only after the person\nconfirmed them at the prompt or passed `--force`.",
           "type": "array",
@@ -570,7 +577,7 @@
           }
         },
         "warnings": {
-          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest.",
+          "description": "Why a checkout's disposable set holds fewer globs than its\n`mxv.toml` declares, such as an invalid manifest, or why its paths\nwait for a confirmation.",
           "type": "array",
           "items": {
             "type": "string"
@@ -589,7 +596,8 @@
         "containers",
         "volumes",
         "manifest_paths",
-        "warnings"
+        "warnings",
+        "manifest_deleted"
       ]
     }
   }
