@@ -350,13 +350,16 @@ immutable id.
 The labels are `mxv.workspace-id`, the workspace's stable id, which is 32
 lowercase hex digits that mxv mints when it creates the workspace and keeps
 in the workspace's record; `mxv.run-record`, the absolute path of the
-workspace's run record; and `mxv.app`, the app, which is the workspace's
+workspace's run record, `<state>/runs/<id>.json` under phase's state
+directory, which mxv sets to `$XDG_STATE_HOME/mxv/phase`; and `mxv.app`, the app, which is the workspace's
 name until mxv names apps. Objects also keep mxv's older labels,
 `mxv.store`, `mxv.workspace`, `mxv.container` and `mxv.volume`, so the
 objects that mxv created before it wrote the new labels stay manageable.
-`sweep` matches an object by `mxv.workspace-id`, and an object that carries
-only the older labels by `mxv.store` and `mxv.workspace`, until the object
-is recreated. It never removes an object without an mxv label.
+The container engine finds an object by `mxv.workspace-id`. It matches an
+object that carries only the older labels by `mxv.store` and
+`mxv.workspace` only when the host names the workspace's older scope, and
+`sweep` names none, so `sweep` leaves such an object alone until mxv
+recreates it. The engine never removes an object without an mxv label.
 
 ### Container secrets
 

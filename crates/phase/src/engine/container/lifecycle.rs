@@ -42,6 +42,7 @@ use crate::engine::container::objects::{
 };
 use crate::engine::container::{ContainerError, RunDir};
 use crate::name::{WorkspaceId, WorkspaceName};
+use crate::phase::Phase;
 
 #[cfg(test)]
 mod tests;
@@ -273,14 +274,15 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     ///
     /// The containers and volumes that the scope creates are also labelled
     /// with the workspace's stable id `id`, the path of its run record,
-    /// `<runs>/<id>.json`, and its app. The host has saved `id` in the
-    /// workspace's record before it calls this.
-    pub fn prepare(&self, id: &WorkspaceId) -> Result<Prepared, H::Error> {
+    /// which [`Phase::run_record`] gives under `phase`'s state directory,
+    /// and its app. The host has saved `id` in the workspace's record
+    /// before it calls this.
+    pub fn prepare(&self, phase: &Phase, id: &WorkspaceId) -> Result<Prepared, H::Error> {
         check()?;
         check_compose()?;
         let identity = Identity {
             id: id.clone(),
-            run_record: self.runs.join(format!("{id}.json")),
+            run_record: phase.run_record(id),
         };
         Ok(Prepared {
             dir: self.dir.clone(),

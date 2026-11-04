@@ -179,12 +179,16 @@ fn without_a_home_directory_the_records_and_the_default_root_are_refused() {
 }
 
 #[test]
-fn the_run_files_sit_beside_the_records_in_the_state_directory() {
+fn the_records_sit_in_mxvs_state_directory() {
     let home = Home::new();
     let environment = home.environment(None);
     assert_eq!(
-        environment.runs().unwrap(),
-        home.path().join(".local/state/mxv/runs")
+        environment.state().unwrap(),
+        home.path().join(".local/state/mxv")
+    );
+    assert_eq!(
+        environment.records().unwrap(),
+        home.path().join(".local/state/mxv/workspaces")
     );
 }
 

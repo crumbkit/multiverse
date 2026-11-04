@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use rustix::process::Signal;
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
+use phase::Phase;
 use phase::container::{
     self as docker, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle,
     OwnedContainer, Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
@@ -303,11 +304,22 @@ enum Readiness {
     TimedOut,
 }
 
+/// The directory under mxv's state directory that holds the run files of
+/// each workspace's processes.
+const RUNS_DIR: &str = "runs";
+
+/// The directory under mxv's state directory that phase keeps its own state
+/// in. Phase keeps each workspace's run record at
+/// `<PHASE_DIR>/runs/<workspace-id>.json`, apart from mxv's records.
+const PHASE_DIR: &str = "phase";
+
 /// The run files of every workspace's processes, under one directory.
 #[derive(Clone, Debug)]
 pub struct Runs {
     /// The directory that holds one directory for each workspace.
     dir: PathBuf,
+    /// The phase whose state directory is `<mxv state>/phase`.
+    phase: Phase,
     /// How long [`Runs::down`] waits after SIGTERM.
     grace: Duration,
     /// The host ports that [`Runs::up`] allocates from.
@@ -318,13 +330,16 @@ pub struct Runs {
 }
 
 impl Runs {
-    /// Returns the run files under `dir`, such as `~/.local/state/mxv/runs`,
-    /// which stop processes with a grace of [`STOP_GRACE`] and allocate
-    /// ports from [`DEFAULT_PORT_RANGE`].
+    /// Returns the run files under mxv's state directory `state`, such as
+    /// `~/.local/state/mxv`, which stop processes with a grace of
+    /// [`STOP_GRACE`] and allocate ports from [`DEFAULT_PORT_RANGE`]. The
+    /// run files live in `<state>/runs`, and phase keeps its state in
+    /// `<state>/phase`.
     #[must_use]
-    pub const fn new(dir: PathBuf) -> Self {
+    pub fn new(state: &Path) -> Self {
         Self {
-            dir,
+            dir: state.join(RUNS_DIR),
+            phase: Phase::new(state.join(PHASE_DIR)),
             grace: STOP_GRACE,
             port_range: DEFAULT_PORT_RANGE,
             lock_wait: LOCK_WAIT,
@@ -663,7 +678,7 @@ impl Runs {
                     message: "the workspace's record holds no stable id".to_owned(),
                 });
             };
-            Some(self.lifecycle(&workspace.name).prepare(&id)?)
+            Some(self.lifecycle(&workspace.name).prepare(&self.phase, &id)?)
         } else {
             None
         };

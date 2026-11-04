@@ -10,6 +10,7 @@ use crate::error::{Operation, PhaseError};
 use crate::logs::{LineSink, LogLine, LogRequest};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::Plan;
+use crate::record::store::RunStore;
 use crate::select::Selection;
 
 struct Unused;
@@ -58,6 +59,20 @@ fn a_new_phase_keeps_its_state_directory_and_the_default_waits() {
     assert_eq!(phase.lock_wait(), DEFAULT_LOCK_WAIT);
     assert_eq!(phase.start_grace(), DEFAULT_START_GRACE);
     assert_eq!(phase.kill_wait(), DEFAULT_KILL_WAIT);
+}
+
+#[test]
+fn a_workspaces_run_record_is_the_path_that_the_run_store_keeps_it_at() {
+    let phase = Phase::new(PathBuf::from("/state/phase"));
+
+    assert_eq!(
+        phase.run_record(&id()),
+        Path::new("/state/phase/runs/0b9f3c8e.json")
+    );
+    assert_eq!(
+        phase.run_record(&id()),
+        RunStore::new(phase.state_dir()).path(&id())
+    );
 }
 
 #[test]

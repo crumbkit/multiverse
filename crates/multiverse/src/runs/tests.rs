@@ -3,7 +3,7 @@ use std::fs;
 use crate::testing::write;
 use std::io::Write as _;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::manifest::Manifest;
@@ -29,7 +29,7 @@ impl Setup {
     }
 
     fn runs(&self) -> Runs {
-        Runs::new(self.dir.path().join("runs")).with_grace(Duration::from_millis(500))
+        Runs::new(self.dir.path()).with_grace(Duration::from_millis(500))
     }
 
     fn workspace(&self, name: &str) -> Workspace {
@@ -398,4 +398,15 @@ image = "busybox:1.37.0"
         .collect();
     assert_eq!(volumes, [("data", "/data")]);
     assert!(!format!("{dynamodb:?}").contains("s3cret"));
+}
+
+#[test]
+fn the_run_files_sit_in_the_runs_directory_of_mxvs_state_directory() {
+    let state = Path::new("/state/mxv");
+    let name: WorkspaceName = "triage".parse().unwrap();
+
+    assert_eq!(
+        Runs::new(state).workspace_dir(&name),
+        Path::new("/state/mxv/runs/triage")
+    );
 }

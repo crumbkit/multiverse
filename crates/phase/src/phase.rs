@@ -116,6 +116,14 @@ impl Phase {
         &self.state_dir
     }
 
+    /// Returns the path of the run record of the workspace `workspace`,
+    /// `<state_dir>/runs/<workspace>.json`, which the run store computes.
+    /// A host labels a workspace's Docker objects with it.
+    #[must_use]
+    pub fn run_record(&self, workspace: &WorkspaceId) -> PathBuf {
+        RunStore::new(&self.state_dir).path(workspace)
+    }
+
     /// Returns how long an operation waits for the lifecycle lock.
     #[must_use]
     pub const fn lock_wait(&self) -> Duration {

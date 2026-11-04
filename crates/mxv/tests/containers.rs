@@ -1127,7 +1127,7 @@ fn up_labels_containers_and_volumes_with_the_stable_id_that_the_record_holds() {
     assert_eq!(id.len(), 32);
     let run_record = setup
         .root()
-        .join(format!("state/mxv/runs/{id}.json"))
+        .join(format!("state/mxv/phase/runs/{id}.json"))
         .display()
         .to_string();
     for (kind, object) in [
