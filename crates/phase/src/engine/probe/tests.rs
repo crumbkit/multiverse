@@ -10,13 +10,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use super::{
-    Attempt, BadLogPattern, Check, CommandEnd, Failure, Goal, HostExec, LogLines, LogPattern,
-    LogWatch, Outcome, ProbeExec, Tally, Verdict, run_bounded, wait,
+    Attempt, Check, CommandEnd, Failure, Goal, HostExec, LogLines, LogWatch, Outcome, ProbeExec,
+    READY_INTERVAL, Tally, Verdict, run_bounded, wait,
 };
 use crate::cancel::Cancel;
 use crate::clock::pause;
 use crate::env::AppliedEnvironment;
-use crate::plan::probe::{Probe, ProbeCheck};
+use crate::plan::probe::{BadLogPattern, LogPattern, Probe, ProbeCheck};
 
 /// A generous upper limit for an attempt or a wait that should end much
 /// sooner, so a slow machine does not fail a timing test.
@@ -78,10 +78,17 @@ fn an_http_check_passes_on_a_2xx_status() {
         port,
         path: "/health?deep=1",
     };
-    assert_eq!(check.attempt(Duration::from_secs(2)), Attempt::Passed);
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
     let requests = requests.lock().unwrap();
-    assert!(requests[0].starts_with("GET /health?deep=1 HTTP/1.1\r\n"));
-    assert!(requests[0].contains(&format!("Host: 127.0.0.1:{port}\r\n")));
+    assert_eq!(
+        requests[0],
+        format!(
+            "GET /health?deep=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        )
+    );
 }
 
 #[test]
@@ -89,7 +96,7 @@ fn an_http_check_fails_on_a_status_outside_2xx() {
     let (port, _) = serve(b"HTTP/1.1 503 Service Unavailable\r\n\r\nbusy");
     let mut check = Check::Http { port, path: "/" };
     assert_eq!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Status(503))
     );
 }
@@ -100,7 +107,7 @@ fn an_http_check_follows_no_redirect_so_a_3xx_status_fails() {
         serve(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n");
     let mut check = Check::Http { port, path: "/" };
     assert_eq!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Status(302))
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
@@ -111,7 +118,7 @@ fn an_http_check_fails_on_a_response_that_is_not_http() {
     let (port, _) = serve(b"SSH-2.0-OpenSSH_9.6\r\n");
     let mut check = Check::Http { port, path: "/" };
     assert_eq!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::BadResponse)
     );
 }
@@ -122,7 +129,7 @@ fn an_http_check_reads_no_more_than_its_bound_of_a_status_line() {
     let (port, _) = serve(&ENDLESS);
     let mut check = Check::Http { port, path: "/" };
     assert_eq!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::BadResponse)
     );
 }
@@ -134,7 +141,7 @@ fn an_http_check_fails_when_nothing_listens() {
         path: "/",
     };
     assert!(matches!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Connect(_))
     ));
 }
@@ -145,7 +152,7 @@ fn an_http_check_times_out_on_a_server_that_never_answers() {
     let mut check = Check::Http { port, path: "/" };
     let started = Instant::now();
     assert_eq!(
-        check.attempt(Duration::from_millis(200)),
+        check.attempt(Duration::from_millis(200), &Cancel::new()),
         Attempt::Failed(Failure::TimedOut)
     );
     let took = started.elapsed();
@@ -157,10 +164,10 @@ fn an_http_check_times_out_on_a_server_that_never_answers() {
 #[test]
 fn an_http_check_refuses_a_path_with_a_space_or_a_control_character() {
     let (port, requests) = serve(b"HTTP/1.1 200 OK\r\n\r\n");
-    for path in ["/a b", "/a\r\nX-Injected: 1"] {
+    for path in ["/a b", "/a\r\nX-Injected: 1", "/caf\u{e9}", "/page#top"] {
         let mut check = Check::Http { port, path };
         assert_eq!(
-            check.attempt(Duration::from_secs(2)),
+            check.attempt(Duration::from_secs(2), &Cancel::new()),
             Attempt::Failed(Failure::BadPath)
         );
     }
@@ -171,7 +178,10 @@ fn an_http_check_refuses_a_path_with_a_space_or_a_control_character() {
 fn a_tcp_check_passes_when_the_port_accepts() {
     let (listener, port) = listener();
     let mut check = Check::Tcp { port };
-    assert_eq!(check.attempt(Duration::from_secs(2)), Attempt::Passed);
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
     drop(listener);
 }
 
@@ -181,7 +191,7 @@ fn a_tcp_check_fails_when_nothing_listens() {
         port: closed_port(),
     };
     assert!(matches!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Connect(_))
     ));
 }
@@ -234,7 +244,10 @@ fn a_command_check_passes_when_the_command_exits_0() {
         run: &run,
         exec: &exec,
     };
-    assert_eq!(check.attempt(Duration::from_secs(2)), Attempt::Passed);
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
 }
 
 #[test]
@@ -248,7 +261,7 @@ fn a_command_check_fails_with_the_command_s_exit_status() {
         exec: &exec,
     };
     assert_eq!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Exited { code: Some(3) })
     );
 }
@@ -263,8 +276,12 @@ fn a_host_command_runs_with_only_the_process_s_environment_in_its_directory() {
         home = dir.path().display()
     );
     assert_eq!(
-        exec.exec(&argv(&["sh", "-c", &script]), Duration::from_secs(2))
-            .unwrap(),
+        exec.exec(
+            &argv(&["sh", "-c", &script]),
+            Duration::from_secs(2),
+            &Cancel::new()
+        )
+        .unwrap(),
         CommandEnd::Exited { code: Some(0) }
     );
 }
@@ -281,7 +298,7 @@ fn a_command_that_outlasts_its_timeout_is_killed_and_fails() {
     };
     let started = Instant::now();
     assert_eq!(
-        check.attempt(Duration::from_millis(200)),
+        check.attempt(Duration::from_millis(200), &Cancel::new()),
         Attempt::Failed(Failure::TimedOut)
     );
     let took = started.elapsed();
@@ -298,7 +315,7 @@ fn a_bounded_command_that_a_signal_ends_reports_no_exit_code() {
     let mut command = Command::new("sh");
     command.args(["-c", "kill -KILL $$"]);
     assert_eq!(
-        run_bounded(command, Duration::from_secs(2)).unwrap(),
+        run_bounded(command, Duration::from_secs(2), &Cancel::new()).unwrap(),
         CommandEnd::Exited { code: None }
     );
 }
@@ -314,7 +331,7 @@ fn a_command_that_cannot_start_fails() {
         exec: &exec,
     };
     assert_eq!(
-        check.attempt(Duration::from_secs(2)),
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Unstarted(io::ErrorKind::NotFound))
     );
 }
@@ -373,9 +390,12 @@ fn a_log_check_passes_once_a_line_matches_and_on_every_later_attempt() {
         lines: &mut lines,
     };
     let timeout = Duration::from_secs(1);
-    assert_eq!(check.attempt(timeout), Attempt::Failed(Failure::NoMatch));
-    assert_eq!(check.attempt(timeout), Attempt::Passed);
-    assert_eq!(check.attempt(timeout), Attempt::Passed);
+    assert_eq!(
+        check.attempt(timeout, &Cancel::new()),
+        Attempt::Failed(Failure::NoMatch)
+    );
+    assert_eq!(check.attempt(timeout, &Cancel::new()), Attempt::Passed);
+    assert_eq!(check.attempt(timeout, &Cancel::new()), Attempt::Passed);
 }
 
 #[test]
@@ -386,7 +406,7 @@ fn a_log_check_fails_when_the_log_cannot_be_read() {
         lines: &mut lines,
     };
     assert_eq!(
-        check.attempt(Duration::from_secs(1)),
+        check.attempt(Duration::from_secs(1), &Cancel::new()),
         Attempt::Failed(Failure::Unreadable(io::ErrorKind::PermissionDenied))
     );
 }
@@ -425,14 +445,17 @@ fn a_tally_fails_after_the_failure_threshold_of_failures_in_a_row() {
 }
 
 #[test]
-fn a_readiness_wait_ends_when_a_late_listener_starts() {
-    let port = closed_port();
-    let opener = thread::spawn(move || {
+fn a_readiness_wait_ends_when_a_late_server_answers() {
+    let (listener, port) = listener();
+    let server = thread::spawn(move || {
         pause(Duration::from_millis(200));
-        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap()
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = [0_u8; 256];
+        let _ = stream.read(&mut head).unwrap();
+        stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
     });
-    let probe = quick(ProbeCheck::tcp("http".parse().unwrap()));
-    let mut check = Check::Tcp { port };
+    let probe = quick(ProbeCheck::http("/".to_owned()));
+    let mut check = Check::Http { port, path: "/" };
     let started = Instant::now();
     let outcome = wait(
         &probe,
@@ -444,7 +467,7 @@ fn a_readiness_wait_ends_when_a_late_listener_starts() {
     );
     assert_eq!(outcome, Outcome::Ready);
     assert!(started.elapsed() >= Duration::from_millis(150));
-    drop(opener.join().unwrap());
+    server.join().unwrap();
 }
 
 #[test]
@@ -657,4 +680,299 @@ fn no_attempt_outlasts_the_wait_s_deadline() {
     );
     assert!(started.elapsed() < SLACK);
     drop(listener);
+}
+
+#[test]
+fn an_http_check_reads_a_status_line_written_in_pauses() {
+    let (listener, port) = listener();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = [0_u8; 256];
+        let _ = stream.read(&mut head).unwrap();
+        for part in [&b"HTT"[..], b"P/1.1 2", b"00 OK\r", b"\n\r\n"] {
+            stream.write_all(part).unwrap();
+            stream.flush().unwrap();
+            pause(Duration::from_millis(60));
+        }
+    });
+    let mut check = Check::Http { port, path: "/" };
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn an_http_check_stops_reading_when_it_is_cancelled() {
+    let (listener, port) = listener();
+    let cancel = Cancel::new();
+    let canceller = cancel.clone();
+    let setter = thread::spawn(move || {
+        pause(Duration::from_millis(150));
+        canceller.cancel();
+    });
+    let mut check = Check::Http { port, path: "/" };
+    let started = Instant::now();
+    assert_eq!(
+        check.attempt(Duration::from_secs(30), &cancel),
+        Attempt::Failed(Failure::Cancelled)
+    );
+    assert!(started.elapsed() < SLACK);
+    setter.join().unwrap();
+    drop(listener);
+}
+
+/// Reports whether the process `pid` still exists, waiting up to
+/// [`SLACK`] for the system to reap it once it has no parent.
+fn gone(pid: &str) -> bool {
+    let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
+    let deadline = Instant::now() + SLACK;
+    while Instant::now() < deadline {
+        if rustix::process::test_kill_process(pid).is_err() {
+            return true;
+        }
+        pause(Duration::from_millis(20));
+    }
+    false
+}
+
+/// Runs `script` through `sh` under [`run_bounded`] with `timeout`, after
+/// it starts `sleep` in the background and writes its pid to a file, and
+/// returns how the command ended and the background pid.
+fn with_background_sleep(script: &str, timeout: Duration) -> (CommandEnd, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test prepares a command for the probe's bounded runner"
+    )]
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        &format!("sleep 30 & echo $! > '{}'; {script}", pid_file.display()),
+    ]);
+    let end = run_bounded(command, timeout, &Cancel::new()).unwrap();
+    (end, std::fs::read_to_string(pid_file).unwrap())
+}
+
+#[test]
+fn a_bounded_command_s_group_is_killed_after_a_timeout() {
+    let (end, pid) = with_background_sleep("sleep 30", Duration::from_millis(300));
+    assert_eq!(end, CommandEnd::TimedOut);
+    assert!(gone(&pid), "the background sleep {pid} is still running");
+}
+
+#[test]
+fn a_bounded_command_s_group_is_killed_after_it_exits() {
+    let (end, pid) = with_background_sleep("exit 0", Duration::from_secs(5));
+    assert_eq!(end, CommandEnd::Exited { code: Some(0) });
+    assert!(gone(&pid), "the background sleep {pid} is still running");
+}
+
+#[test]
+fn a_bounded_command_ends_when_it_is_cancelled() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test prepares a command for the probe's bounded runner"
+    )]
+    let mut command = Command::new("sleep");
+    command.arg("30");
+    let cancel = Cancel::new();
+    let canceller = cancel.clone();
+    let setter = thread::spawn(move || {
+        pause(Duration::from_millis(150));
+        canceller.cancel();
+    });
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(command, Duration::from_secs(30), &cancel).unwrap(),
+        CommandEnd::Cancelled
+    );
+    assert!(started.elapsed() < SLACK);
+    setter.join().unwrap();
+}
+
+#[test]
+fn a_bounded_command_whose_wait_fails_reports_the_failure() {
+    // nextest runs each test in a process of its own, so the only child
+    // this test reaps is the command.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test prepares a command for the probe's bounded runner"
+    )]
+    let mut command = Command::new("sleep");
+    command.arg("0.3");
+    let runner = thread::spawn(move || run_bounded(command, SLACK, &Cancel::new()).unwrap());
+    let deadline = Instant::now() + SLACK;
+    let reaped = loop {
+        match rustix::process::wait(rustix::process::WaitOptions::empty()) {
+            Ok(reaped) => break reaped,
+            Err(_) if Instant::now() < deadline => pause(Duration::from_millis(5)),
+            Err(error) => panic!("no child to reap: {error}"),
+        }
+    };
+    assert!(reaped.is_some());
+    assert!(matches!(
+        runner.join().unwrap(),
+        CommandEnd::WaitFailed { .. }
+    ));
+}
+
+/// A probe command that fails until its `passes_from`th run.
+struct Counted {
+    runs: std::sync::atomic::AtomicU32,
+    passes_from: u32,
+}
+
+impl ProbeExec for Counted {
+    fn exec(&self, _: &[String], _: Duration, _: &Cancel) -> io::Result<CommandEnd> {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(CommandEnd::Exited {
+            code: Some(if run >= self.passes_from { 0 } else { 1 }),
+        })
+    }
+}
+
+#[test]
+fn a_readiness_wait_attempts_at_the_ready_interval_whatever_the_period() {
+    let exec = Counted {
+        runs: 0.into(),
+        passes_from: 3,
+    };
+    let run = argv(&["check"]);
+    let mut check = Check::Command {
+        run: &run,
+        exec: &exec,
+    };
+    let mut probe = quick(ProbeCheck::command(run.clone()));
+    probe.period = Duration::from_secs(60);
+    let started = Instant::now();
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Ready,
+        Instant::now() + Duration::from_secs(30),
+        &mut never_ended(),
+        &Cancel::new(),
+    );
+    assert_eq!(outcome, Outcome::Ready);
+    let took = started.elapsed();
+    assert!(
+        took >= READY_INTERVAL * 2 - Duration::from_millis(20),
+        "took {took:?}"
+    );
+    assert!(took < SLACK, "took {took:?}");
+}
+
+#[test]
+fn a_liveness_wait_attempts_once_each_period() {
+    let exec = Counted {
+        runs: 0.into(),
+        passes_from: u32::MAX,
+    };
+    let run = argv(&["check"]);
+    let mut check = Check::Command {
+        run: &run,
+        exec: &exec,
+    };
+    let mut probe = thresholds(1, 3);
+    probe.period = Duration::from_millis(250);
+    let started = Instant::now();
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Failing,
+        Instant::now() + SLACK,
+        &mut never_ended(),
+        &Cancel::new(),
+    );
+    assert!(matches!(outcome, Outcome::Failing { .. }), "{outcome:?}");
+    let took = started.elapsed();
+    assert!(took >= Duration::from_millis(480), "took {took:?}");
+    assert!(took < SLACK, "took {took:?}");
+}
+
+#[test]
+fn a_process_that_logs_its_ready_line_and_ends_counts_as_ready() {
+    let mut lines = Batches::of(vec![Ok(vec!["ready"])]);
+    let probe = quick(ProbeCheck::log("ready".to_owned()));
+    let mut check = Check::Log {
+        watch: LogWatch::new(LogPattern::new("ready").unwrap()),
+        lines: &mut lines,
+    };
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Ready,
+        Instant::now() + SLACK,
+        &mut || true,
+        &Cancel::new(),
+    );
+    assert_eq!(outcome, Outcome::Ready);
+}
+
+#[test]
+fn a_readiness_wait_makes_one_last_attempt_when_a_matching_line_arrives_at_its_deadline() {
+    let mut lines = Batches::of(vec![Ok(vec!["ready"])]);
+    let probe = quick(ProbeCheck::log("ready".to_owned()));
+    let mut check = Check::Log {
+        watch: LogWatch::new(LogPattern::new("ready").unwrap()),
+        lines: &mut lines,
+    };
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Ready,
+        Instant::now(),
+        &mut never_ended(),
+        &Cancel::new(),
+    );
+    assert_eq!(outcome, Outcome::Ready);
+}
+
+#[test]
+fn a_readiness_wait_without_a_matching_line_at_its_deadline_is_not_ready() {
+    let mut lines = Batches::of(vec![Ok(vec!["starting"])]);
+    let probe = quick(ProbeCheck::log("ready".to_owned()));
+    let mut check = Check::Log {
+        watch: LogWatch::new(LogPattern::new("ready").unwrap()),
+        lines: &mut lines,
+    };
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Ready,
+        Instant::now(),
+        &mut never_ended(),
+        &Cancel::new(),
+    );
+    assert!(matches!(outcome, Outcome::NotReady { .. }), "{outcome:?}");
+}
+
+#[test]
+fn a_matched_log_reaches_the_success_threshold_without_waiting_an_interval() {
+    let mut lines = Batches::of(vec![Ok(vec!["ready"])]);
+    let mut probe = quick(ProbeCheck::log("ready".to_owned()));
+    probe.period = Duration::from_secs(60);
+    probe.success_threshold = NonZeroU32::new(3).unwrap();
+    let mut check = Check::Log {
+        watch: LogWatch::new(LogPattern::new("ready").unwrap()),
+        lines: &mut lines,
+    };
+    let started = Instant::now();
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Ready,
+        Instant::now() + SLACK,
+        &mut never_ended(),
+        &Cancel::new(),
+    );
+    assert_eq!(outcome, Outcome::Ready);
+    assert!(
+        started.elapsed() < READY_INTERVAL,
+        "took {:?}",
+        started.elapsed()
+    );
 }

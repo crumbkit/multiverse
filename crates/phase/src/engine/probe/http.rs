@@ -2,12 +2,18 @@
 //! `TcpStream`. An HTTP check writes one minimal HTTP/1.1 request and reads
 //! only the response's status line, so phase needs no HTTP client.
 
-use std::io::{self, Read as _, Write as _};
+use std::io::{self, Read, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use super::{Attempt, Failure, MOST_RESPONSE_BYTES};
+use crate::cancel::Cancel;
 use crate::clock::now;
+use crate::plan::probe::is_sendable_path;
+
+/// The longest that one read of a response blocks, so the read notices a
+/// cancel or its deadline in good time.
+const READ_SLICE: Duration = Duration::from_millis(50);
 
 /// Connects to 127.0.0.1 at `port` within `timeout`.
 pub(super) fn connect(port: u16, timeout: Duration) -> Result<TcpStream, Failure> {
@@ -18,30 +24,38 @@ pub(super) fn connect(port: u16, timeout: Duration) -> Result<TcpStream, Failure
     })
 }
 
+/// Returns the request that an HTTP check sends for `path` to `port`.
+pub(super) fn request(port: u16, path: &str) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+    )
+}
+
 /// Sends `GET path` to 127.0.0.1 at `port` and passes on a 2xx status,
-/// all within `timeout`.
-pub(super) fn attempt(port: u16, path: &str, timeout: Duration) -> Attempt {
-    get(port, path, timeout).into()
+/// all within `timeout` and until `cancel` is set.
+pub(super) fn attempt(port: u16, path: &str, timeout: Duration, cancel: &Cancel) -> Attempt {
+    get(port, path, timeout, cancel).into()
 }
 
 /// Sends the request and checks the status, failing with the reason.
-fn get(port: u16, path: &str, timeout: Duration) -> Result<(), Failure> {
-    if path
-        .chars()
-        .any(|character| character == ' ' || character.is_control())
-    {
+fn get(port: u16, path: &str, timeout: Duration, cancel: &Cancel) -> Result<(), Failure> {
+    // The plan refuses such a path. This check keeps one from reaching the
+    // request line if a caller builds a check without a plan.
+    if !is_sendable_path(path) {
         return Err(Failure::BadPath);
     }
     let deadline = now() + timeout;
     let mut stream = connect(port, timeout)?;
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-    );
     stream
         .set_write_timeout(Some(left(deadline)?))
         .map_err(exchange)?;
-    stream.write_all(request.as_bytes()).map_err(exchange)?;
-    let line = status_line(&mut stream, deadline)?;
+    stream
+        .write_all(request(port, path).as_bytes())
+        .map_err(exchange)?;
+    stream
+        .set_read_timeout(Some(READ_SLICE))
+        .map_err(exchange)?;
+    let line = status_line(&mut stream, deadline, cancel)?;
     match status(&line) {
         Some(code) if (200..300).contains(&code) => Ok(()),
         Some(code) => Err(Failure::Status(code)),
@@ -49,30 +63,47 @@ fn get(port: u16, path: &str, timeout: Duration) -> Result<(), Failure> {
     }
 }
 
-/// Reads the response until the end of its status line, at most
-/// [`MOST_RESPONSE_BYTES`] bytes, before `deadline`.
-fn status_line(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Failure> {
+/// Reads `response` until the end of its status line, at most
+/// [`MOST_RESPONSE_BYTES`] bytes, before `deadline` and until `cancel` is
+/// set. The line may end with CRLF or a bare LF, and the line returned
+/// holds neither. A read that times out is tried again until the deadline,
+/// so `response` should time out its reads after a short slice.
+pub(super) fn status_line(
+    response: &mut impl Read,
+    deadline: Instant,
+    cancel: &Cancel,
+) -> Result<Vec<u8>, Failure> {
     let mut read = Vec::new();
     let mut buffer = [0_u8; 512];
     loop {
-        if let Some(end) = read.windows(2).position(|pair| pair == b"\r\n") {
+        if let Some(end) = read.iter().position(|byte| *byte == b'\n') {
             read.truncate(end);
+            if read.last() == Some(&b'\r') {
+                read.pop();
+            }
             return Ok(read);
         }
         if read.len() >= MOST_RESPONSE_BYTES {
             return Err(Failure::BadResponse);
         }
-        stream
-            .set_read_timeout(Some(left(deadline)?))
-            .map_err(exchange)?;
+        if cancel.is_cancelled() {
+            return Err(Failure::Cancelled);
+        }
+        left(deadline)?;
         let room = MOST_RESPONSE_BYTES
             .saturating_sub(read.len())
             .min(buffer.len());
         let into = buffer.get_mut(..room).ok_or(Failure::BadResponse)?;
-        match stream.read(into) {
+        match response.read(into) {
             Ok(0) => return Err(Failure::BadResponse),
             Ok(count) => read.extend(into.iter().take(count)),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
             Err(error) => return Err(exchange(error)),
         }
     }
@@ -113,7 +144,11 @@ fn exchange(error: io::Error) -> Failure {
 
 #[cfg(test)]
 mod tests {
-    use super::status;
+    use std::io::{self, Read};
+    use std::time::{Duration, Instant};
+
+    use super::{Failure, MOST_RESPONSE_BYTES, status, status_line};
+    use crate::cancel::Cancel;
 
     #[test]
     fn a_status_line_gives_its_code() {
@@ -127,5 +162,43 @@ mod tests {
         assert_eq!(status(b"HTTP/1.1 20"), None);
         assert_eq!(status(b"HTTP/1.1 2000 OK"), None);
         assert_eq!(status(b"SSH-2.0-OpenSSH"), None);
+    }
+
+    /// An endless response of `x` that counts the bytes read from it.
+    struct Endless(usize);
+
+    impl Read for Endless {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            buffer.fill(b'x');
+            self.0 += buffer.len();
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn a_status_line_read_takes_no_more_than_its_bound_from_the_response() {
+        let mut response = Endless(0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let read = status_line(&mut response, deadline, &Cancel::new());
+
+        assert_eq!(read, Err(Failure::BadResponse));
+        assert!(response.0 <= MOST_RESPONSE_BYTES, "read {}", response.0);
+    }
+
+    #[test]
+    fn a_status_line_may_end_with_a_bare_line_feed() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut bare = &b"HTTP/1.1 200 OK\nServer: x\n\n"[..];
+        let mut crlf = &b"HTTP/1.1 200 OK\r\n\r\n"[..];
+
+        assert_eq!(
+            status_line(&mut bare, deadline, &Cancel::new()).unwrap(),
+            b"HTTP/1.1 200 OK"
+        );
+        assert_eq!(
+            status_line(&mut crlf, deadline, &Cancel::new()).unwrap(),
+            b"HTTP/1.1 200 OK"
+        );
     }
 }

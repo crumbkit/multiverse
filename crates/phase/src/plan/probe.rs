@@ -1,9 +1,11 @@
 //! The readiness probe of a process, in the vocabulary of process-compose.
 //! The engine's probe module runs it.
 
+use std::fmt;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::name::PortName;
@@ -102,7 +104,8 @@ pub enum ProbeCheck {
     /// returns a 2xx status. The process has a port.
     #[non_exhaustive]
     Http {
-        /// The request path, which starts with `/`.
+        /// The request path, which starts with `/` and holds only printable
+        /// ASCII characters other than space and `#`.
         path: String,
     },
     /// A TCP connection to the named port of the app on 127.0.0.1 succeeds.
@@ -157,4 +160,89 @@ impl ProbeCheck {
     pub const fn command(run: Vec<String>) -> Self {
         Self::Command { run }
     }
+}
+
+/// A regular expression that a log probe matches against each new line.
+/// A line matches when the expression matches any part of it.
+#[derive(Clone, Debug)]
+pub(crate) struct LogPattern(Regex);
+
+impl LogPattern {
+    /// Compiles `pattern`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadLogPattern::Empty`] when `pattern` is empty, and
+    /// [`BadLogPattern::Invalid`] with the compiler's one-line reason when
+    /// it is not a regular expression.
+    pub(crate) fn new(pattern: &str) -> Result<Self, BadLogPattern> {
+        if pattern.is_empty() {
+            return Err(BadLogPattern::Empty);
+        }
+        Regex::new(pattern)
+            .map(Self)
+            .map_err(|error| BadLogPattern::Invalid(regex_problem(&error)))
+    }
+
+    /// Returns the pattern as the plan writes it.
+    pub(crate) fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Reports whether `line` matches the pattern.
+    pub(crate) fn is_match(&self, line: &str) -> bool {
+        self.0.is_match(line)
+    }
+}
+
+impl PartialEq for LogPattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for LogPattern {}
+
+/// The reason a log probe's pattern cannot be used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BadLogPattern {
+    /// The pattern is empty, so every line would match it.
+    Empty,
+    /// The pattern is not a regular expression, for the reason given.
+    Invalid(String),
+}
+
+impl fmt::Display for BadLogPattern {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("the log pattern is empty"),
+            Self::Invalid(problem) => {
+                write!(
+                    formatter,
+                    "the log pattern is not a regular expression: {problem}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BadLogPattern {}
+
+/// Returns the one-line reason in `error`, which regex reports over several
+/// lines with the pattern and a caret.
+fn regex_problem(error: &regex::Error) -> String {
+    let text = error.to_string();
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("error: "))
+        .map_or_else(
+            || text.split_whitespace().collect::<Vec<_>>().join(" "),
+            str::to_owned,
+        )
+}
+
+/// Reports whether `path` can be sent as written in an HTTP request line:
+/// it holds only ASCII characters, and no space, control character or `#`.
+pub(crate) fn is_sendable_path(path: &str) -> bool {
+    path.chars()
+        .all(|character| character.is_ascii_graphic() && character != '#')
 }

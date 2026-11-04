@@ -9,10 +9,13 @@
 //!   [`ProbeExec`] that runs a command where the process runs, and the
 //!   [`LogLines`] that hands over the process's new log lines. An attempt
 //!   holds no clock and no thread, and ends within the probe's timeout.
-//! - [`wait`] runs a check under the probe's period and thresholds until
-//!   the process is ready, or for liveness until it fails, or until the
-//!   deadline passes, the process ends or the caller cancels. Every pause
-//!   goes through [`crate::clock`].
+//! - [`wait`] runs a check under the probe's thresholds until the process
+//!   is ready, or for liveness until it fails, or until the deadline
+//!   passes, the process ends or the caller cancels. A readiness wait
+//!   attempts the check every [`READY_INTERVAL`], or every period when the
+//!   period is shorter, so `up` learns of readiness as soon as mxv's
+//!   20 ms polling did, within one interval. A liveness wait attempts it
+//!   once each period. Every pause goes through [`crate::clock`].
 //!
 //! # The checks
 //!
@@ -26,14 +29,22 @@
 //!   [`HostExec`] for a host process, and `docker exec` in the container
 //!   module for a container process. The command's values are separate
 //!   arguments that no shell reads, and no environment value is ever an
-//!   argument.
+//!   argument. When a `docker exec` probe times out, phase kills the local
+//!   `docker` client, and the command inside the container may keep
+//!   running.
 //! - `log` passes once the process has written a line, after phase
 //!   started it, that the probe's regular expression matches. A match
-//!   counts for every later attempt, because the line stays written.
+//!   counts for every later attempt, because the line stays written, so a
+//!   readiness wait reaches the success threshold with attempts in a row
+//!   that do not wait an interval. The wait checks the log for a match
+//!   before it checks whether the process ended, so a process that writes
+//!   its ready line and exits within one poll counts as ready.
 
 use std::fmt;
 use std::io;
 use std::time::Duration;
+
+use crate::cancel::Cancel;
 
 mod command;
 mod http;
@@ -44,8 +55,8 @@ mod runner;
 mod tests;
 
 pub(crate) use command::{CommandEnd, HostExec, ProbeExec, run_bounded};
-pub(crate) use log::{BadLogPattern, LogLines, LogPattern, LogWatch};
-pub(crate) use runner::{Goal, Outcome, Tally, Verdict, wait};
+pub(crate) use log::{LogLines, LogWatch};
+pub(crate) use runner::{Goal, Outcome, READY_INTERVAL, Tally, Verdict, wait};
 
 /// The most bytes of an HTTP response that a probe reads while it looks
 /// for the status line. A response whose status line is longer fails the
@@ -100,21 +111,22 @@ impl fmt::Debug for Check<'_> {
 }
 
 impl Check<'_> {
-    /// Makes one attempt of the check, which ends within `timeout`, and
-    /// returns whether it passed or why it failed.
-    pub(crate) fn attempt(&mut self, timeout: Duration) -> Attempt {
+    /// Makes one attempt of the check, which ends within `timeout` or soon
+    /// after `cancel` is set, and returns whether it passed or why it
+    /// failed.
+    pub(crate) fn attempt(&mut self, timeout: Duration, cancel: &Cancel) -> Attempt {
         match self {
-            Self::Http { port, path } => http::attempt(*port, path, timeout),
+            Self::Http { port, path } => http::attempt(*port, path, timeout, cancel),
             Self::Tcp { port } => http::connect(*port, timeout).map(drop).into(),
-            Self::Command { run, exec } => command::attempt(*exec, run, timeout),
+            Self::Command { run, exec } => command::attempt(*exec, run, timeout, cancel),
             Self::Log { watch, lines } => watch.attempt(*lines),
         }
     }
 
     /// Reads what arrived since the last attempt without making one, and
     /// reports whether an attempt now would pass. Only a log check learns
-    /// anything between attempts, so the runner tries it at once when a
-    /// matching line arrives.
+    /// anything between attempts, so the runner attempts it at once when a
+    /// matching line has arrived.
     pub(crate) fn poll(&mut self) -> bool {
         match self {
             Self::Log { watch, lines } => watch.poll(*lines),
@@ -156,11 +168,16 @@ pub(crate) enum Failure {
     BadResponse,
     /// The response's status was not 2xx.
     Status(u16),
-    /// The request path holds a space or a control character, so phase
-    /// does not send it.
+    /// The request path holds a space, a control character, a character
+    /// outside ASCII or `#`, so phase does not send it.
     BadPath,
     /// The command could not be started.
     Unstarted(io::ErrorKind),
+    /// Waiting for the command failed, so its end is unknown. Its group was
+    /// killed.
+    WaitFailed(io::ErrorKind),
+    /// The caller cancelled the attempt.
+    Cancelled,
     /// The command exited with a status other than 0, or a signal ended it
     /// and `code` is `None`.
     Exited {
@@ -181,10 +198,14 @@ impl fmt::Display for Failure {
             Self::Exchange(kind) => write!(formatter, "the HTTP exchange failed: {kind}"),
             Self::BadResponse => formatter.write_str("the response had no HTTP/1 status line"),
             Self::Status(status) => write!(formatter, "the response status was {status}"),
-            Self::BadPath => {
-                formatter.write_str("the request path holds a space or a control character")
-            }
+            Self::BadPath => formatter.write_str(
+                "the request path holds a space, a control character, a character outside ASCII or `#`",
+            ),
             Self::Unstarted(kind) => write!(formatter, "the command did not start: {kind}"),
+            Self::WaitFailed(kind) => {
+                write!(formatter, "the wait for the command failed: {kind}")
+            }
+            Self::Cancelled => formatter.write_str("the attempt was cancelled"),
             Self::Exited { code: Some(code) } => {
                 write!(formatter, "the command exited with status {code}")
             }

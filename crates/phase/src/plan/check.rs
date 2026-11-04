@@ -5,10 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use super::probe::ProbeCheck;
+use super::probe::{BadLogPattern, LogPattern, ProbeCheck, is_sendable_path};
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, ProcessKind, ProcessPlan, RunnerKind};
-use crate::engine::probe::{BadLogPattern, LogPattern};
 use crate::name::{AppName, PortName, ProcessName};
 use crate::source::Source;
 
@@ -188,6 +187,9 @@ pub enum ProcessProblem {
     HttpProbeWithoutPort,
     /// The HTTP probe's path does not start with `/`.
     HttpPathWithoutSlash,
+    /// The HTTP probe's path holds a space, a control character, a
+    /// character outside ASCII or `#`, so phase cannot send it as written.
+    HttpPathUnsendable,
     /// The log probe's pattern is empty.
     EmptyLogPattern,
     /// The log probe's pattern is not a regular expression.
@@ -372,6 +374,9 @@ impl fmt::Display for ProcessProblem {
             Self::HttpPathWithoutSlash => {
                 formatter.write_str("its http probe's path does not start with `/`")
             }
+            Self::HttpPathUnsendable => formatter.write_str(
+                "its http probe's path holds a space, a control character, a character outside ASCII or `#`",
+            ),
             Self::EmptyLogPattern => formatter.write_str("its log probe's pattern is empty"),
             Self::BadLogPattern { reason } => write!(
                 formatter,
@@ -708,6 +713,9 @@ fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
         }
         ProbeCheck::Http { path } if !path.starts_with('/') => {
             Err(ProcessProblem::HttpPathWithoutSlash)
+        }
+        ProbeCheck::Http { path } if !is_sendable_path(path) => {
+            Err(ProcessProblem::HttpPathUnsendable)
         }
         ProbeCheck::Tcp { port } if !app.ports.contains_key(port) => {
             Err(ProcessProblem::UnknownPort(port.clone()))

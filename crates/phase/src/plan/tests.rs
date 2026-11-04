@@ -228,6 +228,30 @@ fn a_plan_refuses_an_http_probe_path_without_a_leading_slash() {
 }
 
 #[test]
+fn a_plan_refuses_an_http_probe_path_that_cannot_be_sent_as_written() {
+    for path in ["/a b", "/a\r\nX: 1", "/caf\u{e9}", "/page#top", "/\u{7f}"] {
+        let mut api = host_app("api");
+        api.processes[0].ready = Some(Probe::new(ProbeCheck::http(path.to_owned())));
+
+        assert_eq!(
+            process_problem(api),
+            ProcessProblem::HttpPathUnsendable,
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_accepts_an_http_probe_path_with_a_query() {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::http(
+        "/health?deep=1&x=%20".to_owned(),
+    )));
+
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
 fn a_plan_refuses_a_tcp_probe_on_a_port_the_app_lacks() {
     let mut api = host_app("api");
     api.processes[0].ready = Some(Probe::new(ProbeCheck::Tcp {

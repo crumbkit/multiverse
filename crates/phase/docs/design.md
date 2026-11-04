@@ -316,11 +316,26 @@ phase uses the probe and restart vocabulary of process-compose:
 
 A process with no readiness probe is ready as soon as it starts.
 
-A readiness wait during `up` attempts the probe once each period until the
-passes in a row reach the success threshold. Failures do not end it, and the
-process's ready timeout bounds it. A liveness wait in a keeper ends when the
-failures in a row reach the failure threshold. A command probe of a
-container process runs inside its container through `docker exec`.
+A readiness wait during `up` attempts the probe every 100 ms, or every
+period when the period is shorter, until the passes in a row reach the
+success threshold. Decided 4 November 2026: mxv polled a starting process
+every 20 ms, and the first release must not make `up` slower, so readiness
+does not wait a whole period between attempts. Failures do not end a
+readiness wait, and the process's ready timeout bounds it. A log probe's
+match stays matched, so its later attempts pass at once and reach the
+success threshold without an interval between them. The wait checks the
+log for a match before it checks whether the process ended, so a process
+that writes its ready line and then exits counts as ready.
+
+A liveness wait in a keeper attempts the probe once each period, and ends
+when the failures in a row reach the failure threshold.
+
+A command probe of a host process runs in its own process group, and phase
+kills that group however the command ends. A command probe of a container
+process runs inside its container through `docker exec`. When it times
+out, phase kills only the local `docker` client, and the command inside
+the container may keep running. The container module may wrap the command
+in the image's `timeout` program where the image has one.
 
 ### Containers
 
