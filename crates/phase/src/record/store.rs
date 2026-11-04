@@ -27,7 +27,9 @@ use serde::Deserialize;
 use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::run::{EntryState, ObjectKey, RUN_VERSION, RunRecord, Started, Unplanned};
+use crate::record::run::{
+    EntryState, HostProcess, ObjectKey, RUN_VERSION, RunRecord, Started, Unplanned,
+};
 
 #[cfg(test)]
 mod tests;
@@ -424,6 +426,25 @@ impl<'s> Journal<'s> {
         let mut record = self.current(key)?;
         record
             .mark_started(key, started)
+            .map_err(|unplanned| self.unplanned(&unplanned))?;
+        self.commit(record)
+    }
+
+    /// Records that the keeper restarted the host process `key` as `host`,
+    /// after `restarts` restarts in all.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn restarted(
+        &mut self,
+        key: &ObjectKey,
+        host: HostProcess,
+        restarts: u32,
+    ) -> Result<(), PhaseError> {
+        let mut record = self.current(key)?;
+        record
+            .mark_restarted(key, host, restarts)
             .map_err(|unplanned| self.unplanned(&unplanned))?;
         self.commit(record)
     }

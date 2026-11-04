@@ -353,3 +353,44 @@ fn a_record_that_names_pid_1_or_group_0_is_unreadable() {
         assert_eq!(error.code(), "phase::record::unreadable", "{to}");
     }
 }
+
+#[test]
+fn a_restart_records_the_new_process_and_the_count_of_restarts() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    assert_eq!(on_disk(&store).processes[0].restarts, 0);
+    let again = HostProcess {
+        pid: 4343,
+        group: 4343,
+        ..host()
+    };
+
+    journal.restarted(&server(), again.clone(), 3).unwrap();
+
+    let record = on_disk(&store);
+    assert_eq!(record.state(&server()), Some(EntryState::Running));
+    assert_eq!(record.processes[0].host, Some(again));
+    assert_eq!(record.processes[0].restarts, 3);
+}
+
+#[test]
+fn a_record_without_restart_counts_reads_as_no_restarts() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    json["processes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("restarts");
+    write_file(&path, &json.to_string());
+
+    assert_eq!(on_disk(&store).processes[0].restarts, 0);
+}
