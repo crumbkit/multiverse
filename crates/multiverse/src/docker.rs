@@ -40,7 +40,9 @@
 //! [`Error::DockerForeign`] when they do not name this store, workspace and
 //! object. mxv never touches such an object. The labels' check is the only
 //! way to get an [`OwnedContainer`] or an [`OwnedVolume`], and the
-//! functions that stop, remove, delete or follow an object take one.
+//! functions that stop, remove, delete or follow an object take one. An
+//! anonymous volume carries no such labels, so an [`AnonymousVolume`]
+//! comes from the inspection of the owned container that mounts it.
 //!
 //! Each docker command runs with a deadline, after which mxv kills it and
 //! fails with [`Error::DockerFailed`].
@@ -52,7 +54,10 @@
 //! writes the compose file, holds the values of the containers' variables
 //! in a [`ComposeEnv`], and runs `docker compose up`. `lifecycle` keeps the
 //! run records of a workspace's containers, and [`Lifecycle`] is what
-//! [`crate::Runs`] calls.
+//! [`crate::Runs`] calls. A [`Prepared`] from [`Lifecycle::prepare`] or
+//! [`Lifecycle::existing`] is the only way to name the workspace's scope,
+//! and the caller converts the manifest's containers into
+//! [`ContainerSpecs`], so the module reads no manifest.
 
 mod command;
 mod compose;
@@ -63,10 +68,17 @@ mod objects;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use crate::docker::lifecycle::{Lifecycle, Start};
-pub(crate) use crate::docker::names::{Scope, ServiceName, VolumeName};
+pub(crate) use crate::docker::compose::{
+    ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort,
+};
+pub(crate) use crate::docker::lifecycle::{Lifecycle, Prepared, Start, WorkspaceVolumes};
+pub(crate) use crate::docker::names::{ServiceName, VolumeKey};
 pub(crate) use crate::docker::objects::{ContainerState, OwnedContainer, answers, reinspect};
 #[cfg(doc)]
-use crate::docker::{compose::ComposeEnv, objects::OwnedVolume};
+use crate::docker::{
+    compose::ComposeEnv,
+    names::Scope,
+    objects::{AnonymousVolume, OwnedVolume},
+};
 #[cfg(doc)]
 use crate::error::Error;

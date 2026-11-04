@@ -9,9 +9,12 @@
 use std::ffi::OsStr;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::name::{MOST_NAME_BYTES, WorkspaceName};
+#[cfg(doc)]
+use crate::name::MOST_NAME_BYTES;
+use crate::name::{WorkspaceName, is_unit_name};
 
 /// The label that names the store id of an object's state directory.
 pub(crate) const STORE_LABEL: &str = "mxv.store";
@@ -30,6 +33,17 @@ const SHORT_ID: usize = 8;
 
 /// The number of hex digits of a container id.
 const ID_DIGITS: usize = 64;
+
+/// The number of hex digits of a store id.
+const STORE_DIGITS: usize = 32;
+
+/// Reports whether `text` is `digits` lowercase hex digits.
+fn is_hex(text: &str, digits: usize) -> bool {
+    text.len() == digits
+        && text
+            .chars()
+            .all(|digit| digit.is_ascii_digit() || ('a'..='f').contains(&digit))
+}
 
 /// The text of a name that a constructor refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,12 +90,51 @@ macro_rules! name_type {
     };
 }
 
+/// The id of a state directory, 32 lowercase hex digits, which labels its
+/// containers and volumes. One docker daemon can serve several state
+/// directories, and the id tells their objects apart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct StoreId(String);
+
+name_type!(StoreId, as_str);
+
+impl StoreId {
+    /// Returns the store id `text`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadDockerName`] when `text` is not 32 lowercase hex
+    /// digits.
+    pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
+        if is_hex(text, STORE_DIGITS) {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(BadDockerName(text.to_owned()))
+        }
+    }
+}
+
+impl TryFrom<String> for StoreId {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        Self::new(&text).map_err(|_| format!("{text:?} is not 32 lowercase hex digits"))
+    }
+}
+
+impl From<StoreId> for String {
+    fn from(id: StoreId) -> Self {
+        id.0
+    }
+}
+
 /// The name of a workspace's compose project, `mxv-<id8>-<workspace>`,
 /// which only [`Scope::project`] builds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectName(String);
 
-name_type!(ProjectName);
+name_type!(ProjectName, as_str);
 
 /// The name of a manifest container, which is also its compose service's
 /// name: 1 to [`MOST_NAME_BYTES`] ASCII letters, digits, `-` and `_`,
@@ -100,15 +153,31 @@ impl ServiceName {
     ///
     /// Returns [`BadDockerName`] when `text` breaks the rules of the type.
     pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
-        let valid = text.len() <= MOST_NAME_BYTES
-            && text
-                .chars()
-                .next()
-                .is_some_and(|first| first.is_ascii_alphanumeric())
-            && text
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character));
-        if valid {
+        if is_unit_name(text) {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(BadDockerName(text.to_owned()))
+        }
+    }
+}
+
+/// The name of a named volume in the manifest, such as `data`, which
+/// follows the rule of a [`ServiceName`]. Its docker name is
+/// `<project>.<volume>`, which [`Scope::volume_name`] builds.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct VolumeKey(String);
+
+name_type!(VolumeKey, as_str);
+
+impl VolumeKey {
+    /// Returns the volume name `text` of a manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadDockerName`] when `text` breaks the rules of a
+    /// [`ServiceName`].
+    pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
+        if is_unit_name(text) {
             Ok(Self(text.to_owned()))
         } else {
             Err(BadDockerName(text.to_owned()))
@@ -172,11 +241,7 @@ impl ContainerId {
     /// Returns [`BadDockerName`] when `text` is not 64 lowercase hex
     /// digits.
     pub(crate) fn new(text: &str) -> Result<Self, BadDockerName> {
-        let valid = text.len() == ID_DIGITS
-            && text
-                .chars()
-                .all(|digit| digit.is_ascii_digit() || ('a'..='f').contains(&digit));
-        if valid {
+        if is_hex(text, ID_DIGITS) {
             Ok(Self(text.to_owned()))
         } else {
             Err(BadDockerName(text.to_owned()))
@@ -189,7 +254,7 @@ impl ContainerId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Scope {
     /// The store id.
-    store: String,
+    store: StoreId,
     /// The workspace.
     workspace: WorkspaceName,
 }
@@ -197,9 +262,9 @@ pub(crate) struct Scope {
 impl Scope {
     /// Returns the scope of the workspace `workspace` in the store with the
     /// id `store`.
-    pub(crate) fn new(store: &str, workspace: &WorkspaceName) -> Self {
+    pub(super) fn new(store: &StoreId, workspace: &WorkspaceName) -> Self {
         Self {
-            store: store.to_owned(),
+            store: store.clone(),
             workspace: workspace.clone(),
         }
     }
@@ -208,7 +273,7 @@ impl Scope {
     /// `mxv-<id8>-<workspace>`, with the workspace's `_` written `__` and
     /// its `.` written `_d`.
     pub(crate) fn project(&self) -> ProjectName {
-        let short = self.store.get(..SHORT_ID).unwrap_or(&self.store);
+        let short = self.store.0.get(..SHORT_ID).unwrap_or(&self.store.0);
         let workspace = self
             .workspace
             .as_str()
@@ -223,27 +288,22 @@ impl Scope {
         format!("{}.", self.project())
     }
 
-    /// Returns the docker name of the scope's object `object`,
-    /// `<project>.<object>`.
-    pub(super) fn object_name(&self, object: &str) -> String {
-        format!("{}{object}", self.prefix())
-    }
-
-    /// Returns the name of the container of the service `service`.
+    /// Returns the name of the container of the service `service`,
+    /// `<project>.<service>`.
     pub(crate) fn container_name(&self, service: &ServiceName) -> ContainerName {
-        ContainerName(self.object_name(service.as_str()))
+        ContainerName(format!("{}{service}", self.prefix()))
     }
 
-    /// Returns the name of the volume `volume`, a volume name of the
-    /// manifest.
-    pub(crate) fn volume_name(&self, volume: &str) -> VolumeName {
-        VolumeName(self.object_name(volume))
+    /// Returns the docker name of the manifest's volume `volume`,
+    /// `<project>.<volume>`.
+    pub(crate) fn volume_name(&self, volume: &VolumeKey) -> VolumeName {
+        VolumeName(format!("{}{volume}", self.prefix()))
     }
 
     /// Returns the labels of the scope's object `object` under `label`.
     pub(super) fn labels(&self, label: &str, object: &str) -> Value {
         json!({
-            STORE_LABEL: self.store,
+            STORE_LABEL: self.store.as_str(),
             WORKSPACE_LABEL: self.workspace.as_str(),
             label: object,
         })

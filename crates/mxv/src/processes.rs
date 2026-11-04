@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::{
     DownOutcome, Follower, Lock, Manifest, ProcessStatus, Runs, Store, Unstoppable, UpOutcome,
-    Workspace, WorkspaceName, tail,
+    Volumes, Workspace, WorkspaceName, tail,
 };
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
@@ -555,7 +555,7 @@ pub(crate) fn forget(environment: &Environment, name: &WorkspaceName) -> Result<
 pub(crate) fn volumes(
     environment: &Environment,
     name: &WorkspaceName,
-) -> Result<Vec<String>, MxvFailure> {
+) -> Result<Volumes, MxvFailure> {
     Ok(Runs::new(environment.runs()?).volumes(name)?)
 }
 
@@ -573,7 +573,7 @@ pub(crate) fn containers(
 pub(crate) fn delete_volumes(
     environment: &Environment,
     name: &WorkspaceName,
-    volumes: &[String],
+    volumes: Volumes,
 ) -> Result<(), MxvFailure> {
     Ok(Runs::new(environment.runs()?).delete_volumes(name, volumes)?)
 }

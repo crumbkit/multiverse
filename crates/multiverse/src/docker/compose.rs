@@ -9,16 +9,52 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::docker::command::{PULL_DEADLINE, message, run};
-use crate::docker::names::{CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL};
+use crate::docker::names::{CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey};
 use crate::docker::objects::inspect_named;
 use crate::error::Error;
-use crate::manifest::Container;
+use crate::redacted::Redacted;
 
 /// The value of a container's variable. It implements neither `Debug`,
 /// `Display` nor `Serialize`, so it reaches no log, error or file. Only
 /// the environment of the `docker compose` process reads it.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ComposeValue(String);
+
+impl From<&Redacted> for ComposeValue {
+    fn from(value: &Redacted) -> Self {
+        Self(value.reveal().to_owned())
+    }
+}
+
+/// A container port that a [`ContainerSpec`] publishes as a named port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PublishedPort {
+    /// The TCP port inside the container.
+    pub(crate) container: u16,
+    /// The name of the port whose host port it is published on.
+    pub(crate) port: String,
+}
+
+/// What the compose file declares for one service: the docker module's
+/// own copy of a manifest container, which the caller builds.
+#[derive(Clone)]
+pub(crate) struct ContainerSpec {
+    /// The image.
+    pub(crate) image: String,
+    /// The arguments that replace the image's command, or `None` to keep
+    /// it.
+    pub(crate) command: Option<Vec<String>>,
+    /// The variables that the container receives, by name.
+    pub(crate) env: BTreeMap<String, ComposeValue>,
+    /// The container ports that are published on the loopback address.
+    pub(crate) ports: Vec<PublishedPort>,
+    /// The named volumes that the container mounts, with the path that
+    /// each mounts at.
+    pub(crate) volumes: BTreeMap<VolumeKey, String>,
+}
+
+/// The services of a workspace's compose project, in name order.
+pub(crate) type ContainerSpecs = BTreeMap<ServiceName, ContainerSpec>;
 
 /// The variables of a `docker compose` process: the values of one
 /// container's variables, under the names that [`compose_file`] refers
@@ -57,14 +93,14 @@ fn variable_of(service: usize, variable: usize) -> String {
     format!("MXV_ENV_{service}_{variable}")
 }
 
-/// Returns the compose file of `scope` for `containers`, the manifest's
-/// containers, whose ports `ports` holds by port name. A port that `ports`
+/// Returns the compose file of `scope` for `containers`, the services of
+/// the project, whose ports `ports` holds by port name. A port that `ports`
 /// lacks is not published. The file holds no value of a container's
 /// variables: each variable refers to a variable of the `docker compose`
 /// process, which [`compose_env`] returns.
 pub(crate) fn compose_file(
     scope: &Scope,
-    containers: &BTreeMap<String, Container>,
+    containers: &ContainerSpecs,
     ports: &BTreeMap<String, u16>,
 ) -> Value {
     let mut services = Map::new();
@@ -94,15 +130,15 @@ pub(crate) fn compose_file(
             .volumes
             .iter()
             .map(|(volume, path)| {
-                json!({"type": "volume", "source": volume, "target": literal(path)})
+                json!({"type": "volume", "source": volume.as_str(), "target": literal(path)})
             })
             .collect();
         for volume in container.volumes.keys() {
             volumes.insert(
-                volume.clone(),
+                volume.as_str().to_owned(),
                 json!({
                     "name": scope.volume_name(volume).as_str(),
-                    "labels": scope.labels(VOLUME_LABEL, volume),
+                    "labels": scope.labels(VOLUME_LABEL, volume.as_str()),
                 }),
             );
         }
@@ -110,13 +146,16 @@ pub(crate) fn compose_file(
         definition.insert("image".to_owned(), Value::String(literal(&container.image)));
         definition.insert(
             "container_name".to_owned(),
-            Value::String(scope.object_name(name)),
+            Value::String(scope.container_name(name).as_str().to_owned()),
         );
         definition.insert(
             "network_mode".to_owned(),
             Value::String("bridge".to_owned()),
         );
-        definition.insert("labels".to_owned(), scope.labels(CONTAINER_LABEL, name));
+        definition.insert(
+            "labels".to_owned(),
+            scope.labels(CONTAINER_LABEL, name.as_str()),
+        );
         if let Some(command) = &container.command {
             definition.insert(
                 "command".to_owned(),
@@ -126,7 +165,7 @@ pub(crate) fn compose_file(
         definition.insert("environment".to_owned(), Value::Object(environment));
         definition.insert("ports".to_owned(), Value::Array(published));
         definition.insert("volumes".to_owned(), Value::Array(mounts));
-        services.insert(name.clone(), Value::Object(definition));
+        services.insert(name.as_str().to_owned(), Value::Object(definition));
     }
     json!({
         "services": services,
@@ -135,22 +174,20 @@ pub(crate) fn compose_file(
 }
 
 /// Returns the variables of the `docker compose` process that starts the
-/// container `name` of `containers`: the values of the container's
+/// service `name` of `containers`: the values of the container's
 /// variables, under the names that [`compose_file`] refers to.
-pub(crate) fn compose_env(containers: &BTreeMap<String, Container>, name: &str) -> ComposeEnv {
+pub(crate) fn compose_env(containers: &ContainerSpecs, name: &ServiceName) -> ComposeEnv {
     ComposeEnv(
         containers
             .iter()
             .enumerate()
-            .filter(|(_, (service, _))| service.as_str() == name)
+            .filter(|(_, (service, _))| *service == name)
             .flat_map(|(service, (_, container))| {
                 container
                     .env
                     .values()
                     .enumerate()
-                    .map(move |(variable, value)| {
-                        (variable_of(service, variable), ComposeValue(value.clone()))
-                    })
+                    .map(move |(variable, value)| (variable_of(service, variable), value.clone()))
             })
             .collect(),
     )
@@ -220,7 +257,7 @@ pub(crate) fn compose_up(
     let args: [&OsStr; 13] = [
         "compose".as_ref(),
         "--project-name".as_ref(),
-        project.as_ref(),
+        project.as_str().as_ref(),
         "--project-directory".as_ref(),
         dir.as_os_str(),
         "--file".as_ref(),

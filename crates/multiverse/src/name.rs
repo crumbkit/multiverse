@@ -11,6 +11,21 @@ mod tests;
 /// The most bytes that a workspace name holds.
 pub const MOST_NAME_BYTES: usize = 64;
 
+/// Reports whether `name` is a valid name of a manifest's process,
+/// container, volume or port: 1 to [`MOST_NAME_BYTES`] ASCII letters,
+/// digits, `-` and `_`, starting with a letter or a digit. Such a name
+/// never holds a `.`.
+pub(crate) fn is_unit_name(name: &str) -> bool {
+    name.len() <= MOST_NAME_BYTES
+        && name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+}
+
 /// The name of a workspace, such as `reading-list`.
 ///
 /// A name holds 1 to [`MOST_NAME_BYTES`] ASCII letters, digits, `-`, `_`

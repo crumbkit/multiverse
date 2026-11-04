@@ -8,6 +8,13 @@
 //! [`Error::DockerForeign`]. Stopping, removing, deleting and following
 //! the log of an object take its handle, so nothing outside this module
 //! acts on an object whose labels it did not check.
+//!
+//! An anonymous volume, which docker creates for an image's `VOLUME` path,
+//! carries no label that names a scope. An [`AnonymousVolume`] therefore
+//! comes from the inspection of the [`OwnedContainer`] that mounts it.
+//! After the container is removed, the workspace's volume record, which
+//! mxv writes only from such values, is what names the volume, and
+//! [`inspect_anonymous`] checks that docker still labels it anonymous.
 
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -104,16 +111,49 @@ pub(crate) struct Inspected {
     pub(crate) started: String,
     /// The volumes that it mounts and that carry no name of the scope,
     /// which are the anonymous volumes of its image.
-    pub(crate) anonymous: Vec<VolumeName>,
+    pub(crate) anonymous: Vec<AnonymousVolume>,
 }
 
-/// A volume that does not carry a name of the scope and carries docker's
-/// [`ANONYMOUS_LABEL`], or a named volume of the scope whose labels name
-/// the scope and the volume, as an inspection found it.
+/// A named volume of the scope whose labels name the scope and the
+/// volume, as an inspection found it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwnedVolume {
     /// The volume's name.
     name: VolumeName,
+}
+
+/// An anonymous volume that an owned container mounts, as the container's
+/// inspection found it, or that the workspace's volume record names.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AnonymousVolume {
+    /// The volume's name, which docker chose.
+    name: VolumeName,
+}
+
+impl AnonymousVolume {
+    /// Returns the volume's name.
+    pub(crate) const fn name(&self) -> &VolumeName {
+        &self.name
+    }
+}
+
+/// A volume of a workspace that a removal may delete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Volume {
+    /// A named volume of the scope.
+    Named(OwnedVolume),
+    /// An anonymous volume of one of the scope's containers.
+    Anonymous(AnonymousVolume),
+}
+
+impl Volume {
+    /// Returns the volume's name.
+    pub(crate) const fn name(&self) -> &VolumeName {
+        match self {
+            Self::Named(volume) => &volume.name,
+            Self::Anonymous(volume) => &volume.name,
+        }
+    }
 }
 
 /// Returns the Go template of `docker container inspect` that prints what
@@ -162,6 +202,7 @@ pub(super) fn mint_container(
         .split_whitespace()
         .filter(|volume| !volume.starts_with(&prefix))
         .filter_map(|volume| VolumeName::new(volume).ok())
+        .map(|name| AnonymousVolume { name })
         .collect();
     Ok(Inspected {
         container: OwnedContainer {
@@ -265,35 +306,43 @@ pub(crate) fn remove(container: OwnedContainer) -> Result<(), Error> {
     Ok(())
 }
 
-/// Returns the Go template of `docker volume inspect` that prints what
-/// [`mint_volume`] reads for the volume `name` of `scope`.
-fn volume_format(scope: &Scope, name: &VolumeName) -> String {
-    if name.as_str().starts_with(&scope.prefix()) {
-        labels_format(".Labels", VOLUME_LABEL)
-    } else {
-        format!(
-            "{{{{range $key, $value := .Labels}}}}{{{{if eq $key \"{ANONYMOUS_LABEL}\"}}}}anonymous{{{{end}}}}{{{{end}}}}"
-        )
-    }
+/// The Go template of `docker volume inspect` that prints `anonymous` for
+/// a volume with docker's [`ANONYMOUS_LABEL`].
+fn anonymous_format() -> String {
+    format!(
+        "{{{{range $key, $value := .Labels}}}}{{{{if eq $key \"{ANONYMOUS_LABEL}\"}}}}anonymous{{{{end}}}}{{{{end}}}}"
+    )
 }
 
-/// Returns the volume `name` of `scope` that `docker volume inspect`
-/// printed as `printed`, in the format of [`volume_format`].
+/// Runs `docker volume inspect` of `name` with `format`, and returns what
+/// it printed, or `None` when the volume does not exist.
+fn inspect_volume_with(name: &VolumeName, format: &str) -> Result<Option<String>, Error> {
+    let finished = quick(
+        ["volume", "inspect", "--format", format, "--", name.as_str()],
+        "volume inspect",
+    )?;
+    if finished.missing() {
+        return Ok(None);
+    }
+    finished.checked("volume inspect", None).map(Some)
+}
+
+/// Returns the named volume `name` of `scope` that `docker volume inspect`
+/// printed as `printed`, with the labels' format of a volume.
 ///
 /// # Errors
 ///
-/// Returns [`Error::DockerForeign`] for a named volume of the scope whose
-/// labels do not name the scope and the volume, and for any other volume
-/// without docker's anonymous label.
+/// Returns [`Error::DockerForeign`] when `name` is not a name of the scope,
+/// or its labels do not name the scope and the volume.
 pub(super) fn mint_volume(
     scope: &Scope,
     name: &VolumeName,
     printed: &str,
 ) -> Result<OwnedVolume, Error> {
-    let owned = match name.as_str().strip_prefix(&scope.prefix()) {
-        Some(volume) => scope.owns(printed.trim_end_matches('\n'), volume),
-        None => printed.trim() == "anonymous",
-    };
+    let owned = name
+        .as_str()
+        .strip_prefix(&scope.prefix())
+        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), volume));
     if owned {
         Ok(OwnedVolume { name: name.clone() })
     } else {
@@ -304,8 +353,26 @@ pub(super) fn mint_volume(
     }
 }
 
-/// Inspects the volume `name` and returns it as a volume of `scope`, or
-/// `None` when it does not exist.
+/// Returns the anonymous volume `name` that `docker volume inspect`
+/// printed as `printed`, in the format of [`anonymous_format`].
+///
+/// # Errors
+///
+/// Returns [`Error::DockerForeign`] when docker does not label the volume
+/// anonymous.
+pub(super) fn mint_anonymous(name: &VolumeName, printed: &str) -> Result<AnonymousVolume, Error> {
+    if printed.trim() == "anonymous" {
+        Ok(AnonymousVolume { name: name.clone() })
+    } else {
+        Err(Error::DockerForeign {
+            kind: "volume",
+            name: name.as_str().to_owned(),
+        })
+    }
+}
+
+/// Inspects the named volume `name` and returns it as a volume of `scope`,
+/// or `None` when it does not exist.
 ///
 /// # Errors
 ///
@@ -315,32 +382,47 @@ pub(crate) fn inspect_volume(
     scope: &Scope,
     name: &VolumeName,
 ) -> Result<Option<OwnedVolume>, Error> {
-    let format = volume_format(scope, name);
-    let finished = quick(
-        [
-            "volume",
-            "inspect",
-            "--format",
-            &format,
-            "--",
-            name.as_str(),
-        ],
-        "volume inspect",
-    )?;
-    if finished.missing() {
-        return Ok(None);
-    }
-    let printed = finished.checked("volume inspect", None)?;
-    mint_volume(scope, name, &printed).map(Some)
+    let format = labels_format(".Labels", VOLUME_LABEL);
+    inspect_volume_with(name, &format)?
+        .map(|printed| mint_volume(scope, name, &printed))
+        .transpose()
+}
+
+/// Inspects the volume `name`, which an [`AnonymousVolume`] named when the
+/// workspace's volume record was written, and returns it when docker still
+/// has it and labels it anonymous, or `None` when it does not exist.
+///
+/// # Errors
+///
+/// Returns [`Error::DockerForeign`] as [`mint_anonymous`] describes, and
+/// the errors of [`super::command::check`] and [`Error::DockerFailed`].
+pub(super) fn inspect_anonymous(name: &VolumeName) -> Result<Option<AnonymousVolume>, Error> {
+    inspect_volume_with(name, &anonymous_format())?
+        .map(|printed| mint_anonymous(name, &printed))
+        .transpose()
+}
+
+/// Inspects `volume` again, and returns it when it still exists and is the
+/// scope's, or `None` when it does not exist.
+///
+/// # Errors
+///
+/// Returns the errors of [`inspect_volume`] and [`inspect_anonymous`].
+pub(crate) fn reinspect_volume(scope: &Scope, volume: &Volume) -> Result<Option<Volume>, Error> {
+    Ok(match volume {
+        Volume::Named(named) => inspect_volume(scope, &named.name)?.map(Volume::Named),
+        Volume::Anonymous(anonymous) => inspect_anonymous(&anonymous.name)?.map(Volume::Anonymous),
+    })
 }
 
 /// Deletes `volume`. A volume that no longer exists counts as deleted.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`super::command::check`] and [`Error::DockerFailed`].
-pub(crate) fn delete_volume(volume: OwnedVolume) -> Result<(), Error> {
-    let finished = quick(["volume", "rm", "--", volume.name.as_str()], "volume rm")?;
+/// Returns the errors of [`super::command::check`] and
+/// [`Error::DockerFailed`].
+pub(crate) fn delete_volume(volume: Volume) -> Result<(), Error> {
+    let finished = quick(["volume", "rm", "--", volume.name().as_str()], "volume rm")?;
     if !finished.missing() {
         finished.checked("volume rm", None)?;
     }

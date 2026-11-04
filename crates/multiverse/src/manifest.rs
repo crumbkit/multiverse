@@ -56,6 +56,9 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use toml::Spanned;
 
+use crate::name::is_unit_name;
+use crate::redacted::Redacted;
+
 #[cfg(test)]
 mod tests;
 
@@ -80,9 +83,6 @@ pub const MANIFEST_VERSION: u64 = 1;
 
 /// The most bytes of an image reference.
 const MOST_IMAGE_BYTES: usize = 255;
-
-/// The most bytes of a process or port name.
-const MOST_NAME_BYTES: usize = 64;
 
 /// An application's manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,8 +136,9 @@ pub struct Container {
     /// The arguments that replace the image's command, or `None` to keep
     /// it.
     pub command: Option<Vec<String>>,
-    /// The variables that the container receives.
-    pub env: BTreeMap<String, String>,
+    /// The variables that the container receives. Their values are
+    /// [`Redacted`], so no row, log or error shows them.
+    pub env: BTreeMap<String, Redacted>,
     /// The container ports that mxv publishes on the loopback address, in
     /// the order of their container port.
     pub ports: Vec<Published>,
@@ -246,8 +247,10 @@ impl PartialEq for LogPattern {
 impl Eq for LogPattern {}
 
 /// The value of an `env` variable, which may name host ports as
-/// `{port.<name>}` and writes a literal brace as `{{` or `}}`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `{port.<name>}` and writes a literal brace as `{{` or `}}`. Its
+/// `Debug` prints `<redacted>`, and it implements neither `Display` nor
+/// `Serialize`. [`EnvValue::render`] is the only way to read it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct EnvValue {
     /// The value as the manifest writes it.
     text: String,
@@ -266,10 +269,11 @@ enum Part {
 
 impl EnvValue {
     /// Returns the value with each placeholder replaced by its host port in
-    /// `ports`, by port name. A placeholder whose port `ports` lacks stays
-    /// as the manifest writes it.
+    /// `ports`, by port name, for the environment of the process. A
+    /// placeholder whose port `ports` lacks stays as the manifest writes
+    /// it.
     #[must_use]
-    pub fn render(&self, ports: &BTreeMap<String, u16>) -> String {
+    pub fn render(&self, ports: &BTreeMap<String, u16>) -> Redacted {
         let mut rendered = String::new();
         for part in &self.parts {
             match part {
@@ -284,7 +288,7 @@ impl EnvValue {
                 },
             }
         }
-        rendered
+        Redacted::new(rendered)
     }
 
     /// Returns the names of the ports that the value's placeholders name,
@@ -294,12 +298,6 @@ impl EnvValue {
             Part::Port(port) => Some(port.as_str()),
             Part::Text(_) => None,
         })
-    }
-
-    /// Returns the value as the manifest writes it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.text
     }
 
     /// Reads `text`, or returns `None` when a brace is neither doubled nor
@@ -321,7 +319,7 @@ impl EnvValue {
                 let inside = tail.strip_prefix("{port.")?;
                 let end = inside.find('}')?;
                 let port = inside.get(..end)?;
-                if !is_name(port) {
+                if !is_unit_name(port) {
                     return None;
                 }
                 if !literal.is_empty() {
@@ -342,6 +340,14 @@ impl EnvValue {
     }
 }
 
+impl fmt::Debug for EnvValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// A test compares a value with the text the manifest writes without
+/// showing it.
 impl PartialEq<&str> for EnvValue {
     fn eq(&self, other: &&str) -> bool {
         self.text == *other
@@ -559,19 +565,6 @@ fn unknown_field(message: &str) -> Option<String> {
     rest.get(..end).map(str::to_owned)
 }
 
-/// Reports whether `name` is a valid process or port name: 1 to 64 ASCII
-/// letters, digits, `-` and `_`, starting with a letter or a digit.
-fn is_name(name: &str) -> bool {
-    name.len() <= MOST_NAME_BYTES
-        && name
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
-}
-
 /// Reports whether `name` is a valid environment variable name: an ASCII
 /// letter or `_`, then letters, digits and `_`.
 fn is_variable(name: &str) -> bool {
@@ -706,7 +699,7 @@ impl Manifest {
         }
         let mut ports = Vec::new();
         for port in &raw.ports {
-            if !is_name(port.get_ref()) {
+            if !is_unit_name(port.get_ref()) {
                 return Err(errors.invalid(
                     &port.span(),
                     format!(
@@ -891,7 +884,7 @@ fn check_process(
     names: &BTreeSet<&str>,
 ) -> Result<Process, ManifestError> {
     let process = name.get_ref();
-    if !is_name(process) {
+    if !is_unit_name(process) {
         return Err(errors.invalid(
             &name.span(),
             format!("`{process}` is not a process name, which holds 1 to 64 letters, digits, '-' and '_'"),
@@ -1202,7 +1195,7 @@ fn check_container(
     names: &BTreeSet<&str>,
 ) -> Result<Container, ManifestError> {
     let container = name.get_ref();
-    if !is_name(container) {
+    if !is_unit_name(container) {
         return Err(errors.invalid(
             &name.span(),
             format!("`{container}` is not a container name, which holds 1 to 64 letters, digits, '-' and '_'"),
@@ -1226,7 +1219,7 @@ fn check_container(
     let mut env = BTreeMap::new();
     for (variable, value) in &raw.env {
         check_variable(errors, container, variable)?;
-        env.insert(variable.get_ref().clone(), value.clone());
+        env.insert(variable.get_ref().clone(), Redacted::new(value.clone()));
     }
     let mut published = Vec::new();
     for (key, port) in &raw.ports {
@@ -1261,7 +1254,7 @@ fn check_container(
     published.sort_by_key(|published| published.container);
     let mut volumes = BTreeMap::new();
     for (volume, path) in &raw.volumes {
-        if !is_name(volume.get_ref()) {
+        if !is_unit_name(volume.get_ref()) {
             return Err(errors.invalid(
                 &volume.span(),
                 format!(

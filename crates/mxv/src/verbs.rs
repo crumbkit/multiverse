@@ -170,7 +170,7 @@ pub(crate) fn remove(
         delete_unmerged: args.delete_unmerged,
     };
     let mut running = Vec::new();
-    let mut volumes = Vec::new();
+    let mut volumes = None;
     let mut containers = Vec::new();
     if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
         running = processes::running(environment, &workspace)?;
@@ -183,17 +183,22 @@ pub(crate) fn remove(
         }
         // A volume may hold the only copy of a database, so removing it
         // needs its own flag, and `--force` alone keeps the workspace.
-        volumes = processes::volumes(environment, &name)?;
-        if !volumes.is_empty() && !args.delete_volumes {
+        let found = processes::volumes(environment, &name)?;
+        if !found.is_empty() && !args.delete_volumes {
             return Err(RunFailure::Volumes {
                 workspace: name.to_string(),
-                volumes,
+                volumes: found.names().to_vec(),
                 allow,
             }
             .into());
         }
+        volumes = Some(found);
         containers = processes::containers(environment, &name)?;
     }
+    let names: Vec<String> = volumes
+        .as_ref()
+        .map(|volumes| volumes.names().to_vec())
+        .unwrap_or_default();
     let plan = workspaces
         .plan_removal(&name, allow)
         .map_err(MxvFailure::from)?;
@@ -203,7 +208,7 @@ pub(crate) fn remove(
     };
     if output.is_dry_run() {
         return Ok(Prose::new(
-            RemovalResult::new(&removal, true).with_docker(containers, volumes),
+            RemovalResult::new(&removal, true).with_docker(containers, names),
         ));
     }
     output.confirm(
@@ -216,9 +221,11 @@ pub(crate) fn remove(
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
         RemovalOutcome::Done(removed) => {
             processes::forget(environment, &name)?;
-            processes::delete_volumes(environment, &name, &volumes)?;
+            if let Some(volumes) = volumes {
+                processes::delete_volumes(environment, &name, volumes)?;
+            }
             Ok(Prose::new(
-                RemovalResult::new(&removed, false).with_docker(containers, volumes),
+                RemovalResult::new(&removed, false).with_docker(containers, names),
             ))
         }
         RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {
