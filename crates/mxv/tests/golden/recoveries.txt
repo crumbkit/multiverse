@@ -1,0 +1,7 @@
+mxv new
+  fails with mxv::command::unbuilt
+  hint
+
+codes that no start provokes:
+
+codes whose recoveries the check did not follow, because no declared code spells them: 0

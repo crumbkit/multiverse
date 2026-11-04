@@ -1,0 +1,12 @@
+Print the directory of a workspace or of one of its apps
+
+Usage: mxv cd [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv cd
+
+Effects: read-only, closed-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv cd --help` describes them.

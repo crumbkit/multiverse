@@ -1,0 +1,103 @@
+# The pull-request lane and the scheduled advisory check of the Rust
+# standards (BASE-25, BASE-29), from their templates/ci.yml. The map's
+# `lanes` decision in rust-standards.toml records both lanes. The step names
+# are the standards' step names, so a failure reads the same in CI and in
+# AGENTS.md.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "43 6 * * *"
+  workflow_dispatch:
+
+# Each job grants only the permissions it needs.
+permissions: {}
+
+# A new push cancels the run for the previous push, because the newer run
+# checks the same changes and more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Any compiler or Clippy warning fails the build (BASE-1).
+  CARGO_BUILD_WARNINGS: deny
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lane:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    # The pull-request lane's time budget (BASE-25).
+    timeout-minutes: 10
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # rustup installs the version and components that rust-toolchain.toml
+      # names (BASE-26), and the MSRV toolchain that the msrv step uses
+      # (LIB-4). Both install before rust-cache, which reads the installed
+      # rustc versions for its cache key.
+      - run: rustup toolchain install
+      - run: rustup toolchain install 1.89.0 --profile minimal
+      # install-action runs before rust-cache, so the cache leaves out the
+      # tool binaries that install-action downloads on every run.
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-nextest@0.9.140,cargo-deny@0.20.2,cargo-shear@1.14.0,zizmor@1.30.1,cargo-hack@0.6.45
+          fallback: none
+      # The steps that read only the source run first, so a pull request
+      # that fails one of them fails in seconds.
+      - name: format
+        run: cargo fmt --check
+      - name: workflows
+        run: zizmor .
+      # Only a run on main saves the cache. A pull request restores the cache
+      # that main saved and saves none of its own.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: deny
+        run: cargo deny --locked check bans licenses sources
+      - name: shear
+        run: cargo shear
+      - name: clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features
+      - name: tests
+        run: cargo nextest run --locked --workspace --all-features
+      - name: doctests
+        run: cargo test --locked --doc --workspace --all-features
+      - name: rustdoc
+        run: cargo doc --locked --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # LIB-5: every library builds without warnings with no features, with
+      # each feature alone and with all features.
+      - name: features
+        run: cargo hack clippy --locked --workspace --each-feature --all-targets
+      # LIB-4: every target builds on the MSRV with every feature.
+      - name: msrv
+        run: cargo +1.89.0 check --locked --workspace --all-targets --all-features
+
+  advisories:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - name: advisories
+        run: cargo deny --locked check advisories

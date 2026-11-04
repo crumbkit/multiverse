@@ -1,0 +1,30 @@
+# Dependabot opens the weekly pull requests that move multiverse's pins
+# (BASE-26). Each ecosystem puts all its updates in one pull request. The
+# 7-day cooldown proposes a release only once it is 7 days old, so a release
+# that is yanked soon after publication is never proposed.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

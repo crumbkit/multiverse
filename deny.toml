@@ -1,0 +1,49 @@
+# cargo-deny checks the dependency graph (BASE-18). The pull-request lane
+# runs the bans, licenses and sources checks, and the scheduled and release
+# lanes run the advisories check (BASE-29). This file starts from
+# baseline/deny.toml of the Rust standards.
+
+[graph]
+# The checks also cover dependencies behind optional features, which a
+# default build would leave out.
+all-features = true
+
+# BASE-29: each ignored advisory names its ID, why it does not apply and the
+# date by which it is reviewed again, such as
+# { id = "RUSTSEC-2024-0000", reason = "the project never calls the affected function; review by 2027-01-31" }.
+[advisories]
+ignore = []
+
+[licenses]
+# A crate that needs another licence gets an exception for the one crate
+# version that uses it, and the allow list stays the same.
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.93
+# A small dependency tree uses only some of the allowed licences.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+# A `*` version requirement fails the check, because cargo may resolve it to
+# any version, and crates.io refuses to publish a crate that has one.
+wildcards = "deny"
+# A path dependency with no version passes in a dev-dependency or in a crate
+# that is not published, because `cargo publish` leaves out such a
+# dev-dependency.
+allow-wildcard-paths = true
+
+[sources]
+# Every crate comes from crates.io. A crate from any other registry or from a
+# git repository fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

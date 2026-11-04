@@ -1,0 +1,19 @@
+PATH                   ABOUT
+mxv                    Create, archive and restore task workspaces that span several git repositories
+mxv new                Create a workspace with one git worktree for each repository
+mxv list               List the live workspaces
+mxv show               Show live workspaces by name, in the order given
+mxv cd                 Print the directory of a workspace or of one of its apps
+mxv run                Run an app's processes, or one command in the app's environment
+mxv archive            Archive a workspace, so restore can rebuild it at the same commits
+mxv restore            Rebuild an archived workspace at its archived commits
+mxv remove             Delete a live or archived workspace
+mxv commands           Explore mxv's commands
+mxv commands list      List a branch of mxv's commands with their arguments, examples and columns
+mxv schemas            Explore the JSON documents that mxv prints
+mxv schemas list       List the JSON documents that mxv prints, with a description of each
+mxv schemas show       Print the JSON Schema of each document
+mxv self               Review mxv's own use
+mxv self usage         Report the patterns in mxv's usage log where callers waste effort
+mxv self figures       Work with the figures of each command in mxv's usage log
+mxv self figures list  List the figures of each command in mxv's usage log

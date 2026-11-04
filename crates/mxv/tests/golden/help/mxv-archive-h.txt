@@ -1,0 +1,14 @@
+Archive a workspace, so restore can rebuild it at the same commits
+
+Usage: mxv archive [OPTIONS]
+
+Options:
+      --dry-run  Report what the command would change, and change nothing
+      --yes      Proceed without asking for confirmation
+  -h, --help     Print help (see more with '--help')
+
+Examples:
+  mxv archive --dry-run
+
+Effects: destructive, not idempotent, closed-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv archive --help` describes them.

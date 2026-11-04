@@ -1,0 +1,33 @@
+Print the JSON Schema of each document
+
+Usage: mxv schemas show [OPTIONS] <ID>...
+
+Arguments:
+  <ID>...
+          The ids of the documents that `schemas list` lists, separated by spaces
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv schemas show mxv/schemas-list/v1
+          Print the JSON Schema of the document that schemas list prints
+
+Columns:
+  id      The document's id, such as `shelf/books-list/v1`.
+  schema  The document's 2020-12 JSON Schema.
+
+Effects: read-only, closed-world.

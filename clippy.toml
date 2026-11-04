@@ -1,0 +1,67 @@
+# The union of the clippy.toml fragments of the base, cli, child-process and
+# durable-state profiles of the Rust standards. Each effect belongs to one
+# owning module, which suppresses the lint with #[expect] and a reason
+# (BASE-5). An entry whose owning module exists names its path in the
+# reason, and the others name the module that the build plan gives the
+# effect.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-indexing-slicing-in-tests = true
+too-many-lines-threshold = 150 # BASE-10
+max-fn-params-bools = 3 # BASE-16
+
+disallowed-methods = [
+    # BASE-6, LIB-1: the program reads its environment once, in main, and
+    # the multiverse library reads none.
+    { path = "std::env::var", reason = "only crates/mxv/src/main.rs reads the environment, and the library reads none" },
+    { path = "std::env::var_os", reason = "only crates/mxv/src/main.rs reads the environment, and the library reads none" },
+    { path = "std::env::vars", reason = "only crates/mxv/src/main.rs reads the environment, and the library reads none" },
+    { path = "std::env::vars_os", reason = "only crates/mxv/src/main.rs reads the environment, and the library reads none" },
+    { path = "std::env::set_var", reason = "build a snapshot in the test instead" },
+    { path = "std::env::remove_var", reason = "build a snapshot in the test instead" },
+    { path = "std::env::current_dir", reason = "read the directory from the snapshot" },
+    { path = "std::env::set_current_dir", reason = "pass the directory to the operation instead" },
+    # BASE-7
+    { path = "std::process::exit", reason = "return the exit code from main so destructors run" },
+    # BASE-11
+    { path = "std::thread::sleep", reason = "wait for an observable signal, or sleep in the clock owner" },
+    { path = "tokio::time::sleep", reason = "wait for an observable signal, or sleep in the clock owner", allow-invalid = true },
+    # CLI-1
+    { path = "std::io::stdout", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
+    { path = "std::io::stderr", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
+    { path = "std::io::stdin", reason = "read through crumbkit's Output in crates/mxv/src/lib.rs, which knows whether input is a terminal" },
+    # PROC-1
+    { path = "std::process::Command::new", reason = "start processes through the library's git and process modules" },
+    { path = "std::process::Command::spawn", reason = "start processes through the library's git and process modules" },
+    { path = "std::process::Command::status", reason = "start processes through the library's git and process modules" },
+    { path = "std::process::Command::output", reason = "start processes through the library's git and process modules" },
+    { path = "std::os::unix::process::CommandExt::exec", reason = "replacing this process bypasses the process module" },
+    { path = "tokio::process::Command::new", reason = "start processes through the library's git and process modules", allow-invalid = true },
+    { path = "tokio::process::Command::spawn", reason = "start processes through the library's git and process modules", allow-invalid = true },
+    { path = "tokio::process::Command::status", reason = "start processes through the library's git and process modules", allow-invalid = true },
+    { path = "tokio::process::Command::output", reason = "start processes through the library's git and process modules", allow-invalid = true },
+    # DUR-1
+    { path = "std::fs::write", reason = "write through the library's store module" },
+    { path = "std::fs::copy", reason = "write through the library's store module" },
+    { path = "std::fs::rename", reason = "write through the library's store module" },
+    { path = "std::fs::File::create", reason = "write through the library's store module" },
+    { path = "std::fs::OpenOptions::new", reason = "write through the library's store module" },
+    # DUR-2
+    { path = "std::fs::File::lock", reason = "lock through the library's store module, which owns the deadline" },
+    { path = "std::fs::File::try_lock", reason = "lock through the library's store module, which owns the deadline" },
+    { path = "std::fs::File::lock_shared", reason = "lock through the library's store module, which owns the deadline" },
+    { path = "std::fs::File::try_lock_shared", reason = "lock through the library's store module, which owns the deadline" },
+]
+
+disallowed-types = [
+    # PROC-1
+    { path = "std::process::Child", reason = "let the library's process module hold the child, which owns its deadline and cleanup" },
+]
+
+# BASE-7: the untyped-error macros of the project's error crates. multiverse
+# depends on no error crate yet.
+disallowed-macros = []

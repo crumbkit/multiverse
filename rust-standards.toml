@@ -1,0 +1,26 @@
+# multiverse's adoption map of the Rust standards (adoption.md of
+# https://github.com/crumbkit/rust-standards). The standards have no released
+# version yet, so the map names the draft and the commit it was reviewed
+# against.
+
+schema = "rust-standards/adoption/v1"
+standards = { version = "draft", commit = "7c9a7577fed4fe5ba0682960c0380af0a75dace4" }
+
+# multiverse publishes a library crate, builds the `mxv` command, starts git
+# and app processes, and keeps workspace records and a port ledger on disk.
+profiles = ["base", "library", "cli", "child-process", "durable-state"]
+
+[[decision]]
+id = "lanes"
+requirement = """
+- Lane: `lane` in .github/workflows/ci.yml, on each pull request and each push to main. It runs every step of the pull-request lane in the standards' order (format, workflows, deny, shear, clippy, tests, doctests, rustdoc, features), then `msrv` (LIB-4). Its budget is ten minutes, the job's timeout.
+- Lane: `advisories` in .github/workflows/ci.yml, daily at 06:43 UTC and on demand (BASE-29). Nothing waits for it.
+"""
+reason = "The pull-request lane stays within ten minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main."
+realizations = [".github/workflows/ci.yml"]
+
+[[decision]]
+id = "release-profile"
+requirement = "`[profile.release]` sets `overflow-checks = true` and leaves `lto`, `codegen-units` and `strip` at Cargo's defaults."
+reason = "multiverse ships no binary yet, so no measurement shows what a size or speed setting would gain. The pull request that decides how mxv ships records its settings here."
+realizations = ["Cargo.toml"]

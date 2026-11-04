@@ -1,0 +1,12 @@
+Explore mxv's commands
+
+Usage: mxv commands [OPTIONS] <COMMAND>
+
+Commands:
+  list  List a branch of mxv's commands with their arguments, examples and columns
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv commands --help` describes them.
+Next: mxv commands <COMMAND> -h
