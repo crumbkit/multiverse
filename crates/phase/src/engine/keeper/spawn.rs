@@ -5,7 +5,6 @@
 
 use std::ffi::OsString;
 use std::io::{self, BufRead as _, BufReader, Read, Write as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -18,6 +17,7 @@ use crate::clock::now;
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
 use crate::engine::keeper::args::{APP, PROCESS, STATE_DIR, WORKSPACE};
+use crate::engine::keeper::logfile::{diagnostic_log, open_append};
 use crate::engine::keeper::spec::{HANDSHAKE_PREFIX, Handshake, KeeperSpec};
 use crate::env::AppliedEnvironment;
 use crate::error::PhaseError;
@@ -52,9 +52,6 @@ pub(crate) struct Launch<'a> {
     pub(crate) spec: &'a KeeperSpec,
     /// The process's resolved environment, which the keeper holds.
     pub(crate) environment: &'a dyn AppliedEnvironment,
-    /// The variables that the keeper inherits from the caller: `PATH` and
-    /// `HOME`.
-    pub(crate) inherited: &'a [(OsString, OsString)],
     /// When the keeper must have started the app.
     pub(crate) deadline: Instant,
 }
@@ -101,22 +98,14 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
     };
     let spec = serde_json::to_vec(launch.spec)
         .map_err(|error| keeper_failed(format!("the specification cannot be written: {error}")))?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/phase/src/engine/keeper/spawn.rs starts keepers (PROC-1)"
-    )]
-    let mut command = Command::new(&launch.command.program);
-    command
-        .args(&launch.command.leading)
-        .args(command_line(args))
-        .env_clear()
-        .envs(launch.inherited.iter().map(|(name, value)| (name, value)))
-        .current_dir("/")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
-    launch.environment.apply(&mut command);
+    let diagnostics = diagnostic_log(&launch.spec.log, args.app(), args.process());
+    let stderr = open_append(&diagnostics).map_err(|error| {
+        keeper_failed(format!(
+            "the keeper's diagnostic log {} cannot be opened: {error}",
+            diagnostics.display()
+        ))
+    })?;
+    let mut command = keeper_command(launch, stderr.into());
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/phase/src/engine/keeper/spawn.rs starts keepers (PROC-1)"
@@ -142,6 +131,8 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
         let _ = sender.send(read_handshake(stdout));
     });
     let handshake = receiver.recv_timeout(launch.deadline.saturating_duration_since(now()));
+    // A keeper calls `setsid` before it reads its specification, so by its
+    // handshake it leads a group whose id is its pid.
     let keeper = match (started, boot_id) {
         (Ok(Start::At(started_at_us)), Ok(boot_id)) => HostProcess {
             pid,
@@ -193,18 +184,42 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
     }
 }
 
-/// Sends `KILL` to the keeper's group, reaps it, and describes how it
-/// ended.
+/// Returns the keeper's command, with `stderr` as its standard error. Its
+/// environment holds the specification's inherited variables, `PATH` and
+/// `HOME`, and the resolved environment, which overrides them.
+fn keeper_command(launch: &Launch<'_>, stderr: Stdio) -> Command {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/keeper/spawn.rs starts keepers (PROC-1)"
+    )]
+    let mut command = Command::new(&launch.command.program);
+    command
+        .args(&launch.command.leading)
+        .args(command_line(launch.args))
+        .env_clear()
+        .envs(&launch.spec.inherited)
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(stderr);
+    launch.environment.apply(&mut command);
+    command
+}
+
+/// Sends `KILL` to the keeper and to its group, reaps it, and describes
+/// how it ended. The keeper may not have called `setsid` yet, and then it
+/// still belongs to the engine's group, so it is signalled alone too.
 #[expect(
     clippy::disallowed_types,
     reason = "crates/phase/src/engine/keeper/spawn.rs holds the keeper it started (PROC-1)"
 )]
 fn kill(child: &mut std::process::Child) -> String {
-    if let Some(group) = i32::try_from(child.id())
+    if let Some(keeper) = i32::try_from(child.id())
         .ok()
         .and_then(rustix::process::Pid::from_raw)
     {
-        let _ = rustix::process::kill_process_group(group, Signal::KILL);
+        let _ = rustix::process::kill_process(keeper, Signal::KILL);
+        let _ = rustix::process::kill_process_group(keeper, Signal::KILL);
     }
     child.wait().map_or_else(
         |error| format!("an unreadable status: {error}"),

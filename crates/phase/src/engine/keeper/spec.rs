@@ -2,6 +2,7 @@
 //! standard input, and the handshake line, which the keeper writes to its
 //! standard output. Neither holds an environment value.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -46,6 +47,10 @@ pub(crate) struct KeeperSpec {
     /// How many times earlier keepers of this process restarted it, which
     /// counts toward the policy's most restarts.
     pub(crate) restarts: u32,
+    /// The variables that the keeper and its app inherit from the caller,
+    /// `PATH` and `HOME`, which are never secret. The keeper sets them on
+    /// the app beside a freshly resolved environment.
+    pub(crate) inherited: BTreeMap<String, String>,
 }
 
 #[cfg_attr(
@@ -77,6 +82,7 @@ impl KeeperSpec {
             kill_wait,
             expires_at_ms: None,
             restarts: 0,
+            inherited: BTreeMap::new(),
         }
     }
 
@@ -88,6 +94,13 @@ impl KeeperSpec {
                 u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
             })
         });
+        self
+    }
+
+    /// Returns this specification with `inherited` as the variables that
+    /// the keeper and its app inherit from the caller.
+    pub(crate) fn inheriting(mut self, inherited: BTreeMap<String, String>) -> Self {
+        self.inherited = inherited;
         self
     }
 

@@ -26,16 +26,17 @@
 //!   environment through [`AppliedEnvironment::apply`]. Standard input
 //!   carries the keeper's specification, a `phase/keeper/v1` JSON document
 //!   of at most [`MOST_SPEC_BYTES`] bytes that names the command, its
-//!   directory, its log, its restart policy and its stop handling, and
-//!   holds no environment value.
+//!   directory, its log, its restart policy, its stop handling, the
+//!   values of `PATH` and `HOME`, and holds no other environment value.
 //! - Streams and deadline: the keeper writes one handshake line to standard
-//!   output once its app has started or failed to start, and standard error
-//!   is discarded. The engine reads at most [`MOST_HANDSHAKE_BYTES`] bytes
-//!   before the deadline it is given, and kills the keeper's group when the
-//!   deadline passes.
-//! - End: the keeper runs in a process group of its own, so it outlives the
-//!   engine that started it and a Ctrl-C at the engine's terminal does not
-//!   reach it. It ends when it receives `TERM` or `INT`, or when its app
+//!   output once its app has started or failed to start. Its standard error
+//!   is appended to its diagnostic log, `<log dir>/<app>.<process>.keeper.log`,
+//!   which the `logfile` module describes. The engine reads at most
+//!   [`MOST_HANDSHAKE_BYTES`] bytes before the deadline it is given, and
+//!   kills the keeper and its group when the deadline passes.
+//! - End: the keeper's first action is `setsid`, so it leads a session and
+//!   a group of its own. It outlives the engine that started it, and a
+//!   hangup or a Ctrl-C at the engine's terminal does not reach it. It ends when it receives `TERM` or `INT`, or when its app
 //!   ends and the policy does not restart it. The engine reaps it when it
 //!   ends before the handshake. Otherwise the engine leaves it running, and
 //!   the operating system reaps it once the engine exits.
@@ -46,7 +47,12 @@
 //!   `PATH` of the keeper's environment. The plan's author supplies it,
 //!   and the engine has replaced `{program}` with the app's program.
 //! - Arguments: the rest of the command, each a separate value.
-//! - Environment: the keeper's own environment, unchanged.
+//! - Environment: only `PATH`, `HOME` and the resolved environment. At the
+//!   first start the app inherits the keeper's environment, which holds
+//!   exactly those. After the keeper resolves a fresh environment for a
+//!   restart, the app receives `PATH` and `HOME` from the specification and
+//!   the fresh environment. The sandbox will later give the app its own
+//!   `TMPDIR`.
 //! - Streams and deadline: standard input is empty. Standard output and
 //!   standard error are the app's log file, opened with `O_APPEND`, which
 //!   the app holds as its own descriptors. The keeper never reads the
@@ -63,16 +69,24 @@
 //! # Restarts
 //!
 //! The keeper restarts its app under the plan's [`Restart`] policy, waiting
-//! the backoff before each restart. When the policy's [`Resolve`] says the
-//! environment must be resolved again, the keeper cannot do that itself,
-//! because it holds only the values it was given. After the backoff it
-//! exits with [`KeeperExit::NeedsEnvironment`], and the engine starts a
-//! new keeper with a fresh environment.
+//! the backoff before each restart. The backoff doubles with each restart
+//! in a row, and starts again from its first wait after a run longer than
+//! its longest wait or a minute, whichever is longer. When the policy's
+//! [`Resolve`] says the environment must be resolved again, the keeper
+//! resolves it through the [`EnvironmentSource`] that the program which
+//! links phase passes to [`run`], within [`RESOLVE_WAIT`], and applies it
+//! to the restarted app. The keeper holds only applied environments, and
+//! never writes a value to its arguments, a file or a log. When resolving
+//! fails, the keeper notes the failure in its diagnostic log, counts it as
+//! a failed run, waits the next backoff and tries again. Once the policy's
+//! most restarts are used up, it exits with
+//! [`KeeperExit::EnvironmentUnresolved`].
 //!
 //! # The run record
 //!
 //! The keeper records the app's pid, start time, group and boot id as
-//! `running` each time it starts the app, `stopping` before it stops the
+//! `running` each time it starts the app, with the count of restarts so
+//! far after a restart, `stopping` before it stops the
 //! app's group, and `stopped` once the group is gone. A thread of its own
 //! writes these through the run record's journal, which takes the
 //! workspace's lifecycle lock, so an `up` or `down` that holds the lock
@@ -89,7 +103,10 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use crate::env::EnvironmentSource;
+
 mod args;
+mod logfile;
 mod policy;
 mod recorder;
 mod sandbox;
@@ -139,6 +156,11 @@ pub const MOST_HANDSHAKE_BYTES: u64 = 64 * 1024;
 /// the `down` that stopped the keeper, records the stop itself.
 pub const EXIT_RECORD_WAIT: Duration = Duration::from_secs(2);
 
+/// How long a keeper gives its environment source to resolve a fresh
+/// environment before a restart. A source that has not answered by then
+/// fails, and the keeper tries again after the next backoff.
+pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
+
 /// How a keeper ended, which its exit status reports.
 ///
 /// | Exit | Status |
@@ -147,9 +169,9 @@ pub const EXIT_RECORD_WAIT: Duration = Duration::from_secs(2);
 /// | [`Completed`](KeeperExit::Completed) | 0 |
 /// | [`Failed`](KeeperExit::Failed) | 1 |
 /// | [`Unstoppable`](KeeperExit::Unstoppable) | 2 |
+/// | [`EnvironmentUnresolved`](KeeperExit::EnvironmentUnresolved) | 3 |
 /// | [`BadInput`](KeeperExit::BadInput) | 64 |
 /// | [`Unstartable`](KeeperExit::Unstartable) | 69 |
-/// | [`NeedsEnvironment`](KeeperExit::NeedsEnvironment) | 75 |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeeperExit {
@@ -167,9 +189,10 @@ pub enum KeeperExit {
     BadInput,
     /// The keeper could not start the app, or could not open its log.
     Unstartable,
-    /// The app ended, the policy restarts it, and the restart needs its
-    /// environment resolved again, which only the engine can do.
-    NeedsEnvironment,
+    /// The policy restarts the app with a fresh environment, and the
+    /// environment source failed to resolve one on each try until the
+    /// policy's most restarts.
+    EnvironmentUnresolved,
 }
 
 impl KeeperExit {
@@ -180,9 +203,9 @@ impl KeeperExit {
             Self::Stopped | Self::Completed => 0,
             Self::Failed => 1,
             Self::Unstoppable => 2,
+            Self::EnvironmentUnresolved => 3,
             Self::BadInput => 64,
             Self::Unstartable => 69,
-            Self::NeedsEnvironment => 75,
         }
     }
 }
@@ -193,12 +216,19 @@ impl From<KeeperExit> for ExitCode {
     }
 }
 
-/// Runs the keeper that `args` names: reads its specification from
-/// `input`, starts the app, writes the handshake line to `output`, and
-/// supervises the app until it is stopped or its policy leaves it ended.
-/// The program that links phase passes its standard input and standard
+/// Runs the keeper that `args` names: starts a session of its own, reads
+/// its specification from `input`, starts the app, writes the handshake
+/// line to `output`, and supervises the app until it is stopped or its
+/// policy leaves it ended. When a restart needs a fresh environment, the
+/// keeper resolves it through `source`. The program that links phase
+/// passes its own environment source, its standard input and its standard
 /// output, and returns the result from `main` as its exit status.
 #[must_use]
-pub fn run(args: &KeeperArgs, input: impl Read, output: impl Write) -> KeeperExit {
-    supervise::run(args, input, output)
+pub fn run(
+    args: &KeeperArgs,
+    source: &dyn EnvironmentSource,
+    input: impl Read,
+    output: impl Write,
+) -> KeeperExit {
+    supervise::run(args, source, input, output)
 }

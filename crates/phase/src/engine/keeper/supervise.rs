@@ -1,31 +1,34 @@
 //! The keeper's supervision of its app: it starts the app, waits for it to
 //! end or for a stop request, stops its group, and restarts it as the
-//! policy says.
+//! policy says, resolving a fresh environment when the policy asks for one.
 //!
 //! Every event that the keeper waits for arrives on one channel: the app's
 //! end, from a thread that waits for the child, and a stop request, from a
 //! thread that receives the keeper's `TERM` and `INT`. Only the app's group
 //! after its leader has ended gives no event, so the keeper polls it.
 
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use crate::clock::{POLL_INTERVAL, now, pause};
-use crate::engine::keeper::policy::{AfterExit, after_exit, needs_environment};
+use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
+use crate::engine::keeper::policy::{
+    AfterExit, after_exit, backoff_delay, needs_environment, streak_after_run,
+};
 use crate::engine::keeper::recorder::Recorder;
 use crate::engine::keeper::sandbox::apply_sandbox;
 use crate::engine::keeper::spec::{Handshake, KeeperSpec, read_spec, write_handshake};
-use crate::engine::keeper::{EXIT_RECORD_WAIT, KeeperArgs, KeeperExit};
+use crate::engine::keeper::{EXIT_RECORD_WAIT, KeeperArgs, KeeperExit, RESOLVE_WAIT};
+use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::plan::restart::StopSignal;
 use crate::record::process::{Processes, Start, System};
 use crate::record::run::HostProcess;
@@ -39,8 +42,32 @@ enum Event {
     Stop,
 }
 
-/// Runs the keeper, as [`crate::engine::keeper::run`] says.
-pub(crate) fn run(args: &KeeperArgs, input: impl Read, output: impl Write) -> KeeperExit {
+/// Runs the keeper in a session of its own, as
+/// [`crate::engine::keeper::run`] says.
+pub(crate) fn run(
+    args: &KeeperArgs,
+    source: &dyn EnvironmentSource,
+    input: impl Read,
+    output: impl Write,
+) -> KeeperExit {
+    // A new session leaves the group and the terminal of the engine that
+    // started the keeper, so a hangup or Ctrl-C there never reaches it.
+    // The engine starts the keeper as no group's leader, so it succeeds;
+    // a keeper started by hand from a shell already leads its own group
+    // and keeps the shell's session.
+    let session = rustix::process::setsid();
+    keep(args, source, input, output, session.is_ok())
+}
+
+/// Runs the keeper in the session it has, which a test can call within its
+/// own process. `own_session` says whether the keeper leads a new session.
+pub(crate) fn keep(
+    args: &KeeperArgs,
+    source: &dyn EnvironmentSource,
+    input: impl Read,
+    output: impl Write,
+    own_session: bool,
+) -> KeeperExit {
     let spec = match read_spec(input) {
         Ok(spec) => spec,
         Err(reason) => {
@@ -48,26 +75,58 @@ pub(crate) fn run(args: &KeeperArgs, input: impl Read, output: impl Write) -> Ke
             return KeeperExit::BadInput;
         }
     };
+    let diagnostics = Diagnostics::open(&diagnostic_log(&spec.log, args.app(), args.process()));
+    diagnostics.note(&format!(
+        "keeper {} started for {}/{} in {}",
+        std::process::id(),
+        args.app(),
+        args.process(),
+        if own_session {
+            "a session of its own"
+        } else {
+            "its caller's session"
+        }
+    ));
+    let exit = start_and_supervise(args, source, &spec, &diagnostics, output);
+    diagnostics.note(&format!("keeper exits with {exit:?} ({})", exit.code()));
+    exit
+}
+
+/// Starts the signal thread, the app's log and the record writer, then
+/// supervises the app.
+fn start_and_supervise(
+    args: &KeeperArgs,
+    source: &dyn EnvironmentSource,
+    spec: &KeeperSpec,
+    diagnostics: &Diagnostics,
+    output: impl Write,
+) -> KeeperExit {
     let (sender, events) = mpsc::channel();
     if let Err(error) = watch_signals(sender.clone()) {
         let reason = format!("the keeper cannot receive signals: {error}");
+        diagnostics.note(&reason);
         write_handshake(output, &Handshake::Unstartable(reason));
         return KeeperExit::Unstartable;
     }
-    let log = match open_log(&spec) {
+    let log = match open_append(&spec.log) {
         Ok(log) => log,
-        Err(reason) => {
+        Err(error) => {
+            let reason = format!("the log {} cannot be opened: {error}", spec.log.display());
+            diagnostics.note(&reason);
             write_handshake(output, &Handshake::Unstartable(reason));
             return KeeperExit::Unstartable;
         }
     };
-    let recorder = Recorder::start(args);
+    let recorder = Recorder::start(args, diagnostics.clone());
     let mut supervisor = Supervisor {
-        spec: &spec,
+        args,
+        source,
+        spec,
         log,
         sender,
         events,
         recorder: &recorder,
+        diagnostics,
     };
     let exit = supervisor.supervise(output);
     recorder.finish(EXIT_RECORD_WAIT);
@@ -88,32 +147,6 @@ fn watch_signals(sender: Sender<Event>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Opens the app's log for appending, creating it with mode 0600 and its
-/// directory with mode 0700 when they do not exist. It refuses a log that
-/// is a symbolic link.
-fn open_log(spec: &KeeperSpec) -> Result<File, String> {
-    let failed =
-        |error: std::io::Error| format!("the log {} cannot be opened: {error}", spec.log.display());
-    if let Some(dir) = spec.log.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(failed)?;
-    }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/phase/src/engine/keeper/supervise.rs opens the app's log, which the app appends to and phase never rewrites"
-    )]
-    let opened = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).unwrap_or(0))
-        .open(&spec.log);
-    opened.map_err(failed)
-}
-
 /// A started app process.
 #[derive(Debug)]
 struct App {
@@ -121,8 +154,21 @@ struct App {
     host: HostProcess,
 }
 
+/// How the wait before a restart ended.
+enum Resumed {
+    /// The keeper restarts the app with this environment, or with the one
+    /// it holds when it is `None`.
+    Restart(Option<Box<dyn AppliedEnvironment>>),
+    /// The keeper leaves the app ended and exits so.
+    Exit(KeeperExit),
+}
+
 /// One keeper's supervision of its app.
 struct Supervisor<'a> {
+    /// The keeper's arguments, which name the app and the process.
+    args: &'a KeeperArgs,
+    /// The source of a fresh environment.
+    source: &'a dyn EnvironmentSource,
     /// The specification.
     spec: &'a KeeperSpec,
     /// The app's log, which each start of the app receives a copy of.
@@ -133,6 +179,22 @@ struct Supervisor<'a> {
     events: Receiver<Event>,
     /// The writer of the run record.
     recorder: &'a Recorder,
+    /// The keeper's diagnostic log.
+    diagnostics: &'a Diagnostics,
+}
+
+/// What the supervisor tracks across restarts.
+struct Runs {
+    /// The restarts so far, counting earlier keepers', which count toward
+    /// the policy's most restarts and which the run record shows.
+    restarts: u32,
+    /// The restarts in a row since the app last ran healthily, which set
+    /// the backoff.
+    streak: u32,
+    /// When a value of the environment that the app receives expires.
+    expires_at: Option<SystemTime>,
+    /// The freshly resolved environment, once the keeper has resolved one.
+    fresh: Option<Box<dyn AppliedEnvironment>>,
 }
 
 impl Supervisor<'_> {
@@ -140,11 +202,17 @@ impl Supervisor<'_> {
     /// start, and supervises the app until the keeper exits.
     fn supervise(&mut self, output: impl Write) -> KeeperExit {
         let mut output = Some(output);
-        let mut restarts = self.spec.restarts;
+        let mut runs = Runs {
+            restarts: self.spec.restarts,
+            streak: 0,
+            expires_at: self.spec.expires_at(),
+            fresh: None,
+        };
         loop {
-            let app = match self.start() {
+            let app = match self.start(runs.fresh.as_deref()) {
                 Ok(app) => app,
                 Err(reason) => {
+                    self.diagnostics.note(&reason);
                     if let Some(output) = output.take() {
                         write_handshake(output, &Handshake::Unstartable(reason));
                     }
@@ -152,30 +220,88 @@ impl Supervisor<'_> {
                     return KeeperExit::Unstartable;
                 }
             };
-            self.recorder.started(app.host.clone());
+            self.diagnostics
+                .note(&format!("the app started as process {}", app.host.pid));
             if let Some(output) = output.take() {
+                self.recorder.started(app.host.clone());
                 write_handshake(output, &Handshake::Started(app.host.clone()));
+            } else {
+                self.recorder.restarted(app.host.clone(), runs.restarts);
             }
+            let began = now();
             let status = match self.next_event() {
                 Event::Stop => return self.stop(&app),
                 Event::Ended(status) => status,
             };
+            self.diagnostics.note(&match status {
+                Some(status) => format!("the app ended with {status}"),
+                None => "the app ended with an unreadable status".to_owned(),
+            });
             self.recorder.stopping();
             if !self.end_group(&app, false) {
                 return KeeperExit::Unstoppable;
             }
             self.recorder.stopped();
             let failed = !status.is_some_and(|status| status.success());
-            match after_exit(&self.spec.restart, failed, restarts) {
-                AfterExit::Leave(exit) => return exit,
-                AfterExit::Restart { delay, resolve } => {
-                    if self.stop_requested_within(now() + delay) {
-                        return KeeperExit::Stopped;
-                    }
-                    if needs_environment(resolve, SystemTime::now(), self.spec.expires_at()) {
-                        return KeeperExit::NeedsEnvironment;
-                    }
-                    restarts = restarts.saturating_add(1);
+            match self.resume(&mut runs, failed, now().saturating_duration_since(began)) {
+                Resumed::Restart(Some(fresh)) => runs.fresh = Some(fresh),
+                Resumed::Restart(None) => {}
+                Resumed::Exit(exit) => return exit,
+            }
+        }
+    }
+
+    /// Decides what follows a run of the app that lasted `ran` and
+    /// `failed` or not: it waits each backoff, resolves a fresh
+    /// environment when the policy asks for one, and tries again after a
+    /// backoff when resolving fails, until the policy's most restarts.
+    fn resume(&self, runs: &mut Runs, failed: bool, ran: Duration) -> Resumed {
+        let mut failed = failed;
+        let mut unresolved = false;
+        let mut ran = Some(ran);
+        loop {
+            let (backoff, resolve) = match after_exit(&self.spec.restart, failed, runs.restarts) {
+                AfterExit::Leave(_) if unresolved => {
+                    return Resumed::Exit(KeeperExit::EnvironmentUnresolved);
+                }
+                AfterExit::Leave(exit) => return Resumed::Exit(exit),
+                AfterExit::Restart { backoff, resolve } => (backoff, resolve),
+            };
+            if let Some(ran) = ran.take() {
+                runs.streak = streak_after_run(runs.streak, ran, backoff);
+            }
+            let delay = backoff_delay(backoff, runs.streak);
+            runs.restarts = runs.restarts.saturating_add(1);
+            runs.streak = runs.streak.saturating_add(1);
+            self.diagnostics.note(&format!(
+                "restart {} follows in {} ms",
+                runs.restarts,
+                delay.as_millis()
+            ));
+            if self.stop_requested_within(now() + delay) {
+                self.diagnostics
+                    .note("a stop request came during the backoff");
+                return Resumed::Exit(KeeperExit::Stopped);
+            }
+            if !needs_environment(resolve, SystemTime::now(), runs.expires_at) {
+                return Resumed::Restart(None);
+            }
+            match self
+                .source
+                .resolve(self.args.app(), self.args.process(), now() + RESOLVE_WAIT)
+            {
+                Ok(fresh) => {
+                    self.diagnostics
+                        .note("the keeper resolved a fresh environment for the restart");
+                    runs.expires_at = fresh.expires_at();
+                    return Resumed::Restart(Some(fresh));
+                }
+                Err(error) => {
+                    self.diagnostics.note(&format!(
+                        "the keeper could not resolve the environment: {error}"
+                    ));
+                    failed = true;
+                    unresolved = true;
                 }
             }
         }
@@ -183,7 +309,10 @@ impl Supervisor<'_> {
 
     /// Starts the app in a group of its own, with the log as its standard
     /// output and standard error, and a thread that waits for it to end.
-    fn start(&self) -> Result<App, String> {
+    /// With `fresh`, the app receives only the inherited variables and
+    /// `fresh`. Otherwise it inherits the keeper's environment, which holds
+    /// the same inherited variables and the environment resolved first.
+    fn start(&self, fresh: Option<&dyn AppliedEnvironment>) -> Result<App, String> {
         let (program, arguments) = self
             .spec
             .run
@@ -204,6 +333,10 @@ impl Supervisor<'_> {
             .stdout(stdout)
             .stderr(stderr)
             .process_group(0);
+        if let Some(fresh) = fresh {
+            command.env_clear().envs(&self.spec.inherited);
+            fresh.apply(&mut command);
+        }
         apply_sandbox(&mut command);
         #[expect(
             clippy::disallowed_methods,
@@ -251,8 +384,12 @@ impl Supervisor<'_> {
 
     /// Stops the running `app` after a stop request.
     fn stop(&self, app: &App) -> KeeperExit {
+        self.diagnostics
+            .note("a stop request came, and the keeper stops the app");
         self.recorder.stopping();
         if !self.end_group(app, true) {
+            self.diagnostics
+                .note("the app's group was still there after KILL");
             return KeeperExit::Unstoppable;
         }
         self.recorder.stopped();

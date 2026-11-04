@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::engine::keeper::KeeperArgs;
+use crate::engine::keeper::logfile::Diagnostics;
 use crate::name::WorkspaceId;
 use crate::record::run::{HostProcess, ObjectKey, Started};
 use crate::record::store::{Journal, RunStore};
@@ -22,6 +23,9 @@ const RECORD_LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
 enum Note {
     /// The app started as this process.
     Started(HostProcess),
+    /// The keeper restarted the app as this process, after this many
+    /// restarts in all.
+    Restarted(HostProcess, u32),
     /// The keeper is about to stop the app's group.
     Stopping,
     /// The app's group is gone.
@@ -38,8 +42,9 @@ pub(crate) struct Recorder {
 }
 
 impl Recorder {
-    /// Starts the writer of the run record that `args` names.
-    pub(crate) fn start(args: &KeeperArgs) -> Self {
+    /// Starts the writer of the run record that `args` names, which notes
+    /// each failed write in `diagnostics`.
+    pub(crate) fn start(args: &KeeperArgs, diagnostics: Diagnostics) -> Self {
         let (notes, queue) = mpsc::channel();
         let (finished, done) = mpsc::channel();
         let store = RunStore::new(args.state_dir());
@@ -47,7 +52,7 @@ impl Recorder {
         let key = ObjectKey::Process(args.app().clone(), args.process().clone());
         thread::spawn(move || {
             while let Ok(note) = queue.recv() {
-                write(&store, &workspace, &key, note, &queue);
+                write(&store, &workspace, &key, note, &queue, &diagnostics);
             }
             let _ = finished.send(());
         });
@@ -57,6 +62,12 @@ impl Recorder {
     /// Records that the app started as `host`.
     pub(crate) fn started(&self, host: HostProcess) {
         let _ = self.notes.send(Note::Started(host));
+    }
+
+    /// Records that the keeper restarted the app as `host`, after
+    /// `restarts` restarts in all.
+    pub(crate) fn restarted(&self, host: HostProcess, restarts: u32) {
+        let _ = self.notes.send(Note::Restarted(host, restarts));
     }
 
     /// Records that the keeper is about to stop the app's group.
@@ -77,26 +88,40 @@ impl Recorder {
 }
 
 /// Writes `first`, and every change queued behind it, under one hold of
-/// the lifecycle lock. A change to a record that does not name the
-/// process, or that cannot be written, is dropped, because the keeper has
-/// nobody to report it to and must go on supervising.
+/// the lifecycle lock. A change that cannot be written is noted in
+/// `diagnostics` and dropped, because the keeper must go on supervising.
 fn write(
     store: &RunStore,
     workspace: &WorkspaceId,
     key: &ObjectKey,
     first: Note,
     queue: &Receiver<Note>,
+    diagnostics: &Diagnostics,
 ) {
-    let Ok(mut journal) = Journal::open(store, workspace, RECORD_LOCK_WAIT) else {
-        return;
+    let mut journal = match Journal::open(store, workspace, RECORD_LOCK_WAIT) {
+        Ok(journal) => journal,
+        Err(error) => {
+            diagnostics.note(&format!(
+                "the run record could not be written ({}): {error}",
+                error.code()
+            ));
+            return;
+        }
     };
     let mut note = Some(first);
     while let Some(current) = note {
-        let _ = match current {
+        let written = match current {
             Note::Started(host) => journal.started(key, Started::Host(host)),
+            Note::Restarted(host, restarts) => journal.restarted(key, host, restarts),
             Note::Stopping => journal.stopping(key),
             Note::Stopped => journal.stopped(key),
         };
+        if let Err(error) = written {
+            diagnostics.note(&format!(
+                "the run record could not be written ({}): {error}",
+                error.code()
+            ));
+        }
         note = queue.try_recv().ok();
     }
 }

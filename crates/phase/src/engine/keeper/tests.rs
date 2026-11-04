@@ -4,11 +4,13 @@
 //! finds `keep` among them and runs the keeper as the program that links
 //! phase would.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::io::{BufRead as _, BufReader, Read as _};
 use std::num::NonZeroU32;
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
@@ -16,12 +18,14 @@ use tempfile::TempDir;
 
 use super::spawn::{command_line, read_handshake};
 use super::spec::{Handshake, write_handshake};
+use super::supervise::keep;
 use super::{
     BadKeeperArgs, KeeperArgs, KeeperCommand, KeeperExit, KeeperSpec, Kept, Launch, run, spawn,
 };
 use crate::clock::{POLL_INTERVAL, now, pause};
-use crate::env::AppliedEnvironment;
+use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
+use crate::name::{AppName, ProcessName};
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits, Stop};
 use crate::record::process::{Processes, Start, System};
 use crate::record::run::{EntryState, HostProcess, ObjectKey};
@@ -31,6 +35,10 @@ use crate::record::testing::{app, empty_record, process, workspace};
 /// The full name of the test that runs a keeper.
 const ENTRY: &str =
     "engine::keeper::tests::the_test_binary_runs_a_keeper_when_it_is_started_as_one";
+
+/// The full name of the test that starts a keeper and waits.
+const SPAWNER: &str =
+    "engine::keeper::tests::the_test_binary_starts_a_keeper_when_it_is_started_as_a_spawner";
 
 /// How long a test waits for something a keeper does.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -46,12 +54,65 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
         clippy::disallowed_methods,
         reason = "the test binary runs as a keeper, which reads its specification from standard input and writes its handshake to standard output"
     )]
-    let exit = run(&keeper_args, std::io::stdin().lock(), std::io::stdout());
+    let exit = run(
+        &keeper_args,
+        &Source,
+        std::io::stdin().lock(),
+        std::io::stdout(),
+    );
     #[expect(
         clippy::disallowed_methods,
         reason = "the test binary runs as a keeper, whose exit status the engine reads"
     )]
     std::process::exit(i32::from(exit.code()));
+}
+
+#[test]
+fn the_test_binary_starts_a_keeper_when_it_is_started_as_a_spawner() {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let Some(at) = args.iter().position(|arg| arg == "spawn-keeper") else {
+        return;
+    };
+    let fixture = Fixture::at(PathBuf::from(&args[at + 1]));
+    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let running = fixture.start(&spec).unwrap();
+    println!(
+        "spawned {} {} {} {}",
+        running.kept.keeper.pid,
+        running.kept.keeper.started_at_us,
+        running.kept.app.pid,
+        running.kept.app.started_at_us
+    );
+    // The spawner leaves the keeper running, and waits for a signal or for
+    // its standard input to close.
+    std::mem::forget(running);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the spawner waits until its test closes its standard input"
+    )]
+    let _ = std::io::stdin().read_to_end(&mut Vec::new());
+}
+
+/// The environment source of the keepers that tests start. It resolves
+/// `GREETING=fresh`, and fails for the process `unresolvable`.
+struct Source;
+
+impl EnvironmentSource for Source {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        if process.as_str() == "unresolvable" {
+            return Err(EnvironmentError::new(
+                "GREETING".to_owned(),
+                "vault".to_owned(),
+                "the vault is locked".into(),
+            ));
+        }
+        Ok(Box::new(Fixed(vec![("GREETING", "fresh")])))
+    }
 }
 
 /// An environment that holds its values in a list, as a test double of
@@ -80,38 +141,71 @@ impl AppliedEnvironment for Fixed {
     }
 }
 
-/// A state directory whose run record plans `api/server`.
+/// A state directory whose run record plans `api/<process>`.
 struct Fixture {
+    /// The temporary state directory, which a fixture made in another
+    /// process owns instead.
+    _owned: Option<TempDir>,
     /// The state directory.
-    state: TempDir,
+    dir: PathBuf,
+    /// The process, whose name tells [`Source`] how to answer.
+    process: &'static str,
 }
 
 impl Fixture {
+    /// Returns a fixture of the process `server`.
     fn new() -> Self {
+        Self::of("server")
+    }
+
+    /// Returns a fixture of the process `name`.
+    fn of(name: &'static str) -> Self {
         let state = tempfile::tempdir().unwrap();
         let store = RunStore::new(state.path());
         let mut journal = Journal::open(&store, &workspace(), PATIENCE).unwrap();
         journal
-            .plan(empty_record().host_process(&app("api"), &process("server")))
+            .plan(empty_record().host_process(&app("api"), &process(name)))
             .unwrap();
-        Self { state }
+        Self {
+            dir: state.path().to_path_buf(),
+            _owned: Some(state),
+            process: name,
+        }
+    }
+
+    /// Returns the fixture of the process `server` whose state directory
+    /// another process made at `dir`.
+    const fn at(dir: PathBuf) -> Self {
+        Self {
+            _owned: None,
+            dir,
+            process: "server",
+        }
     }
 
     fn args(&self) -> KeeperArgs {
         KeeperArgs::new(
             workspace(),
             app("api"),
-            process("server"),
-            self.state.path().to_path_buf(),
+            process(self.process),
+            self.dir.clone(),
         )
     }
 
     fn log(&self) -> PathBuf {
-        self.state.path().join("logs").join("server.log")
+        self.dir.join("logs").join(format!("{}.log", self.process))
     }
 
     fn log_text(&self) -> String {
         std::fs::read_to_string(self.log()).unwrap_or_default()
+    }
+
+    fn diagnostics_text(&self) -> String {
+        let path = self
+            .dir
+            .join("logs")
+            .join(format!("api.{}.keeper.log", self.process));
+        std::fs::read_to_string(path).unwrap_or_default()
     }
 
     /// Returns the specification of an app that runs `sh -c script` under
@@ -119,16 +213,31 @@ impl Fixture {
     fn spec(&self, script: &str, restart: Restart, stop: Stop) -> KeeperSpec {
         KeeperSpec::new(
             vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
-            self.state.path().to_path_buf(),
+            self.dir.clone(),
             self.log(),
             restart,
             stop,
             Duration::from_secs(5),
         )
+        .inheriting(BTreeMap::from([
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("HOME".to_owned(), self.dir.display().to_string()),
+        ]))
     }
 
-    /// Starts a keeper of `spec` from this test binary.
+    /// Starts a keeper of `spec` from this test binary, with
+    /// `GREETING=hello` as the resolved environment.
     fn start(&self, spec: &KeeperSpec) -> Result<Running, PhaseError> {
+        self.start_with(spec, &Fixed(vec![("GREETING", "hello")]))
+    }
+
+    /// Starts a keeper of `spec` from this test binary, with `environment`
+    /// as the resolved environment.
+    fn start_with(
+        &self,
+        spec: &KeeperSpec,
+        environment: &dyn AppliedEnvironment,
+    ) -> Result<Running, PhaseError> {
         let command = KeeperCommand::new(
             std::env::current_exe().unwrap(),
             ["--exact", "--nocapture", "--", ENTRY, "keep"]
@@ -136,38 +245,27 @@ impl Fixture {
                 .map(OsString::from)
                 .collect(),
         );
-        let environment = Fixed(vec![("GREETING", "hello")]);
-        let inherited = [
-            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
-            (
-                OsString::from("HOME"),
-                self.state.path().as_os_str().to_owned(),
-            ),
-        ];
         spawn(&Launch {
             command: &command,
             args: &self.args(),
             spec,
-            environment: &environment,
-            inherited: &inherited,
+            environment,
             deadline: now() + PATIENCE,
         })
         .map(|kept| Running { kept })
     }
 
-    /// Returns the state of the app in the run record.
-    fn recorded(&self) -> Option<(EntryState, Option<HostProcess>)> {
-        let record = RunStore::new(self.state.path())
-            .read(&workspace())
-            .unwrap()?;
-        let key = ObjectKey::Process(app("api"), process("server"));
+    /// Returns the state of the app in the run record, its process and its
+    /// count of restarts.
+    fn recorded(&self) -> Option<(EntryState, Option<HostProcess>, u32)> {
+        let record = RunStore::new(&self.dir).read(&workspace()).unwrap()?;
+        let key = ObjectKey::Process(app("api"), process(self.process));
         let state = record.state(&key)?;
-        let host = record
+        let entry = record
             .processes
             .iter()
-            .find(|entry| entry.process == process("server"))
-            .and_then(|entry| entry.host.clone());
-        Some((state, host))
+            .find(|entry| entry.process == process(self.process))?;
+        Some((state, entry.host.clone(), entry.restarts))
     }
 }
 
@@ -201,6 +299,17 @@ impl Drop for Running {
         let _ = System.signal(&self.kept.keeper, Signal::KILL);
         let _ = System.signal(&self.kept.app, Signal::KILL);
         let _ = self.kept.exited();
+    }
+}
+
+/// Processes that a test kills, with their groups, when it ends.
+struct Killed(Vec<HostProcess>);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        for host in &self.0 {
+            let _ = System.signal(host, Signal::KILL);
+        }
     }
 }
 
@@ -281,7 +390,7 @@ fn each_way_a_keeper_ends_that_the_engine_acts_on_has_its_own_status() {
         KeeperExit::Unstoppable,
         KeeperExit::BadInput,
         KeeperExit::Unstartable,
-        KeeperExit::NeedsEnvironment,
+        KeeperExit::EnvironmentUnresolved,
     ]
     .map(KeeperExit::code);
 
@@ -314,10 +423,12 @@ fn a_keeper_refuses_a_specification_it_cannot_read() {
     let fixture = Fixture::new();
     let mut output = Vec::new();
 
-    let exit = run(
+    let exit = keep(
         &fixture.args(),
+        &Source,
         b"{\"schema\": \"phase/keeper/v9\"}".as_slice(),
         &mut output,
+        false,
     );
 
     assert_eq!(exit, KeeperExit::BadInput);
@@ -347,7 +458,7 @@ fn a_keeper_starts_its_app_in_a_group_of_its_own_with_only_the_environment_it_ho
         fixture.log_text() == "greeting=hello manifest=unset\n"
     });
     eventually("the keeper's record of the app", || {
-        fixture.recorded() == Some((EntryState::Running, Some(kept.app.clone())))
+        fixture.recorded() == Some((EntryState::Running, Some(kept.app.clone()), 0))
     });
 }
 
@@ -365,22 +476,9 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
     assert_eq!(code, i32::from(KeeperExit::Failed.code()));
     assert_eq!(fixture.log_text(), "run\nrun\nrun\n");
     assert!(started.elapsed() >= first * 3);
-    eventually("the keeper's record of the stop", || {
-        matches!(fixture.recorded(), Some((EntryState::Stopped, _)))
+    eventually("the keeper's record of the stop after two restarts", || {
+        matches!(fixture.recorded(), Some((EntryState::Stopped, _, 2)))
     });
-}
-
-#[test]
-fn a_keeper_whose_restart_needs_a_fresh_environment_exits_with_its_own_status() {
-    let fixture = Fixture::new();
-    let restart = Restart::on_failure(limits(None, Duration::from_millis(10), Resolve::Always));
-    let spec = fixture.spec("echo run; exit 1", restart, Stop::default());
-    let mut running = fixture.start(&spec).unwrap();
-
-    let code = running.exit_code();
-
-    assert_eq!(code, i32::from(KeeperExit::NeedsEnvironment.code()));
-    assert_eq!(fixture.log_text(), "run\n");
 }
 
 #[test]
@@ -402,7 +500,7 @@ fn a_keeper_stops_its_app_with_the_stop_signal_and_records_it_stopped() {
     assert!(log.ends_with("stopping\n"));
     assert!(!System.group_exists(running.kept.app.group));
     eventually("the keeper's record of the stop", || {
-        matches!(fixture.recorded(), Some((EntryState::Stopped, _)))
+        matches!(fixture.recorded(), Some((EntryState::Stopped, _, _)))
     });
 }
 
@@ -460,25 +558,6 @@ fn a_keeper_that_cannot_start_its_program_reports_the_process_unstartable() {
 }
 
 #[test]
-fn a_keeper_whose_environment_has_expired_exits_for_a_fresh_one_before_a_restart() {
-    let fixture = Fixture::new();
-    let restart = Restart::always(limits(
-        None,
-        Duration::from_millis(10),
-        Resolve::WhenExpired,
-    ));
-    let spec = fixture
-        .spec("echo run; exit 0", restart, Stop::default())
-        .expiring(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)));
-    let mut running = fixture.start(&spec).unwrap();
-
-    let code = running.exit_code();
-
-    assert_eq!(code, i32::from(KeeperExit::NeedsEnvironment.code()));
-    assert_eq!(fixture.log_text(), "run\n");
-}
-
-#[test]
 fn a_keeper_counts_the_restarts_of_the_keepers_before_it_toward_the_most() {
     let fixture = Fixture::new();
     let restart = Restart::on_failure(limits(Some(2), Duration::from_millis(10), Resolve::Never));
@@ -491,4 +570,172 @@ fn a_keeper_counts_the_restarts_of_the_keepers_before_it_toward_the_most() {
 
     assert_eq!(code, i32::from(KeeperExit::Failed.code()));
     assert_eq!(fixture.log_text(), "run\n");
+}
+
+#[test]
+fn a_keeper_resolves_a_fresh_environment_for_a_restart_that_asks_for_one() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(10), Resolve::Always));
+    let spec = fixture.spec(
+        "echo \"greeting=$GREETING home=$HOME manifest=${CARGO_MANIFEST_DIR-unset}\"; exit 1",
+        restart,
+        Stop::default(),
+    );
+    let mut running = fixture.start(&spec).unwrap();
+
+    let code = running.exit_code();
+
+    assert_eq!(code, i32::from(KeeperExit::Failed.code()));
+    let home = fixture.dir.display();
+    assert_eq!(
+        fixture.log_text(),
+        format!(
+            "greeting=hello home={home} manifest=unset\ngreeting=fresh home={home} manifest=unset\n"
+        )
+    );
+}
+
+#[test]
+fn a_keeper_resolves_a_fresh_environment_once_its_environment_has_expired() {
+    let fixture = Fixture::new();
+    let restart = Restart::always(limits(
+        Some(1),
+        Duration::from_millis(10),
+        Resolve::WhenExpired,
+    ));
+    let spec = fixture
+        .spec("echo \"greeting=$GREETING\"", restart, Stop::default())
+        .expiring(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)));
+    let mut running = fixture.start(&spec).unwrap();
+
+    let code = running.exit_code();
+
+    assert_eq!(code, i32::from(KeeperExit::Completed.code()));
+    assert_eq!(fixture.log_text(), "greeting=hello\ngreeting=fresh\n");
+}
+
+#[test]
+fn a_keeper_that_cannot_resolve_an_environment_retries_and_then_exits_unresolved() {
+    let fixture = Fixture::of("unresolvable");
+    let restart = Restart::on_failure(limits(Some(2), Duration::from_millis(10), Resolve::Always));
+    let spec = fixture.spec("echo run; exit 1", restart, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+
+    let code = running.exit_code();
+
+    assert_eq!(code, i32::from(KeeperExit::EnvironmentUnresolved.code()));
+    assert_eq!(fixture.log_text(), "run\n");
+    let diagnostics = fixture.diagnostics_text();
+    assert_eq!(
+        diagnostics
+            .matches("vault could not supply the variable GREETING")
+            .count(),
+        2
+    );
+    assert!(!diagnostics.contains("hello"));
+}
+
+#[test]
+fn a_keeper_notes_its_start_restarts_and_exit_in_its_diagnostic_log_without_a_value() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(10), Resolve::Never));
+    let spec = fixture.spec(
+        "echo \"greeting=$GREETING\"; exit 1",
+        restart,
+        Stop::default(),
+    );
+    let mut running = fixture.start(&spec).unwrap();
+
+    running.exit_code();
+
+    let diagnostics = fixture.diagnostics_text();
+    for expected in [
+        "keeper ",
+        "in a session of its own",
+        "the app started as process",
+        "the app ended with exit status: 1",
+        "restart 1 follows in 10 ms",
+        "keeper exits with Failed (1)",
+    ] {
+        assert!(
+            diagnostics.contains(expected),
+            "{expected} is missing from {diagnostics}"
+        );
+    }
+    assert!(fixture.log_text().contains("hello"));
+    assert!(!diagnostics.contains("hello"));
+}
+
+#[test]
+fn a_keeper_survives_a_hangup_sent_to_the_group_that_started_it() {
+    let fixture = Fixture::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts this test binary as a spawner in a group of its own"
+    )]
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "--nocapture", "--", SPAWNER, "spawn-keeper"])
+        .arg(&fixture.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts this test binary as a spawner in a group of its own"
+    )]
+    let mut spawner = command.spawn().unwrap();
+    let mut lines = BufReader::new(spawner.stdout.take().unwrap()).lines();
+    let spawned = lines
+        .find_map(|line| line.unwrap().strip_prefix("spawned ").map(str::to_owned))
+        .unwrap();
+    let numbers: Vec<u64> = spawned
+        .split(' ')
+        .map(|word| word.parse().unwrap())
+        .collect();
+    let host = |pid: u64, started_at_us: u64| HostProcess {
+        pid: u32::try_from(pid).unwrap(),
+        started_at_us,
+        group: u32::try_from(pid).unwrap(),
+        boot_id: None,
+    };
+    let keeper = host(numbers[0], numbers[1]);
+    let app_process = host(numbers[2], numbers[3]);
+    let _cleanup = Killed(vec![keeper.clone(), app_process.clone()]);
+    let spawner_group =
+        rustix::process::Pid::from_raw(i32::try_from(spawner.id()).unwrap()).unwrap();
+
+    rustix::process::kill_process_group(spawner_group, Signal::HUP).unwrap();
+    spawner.wait().unwrap();
+
+    assert!(alive(&keeper));
+    assert!(alive(&app_process));
+    assert_eq!(group_of(keeper.pid), keeper.pid);
+    let session = rustix::process::getsid(rustix::process::Pid::from_raw(
+        i32::try_from(keeper.pid).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        u32::try_from(session.as_raw_nonzero().get()).unwrap(),
+        keeper.pid
+    );
+}
+
+#[test]
+fn an_app_receives_only_path_home_and_its_resolved_environment() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec(
+        "echo \"path=$PATH tmp=${TMPDIR-unset} manifest=${CARGO_MANIFEST_DIR-unset} greeting=$GREETING\"",
+        Restart::No,
+        Stop::default(),
+    );
+    let mut running = fixture.start(&spec).unwrap();
+
+    running.exit_code();
+
+    assert_eq!(
+        fixture.log_text(),
+        "path=/usr/bin:/bin tmp=unset manifest=unset greeting=hello\n"
+    );
 }

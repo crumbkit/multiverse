@@ -251,21 +251,29 @@ process in its own process group, gives it its log file as a file
 descriptor, restarts it under its policy, and exits when the process is
 stopped.
 
-The engine starts a keeper in a process group of its own. The keeper's
-arguments name the workspace's stable id, the app, the process and the state
-directory, and hold no value. Its environment holds `PATH`, `HOME` and the
-process's resolved environment. Its standard input carries a
-`phase/keeper/v1` specification with the command, directory, log, restart
-policy and stop handling. The keeper writes one handshake line to standard
-output once the process has started or failed to start, and the engine
-waits for that line until its deadline. The keeper records each start and
-stop of the process in the run record from a thread of its own, so waiting
-for the lifecycle lock never blocks supervision.
+The engine starts a keeper, and the keeper's first action is `setsid`, so
+it leads a session and a process group of its own, and a hangup or Ctrl-C
+at the engine's terminal never reaches it. The keeper's arguments name the
+workspace's stable id, the app, the process and the state directory, and
+hold no value. The keeper's environment and the app's hold only `PATH`,
+`HOME` and the process's resolved environment. The keeper's
+standard input carries a `phase/keeper/v1` specification with the command,
+directory, log, restart policy and stop handling. The keeper writes one
+handshake line to standard output once the process has started or failed
+to start, and the engine waits for that line until its deadline. The
+keeper records each start, restart count and stop of the process in the
+run record from a thread of its own, so waiting for the lifecycle lock
+never blocks supervision. It notes its start, restarts, resolve failures,
+record-write failures and exit in `<log dir>/<app>.<process>.keeper.log`,
+which never holds a value and also receives its standard error.
 
-A keeper holds only the values it was given, so it cannot resolve the
-environment again. When a restart needs a fresh environment, the keeper
-waits the backoff and exits with status 75, and the engine starts a new
-keeper with a fresh environment and the count of earlier restarts.
+When a restart needs a fresh environment, the keeper resolves it through
+the `EnvironmentSource` that the program linking phase passes to it, and
+applies it to the restarted process. When resolving fails, the keeper
+notes it, waits the next backoff and tries again, up to the policy's most
+restarts, and then exits with status 3. The backoff starts again from its
+first wait after a run longer than its longest wait or a minute, whichever
+is longer.
 
 No long-lived process holds the secrets of every app. If a keeper is killed,
 its app process keeps running, and `phase sweep` or the next `phase up`

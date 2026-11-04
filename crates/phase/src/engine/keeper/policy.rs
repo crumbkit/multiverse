@@ -16,8 +16,9 @@ pub(crate) enum AfterExit {
     /// The keeper waits `delay`, then restarts the app, unless `resolve`
     /// says the restart needs a fresh environment.
     Restart {
-        /// The backoff before the restart.
-        delay: Duration,
+        /// The policy's backoff, from which the supervisor takes the wait
+        /// before the restart.
+        backoff: Backoff,
         /// Whether the restart resolves the environment again.
         resolve: Resolve,
     },
@@ -26,7 +27,8 @@ pub(crate) enum AfterExit {
 }
 
 /// Returns what the keeper does after its app ended, `failed` or not, when
-/// the app has been restarted `restarts` times already under `restart`.
+/// the app has been restarted `restarts` times already under `restart`. A
+/// failed attempt to resolve the environment counts as a failed run.
 pub(crate) fn after_exit(restart: &Restart, failed: bool, restarts: u32) -> AfterExit {
     let leave = AfterExit::Leave(if failed {
         KeeperExit::Failed
@@ -42,20 +44,36 @@ pub(crate) fn after_exit(restart: &Restart, failed: bool, restarts: u32) -> Afte
         return leave;
     }
     AfterExit::Restart {
-        delay: backoff_delay(limits.backoff, restarts),
+        backoff: limits.backoff,
         resolve: limits.resolve,
     }
 }
 
-/// Returns the wait before the restart that follows `restarts` earlier
-/// ones: the backoff's first wait, doubled once for each earlier restart,
-/// and never longer than its longest wait.
-pub(crate) fn backoff_delay(backoff: Backoff, restarts: u32) -> Duration {
-    let factor = 2_u32.checked_pow(restarts).unwrap_or(u32::MAX);
+/// The shortest run after which a process counts as healthy, unless the
+/// backoff's longest wait is longer.
+pub(crate) const HEALTHY_RUN: Duration = Duration::from_secs(60);
+
+/// Returns the wait before a restart that follows `streak` restarts in a
+/// row: the backoff's first wait, doubled once for each of them, and never
+/// longer than its longest wait.
+pub(crate) fn backoff_delay(backoff: Backoff, streak: u32) -> Duration {
+    let factor = 2_u32.checked_pow(streak).unwrap_or(u32::MAX);
     backoff
         .first()
         .checked_mul(factor)
         .map_or(backoff.most(), |delay| delay.min(backoff.most()))
+}
+
+/// Returns the count of restarts in a row after a run that lasted `ran`
+/// and followed `streak` of them. A run longer than the backoff's longest
+/// wait, or than [`HEALTHY_RUN`] when that is longer, was healthy, and the
+/// count starts again from 0, so the next wait is the first one.
+pub(crate) fn streak_after_run(streak: u32, ran: Duration, backoff: Backoff) -> u32 {
+    if ran > backoff.most().max(HEALTHY_RUN) {
+        0
+    } else {
+        streak
+    }
 }
 
 /// Reports whether a restart under `resolve` needs the environment

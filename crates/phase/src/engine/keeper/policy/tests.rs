@@ -1,7 +1,9 @@
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime};
 
-use super::{AfterExit, after_exit, backoff_delay, needs_environment};
+use super::{
+    AfterExit, HEALTHY_RUN, after_exit, backoff_delay, needs_environment, streak_after_run,
+};
 use crate::engine::keeper::KeeperExit;
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits};
 
@@ -47,7 +49,7 @@ fn on_failure_restarts_a_failed_process_and_leaves_one_that_exited_cleanly() {
     assert_eq!(
         after_exit(&restart, true, 2),
         AfterExit::Restart {
-            delay: Duration::from_millis(400),
+            backoff: limits(None, Resolve::Never).backoff,
             resolve: Resolve::Never,
         }
     );
@@ -105,4 +107,23 @@ fn a_restart_that_resolves_when_expired_needs_a_fresh_environment_only_after_exp
     assert!(!needs_environment(Resolve::WhenExpired, now, None));
     assert!(!needs_environment(Resolve::WhenExpired, now, Some(later)));
     assert!(needs_environment(Resolve::WhenExpired, later, Some(later)));
+}
+
+#[test]
+fn a_run_longer_than_a_minute_resets_the_backoff_to_its_first_wait() {
+    let backoff = Backoff::new(Duration::from_millis(100), Duration::from_secs(5)).unwrap();
+
+    assert_eq!(streak_after_run(4, HEALTHY_RUN, backoff), 4);
+    assert_eq!(
+        streak_after_run(4, HEALTHY_RUN + Duration::from_millis(1), backoff),
+        0
+    );
+}
+
+#[test]
+fn a_run_must_outlast_a_longest_wait_above_a_minute_to_reset_the_backoff() {
+    let backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(120)).unwrap();
+
+    assert_eq!(streak_after_run(3, Duration::from_secs(90), backoff), 3);
+    assert_eq!(streak_after_run(3, Duration::from_secs(121), backoff), 0);
 }
