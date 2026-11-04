@@ -67,6 +67,9 @@ pub const FILE_UNWRITABLE: Code = Code::new("mxv", "file", "unwritable");
 pub const PROCESS_UNSTARTABLE: Code = Code::new("mxv", "process", "unstartable");
 /// The code of a process table that `ps` cannot read.
 pub const PROCESS_TABLE_UNREADABLE: Code = Code::new("mxv", "process", "table_unreadable");
+/// The code of an operating system whose process-table structs differ
+/// from the ones mxv reads.
+pub const PROCESS_UNSUPPORTED_OS: Code = Code::new("mxv", "process", "unsupported_os");
 /// The code of a port range whose every port is held by a workspace or taken.
 pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
@@ -257,6 +260,7 @@ pub(crate) const CODES: &[&Code] = &[
     &CONFIG_UNREADABLE,
     &PROCESS_UNSTARTABLE,
     &PROCESS_TABLE_UNREADABLE,
+    &PROCESS_UNSUPPORTED_OS,
     &PORT_EXHAUSTED,
     &WORKSPACE_BUSY,
     &DOCKER_NOT_FOUND,
@@ -364,6 +368,7 @@ impl Failure for MxvFailure {
                 Error::MismatchedRecord { .. } => &RECORD_MISMATCHED,
                 Error::ProcessUnstartable { .. } => &PROCESS_UNSTARTABLE,
                 Error::ProcessTable { .. } => &PROCESS_TABLE_UNREADABLE,
+                Error::UnsupportedOs { .. } => &PROCESS_UNSUPPORTED_OS,
                 Error::NoFreePort { .. } => &PORT_EXHAUSTED,
                 Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
@@ -573,6 +578,9 @@ fn library_recovery(error: &Error) -> Recovery {
             "check that the cwd of {process} in mxv.toml exists in the checkout, and run the command again"
         )),
         Error::ProcessTable { .. } => hint("put ps on PATH, and run the command again"),
+        Error::UnsupportedOs { .. } => hint(
+            "run mxv on a version of the operating system whose process table it reads, and report the version and the message",
+        ),
         Error::NoFreePort { .. } => hint(
             "widen `ports_range` in the config file, or remove workspaces that hold ports you no longer need",
         ),

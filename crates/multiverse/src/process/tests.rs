@@ -7,9 +7,9 @@ use rustix::process::Signal;
 
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::process::{
-    Launch, UNREADABLE, bsd_info_start, bsd_start, exit_code, group_exists, group_listens, launch,
-    listening_inodes, signal, socket_descriptors, socket_listens_on, start_time, stat_group,
-    stat_start_time,
+    Holder, Launch, UNREADABLE, bsd_info_start, bsd_start, exit_code, group_exists, is_bsd_start,
+    launch, listen_holder, listening_inodes, signal, socket_descriptors, socket_listens_on,
+    start_time, stat_field, stat_start_time,
 };
 
 fn argv(words: &[&str]) -> Vec<String> {
@@ -161,10 +161,21 @@ fn the_listening_sockets_of_a_port_come_from_the_lines_in_state_0a() {
 }
 
 #[test]
-fn the_group_in_a_proc_stat_line_is_field_5_even_when_the_name_holds_parentheses() {
+fn the_parent_and_group_in_a_proc_stat_line_are_fields_4_and_5_even_when_the_name_holds_parentheses()
+ {
     let line = "4242 (my (odd) app) S 1 4200 4200 0 -1 4194560\n";
-    assert_eq!(stat_group(line), Some(4200));
-    assert_eq!(stat_group("4242 (short) S"), None);
+    assert_eq!(stat_field(line, 4), Some(1));
+    assert_eq!(stat_field(line, 5), Some(4200));
+    assert_eq!(stat_field("4242 (short) S", 5), None);
+}
+
+#[test]
+fn a_start_time_of_seconds_and_microseconds_is_libprocs_and_what_ps_prints_is_not() {
+    assert!(is_bsd_start("1793809711.139785"));
+    assert!(!is_bsd_start("Wed Nov  4 10:00:00 2026"));
+    assert!(!is_bsd_start("1793809711"));
+    assert!(!is_bsd_start("1793809711.13"));
+    assert!(!is_bsd_start(".139785"));
 }
 
 #[test]
@@ -203,20 +214,50 @@ fn a_socket_info_listens_on_a_port_only_as_a_tcp_socket_in_the_listen_state() {
 }
 
 #[test]
-fn a_group_listens_on_a_port_only_while_one_of_its_members_holds_the_listening_socket() {
+fn the_holder_of_a_listening_socket_is_the_group_or_names_the_other_process() {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let own = u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let other = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
     let answers = (
-        group_listens(own, port).unwrap(),
-        group_listens(other.pid(), port).unwrap(),
+        listen_holder(own, port).unwrap(),
+        listen_holder(other.pid(), port).unwrap(),
     );
     other.kill();
     if cfg!(any(target_os = "linux", target_os = "macos")) {
-        assert_eq!(answers, (Some(true), Some(false)));
+        assert_eq!(
+            answers,
+            (
+                Some(Holder::Group),
+                Some(Holder::Other(Some(std::process::id())))
+            )
+        );
     } else {
         assert_eq!(answers, (None, None));
     }
+}
+
+#[test]
+fn a_launched_process_that_is_dropped_before_it_is_kept_is_killed_with_its_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let launched = started(dir.path(), &["sh", "-c", "sleep 30 & exec sleep 30"], &[]);
+    let pid = launched.pid();
+    assert!(group_exists(pid));
+    drop(launched);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while group_exists(pid) && std::time::Instant::now() < deadline {
+        pause(POLL_INTERVAL);
+    }
+    assert!(!group_exists(pid));
+}
+
+#[test]
+fn a_launched_process_that_is_kept_outlives_its_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let launched = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
+    let pid = launched.pid();
+    launched.keep();
+    assert!(group_exists(pid));
+    signal(pid, Signal::KILL).unwrap();
 }

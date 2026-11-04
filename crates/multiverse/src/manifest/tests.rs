@@ -583,7 +583,7 @@ fn a_brace_that_opens_no_port_placeholder_fails_with_its_line() {
         ));
         assert_eq!(line, Some(4), "{value}");
         assert!(
-            matches!(&problem, ManifestProblem::Invalid { message } if message.contains("{{")),
+            matches!(&problem, ManifestProblem::Invalid { message } if message.contains("{{") && message.contains("`URL`")),
             "{value}: {problem:?}"
         );
     }
@@ -621,6 +621,7 @@ fn a_log_pattern_that_is_not_a_regular_expression_fails_with_its_line() {
     let (line, problem) = problem("[processes.a]\nargv = [\"true\"]\nready = { log = \"(\" }\n");
     assert_eq!(line, Some(3));
     assert!(
-        matches!(problem, ManifestProblem::Invalid { message } if message.contains("regular expression"))
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("regular expression") && message.contains("unclosed group") && !message.contains('\n')),
+        "{problem:?}"
     );
 }

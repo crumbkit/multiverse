@@ -312,13 +312,20 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   ready, `up` fails with `mxv::process::exited` and the log's last 20 lines;
   when it misses its timeout, `up` stops it and fails with
   `mxv::process::not_ready`. When the readiness port is the listen port
-  and it accepts a connection, `up` also checks that a member of the
-  process's group holds the listening socket, through `/proc` on Linux and
-  libproc's `proc_pidfdinfo` on macOS. When none does, another program answered on the port,
-  so `up` stops the process and fails with
-  `mxv::process::foreign_listener`. A process that hands its port to a
-  program in another process group, such as a wrapper around `docker run
-  -p`, fails this check. A failed `up` stops the processes it started
+  and it accepts a connection, `up` also checks which process holds the
+  listening socket, through `/proc` on Linux and libproc's
+  `proc_pidfdinfo` on macOS. When a member of the process's group holds
+  it, the process is ready. When a descendant of the process's shell that
+  left the group holds it, as a daemon that calls `setsid` does, `down`
+  could not stop that descendant, so `up` sends it SIGKILL, stops the
+  process, and fails with `mxv::process::detached_listener` and the
+  descendant's process id. A descendant whose parent between it and the
+  shell has ended counts as another program, because the operating system
+  makes init its parent. When another program holds the socket, `up`
+  stops the process and fails with `mxv::process::foreign_listener` and
+  that program's process id, or a null id when the program belongs to
+  another user. A process that hands its port to a program that it did
+  not start, such as a wrapper around `docker run -p`, fails this check. A failed `up` stops the processes it started
   before the failure. `up` also drops the ports of names that the manifest
   no longer declares, once no running process received them, so a port
   that the manifest renames stays with its old listener until `down`.
@@ -341,8 +348,9 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   Linux it is the boot-relative start time in `/proc/<pid>/stat`, and on
   macOS it is the start that `proc_pidinfo` reports to the microsecond.
   Run records that an earlier mxv wrote on macOS hold the start time that
-  `ps` printed, so their processes read as exited, and `down` deletes their
-  records without signalling them. The shell records a program that a
+  `ps -o lstart=` printed in UTC, so for such a record mxv runs `ps` again
+  and compares what it prints, and `status` and `down` still find the
+  process. The shell records a program that a
   signal ended as code 128 plus the signal's number, so `status` reports a
   code from 129 to 192 as `code` null and `signal` set; a program that
   exits with such a code by itself reads the same way. A process that
@@ -367,11 +375,13 @@ mxv keeps the run files of each workspace's processes in
 and its start time, `<process>.log`, `<process>.log.1`, and
 `<process>.exit`, which holds the exit code once the process ends. Each
 process runs under `/bin/sh`, which waits for it and writes that code, so a
-crash is reported without a long-running mxv. The shell writes the file just
-before it exits, so when `status` finds the process group gone and no exit
-file, it waits up to 200 ms for the file. A shell that something such as
-SIGKILL ended writes no file, and `status` then reports the process as
-exited with a null code and signal and a `reason` that says so.
+crash is reported without a long-running mxv. The shell's redirection
+creates the exit file empty before `printf` writes the code, so mxv counts
+the file as written only once it ends in a line feed. The shell writes the
+file before it exits, so `status` reads the file once more after it finds
+the shell gone. A shell that something such as SIGKILL ended writes no
+file, and `status` then reports the process as exited with a null code and
+signal and a `reason` that says the shell ended without writing its code.
 
 Each `up` of a process moves its previous log to `<process>.log.1`, which
 replaces the log before it, so a process keeps at most two logs. No mxv

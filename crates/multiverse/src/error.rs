@@ -124,6 +124,12 @@ pub enum Error {
         /// What went wrong.
         message: String,
     },
+    /// The operating system answered a process-table call with a struct
+    /// of another size than the one mxv reads, so mxv cannot read it.
+    UnsupportedOs {
+        /// The call and the sizes.
+        message: String,
+    },
     /// Another mxv command holds the lock of a workspace, or of port
     /// allocation, for longer than [`crate::LOCK_WAIT`] by default.
     Busy {
@@ -260,6 +266,10 @@ impl fmt::Display for Error {
             Self::ProcessTable { message } => {
                 write!(formatter, "cannot read the process table: {message}")
             }
+            Self::UnsupportedOs { message } => write!(
+                formatter,
+                "mxv cannot read this operating system's process table: {message}"
+            ),
             Self::Busy { path } => write!(
                 formatter,
                 "another mxv command holds the lock {} and has not released it",
@@ -334,6 +344,7 @@ impl std::error::Error for Error {
             | Self::MismatchedRecord { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::DockerUnavailable { .. }
             | Self::DockerComposeMissing { .. }

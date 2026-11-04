@@ -9,9 +9,7 @@ use std::time::Duration;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
-use crate::runs::{
-    DownOutcome, EXIT_FILE_WAIT, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail,
-};
+use crate::runs::{DownOutcome, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail};
 use crate::store::{Created, Store};
 
 /// A temporary directory with a store, run files and a checkout.
@@ -273,35 +271,11 @@ fn a_running_process_whose_exit_file_the_shell_has_opened_but_not_written_reads_
 }
 
 #[test]
-fn status_waits_for_an_exit_file_that_the_shell_writes_after_its_group_is_gone() {
-    let setup = Setup::new();
-    let workspace = setup.workspace("triage");
-    let dir = record_this_process(&setup, &workspace, "Thu Jan  1 00:00:00 1970");
-    let exit_file = dir.join("a.exit");
-    let writer = std::thread::spawn(move || {
-        crate::clock::pause(Duration::from_millis(60));
-        write(exit_file, "7\n");
-    });
-    let statuses = setup.runs().status(&workspace, None).unwrap();
-    writer.join().unwrap();
-    assert_eq!(
-        statuses[0].state,
-        ProcessState::Exited {
-            code: Some(7),
-            signal: None,
-            reason: None,
-        }
-    );
-}
-
-#[test]
-fn status_reports_an_unknown_code_with_a_reason_once_the_exit_file_stays_missing() {
+fn status_reports_an_unknown_code_with_a_reason_when_the_shell_ended_without_an_exit_file() {
     let setup = Setup::new();
     let workspace = setup.workspace("triage");
     record_this_process(&setup, &workspace, "Thu Jan  1 00:00:00 1970");
-    let began = std::time::Instant::now();
     let statuses = setup.runs().status(&workspace, None).unwrap();
-    assert!(began.elapsed() >= EXIT_FILE_WAIT, "{:?}", began.elapsed());
     assert_eq!(
         statuses[0].state,
         ProcessState::Exited {
@@ -326,4 +300,48 @@ fn a_second_lock_of_a_workspace_fails_with_busy_while_the_first_is_held() {
     assert!(runs.lock(&other.name).is_ok());
     drop(held);
     assert!(runs.lock(&workspace.name).is_ok());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_record_with_the_start_time_that_ps_prints_still_owns_its_running_process_on_macos() {
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let manifest = manifest("[processes.a]\nargv = [\"sleep\", \"30\"]\n");
+    let checkout = workspace.checkouts[0].path.clone();
+    let runs = setup.runs();
+    let outcome = runs
+        .up(
+            &runs.lock(&workspace.name).unwrap(),
+            &setup.store(),
+            &mut workspace,
+            &checkout,
+            &manifest,
+            &[],
+        )
+        .unwrap();
+    let UpOutcome::Up(statuses) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let ProcessState::Running { pid: Some(pid) } = statuses[0].state else {
+        panic!("{statuses:?}");
+    };
+    // An mxv before libproc recorded what `ps -o lstart=` prints in UTC.
+    let record_file = runs.workspace_dir(&workspace.name).join("a.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&record_file).unwrap()).unwrap();
+    let old = crate::process::ps_start_time(pid).unwrap().unwrap();
+    assert!(!old.contains('.'), "{old}");
+    record["started"] = serde_json::Value::String(old);
+    write(&record_file, record.to_string());
+    let statuses = runs.status(&workspace, None).unwrap();
+    assert_eq!(statuses[0].state, ProcessState::Running { pid: Some(pid) });
+    runs.down(
+        &runs.lock(&workspace.name).unwrap(),
+        &workspace,
+        Some(&manifest),
+        &[],
+    )
+    .unwrap();
+    assert!(!crate::process::group_exists(pid));
 }

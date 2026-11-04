@@ -35,14 +35,19 @@
 //! [`start_time`] reads `/proc/<pid>/stat` on Linux and calls
 //! `proc_pidinfo` on macOS. Elsewhere it runs `ps -o lstart= -p <pid>`.
 //!
-//! [`group_listens`] tells whether a member of a process group listens on
-//! a TCP port. On Linux it reads the listening sockets of
-//! `/proc/net/tcp` and `/proc/net/tcp6`, and the file descriptors of the
-//! group's members under `/proc/<pid>/fd`. On macOS it lists the group's
-//! members with `proc_listpids`, their descriptors with `proc_pidinfo`, and
-//! reads each socket with `proc_pidfdinfo`. The calls into libproc are in
-//! the `darwin` module, which holds mxv's only unsafe code.
+//! [`listen_holder`] tells which process holds the socket that listens on a
+//! TCP port: a member of a process group, a descendant of the group's
+//! leader in another group, or another process. On Linux it reads the
+//! listening sockets of `/proc/net/tcp` and `/proc/net/tcp6`, the file
+//! descriptors under `/proc/<pid>/fd`, and each holder's parent and group
+//! from `/proc/<pid>/stat`. On macOS it lists the processes with
+//! `proc_listpids`, their descriptors with `proc_pidinfo`, each socket with
+//! `proc_pidfdinfo`, and each holder's parent and group with
+//! `proc_pidinfo`. The calls into libproc are in the `darwin` module, which
+//! holds mxv's only unsafe code.
 //!
+//! On macOS [`started_at`] also runs `ps -o lstart= -p <pid>` for a run
+//! record that an mxv before libproc wrote, which holds what `ps` prints.
 //! `ps` is found on the caller's `PATH`. `ps` runs with
 //! `LC_ALL=C` and `TZ=UTC0`, so what they print does not depend on the
 //! caller's time zone or locale, an empty standard input, the first
@@ -74,24 +79,16 @@ const SHELL: &str = "/bin/sh";
 /// shell's `$1` is the exit file, and the rest are the `argv`.
 pub(crate) const SCRIPT: &str = r#"exit_file=$1; shift; "$@"; printf '%s\n' "$?" > "$exit_file""#;
 
-/// The deadline of one `ps` run. Linux reads `/proc` and macOS calls
-/// libproc, so neither runs `ps`.
+/// The deadline of one `ps` run. Linux reads `/proc` and runs no `ps`.
 #[cfg_attr(
-    any(target_os = "linux", target_os = "macos"),
-    expect(dead_code, reason = "Linux reads /proc and macOS calls libproc")
+    target_os = "linux",
+    expect(dead_code, reason = "Linux reads the process table from /proc")
 )]
 pub(crate) const PS_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The most bytes of `ps` output that this module keeps, and of
 /// a `/proc` file that it reads. A busy host's socket table may need
 /// several megabytes.
-#[cfg_attr(
-    target_os = "macos",
-    expect(
-        dead_code,
-        reason = "macOS calls libproc and reads neither ps nor /proc"
-    )
-)]
 const MOST_PS_BYTES: u64 = 16 * 1024 * 1024;
 
 /// What [`launch`] needs to start one process.
@@ -130,6 +127,21 @@ pub(crate) struct Launched {
         reason = "crates/multiverse/src/process.rs holds the child and owns its cleanup (PROC-1)"
     )]
     child: std::process::Child,
+    /// Whether the process stays running when this handle is dropped.
+    kept: bool,
+}
+
+impl Drop for Launched {
+    /// Sends SIGKILL to the process's group and reaps the shell, unless
+    /// [`Launched::keep`] kept the process. So a process that `up` started
+    /// stops on every path that leaves `up` before the process is ready,
+    /// an error among them.
+    fn drop(&mut self) {
+        if !self.kept {
+            let _ = signal(self.pid(), Signal::KILL);
+            let _ = self.child.wait();
+        }
+    }
 }
 
 impl Launched {
@@ -151,9 +163,14 @@ impl Launched {
     }
 
     /// Sends SIGKILL to the process's group and reaps the shell.
-    pub(crate) fn kill(mut self) {
-        let _ = signal(self.pid(), Signal::KILL);
-        let _ = self.child.wait();
+    pub(crate) fn kill(self) {
+        drop(self);
+    }
+
+    /// Leaves the process running once this handle is gone, after it is
+    /// ready, or after its shell was reaped and its group handled.
+    pub(crate) fn keep(mut self) {
+        self.kept = true;
     }
 }
 
@@ -196,7 +213,7 @@ pub(crate) fn launch(launch: &Launch<'_>) -> Result<Launched, Error> {
         process: launch.name.to_owned(),
         source,
     })?;
-    Ok(Launched { child })
+    Ok(Launched { child, kept: false })
 }
 
 /// Returns the start time of the process `pid` in a form that does not
@@ -240,12 +257,68 @@ fn macos_start_time(pid: u32) -> Result<Option<String>, Error> {
     };
     match darwin::bsd_info(id) {
         Ok(info) => Ok(bsd_info_start(&info)),
-        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
-        Err(error) if error.raw_os_error() == Some(libc::EPERM) => Ok(Some(UNREADABLE.to_owned())),
-        Err(error) => Err(Error::ProcessTable {
-            message: format!("proc_pidinfo cannot read the process {pid}: {error}"),
-        }),
+        Err(failure) if failure.errno() == Some(libc::ESRCH) => Ok(None),
+        Err(failure) if failure.errno() == Some(libc::EPERM) => Ok(Some(UNREADABLE.to_owned())),
+        Err(failure) => Err(darwin_error(&failure, pid)),
     }
+}
+
+/// Returns the error of a libproc call about `pid` that gave no struct.
+#[cfg(target_os = "macos")]
+fn darwin_error(failure: &darwin::Failure, pid: u32) -> Error {
+    match failure {
+        darwin::Failure::Size {
+            call,
+            written,
+            expected,
+        } => Error::UnsupportedOs {
+            message: format!(
+                "{call} for the process {pid} wrote {written} bytes, and mxv reads a struct of {expected}"
+            ),
+        },
+        darwin::Failure::Os(error) => Error::ProcessTable {
+            message: format!("libproc cannot read the process {pid}: {error}"),
+        },
+    }
+}
+
+/// Reports whether the process `pid` is the one that started at
+/// `recorded`, a start time that [`start_time`] gave when mxv recorded the
+/// process, or `None` when no process has the id. On macOS a record that
+/// an mxv before libproc wrote holds what `ps -o lstart=` prints, so a
+/// recorded start that is not seconds and microseconds is compared with
+/// what `ps` prints now.
+///
+/// # Errors
+///
+/// Returns [`Error::ProcessTable`] or [`Error::UnsupportedOs`] when the
+/// process table cannot be read.
+pub(crate) fn started_at(pid: u32, recorded: &str) -> Result<Option<bool>, Error> {
+    let Some(started) = start_time(pid)? else {
+        return Ok(None);
+    };
+    if started == recorded {
+        return Ok(Some(true));
+    }
+    #[cfg(target_os = "macos")]
+    if !is_bsd_start(recorded) && started != UNREADABLE {
+        return Ok(Some(ps_start_time(pid)?.as_deref() == Some(recorded)));
+    }
+    Ok(Some(false))
+}
+
+/// Reports whether `started` has the form of [`bsd_start`]: seconds, a
+/// dot and six digits of microseconds.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn is_bsd_start(started: &str) -> bool {
+    started.split_once('.').is_some_and(|(seconds, micros)| {
+        !seconds.is_empty()
+            && micros.len() == 6
+            && seconds
+                .bytes()
+                .chain(micros.bytes())
+                .all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// Returns the start time in `info`, the bytes of `struct proc_bsdinfo`,
@@ -291,43 +364,67 @@ fn linux_start_time(pid: u32) -> Result<Option<String>, Error> {
     Ok(read_proc(&format!("/proc/{pid}/stat"))?.and_then(|text| stat_start_time(&text)))
 }
 
-/// Returns the text of the `/proc` file at `path`, or `None` when it does
-/// not exist, such as for a process that has ended.
+/// Returns the text of the `/proc` file at `path`, or `None` when it has
+/// nothing that mxv may read: it does not exist or gives ESRCH, as for a
+/// process that ends meanwhile, or it gives EACCES, as for some files of
+/// another user's process.
 #[cfg(target_os = "linux")]
 fn read_proc(path: &str) -> Result<Option<String>, Error> {
-    let mut text = String::new();
-    match File::open(path) {
-        Ok(file) => file
-            .take(MOST_PS_BYTES)
-            .read_to_string(&mut text)
-            .map_err(|error| Error::ProcessTable {
-                message: format!("cannot read {path}: {error}"),
-            })?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Error::ProcessTable {
-                message: format!("cannot open {path}: {error}"),
-            });
-        }
+    let gone = |error: &io::Error| {
+        error.kind() == io::ErrorKind::NotFound
+            || error.kind() == io::ErrorKind::PermissionDenied
+            || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error())
     };
-    Ok(Some(text))
+    let mut text = String::new();
+    let read = File::open(path).and_then(|file| file.take(MOST_PS_BYTES).read_to_string(&mut text));
+    match read {
+        Ok(_) => Ok(Some(text)),
+        Err(error) if gone(&error) => Ok(None),
+        Err(error) => Err(Error::ProcessTable {
+            message: format!("cannot read {path}: {error}"),
+        }),
+    }
 }
 
-/// Reports whether a member of the process group `group` listens on the
-/// TCP port `port`, or `None` when this system gives mxv no way to tell.
+/// The process that holds the socket that listens on a port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Holder {
+    /// A member of the process group.
+    Group,
+    /// A process in another group that descends from the group's leader,
+    /// such as a daemon that started a session of its own.
+    Descendant(u32),
+    /// Another process, or `None` when no process whose descriptors mxv may
+    /// read holds the socket.
+    Other(Option<u32>),
+}
+
+/// Returns which process holds the socket that listens on the TCP port
+/// `port`, as seen from the process group `group`, whose leader's id is
+/// `group`. It returns `None` when this system gives mxv no way to tell.
 ///
 /// # Errors
 ///
 /// Returns [`Error::ProcessTable`] when the process table or the socket
-/// table cannot be read, or `lsof` misses its deadline.
-pub(crate) fn group_listens(group: u32, port: u16) -> Result<Option<bool>, Error> {
-    #[cfg(target_os = "linux")]
+/// table cannot be read, and [`Error::UnsupportedOs`] when the operating
+/// system's structs differ from the ones mxv reads.
+pub(crate) fn listen_holder(group: u32, port: u16) -> Result<Option<Holder>, Error> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        linux_group_listens(group, port).map(Some)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos_group_listens(group, port).map(Some)
+        let mut others = Vec::new();
+        for pid in listening_processes(port)? {
+            match table_entry(pid)? {
+                Some(entry) if entry.group == group => return Ok(Some(Holder::Group)),
+                Some(_) => others.push(pid),
+                None => {}
+            }
+        }
+        for pid in &others {
+            if descends_from(*pid, group)? {
+                return Ok(Some(Holder::Descendant(*pid)));
+            }
+        }
+        Ok(Some(Holder::Other(others.first().copied())))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -336,10 +433,83 @@ pub(crate) fn group_listens(group: u32, port: u16) -> Result<Option<bool>, Error
     }
 }
 
-/// Reports whether a member of the process group `group` holds a socket
-/// that listens on the TCP port `port`.
+/// The parent and the process group of one process.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    /// The parent's process id.
+    parent: u32,
+    /// The process group's id.
+    group: u32,
+}
+
+/// The most parents that [`descends_from`] follows, which bounds a walk
+/// through a process table that changes while mxv reads it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const MOST_ANCESTORS: usize = 256;
+
+/// Reports whether `leader` is an ancestor of the process `pid`. A process
+/// whose parent ended has the init process as its parent, so a descendant
+/// whose parent between it and `leader` ended no longer counts.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn descends_from(pid: u32, leader: u32) -> Result<bool, Error> {
+    let mut current = pid;
+    for _ in 0..MOST_ANCESTORS {
+        let Some(entry) = table_entry(current)? else {
+            return Ok(false);
+        };
+        if entry.parent == leader {
+            return Ok(true);
+        }
+        if entry.parent <= 1 {
+            return Ok(false);
+        }
+        current = entry.parent;
+    }
+    Ok(false)
+}
+
+/// Returns the parent and the group of `pid`, from fields 4 and 5 of
+/// `/proc/<pid>/stat`, or `None` when no process has the id.
 #[cfg(target_os = "linux")]
-fn linux_group_listens(group: u32, port: u16) -> Result<bool, Error> {
+fn table_entry(pid: u32) -> Result<Option<Entry>, Error> {
+    Ok(read_proc(&format!("/proc/{pid}/stat"))?.and_then(|text| {
+        Some(Entry {
+            parent: stat_field(&text, 4)?,
+            group: stat_field(&text, 5)?,
+        })
+    }))
+}
+
+/// Returns the parent and the group of `pid`, from `pbi_ppid` at offset 16
+/// and `pbi_pgid` at offset 100 of `struct proc_bsdinfo`, or `None` when no
+/// process has the id or mxv may not read it.
+#[cfg(target_os = "macos")]
+fn table_entry(pid: u32) -> Result<Option<Entry>, Error> {
+    let Ok(id) = i32::try_from(pid) else {
+        return Ok(None);
+    };
+    match darwin::bsd_info(id) {
+        Ok(info) => Ok(bsd_info_entry(&info)),
+        Err(failure) if matches!(failure.errno(), Some(libc::ESRCH | libc::EPERM)) => Ok(None),
+        Err(failure) => Err(darwin_error(&failure, pid)),
+    }
+}
+
+/// Returns the parent and the group in `info`, the bytes of
+/// `struct proc_bsdinfo`.
+#[cfg(target_os = "macos")]
+fn bsd_info_entry(info: &[u8]) -> Option<Entry> {
+    Some(Entry {
+        parent: read_i32(info, 16)?.cast_unsigned(),
+        group: read_i32(info, 100)?.cast_unsigned(),
+    })
+}
+
+/// Returns the processes that hold a socket that listens on the TCP port
+/// `port`, among those whose descriptors mxv may read.
+#[cfg(target_os = "linux")]
+fn listening_processes(port: u16) -> Result<Vec<u32>, Error> {
     let mut inodes = Vec::new();
     for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
         if let Some(text) = read_proc(table)? {
@@ -347,11 +517,12 @@ fn linux_group_listens(group: u32, port: u16) -> Result<bool, Error> {
         }
     }
     if inodes.is_empty() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
     let entries = std::fs::read_dir("/proc").map_err(|error| Error::ProcessTable {
         message: format!("cannot read /proc: {error}"),
     })?;
+    let mut holders = Vec::new();
     for entry in entries.flatten() {
         let Some(pid) = entry
             .file_name()
@@ -360,29 +531,61 @@ fn linux_group_listens(group: u32, port: u16) -> Result<bool, Error> {
         else {
             continue;
         };
-        let in_group = read_proc(&format!("/proc/{pid}/stat"))?.and_then(|text| stat_group(&text))
-            == Some(group);
-        if !in_group {
-            continue;
-        }
-        // A member that ends meanwhile, or whose descriptors mxv may not
-        // read, holds none of the group's sockets that mxv can see.
+        // A process that ends meanwhile, or whose descriptors mxv may not
+        // read, holds none of the sockets that mxv can see.
         let Ok(descriptors) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
             continue;
         };
-        for descriptor in descriptors.flatten() {
-            if let Ok(target) = std::fs::read_link(descriptor.path())
-                && let Some(inode) = target
+        let holds = descriptors.flatten().any(|descriptor| {
+            std::fs::read_link(descriptor.path()).is_ok_and(|target| {
+                target
                     .to_str()
                     .and_then(|target| target.strip_prefix("socket:["))
                     .and_then(|rest| rest.strip_suffix(']'))
-                && inodes.iter().any(|listening| listening == inode)
-            {
-                return Ok(true);
+                    .is_some_and(|inode| inodes.iter().any(|listening| listening == inode))
+            })
+        });
+        if holds {
+            holders.push(pid);
+        }
+    }
+    Ok(holders)
+}
+
+/// Returns the processes that hold a socket that listens on the TCP port
+/// `port`, among those whose descriptors mxv may read.
+#[cfg(target_os = "macos")]
+fn listening_processes(port: u16) -> Result<Vec<u32>, Error> {
+    // A process that ends meanwhile gives ESRCH, a descriptor that it
+    // closes meanwhile gives EBADF, and a process of another user gives
+    // EPERM: each holds none of the sockets that mxv can see.
+    let skipped = |failure: &darwin::Failure| {
+        matches!(
+            failure.errno(),
+            Some(libc::ESRCH | libc::EBADF | libc::EPERM | libc::EACCES)
+        )
+    };
+    let processes = darwin::all_processes().map_err(|failure| darwin_error(&failure, 0))?;
+    let mut holders = Vec::new();
+    for pid in processes {
+        let descriptors = match darwin::descriptors(pid) {
+            Ok(descriptors) => descriptors,
+            Err(failure) if skipped(&failure) => continue,
+            Err(failure) => return Err(darwin_error(&failure, pid.cast_unsigned())),
+        };
+        for fd in socket_descriptors(&descriptors) {
+            match darwin::socket_info(pid, fd) {
+                Ok(info) if socket_listens_on(&info, port) => {
+                    holders.push(pid.cast_unsigned());
+                    break;
+                }
+                Ok(_) => {}
+                Err(failure) if skipped(&failure) => {}
+                Err(failure) => return Err(darwin_error(&failure, pid.cast_unsigned())),
             }
         }
     }
-    Ok(false)
+    Ok(holders)
 }
 
 /// Returns the inodes of the sockets in `text`, the contents of
@@ -404,40 +607,17 @@ pub(crate) fn listening_inodes(text: &str, port: u16) -> Vec<String> {
         .collect()
 }
 
-/// Returns field 5 of `text`, the contents of `/proc/<pid>/stat`, which is
-/// the process's group, counted from the last `)` as [`stat_start_time`]
-/// counts.
+/// Returns the numeric field `field` of `text`, the contents of
+/// `/proc/<pid>/stat`, counted from the last `)` as [`stat_start_time`]
+/// counts. Field 4 is the parent and field 5 the process group.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn stat_group(text: &str) -> Option<u32> {
+pub(crate) fn stat_field(text: &str, field: usize) -> Option<u32> {
     let fields = text.rfind(')').and_then(|end| text.get(end + 1..))?;
-    fields.split_whitespace().nth(5 - 3)?.parse().ok()
-}
-
-/// Reports whether a member of the process group `group` holds a socket
-/// that listens on the TCP port `port`.
-#[cfg(target_os = "macos")]
-fn macos_group_listens(group: u32, port: u16) -> Result<bool, Error> {
-    let Ok(group) = i32::try_from(group) else {
-        return Ok(false);
-    };
-    let members = darwin::group_members(group).map_err(|error| Error::ProcessTable {
-        message: format!("proc_listpids cannot list the process group {group}: {error}"),
-    })?;
-    for member in members {
-        // A member that ends meanwhile, or whose descriptors mxv may not
-        // read, holds none of the group's sockets that mxv can see.
-        let Ok(descriptors) = darwin::descriptors(member) else {
-            continue;
-        };
-        for fd in socket_descriptors(&descriptors) {
-            if let Ok(info) = darwin::socket_info(member, fd)
-                && socket_listens_on(&info, port)
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    fields
+        .split_whitespace()
+        .nth(field.checked_sub(3)?)?
+        .parse()
+        .ok()
 }
 
 /// Returns the descriptors in `list`, the bytes of a `struct proc_fdinfo`
@@ -486,8 +666,8 @@ pub(crate) fn stat_start_time(text: &str) -> Option<String> {
 
 /// Returns the start time that `ps -o lstart=` prints in UTC, or `None`
 /// when no process has the id.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn ps_start_time(pid: u32) -> Result<Option<String>, Error> {
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn ps_start_time(pid: u32) -> Result<Option<String>, Error> {
     let Some((success, text)) = tool("ps", &["-o", "lstart=", "-p", &pid.to_string()])? else {
         return Err(Error::ProcessTable {
             message: "cannot start ps: it is not on PATH".to_owned(),
@@ -504,7 +684,7 @@ fn ps_start_time(pid: u32) -> Result<Option<String>, Error> {
 /// Runs `program` with `args` as the module docs say, and returns whether
 /// it succeeded and what it printed, or `None` when `program` is not on
 /// `PATH`.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(target_os = "linux"))]
 fn tool(program: &str, args: &[&str]) -> Result<Option<(bool, String)>, Error> {
     use wait_timeout::ChildExt as _;
 
@@ -573,6 +753,16 @@ fn pid_of(pid: u32) -> Option<Pid> {
 pub(crate) fn signal(pid: u32, signal: Signal) -> io::Result<()> {
     let group = pid_of(pid).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
     rustix::process::kill_process_group(group, signal).map_err(io::Error::from)
+}
+
+/// Sends `signal` to the process `pid` alone.
+///
+/// # Errors
+///
+/// Returns the error of `kill`, such as ESRCH when no process has the id.
+pub(crate) fn signal_process(pid: u32, signal: Signal) -> io::Result<()> {
+    let process = pid_of(pid).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    rustix::process::kill_process(process, signal).map_err(io::Error::from)
 }
 
 /// Reports whether the process group `pid` still has a member. A group

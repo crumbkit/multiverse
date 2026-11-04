@@ -645,6 +645,8 @@ impl Runs {
             log: &self.log(name, container),
             exit_file: &exit_file,
         })?;
+        // A follower whose record cannot be written stops with its
+        // handle, so mxv never leaves a follower that it does not know of.
         let pid = follower.pid();
         let started = process::start_time(pid)?.unwrap_or_default();
         write_json(
@@ -655,7 +657,9 @@ impl Runs {
                 started,
                 ports: BTreeMap::new(),
             },
-        )
+        )?;
+        follower.keep();
+        Ok(())
     }
 
     /// Returns the volumes of the workspace `name` that a removal deletes:

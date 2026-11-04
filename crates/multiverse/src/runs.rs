@@ -40,7 +40,7 @@ use crate::error::Error;
 use crate::manifest::{LogPattern, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
-use crate::process::{self, Launch, Launched};
+use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
@@ -97,22 +97,14 @@ pub(super) struct RunRecord {
     pub(super) ports: BTreeMap<String, u16>,
 }
 
-/// How long `status` waits for the exit file of a process whose group is
-/// gone. The shell writes the file just before it exits, so a status that
-/// reads in between finds the group gone and the file not yet written.
-pub const EXIT_FILE_WAIT: Duration = Duration::from_millis(200);
-
-/// The interval at which `status` reads an exit file that it waits for.
-const EXIT_FILE_POLL: Duration = Duration::from_millis(20);
-
 /// Why mxv does not know the exit code of a process that exited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExitReason {
-    /// The process group is gone and the shell that runs the process wrote
-    /// no exit file within [`EXIT_FILE_WAIT`]. Something, such as SIGKILL
-    /// or a restart of the machine, ended the shell before it could write
-    /// the file.
+    /// The shell that ran the process has ended and wrote no exit file.
+    /// Something, such as SIGKILL or a restart of the machine, ended the
+    /// shell before it could write the file. Members of the process group
+    /// may still run.
     NoExitFile,
 }
 
@@ -122,7 +114,7 @@ impl ExitReason {
     pub const fn describe(self) -> &'static str {
         match self {
             Self::NoExitFile => {
-                "the process group ended without writing its exit code, so something such as SIGKILL ended its shell"
+                "the shell that ran the process ended without writing its exit code, so something such as SIGKILL ended the shell"
             }
         }
     }
@@ -235,6 +227,31 @@ pub enum UpOutcome {
         port: String,
         /// The host port.
         number: u16,
+        /// The process that holds the port, or `None` when it is one whose
+        /// descriptors mxv may not read.
+        pid: Option<u32>,
+        /// The process's log file.
+        log: PathBuf,
+        /// The last lines of its log.
+        tail: Vec<String>,
+    },
+    /// The listen port answered, and the process that holds it descends
+    /// from the process's shell but left the process group, as a daemon
+    /// that starts a session of its own does. `mxv down` could not stop
+    /// it, so `up` stopped it with the process.
+    DetachedListener {
+        /// The process.
+        process: String,
+        /// The port's name.
+        port: String,
+        /// The host port.
+        number: u16,
+        /// The descendant that holds the port, which `up` sent SIGKILL.
+        pid: u32,
+        /// The process's log file.
+        log: PathBuf,
+        /// The last lines of its log.
+        tail: Vec<String>,
     },
     /// A process ran past its readiness timeout before its readiness check
     /// passed, so `up` stopped it.
@@ -429,27 +446,21 @@ impl Runs {
         if let Some(code) = process::exit_code(&exit_file) {
             return Ok(exited(code));
         }
-        if process::start_time(record.pid)?.as_deref() == Some(record.started.as_str()) {
+        if process::started_at(record.pid, &record.started)? == Some(true) {
             return Ok(ProcessState::Running {
                 pid: Some(record.pid),
             });
         }
-        // The shell writes the exit file just before it exits, so a status
-        // that reads between the two finds the group gone and no code yet.
-        let deadline = Instant::now() + EXIT_FILE_WAIT;
-        loop {
-            if let Some(code) = process::exit_code(&exit_file) {
-                return Ok(exited(code));
-            }
-            if Instant::now() >= deadline {
-                return Ok(ProcessState::Exited {
-                    code: None,
-                    signal: None,
-                    reason: Some(ExitReason::NoExitFile),
-                });
-            }
-            pause(EXIT_FILE_POLL);
-        }
+        // The shell writes the exit file before it exits, so a process that
+        // ended between the two reads above has its code by now.
+        Ok(match process::exit_code(&exit_file) {
+            Some(code) => exited(code),
+            None => ProcessState::Exited {
+                code: None,
+                signal: None,
+                reason: Some(ExitReason::NoExitFile),
+            },
+        })
     }
 
     /// Returns the processes of `workspace` and their states: the
@@ -765,11 +776,12 @@ impl Runs {
             .env
             .iter()
             .map(|(variable, value)| (variable.clone(), value.render(&workspace.ports)))
-            .chain(
-                ports
-                    .iter()
-                    .map(|(variable, number)| (variable.clone(), number.to_string())),
-            )
+            .chain(declared.ports.iter().filter_map(|(variable, port)| {
+                workspace
+                    .ports
+                    .get(port)
+                    .map(|number| (variable.clone(), number.to_string()))
+            }))
             .collect();
         let mut launched = process::launch(&Launch {
             name: process,
@@ -796,29 +808,18 @@ impl Runs {
         let watch = watch
             .as_mut()
             .map(|(follower, pattern)| (follower, *pattern));
-        match wait_ready(&mut launched, number, watch, timeout)? {
-            Readiness::Ready => {
-                // The port that answered must be the process's own, or the
-                // process would count as ready while another program
-                // serves its port.
-                if let (Some(listen), Some(number)) = (&declared.listen, number)
-                    && declared
-                        .ready
-                        .as_ref()
-                        .is_some_and(|ready| ready.check == ReadyCheck::Port(listen.clone()))
-                    && process::group_listens(launched.pid(), number)? == Some(false)
-                {
-                    launched.kill();
-                    let _ = fs::remove_file(self.file(name, process, "json"));
-                    let _ = fs::remove_file(&exit_file);
-                    return Ok(Some(UpOutcome::ForeignListener {
-                        process: process.to_owned(),
-                        port: listen.clone(),
-                        number,
-                    }));
-                }
-                Ok(None)
+        // Dropping `launched` on an error stops the process, and its run
+        // files go with it, so a failed `up` leaves nothing running.
+        let readiness = match wait_ready(&mut launched, number, watch, timeout) {
+            Ok(readiness) => readiness,
+            Err(error) => {
+                launched.kill();
+                self.drop_run_files(name, process);
+                return Err(error);
             }
+        };
+        match readiness {
+            Readiness::Ready => self.check_listener(name, process, declared, number, launched, log),
             Readiness::Ended(shell) => {
                 // The shell is reaped. Its group keeps its id only while a
                 // descendant remains, so the signal goes only to a group
@@ -826,6 +827,9 @@ impl Runs {
                 if process::group_exists(launched.pid()) {
                     let _ = process::signal(launched.pid(), Signal::KILL);
                 }
+                // The shell is reaped and its group handled, so dropping the
+                // handle must not signal the group's id again.
+                launched.keep();
                 let (code, signal) = match process::exit_code(&exit_file) {
                     Some(code) => code_and_signal(code),
                     None => (shell.code, shell.signal),
@@ -840,6 +844,7 @@ impl Runs {
             }
             Readiness::TimedOut => {
                 let Some(ready) = &declared.ready else {
+                    launched.keep();
                     return Ok(None);
                 };
                 launched.kill();
@@ -863,6 +868,84 @@ impl Runs {
                 }))
             }
         }
+    }
+
+    /// Checks, for a `process` that is ready on its listen port `number`,
+    /// which process holds the port. The port that answered must be the
+    /// process's own, or the process would count as ready while another
+    /// program serves its port. It keeps `launched` running and returns
+    /// `None` when a member of the process's group holds the port, and
+    /// stops it and returns the outcome that stops `up` otherwise.
+    fn check_listener(
+        &self,
+        name: &WorkspaceName,
+        process: &str,
+        declared: &Process,
+        number: Option<u16>,
+        launched: Launched,
+        log: PathBuf,
+    ) -> Result<Option<UpOutcome>, Error> {
+        let (Some(listen), Some(number)) = (&declared.listen, number) else {
+            launched.keep();
+            return Ok(None);
+        };
+        if declared
+            .ready
+            .as_ref()
+            .is_none_or(|ready| ready.check != ReadyCheck::Port(listen.clone()))
+        {
+            launched.keep();
+            return Ok(None);
+        }
+        let holder = match process::listen_holder(launched.pid(), number) {
+            Ok(None | Some(Holder::Group)) => {
+                launched.keep();
+                return Ok(None);
+            }
+            Ok(Some(holder)) => holder,
+            Err(error) => {
+                launched.kill();
+                self.drop_run_files(name, process);
+                return Err(error);
+            }
+        };
+        // The descendant may lead a group of its own, such as after setsid,
+        // and that group goes with it.
+        if let Holder::Descendant(pid) = holder {
+            let _ = process::signal(pid, Signal::KILL);
+            let _ = process::signal_process(pid, Signal::KILL);
+        }
+        launched.kill();
+        self.drop_run_files(name, process);
+        let tail = tail(&log, TAIL_LINES);
+        Ok(Some(match holder {
+            Holder::Descendant(pid) => UpOutcome::DetachedListener {
+                process: process.to_owned(),
+                port: listen.clone(),
+                number,
+                pid,
+                log,
+                tail,
+            },
+            Holder::Group | Holder::Other(_) => UpOutcome::ForeignListener {
+                process: process.to_owned(),
+                port: listen.clone(),
+                number,
+                pid: match holder {
+                    Holder::Other(pid) => pid,
+                    Holder::Group | Holder::Descendant(_) => None,
+                },
+                log,
+                tail,
+            },
+        }))
+    }
+
+    /// Deletes the run record and the exit file of `process`, which `up`
+    /// stopped before it was ready.
+    fn drop_run_files(&self, name: &WorkspaceName, process: &str) {
+        let _ = fs::remove_file(self.file(name, process, "json"));
+        let _ = fs::remove_file(self.file(name, process, "exit"));
     }
 
     /// Writes the run record of the process that was just launched.
@@ -1092,14 +1175,15 @@ impl Runs {
 
 /// Returns the host ports that `declared` receives in `workspace`: those
 /// of its `ports` by variable name, and those that its `env` values name
-/// by their placeholder, such as `{port.api}`. A port that the workspace
-/// does not hold yet is left out.
+/// as `port.<name>`, such as `port.api` for `{port.api}`. A port that the
+/// workspace does not hold yet is left out. Only the variables of `ports`
+/// are in the process's environment.
 fn received(workspace: &Workspace, declared: &Process) -> BTreeMap<String, u16> {
     let placeholders = declared
         .env
         .values()
         .flat_map(|value| value.ports())
-        .map(|port| (format!("{{port.{port}}}"), port));
+        .map(|port| (format!("port.{port}"), port));
     declared
         .ports
         .iter()
@@ -1150,8 +1234,8 @@ fn wait_ready(
 /// with the recorded id and another start time took a free id after the
 /// group ended, so the group is not ours.
 pub(super) fn owns_group(record: &RunRecord) -> Result<bool, Error> {
-    Ok(match process::start_time(record.pid)? {
-        Some(started) => started == record.started,
+    Ok(match process::started_at(record.pid, &record.started)? {
+        Some(owned) => owned,
         None => process::group_exists(record.pid),
     })
 }

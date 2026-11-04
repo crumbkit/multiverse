@@ -1004,7 +1004,7 @@ fn check_env(
             errors.invalid(
                 &value.span(),
                 format!(
-                    "the value of {} in `{process}` has a brace that is not part of a port placeholder such as `{{port.api}}`; write `{{{{` or `}}}}` for a literal brace",
+                    "the value of `{}` in `{process}` has a brace that is not part of a port placeholder such as `{{port.api}}`; write `{{{{` or `}}}}` for a literal brace",
                     variable.get_ref()
                 ),
             )
@@ -1016,7 +1016,7 @@ fn check_env(
             return Err(errors.invalid(
                 &value.span(),
                 format!(
-                    "the value of {} in `{process}` names the port `{port}`, which `ports` does not declare",
+                    "the value of `{}` in `{process}` names the port `{port}`, which `ports` does not declare",
                     variable.get_ref()
                 ),
             ));
@@ -1055,7 +1055,8 @@ fn check_ready(
                         errors.invalid(
                             &log.span(),
                             format!(
-                                "the `log` pattern of `{process}` is not a regular expression: {error}"
+                                "the `log` pattern of `{process}` is not a regular expression: {}",
+                                regex_problem(&error)
                             ),
                         )
                     })?;
@@ -1089,6 +1090,19 @@ fn check_ready(
             timeout: DEFAULT_READY_TIMEOUT,
         }),
     })
+}
+
+/// Returns what is wrong with a pattern that `error` rejected, on one
+/// line. A syntax error prints the pattern with a caret under the problem
+/// and then a line `error: <problem>`, and only that problem is kept.
+fn regex_problem(error: &regex::Error) -> String {
+    let text = error.to_string();
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("error: "))
+        .map_or_else(
+            || text.split_whitespace().collect::<Vec<_>>().join(" "),
+            str::to_owned,
+        )
 }
 
 /// Checks that `variable` is a valid environment variable name.

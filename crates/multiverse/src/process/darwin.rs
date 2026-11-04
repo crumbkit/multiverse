@@ -11,9 +11,8 @@
 use std::ffi::c_void;
 use std::io;
 
-/// `PROC_PGRP_ONLY` of `<sys/proc_info.h>`: list the members of a process
-/// group.
-const PROC_PGRP_ONLY: u32 = 2;
+/// `PROC_ALL_PIDS` of `<sys/proc_info.h>`: list every process.
+const PROC_ALL_PIDS: u32 = 1;
 
 /// `PROC_PIDFDSOCKETINFO` of `<sys/proc_info.h>`: describe a socket.
 const PROC_PIDFDSOCKETINFO: i32 = 3;
@@ -24,9 +23,38 @@ pub(super) const BSDINFO_BYTES: usize = 136;
 /// The size of `struct socket_fdinfo`.
 pub(super) const SOCKET_FDINFO_BYTES: usize = 792;
 
+/// Why a libproc call gave no struct.
+#[derive(Debug)]
+pub(super) enum Failure {
+    /// The call failed with this error, such as ESRCH for a process that
+    /// has ended.
+    Os(io::Error),
+    /// The call succeeded and wrote `written` bytes where the struct that
+    /// mxv reads has `expected`, so this macOS's struct differs from it.
+    Size {
+        /// The call.
+        call: &'static str,
+        /// The bytes that the call wrote.
+        written: usize,
+        /// The bytes of the struct that mxv reads.
+        expected: usize,
+    },
+}
+
+impl Failure {
+    /// Returns the errno of a failed call, or `None` for a struct of
+    /// another size.
+    pub(super) fn errno(&self) -> Option<i32> {
+        match self {
+            Self::Os(error) => error.raw_os_error(),
+            Self::Size { .. } => None,
+        }
+    }
+}
+
 /// Returns `struct proc_bsdinfo` of `pid` as bytes, from
 /// `proc_pidinfo(PROC_PIDTBSDINFO)`.
-pub(super) fn bsd_info(pid: i32) -> io::Result<[u8; BSDINFO_BYTES]> {
+pub(super) fn bsd_info(pid: i32) -> Result<[u8; BSDINFO_BYTES], Failure> {
     let mut info = [0_u8; BSDINFO_BYTES];
     // SAFETY: `info` is a live, writable buffer of `BSDINFO_BYTES` bytes,
     // and the kernel writes at most the size it is given.
@@ -39,19 +67,16 @@ pub(super) fn bsd_info(pid: i32) -> io::Result<[u8; BSDINFO_BYTES]> {
             c_int(BSDINFO_BYTES),
         )
     };
-    if usize::try_from(written).ok() == Some(BSDINFO_BYTES) {
-        Ok(info)
-    } else {
-        Err(error_or_short("proc_pidinfo(PROC_PIDTBSDINFO)"))
-    }
+    whole("proc_pidinfo(PROC_PIDTBSDINFO)", written, BSDINFO_BYTES)?;
+    Ok(info)
 }
 
-/// Returns the ids of the members of the process group `group`.
-pub(super) fn group_members(group: i32) -> io::Result<Vec<i32>> {
-    let bytes = listing("proc_listpids(PROC_PGRP_ONLY)", |buffer, size| {
+/// Returns the ids of every process.
+pub(super) fn all_processes() -> Result<Vec<i32>, Failure> {
+    let bytes = listing(|buffer, size| {
         // SAFETY: `buffer` is null with `size` 0, or a live, writable buffer
         // of `size` bytes, and the kernel writes at most `size` bytes.
-        unsafe { libc::proc_listpids(PROC_PGRP_ONLY, group.cast_unsigned(), buffer, size) }
+        unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, buffer, size) }
     })?;
     let (ids, _) = bytes.as_chunks::<4>();
     Ok(ids
@@ -63,8 +88,8 @@ pub(super) fn group_members(group: i32) -> io::Result<Vec<i32>> {
 
 /// Returns the descriptor list of `pid` as bytes: `struct proc_fdinfo`
 /// entries of 8 bytes each, from `proc_pidinfo(PROC_PIDLISTFDS)`.
-pub(super) fn descriptors(pid: i32) -> io::Result<Vec<u8>> {
-    listing("proc_pidinfo(PROC_PIDLISTFDS)", |buffer, size| {
+pub(super) fn descriptors(pid: i32) -> Result<Vec<u8>, Failure> {
+    listing(|buffer, size| {
         // SAFETY: `buffer` is null with `size` 0, or a live, writable buffer
         // of `size` bytes, and the kernel writes at most `size` bytes.
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, buffer, size) }
@@ -73,7 +98,7 @@ pub(super) fn descriptors(pid: i32) -> io::Result<Vec<u8>> {
 
 /// Returns `struct socket_fdinfo` of the descriptor `fd` of `pid` as
 /// bytes, from `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`.
-pub(super) fn socket_info(pid: i32, fd: i32) -> io::Result<Vec<u8>> {
+pub(super) fn socket_info(pid: i32, fd: i32) -> Result<Vec<u8>, Failure> {
     let mut info = vec![0_u8; SOCKET_FDINFO_BYTES];
     // SAFETY: `info` is a live, writable buffer of `SOCKET_FDINFO_BYTES`
     // bytes, and the kernel writes at most the size it is given.
@@ -86,42 +111,47 @@ pub(super) fn socket_info(pid: i32, fd: i32) -> io::Result<Vec<u8>> {
             c_int(SOCKET_FDINFO_BYTES),
         )
     };
-    if usize::try_from(written).ok() == Some(SOCKET_FDINFO_BYTES) {
-        Ok(info)
-    } else {
-        Err(error_or_short("proc_pidfdinfo(PROC_PIDFDSOCKETINFO)"))
+    whole(
+        "proc_pidfdinfo(PROC_PIDFDSOCKETINFO)",
+        written,
+        SOCKET_FDINFO_BYTES,
+    )?;
+    Ok(info)
+}
+
+/// Checks that a call that returned `written` wrote a whole struct of
+/// `expected` bytes. A result of zero or less is a failure with errno.
+fn whole(call: &'static str, written: i32, expected: usize) -> Result<(), Failure> {
+    match usize::try_from(written) {
+        Ok(written) if written == expected => Ok(()),
+        Ok(written) if written > 0 => Err(Failure::Size {
+            call,
+            written,
+            expected,
+        }),
+        _ => Err(Failure::Os(io::Error::last_os_error())),
     }
 }
 
 /// Runs `call` once with a null buffer, which returns the bytes the list
 /// needs now, and again with a buffer of that size and room for 32 more
 /// entries, and returns the bytes that the second call wrote.
-fn listing(name: &str, call: impl Fn(*mut c_void, i32) -> i32) -> io::Result<Vec<u8>> {
+fn listing(call: impl Fn(*mut c_void, i32) -> i32) -> Result<Vec<u8>, Failure> {
     let needed = call(std::ptr::null_mut(), 0);
     let Ok(needed) = usize::try_from(needed) else {
-        return Err(error_or_short(name));
+        return Err(Failure::Os(io::Error::last_os_error()));
     };
     let mut buffer = vec![0_u8; needed + 32 * 8];
     let written = call(buffer.as_mut_ptr().cast::<c_void>(), c_int(buffer.len()));
     let Ok(written) = usize::try_from(written) else {
-        return Err(error_or_short(name));
+        return Err(Failure::Os(io::Error::last_os_error()));
     };
     buffer.truncate(written.min(buffer.len()));
     Ok(buffer)
 }
 
 /// Returns `size` as the C `int` that libproc takes. Every size here is a
-/// struct's size or a process's descriptor list, far below `i32::MAX`.
+/// struct's size or a process list, far below `i32::MAX`.
 fn c_int(size: usize) -> i32 {
     i32::try_from(size).unwrap_or(i32::MAX)
-}
-
-/// Returns the error of a libproc call that failed or wrote less than a
-/// whole struct, with the call's name.
-fn error_or_short(name: &str) -> io::Error {
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(code) if code != 0 => error,
-        _ => io::Error::other(format!("{name} wrote less than a whole struct")),
-    }
 }

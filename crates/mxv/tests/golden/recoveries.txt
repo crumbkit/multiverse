@@ -130,6 +130,8 @@ codes that no start provokes:
   mxv::process::exited: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::process::not_ready: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::process::foreign_listener: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::process::detached_listener: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::process::unsupported_os: Only an operating system whose libproc structs have another size than the ones mxv reads provokes it.
   mxv::process::unstoppable: Only a process group that outlives SIGKILL provokes it, such as a process stuck in the kernel, which a test cannot make on demand.
   mxv::port::taken: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::process::unstartable: Only a manifest process whose cwd is missing from a live checkout provokes it; the library's process tests provoke it.

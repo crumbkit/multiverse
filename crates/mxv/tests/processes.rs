@@ -60,6 +60,16 @@ fn listen() -> String {
     path.display().to_string()
 }
 
+/// Reports whether the process `pid` exists, by asking `kill -0` to
+/// signal it.
+fn process_exists(pid: u64) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .env("PATH", PATH)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 /// Reports whether the process group `pid` has a member, by asking `kill -0`
 /// to signal it.
 fn group_exists(pid: u64) -> bool {
@@ -1071,17 +1081,20 @@ fn an_env_value_receives_the_host_port_that_its_placeholder_names() {
     let setup = Setup::new();
     setup.workspace(
         "triage",
-        "ports = [\"api\"]\n[processes.client]\nargv = [\"sh\", \"-c\", \"echo url=$API_URL; exec sleep 60\"]\nenv = { API_URL = \"http://127.0.0.1:{port.api}/v1?q={{x}}\" }\nready = { log = \"^url=\", timeout_seconds = 20 }\n",
+        "ports = [\"api\"]\n[processes.client]\nargv = [\"sh\", \"-c\", \"echo url=$API_URL; echo placeholders=$(env | grep -c port.api); exec sleep 60\"]\nenv = { API_URL = \"http://127.0.0.1:{port.api}/v1?q={{x}}\" }\nready = { log = \"^placeholders=\", timeout_seconds = 20 }\n",
     );
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
     let port = setup.port("triage", "api");
     let (_, logs) = setup.text(&["logs", "-w", "triage", "client"]);
-    assert_eq!(logs, format!("url=http://127.0.0.1:{port}/v1?q={{x}}\n"));
+    assert_eq!(
+        logs,
+        format!("url=http://127.0.0.1:{port}/v1?q={{x}}\nplaceholders=0\n")
+    );
     let (_, status) = setup.json(&["status", "-w", "triage"]);
     assert_eq!(
         row(&status, "client")["ports"][0],
-        format!("{{port.api}}={port}"),
+        format!("port.api={port}"),
         "{status}"
     );
 }
@@ -1120,6 +1133,46 @@ fn a_worker_that_writes_no_matching_log_line_fails_up_as_not_ready_with_the_patt
 }
 
 #[test]
+fn up_fails_with_detached_listener_and_stops_it_when_a_descendant_in_another_group_holds_the_port()
+{
+    let setup = Setup::new();
+    // perl starts a session of its own, and so a process group of its own,
+    // before it runs the server, as a daemon's fork and setsid would.
+    setup.workspace(
+        "triage",
+        &format!(
+            "ports = [\"api\"]\n[processes.server]\nargv = [\"perl\", \"-MPOSIX\", \"-e\", \"POSIX::setsid(); exec @ARGV\", \"{}\"]\nports = {{ PORT = \"api\" }}\nlisten = \"api\"\nready = {{ timeout_seconds = 20 }}\n",
+            listen()
+        ),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::process::detached_listener",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["port"], "api");
+    let pid = document["fields"]["pid"].as_u64().unwrap();
+    assert!(
+        document["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&pid.to_string()),
+        "{document}"
+    );
+    for () in waiting() {
+        if !process_exists(pid) {
+            assert_eq!(
+                setup.states("triage"),
+                [("server".to_owned(), "stopped".to_owned())]
+            );
+            return;
+        }
+    }
+    panic!("the detached listener {pid} still runs");
+}
+
+#[test]
 fn up_fails_with_foreign_listener_when_another_program_answers_on_the_listen_port() {
     let setup = Setup::new();
     setup.workspace(
@@ -1146,6 +1199,14 @@ fn up_fails_with_foreign_listener_when_another_program_answers_on_the_listen_por
         );
         assert_eq!(document["fields"]["port"], "api");
         assert_eq!(document["fields"]["number"], port);
+        assert_eq!(document["fields"]["pid"], std::process::id(), "{document}");
+        assert!(
+            !document["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("lsof"),
+            "{document}"
+        );
     });
     assert_eq!(
         setup.states("triage"),
