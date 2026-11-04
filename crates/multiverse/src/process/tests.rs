@@ -7,8 +7,9 @@ use rustix::process::Signal;
 
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::process::{
-    Launch, UNREADABLE, bsd_start, exit_code, group_exists, group_listens, launch,
-    listening_inodes, lsof_groups, signal, start_time, stat_group, stat_start_time,
+    Launch, UNREADABLE, bsd_info_start, bsd_start, exit_code, group_exists, group_listens, launch,
+    listening_inodes, signal, socket_descriptors, socket_listens_on, start_time, stat_group,
+    stat_start_time,
 };
 
 fn argv(words: &[&str]) -> Vec<String> {
@@ -167,9 +168,38 @@ fn the_group_in_a_proc_stat_line_is_field_5_even_when_the_name_holds_parentheses
 }
 
 #[test]
-fn the_groups_that_lsof_prints_are_its_g_lines() {
-    assert_eq!(lsof_groups("p501\ng501\np777\ng700\n"), [501, 700]);
-    assert!(lsof_groups("").is_empty());
+fn the_start_time_in_a_bsd_info_is_its_seconds_and_microseconds_at_offsets_120_and_128() {
+    let mut info = [0_u8; 136];
+    info[120..128].copy_from_slice(&1_793_809_711_u64.to_ne_bytes());
+    info[128..136].copy_from_slice(&139_785_u64.to_ne_bytes());
+    assert_eq!(bsd_info_start(&info).as_deref(), Some("1793809711.139785"));
+    assert_eq!(bsd_info_start(&info[..130]), None);
+}
+
+#[test]
+fn the_socket_descriptors_of_a_descriptor_list_are_the_entries_of_type_socket() {
+    let mut list = Vec::new();
+    for (fd, kind) in [(0_i32, 1_i32), (3, 2), (4, 3), (7, 2)] {
+        list.extend_from_slice(&fd.to_ne_bytes());
+        list.extend_from_slice(&kind.to_ne_bytes());
+    }
+    assert_eq!(socket_descriptors(&list), [3, 7]);
+}
+
+#[test]
+fn a_socket_info_listens_on_a_port_only_as_a_tcp_socket_in_the_listen_state() {
+    let info = |kind: i32, port: u16, state: i32| {
+        let mut info = vec![0_u8; 792];
+        info[256..260].copy_from_slice(&kind.to_ne_bytes());
+        info[268..270].copy_from_slice(&port.to_be_bytes());
+        info[344..348].copy_from_slice(&state.to_ne_bytes());
+        info
+    };
+    assert!(socket_listens_on(&info(2, 24_001, 1), 24_001));
+    assert!(!socket_listens_on(&info(2, 24_001, 1), 24_002));
+    assert!(!socket_listens_on(&info(2, 24_001, 4), 24_001));
+    assert!(!socket_listens_on(&info(1, 24_001, 1), 24_001));
+    assert!(!socket_listens_on(&info(2, 24_001, 1)[..300], 24_001));
 }
 
 #[test]

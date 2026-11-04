@@ -314,7 +314,7 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   `mxv::process::not_ready`. When the readiness port is the listen port
   and it accepts a connection, `up` also checks that a member of the
   process's group holds the listening socket, through `/proc` on Linux and
-  `lsof` on macOS. When none does, another program answered on the port,
+  libproc's `proc_pidfdinfo` on macOS. When none does, another program answered on the port,
   so `up` stops the process and fails with
   `mxv::process::foreign_listener`. A process that hands its port to a
   program in another process group, such as a wrapper around `docker run

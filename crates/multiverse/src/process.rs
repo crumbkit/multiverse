@@ -38,11 +38,12 @@
 //! [`group_listens`] tells whether a member of a process group listens on
 //! a TCP port. On Linux it reads the listening sockets of
 //! `/proc/net/tcp` and `/proc/net/tcp6`, and the file descriptors of the
-//! group's members under `/proc/<pid>/fd`. On macOS it runs
-//! `/usr/sbin/lsof -nP -a -iTCP:<port> -sTCP:LISTEN -Fg`, which prints the
-//! process group of each listener that the caller may inspect.
+//! group's members under `/proc/<pid>/fd`. On macOS it lists the group's
+//! members with `proc_listpids`, their descriptors with `proc_pidinfo`, and
+//! reads each socket with `proc_pidfdinfo`. The calls into libproc are in
+//! the `darwin` module, which holds mxv's only unsafe code.
 //!
-//! `ps` is found on the caller's `PATH`. `ps` and `lsof` run with
+//! `ps` is found on the caller's `PATH`. `ps` runs with
 //! `LC_ALL=C` and `TZ=UTC0`, so what they print does not depend on the
 //! caller's time zone or locale, an empty standard input, the first
 //! [`MOST_PS_BYTES`] bytes of standard output kept and standard error
@@ -61,13 +62,10 @@ use rustix::process::{Pid, Signal};
 use crate::error::Error;
 use crate::store;
 
+#[cfg(target_os = "macos")]
+mod darwin;
 #[cfg(test)]
 mod tests;
-
-/// The `lsof` that macOS installs, at its fixed path, which a `PATH`
-/// without `/usr/sbin` still reaches.
-#[cfg(target_os = "macos")]
-const LSOF: &str = "/usr/sbin/lsof";
 
 /// The shell that runs [`SCRIPT`].
 const SHELL: &str = "/bin/sh";
@@ -76,17 +74,24 @@ const SHELL: &str = "/bin/sh";
 /// shell's `$1` is the exit file, and the rest are the `argv`.
 pub(crate) const SCRIPT: &str = r#"exit_file=$1; shift; "$@"; printf '%s\n' "$?" > "$exit_file""#;
 
-/// The deadline of one `ps` or `lsof` run. Linux reads `/proc` and runs
-/// neither.
+/// The deadline of one `ps` run. Linux reads `/proc` and macOS calls
+/// libproc, so neither runs `ps`.
 #[cfg_attr(
-    target_os = "linux",
-    expect(dead_code, reason = "Linux reads the process table from /proc")
+    any(target_os = "linux", target_os = "macos"),
+    expect(dead_code, reason = "Linux reads /proc and macOS calls libproc")
 )]
 pub(crate) const PS_DEADLINE: Duration = Duration::from_secs(5);
 
-/// The most bytes of `ps` or `lsof` output that this module keeps, and of
+/// The most bytes of `ps` output that this module keeps, and of
 /// a `/proc` file that it reads. A busy host's socket table may need
 /// several megabytes.
+#[cfg_attr(
+    target_os = "macos",
+    expect(
+        dead_code,
+        reason = "macOS calls libproc and reads neither ps nor /proc"
+    )
+)]
 const MOST_PS_BYTES: u64 = 16 * 1024 * 1024;
 
 /// What [`launch`] needs to start one process.
@@ -230,22 +235,41 @@ pub(crate) fn start_time(pid: u32) -> Result<Option<String>, Error> {
 /// `pid`, or `None` when no process has the id.
 #[cfg(target_os = "macos")]
 fn macos_start_time(pid: u32) -> Result<Option<String>, Error> {
-    use libproc::libproc::bsd_info::BSDInfo;
-    use libproc::libproc::proc_pid::pidinfo;
-
     let Ok(id) = i32::try_from(pid) else {
         return Ok(None);
     };
-    match pidinfo::<BSDInfo>(id, 0) {
-        Ok(info) => Ok(Some(bsd_start(info.pbi_start_tvsec, info.pbi_start_tvusec))),
-        // libproc reports the errno in its message: ESRCH is "No such
-        // process" and EPERM "Operation not permitted".
-        Err(message) if message.contains("errno = 3,") => Ok(None),
-        Err(message) if message.contains("errno = 1,") => Ok(Some(UNREADABLE.to_owned())),
-        Err(message) => Err(Error::ProcessTable {
-            message: format!("proc_pidinfo cannot read the process {pid}: {message}"),
+    match darwin::bsd_info(id) {
+        Ok(info) => Ok(bsd_info_start(&info)),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::EPERM) => Ok(Some(UNREADABLE.to_owned())),
+        Err(error) => Err(Error::ProcessTable {
+            message: format!("proc_pidinfo cannot read the process {pid}: {error}"),
         }),
     }
+}
+
+/// Returns the start time in `info`, the bytes of `struct proc_bsdinfo`,
+/// whose `pbi_start_tvsec` and `pbi_start_tvusec` are 64-bit fields at
+/// offsets 120 and 128.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn bsd_info_start(info: &[u8]) -> Option<String> {
+    Some(bsd_start(read_u64(info, 120)?, read_u64(info, 128)?))
+}
+
+/// Returns the native-endian `u64` at `offset` of `bytes`, or `None` when
+/// `bytes` ends first.
+#[cfg(any(target_os = "macos", test))]
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let field = bytes.get(offset..offset.checked_add(8)?)?;
+    Some(u64::from_ne_bytes(field.try_into().ok()?))
+}
+
+/// Returns the native-endian `i32` at `offset` of `bytes`, or `None` when
+/// `bytes` ends first.
+#[cfg(any(target_os = "macos", test))]
+fn read_i32(bytes: &[u8], offset: usize) -> Option<i32> {
+    let field = bytes.get(offset..offset.checked_add(4)?)?;
+    Some(i32::from_ne_bytes(field.try_into().ok()?))
 }
 
 /// The start time of a process whose start mxv may not read.
@@ -303,14 +327,7 @@ pub(crate) fn group_listens(group: u32, port: u16) -> Result<Option<bool>, Error
     }
     #[cfg(target_os = "macos")]
     {
-        let Some((_, text)) = tool(
-            LSOF,
-            &["-nP", "-a", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fg"],
-        )?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(lsof_groups(&text).contains(&group)))
+        macos_group_listens(group, port).map(Some)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -396,13 +413,63 @@ pub(crate) fn stat_group(text: &str) -> Option<u32> {
     fields.split_whitespace().nth(5 - 3)?.parse().ok()
 }
 
-/// Returns the process groups in `text`, what `lsof -Fg` prints: a line
-/// `p<pid>` and a line `g<group>` for each process.
+/// Reports whether a member of the process group `group` holds a socket
+/// that listens on the TCP port `port`.
+#[cfg(target_os = "macos")]
+fn macos_group_listens(group: u32, port: u16) -> Result<bool, Error> {
+    let Ok(group) = i32::try_from(group) else {
+        return Ok(false);
+    };
+    let members = darwin::group_members(group).map_err(|error| Error::ProcessTable {
+        message: format!("proc_listpids cannot list the process group {group}: {error}"),
+    })?;
+    for member in members {
+        // A member that ends meanwhile, or whose descriptors mxv may not
+        // read, holds none of the group's sockets that mxv can see.
+        let Ok(descriptors) = darwin::descriptors(member) else {
+            continue;
+        };
+        for fd in socket_descriptors(&descriptors) {
+            if let Ok(info) = darwin::socket_info(member, fd)
+                && socket_listens_on(&info, port)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Returns the descriptors in `list`, the bytes of a `struct proc_fdinfo`
+/// array, whose type is `PROX_FDTYPE_SOCKET`. Each entry holds the
+/// descriptor at offset 0 and its type at offset 4.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn lsof_groups(text: &str) -> Vec<u32> {
-    text.lines()
-        .filter_map(|line| line.strip_prefix('g')?.parse().ok())
+pub(crate) fn socket_descriptors(list: &[u8]) -> Vec<i32> {
+    /// `PROX_FDTYPE_SOCKET` of `<sys/proc_info.h>`.
+    const PROX_FDTYPE_SOCKET: i32 = 2;
+    list.chunks_exact(8)
+        .filter(|entry| read_i32(entry, 4) == Some(PROX_FDTYPE_SOCKET))
+        .filter_map(|entry| read_i32(entry, 0))
         .collect()
+}
+
+/// Reports whether `info`, the bytes of `struct socket_fdinfo`, is a TCP
+/// socket in the LISTEN state on the local port `port`. Its `soi_kind` is
+/// at offset 256, the local port of its `in_sockinfo` at offset 268 in
+/// network byte order, and its `tcpsi_state` at offset 344.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn socket_listens_on(info: &[u8], port: u16) -> bool {
+    /// `SOCKINFO_TCP` of `<sys/proc_info.h>`.
+    const SOCKINFO_TCP: i32 = 2;
+    /// `TSI_S_LISTEN` of `<sys/proc_info.h>`.
+    const TSI_S_LISTEN: i32 = 1;
+    let local_port = info
+        .get(268..270)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_be_bytes);
+    read_i32(info, 256) == Some(SOCKINFO_TCP)
+        && read_i32(info, 344) == Some(TSI_S_LISTEN)
+        && local_port == Some(port)
 }
 
 /// Returns field 22 of `text`, the contents of `/proc/<pid>/stat`, which is
@@ -435,7 +502,7 @@ fn ps_start_time(pid: u32) -> Result<Option<String>, Error> {
 /// Runs `program` with `args` as the module docs say, and returns whether
 /// it succeeded and what it printed, or `None` when `program` is not on
 /// `PATH`.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn tool(program: &str, args: &[&str]) -> Result<Option<(bool, String)>, Error> {
     use wait_timeout::ChildExt as _;
 
