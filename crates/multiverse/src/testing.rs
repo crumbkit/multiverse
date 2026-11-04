@@ -6,7 +6,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 /// A temporary directory that holds a bare repository `origin.git` with one
-/// commit on `main`, and a clone of it, `inbox`, whose `origin` is that
+/// commit on `main`, and a clone of it, `app`, whose `origin` is that
 /// bare repository.
 pub(crate) struct Fixture {
     /// The temporary directory, which is deleted when the fixture drops.
@@ -57,10 +57,10 @@ pub(crate) fn fixture() -> Fixture {
     );
     let origin = root.join("origin.git");
     git(&root, &["clone", "--quiet", "--bare", "seed", "origin.git"]);
-    git(&root, &["clone", "--quiet", "origin.git", "inbox"]);
+    git(&root, &["clone", "--quiet", "origin.git", "app"]);
     Fixture {
         dir,
-        clone: root.join("inbox"),
+        clone: root.join("app"),
         origin,
     }
 }

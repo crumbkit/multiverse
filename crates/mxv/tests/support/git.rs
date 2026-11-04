@@ -41,7 +41,7 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 /// Creates, in `root`, a bare repository `origin.git` with one commit on
-/// `main` and a clone of it named `inbox` whose `origin` is the relative
+/// `main` and a clone of it named `app` whose `origin` is the relative
 /// path `../origin.git`, so a copy of `root` keeps working. Returns the
 /// clone's path.
 pub(crate) fn repository(root: &Path) -> PathBuf {
@@ -54,8 +54,8 @@ pub(crate) fn repository(root: &Path) -> PathBuf {
     );
     git(root, &["clone", "--quiet", "--bare", "seed", "origin.git"]);
     std::fs::remove_dir_all(&seed).unwrap();
-    git(root, &["clone", "--quiet", "origin.git", "inbox"]);
-    let clone = root.join("inbox");
+    git(root, &["clone", "--quiet", "origin.git", "app"]);
+    let clone = root.join("app");
     git(&clone, &["remote", "set-url", "origin", "../origin.git"]);
     clone
 }

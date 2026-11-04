@@ -8,7 +8,7 @@
 //! files.
 //!
 //! Each example runs in a fresh copy of a directory that the test builds
-//! with git: a bare `origin.git`, its clone `inbox`, a repository `plain`
+//! with git: a bare `origin.git`, its clone `app`, a repository `plain`
 //! without an origin, and a clone `fresh` of an origin without commits. Its
 //! XDG state starts as a copy of `tests/fixtures/xdg`, which holds the
 //! record of the workspace `reading-list`. That record names directories
@@ -38,13 +38,13 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    BRANCH_EXISTS, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES, CONFIG_INVALID,
-    CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
-    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, RECORD_CORRUPT,
-    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, UNBUILT,
-    UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_NOT_FOUND,
+    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_UNOWNED, CHECKOUT_UNREACHABLE_COMMITS, CODES,
+    CONFIG_INVALID, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN, ENVIRONMENT_NO_DIRECTORY,
+    ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE,
+    PATH_INACCESSIBLE, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, UNBUILT, UNBUILT_CODES, WORKSPACE_BAD_NAME, WORKSPACE_DIRTY,
+    WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_FOUND,
 };
 use tempfile::TempDir;
 
@@ -113,14 +113,14 @@ const MISMATCHED_RECORD: Failing<'static> =
 /// `new` with a config file that sets an unknown key.
 const BAD_CONFIG: Failing<'static> = Failing::new(
     &CONFIG_INVALID,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-bad-config");
 
 /// `new` with a directory where the config file belongs.
 const UNREADABLE_CONFIG: Failing<'static> = Failing::new(
     &CONFIG_UNREADABLE,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-config-directory");
 
@@ -157,12 +157,12 @@ struct Repositories {
 }
 
 /// Returns a new directory of the repositories that the module docs name.
-/// The clone `inbox` also holds a branch named `taken`.
+/// The clone `app` also holds a branch named `taken`.
 fn repositories() -> Repositories {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    let inbox = repository(&root);
-    git(&inbox, &["branch", "taken"]);
+    let app = repository(&root);
+    git(&app, &["branch", "taken"]);
     let plain = root.join("plain");
     std::fs::create_dir(&plain).unwrap();
     git(&plain, &["init", "--quiet"]);
@@ -304,19 +304,19 @@ const CD_MISSING: Failing<'static> = Failing::new(&WORKSPACE_NOT_FOUND, &["cd", 
 /// `new` of the name of the workspace in the fixture.
 const NEW_TAKEN_NAME: Failing<'static> = Failing::new(
     &WORKSPACE_EXISTS,
-    &["new", "reading-list", "--repo", "inbox", "--dry-run"],
+    &["new", "reading-list", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of a name with a slash.
 const NEW_BAD_NAME: Failing<'static> = Failing::new(
     &WORKSPACE_BAD_NAME,
-    &["new", "a/b", "--repo", "inbox", "--dry-run"],
+    &["new", "a/b", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of the name of a branch that the repository already has.
 const NEW_TAKEN_BRANCH: Failing<'static> = Failing::new(
     &BRANCH_EXISTS,
-    &["new", "taken", "--repo", "inbox", "--dry-run"],
+    &["new", "taken", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of a path that does not exist.
@@ -340,27 +340,27 @@ const NEW_EMPTY_ORIGIN: Failing<'static> = Failing::new(
 /// `new` with a relative `MXV_ROOT`.
 const NEW_RELATIVE_ROOT: Failing<'static> = Failing::new(
     &ENVIRONMENT_RELATIVE_ROOT,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .env(&[("MXV_ROOT", Some("work"))]);
 
 /// `new` of a name whose directory already exists under the default root.
 const NEW_TAKEN_DIRECTORY: Failing<'static> = Failing::new(
     &DIRECTORY_TAKEN,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-taken");
 
 /// `new` with a `PATH` that finds no git.
 const NEW_NO_GIT: Failing<'static> = Failing::new(
     &GIT_NOT_FOUND,
-    &["new", "triage", "--repo", "inbox", "--dry-run"],
+    &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .env(&[("PATH", Some("/nonexistent"))]);
 
 /// The words of `new` that the fixture accepts, which each `new` line above
 /// differs from in one word.
-const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "inbox", "--dry-run"];
+const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "app", "--dry-run"];
 
 /// The command lines that start the recovery chains, one for each code that
 /// a command line provokes.
@@ -400,6 +400,14 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         &CHECKOUT_UNREACHABLE_COMMITS,
         "Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &CHECKOUT_LOCKED,
+        "Only a live checkout that git lists as locked provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &PATH_INACCESSIBLE,
+        "Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.",
     ),
     Unprovoked::new(
         &ENVIRONMENT_NO_DIRECTORY,
@@ -453,7 +461,7 @@ const PAIRS: &[Twin<'static>] = &[
     Twin::variable(NEW_RELATIVE_ROOT, "MXV_ROOT"),
     Twin::new(
         NEW_TAKEN_DIRECTORY,
-        &["new", "sorting", "--repo", "inbox", "--dry-run"],
+        &["new", "sorting", "--repo", "app", "--dry-run"],
     ),
     Twin::variable(NEW_NO_GIT, "PATH"),
 ];

@@ -44,8 +44,8 @@ fn a_name_that_git_refuses_as_a_branch_is_refused() {
 
 #[test]
 fn a_name_reads_back_from_json_only_through_the_checks() {
-    let name: WorkspaceName = serde_json::from_str("\"inbox\"").unwrap();
-    assert_eq!(name.as_str(), "inbox");
+    let name: WorkspaceName = serde_json::from_str("\"app\"").unwrap();
+    assert_eq!(name.as_str(), "app");
     assert!(serde_json::from_str::<WorkspaceName>("\"a/b\"").is_err());
 }
 

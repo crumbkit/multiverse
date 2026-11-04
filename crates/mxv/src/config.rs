@@ -78,6 +78,12 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
                 "`root` must be a string that holds an absolute path".to_owned(),
             ));
         };
+        if written.contains('\0') {
+            return Err(bad(
+                at,
+                "`root` holds a NUL character, which no path can hold".to_owned(),
+            ));
+        }
         let expanded = expand(written, home).ok_or_else(|| {
             bad(
                 at,

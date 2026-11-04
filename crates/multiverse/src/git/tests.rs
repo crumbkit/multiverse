@@ -40,7 +40,7 @@ fn a_subdirectory_of_a_clone_names_the_clone_and_its_directory_name() {
     fs::create_dir(&sub).unwrap();
     let repository = Git.repository(&sub).unwrap();
     assert_eq!(repository.root, fixture.clone);
-    assert_eq!(repository.name, "inbox");
+    assert_eq!(repository.name, "app");
 }
 
 #[test]
@@ -58,16 +58,16 @@ fn a_checkout_starts_at_the_fetched_base_on_a_branch_that_tracks_nothing() {
     let latest = advance_origin(&fixture);
     Git.fetch(&fixture.clone).unwrap();
     let checkout = fixture.dir.path().join("work");
+    let created = Git
+        .create_branch(&fixture.clone, "reading-list", "refs/remotes/origin/main")
+        .unwrap();
+    assert_eq!(created.as_deref(), Some(latest.as_str()));
     let commit = Git
-        .add_checkout(
-            &fixture.clone,
-            &checkout,
-            "reading-list",
-            "refs/remotes/origin/main",
-        )
+        .add_checkout(&fixture.clone, &checkout, "reading-list")
         .unwrap();
     assert_eq!(commit, latest);
-    assert!(Git.owns_checkout(&fixture.clone, &checkout).unwrap());
+    let listed = Git.listed_checkout(&fixture.clone, &checkout).unwrap();
+    assert_eq!(listed.and_then(|listed| listed.head), Some(latest));
     let upstream = git(
         &checkout,
         &[
@@ -107,44 +107,109 @@ fn a_branch_counts_the_commits_that_its_base_does_not_hold() {
     let fixture = fixture();
     let base = "refs/remotes/origin/main";
     let checkout = fixture.dir.path().join("work");
-    Git.add_checkout(&fixture.clone, &checkout, "topic", base)
-        .unwrap();
+    work(&fixture, &checkout, "topic");
     let unmerged = || {
         Git.unmerged_commits(&fixture.clone, "refs/heads/topic", base)
             .unwrap()
     };
-    assert_eq!(unmerged(), 0);
+    assert_eq!(unmerged(), Some(0));
     for _ in 0..2 {
         git(
             &checkout,
             &["commit", "--quiet", "--allow-empty", "-m", "Work"],
         );
     }
-    assert_eq!(unmerged(), 2);
+    assert_eq!(unmerged(), Some(2));
+    git(&fixture.clone, &["update-ref", "-d", base]);
+    assert_eq!(unmerged(), None);
+}
+
+/// Creates the branch `branch` from `origin/main` and checks it out at
+/// `checkout`.
+fn work(fixture: &crate::testing::Fixture, checkout: &std::path::Path, branch: &str) {
+    Git.create_branch(&fixture.clone, branch, "refs/remotes/origin/main")
+        .unwrap();
+    Git.add_checkout(&fixture.clone, checkout, branch).unwrap();
+}
+
+#[test]
+fn creating_a_branch_that_exists_leaves_it_where_it_was() {
+    let fixture = fixture();
+    git(
+        &fixture.clone,
+        &["commit", "--quiet", "--allow-empty", "-m", "Mine"],
+    );
+    let mine = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    git(&fixture.clone, &["branch", "topic"]);
+    let created = Git
+        .create_branch(&fixture.clone, "topic", "refs/remotes/origin/main")
+        .unwrap();
+    assert_eq!(created, None);
+    assert_eq!(git(&fixture.clone, &["rev-parse", "topic"]), mine);
+}
+
+#[test]
+fn a_branch_is_deleted_at_a_commit_only_while_it_still_points_there() {
+    let fixture = fixture();
+    let start = Git
+        .create_branch(&fixture.clone, "topic", "refs/remotes/origin/main")
+        .unwrap()
+        .unwrap();
+    git(
+        &fixture.clone,
+        &["commit", "--quiet", "--allow-empty", "-m", "Moved"],
+    );
+    git(&fixture.clone, &["branch", "--force", "topic", "HEAD"]);
+    assert!(
+        Git.delete_branch_at(&fixture.clone, "topic", &start)
+            .is_err()
+    );
+    assert!(Git.has_branch(&fixture.clone, "topic").unwrap());
+}
+
+#[test]
+fn a_listed_checkout_reports_its_lock_and_a_detached_head() {
+    let fixture = fixture();
+    let checkout = fixture.dir.path().join("work");
+    work(&fixture, &checkout, "topic");
+    let path = checkout.to_str().unwrap();
+    git(
+        &fixture.clone,
+        &["worktree", "lock", "--reason", "initializing", path],
+    );
+    git(&checkout, &["switch", "--quiet", "--detach"]);
+    let listed = Git
+        .listed_checkout(&fixture.clone, &checkout)
+        .unwrap()
+        .unwrap();
+    assert_eq!(listed.locked.as_deref(), Some(crate::backend::INITIALIZING));
+    assert!(listed.detached);
+    Git.unlock_checkout(&fixture.clone, &checkout).unwrap();
+    let listed = Git
+        .listed_checkout(&fixture.clone, &checkout)
+        .unwrap()
+        .unwrap();
+    assert_eq!(listed.locked, None);
 }
 
 #[test]
 fn commits_on_a_detached_head_count_as_stray_and_commits_on_any_branch_do_not() {
     let fixture = fixture();
     let checkout = fixture.dir.path().join("work");
-    Git.add_checkout(
-        &fixture.clone,
-        &checkout,
-        "topic",
-        "refs/remotes/origin/main",
-    )
-    .unwrap();
+    work(&fixture, &checkout, "topic");
     git(
         &checkout,
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
     );
-    assert_eq!(Git.stray_commits(&checkout).unwrap(), 0);
+    assert_eq!(Git.stray_commits(&checkout, "HEAD").unwrap(), 0);
     git(&checkout, &["switch", "--quiet", "--detach"]);
     git(
         &checkout,
         &["commit", "--quiet", "--allow-empty", "-m", "Lost"],
     );
-    assert_eq!(Git.stray_commits(&checkout).unwrap(), 1);
+    assert_eq!(Git.stray_commits(&checkout, "HEAD").unwrap(), 1);
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    assert_eq!(Git.stray_commits(&fixture.clone, head.trim()).unwrap(), 1);
 }
 
 #[test]
@@ -163,13 +228,7 @@ fn a_failure_message_without_a_fatal_line_quotes_the_last_lines_that_are_not_hin
 fn a_symbolic_link_in_place_of_a_checkout_is_not_the_checkout() {
     let fixture = fixture();
     let checkout = fixture.dir.path().join("work");
-    Git.add_checkout(
-        &fixture.clone,
-        &checkout,
-        "topic",
-        "refs/remotes/origin/main",
-    )
-    .unwrap();
+    work(&fixture, &checkout, "topic");
     let moved = fixture.dir.path().join("moved");
     git(
         &fixture.clone,
@@ -181,8 +240,15 @@ fn a_symbolic_link_in_place_of_a_checkout_is_not_the_checkout() {
         ],
     );
     std::os::unix::fs::symlink(&moved, &checkout).unwrap();
-    assert!(!Git.owns_checkout(&fixture.clone, &checkout).unwrap());
-    assert!(Git.owns_checkout(&fixture.clone, &moved).unwrap());
+    assert_eq!(
+        Git.listed_checkout(&fixture.clone, &checkout).unwrap(),
+        None
+    );
+    assert!(
+        Git.listed_checkout(&fixture.clone, &moved)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -232,8 +298,8 @@ fn a_clone_of_an_origin_without_commits_has_an_empty_origin() {
             "origin.git",
         ],
     );
-    git(&root, &["clone", "--quiet", "origin.git", "inbox"]);
-    let clone = root.join("inbox");
+    git(&root, &["clone", "--quiet", "origin.git", "app"]);
+    let clone = root.join("app");
     Git.fetch(&clone).unwrap();
     let error = Git.base(&clone).unwrap_err();
     assert!(matches!(error, Error::EmptyOrigin { .. }), "{error:?}");

@@ -22,7 +22,7 @@ use crate::support::{GIT_ENV, PATH, git, repository};
 struct Setup {
     /// The temporary directory.
     dir: TempDir,
-    /// The clone `inbox`.
+    /// The clone `app`.
     clone: PathBuf,
 }
 
@@ -103,7 +103,7 @@ impl Setup {
 }
 
 fn created(setup: &Setup, name: &str) -> PathBuf {
-    let (exit, document) = setup.json(&["new", name, "--repo", "inbox"]);
+    let (exit, document) = setup.json(&["new", name, "--repo", "app"]);
     assert_eq!(exit, 0, "{document}");
     setup.workspace(name)
 }
@@ -112,11 +112,11 @@ fn created(setup: &Setup, name: &str) -> PathBuf {
 fn new_checks_out_the_repository_inside_the_workspace_directory_on_a_branch_of_the_workspaces_name()
 {
     let setup = Setup::new();
-    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "inbox"]);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["schema"], "mxv/new/v1");
     let workspace = setup.workspace("reading-list");
-    let checkout = workspace.join("inbox");
+    let checkout = workspace.join("app");
     assert_eq!(document["data"]["path"], workspace.display().to_string());
     assert_eq!(document["data"]["branch"], "reading-list");
     assert_eq!(
@@ -150,7 +150,7 @@ fn list_show_and_cd_report_the_new_workspace() {
 #[test]
 fn a_dry_run_of_new_creates_nothing() {
     let setup = Setup::new();
-    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "inbox", "--dry-run"]);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app", "--dry-run"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["dry_run"], true);
     assert!(!setup.workspace("reading-list").exists());
@@ -191,7 +191,7 @@ fn new_of_a_repository_whose_origin_has_no_commits_fails_with_empty_origin_and_s
 fn a_second_workspace_with_the_same_name_fails_with_exists() {
     let setup = Setup::new();
     created(&setup, "reading-list");
-    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "inbox"]);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
     assert_eq!(exit, 1);
     assert_eq!(document["code"], "mxv::workspace::exists");
 }
@@ -199,7 +199,7 @@ fn a_second_workspace_with_the_same_name_fails_with_exists() {
 #[test]
 fn a_name_with_a_slash_fails_with_bad_name() {
     let setup = Setup::new();
-    let (exit, document) = setup.json(&["new", "a/b", "--repo", "inbox"]);
+    let (exit, document) = setup.json(&["new", "a/b", "--repo", "app"]);
     assert_eq!(exit, 1);
     assert_eq!(document["code"], "mxv::workspace::bad_name");
 }
@@ -248,12 +248,12 @@ fn remove_without_yes_and_without_a_terminal_asks_for_yes() {
 fn remove_refuses_a_workspace_with_an_untracked_file_unless_forced() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
-    write(&workspace.join("inbox").join("notes.md"));
+    write(&workspace.join("app").join("notes.md"));
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
     assert_eq!(exit, 1);
     assert_eq!(document["code"], "mxv::workspace::dirty");
-    assert_eq!(document["fields"]["changes"][0], "inbox: ?? notes.md");
-    assert!(workspace.join("inbox").join("notes.md").exists());
+    assert_eq!(document["fields"]["changes"][0], "app: ?? notes.md");
+    assert!(workspace.join("app").join("notes.md").exists());
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes", "--force"]);
     assert_eq!(exit, 0, "{document}");
     assert!(!workspace.exists());
@@ -263,7 +263,7 @@ fn remove_refuses_a_workspace_with_an_untracked_file_unless_forced() {
 fn remove_refuses_a_workspace_with_an_uncommitted_change() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
-    let checkout = workspace.join("inbox");
+    let checkout = workspace.join("app");
     write(&checkout.join("notes.md"));
     git(&checkout, &["add", "notes.md"]);
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
@@ -276,7 +276,7 @@ fn remove_keeps_a_branch_with_unmerged_commits_unless_forced() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
     git(
-        &workspace.join("inbox"),
+        &workspace.join("app"),
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
     );
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
@@ -293,7 +293,7 @@ fn remove_keeps_a_branch_with_unmerged_commits_unless_forced() {
 fn force_discards_changes_but_keeps_an_unmerged_branch() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
-    let checkout = workspace.join("inbox");
+    let checkout = workspace.join("app");
     git(
         &checkout,
         &["commit", "--quiet", "--allow-empty", "-m", "Work"],
@@ -305,7 +305,7 @@ fn force_discards_changes_but_keeps_an_unmerged_branch() {
         document["data"]["checkouts"][0]["branch_fate"],
         "kept_unmerged"
     );
-    assert_eq!(document["data"]["discarded"][0], "inbox: ?? notes.md");
+    assert_eq!(document["data"]["discarded"][0], "app: ?? notes.md");
     assert!(!workspace.exists());
     assert!(!git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty());
 }
@@ -316,7 +316,7 @@ fn delete_unmerged_deletes_a_branch_with_unmerged_commits_and_counts_them() {
     let workspace = created(&setup, "reading-list");
     for _ in 0..2 {
         git(
-            &workspace.join("inbox"),
+            &workspace.join("app"),
             &["commit", "--quiet", "--allow-empty", "-m", "Work"],
         );
     }
@@ -335,20 +335,20 @@ fn remove_refuses_an_ignored_env_file_but_deletes_an_ignored_target_directory() 
     let setup = Setup::new();
     write_text(&setup.clone.join(".git/info/exclude"), ".env\ntarget/\n");
     let workspace = created(&setup, "reading-list");
-    let checkout = workspace.join("inbox");
+    let checkout = workspace.join("app");
     write(&checkout.join(".env"));
     fs::create_dir_all(checkout.join("target")).unwrap();
     write(&checkout.join("target").join("mxv"));
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::workspace::ignored_files");
-    assert_eq!(document["fields"]["paths"][0], "inbox: .env");
+    assert_eq!(document["fields"]["paths"][0], "app: .env");
     assert!(checkout.join(".env").exists());
 
     fs::remove_file(checkout.join(".env")).unwrap();
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
     assert_eq!(exit, 0, "{document}");
-    assert_eq!(document["data"]["disposable"][0], "inbox: target/");
+    assert_eq!(document["data"]["disposable"][0], "app: target/");
     assert!(!workspace.exists());
 }
 
@@ -356,7 +356,7 @@ fn remove_refuses_an_ignored_env_file_but_deletes_an_ignored_target_directory() 
 fn remove_refuses_commits_on_a_detached_head_unless_unmerged_commits_may_be_deleted() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
-    let checkout = workspace.join("inbox");
+    let checkout = workspace.join("app");
     git(&checkout, &["switch", "--quiet", "--detach"]);
     git(
         &checkout,
@@ -375,12 +375,12 @@ fn remove_refuses_commits_on_a_detached_head_unless_unmerged_commits_may_be_dele
 fn without_mxv_root_or_a_config_file_new_puts_the_workspace_in_the_data_directory() {
     let setup = Setup::new();
     let (exit, document) =
-        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "inbox"]));
+        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "app"]));
     assert_eq!(exit, 0, "{document}");
     let root = setup.root().join("data/mxv/workspaces");
     assert_eq!(document["data"]["root"], root.display().to_string());
     assert_eq!(document["data"]["root_source"], "default");
-    assert!(root.join("reading-list").join("inbox").exists());
+    assert!(root.join("reading-list").join("app").exists());
 }
 
 #[test]
@@ -388,7 +388,7 @@ fn the_config_file_root_names_the_root_and_show_reports_it() {
     let setup = Setup::new();
     setup.config("root = \"~/work\"\n");
     let (exit, document) =
-        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "inbox"]));
+        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "app"]));
     assert_eq!(exit, 0, "{document}");
     let root = setup.root().join("home/work");
     assert_eq!(document["data"]["root"], root.display().to_string());
@@ -406,7 +406,7 @@ fn the_config_file_root_names_the_root_and_show_reports_it() {
 fn mxv_root_wins_over_the_config_file() {
     let setup = Setup::new();
     setup.config("root = \"~/work\"\n");
-    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "inbox"]);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"]["root_source"], "env");
     assert!(setup.workspace("reading-list").exists());
@@ -417,7 +417,7 @@ fn a_config_file_with_an_unknown_key_fails_with_config_invalid_naming_the_file_a
     let setup = Setup::new();
     setup.config("root = \"/srv\"\nroots = \"/srv\"\n");
     let (exit, document) =
-        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "inbox"]));
+        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "app"]));
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::config::invalid");
     assert_eq!(document["fields"]["line"], 2);
@@ -436,7 +436,7 @@ fn a_relative_root_in_the_config_file_fails_with_config_invalid() {
     let setup = Setup::new();
     setup.config("root = \"work\"\n");
     let (exit, document) =
-        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "inbox"]));
+        Setup::run_json(setup.without_mxv_root(&["new", "reading-list", "--repo", "app"]));
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::config::invalid");
     assert_eq!(document["fields"]["line"], 1);
@@ -447,7 +447,7 @@ fn a_relative_mxv_root_fails_with_relative_root() {
     let setup = Setup::new();
     let (exit, document) = Setup::run_json(
         setup
-            .without_mxv_root(&["new", "reading-list", "--repo", "inbox"])
+            .without_mxv_root(&["new", "reading-list", "--repo", "app"])
             .env("MXV_ROOT", "work"),
     );
     assert_eq!(exit, 1, "{document}");
@@ -466,9 +466,9 @@ fn changing_the_root_later_leaves_existing_workspaces_where_they_are() {
     assert_eq!(exit, 0, "{listed}");
     assert_eq!(listed["data"][0]["path"], workspace.display().to_string());
     let (exit, document) =
-        Setup::run_json(setup.without_mxv_root(&["new", "triage", "--repo", "inbox"]));
+        Setup::run_json(setup.without_mxv_root(&["new", "triage", "--repo", "app"]));
     assert_eq!(exit, 0, "{document}");
-    assert!(setup.root().join("home/elsewhere/triage/inbox").exists());
+    assert!(setup.root().join("home/elsewhere/triage/app").exists());
     let (exit, document) =
         Setup::run_json(setup.without_mxv_root(&["remove", "reading-list", "--yes"]));
     assert_eq!(exit, 0, "{document}");
@@ -486,7 +486,7 @@ fn list_reports_a_corrupt_record_and_still_lists_the_other_workspaces() {
     let (exit, listed) = setup.json(&["list"]);
     assert_eq!(exit, 1, "{listed}");
     assert_eq!(listed["total"], 2);
-    assert_eq!(listed["data"][0]["name"], "broken.json");
+    assert_eq!(listed["data"][0]["name"], "broken");
     assert_ne!(listed["data"][0]["problem"], "");
     assert_eq!(listed["data"][1]["name"], "reading-list");
     assert_eq!(listed["data"][1]["problem"], "");
@@ -499,7 +499,7 @@ fn a_dry_run_of_remove_changes_nothing() {
     let (exit, text) = setup.text(&["remove", "reading-list", "--dry-run"]);
     assert_eq!(exit, 0);
     assert!(text.contains("would remove the checkout"), "{text}");
-    assert!(workspace.join("inbox").exists());
+    assert!(workspace.join("app").exists());
     assert_eq!(setup.json(&["list"]).1["total"], 1);
 }
 
@@ -542,4 +542,48 @@ fn empty_repository(root: &Path) -> PathBuf {
     );
     git(root, &["clone", "--quiet", "empty.git", "fresh"]);
     root.join("fresh")
+}
+
+#[test]
+fn remove_refuses_a_checkout_locked_for_another_reason_and_names_git_worktree_unlock() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let checkout = workspace.join("app");
+    git(
+        &setup.clone,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "in use",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes", "--force"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::locked");
+    assert_eq!(document["fields"]["reason"], "in use");
+    let hint =
+        document["hint"].as_str().unwrap_or_default().to_owned() + document.to_string().as_str();
+    assert!(hint.contains("worktree unlock"), "{document}");
+    assert!(checkout.exists());
+}
+
+#[test]
+fn remove_keeps_a_branch_whose_base_is_gone_and_reports_an_unknown_count() {
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    git(
+        &setup.clone,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(
+        document["data"]["checkouts"][0]["branch_fate"],
+        "kept_unmerged"
+    );
+    assert!(document["data"]["checkouts"][0]["unmerged_commits"].is_null());
+    assert!(!workspace.exists());
+    assert!(!git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty());
 }

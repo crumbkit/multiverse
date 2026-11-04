@@ -16,7 +16,7 @@ The repository holds two crates:
 repository starts from a local clone that has a remote named `origin`:
 
 ```sh
-mxv new reading-list --repo ~/Code/inbox   # fetch origin, branch reading-list from origin/main
+mxv new reading-list --repo ~/src/app      # fetch origin, branch reading-list from origin/main
 cd "$(mxv cd reading-list)"                # resume the workspace
 mxv list                                   # list the workspaces
 mxv show reading-list                      # print its record

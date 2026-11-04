@@ -198,6 +198,23 @@ pub(crate) fn remove(
             }
             .into());
         }
+        RemovalPlan::Locked {
+            workspace,
+            checkout,
+            reason,
+        } => {
+            return Err(MxvFailure::Locked {
+                name: name.to_string(),
+                repository: workspace
+                    .checkouts
+                    .iter()
+                    .find(|listed| listed.path == checkout)
+                    .map_or_else(|| checkout.clone(), |listed| listed.source.clone()),
+                path: checkout,
+                reason,
+            }
+            .into());
+        }
         RemovalPlan::Unowned { checkout, .. } => {
             return Err(MxvFailure::Unowned {
                 name: name.to_string(),

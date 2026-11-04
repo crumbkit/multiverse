@@ -22,6 +22,12 @@ pub const WORKSPACE_IGNORED_FILES: Code = Code::new("mxv", "workspace", "ignored
 /// The code of a removal that commits on no branch, such as commits on a
 /// detached `HEAD`, stop.
 pub const CHECKOUT_UNREACHABLE_COMMITS: Code = Code::new("mxv", "checkout", "unreachable_commits");
+/// The code of a removal that a checkout locked for a reason other than
+/// `initializing` stops.
+pub const CHECKOUT_LOCKED: Code = Code::new("mxv", "checkout", "locked");
+/// The code of a path that mxv cannot inspect, such as one below a
+/// directory it cannot search.
+pub const PATH_INACCESSIBLE: Code = Code::new("mxv", "path", "inaccessible");
 /// The code of a new workspace whose directory already exists.
 pub const DIRECTORY_TAKEN: Code = Code::new("mxv", "directory", "taken");
 /// The code of a checkout directory that its repository does not list.
@@ -106,6 +112,17 @@ pub(crate) enum MxvFailure {
         /// The number of commits that removing the checkout would lose.
         commits: u32,
     },
+    /// A checkout is locked for a reason other than `initializing`.
+    Locked {
+        /// The workspace's name.
+        name: String,
+        /// The checkout's repository.
+        repository: PathBuf,
+        /// The checkout's directory.
+        path: PathBuf,
+        /// The lock's reason.
+        reason: String,
+    },
     /// The workspace's directory already exists.
     DirectoryTaken {
         /// The directory.
@@ -167,6 +184,8 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_DIRTY,
     &WORKSPACE_IGNORED_FILES,
     &CHECKOUT_UNREACHABLE_COMMITS,
+    &CHECKOUT_LOCKED,
+    &PATH_INACCESSIBLE,
     &DIRECTORY_TAKEN,
     &CHECKOUT_UNOWNED,
     &BRANCH_EXISTS,
@@ -207,6 +226,7 @@ impl Failure for MxvFailure {
             Self::Dirty { .. } => &WORKSPACE_DIRTY,
             Self::IgnoredFiles { .. } => &WORKSPACE_IGNORED_FILES,
             Self::StrayCommits { .. } => &CHECKOUT_UNREACHABLE_COMMITS,
+            Self::Locked { .. } => &CHECKOUT_LOCKED,
             Self::DirectoryTaken { .. } => &DIRECTORY_TAKEN,
             Self::Unowned { .. } => &CHECKOUT_UNOWNED,
             Self::BranchExists { .. } => &BRANCH_EXISTS,
@@ -226,6 +246,7 @@ impl Failure for MxvFailure {
                 Error::CorruptRecord { .. } => &RECORD_CORRUPT,
                 Error::NewerRecord { .. } => &RECORD_NEWER,
                 Error::MismatchedRecord { .. } => &RECORD_MISMATCHED,
+                Error::Inaccessible { .. } => &PATH_INACCESSIBLE,
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
                 // mxv gives it a code of its own.
@@ -246,6 +267,16 @@ impl Failure for MxvFailure {
             )),
             Self::IgnoredFiles { name, .. } => hint(format!(
                 "move the ignored files you want to keep out of the checkout, or run `mxv remove {name} --force` to delete them with the workspace"
+            )),
+            Self::Locked {
+                name,
+                repository,
+                path,
+                ..
+            } => hint(format!(
+                "when nothing else uses the checkout, run `git -C {} worktree unlock {}`, and then `mxv remove {name}` again",
+                shown(repository),
+                shown(path)
             )),
             Self::StrayCommits { name, path, .. } => hint(format!(
                 "keep the commits on a branch with `git -C {} switch -c <BRANCH>`, or run `mxv remove {name} --delete-unmerged` to delete them",
@@ -297,6 +328,17 @@ impl Failure for MxvFailure {
             Self::IgnoredFiles { name, paths } => vec![
                 Field::new("name", name),
                 Field::new("paths", FieldValue::list(paths.iter())),
+            ],
+            Self::Locked {
+                name,
+                repository,
+                path,
+                reason,
+            } => vec![
+                Field::new("name", name),
+                Field::new("repository", shown(repository)),
+                Field::new("path", shown(path)),
+                Field::new("reason", reason),
             ],
             Self::StrayCommits {
                 name,
@@ -364,6 +406,10 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::NewerRecord { .. } => {
             hint("upgrade mxv to the version that wrote the record, or a later one")
         }
+        Error::Inaccessible { path, .. } => hint(format!(
+            "make the directories above {} searchable, and run the command again",
+            shown(path)
+        )),
         Error::MismatchedRecord { path, .. } => hint(format!(
             "rename {} to the name that it holds, or delete it, which makes mxv forget that workspace",
             shown(path)
@@ -404,6 +450,7 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("dir", shown(dir)),
             Field::new("seconds", deadline.as_secs()),
         ],
+        Error::Inaccessible { path, .. } => vec![Field::new("path", shown(path))],
         Error::MismatchedRecord { path, name } => {
             vec![Field::new("path", shown(path)), Field::new("name", name)]
         }
@@ -439,6 +486,14 @@ impl fmt::Display for MxvFailure {
                 "the workspace {name} has {} ignored {} that mxv does not treat as disposable",
                 paths.len(),
                 if paths.len() == 1 { "path" } else { "paths" }
+            ),
+            Self::Locked {
+                name, path, reason, ..
+            } => write!(
+                formatter,
+                "the checkout {} of the workspace {name} is locked: {}",
+                shown(path),
+                if reason.is_empty() { "git gives no reason" } else { reason }
             ),
             Self::StrayCommits {
                 name,
@@ -503,6 +558,7 @@ impl std::error::Error for MxvFailure {
             | Self::BranchExists { .. }
             | Self::IgnoredFiles { .. }
             | Self::StrayCommits { .. }
+            | Self::Locked { .. }
             | Self::NoHome
             | Self::RelativeRoot { .. }
             | Self::BadConfig { .. } => None,

@@ -11,7 +11,7 @@ Options:
   -h, --help         Print help (see more with '--help')
 
 Examples:
-  mxv new triage --repo inbox --dry-run
+  mxv new triage --repo app --dry-run
 
 Effects: additive, not idempotent, open-world.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv new --help` describes them.

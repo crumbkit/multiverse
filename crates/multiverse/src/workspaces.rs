@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, INITIALIZING};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, agents_text};
@@ -26,9 +26,9 @@ pub enum Mode {
 /// backend makes.
 ///
 /// A workspace lives in a directory below a root directory that the caller
-/// passes to [`Workspaces::create`]. A workspace named `reading-list` of the repository `inbox` lives at
+/// passes to [`Workspaces::create`]. A workspace named `reading-list` of the repository `app` lives at
 /// `<root>/reading-list`. That directory holds the workspace's `AGENTS.md`
-/// and the checkout `<root>/reading-list/inbox`, so git never sees the
+/// and the checkout `<root>/reading-list/app`, so git never sees the
 /// `AGENTS.md`, and a later workspace can hold one checkout for each of
 /// several repositories beside it.
 #[derive(Debug)]
@@ -76,6 +76,10 @@ pub struct CheckoutRemoval {
     /// branch holds, such as commits on a detached `HEAD`, which the
     /// removal loses.
     pub stray_commits: u32,
+    /// Whether the removal unlocks the checkout first, because a killed
+    /// `git worktree add` left it locked with the reason
+    /// [`INITIALIZING`](crate::backend::INITIALIZING).
+    pub unlock: bool,
 }
 
 /// What removing a workspace does to a checkout's directory or to the
@@ -99,14 +103,17 @@ pub enum BranchFate {
     /// The branch stays, because it holds commits that are not on its base
     /// and the caller did not allow deleting them.
     KeptUnmerged {
-        /// The number of commits on the branch that are not on its base.
-        commits: u32,
+        /// The number of commits on the branch that are not on its base, or
+        /// `None` when its base names no commit any more, so the number is
+        /// unknown.
+        commits: Option<u32>,
     },
     /// The branch is deleted with commits that are not on its base,
     /// because the caller allowed it.
     DeletedUnmerged {
-        /// The number of commits on the branch that are not on its base.
-        commits: u32,
+        /// The number of commits on the branch that are not on its base, or
+        /// `None` when its base names no commit any more.
+        commits: Option<u32>,
     },
     /// The branch, or its repository, was already gone.
     Missing,
@@ -127,16 +134,20 @@ pub struct Allow {
 
 /// The names of ignored directories that a removal deletes without asking,
 /// because a build or an install makes them again. An ignored path is
-/// disposable when one of its components has one of these names, such as
-/// `target/` or `web/node_modules/`. Every other ignored path, such as
-/// `.env`, stops a removal unless the caller allows discarding changes.
+/// disposable when git reports it as a whole ignored directory, with a
+/// trailing `/`, whose own name is one of these, such as `target/` or
+/// `web/node_modules/`. Every other ignored path stops a removal unless the
+/// caller allows discarding changes, including `.env`, an ignored file named
+/// `build`, and an ignored file inside a tracked `dist/` directory, such as
+/// `tools/dist/prod.secret`.
 pub const DISPOSABLE: &[&str] = &["target", "node_modules", "dist", "build", ".cache"];
 
 /// Reports whether `path`, as `git status` prints an ignored path, is in
 /// [`DISPOSABLE`].
 fn disposable(path: &str) -> bool {
-    path.split('/')
-        .any(|component| DISPOSABLE.contains(&component))
+    path.strip_suffix('/')
+        .and_then(|directory| directory.rsplit('/').next())
+        .is_some_and(|name| DISPOSABLE.contains(&name))
 }
 
 /// What removing a workspace does, or did.
@@ -152,7 +163,7 @@ pub struct Removal {
     /// What the caller allowed the removal to lose.
     pub allow: Allow,
     /// The ignored paths in [`DISPOSABLE`] that the removal deletes, with
-    /// the checkout's name in front, such as `inbox: target/`.
+    /// the checkout's name in front, such as `app: target/`.
     pub disposable: Vec<String>,
     /// The changes and other ignored paths that the removal discards
     /// because the caller allowed it, in the form of
@@ -174,7 +185,7 @@ pub enum RemovalPlan {
         /// The workspace's record.
         workspace: Workspace,
         /// Each change, as `git status --porcelain` prints it, with the
-        /// checkout's directory name in front, such as `inbox: ?? notes.md`.
+        /// checkout's directory name in front, such as `app: ?? notes.md`.
         changes: Vec<String>,
     },
     /// A checkout holds ignored files outside [`DISPOSABLE`], such as
@@ -183,7 +194,7 @@ pub enum RemovalPlan {
         /// The workspace's record.
         workspace: Workspace,
         /// Each ignored path, with the checkout's name in front, such as
-        /// `inbox: .env`.
+        /// `app: .env`.
         paths: Vec<String>,
     },
     /// A checkout's `HEAD` holds commits that no branch holds, such as
@@ -196,6 +207,17 @@ pub enum RemovalPlan {
         checkout: PathBuf,
         /// The number of commits that removing the checkout would lose.
         commits: u32,
+    },
+    /// A checkout is locked for a reason other than
+    /// [`INITIALIZING`](crate::backend::INITIALIZING), so something else may
+    /// still use it, such as a checkout on a removable disk.
+    Locked {
+        /// The workspace's record.
+        workspace: Workspace,
+        /// The checkout's directory.
+        checkout: PathBuf,
+        /// The lock's reason, which is empty when the lock gives none.
+        reason: String,
     },
     /// The workspace's directory or a checkout's directory is a symbolic
     /// link, or a checkout's directory exists but its repository does not
@@ -221,14 +243,22 @@ enum Entry {
 }
 
 impl Entry {
-    /// Returns what is at `path`. An entry that cannot be read counts as
-    /// present, so a later step reports why.
-    fn at(path: &Path) -> Self {
+    /// Returns what is at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Inaccessible`] when mxv cannot tell, such as when a
+    /// parent directory cannot be searched, so nothing treats the path as
+    /// present or absent by guess.
+    fn at(path: &Path) -> Result<Self, Error> {
         match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => Self::Link,
-            Ok(_) => Self::Present,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::Absent,
-            Err(_) => Self::Present,
+            Ok(metadata) if metadata.file_type().is_symlink() => Ok(Self::Link),
+            Ok(_) => Ok(Self::Present),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::Absent),
+            Err(source) => Err(Error::Inaccessible {
+                path: path.to_path_buf(),
+                source,
+            }),
         }
     }
 }
@@ -239,12 +269,29 @@ impl Entry {
 struct Made {
     /// Whether the run created the workspace's directory.
     directory: bool,
-    /// The number of checkouts that the run started to add. A checkout
-    /// whose `worktree add` failed counts, because git may have left its
-    /// directory and branch.
-    checkouts: usize,
+    /// The commit at which the run created each checkout's branch, in the
+    /// record's order, for the checkouts whose branch it created. A
+    /// checkout whose `worktree add` then failed counts, because git may
+    /// have left its directory.
+    branches: Vec<String>,
     /// Whether the run wrote `AGENTS.md`.
     agents: bool,
+}
+
+/// How [`Workspaces::make`] ended without an error.
+#[derive(Debug, PartialEq, Eq)]
+enum Making {
+    /// The workspace is complete.
+    Done,
+    /// Another process created a checkout's branch after
+    /// [`Workspaces::create`] checked for it, so the run left that branch
+    /// alone and stopped.
+    BranchTaken {
+        /// The checkout's repository.
+        repository: PathBuf,
+        /// The branch.
+        branch: String,
+    },
 }
 
 impl<B: Backend> Workspaces<B> {
@@ -302,7 +349,7 @@ impl<B: Backend> Workspaces<B> {
         }
         let repository = self.backend.repository(repository)?;
         let path = root.join(name.as_str());
-        if Entry::at(&path) != Entry::Absent {
+        if Entry::at(&path)? != Entry::Absent {
             return Ok(NewOutcome::PathTaken(path));
         }
         if self.backend.has_branch(&repository.root, name.as_str())? {
@@ -334,7 +381,11 @@ impl<B: Backend> Workspaces<B> {
         }
         let mut made = Made::default();
         match self.make(root, &mut workspace, &mut made) {
-            Ok(()) => Ok(NewOutcome::Created(workspace)),
+            Ok(Making::Done) => Ok(NewOutcome::Created(workspace)),
+            Ok(Making::BranchTaken { repository, branch }) => {
+                self.undo(&workspace, &made);
+                Ok(NewOutcome::BranchTaken { repository, branch })
+            }
             Err(error) => {
                 self.undo(&workspace, &made);
                 Err(error)
@@ -344,9 +395,15 @@ impl<B: Backend> Workspaces<B> {
 
     /// Makes the directory, the checkouts and the `AGENTS.md` of
     /// `workspace`, whose record the store already holds, and writes the
-    /// record again with each checkout's commit. It notes in `made` each
-    /// thing it creates.
-    fn make(&self, root: &Path, workspace: &mut Workspace, made: &mut Made) -> Result<(), Error> {
+    /// record again with each checkout's commit. It creates each branch in
+    /// one step that fails when the branch exists, and then adds the
+    /// checkout on it. It notes in `made` each thing it creates.
+    fn make(
+        &self,
+        root: &Path,
+        workspace: &mut Workspace,
+        made: &mut Made,
+    ) -> Result<Making, Error> {
         let unwritable = |path: &Path| {
             let path = path.to_path_buf();
             move |source| Error::Unwritable { path, source }
@@ -355,49 +412,58 @@ impl<B: Backend> Workspaces<B> {
         fs::create_dir(&workspace.path).map_err(unwritable(&workspace.path))?;
         made.directory = true;
         for checkout in &mut workspace.checkouts {
-            made.checkouts += 1;
-            let commit = self.backend.add_checkout(
-                &checkout.source,
-                &checkout.path,
-                &checkout.branch,
-                &checkout.base,
-            )?;
+            let Some(start) =
+                self.backend
+                    .create_branch(&checkout.source, &checkout.branch, &checkout.base)?
+            else {
+                return Ok(Making::BranchTaken {
+                    repository: checkout.source.clone(),
+                    branch: checkout.branch.clone(),
+                });
+            };
+            made.branches.push(start);
+            let commit =
+                self.backend
+                    .add_checkout(&checkout.source, &checkout.path, &checkout.branch)?;
             checkout.commit = Some(commit);
         }
         made.agents = true;
         store::replace_file(&workspace.agents_file(), agents_text(workspace).as_bytes())?;
-        self.store.update(workspace)
+        self.store.update(workspace)?;
+        Ok(Making::Done)
     }
 
     /// Deletes what a failed [`Workspaces::make`] created, as `made`
-    /// records it: each checkout it started, even one whose `worktree add`
-    /// failed partway, each branch it created, its `AGENTS.md` and its
-    /// directory. [`Workspaces::create`] checked that the branch and the
-    /// directory did not exist, so a branch with the workspace's name was
-    /// created by this run. Each step is best effort, because the caller
-    /// reports the failure that stopped the creation. The record is deleted
-    /// only when every step succeeded, so `mxv remove` can finish a cleanup
-    /// that failed.
+    /// records it: each checkout it started, even one that `worktree add`
+    /// left locked or half made, each branch it created while that branch
+    /// still points where the run created it, its `AGENTS.md` and its
+    /// directory. A branch that another process created is never touched.
+    /// Each step is best effort, because the caller reports the failure
+    /// that stopped the creation. The record is deleted only when every
+    /// step succeeded, so `mxv remove` can finish a cleanup that failed.
     fn undo(&self, workspace: &Workspace, made: &Made) {
         let mut clean = true;
-        for checkout in workspace.checkouts.iter().take(made.checkouts) {
-            if Entry::at(&checkout.path) != Entry::Absent {
+        for (checkout, start) in workspace.checkouts.iter().zip(&made.branches) {
+            if let Ok(Some(listed)) = self
+                .backend
+                .listed_checkout(&checkout.source, &checkout.path)
+            {
+                if listed.locked.as_deref() == Some(INITIALIZING) {
+                    clean &= self
+                        .backend
+                        .unlock_checkout(&checkout.source, &checkout.path)
+                        .is_ok();
+                }
                 clean &= self
                     .backend
                     .remove_checkout(&checkout.source, &checkout.path, true)
                     .is_ok();
             }
             clean &= self.backend.prune_checkouts(&checkout.source).is_ok();
-            if self
+            clean &= self
                 .backend
-                .has_branch(&checkout.source, &checkout.branch)
-                .unwrap_or(true)
-            {
-                clean &= self
-                    .backend
-                    .delete_branch(&checkout.source, &checkout.branch)
-                    .is_ok();
-            }
+                .delete_branch_at(&checkout.source, &checkout.branch, start)
+                .is_ok();
         }
         if made.agents {
             let agents = workspace.agents_file();
@@ -441,7 +507,7 @@ impl<B: Backend> Workspaces<B> {
         let Some(workspace) = self.store.read(name)? else {
             return Ok(RemovalPlan::NotFound);
         };
-        let directory = match Entry::at(&workspace.path) {
+        let directory = match Entry::at(&workspace.path)? {
             Entry::Link => {
                 return Ok(RemovalPlan::Unowned {
                     checkout: workspace.path.clone(),
@@ -457,45 +523,68 @@ impl<B: Backend> Workspaces<B> {
         let mut disposables = Vec::new();
         for checkout in &workspace.checkouts {
             let source = checkout.source.is_dir();
-            let (directory, stray_commits) = match Entry::at(&checkout.path) {
-                Entry::Absent => (Fate::Missing, 0),
-                Entry::Link => {
-                    return Ok(RemovalPlan::Unowned {
+            let entry = Entry::at(&checkout.path)?;
+            if entry == Entry::Link {
+                return Ok(RemovalPlan::Unowned {
+                    checkout: checkout.path.clone(),
+                    workspace,
+                });
+            }
+            let listed = if source {
+                self.backend
+                    .listed_checkout(&checkout.source, &checkout.path)?
+            } else {
+                None
+            };
+            if entry == Entry::Present && listed.is_none() {
+                return Ok(RemovalPlan::Unowned {
+                    checkout: checkout.path.clone(),
+                    workspace,
+                });
+            }
+            let mut unlock = false;
+            if let Some(reason) = listed.as_ref().and_then(|listed| listed.locked.clone()) {
+                if reason != INITIALIZING {
+                    return Ok(RemovalPlan::Locked {
                         checkout: checkout.path.clone(),
+                        reason,
                         workspace,
                     });
                 }
-                Entry::Present => {
-                    if !source
-                        || !self
-                            .backend
-                            .owns_checkout(&checkout.source, &checkout.path)?
-                    {
-                        return Ok(RemovalPlan::Unowned {
-                            checkout: checkout.path.clone(),
-                            workspace,
-                        });
+                unlock = true;
+            }
+            let stray = if entry == Entry::Present {
+                let found = self.backend.changes(&checkout.path)?;
+                let named = |item: &String| format!("{}: {item}", checkout.name);
+                changes.extend(found.changed.iter().map(named));
+                for path in &found.ignored {
+                    if disposable(path) {
+                        disposables.push(named(path));
+                    } else {
+                        ignored.push(named(path));
                     }
-                    let found = self.backend.changes(&checkout.path)?;
-                    let named = |item: &String| format!("{}: {item}", checkout.name);
-                    changes.extend(found.changed.iter().map(named));
-                    for path in &found.ignored {
-                        if disposable(path) {
-                            disposables.push(named(path));
-                        } else {
-                            ignored.push(named(path));
-                        }
-                    }
-                    let stray = self.backend.stray_commits(&checkout.path)?;
-                    if stray > 0 && !allow.delete_unmerged {
-                        return Ok(RemovalPlan::StrayCommits {
-                            checkout: checkout.path.clone(),
-                            commits: stray,
-                            workspace,
-                        });
-                    }
-                    (Fate::Removed, stray)
                 }
+                self.backend.stray_commits(&checkout.path, "HEAD")?
+            } else {
+                // The directory is gone, but until a prune the repository
+                // still holds the checkout's `HEAD`, which may name commits
+                // that no branch holds.
+                match listed.as_ref().and_then(|listed| listed.head.as_deref()) {
+                    Some(head) => self.backend.stray_commits(&checkout.source, head)?,
+                    None => 0,
+                }
+            };
+            if stray > 0 && !allow.delete_unmerged {
+                return Ok(RemovalPlan::StrayCommits {
+                    checkout: checkout.path.clone(),
+                    commits: stray,
+                    workspace,
+                });
+            }
+            let directory = if entry == Entry::Present {
+                Fate::Removed
+            } else {
+                Fate::Missing
             };
             let branch = if !source
                 || !self
@@ -509,7 +598,7 @@ impl<B: Backend> Workspaces<B> {
                     .backend
                     .unmerged_commits(&checkout.source, &revision, &checkout.base)?
                 {
-                    0 => BranchFate::Deleted,
+                    Some(0) => BranchFate::Deleted,
                     commits if allow.delete_unmerged => BranchFate::DeletedUnmerged { commits },
                     commits => BranchFate::KeptUnmerged { commits },
                 }
@@ -518,7 +607,8 @@ impl<B: Backend> Workspaces<B> {
                 checkout: checkout.clone(),
                 directory,
                 branch,
-                stray_commits,
+                stray_commits: stray,
+                unlock,
             });
         }
         if !allow.discard_changes {
@@ -558,6 +648,10 @@ impl<B: Backend> Workspaces<B> {
     pub fn remove(&self, mut removal: Removal) -> Result<Removal, Error> {
         for planned in &removal.checkouts {
             let checkout = &planned.checkout;
+            if planned.unlock {
+                self.backend
+                    .unlock_checkout(&checkout.source, &checkout.path)?;
+            }
             match planned.directory {
                 Fate::Removed => {
                     self.backend.remove_checkout(

@@ -4,10 +4,10 @@
   "path": "/home/agent/mxv/reading-list",
   "checkouts": [
     {
-      "name": "inbox",
+      "name": "app",
       "backend": "git",
-      "source": "/home/agent/code/inbox",
-      "path": "/home/agent/mxv/reading-list/inbox",
+      "source": "/home/agent/src/app",
+      "path": "/home/agent/mxv/reading-list/app",
       "branch": "reading-list",
       "base": "refs/remotes/origin/main",
       "commit": "4b825dc642cb6eb9a060e54bf8d69288fbee4904"

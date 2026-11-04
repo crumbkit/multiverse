@@ -55,11 +55,11 @@ twins/no-twin: mxv show reading-list
   Reason: The record that holds another name causes the failure, and every word of the command line that names it reads the same record.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
-twins/no-twin: mxv new triage --repo inbox --dry-run
+twins/no-twin: mxv new triage --repo app --dry-run
   Reason: The config file causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
-twins/no-twin: mxv new triage --repo inbox --dry-run
+twins/no-twin: mxv new triage --repo app --dry-run
   Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 

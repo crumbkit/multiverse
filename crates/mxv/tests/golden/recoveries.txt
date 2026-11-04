@@ -3,16 +3,16 @@ mxv cd missing
   run mxv list
     exits 0
 
-mxv new reading-list --repo inbox --dry-run
+mxv new reading-list --repo app --dry-run
   fails with mxv::workspace::exists
   run mxv show reading-list
     exits 0
 
-mxv new a/b --repo inbox --dry-run
+mxv new a/b --repo app --dry-run
   fails with mxv::workspace::bad_name
   hint
 
-mxv new taken --repo inbox --dry-run
+mxv new taken --repo app --dry-run
   fails with mxv::branch::exists
   hint
 
@@ -28,15 +28,15 @@ mxv new triage --repo fresh --dry-run
   fails with mxv::repository::empty_origin
   hint
 
-mxv new triage --repo inbox --dry-run (with MXV_ROOT=work)
+mxv new triage --repo app --dry-run (with MXV_ROOT=work)
   fails with mxv::environment::relative_root
   hint
 
-mxv new triage --repo inbox --dry-run
+mxv new triage --repo app --dry-run
   fails with mxv::directory::taken
   hint
 
-mxv new triage --repo inbox --dry-run (with PATH=/nonexistent)
+mxv new triage --repo app --dry-run (with PATH=/nonexistent)
   fails with mxv::git::not_found
   hint
 
@@ -52,11 +52,11 @@ mxv show reading-list
   fails with mxv::record::mismatched
   hint
 
-mxv new triage --repo inbox --dry-run
+mxv new triage --repo app --dry-run
   fails with mxv::config::invalid
   hint
 
-mxv new triage --repo inbox --dry-run
+mxv new triage --repo app --dry-run
   fails with mxv::config::unreadable
   hint
 
@@ -73,6 +73,8 @@ codes that no start provokes:
   mxv::workspace::dirty: Only a live checkout with changes provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
   mxv::workspace::ignored_files: Only a live checkout with an ignored file such as .env provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
   mxv::checkout::unreachable_commits: Only a live checkout with commits on a detached HEAD provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
+  mxv::checkout::locked: Only a live checkout that git lists as locked provokes it, and the fixture's workspace has no checkout; tests/workspaces.rs provokes it.
+  mxv::path::inaccessible: Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.
   mxv::environment::no_directory: Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.
   mxv::checkout::unowned: Only a checkout directory that git does not list provokes it, and the fixture's workspace has no checkout directory.
   mxv::repository::no_default_branch: Only a clone whose origin has branches but no default branch provokes it; the library's git tests provoke it.

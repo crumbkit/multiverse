@@ -87,6 +87,14 @@ pub enum Error {
         /// What is wrong with it.
         source: serde_json::Error,
     },
+    /// mxv cannot tell what is at a path, such as when a parent directory
+    /// cannot be searched.
+    Inaccessible {
+        /// The path.
+        path: PathBuf,
+        /// The error of the lookup.
+        source: io::Error,
+    },
     /// A workspace record holds a name other than the one its file is
     /// named for, such as on a file system that ignores case.
     MismatchedRecord {
@@ -164,6 +172,11 @@ impl fmt::Display for Error {
                     path.display()
                 )
             }
+            Self::Inaccessible { path, source } => write!(
+                formatter,
+                "mxv cannot tell what is at {}: {source}",
+                path.display()
+            ),
             Self::MismatchedRecord { path, name } => write!(
                 formatter,
                 "the workspace record {} holds the name {name}, which its file name does not match",
@@ -183,7 +196,8 @@ impl std::error::Error for Error {
         match self {
             Self::ProgramMissing { source, .. }
             | Self::StateUnreadable { source, .. }
-            | Self::Unwritable { source, .. } => Some(source),
+            | Self::Unwritable { source, .. }
+            | Self::Inaccessible { source, .. } => Some(source),
             Self::CorruptRecord { source, .. } => Some(source),
             Self::RepositoryNotFound { .. }
             | Self::NoOrigin { .. }
