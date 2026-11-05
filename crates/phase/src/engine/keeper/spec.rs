@@ -56,6 +56,11 @@ pub(crate) struct KeeperSpec {
     /// app's first start. The spawn side fills them in.
     #[serde(default)]
     pub(crate) resolved: BTreeSet<String>,
+    /// The names of the variables that the app requires: those its plan
+    /// names and does not mark optional. A fresh environment for a restart
+    /// that lacks one counts as one that could not be resolved.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) required: BTreeSet<String>,
 }
 
 /// The only variables that a keeper and its app inherit from the caller.
@@ -111,6 +116,7 @@ impl KeeperSpec {
             restarts: 0,
             inherited: BTreeMap::new(),
             resolved: BTreeSet::new(),
+            required: BTreeSet::new(),
         }
     }
 
@@ -139,6 +145,13 @@ impl KeeperSpec {
         check_inherited(&inherited)?;
         self.inherited = inherited;
         Ok(self)
+    }
+
+    /// Returns this specification with `required` as the variables that
+    /// every environment of the app must name.
+    pub(crate) fn requiring(mut self, required: BTreeSet<String>) -> Self {
+        self.required = required;
+        self
     }
 
     /// Returns this specification counting `restarts` earlier restarts.

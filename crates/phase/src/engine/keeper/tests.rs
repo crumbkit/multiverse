@@ -147,7 +147,8 @@ impl<W: Write> Write for Slow<W> {
 }
 
 /// The environment source of the keepers that tests start. It resolves
-/// `GREETING=fresh`, fails for the process `unresolvable`, and takes
+/// `GREETING=fresh`, fails for the process `unresolvable`, resolves no
+/// variable for the process `missing-required`, and takes
 /// [`SLOW`] for the process `slow-resolve`.
 struct Source;
 
@@ -160,6 +161,9 @@ impl EnvironmentSource for Source {
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
         if process.as_str() == "slow-resolve" {
             pause(SLOW);
+        }
+        if process.as_str() == "missing-required" {
+            return Ok(Box::new(Fixed(Vec::new())));
         }
         if process.as_str() == "unresolvable" {
             return Err(EnvironmentError::new(
@@ -1176,4 +1180,28 @@ fn a_keepers_end_and_stop_skip_an_entry_that_another_operation_already_stopped()
         assert!(note.applies_to(Some(&host), EntryState::Stopping));
         assert!(!note.applies_to(Some(&host), EntryState::Stopped));
     }
+}
+
+#[test]
+fn a_keeper_whose_fresh_environment_lacks_a_required_variable_exits_unresolved() {
+    let fixture = Fixture::of("missing-required");
+    let restart = Restart::on_failure(limits(Some(2), Duration::from_millis(10), Resolve::Always));
+    let spec = fixture
+        .spec("echo \"run $GREETING\"; exit 1", restart, Stop::default())
+        .requiring(BTreeSet::from(["GREETING".to_owned()]));
+    let mut running = fixture.start(&spec).unwrap();
+
+    let code = running.exit_code();
+
+    assert_eq!(code, i32::from(KeeperExit::EnvironmentUnresolved.code()));
+    assert_eq!(fixture.log_text(), "run hello\n");
+    let diagnostics = fixture.diagnostics_text();
+    assert_eq!(
+        diagnostics
+            .matches("the environment source could not supply the variable GREETING")
+            .count(),
+        2,
+        "{diagnostics}"
+    );
+    assert!(!diagnostics.contains("hello"));
 }

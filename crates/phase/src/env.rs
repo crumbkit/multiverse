@@ -37,7 +37,8 @@ mod tests;
 /// `LANG`.
 pub trait EnvironmentSource {
     /// Resolves every variable that `process` of `app` receives, before
-    /// `deadline`.
+    /// `deadline`. An optional variable without a value is left out of
+    /// the environment's [`AppliedEnvironment::names`].
     ///
     /// # Errors
     ///
@@ -78,6 +79,18 @@ pub trait EnvironmentSource {
 /// ```
 pub trait AppliedEnvironment: Send {
     /// Returns the names of the variables, which are never secret.
+    ///
+    /// A variable whose name this set lacks is absent. The source leaves
+    /// out a variable that the plan marks optional, in
+    /// [`ProcessPlan::optional_env`](crate::ProcessPlan::optional_env),
+    /// when it has no value for it, such as `LANG` when the caller's shell
+    /// does not set it. phase then starts a host process with the variable
+    /// unset, leaves the variable out of a container's service, and writes
+    /// no secret file for it. For a required variable without a value the
+    /// source returns an [`EnvironmentError`] from
+    /// [`EnvironmentSource::resolve`] instead, and phase refuses an
+    /// environment whose names lack a required variable with the same
+    /// error, so the process never starts with it unset or empty.
     fn names(&self) -> BTreeSet<String>;
 
     /// Returns the earliest time at which one of the values expires, such as
@@ -116,7 +129,8 @@ pub trait AppliedEnvironment: Send {
     /// # Errors
     ///
     /// Returns [`io::ErrorKind::NotFound`] when the environment has no
-    /// variable `name`, the error of `out`, and, by default,
+    /// variable `name`, which phase never asks for an absent optional
+    /// secret, the error of `out`, and, by default,
     /// [`io::ErrorKind::Unsupported`] for an environment that cannot write
     /// a value, which phase reports as a container secret it cannot
     /// deliver as a file.
@@ -130,6 +144,68 @@ pub trait AppliedEnvironment: Send {
     fn apply(&self, command: &mut Command) {
         self.apply_as(command, &|name| Some(name.to_owned()));
     }
+}
+
+/// The resolver that [`require`] names in its error: the environment
+/// source as a whole, which returned an environment without the variable.
+const SOURCE: &str = "the environment source";
+
+/// The reason of a [`require`] error, which holds no value.
+#[derive(Debug)]
+struct LeftOut;
+
+impl fmt::Display for LeftOut {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "the resolved environment does not name the variable, which the plan requires",
+        )
+    }
+}
+
+impl Error for LeftOut {}
+
+/// Checks that `environment` names each variable of `required`, the
+/// variables that a process receives and does not mark optional. phase
+/// calls it wherever it applies a resolved environment: before a host
+/// process's keeper starts, when a keeper resolves a fresh environment for
+/// a restart, and before a container starts. A source that leaves out a
+/// required variable therefore fails the start, and the process never runs
+/// with the variable unset or empty.
+///
+/// # Errors
+///
+/// Returns an [`EnvironmentError`] that names the first required variable
+/// that `environment` lacks, and holds no value.
+pub(crate) fn require<'n>(
+    required: impl IntoIterator<Item = &'n String>,
+    environment: &dyn AppliedEnvironment,
+) -> Result<(), EnvironmentError> {
+    let names = environment.names();
+    match required.into_iter().find(|name| !names.contains(*name)) {
+        Some(name) => Err(EnvironmentError::new(
+            name.clone(),
+            SOURCE.to_owned(),
+            Box::new(LeftOut),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Resolves the environment of `process` of `app` through `source` before
+/// `deadline`, and checks it with [`require`].
+///
+/// # Errors
+///
+/// Returns the source's [`EnvironmentError`], or that of [`require`].
+pub(crate) fn resolve_required(
+    source: &dyn EnvironmentSource,
+    app: &AppName,
+    process: &crate::ProcessPlan,
+    deadline: Instant,
+) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+    let environment = source.resolve(app, &process.name, deadline)?;
+    require(process.required_env(), environment.as_ref())?;
+    Ok(environment)
 }
 
 /// A resolver could not supply the value of a variable. The error names the

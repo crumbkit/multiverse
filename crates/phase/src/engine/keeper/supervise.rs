@@ -385,9 +385,12 @@ impl Supervisor<'_> {
             }
             self.diagnostics
                 .note("the keeper resolves a fresh environment");
-            let resolved =
-                self.source
-                    .resolve(self.args.app(), self.args.process(), now() + RESOLVE_WAIT);
+            let resolved = self
+                .source
+                .resolve(self.args.app(), self.args.process(), now() + RESOLVE_WAIT)
+                .and_then(|fresh| {
+                    crate::env::require(&self.spec.required, fresh.as_ref()).map(|()| fresh)
+                });
             // Resolving can take long, and a stop request meanwhile waits
             // on the channel until the keeper looks.
             if self.stop_waiting() {

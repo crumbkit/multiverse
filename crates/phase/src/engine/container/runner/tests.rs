@@ -481,7 +481,7 @@ fn up_leaves_a_running_container_of_the_same_plan_alone_and_replaces_a_stopped_o
 fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_text() {
     use super::ContainerError;
     use crate::error::PhaseError;
-    use crate::record::docker::{DockerCause, DockerError};
+    use crate::record::docker::{DockerCause, DockerError, DockerKind};
 
     let cases = [
         (
@@ -549,12 +549,66 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
             panic!("{error:?}");
         };
         assert_eq!(source.cause(), cause, "{error:?}");
-        if unavailable {
-            assert_eq!(source, DockerError::unavailable(text).with_cause(cause));
+        let plain = if unavailable {
+            DockerError::unavailable(text)
         } else {
-            assert_eq!(source, DockerError::refused(text).with_cause(cause));
+            DockerError::refused(text)
+        };
+        let mut expected = plain.with_cause(cause);
+        match &error {
+            ContainerError::Failed {
+                operation,
+                container,
+                ..
+            } => expected = expected.during(operation, container.as_deref()),
+            ContainerError::Cancelled { operation } => expected = expected.during(operation, None),
+            ContainerError::Foreign { name, .. } => {
+                expected = expected.about_foreign(DockerKind::Container, name);
+            }
+            _ => {}
         }
+        assert_eq!(source, expected, "{error:?}");
     }
+}
+
+#[test]
+fn a_docker_error_names_the_operation_the_container_and_the_foreign_object() {
+    use super::ContainerError;
+    use crate::error::PhaseError;
+    use crate::record::docker::DockerKind;
+
+    let docker = |error: &ContainerError| match super::docker_error(error) {
+        PhaseError::Docker { source } => source,
+        other => panic!("{other:?}"),
+    };
+    let up = docker(&ContainerError::failed(
+        "compose up",
+        Some("server"),
+        "Error response from daemon: no",
+    ));
+    assert_eq!(up.operation(), Some("compose up"));
+    assert_eq!(up.service(), Some("server"));
+    assert_eq!(up.container_id(), None);
+    assert_eq!(up.foreign(), None);
+
+    let pull = docker(&ContainerError::Cancelled { operation: "pull" });
+    assert_eq!(pull.operation(), Some("pull"));
+    assert_eq!(pull.service(), None);
+
+    let volume = docker(&ContainerError::foreign(
+        "volume",
+        "phase-0123456789abcdef.data",
+    ));
+    let object = volume.foreign().unwrap();
+    assert_eq!(object.kind(), DockerKind::Volume);
+    assert_eq!(object.name(), "phase-0123456789abcdef.data");
+    assert_eq!(volume.operation(), None);
+
+    let missing = docker(&ContainerError::Missing {
+        source: std::io::Error::from(std::io::ErrorKind::NotFound),
+    });
+    assert_eq!(missing.operation(), None);
+    assert_eq!(missing.foreign(), None);
 }
 
 fn logged(at: u32, text: &str) -> String {
@@ -1052,6 +1106,7 @@ fn a_secret_is_in_no_argument_list_or_environment_inside_the_container_while_it_
             &inspected,
             super::Delivery {
                 values: super::secret_values(&db, &db.processes[0], &values).unwrap(),
+                removed: Vec::new(),
                 owner: "1000:1000",
                 docker_environment: Some(&docker_environment),
             },
@@ -1106,6 +1161,7 @@ fn writing_secrets_again_replaces_their_files_in_the_running_container_without_a
         &world.inspected(&db),
         super::Delivery {
             values: super::secret_values(&db, &db.processes[0], fresh.as_ref()).unwrap(),
+            removed: Vec::new(),
             owner: "1000:1000",
             docker_environment: None,
         },
@@ -1167,6 +1223,7 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
                     super::SecretBytes::of(&values, "TOKEN").unwrap().cut(4),
                 ),
             ],
+            removed: Vec::new(),
             owner: "1000:1000",
             docker_environment: None,
         },
@@ -1226,7 +1283,7 @@ fn a_secret_feed_cut_short_fails_and_leaves_no_staged_file() {
 }
 
 #[test]
-fn a_secret_that_cannot_be_written_fails_the_start_and_removes_the_container() {
+fn a_required_secret_without_a_value_fails_the_start_before_a_container_exists() {
     if !docker_ready() {
         return;
     }
@@ -1236,12 +1293,7 @@ fn a_secret_that_cannot_be_written_fails_the_start_and_removes_the_container() {
     let report = world.up_with(&plan, &Secrets::new(None));
 
     match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(
-                message.contains("supplied no value for the secret TOKEN"),
-                "{message}"
-            );
-        }
+        AppOutcome::Errored { code, .. } => assert_eq!(code, "phase::environment"),
         other => panic!("{other:?}"),
     }
     assert!(!world.has_containers());
@@ -1258,7 +1310,7 @@ fn a_container_whose_secret_files_would_belong_to_root_is_refused_before_it_is_c
     let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
 
     match outcome(&report, "db") {
-        AppOutcome::Errored { code, message } => {
+        AppOutcome::Errored { code, message, .. } => {
             assert_eq!(code, "phase::container::secret_owner_unknown");
             assert!(message.contains("secret_owner"), "{message}");
             assert!(message.contains("secret_delivery"), "{message}");
@@ -1482,6 +1534,41 @@ fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
     assert!(!world.has_containers());
 }
 
+/// An environment source whose environment names `MODE`, `TOKEN` and
+/// `KEY`, and keeps the default `write_value`, which cannot write a value.
+struct Unwritable;
+
+impl EnvironmentSource for Unwritable {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        _process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        Ok(Box::new(Unwritable))
+    }
+}
+
+impl AppliedEnvironment for Unwritable {
+    fn names(&self) -> BTreeSet<String> {
+        ["MODE", "TOKEN", "KEY"].map(str::to_owned).into()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>) {
+        if let Some(name) = reference("MODE") {
+            command.env(name, MODE);
+        }
+    }
+}
+
 #[test]
 fn an_environment_that_cannot_write_a_secret_leaves_the_running_container_in_place() {
     if !docker_ready() {
@@ -1495,9 +1582,9 @@ fn an_environment_that_cannot_write_a_secret_leaves_the_running_container_in_pla
     let mut changed = db;
     changed.processes[0].run[2] = format!("{COPY_SECRETS} # changed");
 
-    // `Mode`'s environment keeps the default `write_value`, which cannot
-    // write a value.
-    let report = world.up_with(&world.plan(vec![changed]), &Mode);
+    // `Unwritable`'s environment names every variable and keeps the
+    // default `write_value`, which cannot write a value.
+    let report = world.up_with(&world.plan(vec![changed]), &Unwritable);
 
     match outcome(&report, "db") {
         AppOutcome::Errored { message, .. } => {
@@ -1825,4 +1912,340 @@ fn a_failed_start_removes_the_anonymous_volumes_of_the_containers_it_cleans_up()
     let _leftovers = Leftovers(vec![anonymous.clone()]);
     assert!(!volume_exists(&anonymous), "{anonymous} was left behind");
     assert!(volume_exists(named), "{named} was removed");
+}
+
+/// The value of `LANG` that [`Listed`] gives when the caller's shell sets
+/// it, a test value.
+const LANG: &str = "test-lang-9e2b";
+
+/// An environment source and environment that give the variables they
+/// list, and fail for a variable that `refused` names.
+#[derive(Clone)]
+struct Listed {
+    values: Vec<(&'static str, &'static str)>,
+    refused: Option<&'static str>,
+}
+
+impl Listed {
+    fn of(values: &[(&'static str, &'static str)]) -> Self {
+        Self {
+            values: values.to_vec(),
+            refused: None,
+        }
+    }
+
+    fn value(&self, name: &str) -> Option<&'static str> {
+        self.values
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, value)| *value)
+    }
+}
+
+impl EnvironmentSource for Listed {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        _process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        if let Some(variable) = self.refused {
+            return Err(EnvironmentError::new(
+                variable.to_owned(),
+                "vault".to_owned(),
+                "the vault has no such item".into(),
+            ));
+        }
+        Ok(Box::new(self.clone()))
+    }
+}
+
+impl AppliedEnvironment for Listed {
+    fn names(&self) -> BTreeSet<String> {
+        self.values
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>) {
+        for (name, value) in &self.values {
+            if let Some(reference) = reference(name) {
+                command.env(reference, value);
+            }
+        }
+    }
+
+    fn write_value(&self, name: &str, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        let value = self
+            .value(name)
+            .ok_or(std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        out.write_all(value.as_bytes())
+    }
+}
+
+/// Returns the container app `app` whose `server` receives `MODE` and the
+/// optional `LANG`, and is ready at once.
+fn optional_app(name: &str) -> AppPlan {
+    let mut app = app(name, "exec sleep 60");
+    app.processes[0].env.insert("LANG".to_owned());
+    app.processes[0].optional_env.insert("LANG".to_owned());
+    app
+}
+
+impl World {
+    /// Returns the recorded plan hash of the container of `process` of
+    /// `app`.
+    fn plan_hash(&self, app: &str, process: &str) -> Option<crate::record::run::PlanHash> {
+        let record = RunStore::new(self.state.path())
+            .read(&self.id)
+            .unwrap()
+            .unwrap();
+        record
+            .containers
+            .iter()
+            .find(|entry| entry.app.as_str() == app && entry.process.as_str() == process)
+            .unwrap()
+            .plan_hash
+            .clone()
+    }
+
+    /// Returns the environment of the container of `process` of `app`, as
+    /// `env` prints it inside the container.
+    fn container_env(&self, app: &str, process: &str) -> String {
+        let id = self.container(app, process).unwrap();
+        docker(&["exec", "--", &id, "env"]).unwrap()
+    }
+}
+
+#[test]
+fn an_optional_variable_that_has_a_value_reaches_the_container() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_app("db")]);
+
+    let report = world.up_with(&plan, &Listed::of(&[("MODE", MODE), ("LANG", LANG)]));
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let env = world.container_env("db", "server");
+    assert!(
+        env.lines().any(|line| line == format!("LANG={LANG}")),
+        "{env}"
+    );
+    assert!(
+        env.lines().any(|line| line == format!("MODE={MODE}")),
+        "{env}"
+    );
+    world.down();
+}
+
+#[test]
+fn an_absent_optional_variable_is_unset_in_the_container_and_the_start_succeeds() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_app("db")]);
+
+    let report = world.up_with(&plan, &Listed::of(&[("MODE", MODE)]));
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let env = world.container_env("db", "server");
+    assert!(!env.lines().any(|line| line.starts_with("LANG=")), "{env}");
+    assert!(
+        env.lines().any(|line| line == format!("MODE={MODE}")),
+        "{env}"
+    );
+    world.down();
+}
+
+#[test]
+fn a_container_records_one_plan_hash_whether_or_not_the_shell_sets_an_optional_variable() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_app("db")]);
+    let report = world.up_with(&plan, &Listed::of(&[("MODE", MODE), ("LANG", LANG)]));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let with_lang = world.plan_hash("db", "server");
+    assert!(with_lang.is_some());
+    world.down();
+
+    let report = world.up_with(&plan, &Listed::of(&[("MODE", MODE)]));
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.plan_hash("db", "server"), with_lang);
+    world.down();
+}
+
+#[test]
+fn a_required_variable_that_the_source_cannot_supply_fails_the_start_as_before() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_app("db")]);
+    let mut source = Listed::of(&[("LANG", LANG)]);
+    source.refused = Some("MODE");
+
+    let report = world.up_with(&plan, &source);
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored {
+            code,
+            message,
+            cause,
+        } => {
+            assert_eq!(code, "phase::environment");
+            assert!(message.contains("db"), "{message}");
+            assert_eq!(*cause, None);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+}
+
+/// The script of a process that copies its `TOKEN` file and is then
+/// ready, whether or not it has a `KEY` file.
+const COPY_TOKEN: &str = "cat /run/secrets/TOKEN > /tmp/seen && touch /tmp/ready; exec sleep 60";
+
+/// Returns the app of [`secret_app`] whose `server` copies only `TOKEN`
+/// and treats the secret `KEY` as optional.
+fn optional_secret_app(name: &str) -> AppPlan {
+    let mut app = secret_app_running(name, COPY_TOKEN);
+    app.container.user = Some("1000:1000".to_owned());
+    app.processes[0].optional_env.insert("KEY".to_owned());
+    app
+}
+
+#[test]
+fn an_optional_secret_that_has_a_value_gets_its_file() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_secret_app("db")]);
+
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let key = docker(&["exec", "--", &id, "cat", "/run/secrets/KEY"]).unwrap();
+    assert_eq!(key, KEY);
+    world.down();
+}
+
+#[test]
+fn an_absent_optional_secret_gets_no_file_and_the_wrapper_does_not_wait_for_it() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_secret_app("db")]);
+    let source = Secrets::new(Some(TOKEN));
+    source.set(SecretValues {
+        token: Some(TOKEN),
+        key: None,
+    });
+
+    let report = world.up_with(&plan, &source);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    assert_eq!(
+        docker(&["exec", "--", &id, "cat", "/tmp/seen"]).unwrap(),
+        TOKEN
+    );
+    assert!(docker(&["exec", "--", &id, "test", "-e", "/run/secrets/KEY"]).is_none());
+    world.down();
+}
+
+#[test]
+fn a_source_that_leaves_out_a_required_variable_fails_a_container_start() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_app("db")]);
+
+    let report = world.up_with(&plan, &Listed::of(&[("LANG", LANG)]));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, .. } => assert_eq!(code, "phase::environment"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+}
+
+#[test]
+fn a_rotation_removes_the_file_of_an_optional_secret_that_lost_its_value() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = optional_secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    env.set(SecretValues {
+        token: Some(ROTATED),
+        key: None,
+    });
+    let fresh = env
+        .resolve(&db.name, &db.processes[0].name, Instant::now())
+        .unwrap();
+
+    super::write_secrets(
+        &world.inspected(&db),
+        super::Delivery {
+            values: super::secret_values(&db, &db.processes[0], fresh.as_ref()).unwrap(),
+            removed: super::lost_secrets(&db, &db.processes[0], fresh.as_ref()),
+            owner: "1000:1000",
+            docker_environment: None,
+        },
+        (Instant::now() + Duration::from_secs(30), &Cancel::new()),
+    )
+    .unwrap();
+
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, ROTATED);
+    let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
+    assert_eq!(
+        listed.split_whitespace().collect::<Vec<_>>(),
+        [".", "..", "TOKEN"]
+    );
+    world.down();
+}
+
+#[test]
+fn a_process_whose_every_secret_file_is_optional_and_absent_needs_no_owner() {
+    let mut db = secret_app_running("db", COPY_TOKEN);
+    db.processes[0].optional_env = ["TOKEN".to_owned(), "KEY".to_owned()].into();
+    // The image runs as root and the plan names no owner, so the files
+    // would belong to root.
+    let image = super::secrets::ImageConfig::new(&[], &["sh"], "");
+    let none = Listed::of(&[("MODE", MODE)]);
+    let token = Listed::of(&[("MODE", MODE), ("TOKEN", TOKEN)]);
+
+    let absent = super::delivered(&db, &db.processes[0], Some(&image), &none);
+    let present = super::delivered(&db, &db.processes[0], Some(&image), &token);
+
+    assert!(matches!(absent, Ok(None)));
+    assert!(matches!(
+        present,
+        Err(crate::error::PhaseError::SecretOwnerUnknown { .. })
+    ));
 }

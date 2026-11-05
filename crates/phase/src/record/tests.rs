@@ -358,3 +358,92 @@ fn a_docker_failure_reads_as_one_sentence_that_names_dockers_own_message() {
     );
     assert!(std::error::Error::source(&refused).is_none());
 }
+
+#[test]
+fn a_docker_cause_has_a_stable_snake_case_name_in_json() {
+    use crate::record::docker::DockerCause;
+
+    let names = [
+        (DockerCause::DockerMissing, "docker_missing"),
+        (DockerCause::ComposeMissing, "compose_missing"),
+        (DockerCause::DaemonUnavailable, "daemon_unavailable"),
+        (DockerCause::NoAddressPool, "no_address_pool"),
+        (DockerCause::PullFailed, "pull_failed"),
+        (DockerCause::Refused, "refused"),
+        (DockerCause::TimedOut, "timed_out"),
+        (DockerCause::Cancelled, "cancelled"),
+        (DockerCause::Foreign, "foreign"),
+        (DockerCause::Unexpected, "unexpected"),
+    ];
+    for (cause, name) in names {
+        assert_eq!(serde_json::to_value(cause).unwrap(), name);
+        assert_eq!(
+            serde_json::from_value::<DockerCause>(name.into()).unwrap(),
+            cause
+        );
+    }
+}
+
+#[test]
+fn a_docker_error_carries_its_operation_container_and_foreign_object_and_keeps_its_text() {
+    use crate::record::docker::{DockerError, DockerKind};
+
+    let plain = DockerError::refused("Error response from daemon: no".to_owned());
+    assert_eq!(plain.operation(), None);
+    assert_eq!(plain.service(), None);
+    assert_eq!(plain.container_id(), None);
+    assert_eq!(plain.foreign(), None);
+
+    let stop = DockerError::refused("Error response from daemon: no".to_owned())
+        .during("stop", Some("server"));
+    assert_eq!(stop.operation(), Some("stop"));
+    assert_eq!(stop.service(), Some("server"));
+    assert_eq!(stop.container_id(), None);
+    assert_eq!(stop.foreign(), None);
+    assert_eq!(
+        stop.to_string(),
+        "Docker refused: Error response from daemon: no"
+    );
+
+    let id = "ab".repeat(32);
+    let rm = DockerError::refused("Error response from daemon: no".to_owned())
+        .during_on_id("rm", Some(&id));
+    assert_eq!(rm.operation(), Some("rm"));
+    assert_eq!(rm.service(), None);
+    assert_eq!(rm.container_id(), Some(id.as_str()));
+
+    let foreign = DockerError::refused("the labels do not name its scope".to_owned())
+        .about_foreign(DockerKind::Volume, "phase-0123456789abcdef.data");
+    let object = foreign.foreign().unwrap();
+    assert_eq!(object.kind(), DockerKind::Volume);
+    assert_eq!(object.name(), "phase-0123456789abcdef.data");
+    assert_eq!(
+        foreign.to_string(),
+        "Docker refused: the labels do not name its scope"
+    );
+}
+
+#[test]
+fn a_docker_cause_that_a_newer_phase_wrote_reads_as_unknown() {
+    use crate::record::docker::DockerCause;
+
+    assert_eq!(
+        serde_json::from_value::<DockerCause>("registry_quota_exceeded".into()).unwrap(),
+        DockerCause::Unknown
+    );
+    let outcome: crate::report::AppReport = serde_json::from_value(serde_json::json!({
+        "app": "db",
+        "outcome": "errored",
+        "code": "phase::docker::refused",
+        "message": "Docker refused a request of the run: no",
+        "cause": "registry_quota_exceeded",
+    }))
+    .unwrap();
+    assert!(matches!(
+        outcome.outcome,
+        crate::report::AppOutcome::Errored {
+            cause: Some(DockerCause::Unknown),
+            ..
+        }
+    ));
+}

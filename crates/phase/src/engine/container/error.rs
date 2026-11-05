@@ -9,7 +9,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use crate::record::DockerCause;
+use crate::record::{DockerCause, DockerError, DockerKind};
 
 /// A failure of a step of the container engine.
 #[derive(Debug)]
@@ -47,8 +47,9 @@ pub enum ContainerError {
     Failed {
         /// The docker command or step, such as `compose up`.
         operation: &'static str,
-        /// The name of the container that the command worked on, when it
-        /// worked on one.
+        /// The compose service of the container that the command worked
+        /// on, which is its process's name, such as `server`, when it
+        /// worked on one. It is never a container's id or Docker name.
         container: Option<String>,
         /// The line of docker's standard error that says what failed.
         message: String,
@@ -155,6 +156,28 @@ impl ContainerError {
         }
     }
 
+    /// Returns `error` with what this failure says phase was doing: the
+    /// docker command or step and its container, or the foreign object.
+    pub(crate) fn describe(&self, error: DockerError) -> DockerError {
+        match self {
+            Self::Failed {
+                operation,
+                container,
+                ..
+            } => error.during(operation, container.as_deref()),
+            Self::Cancelled { operation } => error.during(operation, None),
+            Self::Foreign { kind, name } => match foreign_kind(kind) {
+                Some(kind) => error.about_foreign(kind, name),
+                None => error,
+            },
+            Self::Missing { .. }
+            | Self::ComposeMissing { .. }
+            | Self::NoAddressPool { .. }
+            | Self::Unavailable { .. }
+            | Self::Unreadable { .. } => error,
+        }
+    }
+
     /// Returns the failure of an object of `kind` named `name` whose labels
     /// do not name the scope.
     pub(crate) fn foreign(kind: &'static str, name: &str) -> Self {
@@ -162,6 +185,17 @@ impl ContainerError {
             kind,
             name: name.to_owned(),
         }
+    }
+}
+
+/// Returns the kind of object that [`ContainerError::Foreign`] names as
+/// `kind`, or `None` for a kind that phase does not label.
+fn foreign_kind(kind: &str) -> Option<DockerKind> {
+    match kind {
+        "container" => Some(DockerKind::Container),
+        "network" => Some(DockerKind::Network),
+        "volume" => Some(DockerKind::Volume),
+        _ => None,
     }
 }
 

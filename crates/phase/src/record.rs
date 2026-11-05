@@ -23,7 +23,9 @@ pub(crate) mod sweep;
 #[cfg(test)]
 pub(crate) mod testing;
 
-pub use crate::record::docker::{DockerCause, DockerError, MOST_DOCKER_MESSAGE_BYTES};
+pub use crate::record::docker::{
+    DockerCause, DockerContext, DockerError, DockerKind, ForeignObject, MOST_DOCKER_MESSAGE_BYTES,
+};
 
 #[cfg(test)]
 mod tests;

@@ -413,3 +413,27 @@ fn a_value_written_in_many_small_pieces_is_framed_whole() {
     framed.extend_from_slice(&expected);
     assert_eq!(bytes.framed(), framed.as_slice());
 }
+
+#[test]
+fn committing_removes_the_file_of_a_secret_named_after_the_separator_with_the_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("TOKEN"), "old-test-value");
+    write(&dir.path().join("KEY"), "old-test-key");
+    let stage = host_stage(dir.path());
+    let token = sh(&stage, &["TOKEN", "1:1"], b"14\nnew-test-value", None);
+    assert!(token.status.success(), "{token:?}");
+
+    let commit = sh(
+        &commit_script(&dir.path().to_string_lossy()),
+        &["TOKEN", "--", "KEY", "ABSENT"],
+        b"",
+        None,
+    );
+
+    assert!(commit.status.success(), "{commit:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("TOKEN")).unwrap(),
+        "new-test-value"
+    );
+    assert_eq!(listed(dir.path()), ["TOKEN"]);
+}

@@ -173,6 +173,9 @@ pub enum ProcessProblem {
     /// The process receives a variable whose name a process cannot receive.
     #[non_exhaustive]
     BadVariableName(String),
+    /// The process marks a variable optional that it does not receive.
+    #[non_exhaustive]
+    UndeclaredOptional(String),
     /// The ready timeout is zero or longer than
     /// [`MOST_READY_TIMEOUT`].
     ReadyTimeoutOutOfRange,
@@ -371,6 +374,10 @@ impl fmt::Display for ProcessProblem {
             Self::BadVariableName(name) => write!(
                 formatter,
                 "it receives the variable {name:?}, which a process cannot receive"
+            ),
+            Self::UndeclaredOptional(name) => write!(
+                formatter,
+                "it marks the variable {name:?} optional, which it does not receive"
             ),
             Self::StopGraceOutOfRange => {
                 formatter.write_str("its stop grace is longer than an hour")
@@ -698,6 +705,13 @@ fn check_process(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProb
     }
     if let Some(name) = process.env.iter().find(|name| !is_variable_name(name)) {
         return Err(ProcessProblem::BadVariableName(name.clone()));
+    }
+    if let Some(name) = process
+        .optional_env
+        .iter()
+        .find(|name| !process.env.contains(*name))
+    {
+        return Err(ProcessProblem::UndeclaredOptional(name.clone()));
     }
     if let Some(owner) = process
         .secret_owner

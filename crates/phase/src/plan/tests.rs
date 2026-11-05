@@ -947,3 +947,52 @@ fn a_plan_refuses_a_secret_owner_on_a_host_process() {
 
     assert_eq!(process_problem(api), ProcessProblem::ContainerFieldOnHost);
 }
+
+#[test]
+fn an_optional_variable_survives_a_trip_through_json_and_an_empty_set_is_left_out() {
+    let mut api = host_app("api");
+    api.processes[0].env.insert("LANG".into());
+    api.processes[0].env.insert("PORT".into());
+    api.processes[0].optional_env.insert("LANG".into());
+    let original = plan(vec![api]).unwrap();
+
+    let json = serde_json::to_value(&original).unwrap();
+
+    assert_eq!(
+        json["apps"][0]["processes"][0]["optional_env"],
+        serde_json::json!(["LANG"])
+    );
+    assert_eq!(serde_json::from_value::<Plan>(json).unwrap(), original);
+    let plain = serde_json::to_value(plan(vec![host_app("api")]).unwrap()).unwrap();
+    assert!(
+        plain["apps"][0]["processes"][0]
+            .get("optional_env")
+            .is_none(),
+        "{plain}"
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_optional_variable_that_the_process_does_not_receive() {
+    let mut api = host_app("api");
+    api.processes[0].optional_env.insert("LANG".into());
+
+    assert_eq!(
+        process_problem(api),
+        ProcessProblem::UndeclaredOptional("LANG".into())
+    );
+}
+
+#[test]
+fn the_plan_digest_covers_the_optional_flag_and_holds_no_value() {
+    let mut required = host_app("api");
+    required.processes[0].env.insert("LANG".into());
+    let mut optional = required.clone();
+    optional.processes[0].optional_env.insert("LANG".into());
+
+    let required = plan(vec![required]).unwrap();
+    let optional = plan(vec![optional]).unwrap();
+
+    assert_ne!(required.digest(), optional.digest());
+    assert_eq!(optional.digest(), optional.clone().digest());
+}
