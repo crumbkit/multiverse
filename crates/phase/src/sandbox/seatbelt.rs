@@ -2,7 +2,7 @@
 //! nono's. The rules are plain text, so this module builds on every
 //! platform and its ordering tests run on the Linux pull-request lane too.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{SandboxSpec, canonical};
 
@@ -39,25 +39,38 @@ const ROOT_LINKS: &[&str] = &["/var"];
 ///
 /// The filesystem rules deny the spec's protected paths, deny writes to
 /// the paths it may only read, allow again the grants that lie inside a
-/// denied path, and allow the metadata of [`ROOT_LINKS`]. The Mach rules
-/// deny [`DENIED_SERVICES`] and sending Apple events. The network rules allow the loopback ports, and
-/// each starts with [`NETWORK_RULE`].
+/// denied path, and allow the metadata of [`ROOT_LINKS`] and of the spec's
+/// links. A denied path
+/// that lies inside a grant that the rules allow again, such as the
+/// `private` directory of an OpenSSL directory inside `/usr/local/etc`, is
+/// denied after that allow, because Seatbelt applies the last rule that
+/// matches. The Mach rules deny [`DENIED_SERVICES`] and sending Apple
+/// events. The network rules allow the loopback ports, and each starts
+/// with [`NETWORK_RULE`].
 pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
     let quoted = |path: &Path| format!("(subpath \"{}\")", canonical(path).display());
-    let mut rules = Vec::new();
-    for path in &spec.deny {
-        rules.push(format!(
-            "(deny file-read-data file-write* {})",
-            quoted(path)
-        ));
-    }
-    for path in &spec.read_only {
-        rules.push(format!("(deny file-write* {})", quoted(path)));
-    }
+    let deny_rule = |path: &Path| format!("(deny file-read-data file-write* {})", quoted(path));
     let inside_deny = |path: &Path| {
         let path = canonical(path);
         spec.deny.iter().any(|deny| path.starts_with(deny))
     };
+    let allowed_again: Vec<PathBuf> = spec
+        .read
+        .iter()
+        .chain(&spec.write)
+        .filter(|path| inside_deny(path))
+        .map(|path| canonical(path))
+        .collect();
+    let (nested, outer): (Vec<&PathBuf>, Vec<&PathBuf>) = spec.deny.iter().partition(|path| {
+        let path = canonical(path);
+        allowed_again
+            .iter()
+            .any(|grant| path.starts_with(grant) && path != *grant)
+    });
+    let mut rules: Vec<String> = outer.into_iter().map(|path| deny_rule(path)).collect();
+    for path in &spec.read_only {
+        rules.push(format!("(deny file-write* {})", quoted(path)));
+    }
     for path in spec.read.iter().filter(|path| inside_deny(path)) {
         rules.push(format!("(allow file-read-data {})", quoted(path)));
     }
@@ -67,8 +80,15 @@ pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
             quoted(path)
         ));
     }
+    rules.extend(nested.into_iter().map(|path| deny_rule(path)));
     for link in ROOT_LINKS {
         rules.push(format!("(allow file-read-metadata (literal \"{link}\"))"));
+    }
+    for link in &spec.links {
+        rules.push(format!(
+            "(allow file-read-metadata (literal \"{}\"))",
+            link.display()
+        ));
     }
     for service in DENIED_SERVICES {
         rules.push(format!("(deny mach-lookup (global-name \"{service}\"))"));

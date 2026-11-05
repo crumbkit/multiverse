@@ -14,8 +14,9 @@ use tempfile::TempDir;
 
 use super::{
     AppDirs, Context, LANDLOCK_UNSANDBOXED, Launcher, Platform, SandboxError, SandboxSpec,
-    Sandboxing, UNDECLARED, WorkspacePaths, developer_dir, homebrew_deny, homebrew_read, launch,
-    launcher_command, sandboxing, spec, toolchain, usr_without_local_data, verify,
+    Sandboxing, UNDECLARED, WorkspacePaths, add_toolchain, developer_dir, homebrew_deny,
+    homebrew_read, launch, launcher_command, sandboxing, spec, toolchain, usr_without_local_data,
+    verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
 use crate::record::testing::{app, workspace};
@@ -700,8 +701,10 @@ fn a_homebrew_path_entry_lets_the_app_read_its_programs_but_never_its_data_or_co
 }
 
 /// Makes a Homebrew prefix in `root` whose `etc` holds OpenSSL's
-/// directories, each with its configuration, CA bundle, certificates and a
-/// private key, and another configuration directory, and returns it.
+/// directories, each with its configuration, certificates, a private key
+/// and a `cert.pem` link to the CA bundle in `etc/ca-certificates`, as
+/// Homebrew lays them out, and another configuration directory, and
+/// returns it.
 fn homebrew_prefix_in(root: &std::path::Path) -> PathBuf {
     let prefix = root.join("homebrew");
     for dir in ["etc/openssl@3", "etc/openssl"] {
@@ -714,9 +717,21 @@ fn homebrew_prefix_in(root: &std::path::Path) -> PathBuf {
         )]
         {
             std::fs::write(dir.join("openssl.cnf"), "# config\n").unwrap();
-            std::fs::write(dir.join("cert.pem"), "# bundle\n").unwrap();
             std::fs::write(dir.join("private/key.pem"), "# key\n").unwrap();
         }
+    }
+    std::fs::create_dir_all(prefix.join("etc/ca-certificates")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test writes the CA bundle that the OpenSSL directories link to"
+    )]
+    std::fs::write(prefix.join("etc/ca-certificates/cert.pem"), "# bundle\n").unwrap();
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        std::os::unix::fs::symlink(
+            prefix.join("etc/ca-certificates/cert.pem"),
+            prefix.join(dir).join("cert.pem"),
+        )
+        .unwrap();
     }
     std::fs::create_dir_all(prefix.join("etc/other")).unwrap();
     std::fs::create_dir_all(prefix.join("etc/opensslish")).unwrap();
@@ -732,17 +747,10 @@ fn a_homebrew_prefix_lets_the_app_read_its_openssl_configuration_but_no_other_co
 
     assert!(read.contains(&prefix.join("bin")));
     for dir in ["etc/openssl@3", "etc/openssl"] {
-        assert!(read.contains(&prefix.join(dir).join("cert.pem")), "{dir}");
-        if cfg!(target_os = "macos") {
-            assert!(read.contains(&prefix.join(dir)), "{dir}");
-        } else {
-            assert!(
-                read.contains(&prefix.join(dir).join("openssl.cnf")),
-                "{dir}"
-            );
-            assert!(read.contains(&prefix.join(dir).join("certs")), "{dir}");
-            assert!(!read.contains(&prefix.join(dir)), "{dir}");
+        for name in ["openssl.cnf", "cert.pem", "certs"] {
+            assert!(read.contains(&prefix.join(dir).join(name)), "{dir}/{name}");
         }
+        assert!(!read.contains(&prefix.join(dir)), "{dir}");
     }
     assert!(
         !read
@@ -751,6 +759,39 @@ fn a_homebrew_prefix_lets_the_app_read_its_openssl_configuration_but_no_other_co
                 || path.starts_with(prefix.join("etc/opensslish")))
     );
     assert!(!read.contains(&prefix.join("etc")));
+}
+
+#[test]
+fn a_spec_records_each_toolchain_path_that_is_a_link_so_the_app_can_follow_it() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let prefix = homebrew_prefix_in(&fixture.outside());
+    let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    add_toolchain(
+        &mut spec.read,
+        &mut spec.read_only,
+        &mut spec.links,
+        &homebrew_read(&prefix),
+        &|_| false,
+    );
+
+    let link = prefix.join("etc/openssl@3/cert.pem");
+    assert!(spec.links.contains(&link), "{:?}", spec.links);
+    assert!(
+        spec.read
+            .contains(&prefix.join("etc/ca-certificates/cert.pem"))
+    );
+    assert!(!spec.read.contains(&link));
+    assert!(
+        spec.read
+            .contains(&prefix.join("etc/openssl@3/openssl.cnf"))
+    );
+    assert!(
+        !spec
+            .links
+            .contains(&prefix.join("etc/openssl@3/openssl.cnf"))
+    );
 }
 
 #[test]
@@ -763,9 +804,17 @@ fn no_grant_of_a_homebrew_prefix_lets_the_app_read_an_openssl_private_directory(
 
     for dir in ["etc/openssl@3", "etc/openssl"] {
         let private = prefix.join(dir).join("private");
-        assert!(!read.iter().any(|path| path.starts_with(&private)), "{dir}");
-        let covered = read.iter().any(|path| private.starts_with(path));
-        assert_eq!(covered, deny.contains(&private), "{dir}: {deny:?}");
+        assert!(
+            !read
+                .iter()
+                .any(|path| path.starts_with(&private) || private.starts_with(path)),
+            "{dir}"
+        );
+        assert_eq!(
+            deny.contains(&private),
+            cfg!(target_os = "macos"),
+            "{dir}: {deny:?}"
+        );
     }
 }
 
@@ -986,46 +1035,101 @@ fn a_spec_looks_nothing_up_in_a_path_entry_that_reaches_a_protected_path() {
     assert_eq!(spec.path_dirs, [PathBuf::from("/usr/bin")]);
 }
 
-#[test]
-fn the_developer_directory_is_the_resolved_directory_that_the_link_names() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("CommandLineTools");
-    std::fs::create_dir_all(&dir).unwrap();
-    let link = root.path().join("developer_dir");
-    std::os::unix::fs::symlink(&dir, &link).unwrap();
+/// A temporary tree with an `Applications` directory for app bundles and a
+/// `Library/Developer` directory for developer tools, in which
+/// [`developer_dir`] may find a developer directory.
+struct DeveloperRoots {
+    root: TempDir,
+}
 
-    assert_eq!(developer_dir(&link), Some(dir.canonicalize().unwrap()));
+impl DeveloperRoots {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Applications")).unwrap();
+        std::fs::create_dir_all(root.path().join("Library/Developer")).unwrap();
+        Self { root }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.root.path().canonicalize().unwrap().join(name)
+    }
+
+    /// Returns a link named `name` to `target`.
+    fn link(&self, name: &str, target: &std::path::Path) -> PathBuf {
+        let link = self.path(name);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        link
+    }
+
+    /// Returns the developer directory that `link` names.
+    fn developer_dir(&self, link: &std::path::Path) -> Option<PathBuf> {
+        developer_dir(
+            link,
+            &[self.path("Applications")],
+            &[self.path("Library/Developer")],
+        )
+    }
+}
+
+#[test]
+fn the_developer_directory_of_the_command_line_tools_is_that_directory() {
+    let roots = DeveloperRoots::new();
+    let dir = roots.path("Library/Developer/CommandLineTools");
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = roots.link("developer_dir", &dir);
+
+    assert_eq!(roots.developer_dir(&link), Some(dir));
 }
 
 #[test]
 fn the_developer_directory_of_an_xcode_is_its_whole_app_bundle() {
-    let root = tempfile::tempdir().unwrap();
-    let bundle = root.path().join("Xcode_26.6.app");
+    let roots = DeveloperRoots::new();
+    let bundle = roots.path("Applications/Xcode_26.6.app");
     std::fs::create_dir_all(bundle.join("Contents/Developer")).unwrap();
-    let link = root.path().join("developer_dir");
-    std::os::unix::fs::symlink(bundle.join("Contents/Developer"), &link).unwrap();
+    let link = roots.link("developer_dir", &bundle.join("Contents/Developer"));
 
-    assert_eq!(developer_dir(&link), Some(bundle.canonicalize().unwrap()));
+    assert_eq!(roots.developer_dir(&link), Some(bundle));
 }
 
 #[test]
-fn a_link_to_the_root_or_a_directory_beside_it_or_nowhere_names_no_developer_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let link = |name: &str, target: &str| {
-        let link = root.path().join(name);
-        std::os::unix::fs::symlink(target, &link).unwrap();
-        link
-    };
-
-    for link in [
-        link("root", "/"),
-        link("beside", "/usr"),
-        link("relative", "Xcode.app/Contents/Developer"),
-        link("dangling", "/nonexistent/Xcode.app/Contents/Developer"),
-        root.path().join("absent"),
+fn a_link_to_anything_but_an_installed_xcode_or_the_developer_library_names_no_developer_directory()
+{
+    let roots = DeveloperRoots::new();
+    for dir in [
+        "Users/Shared/x",
+        "Users/Shared/Xcode.app/Contents/Developer",
+        "Applications/Tools/Developer",
+        "Applications/Xcode.app/Contents/Other",
     ] {
-        assert_eq!(developer_dir(&link), None, "{}", link.display());
+        std::fs::create_dir_all(roots.path(dir)).unwrap();
     }
+
+    for (name, target) in [
+        ("root", PathBuf::from("/")),
+        ("usr", PathBuf::from("/usr")),
+        ("shared", PathBuf::from("/Users/Shared/x")),
+        ("outside", roots.path("Users/Shared/x")),
+        (
+            "bundle-outside",
+            roots.path("Users/Shared/Xcode.app/Contents/Developer"),
+        ),
+        ("not-a-bundle", roots.path("Applications/Tools/Developer")),
+        (
+            "inside-a-bundle",
+            roots.path("Applications/Xcode.app/Contents/Other"),
+        ),
+        ("applications", roots.path("Applications")),
+        ("library", roots.path("Library/Developer")),
+        ("relative", PathBuf::from("Xcode.app/Contents/Developer")),
+        (
+            "dangling",
+            PathBuf::from("/nonexistent/Xcode.app/Contents/Developer"),
+        ),
+    ] {
+        let link = roots.link(&format!("link-{name}"), &target);
+        assert_eq!(roots.developer_dir(&link), None, "{name}");
+    }
+    assert_eq!(roots.developer_dir(&roots.path("absent")), None);
 }
 
 #[test]
@@ -1055,6 +1159,7 @@ fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_loca
 /// on the Linux pull-request lane too.
 mod rules {
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     use super::{Fixture, sh};
     use crate::sandbox::seatbelt::{NETWORK_RULE, rules};
@@ -1112,6 +1217,59 @@ mod rules {
         ));
         assert!(deny < allow);
         assert!(git < allow);
+    }
+
+    #[test]
+    fn a_deny_inside_a_grant_that_the_profile_allows_again_comes_after_every_allow_that_covers_it()
+    {
+        let fixture = Fixture::new();
+        let api = fixture.app(sh("true"), 41_000);
+        let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+        let etc = PathBuf::from("/usr/local/etc");
+        let openssl = etc.join("openssl@3");
+        let private = openssl.join("private");
+        spec.deny.extend([etc, private.clone()]);
+        spec.read.insert(openssl);
+
+        let rules = rules(&spec);
+
+        let deny = rules
+            .iter()
+            .position(|rule| {
+                rule.starts_with("(deny file-read-data")
+                    && rule.contains(&format!("\"{}\"", private.display()))
+            })
+            .unwrap_or_else(|| panic!("no deny of {} in {rules:?}", private.display()));
+        let covering = rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.starts_with("(allow file-read-data"))
+            .filter(|(_, rule)| {
+                rule.split('"')
+                    .nth(1)
+                    .is_some_and(|path| private.starts_with(path))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert!(!covering.is_empty(), "{rules:?}");
+        assert!(covering.iter().all(|&allow| allow < deny), "{rules:?}");
+    }
+
+    #[test]
+    fn the_profile_lets_the_app_read_the_metadata_of_each_link_of_the_spec() {
+        let fixture = Fixture::new();
+        let api = fixture.app(sh("true"), 41_000);
+        let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+        let link = fixture.outside().join("cert.pem");
+        spec.links.insert(link.clone());
+
+        let rules = rules(&spec);
+
+        let wanted = format!(
+            "(allow file-read-metadata (literal \"{}\"))",
+            link.display()
+        );
+        assert!(rules.contains(&wanted), "{rules:?}");
     }
 
     #[test]
@@ -1462,59 +1620,79 @@ mod seatbelt {
 
     #[test]
     fn a_sandboxed_app_reads_a_homebrew_openssl_configuration_but_never_its_private_keys() {
-        let fixture = Fixture::new();
-        let prefix = super::homebrew_prefix_in(&fixture.outside());
-        let dir = prefix.join("etc/openssl@3");
-        let script = format!(
-            r#"
-            check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
-            case=config check cat "{dir}/openssl.cnf"
-            case=bundle check cat "{dir}/cert.pem"
-            case=key check cat "{dir}/private/key.pem"
-            case=list check ls "{dir}/private"
-            case=other check ls "{prefix}/etc/other"
-            "#,
-            dir = dir.display(),
-            prefix = prefix.display(),
-        );
-        let api = fixture.app(sh(&script), 41_000);
-        let mut spec = fixture
-            .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
-            .unwrap();
-        // The spec reads what exists of the prefix and denies its OpenSSL
-        // directories' `private`, as `spec` does for a prefix on `PATH`.
-        let read = crate::sandbox::homebrew_read(&prefix);
-        spec.read.extend(
-            read.iter()
-                .filter(|path| path.exists())
-                .map(|path| crate::sandbox::canonical(path)),
-        );
-        let deny = crate::sandbox::homebrew_deny(&prefix);
-        spec.deny
-            .extend(deny.iter().map(|path| crate::sandbox::canonical(path)));
-        let mut command = launcher_command(&spec, &sh(&script)).unwrap();
-        command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("TMPDIR", &spec.tmp)
-            .current_dir(fixture.checkout())
-            .stdin(Stdio::null());
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the test starts this test binary as the launcher"
-        )]
-        let output = command.output().unwrap();
-        let output = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        // The second prefix lies inside a denied path, as `/usr/local/etc`
+        // is denied when Homebrew lives at `/usr/local`, so the profile
+        // allows its OpenSSL grants again after the deny.
+        for etc_denied in [false, true] {
+            let fixture = Fixture::new();
+            let prefix = super::homebrew_prefix_in(&fixture.outside());
+            let dir = prefix.join("etc/openssl@3");
+            let script = format!(
+                r#"
+                check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+                case=config check cat "{dir}/openssl.cnf"
+                case=bundle check cat "{dir}/cert.pem"
+                case=certs check ls "{dir}/certs"
+                case=key check cat "{dir}/private/key.pem"
+                case=list check ls "{dir}/private"
+                case=other check ls "{prefix}/etc/other"
+                "#,
+                dir = dir.display(),
+                prefix = prefix.display(),
+            );
+            let api = fixture.app(sh(&script), 41_000);
+            let mut spec = fixture
+                .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+                .unwrap();
+            // The spec reads the prefix's grants and denies its OpenSSL
+            // directories' `private`, as `spec` does for a prefix on `PATH`.
+            crate::sandbox::add_toolchain(
+                &mut spec.read,
+                &mut spec.read_only,
+                &mut spec.links,
+                &crate::sandbox::homebrew_read(&prefix),
+                &|_| false,
+            );
+            let deny = crate::sandbox::homebrew_deny(&prefix);
+            spec.deny
+                .extend(deny.iter().map(|path| crate::sandbox::canonical(path)));
+            if etc_denied {
+                spec.deny
+                    .insert(crate::sandbox::canonical(&prefix.join("etc")));
+            }
+            let mut command = launcher_command(&spec, &sh(&script)).unwrap();
+            command
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("TMPDIR", &spec.tmp)
+                .current_dir(fixture.checkout())
+                .stdin(Stdio::null());
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the test starts this test binary as the launcher"
+            )]
+            let output = command.output().unwrap();
+            let output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
 
-        assert_eq!(outcome(&output, "config"), "allowed", "{output}");
-        assert_eq!(outcome(&output, "bundle"), "allowed", "{output}");
-        assert_eq!(outcome(&output, "key"), "denied", "{output}");
-        assert_eq!(outcome(&output, "list"), "denied", "{output}");
-        assert_eq!(outcome(&output, "other"), "denied", "{output}");
+            for (case, expected) in [
+                ("config", "allowed"),
+                ("bundle", "allowed"),
+                ("certs", "allowed"),
+                ("key", "denied"),
+                ("list", "denied"),
+                ("other", "denied"),
+            ] {
+                assert_eq!(
+                    outcome(&output, case),
+                    expected,
+                    "{case} with etc denied {etc_denied}: {output}"
+                );
+            }
+        }
     }
 
     /// Reports whether `program` is on this machine's `PATH`.
@@ -1802,6 +1980,7 @@ mod landlock {
             check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
             case=config check cat "{dir}/openssl.cnf"
             case=bundle check cat "{dir}/cert.pem"
+            case=certs check ls "{dir}/certs"
             case=key check cat "{dir}/private/key.pem"
             case=list check ls "{dir}/private"
             case=other check ls "{prefix}/etc/other"
@@ -1813,13 +1992,14 @@ mod landlock {
         let mut spec = fixture
             .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
             .unwrap();
-        // The spec reads what exists of the prefix, as `spec` does for a
-        // prefix on `PATH`.
-        let read = crate::sandbox::homebrew_read(&prefix);
-        spec.read.extend(
-            read.iter()
-                .filter(|path| path.exists())
-                .map(|path| crate::sandbox::canonical(path)),
+        // The spec reads the prefix's grants, as `spec` does for a prefix
+        // on `PATH`.
+        crate::sandbox::add_toolchain(
+            &mut spec.read,
+            &mut spec.read_only,
+            &mut spec.links,
+            &crate::sandbox::homebrew_read(&prefix),
+            &|_| false,
         );
         let mut command = launcher_command(&spec, &sh(&script)).unwrap();
         command
@@ -1845,6 +2025,7 @@ mod landlock {
         for (case, expected) in [
             ("config", "allowed"),
             ("bundle", "allowed"),
+            ("certs", "allowed"),
             ("key", "denied"),
             ("list", "denied"),
             ("other", "denied"),
