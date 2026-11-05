@@ -2,7 +2,9 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{LineSink, LogLine, LogRequest, LogStream, MOST_TAIL_BYTES, log_path, logs, tail};
+use super::{
+    LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, log_path, logs, tail,
+};
 use crate::error::{Operation, PhaseError};
 use crate::record::process::{Processes, System};
 use crate::record::run::{EntryState, RunRecord};
@@ -17,6 +19,8 @@ struct Kept {
     lines: Vec<(Option<LogStream>, String)>,
     /// The lines after which the sink breaks.
     most: usize,
+    /// The notes that the sink received.
+    notes: Vec<LogNote>,
 }
 
 impl Kept {
@@ -24,6 +28,7 @@ impl Kept {
         Self {
             lines: Vec::new(),
             most,
+            notes: Vec::new(),
         }
     }
 
@@ -40,6 +45,10 @@ impl LineSink for Kept {
         } else {
             ControlFlow::Continue(())
         }
+    }
+
+    fn note(&mut self, note: LogNote) {
+        self.notes.push(note);
     }
 }
 
@@ -210,6 +219,7 @@ fn a_container_that_has_not_started_has_no_lines_and_a_since_is_not_built_yet() 
     )
     .unwrap();
     assert!(sink.lines.is_empty());
+    assert_eq!(sink.notes, [LogNote::NotStarted]);
 
     let mut since = request(false);
     since.since = Some(Duration::from_secs(300));
@@ -314,4 +324,84 @@ fn a_tail_without_follow_counts_an_unfinished_last_line_as_a_line() {
     read(state.path(), &last, &mut sink, &FakeProcesses::default()).unwrap();
 
     assert_eq!(sink.texts(), ["two", "ab"]);
+}
+
+#[test]
+fn a_follow_from_no_last_lines_starts_after_an_unfinished_line_and_passes_it_whole() {
+    let state = tempfile::tempdir().unwrap();
+    write_log(state.path(), "one\nab");
+    let log = server_log(state.path());
+    let mut writer = Spawned::shell(&format!(
+        "echo ready; sleep 0.3; printf 'cd\\nthree\\n' >> {log}; exit 0",
+        log = log.display()
+    ));
+    write_record(state.path(), &running(writer.host()));
+    let mut sink = Kept::new(100);
+    let mut none = request(true);
+    none.lines = Some(0);
+
+    let reading = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| read(state.path(), &none, &mut sink, &System));
+        writer.wait_for_exit();
+        reader.join().unwrap()
+    });
+
+    reading.unwrap();
+    assert_eq!(sink.texts(), ["abcd", "three"]);
+}
+
+#[test]
+fn no_last_lines_without_follow_passes_nothing_even_with_an_unfinished_line() {
+    let state = tempfile::tempdir().unwrap();
+    write_log(state.path(), "one\nab");
+    let mut sink = Kept::new(100);
+    let mut none = request(false);
+    none.lines = Some(0);
+
+    read(state.path(), &none, &mut sink, &FakeProcesses::default()).unwrap();
+
+    assert!(sink.texts().is_empty());
+    assert!(super::tail(&server_log(state.path()), 0).is_empty());
+}
+
+#[test]
+fn a_container_that_phase_stopped_has_no_lines_and_a_note_that_says_so() {
+    let state = tempfile::tempdir().unwrap();
+    let mut record = empty_record().container(
+        &app("api"),
+        &process("server"),
+        "api-server".parse().unwrap(),
+    );
+    record
+        .set_state(
+            &crate::record::run::ObjectKey::Container(app("api"), process("server")),
+            EntryState::Stopped,
+        )
+        .unwrap();
+    write_record(state.path(), &record);
+    let mut sink = Kept::new(1);
+
+    read(
+        state.path(),
+        &request(true),
+        &mut sink,
+        &FakeProcesses::default(),
+    )
+    .unwrap();
+
+    assert!(sink.lines.is_empty());
+    assert_eq!(sink.notes, [LogNote::Stopped]);
+}
+
+#[test]
+fn each_note_has_a_message_that_names_no_value() {
+    for note in [
+        LogNote::ContainerGone,
+        LogNote::NotStarted,
+        LogNote::Stopped,
+        LogNote::EntryUnusable,
+    ] {
+        assert!(!note.message().is_empty());
+        assert_eq!(note.to_string(), note.message());
+    }
 }

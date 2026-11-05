@@ -1505,7 +1505,16 @@ fn up_drops_the_run_files_of_legacy_processes_that_have_ended_and_starts_under_p
         "triage",
         "[processes.short]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
     );
-    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    // `status` reports the process as exited once its exit file is written,
+    // and its shell ends a moment later. `up` waits for the whole group to
+    // be gone, so on a loaded machine it may still refuse once or twice.
+    let (mut exit, mut document) = setup.json(&["up", "-w", "triage"]);
+    for () in waiting() {
+        if document["code"] != "mxv::workspace::legacy_running" {
+            break;
+        }
+        (exit, document) = setup.json(&["up", "-w", "triage"]);
+    }
     assert_eq!(exit, 0, "{document}");
     assert!(!runs.join("short.json").exists(), "up kept the run file");
     assert!(setup.started("short"));

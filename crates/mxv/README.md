@@ -442,10 +442,24 @@ workspace that has never run a container.
   SIGKILL ended, and its `signal` is null. When docker does not answer, the
   state is `unknown` and `reason` says why.
 - `mxv logs` prints `docker logs` of the container, its standard output and
-  standard error together. Once `down` has removed the container, its log
-  is gone, and `logs` prints nothing for it. Without `-f`, `logs` stops
-  docker and fails with `mxv::docker::failed` when docker prints nothing
-  for 30 seconds.
+  standard error together. When the container has no log, `logs` prints
+  nothing and a warning on standard error that says why, and exits 0: the
+  container has not started yet, `down` has stopped and removed it, docker
+  no longer has it, as after a removal by hand, or phase's run record
+  names it by a name or id that phase cannot use. Without `-f`, `logs`
+  stops docker and fails with `mxv::docker::failed` when docker prints
+  nothing for 30 seconds.
+- docker prints its own errors on standard error among the container's
+  lines. mxv recognises only the lines that start with
+  `Error response from daemon:`, `Error: No such container:`,
+  `error from daemon in stream:` or `Cannot connect to the Docker daemon`.
+  When docker exits with code 1 just after such a line, the line becomes
+  the message of `mxv::docker::failed` and is not printed as a line of the
+  container. Otherwise the line is printed as the container's, at most
+  0.25 seconds late. Any other failure of `docker logs`, such as a signal
+  that ended it, gives its exit status as the message, so a line that the
+  container wrote becomes the message only when it starts like one of
+  those lines and docker then exits with code 1.
 
 When a workspace needs docker and no `docker` program is on `PATH`, its
 command fails with `mxv::docker::not_found`. When docker's daemon does not
@@ -506,7 +520,10 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   not parse, so a broken manifest never keeps processes running.
 - `mxv logs` prints the last 50 lines of a log, or `--lines N`. With `-f`
   it prints each new line until the process has exited. A line longer than
-  1 MiB comes out in parts.
+  1 MiB comes out in parts. An unfinished last line counts as one of the
+  lines, and `-f` prints it once it is finished, also with `--lines 0`. An
+  unfinished last line longer than 64 KiB loses its start, so `-f`, even
+  with `--lines 0`, starts in the middle of it.
 - `mxv ports reset [-w WORKSPACE] [PORT]...` gives the named ports, or
   every port, new host ports that differ from the old ones. It refuses with
   `mxv::workspace::running` while the workspace's processes run, and it is

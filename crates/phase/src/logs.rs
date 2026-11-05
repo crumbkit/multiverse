@@ -42,13 +42,14 @@ pub(crate) fn log_path(
 
 /// Returns the last `lines` lines of the file at `path`, read from its
 /// last [`MOST_TAIL_BYTES`] bytes, or no lines when it cannot be read. An
-/// unfinished last line counts as a line. A request for more lines than
-/// those bytes hold returns fewer.
+/// unfinished last line counts as a line, and one longer than those bytes
+/// is left out. A request for more lines than those bytes hold returns
+/// fewer.
 #[must_use]
 pub fn tail(path: &Path, lines: usize) -> Vec<String> {
     let length = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
     let (mut complete, partial) = tail_before(path, lines, length);
-    if !partial.is_empty() {
+    if lines > 0 && !partial.is_empty() {
         complete.push(String::from_utf8_lossy(&partial).into_owned());
     }
     complete
@@ -56,9 +57,11 @@ pub fn tail(path: &Path, lines: usize) -> Vec<String> {
 
 /// Returns the last lines of the file at `path` before the offset `end`,
 /// read from at most [`MOST_TAIL_BYTES`] bytes before it, as complete lines
-/// and the unfinished line that `end` cuts, which may be empty. The two
-/// hold `lines` lines at most, counting a non-empty unfinished line as one.
-/// A file that cannot be read has no lines.
+/// and the unfinished line that `end` cuts, which may be empty. The
+/// complete lines number at most `lines`, less one for a non-empty
+/// unfinished line, which comes back even when `lines` is 0. An unfinished
+/// line that starts before those bytes comes back empty, so it loses its
+/// start. A file that cannot be read has no lines.
 fn tail_before(path: &Path, lines: usize, end: u64) -> (Vec<String>, Vec<u8>) {
     let Ok(mut file) = File::open(path) else {
         return (Vec::new(), Vec::new());
@@ -94,14 +97,9 @@ fn tail_before(path: &Path, lines: usize, end: u64) -> (Vec<String>, Vec<u8>) {
     let text = String::from_utf8_lossy(complete);
     let all: Vec<&str> = text.lines().collect();
     let skip = all.len().saturating_sub(room);
-    let partial = if lines == 0 {
-        Vec::new()
-    } else {
-        partial.to_vec()
-    };
     (
         all.into_iter().skip(skip).map(str::to_owned).collect(),
-        partial,
+        partial.to_vec(),
     )
 }
 
@@ -145,22 +143,24 @@ pub(crate) fn logs(
         {
             // A container that `down` stopped is gone, so its entry has no
             // log, even while the entry keeps the container's id.
-            container = Some(
-                entry
-                    .id
-                    .clone()
-                    .filter(|_| entry.state != EntryState::Stopped),
-            );
+            container = Some(match &entry.id {
+                _ if entry.state == EntryState::Stopped => Err(LogNote::Stopped),
+                Some(id) => Ok(id.clone()),
+                None => Err(LogNote::NotStarted),
+            });
         }
         let (keeper, entry) = record.host_pair(app, process);
         host = keeper.is_some() || entry.is_some();
     }
     if let Some(id) = container {
         // A container that has not started yet, or that phase stopped, has
-        // no log.
+        // no log, and the sink hears why.
         return match id {
-            Some(id) => container_logs(state_dir, workspace, &id, request, sink),
-            None => Ok(()),
+            Ok(id) => container_logs(state_dir, workspace, &id, request, sink),
+            Err(note) => {
+                sink.note(note);
+                Ok(())
+            }
         };
     }
     let path = log_path(state_dir, workspace, app, process);
@@ -196,10 +196,13 @@ pub(crate) fn logs(
             }
         }
         // The unfinished line that the follower's position cuts waits in
-        // the follower for the rest of its bytes.
+        // the follower for the rest of its bytes, so the follow never
+        // starts inside a line, even when no last lines were asked for.
         follower.hold(partial);
         if !request.follow {
-            if let Some(rest) = follower.take_partial() {
+            if lines > 0
+                && let Some(rest) = follower.take_partial()
+            {
                 let _ = sink.line(&LogLine::merged(&rest));
             }
             return Ok(());
@@ -242,7 +245,12 @@ fn container_logs(
         };
         sink.line(&LogLine::new(stream, text))
     };
-    crate::engine::container::recorded_logs(state_dir, workspace, id, request, &mut pass)
+    let note =
+        crate::engine::container::recorded_logs(state_dir, workspace, id, request, &mut pass)?;
+    if let Some(note) = note {
+        sink.note(note);
+    }
+    Ok(())
 }
 
 /// Reports whether the keeper or the process of `process` of `app` that
@@ -291,7 +299,10 @@ pub struct LogRequest {
     /// How many of the log's last lines `logs` passes before it follows,
     /// or `None` for every line from the log's start. A host process's last
     /// lines come from at most the log's last [`MOST_TAIL_BYTES`] bytes, so
-    /// a larger count passes fewer lines.
+    /// a larger count passes fewer lines. An unfinished last line counts as
+    /// one of them, and a follow passes it once it is finished. An
+    /// unfinished last line longer than those bytes loses its start, so a
+    /// follow, even one with `lines` set to 0, then starts inside it.
     pub lines: Option<usize>,
 }
 
@@ -315,6 +326,52 @@ pub trait LineSink {
     /// Receives one line. Returning [`ControlFlow::Break`] ends the read,
     /// which is how a caller stops following a log.
     fn line(&mut self, line: &LogLine<'_>) -> ControlFlow<()>;
+
+    /// Receives a note about the log that is not a line of it, such as
+    /// that its container is gone. A sink that does not override it
+    /// ignores notes.
+    fn note(&mut self, _note: LogNote) {}
+}
+
+/// Something that [`crate::Phase::logs`] tells a [`LineSink`] besides the
+/// log's lines, which says why a container's log passed no lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LogNote {
+    /// The run record names a container that docker no longer has, such
+    /// as one that someone removed by hand, so the container has no log.
+    ContainerGone,
+    /// The run record names the container before docker created it, so it
+    /// has no log yet.
+    NotStarted,
+    /// phase stopped and removed the container, so its log is gone.
+    Stopped,
+    /// The run record names the container by a service name or container
+    /// id that phase cannot use, so phase did not ask docker for its log.
+    EntryUnusable,
+}
+
+impl LogNote {
+    /// Returns what the note says, as a sentence without a final stop.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::ContainerGone => {
+                "docker no longer has the container that the run record names, so it has no log"
+            }
+            Self::NotStarted => "the container has not started yet, so it has no log",
+            Self::Stopped => "phase stopped and removed the container, so its log is gone",
+            Self::EntryUnusable => {
+                "the run record names the container by a name or id that phase cannot use, so phase read no log"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for LogNote {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
 }
 
 /// One line of a process's log, without its line ending.

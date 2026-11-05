@@ -705,22 +705,26 @@ impl ProbeExec for DockerExec {
 /// the flag is false, standard error's when it is true.
 type StreamedLine = (bool, String);
 
-/// Runs `docker <args>` with no input, and passes each line it prints to
-/// `line`, with whether it printed it on standard error, until it exits or
-/// `line` breaks, which kills it. It returns how docker exited, or `None`
-/// when `line` broke. A line is read as UTF-8, with each byte that is not
-/// replaced, and without its line ending. With `idle`, docker is killed
-/// when it prints nothing for that long, as a daemon that hangs does. A
-/// follow of a container's log passes no `idle`, because it lasts as long
-/// as the container runs or the reader reads.
-///
-/// # Errors
-///
-/// Returns [`Error::Missing`] when no `docker` program is on `PATH`,
-/// [`Error::Failed`] with the timed-out cause when docker was idle for
-/// `idle`, and [`Error::Failed`] when docker cannot start or cannot be
-/// waited for.
-pub(super) fn stream<I, S>(
+/// How many lines the readers of [`stream_with_ticks`] may hold for the
+/// calling thread. A reader whose line does not fit waits, so a slow `event`
+/// slows docker down instead of growing phase's memory. Each line holds at
+/// most [`MOST_LINE_BYTES`], so the queue holds at most 16 MiB. Each of the
+/// two readers holds one more line while it waits, and the calling thread
+/// holds the line it passes, so a stream holds about 19 MiB at most.
+const STREAMED_LINES: usize = 16;
+
+/// The most bytes of one line that [`stream_with_ticks`] passes at once. A
+/// longer line comes out in parts of at most this many bytes, as the host
+/// log follower splits one. A part never ends inside a UTF-8 character:
+/// the bytes of a character that the bound cuts start the next part.
+pub(crate) const MOST_LINE_BYTES: usize = 1024 * 1024;
+
+/// Runs `<program> <args>` as [`stream_with_ticks`] does without ticks,
+/// and passes each line to `line` with whether it came from standard
+/// error.
+#[cfg(test)]
+fn stream_program<I, S>(
+    program: &OsStr,
     args: I,
     operation: &'static str,
     idle: Option<Duration>,
@@ -730,38 +734,61 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    stream_program(DOCKER.as_ref(), args, operation, idle, line)
+    stream_with_ticks(program, args, operation, idle, None, &mut |event| {
+        event.map_or(std::ops::ControlFlow::Continue(()), |(is_stderr, text)| {
+            line(is_stderr, text)
+        })
+    })
 }
 
-/// How many lines the readers of [`stream_program`] may hold for the
-/// calling thread. A reader whose line does not fit waits, so a slow `line`
-/// slows docker down instead of growing phase's memory.
-const STREAMED_LINES: usize = 256;
+/// What [`stream_with_ticks`] passes its caller: a line with whether it
+/// came from standard error, or `None` when the program printed nothing
+/// for the tick.
+pub(super) type StreamEvent<'a> = Option<(bool, &'a str)>;
 
-/// The most bytes of one line that [`stream_program`] passes at once. A
-/// longer line comes out in parts of at most this many bytes, as the host
-/// log follower splits one.
-pub(crate) const MOST_LINE_BYTES: usize = 1024 * 1024;
-
-/// Runs `<program> <args>`, where `program` is the `docker` program, as
-/// [`stream`] does. `line` runs on the calling thread only, so it is never
-/// called while a read of either stream blocks: each stream is read on a
-/// thread of its own, which hands the calling thread complete lines.
+/// Runs `<program> <args>`, where `program` is the `docker` program, with
+/// no input, and passes each line it prints to `event` as `Some`, with whether it
+/// printed it on standard error, until it exits or `event` breaks, which
+/// kills it. It returns how the program exited, or `None` when `event`
+/// broke. A line is read as UTF-8, with each byte that is not replaced,
+/// and without its line ending. With `idle`, the program is killed when it
+/// prints nothing for that long, as docker does when its daemon hangs. A
+/// follow of a container's log passes no `idle`, because it lasts as long
+/// as the container runs or the reader reads.
+///
+/// With `tick`, it also passes `None` to `event` each time the program
+/// prints nothing for that long, so the caller can act on a quiet stream,
+/// such as by passing a line that it held back.
+///
+/// `event` runs on the calling thread only, so it is never called while a
+/// read of either stream blocks: each stream is read on a thread of its
+/// own, which hands the calling thread complete lines.
 ///
 /// The program stays in the caller's process group, so a signal that the
 /// terminal sends to the foreground group, such as SIGINT from Ctrl-C,
-/// reaches it too and it ends with the caller. When `line` breaks, the
-/// idle deadline passes or `line` panics, phase kills the program by its
-/// process id, reaps it and joins both readers. `docker logs` starts no
-/// program of its own, so killing it ends everything the stream started.
-/// A `docker` wrapper that does not exec could leave a child that holds
-/// the pipes, and the readers would then wait until that child ends.
-fn stream_program<I, S>(
+/// reaches it too and it ends with the caller. When `event` breaks, the
+/// idle deadline passes or `event` panics, phase kills the program by its
+/// process id, reaps it, and waits at most [`READER_WAIT`] for both
+/// readers to end. `docker logs` starts no program of its own, so killing
+/// it ends everything the stream started. A `docker` wrapper that does not
+/// exec leaves its child running with the pipes after the wrapper is
+/// killed. phase then leaves a reader that has not ended. The reader ends
+/// at the container's next line, because nothing receives it, and the
+/// child ends when it writes the line after that to the closed pipe.
+///
+/// # Errors
+///
+/// Returns [`Error::Missing`] when `program` does not exist,
+/// [`Error::Failed`] with the timed-out cause when the program was idle for
+/// `idle`, and [`Error::Failed`] when it cannot start or cannot be waited
+/// for.
+pub(super) fn stream_with_ticks<I, S>(
     program: &OsStr,
     args: I,
     operation: &'static str,
     idle: Option<Duration>,
-    line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
+    tick: Option<Duration>,
+    event: &mut dyn FnMut(StreamEvent<'_>) -> std::ops::ControlFlow<()>,
 ) -> Result<Option<ExitStatus>, Error>
 where
     I: IntoIterator<Item = S>,
@@ -820,17 +847,35 @@ where
     let mut broke = false;
     let mut idled = false;
     if let Some(receiver) = &streaming.receiver {
+        use std::sync::mpsc::RecvTimeoutError;
+        let mut last_line = now();
         loop {
-            let received = match idle {
-                Some(idle) => receiver.recv_timeout(idle).map_err(|error| {
-                    idled = error == std::sync::mpsc::RecvTimeoutError::Timeout;
-                }),
-                None => receiver.recv().map_err(|_| ()),
+            let wait = [
+                idle.map(|idle| idle.saturating_sub(last_line.elapsed())),
+                tick,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            let received = match wait {
+                Some(wait) => receiver.recv_timeout(wait),
+                None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
-            let Ok((is_stderr, text)) = received else {
-                break;
+            let passed = match received {
+                Ok((is_stderr, text)) => {
+                    last_line = now();
+                    event(Some((is_stderr, &text)))
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if idle.is_some_and(|idle| last_line.elapsed() >= idle) {
+                        idled = true;
+                        break;
+                    }
+                    event(None)
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
             };
-            if line(is_stderr, &text).is_break() {
+            if passed.is_break() {
                 broke = true;
                 break;
             }
@@ -850,7 +895,7 @@ where
     }
 }
 
-/// The program that [`stream_program`] runs, with the readers of its
+/// The program that [`stream_with_ticks`] runs, with the readers of its
 /// streams, which [`Streaming::finish`] ends, or dropping it ends when the
 /// caller unwinds.
 struct Streaming {
@@ -871,9 +916,12 @@ struct Streaming {
 impl Streaming {
     /// Kills the program with SIGKILL when `kill`, reaps the program,
     /// drops the receiver so that a reader that waits to send gives up, and
-    /// joins the readers. The program stays unreaped until it is killed, so
-    /// its process id is not reused in between. A program whose streams
-    /// both closed is reaped without a kill, so its exit status is its own.
+    /// joins the readers that end within [`READER_WAIT`]. The program stays
+    /// unreaped until it is killed, so its process id is not reused in
+    /// between. A program whose streams both closed is reaped without a
+    /// kill, so its exit status is its own. A reader that is still blocked,
+    /// because a child of the program holds its pipe, is left to end when
+    /// that child closes the pipe.
     fn finish(&mut self, kill: bool) -> io::Result<ExitStatus> {
         self.finished = true;
         if kill {
@@ -881,12 +929,27 @@ impl Streaming {
         }
         let waited = self.child.wait();
         drop(self.receiver.take());
+        let started = now();
+        while self.readers.iter().any(|reader| !reader.is_finished())
+            && started.elapsed() < READER_WAIT
+        {
+            pause(READER_POLL);
+        }
         for reader in self.readers.drain(..) {
-            let _ = reader.join();
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
         }
         waited
     }
 }
+
+/// The longest that [`Streaming::finish`] waits for the readers once the
+/// program is reaped.
+const READER_WAIT: Duration = Duration::from_secs(1);
+
+/// How often [`Streaming::finish`] checks whether the readers have ended.
+const READER_POLL: Duration = Duration::from_millis(10);
 
 impl Drop for Streaming {
     fn drop(&mut self) {
@@ -909,12 +972,21 @@ fn read_lines<R: io::Read + Send + 'static>(
         use std::io::BufRead as _;
         let mut reader = io::BufReader::new(stream);
         let mut bytes = Vec::new();
-        let most = u64::try_from(MOST_LINE_BYTES).unwrap_or(u64::MAX);
+        // The start of a UTF-8 character that the bound cut from the last
+        // part, which starts the next one.
+        let mut carried = Vec::new();
         loop {
             bytes.clear();
-            match (&mut reader).take(most).read_until(b'\n', &mut bytes) {
-                Ok(0) | Err(_) => return,
+            bytes.append(&mut carried);
+            let room = MOST_LINE_BYTES - bytes.len();
+            let room = u64::try_from(room).unwrap_or(u64::MAX);
+            match (&mut reader).take(room).read_until(b'\n', &mut bytes) {
+                Ok(0) if bytes.is_empty() => return,
                 Ok(_) => {}
+                Err(_) => return,
+            }
+            if bytes.len() >= MOST_LINE_BYTES && bytes.last() != Some(&b'\n') {
+                carried = bytes.split_off(cut_character_start(&bytes));
             }
             if bytes.last() == Some(&b'\n') {
                 bytes.pop();
@@ -928,6 +1000,33 @@ fn read_lines<R: io::Read + Send + 'static>(
             }
         }
     })
+}
+
+/// Returns where the UTF-8 character that `bytes` ends inside starts, or
+/// the length of `bytes` when it ends with a whole character or with bytes
+/// that are not UTF-8.
+fn cut_character_start(bytes: &[u8]) -> usize {
+    let from = bytes.len().saturating_sub(3);
+    let Some((lead, &byte)) = bytes
+        .iter()
+        .enumerate()
+        .skip(from)
+        .rev()
+        .find(|(_, byte)| *byte & 0b1100_0000 != 0b1000_0000)
+    else {
+        return bytes.len();
+    };
+    let width = match byte {
+        0b1100_0000..=0b1101_1111 => 2,
+        0b1110_0000..=0b1110_1111 => 3,
+        0b1111_0000..=0b1111_0111 => 4,
+        _ => 1,
+    };
+    if lead + width > bytes.len() && lead > 0 {
+        lead
+    } else {
+        bytes.len()
+    }
 }
 
 #[cfg(test)]

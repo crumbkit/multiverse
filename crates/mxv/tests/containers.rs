@@ -808,6 +808,33 @@ fn logs_of_a_container_that_restarted_outside_mxv_hold_both_starts() {
 }
 
 #[test]
+fn logs_of_a_container_removed_outside_mxv_print_nothing_and_a_warning() {
+    if !docker_runs("logs_of_a_container_removed_outside_mxv") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-removed", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-removed"]);
+    assert_eq!(exit, 0, "{document}");
+    let (removed, _) = docker(&["rm", "--force", &setup.container_name("web")]);
+    assert!(removed);
+
+    let output = setup
+        .command(PATH, &["logs", "-w", "mxvtest-removed", "web"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "warning: `web`: docker no longer has the container that the run record names, so it has no log."
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn down_deletes_a_containers_anonymous_volumes_with_the_container() {
     if !docker_runs("down_deletes_a_containers_anonymous_volumes") {
         return;

@@ -364,9 +364,10 @@ impl Phase {
     /// [`crate::logs::MOST_TAIL_BYTES`] bytes, so a request for more lines
     /// than those bytes hold passes fewer. A container's log comes from
     /// `docker logs`, after phase inspects the container with its app's
-    /// labels. A container that has not started, that phase stopped, or
-    /// that docker no longer has passes no lines, even with
-    /// `request.follow`. It takes no lock.
+    /// labels. A container that has not started, that phase stopped, that
+    /// docker no longer has, or that the record names by a name or id phase
+    /// cannot use passes no lines, even with `request.follow`, and gives
+    /// the sink the [`crate::LogNote`] that says which. It takes no lock.
     ///
     /// # Errors
     ///

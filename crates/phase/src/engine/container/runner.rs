@@ -266,9 +266,13 @@ pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
 /// Passes the log of the container `id` that the run record of
 /// `workspace` names for the process that `request` names to `line`, as
 /// [`objects::logs`] does with the request's lines and follow, after it
-/// inspects the container with the app's scope. A container that docker no longer has passes no lines, and one
-/// whose labels do not name the app's scope fails with the foreign cause,
-/// so docker's own errors never reach `line` as lines of the app.
+/// inspects the container with the app's scope. It returns the note that
+/// says why no lines passed, or `None` when it read the log. A process
+/// name that is not a service name, or an `id` that is not a container
+/// id, gives [`crate::LogNote::EntryUnusable`], and a container that docker no
+/// longer has gives [`crate::LogNote::ContainerGone`]. One whose labels do not
+/// name the app's scope fails with the foreign cause, so docker's own
+/// errors never reach `line` as lines of the app.
 ///
 /// # Errors
 ///
@@ -280,7 +284,8 @@ pub(crate) fn recorded_logs(
     id: &ContainerId,
     request: &crate::logs::LogRequest,
     line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
-) -> Result<(), PhaseError> {
+) -> Result<Option<crate::LogNote>, PhaseError> {
+    use crate::LogNote;
     let scope = Scope::app(
         Identity {
             id: workspace.clone(),
@@ -292,14 +297,15 @@ pub(crate) fn recorded_logs(
         names::ServiceName::new(request.process.as_str()),
         names::ContainerId::new(id.as_str()),
     ) else {
-        return Ok(());
+        return Ok(Some(LogNote::EntryUnusable));
     };
     match inspect_id(&scope, &service, &docker_id) {
         Ok(Some(_)) => {}
-        Ok(None) => return Ok(()),
+        Ok(None) => return Ok(Some(LogNote::ContainerGone)),
         Err(error) => return Err(docker_error(&error)),
     }
-    objects::logs(id, request.lines, request.follow, line).map_err(|error| docker_error(&error))
+    objects::logs(id, request.lines, request.follow, line).map_err(|error| docker_error(&error))?;
+    Ok(None)
 }
 
 /// Returns the record's id of the container that `inspected` names.

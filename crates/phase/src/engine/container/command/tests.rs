@@ -205,3 +205,36 @@ fn a_sigint_to_the_callers_group_ends_the_streamed_program_with_the_caller() {
     });
     assert!(gone, "the streamed program outlived its caller");
 }
+
+#[test]
+fn a_part_of_a_long_line_never_ends_inside_a_utf8_character() {
+    let most = super::MOST_LINE_BYTES;
+    // One ASCII byte short of the bound, then a two-byte character that
+    // the bound would cut in half.
+    let script = format!(
+        "head -c {} /dev/zero | tr '\\000' a; printf '\\303\\251b'",
+        most - 1
+    );
+    let (status, lines) = streamed(&script, |_| true);
+    assert_eq!(status.and_then(|status| status.code()), Some(0));
+    let lengths: Vec<usize> = lines.iter().map(|(_, text)| text.len()).collect();
+    assert_eq!(lengths, [most - 1, 3]);
+    assert_eq!(lines[1].1, "\u{e9}b");
+}
+
+#[test]
+fn a_broken_stream_returns_soon_when_a_child_of_the_program_holds_its_pipes() {
+    // The shell does not exec, and its background `sleep` holds standard
+    // output open after the shell is killed.
+    let started = now();
+    let (status, lines) = streamed("sleep 5 & echo $!; wait", |_| false);
+    assert!(status.is_none());
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    let pid: i32 = lines[0].1.parse().unwrap();
+    let pid = rustix::process::Pid::from_raw(pid).unwrap();
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+}
