@@ -1370,8 +1370,11 @@ configuration" when it can stat `~/.cargo/config.toml` but cannot read it.
 On Linux, Landlock does not restrict reading metadata, so a process can
 stat every protected path there and learn the same facts about each.
 
-Every sandboxed app runs with `GIT_CONFIG_GLOBAL=/dev/null`, which the
-keeper sets, so git reads no global configuration. git stops with "unable
+Every sandboxed app runs with `GIT_CONFIG_GLOBAL=/dev/null` unless the
+app's environment sets `GIT_CONFIG_GLOBAL`, so git reads no global
+configuration. The keeper sets it after the app's environment and keeps a
+value that the plan gave, so a plan can still name a configuration file
+that the app may read. git stops with "unable
 to access" when `~/.gitconfig` or `~/.config/git/config` exists but cannot
 be read, so without it a sandboxed git ran no command on a machine that
 has either.

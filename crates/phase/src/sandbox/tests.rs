@@ -1241,6 +1241,63 @@ fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_loca
     assert_eq!(read, ["bin", "lib", "local/bin", "local/share"]);
 }
 
+/// Returns the variables that `command` sets or removes, in name order.
+fn environment(command: &std::process::Command) -> Vec<(String, Option<String>)> {
+    command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_sandboxed_command_gets_the_sandbox_temporary_directory_and_reads_no_global_git_configuration()
+{
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the environment it sets and never starts the command"
+    )]
+    let mut command = std::process::Command::new("true");
+    command.env("TMPDIR", "/elsewhere");
+
+    super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+
+    assert_eq!(
+        environment(&command),
+        vec![
+            ("GIT_CONFIG_GLOBAL".to_owned(), Some("/dev/null".to_owned())),
+            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn a_sandboxed_command_keeps_the_git_configuration_that_its_environment_names() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the environment it sets and never starts the command"
+    )]
+    let mut command = std::process::Command::new("true");
+    command.env("GIT_CONFIG_GLOBAL", "/plan/gitconfig");
+
+    super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+
+    assert_eq!(
+        environment(&command),
+        vec![
+            (
+                "GIT_CONFIG_GLOBAL".to_owned(),
+                Some("/plan/gitconfig".to_owned())
+            ),
+            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
+        ]
+    );
+}
+
 /// The tests of phase's Seatbelt rules, which are plain text, so they run
 /// on the Linux pull-request lane too.
 mod rules {
@@ -1735,11 +1792,10 @@ mod seatbelt {
             .env_clear()
             .env("PATH", &path)
             .env("HOME", &home)
-            .env("TMPDIR", &spec.tmp)
-            .envs(crate::sandbox::SANDBOX_ENVIRONMENT.iter().copied())
             .env("CARGO_TARGET_DIR", fixture.checkout().join("target"))
             .current_dir(fixture.checkout())
             .stdin(Stdio::null());
+        crate::sandbox::sandboxed_environment(&mut command, &spec.tmp);
         #[expect(
             clippy::disallowed_methods,
             reason = "the test starts this test binary as the launcher"

@@ -51,6 +51,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -121,12 +122,32 @@ impl fmt::Display for Sandboxing {
     }
 }
 
-/// The variables that the keeper sets for every sandboxed app.
-/// `GIT_CONFIG_GLOBAL=/dev/null` makes git read no global configuration.
-/// The sandbox protects `~/.gitconfig` and `~/.config/git`, and git stops
-/// with "unable to access" when its global configuration exists but cannot
-/// be read, so without it a sandboxed git ran no command at all.
+/// The variables that every sandboxed process receives unless its own
+/// environment sets them. `GIT_CONFIG_GLOBAL=/dev/null` makes git read no
+/// global configuration. The sandbox protects `~/.gitconfig` and
+/// `~/.config/git`, and git stops with "unable to access" when its global
+/// configuration exists but cannot be read, so without it a sandboxed git
+/// ran no command at all.
 pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[("GIT_CONFIG_GLOBAL", "/dev/null")];
+
+/// Sets on `command` the environment of a process that runs under a
+/// sandbox whose temporary directory is `tmp`. `TMPDIR` names `tmp` and
+/// replaces any other value, because the sandbox lets the process write no
+/// other temporary directory. Each variable of [`SANDBOX_ENVIRONMENT`] is
+/// set only when `command` does not set it already, so a value from the
+/// app's own environment wins. Call it after the command's environment is
+/// set.
+pub(crate) fn sandboxed_environment(command: &mut Command, tmp: &Path) {
+    command.env("TMPDIR", tmp);
+    for (name, value) in SANDBOX_ENVIRONMENT {
+        let set = command
+            .get_envs()
+            .any(|(key, given)| key == std::ffi::OsStr::new(name) && given.is_some());
+        if !set {
+            command.env(name, value);
+        }
+    }
+}
 
 /// What the sandbox cannot enforce on macOS. Seatbelt restricts a bind by port
 /// and never by address, and its `localhost` matches every address of the
