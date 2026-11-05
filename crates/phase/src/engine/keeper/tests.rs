@@ -723,7 +723,7 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
     // sandbox.
     let tmp = tmp.canonicalize().unwrap();
     let script = format!(
-        "if echo x > '{}/file' 2>/dev/null; then echo wrote; else echo denied; fi; mkdir \"$TMPDIR/run.$$\"; exit 3",
+        "if echo x > '{}/file' 2>/dev/null; then echo wrote; else echo denied; fi; echo \"git=${{GIT_CONFIG_GLOBAL-unset}}\"; mkdir \"$TMPDIR/run.$$\"; exit 3",
         outside.display()
     );
     let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(50), Resolve::Never));
@@ -745,7 +745,7 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
         protected: Vec::new(),
         read_only: BTreeSet::new(),
         deny: BTreeSet::new(),
-        links: BTreeSet::new(),
+        metadata: BTreeSet::new(),
         listen: BTreeSet::new(),
         connect: BTreeSet::new(),
         tmp: tmp.clone(),
@@ -774,6 +774,11 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
         "{log}"
     );
     assert!(!log.lines().any(|line| line == "wrote"), "{log}");
+    assert_eq!(
+        log.lines().filter(|line| *line == "git=/dev/null").count(),
+        2,
+        "{log}"
+    );
     assert!(log.contains("Operation not permitted"), "{log}");
     assert!(!outside.join("file").exists());
     assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 2);
@@ -1030,7 +1035,7 @@ fn a_keeper_survives_a_hangup_sent_to_the_group_that_started_it() {
 fn an_app_receives_only_path_home_and_its_resolved_environment() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
-        "echo \"path=$PATH tmp=${TMPDIR-unset} manifest=${CARGO_MANIFEST_DIR-unset} greeting=$GREETING\"",
+        "echo \"path=$PATH tmp=${TMPDIR-unset} git=${GIT_CONFIG_GLOBAL-unset} manifest=${CARGO_MANIFEST_DIR-unset} greeting=$GREETING\"",
         Restart::No,
         Stop::default(),
     );
@@ -1040,7 +1045,7 @@ fn an_app_receives_only_path_home_and_its_resolved_environment() {
 
     assert_eq!(
         fixture.log_text(),
-        "path=/usr/bin:/bin tmp=unset manifest=unset greeting=hello\n"
+        "path=/usr/bin:/bin tmp=unset git=unset manifest=unset greeting=hello\n"
     );
 }
 

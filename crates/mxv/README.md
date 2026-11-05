@@ -444,8 +444,8 @@ permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"]
 
 The `sandbox` column of `up`, `down`, `restart` and `status` shows how
 phase runs each host process: `seatbelt (partial: ...)` on macOS, where
-Seatbelt lets the process's listening ports accept connections from other
-machines on the network, or `unsandboxed (<reason>)`, such as
+the sandbox cannot limit the process's listening ports to the loopback
+interface, so other machines on the network can connect to them, or `unsandboxed (<reason>)`, such as
 `unsandboxed (its app declares no permissions)`. It is null for a
 container. A process that phase started is shown as its run record
 recorded it.

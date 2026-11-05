@@ -47,7 +47,7 @@ pub(crate) const TERMINAL_DEVICES: &str = "^/dev/(ttys[0-9]+|pty[a-z][0-9a-f]+|t
 /// The filesystem rules deny the spec's protected paths, deny writes to
 /// the paths it may only read, allow again the grants that lie inside a
 /// denied path, and allow the metadata of [`ROOT_LINKS`] and of the spec's
-/// links. A denied path
+/// `metadata` paths. A denied path
 /// that lies inside a grant that the rules allow again, such as the
 /// `private` directory of an OpenSSL directory inside `/usr/local/etc`, is
 /// denied after that allow, because Seatbelt applies the last rule that
@@ -92,10 +92,10 @@ pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
     for link in ROOT_LINKS {
         rules.push(format!("(allow file-read-metadata (literal \"{link}\"))"));
     }
-    for link in &spec.links {
+    for path in &spec.metadata {
         rules.push(format!(
             "(allow file-read-metadata (literal \"{}\"))",
-            link.display()
+            path.display()
         ));
     }
     for service in DENIED_SERVICES {

@@ -5,7 +5,7 @@
 use std::process::Command;
 
 use crate::engine::keeper::KeeperSpec;
-use crate::sandbox::launcher_command;
+use crate::sandbox::{SANDBOX_ENVIRONMENT, launcher_command};
 
 /// Returns the command that starts the app of `spec`: its own program and
 /// arguments, or the launcher with them when `spec` names a sandbox.
@@ -27,11 +27,13 @@ pub(crate) fn app_command(spec: &KeeperSpec) -> Result<Command, String> {
     Ok(command)
 }
 
-/// Sets `TMPDIR` on `command` to the sandbox's temporary directory when
-/// `spec` names a sandbox. It replaces any `TMPDIR` the environment gave,
-/// because the sandbox lets the app write no other temporary directory.
+/// Sets `TMPDIR` on `command` to the sandbox's temporary directory, and
+/// the variables of [`SANDBOX_ENVIRONMENT`], when `spec` names a sandbox.
+/// It replaces any value the environment gave, because the sandbox lets
+/// the app write no other temporary directory.
 pub(crate) fn sandbox_environment(spec: &KeeperSpec, command: &mut Command) {
     if let Some(sandbox) = &spec.sandbox {
         command.env("TMPDIR", &sandbox.tmp);
+        command.envs(SANDBOX_ENVIRONMENT.iter().copied());
     }
 }
