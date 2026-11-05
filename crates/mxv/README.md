@@ -392,13 +392,11 @@ contents outside the sandbox. For example, a sandboxed process that may
 write `target` can leave a build script there, and an unsandboxed
 `cargo build` then runs it.
 
-A change to a process's `permissions` takes effect when the process
-restarts. `mxv up` leaves a running process as it is, so a process that
-was running when its manifest gained or lost its `permissions` table keeps
-running as it started. `up` then prints a `warning:` line under that
-process, which names the `mxv restart` that applies the change. `up` cannot
-see a change to the grants of a process that already runs sandboxed, so
-restart such a process after you change its grants.
+A change to a process's `permissions` takes effect at the next `mxv up`.
+`up` restarts a running host process whose manifest gained or lost its
+`permissions` table or changed its grants, and prints an `info:` line
+under it that says it restarted the process because its part of the plan
+changed.
 
 This manifest runs four sandboxed processes beside two containers:
 
@@ -628,10 +626,10 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   files they found running: `info:` when `up` rewrote them, and `warning:`
   when it could not, so the container still runs with its earlier files.
   mxv's manifest declares no secrets yet, so neither line appears until it
-  does. `mxv up` also prints a `warning:` line under a running host
-  process whose manifest gained or lost its `permissions` table since it
-  started, as [Sandboxed processes](#sandboxed-processes) describes. The
-  JSON holds these lines in each row's `notes`.
+  does. `mxv up` also prints an `info:` line under a running host process
+  that it restarted because its part of the plan changed, as [Sandboxed
+  processes](#sandboxed-processes) describes. The JSON holds these lines
+  in each row's `notes`.
 - `mxv status` and `mxv down` read phase's run record when the manifest does
   not parse, so a broken manifest never keeps processes running.
 - `mxv logs` prints the last 50 lines of a log, or `--lines N`. With `-f`
