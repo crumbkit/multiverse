@@ -235,7 +235,8 @@ pub(crate) struct SandboxSpec {
     pub(crate) read_only: BTreeSet<PathBuf>,
     /// The paths that the process is always denied, which the macOS
     /// profile names explicitly: the protected paths, and on macOS the
-    /// directories inside a system directory that it must not read.
+    /// directories inside a system directory or a Homebrew prefix's grants
+    /// that it must not read.
     pub(crate) deny: BTreeSet<PathBuf>,
     /// The loopback ports that the process may listen on.
     pub(crate) listen: BTreeSet<u16>,
@@ -639,6 +640,10 @@ fn always_protected(home: Option<&Path>) -> Vec<Protected> {
 /// OpenSSL's configuration and the CA bundle that Homebrew copies from the
 /// system keychain. Neither is secret, and every TLS client that links
 /// Homebrew's OpenSSL, such as Homebrew's node, opens them when it starts.
+/// Each OpenSSL directory also holds `private`, OpenSSL's conventional
+/// directory for private keys, which no sandboxed process may read: the
+/// macOS profile grants the directory and denies `private` again, which
+/// [`homebrew_deny`] names, and Linux grants only [`OPENSSL_READ`].
 const HOMEBREW_READ: &[&str] = &[
     "bin",
     "sbin",
@@ -650,6 +655,74 @@ const HOMEBREW_READ: &[&str] = &[
     "include",
     "Frameworks",
 ];
+
+/// The Homebrew prefixes that phase knows.
+const HOMEBREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+
+/// The entries of an OpenSSL directory of a Homebrew prefix that a
+/// sandboxed process may read on Linux: OpenSSL's configuration, the CA
+/// bundle and the directory of hashed CA certificates. Landlock cannot
+/// deny a path inside a granted one, so Linux grants these instead of the
+/// directory, and never its `private`.
+const OPENSSL_READ: &[&str] = &["openssl.cnf", "cert.pem", "certs"];
+
+/// Returns the Homebrew prefix that the `PATH` entry `entry` lies in.
+fn homebrew_prefix(entry: &Path) -> Option<&'static Path> {
+    HOMEBREW_PREFIXES
+        .iter()
+        .map(Path::new)
+        .find(|prefix| entry.starts_with(prefix))
+}
+
+/// Returns the OpenSSL directories of the Homebrew prefix `prefix`: the
+/// entries of its `etc` named `openssl` or `openssl@<version>`.
+fn openssl_dirs(prefix: &Path) -> Vec<PathBuf> {
+    let is_openssl = |name: &str| name == "openssl" || name.starts_with("openssl@");
+    std::fs::read_dir(prefix.join("etc"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_str().is_some_and(is_openssl))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_else(|_| Vec::new())
+}
+
+/// Returns the paths of the Homebrew prefix `prefix` that a sandboxed
+/// process may read: [`HOMEBREW_READ`], and for each OpenSSL directory the
+/// directory and its `cert.pem` on macOS, whose link may name a file
+/// outside the directory, or [`OPENSSL_READ`] on Linux. No other entry of
+/// `etc` is returned.
+fn homebrew_read(prefix: &Path) -> Vec<PathBuf> {
+    let openssl = openssl_dirs(prefix).into_iter().flat_map(|dir| {
+        if cfg!(target_os = "macos") {
+            vec![dir.join("cert.pem"), dir]
+        } else {
+            OPENSSL_READ.iter().map(|name| dir.join(name)).collect()
+        }
+    });
+    HOMEBREW_READ
+        .iter()
+        .map(|name| prefix.join(name))
+        .chain(openssl)
+        .collect()
+}
+
+/// Returns the paths inside the grants of the Homebrew prefix `prefix`
+/// that the macOS profile denies again: the `private` directory of each
+/// OpenSSL directory. Linux grants nothing that holds one, so it returns
+/// none there.
+fn homebrew_deny(prefix: &Path) -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        openssl_dirs(prefix)
+            .into_iter()
+            .map(|dir| dir.join("private"))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
 
 /// Returns the toolchain directories that the `PATH` entry `entry` lets a
 /// sandboxed process read: for Cargo its `bin`, `registry` and `git`
@@ -673,34 +746,10 @@ fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
             }
         }
     }
-    for root in ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"] {
-        if entry.starts_with(root) {
-            return homebrew_read(Path::new(root));
-        }
+    if let Some(prefix) = homebrew_prefix(entry) {
+        return homebrew_read(prefix);
     }
     vec![entry.to_path_buf()]
-}
-
-/// Returns the directories of the Homebrew prefix `prefix` that a
-/// sandboxed process may read: [`HOMEBREW_READ`], and the entries of its
-/// `etc` named `openssl` or `openssl@<version>`. No other entry of `etc`
-/// is returned.
-fn homebrew_read(prefix: &Path) -> Vec<PathBuf> {
-    let is_openssl = |name: &str| name == "openssl" || name.starts_with("openssl@");
-    let openssl = std::fs::read_dir(prefix.join("etc"))
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_str().is_some_and(is_openssl))
-                .map(|entry| entry.path())
-                .collect()
-        })
-        .unwrap_or_else(|_| Vec::new());
-    HOMEBREW_READ
-        .iter()
-        .map(|name| prefix.join(name))
-        .chain(openssl)
-        .collect()
 }
 
 /// Returns the sandbox of `process` of the host `app`, whose permissions
@@ -783,10 +832,14 @@ pub(crate) fn spec(
     }
     read_only.insert(checkout.join(".git"));
     let mut path_dirs = Vec::new();
+    let mut deny: BTreeSet<PathBuf> = BTreeSet::new();
     for entry in context.path.unwrap_or_default().split(':') {
         let entry = Path::new(entry);
         if !entry.is_absolute() {
             continue;
+        }
+        if let Some(prefix) = homebrew_prefix(entry) {
+            deny.extend(homebrew_deny(prefix).iter().map(|path| canonical(path)));
         }
         read_only.insert(canonical(entry));
         // A `PATH` entry that reaches a protected path, such as the home
@@ -804,7 +857,7 @@ pub(crate) fn spec(
             }
         }
     }
-    let mut deny: BTreeSet<PathBuf> = protected.iter().map(|found| found.path.clone()).collect();
+    deny.extend(protected.iter().map(|found| found.path.clone()));
     deny.extend(SYSTEM_DENY.iter().map(PathBuf::from));
     let listen = permissions
         .listen

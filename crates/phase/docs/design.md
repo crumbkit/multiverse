@@ -1146,7 +1146,15 @@ The sandbox allows (decision P18):
   the CA bundle that Homebrew copies from the system keychain. Neither is
   secret, and every TLS client that links Homebrew's OpenSSL opens them
   when it starts: Homebrew's node exits with "OpenSSL configuration error"
-  when it cannot read `openssl.cnf`. The rest of `etc` stays unreadable. A `PATH` entry that
+  when it cannot read `openssl.cnf`. Each OpenSSL directory also holds
+  `private`, OpenSSL's conventional directory for private keys, which a
+  user may fill, so no sandboxed process may read it. On macOS the profile
+  grants the OpenSSL directory and denies its `private` again, as it denies
+  the protected paths inside a granted one. It also grants the file that
+  the directory's `cert.pem` link names, which Homebrew keeps in
+  `etc/ca-certificates`. Landlock cannot deny a path inside a granted one,
+  so on Linux phase grants only the directory's `openssl.cnf`, `cert.pem`
+  and `certs`. The rest of `etc` stays unreadable. A `PATH` entry that
   would reach a protected path, such as the home directory, adds nothing.
   On macOS the system directories also include the developer directory
   that `/var/select/developer_dir` names, which `xcode-select --switch`

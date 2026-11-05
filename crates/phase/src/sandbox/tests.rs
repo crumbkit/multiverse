@@ -14,8 +14,8 @@ use tempfile::TempDir;
 
 use super::{
     AppDirs, Context, LANDLOCK_UNSANDBOXED, Launcher, Platform, SandboxError, SandboxSpec,
-    Sandboxing, UNDECLARED, WorkspacePaths, developer_dir, homebrew_read, launch, launcher_command,
-    sandboxing, spec, toolchain, usr_without_local_data, verify,
+    Sandboxing, UNDECLARED, WorkspacePaths, developer_dir, homebrew_deny, homebrew_read, launch,
+    launcher_command, sandboxing, spec, toolchain, usr_without_local_data, verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
 use crate::record::testing::{app, workspace};
@@ -699,26 +699,74 @@ fn a_homebrew_path_entry_lets_the_app_read_its_programs_but_never_its_data_or_co
     assert!(!dirs.contains(&PathBuf::from("/opt/homebrew")));
 }
 
+/// Makes a Homebrew prefix in `root` whose `etc` holds OpenSSL's
+/// directories, each with its configuration, CA bundle, certificates and a
+/// private key, and another configuration directory, and returns it.
+fn homebrew_prefix_in(root: &std::path::Path) -> PathBuf {
+    let prefix = root.join("homebrew");
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        let dir = prefix.join(dir);
+        std::fs::create_dir_all(dir.join("certs")).unwrap();
+        std::fs::create_dir_all(dir.join("private")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the OpenSSL files that the sandbox may or may not read"
+        )]
+        {
+            std::fs::write(dir.join("openssl.cnf"), "# config\n").unwrap();
+            std::fs::write(dir.join("cert.pem"), "# bundle\n").unwrap();
+            std::fs::write(dir.join("private/key.pem"), "# key\n").unwrap();
+        }
+    }
+    std::fs::create_dir_all(prefix.join("etc/other")).unwrap();
+    std::fs::create_dir_all(prefix.join("etc/opensslish")).unwrap();
+    prefix
+}
+
 #[test]
 fn a_homebrew_prefix_lets_the_app_read_its_openssl_configuration_but_no_other_configuration() {
-    let prefix = tempfile::tempdir().unwrap();
-    for dir in [
-        "etc/openssl@3",
-        "etc/openssl",
-        "etc/other",
-        "etc/opensslish",
-    ] {
-        std::fs::create_dir_all(prefix.path().join(dir)).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let prefix = homebrew_prefix_in(root.path());
+
+    let read = homebrew_read(&prefix);
+
+    assert!(read.contains(&prefix.join("bin")));
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        assert!(read.contains(&prefix.join(dir).join("cert.pem")), "{dir}");
+        if cfg!(target_os = "macos") {
+            assert!(read.contains(&prefix.join(dir)), "{dir}");
+        } else {
+            assert!(
+                read.contains(&prefix.join(dir).join("openssl.cnf")),
+                "{dir}"
+            );
+            assert!(read.contains(&prefix.join(dir).join("certs")), "{dir}");
+            assert!(!read.contains(&prefix.join(dir)), "{dir}");
+        }
     }
+    assert!(
+        !read
+            .iter()
+            .any(|path| path.starts_with(prefix.join("etc/other"))
+                || path.starts_with(prefix.join("etc/opensslish")))
+    );
+    assert!(!read.contains(&prefix.join("etc")));
+}
 
-    let dirs = homebrew_read(prefix.path());
+#[test]
+fn no_grant_of_a_homebrew_prefix_lets_the_app_read_an_openssl_private_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let prefix = homebrew_prefix_in(root.path());
 
-    assert!(dirs.contains(&prefix.path().join("etc/openssl@3")));
-    assert!(dirs.contains(&prefix.path().join("etc/openssl")));
-    assert!(dirs.contains(&prefix.path().join("bin")));
-    assert!(!dirs.contains(&prefix.path().join("etc/other")));
-    assert!(!dirs.contains(&prefix.path().join("etc/opensslish")));
-    assert!(!dirs.contains(&prefix.path().join("etc")));
+    let read = homebrew_read(&prefix);
+    let deny = homebrew_deny(&prefix);
+
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        let private = prefix.join(dir).join("private");
+        assert!(!read.iter().any(|path| path.starts_with(&private)), "{dir}");
+        let covered = read.iter().any(|path| private.starts_with(path));
+        assert_eq!(covered, deny.contains(&private), "{dir}: {deny:?}");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1412,6 +1460,63 @@ mod seatbelt {
         )
     }
 
+    #[test]
+    fn a_sandboxed_app_reads_a_homebrew_openssl_configuration_but_never_its_private_keys() {
+        let fixture = Fixture::new();
+        let prefix = super::homebrew_prefix_in(&fixture.outside());
+        let dir = prefix.join("etc/openssl@3");
+        let script = format!(
+            r#"
+            check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+            case=config check cat "{dir}/openssl.cnf"
+            case=bundle check cat "{dir}/cert.pem"
+            case=key check cat "{dir}/private/key.pem"
+            case=list check ls "{dir}/private"
+            case=other check ls "{prefix}/etc/other"
+            "#,
+            dir = dir.display(),
+            prefix = prefix.display(),
+        );
+        let api = fixture.app(sh(&script), 41_000);
+        let mut spec = fixture
+            .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+            .unwrap();
+        // The spec reads what exists of the prefix and denies its OpenSSL
+        // directories' `private`, as `spec` does for a prefix on `PATH`.
+        let read = crate::sandbox::homebrew_read(&prefix);
+        spec.read.extend(
+            read.iter()
+                .filter(|path| path.exists())
+                .map(|path| crate::sandbox::canonical(path)),
+        );
+        let deny = crate::sandbox::homebrew_deny(&prefix);
+        spec.deny
+            .extend(deny.iter().map(|path| crate::sandbox::canonical(path)));
+        let mut command = launcher_command(&spec, &sh(&script)).unwrap();
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &spec.tmp)
+            .current_dir(fixture.checkout())
+            .stdin(Stdio::null());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let output = command.output().unwrap();
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(outcome(&output, "config"), "allowed", "{output}");
+        assert_eq!(outcome(&output, "bundle"), "allowed", "{output}");
+        assert_eq!(outcome(&output, "key"), "denied", "{output}");
+        assert_eq!(outcome(&output, "list"), "denied", "{output}");
+        assert_eq!(outcome(&output, "other"), "denied", "{output}");
+    }
+
     /// Reports whether `program` is on this machine's `PATH`.
     #[expect(
         clippy::disallowed_methods,
@@ -1675,6 +1780,74 @@ mod landlock {
             ("read-ssh", "denied"),
             ("connect-dependency", "allowed"),
             ("connect-other", "denied"),
+        ] {
+            let line = format!("{case}={expected}");
+            assert!(
+                output.lines().any(|seen| seen == line),
+                "{line} in {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sandboxed_app_reads_a_homebrew_openssl_configuration_but_never_its_private_keys() {
+        if !matches!(platform(), Platform::Available(_)) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let prefix = super::homebrew_prefix_in(&fixture.outside());
+        let dir = prefix.join("etc/openssl@3");
+        let script = format!(
+            r#"
+            check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+            case=config check cat "{dir}/openssl.cnf"
+            case=bundle check cat "{dir}/cert.pem"
+            case=key check cat "{dir}/private/key.pem"
+            case=list check ls "{dir}/private"
+            case=other check ls "{prefix}/etc/other"
+            "#,
+            dir = dir.display(),
+            prefix = prefix.display(),
+        );
+        let api = fixture.app(sh(&script), 41_000);
+        let mut spec = fixture
+            .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+            .unwrap();
+        // The spec reads what exists of the prefix, as `spec` does for a
+        // prefix on `PATH`.
+        let read = crate::sandbox::homebrew_read(&prefix);
+        spec.read.extend(
+            read.iter()
+                .filter(|path| path.exists())
+                .map(|path| crate::sandbox::canonical(path)),
+        );
+        let mut command = launcher_command(&spec, &sh(&script)).unwrap();
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &spec.tmp)
+            .current_dir(fixture.checkout())
+            .stdout(Stdio::piped());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let mut child = command.spawn().unwrap();
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        child.wait().unwrap();
+
+        for (case, expected) in [
+            ("config", "allowed"),
+            ("bundle", "allowed"),
+            ("key", "denied"),
+            ("list", "denied"),
+            ("other", "denied"),
         ] {
             let line = format!("{case}={expected}");
             assert!(
