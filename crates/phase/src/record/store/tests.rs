@@ -408,6 +408,7 @@ fn launching(grace_ms: u64, hash: u8) -> Launching {
         },
         listen: None,
         restart: Restart::No,
+        sandbox: Some(crate::sandbox::Sandboxing::Seatbelt),
     }
 }
 

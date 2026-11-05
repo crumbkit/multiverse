@@ -1,7 +1,10 @@
 //! The launcher: the program that links phase, run by a keeper as
 //! `<keeper words> --sandboxed <spec> -- <app command>`. It applies the
 //! sandbox to itself and then replaces itself with the app, so the app's
-//! pid is the launcher's and every start runs under the sandbox.
+//! pid is the launcher's and every start runs under the sandbox. Before it
+//! applies the sandbox it checks the spec again on the paths as they
+//! resolve then, and refuses to start the app when a path moved or reaches
+//! a protected one.
 
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -77,6 +80,10 @@ fn run(args: &[OsString]) -> Result<Infallible, String> {
         .ok_or_else(|| "the launcher's sandbox is not UTF-8".to_owned())?;
     let spec: SandboxSpec = serde_json::from_str(spec)
         .map_err(|error| format!("the launcher's sandbox cannot be read: {error}"))?;
+    // The checkout or an app's directory may have changed since the engine
+    // built the sandbox, for example by a restart after the app replaced a
+    // directory with a symbolic link, so the launcher checks it again.
+    super::verify(&spec).map_err(|error| error.to_string())?;
     apply(&spec)?;
     #[expect(
         clippy::disallowed_methods,

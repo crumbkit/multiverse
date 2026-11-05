@@ -54,6 +54,7 @@ fn plan_of(manifest: &Manifest, caller: &CallerEnvironment) -> Built {
         checkout: Path::new("/work/triage/app"),
         roots: Vec::new(),
         ports: &ports,
+        workspace_dir: None,
         grace: Duration::from_secs(5),
         caller,
     })
@@ -368,6 +369,7 @@ fn a_merged_manifest_maps_onto_apps_and_ports_whose_names_do_not_clash() {
         checkout: &workspace.path,
         roots,
         ports: &ports,
+        workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
     })
@@ -429,6 +431,7 @@ fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
         checkout: Path::new("/work/triage/app"),
         roots,
         ports: &ports,
+        workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
     }) else {
@@ -463,6 +466,7 @@ fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::
             PathBuf::from("/work/triage"),
         ],
         ports: &ports,
+        workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
     })?;

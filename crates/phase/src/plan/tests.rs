@@ -1094,7 +1094,7 @@ fn a_plan_refuses_a_sandboxed_process_that_listens_on_a_port_its_app_may_not_lis
 
 #[test]
 fn a_plan_refuses_a_write_path_that_leaves_the_checkout() {
-    for path in ["../other", "", "$HOME/x", "target/../../x"] {
+    for path in ["../other", "", "$HOME/x", "target/../../x", "/srv/../etc"] {
         let mut api = sandboxed(host_app("api"));
         api.permissions
             .get_or_insert_default()
@@ -1129,4 +1129,39 @@ fn a_plan_leaves_the_permissions_of_a_container_app_to_docker() {
         .insert("api.stripe.com".into());
 
     assert!(plan(vec![db]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_write_path_inside_another_write_path() {
+    let mut api = sandboxed(host_app("api"));
+    api.permissions.get_or_insert_default().write = ["target", "target/debug"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    assert_eq!(
+        permission_problem(vec![api]),
+        PermissionProblem::NestedWrite {
+            outer: "target".to_owned(),
+            inner: "target/debug".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_absolute_write_path_inside_the_checkouts_write_path() {
+    let mut api = sandboxed(host_app("api"));
+    let crate::source::Source::Checkout { dir, .. } = &api.source else {
+        panic!("a host app runs from its checkout");
+    };
+    let inner = dir.join("target/debug").display().to_string();
+    api.permissions.get_or_insert_default().write = ["target".to_owned(), inner.clone()].into();
+
+    assert_eq!(
+        permission_problem(vec![api]),
+        PermissionProblem::NestedWrite {
+            outer: "target".to_owned(),
+            inner,
+        }
+    );
 }

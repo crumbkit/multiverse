@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, PortName, ProcessName, VolumeName, WorkspaceId, WorkspaceName};
+use crate::sandbox::WorkspacePaths;
 use crate::source::Source;
 
 mod check;
@@ -63,6 +64,11 @@ pub struct Plan {
     id: WorkspaceId,
     /// The apps, in the order the plan lists them.
     apps: Vec<AppPlan>,
+    /// The workspace's own directory and the paths of the workspace that
+    /// a sandboxed app may never use, which the host program gives with
+    /// [`Plan::with_workspace_dir`]. The plan's JSON form and digest leave
+    /// them out.
+    workspace_paths: WorkspacePaths,
 }
 
 impl Plan {
@@ -88,7 +94,29 @@ impl Plan {
             workspace,
             id,
             apps,
+            workspace_paths: WorkspacePaths::default(),
         })
+    }
+
+    /// Returns this plan with `dir` as the workspace's own directory, which
+    /// holds its checkouts, and `protected` as the workspace's paths that a
+    /// sandboxed app may never read or write, such as the workspace
+    /// manifest. phase refuses to sandbox an app whose checkout is `dir`,
+    /// and denies a sandboxed app the rest of `dir` outside its checkout.
+    /// Without `dir`, phase takes the parent of each app's checkout as the
+    /// workspace's directory.
+    #[must_use]
+    pub fn with_workspace_dir(mut self, dir: PathBuf, protected: Vec<PathBuf>) -> Self {
+        self.workspace_paths = WorkspacePaths {
+            dir: Some(dir),
+            protected,
+        };
+        self
+    }
+
+    /// Returns the workspace's own directory and protected paths.
+    pub(crate) const fn workspace_paths(&self) -> &WorkspacePaths {
+        &self.workspace_paths
     }
 
     /// Returns the workspace's name.

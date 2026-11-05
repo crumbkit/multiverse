@@ -154,6 +154,15 @@ pub enum PermissionProblem {
     /// backslash or a control character, which the sandbox's profile cannot
     /// hold.
     BadWrite(String),
+    /// One entry of `write` lies inside another, so the inner one grants
+    /// nothing and hides what the outer one covers.
+    #[non_exhaustive]
+    NestedWrite {
+        /// The entry that holds the other.
+        outer: String,
+        /// The entry inside it.
+        inner: String,
+    },
 }
 
 impl fmt::Display for PermissionProblem {
@@ -173,7 +182,11 @@ impl fmt::Display for PermissionProblem {
             ),
             Self::BadWrite(path) => write!(
                 formatter,
-                "it may write {path:?}, which is neither $STATE, an absolute path, nor a path inside its checkout that a sandbox profile can hold"
+                "it may write {path:?}, which is neither $STATE, an absolute path without `..`, nor a path inside its checkout that a sandbox profile can hold"
+            ),
+            Self::NestedWrite { outer, inner } => write!(
+                formatter,
+                "it may write {inner:?}, which lies inside {outer:?}, another path it may write"
             ),
         }
     }
@@ -594,6 +607,29 @@ fn check_permissions(
     if let Some(path) = permissions.write.iter().find(|path| !is_writable(path)) {
         return Err(PermissionProblem::BadWrite(path.clone()));
     }
+    // A relative entry is inside the checkout, so it is compared as the
+    // checkout's path joined with it. `$STATE` lies outside every other
+    // entry, under phase's state directory.
+    let checkout = match &app.source {
+        Source::Checkout { dir, .. } => dir.clone(),
+        _ => PathBuf::new(),
+    };
+    let resolved: Vec<(&String, PathBuf)> = permissions
+        .write
+        .iter()
+        .filter(|entry| entry.as_str() != STATE)
+        .map(|entry| (entry, checkout.join(entry).components().collect()))
+        .collect();
+    for (outer, outer_path) in &resolved {
+        for (inner, inner_path) in &resolved {
+            if outer != inner && inner_path.starts_with(outer_path) {
+                return Err(PermissionProblem::NestedWrite {
+                    outer: (*outer).clone(),
+                    inner: (*inner).clone(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -601,8 +637,8 @@ fn check_permissions(
 pub(crate) const STATE: &str = "$STATE";
 
 /// Reports whether `path`, an entry of `write`, is `$STATE`, an absolute
-/// path, or a relative path that stays inside the checkout, and holds no
-/// quote, backslash or control character.
+/// path without `..`, or a relative path that stays inside the checkout,
+/// and holds no quote, backslash or control character.
 fn is_writable(path: &str) -> bool {
     if path == STATE {
         return true;
@@ -616,10 +652,11 @@ fn is_writable(path: &str) -> bool {
         return false;
     }
     let path = Path::new(path);
-    path.is_absolute()
-        || path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+    path.components().all(|component| match component {
+        Component::Normal(_) | Component::CurDir => true,
+        Component::RootDir => path.is_absolute(),
+        Component::ParentDir | Component::Prefix(_) => false,
+    })
 }
 
 /// Returns the first cycle in `graph`, which maps each name to the names it

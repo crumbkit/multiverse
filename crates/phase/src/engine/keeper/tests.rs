@@ -719,6 +719,9 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
     let outside = fixture.dir.join("outside");
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::create_dir_all(&outside).unwrap();
+    // The launcher checks that each path is canonical before it applies the
+    // sandbox.
+    let tmp = tmp.canonicalize().unwrap();
     let script = format!(
         "if echo x > '{}/file' 2>/dev/null; then echo wrote; else echo denied; fi; mkdir \"$TMPDIR/run.$$\"; exit 3",
         outside.display()
@@ -729,7 +732,7 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
             "/usr",
             "/bin",
             "/System",
-            "/Library",
+            "/Library/Apple",
             "/private/etc",
             "/private/var/select",
             "/dev",
@@ -739,6 +742,8 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
         .collect(),
         write: BTreeSet::from([tmp.clone()]),
         path_dirs: Vec::new(),
+        protected: Vec::new(),
+        read_only: BTreeSet::new(),
         deny: BTreeSet::new(),
         listen: BTreeSet::new(),
         connect: BTreeSet::new(),

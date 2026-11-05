@@ -6,29 +6,34 @@
 //! plan records that, because it writes the app's permissions as `null`.
 //! On a platform with no sandbox that phase supports, or a Linux kernel
 //! whose Landlock cannot restrict TCP ports, an app with permissions runs
-//! unsandboxed too, and `status` shows why.
+//! unsandboxed too, and `status` shows why. Landlock leaves Unix sockets
+//! and UDP open, so `status` shows it as a partial sandbox
+//! ([`LANDLOCK_PARTIAL`]).
 //!
 //! The engine turns the plan into a [`SandboxSpec`]: the paths the process
-//! may read and write, the ports it may listen on and connect to, and the
-//! paths it is always denied. The spec holds paths and ports, never an
-//! environment value. The keeper starts the app through the launcher, the
-//! program that links phase run as `<keeper words> --sandboxed <spec> --
-//! <app command>`, which applies the sandbox to itself and then replaces
-//! itself with the app. So every start of the app, including each restart
-//! by its keeper, runs under the sandbox, and the app's pid is the
-//! launcher's.
+//! may read and write, the paths it may only read, the ports it may listen
+//! on and connect to, and the paths it is always denied. The spec holds
+//! canonical paths and ports, never an environment value. The keeper
+//! starts the app through the launcher, the program that links phase run
+//! as `<keeper words> --sandboxed <spec> -- <app command>`, which checks
+//! the spec again, applies the sandbox to itself and then replaces itself
+//! with the app. So every start of the app, including each restart by its
+//! keeper, runs under the sandbox, and the app's pid is the launcher's.
 //!
 //! The spec allows reading the system's own directories, the toolchain
-//! directories that `PATH` names (Cargo, rustup, mise and Homebrew), the
-//! app's checkout and the paths the app may write. It allows writing the
+//! directories that `PATH` names (Cargo, rustup, mise and the program
+//! directories of Homebrew) and the app's checkout. It allows writing the
 //! app's own state directory, `<phase state>/apps/<workspace id>/<app>/state`,
 //! its temporary directory `.../tmp`, which becomes the app's `TMPDIR`, and
-//! the paths its permissions add. It refuses to build a spec whose allowed
-//! paths cover or lie inside a protected path: `~/.ssh`, the Keychains, the
-//! per-user temporary directory that holds the agent's socket, phase's own
-//! state directory, the protected paths the host program names, and the
-//! workspace directory outside the app's checkout. On macOS the profile
-//! also denies those paths explicitly.
+//! the paths its permissions add. phase refuses to build a spec whose
+//! allowed paths cover or lie inside a protected path: the credentials in
+//! the home directory, the Keychains, the per-user temporary directory
+//! that holds the agent's socket, phase's own state directory, the paths
+//! the host program protects, and the workspace's own directory outside the
+//! app's checkout. It also refuses a spec whose write paths reach a path
+//! the app may only read: the launcher program and its directory, the
+//! `PATH` directories, the toolchain directories and the checkout's
+//! `.git`. On macOS the profile also denies those paths explicitly.
 //!
 //! The network is loopback only until phase runs its allowlist proxy: the
 //! app may listen on the ports its permissions name and connect to the
@@ -37,8 +42,9 @@
 //! those ports, because nono's port rules allow binding any port. Seatbelt
 //! applies the last rule that matches, so the rules work only because nono
 //! writes them after its `(deny network*)`, which it does for every rule
-//! that starts with `(allow network`. The exact pin of nono in Cargo.toml
-//! and the macOS test of a sandboxed process's ports guard that order.
+//! that starts with `(allow network`. The exact pin of nono in Cargo.toml,
+//! a unit test of the rules' prefix and the macOS test of a sandboxed
+//! process's ports guard that order.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -54,6 +60,8 @@ use crate::source::Source;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod capabilities;
 mod launch;
+#[cfg(any(target_os = "macos", test))]
+mod seatbelt;
 
 #[cfg(test)]
 mod tests;
@@ -70,8 +78,13 @@ pub use launch::{SANDBOX_REFUSED, launch};
 pub enum Sandboxing {
     /// The process runs under macOS's Seatbelt.
     Seatbelt,
-    /// The process runs under Linux's Landlock.
-    Landlock,
+    /// The process runs under Linux's Landlock, which confines it only in
+    /// part: [`LANDLOCK_PARTIAL`] says what Landlock leaves open.
+    #[non_exhaustive]
+    Landlock {
+        /// What Landlock leaves unrestricted.
+        partial: String,
+    },
     /// The process runs without a sandbox, for this reason.
     #[non_exhaustive]
     Unsandboxed {
@@ -79,6 +92,34 @@ pub enum Sandboxing {
         reason: String,
     },
 }
+
+impl Sandboxing {
+    /// Returns the partial sandbox of Linux, which [`LANDLOCK_PARTIAL`]
+    /// describes.
+    #[must_use]
+    pub fn landlock() -> Self {
+        Self::Landlock {
+            partial: LANDLOCK_PARTIAL.to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for Sandboxing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Seatbelt => formatter.write_str("seatbelt"),
+            Self::Landlock { partial } => write!(formatter, "landlock (partial: {partial})"),
+            Self::Unsandboxed { reason } => write!(formatter, "unsandboxed ({reason})"),
+        }
+    }
+}
+
+/// What Landlock leaves open on Linux. Before its ABI 9 Landlock cannot
+/// restrict `connect` to a Unix socket, and nono 0.81 does not enforce
+/// one, so a process can reach any Unix socket it can name, such as
+/// Docker's, the user's D-Bus bus or an ssh or gpg agent. Landlock does
+/// not restrict UDP, and it restricts a TCP port on every address.
+pub const LANDLOCK_PARTIAL: &str = "Unix sockets and UDP unrestricted, TCP ports on every address";
 
 /// The reason of a process whose app declares no permissions.
 pub(crate) const UNDECLARED: &str = "its app declares no permissions";
@@ -108,7 +149,7 @@ pub(crate) fn platform() -> Platform {
 #[cfg(target_os = "linux")]
 pub(crate) fn platform() -> Platform {
     match nono::Sandbox::detect_abi() {
-        Ok(abi) if abi.has_network() => Platform::Available(Sandboxing::Landlock),
+        Ok(abi) if abi.has_network() => Platform::Available(Sandboxing::landlock()),
         Ok(abi) => Platform::Unavailable(format!(
             "the kernel's Landlock ABI {} cannot restrict TCP ports, which needs ABI 4",
             abi.version_string()
@@ -152,19 +193,30 @@ pub(crate) struct Launcher {
 }
 
 /// What a sandboxed process may do, as the keeper passes it to the
-/// launcher. It holds paths and ports, never an environment value.
+/// launcher. It holds paths and ports, never an environment value. Its
+/// read and write paths are canonical, so the launcher can tell that a
+/// path moved before it applies the sandbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SandboxSpec {
     /// The directories and files that the process may read.
     pub(crate) read: BTreeSet<PathBuf>,
-    /// The directories that the process may read and write.
+    /// The directories that the process may read and write. The launcher
+    /// creates one that does not exist yet.
     pub(crate) write: BTreeSet<PathBuf>,
     /// The directories of `PATH`, which the process may look a program up
     /// in.
     pub(crate) path_dirs: Vec<PathBuf>,
+    /// The paths that the process may neither read nor write, apart from
+    /// each one's exception.
+    pub(crate) protected: Vec<Protected>,
+    /// The paths that the process may read but never write: the launcher
+    /// program and its directory, the `PATH` directories, the toolchain
+    /// directories and the checkout's `.git`.
+    pub(crate) read_only: BTreeSet<PathBuf>,
     /// The paths that the process is always denied, which the macOS
-    /// profile names explicitly.
+    /// profile names explicitly: the protected paths, and on macOS the
+    /// directories inside a system directory that it must not read.
     pub(crate) deny: BTreeSet<PathBuf>,
     /// The loopback ports that the process may listen on.
     pub(crate) listen: BTreeSet<u16>,
@@ -183,6 +235,9 @@ pub(crate) struct SandboxSpec {
 pub(crate) enum SandboxError {
     /// The app runs from a release, which has no sandbox yet.
     Release,
+    /// The app's checkout is the workspace's own directory, which holds
+    /// the workspace manifest and every other checkout.
+    WorkspaceRoot(PathBuf),
     /// An allowed path covers or lies inside a path that the sandbox always
     /// denies.
     Protected {
@@ -190,6 +245,22 @@ pub(crate) enum SandboxError {
         allowed: PathBuf,
         /// The protected path.
         protected: PathBuf,
+    },
+    /// A writable path covers or lies inside a path that the app may only
+    /// read.
+    ReadOnly {
+        /// The writable path.
+        allowed: PathBuf,
+        /// The path that the app may only read.
+        read_only: PathBuf,
+    },
+    /// A path resolves somewhere else than when phase built the sandbox,
+    /// because a symbolic link changed.
+    Moved {
+        /// The path as phase built the sandbox.
+        path: PathBuf,
+        /// Where it resolves now.
+        now: PathBuf,
     },
     /// A path that the sandbox needs cannot be read or created.
     Unusable {
@@ -211,11 +282,28 @@ impl fmt::Display for SandboxError {
             Self::Release => formatter.write_str(
                 "the app runs from a release, and phase sandboxes only an app that runs from its checkout",
             ),
+            Self::WorkspaceRoot(path) => write!(
+                formatter,
+                "the app runs in {}, the workspace's own directory, which holds the workspace manifest and every checkout, so phase sandboxes only an app that runs in one checkout",
+                path.display()
+            ),
             Self::Protected { allowed, protected } => write!(
                 formatter,
                 "the sandbox would allow {}, which overlaps {}, a path that the sandbox always denies",
                 allowed.display(),
                 protected.display()
+            ),
+            Self::ReadOnly { allowed, read_only } => write!(
+                formatter,
+                "the sandbox would let the app write {}, which overlaps {}, a path that the app may only read",
+                allowed.display(),
+                read_only.display()
+            ),
+            Self::Moved { path, now } => write!(
+                formatter,
+                "the sandbox allows {}, which now resolves to {}",
+                path.display(),
+                now.display()
             ),
             Self::Unusable { path, reason } => write!(
                 formatter,
@@ -239,11 +327,13 @@ impl std::error::Error for SandboxError {}
 
 /// A path that the sandbox always denies, apart from one directory inside
 /// it that the app may use.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Protected {
-    /// The path, canonical when it exists.
+    /// The path, canonical.
     path: PathBuf,
     /// The directory inside it that the app may use, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     except: Option<PathBuf>,
 }
 
@@ -251,7 +341,7 @@ impl Protected {
     /// Returns the protection of `path`.
     pub(crate) fn path(path: &Path) -> Self {
         Self {
-            path: canonical_or_given(path),
+            path: canonical(path),
             except: None,
         }
     }
@@ -259,8 +349,8 @@ impl Protected {
     /// Returns the protection of `path` apart from `except`.
     fn except(path: &Path, except: &Path) -> Self {
         Self {
-            path: canonical_or_given(path),
-            except: Some(canonical_or_given(except)),
+            path: canonical(path),
+            except: Some(canonical(except)),
         }
     }
 
@@ -278,10 +368,40 @@ impl Protected {
     }
 }
 
-/// Returns `path` with its symbolic links resolved, or `path` itself when
-/// it does not exist.
-fn canonical_or_given(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+/// Returns `path` with its symbolic links resolved. A path that does not
+/// exist resolves its nearest existing ancestor and keeps the rest of its
+/// names, so it compares equal to the path once it is created.
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    let mut names = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(resolved) = current.canonicalize() {
+            return names
+                .iter()
+                .rev()
+                .fold(resolved, |resolved, name| resolved.join(name));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                names.push(name.to_os_string());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// The paths of one workspace that the host program gives the plan: the
+/// workspace's own directory, which holds every checkout, and the paths of
+/// the workspace that a sandboxed app may never read or write, such as its
+/// manifest. They are not part of the plan's digest.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkspacePaths {
+    /// The workspace's own directory, or `None` when the host program gave
+    /// none, and phase takes the parent of each checkout instead.
+    pub(crate) dir: Option<PathBuf>,
+    /// The workspace's protected paths.
+    pub(crate) protected: Vec<PathBuf>,
 }
 
 /// What the engine knows when it builds a process's sandbox, besides the
@@ -292,6 +412,8 @@ pub(crate) struct Context<'a> {
     pub(crate) state_dir: &'a Path,
     /// The workspace's stable id.
     pub(crate) workspace: &'a WorkspaceId,
+    /// The workspace's own directory and protected paths.
+    pub(crate) workspace_paths: &'a WorkspacePaths,
     /// The value of `PATH` that keepers and apps inherit, or `None`.
     pub(crate) path: Option<&'a str>,
     /// The value of `HOME` that keepers and apps inherit, or `None`.
@@ -309,6 +431,8 @@ pub(crate) struct Context<'a> {
 /// directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppDirs {
+    /// The directory that holds both, `apps/<workspace>/<app>`.
+    pub(crate) base: PathBuf,
     /// The app's state directory, which `$STATE` names.
     pub(crate) state: PathBuf,
     /// The app's temporary directory.
@@ -326,21 +450,26 @@ impl AppDirs {
         Self {
             state: base.join("state"),
             tmp: base.join("tmp"),
+            base,
         }
     }
 
-    /// Creates both directories, readable only by the user.
+    /// Creates both directories and sets them readable only by the user,
+    /// also when they exist already.
     fn create(&self) -> Result<(), SandboxError> {
-        use std::os::unix::fs::DirBuilderExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
         for dir in [&self.state, &self.tmp] {
+            let unusable = |error: std::io::Error| SandboxError::Unusable {
+                path: dir.clone(),
+                reason: error.to_string(),
+            };
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(dir)
-                .map_err(|error| SandboxError::Unusable {
-                    path: dir.clone(),
-                    reason: error.to_string(),
-                })?;
+                .map_err(unusable)?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(unusable)?;
         }
         Ok(())
     }
@@ -348,14 +477,17 @@ impl AppDirs {
 
 /// The system directories that every sandboxed process may read on macOS.
 /// `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
-/// profile allows the resolved paths.
+/// profile allows the resolved paths. Of `/Library` it allows only what
+/// toolchains read.
 #[cfg(target_os = "macos")]
 const SYSTEM_READ: &[&str] = &[
     "/usr",
     "/bin",
     "/sbin",
     "/System",
-    "/Library",
+    "/Library/Developer",
+    "/Library/Frameworks",
+    "/Library/Apple",
     "/private/etc",
     "/private/var/db/timezone",
     "/private/var/select",
@@ -368,19 +500,64 @@ const SYSTEM_READ: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/dev", "/proc",
 ];
 
+/// The directories inside [`SYSTEM_READ`] that the macOS profile denies
+/// again: the data and configuration of a Homebrew under `/usr/local`.
+/// Landlock cannot deny a path inside a granted one, so Linux has none.
+#[cfg(target_os = "macos")]
+const SYSTEM_DENY: &[&str] = &["/usr/local/var", "/usr/local/etc"];
+
+/// The directories inside [`SYSTEM_READ`] that the profile denies again,
+/// which Linux cannot.
+#[cfg(not(target_os = "macos"))]
+const SYSTEM_DENY: &[&str] = &[];
+
+/// The paths in the home directory that every sandbox protects: the
+/// credentials of ssh, AWS, GitHub's CLI, Docker, netrc, git and gpg and
+/// Cargo, the shells' startup files, the agents' own directories, mise's
+/// configuration, and on macOS the Keychains and the user's launch agents.
+const HOME_PROTECTED: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".config/gh",
+    ".docker",
+    ".netrc",
+    ".git-credentials",
+    ".gnupg",
+    ".cargo/credentials.toml",
+    ".cargo/credentials",
+    ".config/mise",
+    ".claude",
+    ".codex",
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".config/fish",
+    #[cfg(target_os = "macos")]
+    "Library/Keychains",
+    #[cfg(target_os = "macos")]
+    "Library/LaunchAgents",
+];
+
 /// Returns the protected paths that every sandbox has on this platform:
-/// `~/.ssh`, the Keychains and the directory of the agent's socket.
+/// [`HOME_PROTECTED`], the system Keychains, and the directory of the
+/// agent's socket.
 fn always_protected(home: Option<&Path>) -> Vec<Protected> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    if let Some(home) = home {
-        paths.push(home.join(".ssh"));
-        #[cfg(target_os = "macos")]
-        paths.push(home.join("Library/Keychains"));
-    }
+    let mut paths: Vec<PathBuf> = home
+        .map(|home| HOME_PROTECTED.iter().map(|name| home.join(name)).collect())
+        .unwrap_or_default();
     // Every per-user temporary directory that macOS hands out, including
     // the one that holds the agent's socket, lies under /private/var/folders.
     #[cfg(target_os = "macos")]
-    paths.push(PathBuf::from("/private/var/folders"));
+    paths.extend([
+        PathBuf::from("/private/var/folders"),
+        PathBuf::from("/Library/Keychains"),
+    ]);
     #[cfg(target_os = "linux")]
     paths.push(PathBuf::from(format!(
         "/run/user/{}",
@@ -389,10 +566,26 @@ fn always_protected(home: Option<&Path>) -> Vec<Protected> {
     paths.iter().map(|path| Protected::path(path)).collect()
 }
 
+/// The directories of a Homebrew prefix that a sandboxed process may read.
+/// Its `var` and `etc`, which hold services' data and configuration, are
+/// left out.
+const HOMEBREW_READ: &[&str] = &[
+    "bin",
+    "sbin",
+    "Cellar",
+    "opt",
+    "lib",
+    "libexec",
+    "share",
+    "include",
+    "Frameworks",
+];
+
 /// Returns the toolchain directories that the `PATH` entry `entry` lets a
 /// sandboxed process read: for Cargo its `bin`, `registry` and `git`
 /// directories and rustup's home, never Cargo's credentials; mise's data
-/// directory; Homebrew's prefix; and otherwise the entry itself.
+/// directory; the program directories of a Homebrew prefix; and otherwise
+/// the entry itself.
 fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     if let Some(home) = home {
         let cargo = home.join(".cargo");
@@ -412,7 +605,10 @@ fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     }
     for root in ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"] {
         if entry.starts_with(root) {
-            return vec![PathBuf::from(root)];
+            return HOMEBREW_READ
+                .iter()
+                .map(|name| Path::new(root).join(name))
+                .collect();
         }
     }
     vec![entry.to_path_buf()]
@@ -423,57 +619,77 @@ fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 ///
 /// # Errors
 ///
-/// Returns a [`SandboxError`] when the app runs from a release, an allowed
-/// path reaches a protected one, a path cannot be used or held, or the
-/// launcher cannot be named.
+/// Returns a [`SandboxError`] when the app runs from a release or from the
+/// workspace's own directory, an allowed path reaches a protected one, a
+/// writable path reaches one the app may only read, a path cannot be used
+/// or held, or the launcher cannot be named.
 pub(crate) fn spec(
     app: &AppPlan,
     process: &ProcessPlan,
     permissions: &Permissions,
     context: &Context<'_>,
 ) -> Result<SandboxSpec, SandboxError> {
-    let Source::Checkout { dir: checkout, .. } = &app.source else {
+    let Source::Checkout { dir, .. } = &app.source else {
         return Err(SandboxError::Release);
     };
+    let checkout = canonical(dir);
+    let workspace_dir = context
+        .workspace_paths
+        .dir
+        .as_deref()
+        .map(canonical)
+        .or_else(|| checkout.parent().map(Path::to_path_buf));
+    if workspace_dir.as_ref() == Some(&checkout) {
+        return Err(SandboxError::WorkspaceRoot(checkout));
+    }
     let dirs = AppDirs::of(context.state_dir, context.workspace, &app.name);
-    // The app's own directories lie inside phase's state directory, so they
-    // are checked only against the paths that every sandbox protects.
-    let fixed = always_protected(context.home);
-    for dir in [&dirs.state, &dirs.tmp] {
-        let dir = canonical_or_given(dir);
-        if let Some(found) = fixed.iter().find(|found| found.reached_by(&dir)) {
-            return Err(SandboxError::Protected {
-                allowed: dir,
-                protected: found.path.clone(),
-            });
-        }
-    }
-    let mut protected = fixed;
-    protected.push(Protected::path(context.state_dir));
+    let mut protected = always_protected(context.home);
+    // The app's own directories lie inside phase's state directory, which
+    // is protected apart from them.
+    protected.push(Protected::except(context.state_dir, &dirs.base));
     protected.extend(context.protected.iter().map(|path| Protected::path(path)));
-    if let Some(workspace) = checkout.parent() {
-        protected.push(Protected::except(workspace, checkout));
+    protected.extend(
+        context
+            .workspace_paths
+            .protected
+            .iter()
+            .map(|path| Protected::path(path)),
+    );
+    if let Some(workspace) = &workspace_dir {
+        protected.push(Protected::except(workspace, &checkout));
     }
-    dirs.create()?;
-    let mut write: BTreeSet<PathBuf> = [dirs.state.clone(), dirs.tmp.clone()].into();
+    let reaches = |path: &Path| protected.iter().any(|found| found.reached_by(path));
+    let mut write: BTreeSet<PathBuf> = [canonical(&dirs.state), canonical(&dirs.tmp)].into();
     for entry in &permissions.write {
         write.insert(if entry == STATE {
-            dirs.state.clone()
+            canonical(&dirs.state)
         } else {
-            checkout.join(entry)
+            canonical(&checkout.join(entry))
         });
     }
     let mut read: BTreeSet<PathBuf> = SYSTEM_READ
         .iter()
-        .map(PathBuf::from)
+        .map(Path::new)
         .filter(|path| path.exists())
+        .map(canonical)
         .collect();
     read.insert(checkout.clone());
     if let Some(program) = process.run.first().map(Path::new)
         && program.is_absolute()
     {
-        read.insert(program.to_path_buf());
+        read.insert(canonical(program));
     }
+    let mut read_only: BTreeSet<PathBuf> = BTreeSet::new();
+    for program in [
+        context.launcher.program.clone(),
+        canonical(&context.launcher.program),
+    ] {
+        if let Some(parent) = program.parent() {
+            read_only.insert(canonical(parent));
+        }
+        read_only.insert(canonical(&program));
+    }
+    read_only.insert(checkout.join(".git"));
     let mut path_dirs = Vec::new();
     for entry in context.path.unwrap_or_default().split(':') {
         let entry = Path::new(entry);
@@ -481,49 +697,115 @@ pub(crate) fn spec(
             continue;
         }
         path_dirs.push(entry.to_path_buf());
+        read_only.insert(canonical(entry));
         for dir in toolchain(entry, context.home) {
-            let canonical = canonical_or_given(&dir);
+            let dir = canonical(&dir);
+            read_only.insert(dir.clone());
             // A `PATH` entry that reaches a protected path, such as one
             // that names the home directory, gives the app nothing.
-            if dir.exists() && !protected.iter().any(|found| found.reached_by(&canonical)) {
+            if dir.exists() && !reaches(&dir) {
                 read.insert(dir);
             }
         }
     }
-    for path in read.iter().chain(write.iter()) {
-        if [&dirs.state, &dirs.tmp].contains(&path) {
-            continue;
-        }
-        let canonical = canonical_or_given(path);
-        if let Some(found) = protected.iter().find(|found| found.reached_by(&canonical)) {
-            return Err(SandboxError::Protected {
-                allowed: path.clone(),
-                protected: found.path.clone(),
-            });
-        }
-    }
-    let deny: BTreeSet<PathBuf> = protected.iter().map(|found| found.path.clone()).collect();
-    for path in read.iter().chain(&write).chain(&deny).chain(&path_dirs) {
-        if !is_profile_path(path) {
-            return Err(SandboxError::Unwritable(path.clone()));
-        }
-    }
+    let mut deny: BTreeSet<PathBuf> = protected.iter().map(|found| found.path.clone()).collect();
+    deny.extend(SYSTEM_DENY.iter().map(PathBuf::from));
     let listen = permissions
         .listen
         .iter()
         .filter_map(|port| app.ports.get(port))
         .map(|port| port.get())
         .collect();
-    Ok(SandboxSpec {
+    let spec = SandboxSpec {
         read,
         write,
         path_dirs,
+        protected,
+        read_only,
         deny,
         listen,
         connect: context.connect.clone(),
-        tmp: dirs.tmp,
+        tmp: canonical(&dirs.tmp),
         launcher: context.launcher.clone(),
-    })
+    };
+    check(&spec)?;
+    for path in spec
+        .read
+        .iter()
+        .chain(&spec.write)
+        .chain(&spec.deny)
+        .chain(&spec.read_only)
+        .chain(&spec.path_dirs)
+    {
+        if !is_profile_path(path) {
+            return Err(SandboxError::Unwritable(path.clone()));
+        }
+    }
+    dirs.create()?;
+    Ok(spec)
+}
+
+/// Checks that no read or write path of `spec` reaches a protected path,
+/// and that no write path reaches a path the app may only read. The
+/// engine checks a spec when it builds it, and the launcher checks it
+/// again before it applies it.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Protected`] or [`SandboxError::ReadOnly`] for
+/// the first path that reaches one.
+pub(crate) fn check(spec: &SandboxSpec) -> Result<(), SandboxError> {
+    for path in spec.read.iter().chain(&spec.write) {
+        if let Some(found) = spec.protected.iter().find(|found| found.reached_by(path)) {
+            return Err(SandboxError::Protected {
+                allowed: path.clone(),
+                protected: found.path.clone(),
+            });
+        }
+    }
+    for path in &spec.write {
+        if let Some(found) = spec
+            .read_only
+            .iter()
+            .find(|read_only| Protected::path(read_only).reached_by(path))
+        {
+            return Err(SandboxError::ReadOnly {
+                allowed: path.clone(),
+                read_only: found.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Checks `spec` as the launcher sees it just before it applies it: each
+/// read and write path still resolves to itself, so no symbolic link has
+/// moved it since the engine built the spec, and [`check`] still passes.
+/// Then it creates each write directory that does not exist yet.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Moved`] for a path that resolves elsewhere, the
+/// errors of [`check`], and [`SandboxError::Unusable`] for a directory that
+/// cannot be created.
+pub(crate) fn verify(spec: &SandboxSpec) -> Result<(), SandboxError> {
+    for path in spec.read.iter().chain(&spec.write) {
+        let now = canonical(path);
+        if &now != path {
+            return Err(SandboxError::Moved {
+                path: path.clone(),
+                now,
+            });
+        }
+    }
+    check(spec)?;
+    for path in &spec.write {
+        std::fs::create_dir_all(path).map_err(|error| SandboxError::Unusable {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 /// Reports whether `path` is UTF-8 and holds no quote, backslash or control

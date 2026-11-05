@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::name::{AppName, PortName, ProcessName, WorkspaceId};
 use crate::plan::restart::{Restart, Stop};
 use crate::record::{BadHex, ContainerId, DockerName, hex_id};
+use crate::sandbox::Sandboxing;
 
 /// The version of the run record. phase reads every version and writes
 /// only the newest, [`RUN_VERSION`]. Each version adds fields that an
@@ -164,6 +165,13 @@ pub(crate) struct HostEntry {
     /// `phase/run/v2` record, reads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ready: Option<Ready>,
+    /// How phase launched the process, under which sandbox or unsandboxed
+    /// and why, which `status` shows. A keeper's restart runs under the
+    /// same sandbox, so it keeps it. It is `None` for a keeper, for a
+    /// process that phase has not started yet, and in a record that phase
+    /// wrote before it recorded the sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sandbox: Option<Sandboxing>,
 }
 
 /// When phase observed a process ready: its readiness probe passed, or a
@@ -316,6 +324,9 @@ pub(crate) struct Launching {
     pub(crate) listen: Option<Listen>,
     /// The restart policy that its keeper follows.
     pub(crate) restart: Restart,
+    /// How the process runs: under which sandbox, or unsandboxed and why.
+    /// It is `None` for a container.
+    pub(crate) sandbox: Option<Sandboxing>,
 }
 
 /// A started host process.
@@ -583,6 +594,7 @@ impl RunRecord {
             ended: None,
             restart: None,
             ready: None,
+            sandbox: None,
         };
         self.keepers.push(entry(None, None));
         self.processes.push(entry(stop, listen));
@@ -882,6 +894,7 @@ impl RunRecord {
         entry.stop = Some(launching.stop);
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
+        entry.sandbox.clone_from(&launching.sandbox);
         Ok(())
     }
 

@@ -61,7 +61,7 @@ use crate::record::run::{
 };
 use crate::record::store::{Journal, RunStore};
 use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
-use crate::sandbox::{self, Context, Platform, SandboxError, SandboxSpec};
+use crate::sandbox::{self, Context, Platform, SandboxError, SandboxSpec, WorkspacePaths};
 use crate::select::Selection;
 use crate::source::Source;
 
@@ -145,6 +145,7 @@ impl Engine<'_> {
             cancel,
             started: Vec::new(),
             ports: app_ports(plan),
+            workspace_paths: plan.workspace_paths().clone(),
         };
         op.up(plan, &chosen)
     }
@@ -179,6 +180,7 @@ impl Engine<'_> {
             cancel,
             started: Vec::new(),
             ports: app_ports(plan),
+            workspace_paths: plan.workspace_paths().clone(),
         };
         op.restart(&chosen)
     }
@@ -226,6 +228,9 @@ struct Op<'e, 's> {
     /// The loopback ports of each app of the plan, which a sandboxed app
     /// may connect to when it depends on that app.
     ports: BTreeMap<AppName, BTreeSet<u16>>,
+    /// The workspace's own directory and protected paths, which the
+    /// sandbox of each app keeps it out of.
+    workspace_paths: WorkspacePaths,
 }
 
 /// Something that an operation started, which it stops again when the
@@ -646,6 +651,7 @@ impl Op<'_, '_> {
                 stop: process.stop,
                 listen: listen.clone(),
                 restart: process.restart.clone(),
+                sandbox: sandbox::sandboxing(app, &sandbox::platform()),
             },
         )?;
         let (keeper, started, end, lines) = match self.launch(app, process, environment.as_ref()) {
@@ -883,6 +889,7 @@ impl Op<'_, '_> {
         let context = Context {
             state_dir: settings.state_dir,
             workspace: &self.workspace,
+            workspace_paths: &self.workspace_paths,
             path: settings.inherited.get("PATH").map(String::as_str),
             home: settings.inherited.get("HOME").map(Path::new),
             protected: settings.protected,
@@ -1335,26 +1342,25 @@ fn listen(app: &AppPlan, process: &ProcessPlan) -> Option<Listen> {
     })
 }
 
-/// Returns the directory that `process` of `app` starts in: the app's
-/// checkout, or the process's directory within it.
 /// Returns where the sandbox's denials show for a process of `app` that
 /// exited with `code` before it was ready, or `None` when it ran
-/// unsandboxed.
+/// unsandboxed. The process may have ended for another reason, so the
+/// note says only that a denial may be why.
 fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
     let kind = match sandbox::sandboxing(app, &sandbox::platform())? {
         sandbox::Sandboxing::Seatbelt => "Seatbelt",
-        sandbox::Sandboxing::Landlock => "Landlock",
+        sandbox::Sandboxing::Landlock { .. } => "Landlock",
         sandbox::Sandboxing::Unsandboxed { .. } => return None,
     };
     if code == Some(i32::from(sandbox::SANDBOX_REFUSED)) {
         return Some(format!(
-            "the process was to run under {kind}, and its log says why the sandbox or the program could not start"
+            "the process was to run under {kind}, and its log may say why the sandbox or the program could not start"
         ));
     }
     Some(if kind == "Seatbelt" {
-        "the process ran under Seatbelt, which fails each access it denies with \"Operation not permitted\", and `log show --last 5m --style compact --predicate 'sender == \"Sandbox\"'` lists the denials".to_owned()
+        "the process ran under Seatbelt, which may have denied an access it needed: Seatbelt fails each access it denies with \"Operation not permitted\", and `log show --last 5m --style compact --predicate 'sender == \"Sandbox\"'` lists the denials".to_owned()
     } else {
-        "the process ran under Landlock, which fails each access it denies with \"Permission denied\" or \"Operation not permitted\"".to_owned()
+        "the process ran under Landlock, which may have denied an access it needed: Landlock fails each access it denies with \"Permission denied\" or \"Operation not permitted\"".to_owned()
     })
 }
 
@@ -1371,6 +1377,8 @@ fn app_ports(plan: &Plan) -> BTreeMap<AppName, BTreeSet<u16>> {
         .collect()
 }
 
+/// Returns the directory that `process` of `app` starts in: the app's
+/// checkout, or the process's directory within it.
 fn process_dir(app: &AppPlan, process: &ProcessPlan) -> PathBuf {
     let base = match &app.source {
         Source::Checkout { dir, .. } => dir.clone(),

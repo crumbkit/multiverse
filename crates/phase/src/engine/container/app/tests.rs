@@ -7,7 +7,8 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::{
-    compose_file, file_secrets, for_environment, objects, plan_hash, reference, references,
+    compose_file, file_secrets, for_environment, keys_sorted, objects, plan_hash, reference,
+    references,
 };
 use crate::engine::container::names::{Identity, Scope};
 use crate::engine::container::secrets::{ImageConfig, entrypoint};
@@ -332,7 +333,11 @@ fn a_processs_plan_hash_does_not_depend_on_its_images_command() {
 
     assert_eq!(
         hash,
-        PlanHash::new(digest(file["services"]["server"].to_string().as_bytes()))
+        PlanHash::new(digest(
+            keys_sorted(&file["services"]["server"])
+                .to_string()
+                .as_bytes()
+        ))
     );
 }
 
@@ -523,7 +528,11 @@ fn an_absent_optional_variable_is_left_out_of_the_service_and_a_required_one_sta
     assert_eq!(absent["services"]["worker"], file["services"]["worker"]);
     assert_eq!(
         plan_hash(&scope, &app, &name("server")).unwrap(),
-        PlanHash::new(digest(file["services"]["server"].to_string().as_bytes()))
+        PlanHash::new(digest(
+            keys_sorted(&file["services"]["server"])
+                .to_string()
+                .as_bytes()
+        ))
     );
 }
 
@@ -552,9 +561,22 @@ fn a_process_whose_every_secret_file_is_optional_and_absent_starts_without_files
     assert_eq!(
         plan_hash(&scope, &app, &name("server")).unwrap(),
         PlanHash::new(digest(
-            compose_file(&scope, &app, None).unwrap()["services"]["server"]
+            keys_sorted(&compose_file(&scope, &app, None).unwrap()["services"]["server"])
                 .to_string()
                 .as_bytes()
         ))
+    );
+}
+
+#[test]
+fn a_processs_plan_hash_is_the_one_of_its_service_with_sorted_keys_whatever_order_serde_json_keeps()
+{
+    let hash = plan_hash(&scope("db"), &db(), &name("server")).unwrap();
+
+    // The hash that phase recorded before a dependency turned on serde_json's
+    // insertion order, so an upgrade replaces no container.
+    assert_eq!(
+        serde_json::to_value(&hash).unwrap(),
+        json!("0693baefa96a4945e387c7b392c3d90651d1de37b9649a80a747e70aa2fdc1b0")
     );
 }

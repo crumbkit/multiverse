@@ -198,6 +198,10 @@ pub(crate) struct Inputs<'a> {
     /// Such a process's source is the root that holds its `cwd`, and its
     /// `cwd` becomes the rest of the path.
     pub(crate) roots: Vec<PathBuf>,
+    /// The workspace's own directory, which holds its checkouts, its
+    /// manifest and its `AGENTS.md`, or `None` when the plan is built
+    /// without a workspace on disk.
+    pub(crate) workspace_dir: Option<&'a Path>,
     /// The workspace's host ports, by port name.
     pub(crate) ports: &'a BTreeMap<String, u16>,
     /// How long a process gets after its stop signal.
@@ -295,12 +299,25 @@ pub(crate) fn build(inputs: &Inputs<'_>) -> Result<Built, Unrunnable> {
         apps.push(plan);
         values.insert(app, vars);
     }
-    let plan = Plan::new(inputs.workspace.clone(), inputs.id.clone(), apps).map_err(|error| {
-        Unrunnable {
-            unit: None,
-            message: format!("phase cannot run the manifest: {error}"),
-        }
-    })?;
+    let mut plan =
+        Plan::new(inputs.workspace.clone(), inputs.id.clone(), apps).map_err(|error| {
+            Unrunnable {
+                unit: None,
+                message: format!("phase cannot run the manifest: {error}"),
+            }
+        })?;
+    // A sandboxed app may use only its own checkout of the workspace, and
+    // never the workspace manifest or `AGENTS.md`, which lie in the
+    // workspace's own directory.
+    if let Some(dir) = inputs.workspace_dir {
+        plan = plan.with_workspace_dir(
+            dir.to_path_buf(),
+            vec![
+                dir.join(crate::manifest::MANIFEST_FILE),
+                dir.join(crate::record::AGENTS_FILE),
+            ],
+        );
+    }
     Ok(Built {
         plan,
         environment: ManifestEnvironment { values },

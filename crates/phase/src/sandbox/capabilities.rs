@@ -55,65 +55,11 @@ fn platform(caps: CapabilitySet, spec: &SandboxSpec) -> Result<CapabilitySet, St
     for dir in &spec.path_dirs {
         caps.add_path_metadata_dir(dir.clone());
     }
-    for rule in seatbelt_rules(spec) {
+    for rule in super::seatbelt::rules(spec) {
         caps.add_platform_rule(rule)
             .map_err(|error| error.to_string())?;
     }
     Ok(caps)
-}
-
-/// Returns phase's own Seatbelt rules for `spec`, in the order they apply.
-#[cfg(target_os = "macos")]
-pub(crate) fn seatbelt_rules(spec: &SandboxSpec) -> Vec<String> {
-    let quoted = |path: &Path| format!("(subpath \"{}\")", canonical(path).display());
-    let mut rules = Vec::new();
-    for path in &spec.deny {
-        rules.push(format!(
-            "(deny file-read-data file-write* {})",
-            quoted(path)
-        ));
-    }
-    let inside_deny = |path: &Path| {
-        let path = canonical(path);
-        spec.deny.iter().any(|deny| path.starts_with(deny))
-    };
-    for path in spec.read.iter().filter(|path| inside_deny(path)) {
-        rules.push(format!("(allow file-read-data {})", quoted(path)));
-    }
-    for path in spec.write.iter().filter(|path| inside_deny(path)) {
-        rules.push(format!(
-            "(allow file-read-data file-write* {})",
-            quoted(path)
-        ));
-    }
-    if !spec.listen.is_empty() || !spec.connect.is_empty() {
-        rules
-            .push("(allow system-socket (socket-domain AF_INET) (socket-type SOCK_STREAM))".into());
-        rules.push(
-            "(allow system-socket (socket-domain AF_INET6) (socket-type SOCK_STREAM))".into(),
-        );
-    }
-    for port in &spec.listen {
-        rules.push(format!(
-            "(allow network-bind (local tcp \"localhost:{port}\"))"
-        ));
-        rules.push(format!(
-            "(allow network-inbound (local tcp \"localhost:{port}\"))"
-        ));
-    }
-    for port in &spec.connect {
-        rules.push(format!(
-            "(allow network-outbound (remote tcp \"localhost:{port}\"))"
-        ));
-    }
-    rules
-}
-
-/// Returns `path` with its symbolic links resolved, as Seatbelt matches
-/// it, or `path` when it does not exist.
-#[cfg(target_os = "macos")]
-fn canonical(path: &Path) -> std::path::PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Adds the rules of Linux: Landlock's TCP port rules. Landlock restricts
