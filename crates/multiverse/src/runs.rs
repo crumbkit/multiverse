@@ -1297,7 +1297,10 @@ impl Runs {
         };
         let mut running = Vec::new();
         for service in recorded {
-            if lifecycle.state(&prepared, &service)? == Some(ContainerState::Running) {
+            if lifecycle
+                .state(&prepared, &service)?
+                .is_some_and(ContainerState::is_up)
+            {
                 running.push(service.as_str().to_owned());
             }
         }
@@ -1363,9 +1366,10 @@ impl Runs {
         container: &str,
     ) -> Result<bool, Error> {
         match service(container) {
-            Some(service) => Ok(
-                self.lifecycle(name).state(prepared, &service)? == Some(ContainerState::Running)
-            ),
+            Some(service) => Ok(self
+                .lifecycle(name)
+                .state(prepared, &service)?
+                .is_some_and(ContainerState::is_up)),
             None => Ok(false),
         }
     }
@@ -1466,7 +1470,7 @@ impl Runs {
         let deadline = Instant::now() + timeout;
         loop {
             let state = docker::reinspect(container)?.map(|inspected| inspected.state);
-            if state != Some(ContainerState::Running) && state != Some(ContainerState::Created) {
+            if !state.is_some_and(|state| state.is_up() || state == ContainerState::Created) {
                 let code = match state {
                     Some(ContainerState::Exited(code)) => Some(code),
                     _ => None,
@@ -1612,7 +1616,11 @@ fn service(name: &str) -> Option<ServiceName> {
 /// exit code is docker's, which mxv does not read as a signal.
 const fn container_state(state: ContainerState) -> ProcessState {
     match state {
-        ContainerState::Running => ProcessState::Running { pid: None },
+        // mxv reports a paused container, and one that docker is
+        // restarting, as running, as it did before phase told them apart.
+        ContainerState::Running | ContainerState::Paused | ContainerState::Restarting => {
+            ProcessState::Running { pid: None }
+        }
         ContainerState::Created => ProcessState::Created,
         ContainerState::Exited(code) => ProcessState::Exited {
             code: Some(code),

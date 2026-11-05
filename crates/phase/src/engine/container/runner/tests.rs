@@ -378,8 +378,9 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
         other => panic!("{other:?}"),
     }
     // Without the restart check, the wait would last the 300-second
-    // ready timeout, or the 60-second deadline of the test.
-    assert!(began.elapsed() < Duration::from_secs(20));
+    // ready timeout, or the 60-second deadline of the test. The bound
+    // leaves room for a slow pull and `compose up` on a busy runner.
+    assert!(began.elapsed() < Duration::from_secs(45));
 }
 
 #[test]
@@ -532,6 +533,75 @@ fn a_line_longer_than_a_read_keeps_is_handed_over_cut_and_the_reads_move_past_it
     assert_eq!(
         super::just_after("2026-11-05T10:00:00.000000999Z"),
         "2026-11-05T10:00:00.000001000Z"
+    );
+}
+
+#[test]
+fn a_refused_restart_policy_update_fails_only_a_container_that_still_runs() {
+    use crate::engine::container::ContainerState;
+    let refused = || {
+        Err(crate::engine::container::ContainerError::Failed {
+            operation: "update",
+            container: Some("server".to_owned()),
+            message: "cannot update a stopped container".to_owned(),
+        })
+    };
+    let runs = |state: &ContainerState| state.runs();
+    assert!(super::settled(refused(), Some(ContainerState::Running), runs).is_err());
+    assert!(super::settled(refused(), Some(ContainerState::Paused), runs).is_err());
+    for state in [
+        ContainerState::Exited(1),
+        ContainerState::Restarting,
+        ContainerState::Created,
+    ] {
+        assert_eq!(
+            super::settled(refused(), Some(state), runs).unwrap(),
+            Some(state)
+        );
+    }
+    assert_eq!(super::settled(refused(), None, runs).unwrap(), None);
+    assert_eq!(
+        super::settled(Ok(()), Some(ContainerState::Running), runs).unwrap(),
+        Some(ContainerState::Running)
+    );
+}
+
+#[test]
+fn the_time_just_after_a_stamp_carries_into_the_seconds_and_the_date() {
+    for (stamp, after) in [
+        (
+            "2026-11-05T10:00:59.999999999Z",
+            "2026-11-05T10:01:00.000000000Z",
+        ),
+        (
+            "2026-12-31T23:59:59.999999999Z",
+            "2027-01-01T00:00:00.000000000Z",
+        ),
+        (
+            "2028-02-28T23:59:59.999999999Z",
+            "2028-02-29T00:00:00.000000000Z",
+        ),
+        (
+            "2026-02-28T23:59:59.999999999Z",
+            "2026-03-01T00:00:00.000000000Z",
+        ),
+        ("2026-11-05T10:00:00.5Z", "2026-11-05T10:00:00.500000001Z"),
+    ] {
+        assert_eq!(super::just_after(stamp), after, "{stamp}");
+    }
+    assert_eq!(super::just_after("not a time"), "not a time");
+}
+
+#[test]
+fn a_read_moves_past_a_cut_line_even_when_another_line_shares_its_time() {
+    let long = logged(1, &"x".repeat(100));
+    let cut = &long[..60];
+    let mut reader = logs(60);
+    let handed = reader.after(cut, &logged(1, "beside"));
+    assert_eq!(handed.len(), 2, "{handed:?}");
+    assert_eq!(
+        reader.since.as_ref().map(|(since, _)| since.as_str()),
+        Some("2026-11-05T10:00:00.000000002Z")
     );
 }
 

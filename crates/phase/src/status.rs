@@ -200,8 +200,13 @@ pub enum ProcessState {
     /// The process runs. The run record does not say whether it passed its
     /// probe, so `status` reports a running process in this state.
     Running,
-    /// The process exited and phase is waiting to restart it.
+    /// The process exited and phase is waiting to restart it, or Docker is
+    /// restarting the container under its restart policy.
     Restarting,
+    /// The container is paused: its processes are frozen and keep their
+    /// resources. phase never pauses a container, so something outside
+    /// phase paused it.
+    Paused,
     /// phase sent the stop signal and the process has not exited yet.
     Stopping,
     /// The process is not running and phase did not see it fail.

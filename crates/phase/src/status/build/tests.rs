@@ -429,6 +429,35 @@ fn a_planned_container_that_docker_has_not_started_is_starting() {
 }
 
 #[test]
+fn a_container_that_docker_is_restarting_is_restarting_and_a_paused_one_is_paused() {
+    let state = tempfile::tempdir().unwrap();
+    container_record(state.path(), EntryState::Running);
+    let id = container_id();
+    let in_state = |docker_state| {
+        FakeDocker::default()
+            .with(DockerKind::Container, "db-server", id.as_str())
+            .in_state(id.as_str(), docker_state)
+    };
+
+    assert_eq!(
+        container_state(state.path(), &in_state(ContainerState::Restarting)),
+        ProcessState::Restarting
+    );
+    assert_eq!(
+        container_state(state.path(), &in_state(ContainerState::Paused)),
+        ProcessState::Paused
+    );
+    let status = read(
+        state.path(),
+        None,
+        &FakeProcesses::default(),
+        &in_state(ContainerState::Paused),
+    );
+    assert_eq!(status.rows[0].handle, Some(Handle::container(id.clone())));
+    assert_eq!(status.state, WorkspaceState::PartlyRunning);
+}
+
+#[test]
 fn a_container_in_a_state_that_phase_does_not_know_is_unknown() {
     let state = tempfile::tempdir().unwrap();
     container_record(state.path(), EntryState::Running);

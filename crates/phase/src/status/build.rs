@@ -280,6 +280,10 @@ fn container_row(
     let planned = entry.state == EntryState::Planned;
     let state = match state {
         Ok(Some(ContainerState::Running)) => ProcessState::Running,
+        Ok(Some(ContainerState::Paused)) => ProcessState::Paused,
+        // Docker restarts a container that exits under its restart policy,
+        // as a keeper restarts a host process.
+        Ok(Some(ContainerState::Restarting)) => ProcessState::Restarting,
         Ok(Some(ContainerState::Exited(code))) => ProcessState::exited(Some(code)),
         Ok(Some(ContainerState::Created) | None) if planned => ProcessState::Starting,
         Ok(Some(ContainerState::Created) | None) => ProcessState::Stopped,

@@ -49,8 +49,14 @@ fn labels_format(path: &str) -> String {
 /// What `docker container inspect` reports about a container.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerState {
-    /// The container runs, or is paused or restarting.
+    /// The container runs.
     Running,
+    /// The container is paused: its processes are frozen and keep their
+    /// resources.
+    Paused,
+    /// The container exited and Docker is restarting it under its restart
+    /// policy.
+    Restarting,
     /// docker created the container and has not started it.
     Created,
     /// The container has stopped, with the exit code that docker reports.
@@ -68,7 +74,9 @@ impl ContainerState {
     pub(crate) fn parse(printed: &str) -> Self {
         let mut fields = printed.split_whitespace();
         match (fields.next(), fields.next(), fields.next()) {
-            (Some("running" | "paused" | "restarting"), _, None) => Self::Running,
+            (Some("running"), _, None) => Self::Running,
+            (Some("paused"), _, None) => Self::Paused,
+            (Some("restarting"), _, None) => Self::Restarting,
             (Some("created"), _, None) => Self::Created,
             (Some("exited" | "dead"), Some(code), None) => {
                 code.parse().map_or(Self::Unknown, Self::Exited)
@@ -76,37 +84,20 @@ impl ContainerState {
             _ => Self::Unknown,
         }
     }
-}
 
-/// Docker's exact status of a container, where phase's container runner
-/// needs more than [`ContainerState`] says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Status {
-    /// The container runs.
-    Running,
-    /// The container is paused.
-    Paused,
-    /// Docker is restarting the container after it exited.
-    Restarting,
-    /// Any other status, such as `created` or `exited`.
-    Other,
-}
-
-impl Status {
     /// Reports whether the container runs or is paused, so it takes a stop
-    /// signal.
-    pub(crate) const fn runs(self) -> bool {
+    /// signal. A container that Docker is restarting does not: `docker
+    /// stop` first waits out Docker's restart delay.
+    #[must_use]
+    pub const fn runs(self) -> bool {
         matches!(self, Self::Running | Self::Paused)
     }
 
-    /// Returns the status that docker prints as `<status> <exit code>`.
-    fn parse(printed: &str) -> Self {
-        match printed.split_whitespace().next() {
-            Some("running") => Self::Running,
-            Some("paused") => Self::Paused,
-            Some("restarting") => Self::Restarting,
-            _ => Self::Other,
-        }
+    /// Reports whether the container is up: it runs, is paused, or Docker
+    /// is restarting it.
+    #[must_use]
+    pub const fn is_up(self) -> bool {
+        matches!(self, Self::Running | Self::Paused | Self::Restarting)
     }
 }
 
@@ -143,8 +134,6 @@ pub struct Inspected {
     pub(crate) container: OwnedContainer,
     /// Its state.
     pub state: ContainerState,
-    /// Its exact status.
-    pub(crate) status: Status,
     /// How many times Docker has restarted it under its restart policy.
     pub(crate) restarts: u32,
     /// When it last started, as docker prints it, for `docker logs
@@ -240,7 +229,6 @@ pub(super) fn mint_container(
     })?;
     let printed_state = lines.next().unwrap_or_default();
     let state = ContainerState::parse(printed_state);
-    let status = Status::parse(printed_state);
     let started = lines.next().unwrap_or_default().trim().to_owned();
     let prefix = scope.volume_prefix();
     let anonymous = lines
@@ -262,7 +250,6 @@ pub(super) fn mint_container(
             id,
         },
         state,
-        status,
         restarts,
         started,
         anonymous,

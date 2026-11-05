@@ -62,6 +62,7 @@
 //! container's result, and `stop` goes on to the next. Volumes stay.
 
 use std::cell::Cell;
+use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -77,8 +78,8 @@ use crate::engine::container::command::{
 use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
 use crate::engine::container::objects::{
-    self, ContainerState, Inspected, Status, ensure_image, ensure_volume, inspect_id,
-    inspect_named, no_restart, reinspect, remove, stop, stop_until,
+    self, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id, inspect_named,
+    no_restart, reinspect, remove, stop, stop_until,
 };
 use crate::engine::containers::{
     ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
@@ -475,8 +476,24 @@ impl ComposeRunner {
 fn settle(
     container: &crate::engine::container::OwnedContainer,
 ) -> Result<Option<Inspected>, ContainerError> {
-    no_restart(container)?;
-    reinspect(container)
+    let updated = no_restart(container);
+    settled(updated, reinspect(container)?, |fresh| fresh.state.runs())
+}
+
+/// Returns `fresh`, the container as docker has it after `updated`, the
+/// update of its restart policy. Docker refuses to update a container that
+/// has stopped, such as one between two restarts, and `docker rm --force`
+/// removes that container anyway, so a refused update fails only while the
+/// container runs, as `runs` tells.
+fn settled<T>(
+    updated: Result<(), ContainerError>,
+    fresh: Option<T>,
+    runs: impl Fn(&T) -> bool,
+) -> Result<Option<T>, ContainerError> {
+    match (updated, fresh) {
+        (Err(error), Some(fresh)) if runs(&fresh) => Err(error),
+        (_, fresh) => Ok(fresh),
+    }
 }
 
 /// Stops and removes the container `inspected`, which waits `grace` after
@@ -489,7 +506,7 @@ fn discard(inspected: &Inspected, grace: Duration) -> Result<(), ContainerError>
     let Some(fresh) = settle(&inspected.container)? else {
         return Ok(());
     };
-    if fresh.status.runs() {
+    if fresh.state.runs() {
         stop(&fresh.container, grace)?;
     }
     remove(fresh.container)
@@ -501,7 +518,7 @@ fn discard_until(inspected: &Inspected, grace: Duration, cancel: &Cancel) -> Res
     let Some(fresh) = settle(&inspected.container).map_err(|error| halt(&error))? else {
         return Ok(());
     };
-    if fresh.status.runs() {
+    if fresh.state.runs() {
         stop_until(&fresh.container, grace, cancel).map_err(|error| halt(&error))?;
     }
     remove(fresh.container).map_err(|error| halt(&error))
@@ -587,7 +604,7 @@ impl ContainerRunner for ComposeRunner {
                 continue;
             }
             match inspect_id(&scope, &service, &id) {
-                Ok(Some(inspected)) if inspected.status == Status::Running => {
+                Ok(Some(inspected)) if inspected.state == ContainerState::Running => {
                     running.push(entry.process.clone());
                 }
                 // A container that is gone, has stopped, is restarting, or
@@ -706,7 +723,7 @@ impl Watcher {
                 if let ContainerState::Exited(code) = inspected.state {
                     self.ended.set(true);
                     self.code.set(Some(code));
-                } else if inspected.status == Status::Restarting || inspected.restarts > 0 {
+                } else if inspected.state == ContainerState::Restarting || inspected.restarts > 0 {
                     // Docker restarts a container that exits under its
                     // restart policy, so a container that crashes in a loop
                     // never shows as exited. Its first exit ends the wait.
@@ -791,24 +808,129 @@ fn stamped<'a>(stdout: &'a str, stderr: &'a str, cap: u64) -> Vec<(&'a str, Stri
 }
 
 /// Returns the timestamp one nanosecond after `stamp`, which docker
-/// printed as `2026-11-05T10:00:00.123456789Z`, or `stamp` itself when its
-/// fraction is all nines or it has none.
+/// printed as `2026-11-05T10:00:00.123456789Z`, with nine digits of
+/// fraction. The nanosecond carries into the seconds and on into the date.
+/// A stamp that is not in that form comes back as it is.
 fn just_after(stamp: &str) -> String {
-    let Some((head, tail)) = stamp.split_once('.') else {
-        return stamp.to_owned();
-    };
-    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-    let (fraction, zone) = tail.split_at(digits);
-    let mut bytes = fraction.as_bytes().to_vec();
-    for byte in bytes.iter_mut().rev() {
-        if *byte == b'9' {
-            *byte = b'0';
-        } else {
-            *byte += 1;
-            return format!("{head}.{}{zone}", String::from_utf8_lossy(&bytes));
+    Stamp::parse(stamp).map_or_else(|| stamp.to_owned(), |parsed| parsed.next().to_string())
+}
+
+/// A UTC time as docker prints it in `docker logs --timestamps`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    /// Days since 1970-01-01.
+    days: i64,
+    /// Seconds since midnight.
+    seconds: u32,
+    /// Nanoseconds since the second.
+    nanos: u32,
+}
+
+impl Stamp {
+    /// Seconds in a day.
+    const DAY: u32 = 86_400;
+    /// Nanoseconds in a second.
+    const SECOND: u32 = 1_000_000_000;
+
+    /// Reads `YYYY-MM-DDTHH:MM:SS.fZ`, where the fraction has one to nine
+    /// digits.
+    fn parse(stamp: &str) -> Option<Self> {
+        let (date, rest) = stamp.split_once('T')?;
+        let (time, fraction) = rest.strip_suffix('Z')?.split_once('.')?;
+        let mut date = date.splitn(3, '-');
+        let year: i64 = number(date.next()?)?;
+        let month: u32 = number(date.next()?)?;
+        let day: u32 = number(date.next()?)?;
+        let mut time = time.splitn(3, ':');
+        let hours: u32 = number(time.next()?)?;
+        let minutes: u32 = number(time.next()?)?;
+        let seconds: u32 = number(time.next()?)?;
+        if !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hours > 23
+            || minutes > 59
+            || seconds > 59
+            || fraction.is_empty()
+            || fraction.len() > 9
+        {
+            return None;
         }
+        let nanos: u32 = number(&format!("{fraction:0<9}"))?;
+        Some(Self {
+            days: days_from_civil(year, month, day),
+            seconds: hours * 3600 + minutes * 60 + seconds,
+            nanos,
+        })
     }
-    stamp.to_owned()
+
+    /// Returns the time one nanosecond later.
+    const fn next(self) -> Self {
+        let mut next = self;
+        next.nanos += 1;
+        if next.nanos == Self::SECOND {
+            next.nanos = 0;
+            next.seconds += 1;
+            if next.seconds == Self::DAY {
+                next.seconds = 0;
+                next.days += 1;
+            }
+        }
+        next
+    }
+}
+
+impl fmt::Display for Stamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (year, month, day) = civil_from_days(self.days);
+        write!(
+            formatter,
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:09}Z",
+            self.seconds / 3600,
+            self.seconds / 60 % 60,
+            self.seconds % 60,
+            self.nanos,
+        )
+    }
+}
+
+/// Reads `text`, which holds only ASCII digits, as a number.
+fn number<T: std::str::FromStr>(text: &str) -> Option<T> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// Returns the days from 1970-01-01 to the proleptic Gregorian date
+/// `year`-`month`-`day`, with Howard Hinnant's `days_from_civil`.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_from_march = i64::from((month + 9) % 12);
+    let day_of_year = (153 * month_from_march + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Returns the proleptic Gregorian date `days` after 1970-01-01, with
+/// Howard Hinnant's `civil_from_days`.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = if month_from_march < 10 {
+        month_from_march + 3
+    } else {
+        month_from_march - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 /// The output of a container, read with `docker logs --timestamps` at most
@@ -843,8 +965,12 @@ impl DockerLogs {
     /// --timestamps` printed, that come after the lines already handed
     /// over, and counts them as handed over.
     fn after(&mut self, stdout: &str, stderr: &str) -> Vec<String> {
-        let (since, mut repeated) = self.since.clone().unwrap_or_default();
+        let (since, already) = self.since.clone().unwrap_or_default();
+        let mut repeated = already;
         let mut handed = Vec::new();
+        // The latest stamp handed over, how many lines carry it, and
+        // whether a read cut one of them short.
+        let mut latest: Option<(&str, usize, bool)> = None;
         for (stamp, text) in stamped(stdout, stderr, self.cap) {
             if !since.is_empty() && stamp < since.as_str() {
                 continue;
@@ -853,17 +979,25 @@ impl DockerLogs {
                 repeated -= 1;
                 continue;
             }
-            if text.ends_with(CUT_LINE) {
+            let cut = text.ends_with(CUT_LINE);
+            latest = match latest {
+                Some((last, count, was_cut)) if last == stamp => {
+                    Some((last, count + 1, was_cut || cut))
+                }
+                _ => Some((stamp, 1, cut)),
+            };
+            handed.push(text);
+        }
+        if let Some((stamp, count, cut)) = latest {
+            self.since = Some(if cut {
                 // `--since` includes its own time, so the next read starts
                 // just after the cut line, which would fill it again.
-                self.since = Some((just_after(stamp), 0));
+                (just_after(stamp), 0)
+            } else if stamp == since {
+                (since.clone(), already + count)
             } else {
-                match &mut self.since {
-                    Some((last, count)) if last == stamp => *count += 1,
-                    _ => self.since = Some((stamp.to_owned(), 1)),
-                }
-            }
-            handed.push(text);
+                (stamp.to_owned(), count)
+            });
         }
         handed
     }

@@ -553,7 +553,11 @@ nothing.
 
 `sweep` finds a container or network whose id the record does not hold yet
 by its name, and only when it carries phase's workspace label with the
-workspace's stable id. When Docker does not answer, `sweep` fails with
+workspace's stable id. It removes a container as `down` does: it turns
+off the restart policy, reads the status again, stops a running or paused
+container, and removes any container with `docker rm --force`. When
+Docker refuses to update a container that has stopped, `sweep` still
+removes it. When Docker does not answer, `sweep` fails with
 `phase::docker::unavailable`; when Docker refuses a removal, it fails with
 `phase::docker::refused`. Either way the record keeps what is left.
 
@@ -578,7 +582,9 @@ with a group of 1, which `sweep` leaves until someone removes it, shows
 as `unknown` with its reason. A container shows as `unknown` when Docker
 does not answer or reports a state that phase does not know, such as
 `removing`, and never as stopped. A container that the record plans and
-Docker has not started shows as `starting`. The workspace's state comes
+Docker has not started shows as `starting`. A container that Docker is
+restarting under its restart policy shows as `restarting`, and a paused
+container shows as `paused`, which counts as partly running. The workspace's state comes
 from the rows that are not unknown. It is `unknown` when the unknown rows
 decide it: every other row is running, or none of the others runs. With the workspace's plan, the rows
 follow the plan and carry its sources and addresses, and record entries

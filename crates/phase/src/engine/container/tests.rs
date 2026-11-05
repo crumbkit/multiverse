@@ -18,7 +18,7 @@ use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
-    ContainerState, STOP_TIMEOUT_FORMAT, Status, mint_anonymous, mint_container, mint_volume,
+    ContainerState, STOP_TIMEOUT_FORMAT, mint_anonymous, mint_container, mint_volume,
     stop_timeout_of,
 };
 use crate::name::WorkspaceName;
@@ -273,15 +273,15 @@ fn a_workspace_name_with_an_underscore_or_a_dot_gives_a_project_name_that_compos
 }
 
 #[test]
-fn docker_states_parse_into_running_created_or_exited_with_dockers_code() {
+fn docker_states_parse_into_dockers_exact_status_or_exited_with_dockers_code() {
     assert_eq!(
         ContainerState::parse("running 0\n"),
         ContainerState::Running
     );
-    assert_eq!(ContainerState::parse("paused 0"), ContainerState::Running);
+    assert_eq!(ContainerState::parse("paused 0"), ContainerState::Paused);
     assert_eq!(
         ContainerState::parse("restarting 1"),
-        ContainerState::Running
+        ContainerState::Restarting
     );
     assert_eq!(ContainerState::parse("created 0"), ContainerState::Created);
     assert_eq!(
@@ -294,6 +294,22 @@ fn docker_states_parse_into_running_created_or_exited_with_dockers_code() {
     assert_eq!(ContainerState::parse("exited x"), ContainerState::Unknown);
     assert_eq!(ContainerState::parse("frozen 0"), ContainerState::Unknown);
     assert_eq!(ContainerState::parse(""), ContainerState::Unknown);
+}
+
+#[test]
+fn only_a_running_or_paused_container_takes_a_stop_signal_and_a_restarting_one_is_up() {
+    let states = [
+        ContainerState::Running,
+        ContainerState::Paused,
+        ContainerState::Restarting,
+        ContainerState::Created,
+        ContainerState::Exited(0),
+        ContainerState::Unknown,
+    ];
+    let runs: Vec<bool> = states.iter().map(|state| state.runs()).collect();
+    assert_eq!(runs, [true, true, false, false, false, false]);
+    let up: Vec<bool> = states.iter().map(|state| state.is_up()).collect();
+    assert_eq!(up, [true, true, true, false, false, false]);
 }
 
 #[test]
@@ -737,23 +753,17 @@ fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
     let labels = container_labels(STORE, "reading-list", "db");
     let printed = format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n\n4\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
-    assert_eq!(inspected.state, ContainerState::Running);
-    assert_eq!(inspected.status, Status::Restarting);
+    assert_eq!(inspected.state, ContainerState::Restarting);
     assert_eq!(inspected.restarts, 4);
 
     let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
-    assert_eq!(inspected.status, Status::Running);
+    assert_eq!(inspected.state, ContainerState::Running);
     assert_eq!(inspected.restarts, 0);
 
     let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
-    assert_eq!(inspected.state, ContainerState::Running);
-    assert_eq!(inspected.status, Status::Paused);
-
-    let printed = format!("{labels}\n{ID}\nexited 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
-    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
-    assert_eq!(inspected.status, Status::Other);
+    assert_eq!(inspected.state, ContainerState::Paused);
 }
 
 #[test]
