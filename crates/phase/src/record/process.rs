@@ -629,6 +629,41 @@ const fn boot_id() -> Result<Option<String>, PhaseError> {
     Ok(None)
 }
 
+/// Returns when a process whose recorded start is `started_at_us`
+/// started, in milliseconds since the Unix epoch, or `None` when phase
+/// cannot tell. macOS records the start since the epoch. Linux records it
+/// since boot, and the boot's time in `/proc/stat` is in whole seconds, so
+/// the result can be up to a second early.
+pub(crate) fn started_at_ms(started_at_us: u64) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(started_at_us / 1000)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let ProcRead::Text(text) = read_proc("/proc/stat").ok()? else {
+            return None;
+        };
+        boot_seconds(&text)?
+            .checked_mul(1000)?
+            .checked_add(started_at_us / 1000)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = started_at_us;
+        None
+    }
+}
+
+/// Returns the time of the boot, in seconds since the Unix epoch, from
+/// the `btime` line of `/proc/stat`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn boot_seconds(stat: &str) -> Option<u64> {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("btime "))
+        .and_then(|seconds| seconds.trim().parse().ok())
+}
+
 /// What a recorded host process is now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Identity {
@@ -689,7 +724,11 @@ pub(crate) fn signallable(host: &HostProcess) -> bool {
 }
 
 /// Stops the keeper and the app of `stop` through `processes`, as
-/// [`HostStop`] describes, and gives up the first wait at `deadline`. A
+/// [`HostStop`] describes, and gives up the first wait at `deadline`. The
+/// app's grace and kill wait count from the signal that `stop_host` sends
+/// it, so an app whose keeper ends late still has its whole grace, up to
+/// `deadline`. After `KILL`, it waits the kill wait even when `deadline` has
+/// passed, so it returns by `deadline` plus the kill wait. A
 /// recorded pid or group of 0 or 1 makes it signal nothing and report
 /// [`HostStopped::NotOurs`]. It
 /// reaps each of them when it is an ended child of this process, so a
@@ -734,7 +773,7 @@ pub(crate) fn stop_host(
     if let (Some(host), Identity::Ours) = (stop.keeper, keeper) {
         processes.signal(host, Signal::TERM)?;
     }
-    let first = (now() + stop.grace + stop.kill_wait).min(deadline);
+    let mut first = (now() + stop.grace + stop.kill_wait).min(deadline);
     let (mut keeper, mut app) = (keeper, app);
     loop {
         keeper = settle(keeper, look(stop.keeper)?);
@@ -745,6 +784,9 @@ pub(crate) fn stop_host(
         if keeper != Identity::Ours && !app_signalled {
             if let Some(host) = stop.app {
                 processes.signal(host, signal)?;
+                // The app has its whole grace from its own signal, so a
+                // keeper that ended late does not shorten it.
+                first = first.max((now() + stop.grace + stop.kill_wait).min(deadline));
             }
             app_signalled = true;
         }

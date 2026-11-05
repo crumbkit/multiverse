@@ -25,8 +25,8 @@
 //! has ended and the container runs, such as after a restart outside mxv.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::fs;
+use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -76,9 +76,7 @@ pub const MOST_LOG_BYTES: u64 = 32 * 1024 * 1024;
 /// The number of log lines that a failed start reports.
 pub const TAIL_LINES: usize = 20;
 
-/// The most bytes from the end of a log that a tail reads. A tail of a
-/// log whose last lines are longer than this returns fewer lines.
-pub const MOST_TAIL_BYTES: u64 = 64 * 1024;
+pub use phase::{MOST_TAIL_BYTES, tail};
 
 /// The most bytes that one read of a followed log takes. The rest waits
 /// for the next read.
@@ -1684,32 +1682,6 @@ fn code_and_signal(code: Option<i32>) -> (Option<i32>, Option<i32>) {
         Some(code) if (129..=192).contains(&code) => (None, Some(code - 128)),
         code => (code, None),
     }
-}
-
-/// Returns the last `lines` lines of the file at `path`, read from its
-/// last [`MOST_TAIL_BYTES`] bytes, or no lines when it cannot be read.
-#[must_use]
-pub fn tail(path: &Path, lines: usize) -> Vec<String> {
-    let Ok(mut file) = File::open(path) else {
-        return Vec::new();
-    };
-    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    let start = length.saturating_sub(MOST_TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
-    let mut bytes = Vec::new();
-    if file.take(MOST_TAIL_BYTES).read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut all: Vec<&str> = text.lines().collect();
-    if start > 0 && !all.is_empty() {
-        // The read started inside a line, so its first line is partial.
-        all.remove(0);
-    }
-    let skip = all.len().saturating_sub(lines);
-    all.into_iter().skip(skip).map(str::to_owned).collect()
 }
 
 /// A log file that `mxv logs -f` reads as it grows, through phase's

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use crate::engine::container::ContainerState;
 use crate::engine::container::cli::DockerCli;
 use crate::engine::container::names::{Scope, StoreId};
 use crate::name::{WorkspaceId, WorkspaceName};
@@ -660,4 +661,46 @@ fn a_container_removal_waits_at_least_a_second_and_rounds_a_part_second_up() {
             fake.calls()
         );
     }
+}
+
+#[test]
+fn a_containers_state_comes_from_its_inspection_when_it_carries_this_workspaces_id() {
+    let fake = Fake::new();
+    let (running, exited, foreign) = (container_id('a'), container_id('b'), container_id('c'));
+    let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
+    fake.labelled(&[&running], &running, &format!("{ours}\nrunning 0"));
+    fake.labelled(&[&exited], &exited, &format!("{ours}\nexited 137"));
+    fake.labelled(
+        &[&foreign],
+        &foreign,
+        r#"{"mxv.workspace-id":"another"}
+running 0"#,
+    );
+    let workspace = workspace();
+    let db = name("db");
+    let state = |id: &str| {
+        fake.docker()
+            .container_state(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .unwrap()
+    };
+
+    assert_eq!(state(&running), Some(ContainerState::Running));
+    assert_eq!(state(&exited), Some(ContainerState::Exited(137)));
+    assert_eq!(state(&foreign), None);
+    assert_eq!(state(&container_id('d')), None);
+    assert!(
+        fake.calls().contains("{{.State.Status}}"),
+        "{}",
+        fake.calls()
+    );
+    fake.mark("down");
+    assert!(matches!(
+        fake.docker().container_state(&object(
+            &workspace,
+            DockerKind::Container,
+            &db,
+            Some(&running)
+        )),
+        Err(DockerError::Unavailable { .. })
+    ));
 }

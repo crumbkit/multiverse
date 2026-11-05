@@ -1,16 +1,29 @@
 //! The status document `phase/status/v1`, which `mxv phase status --json`
-//! prints for people, agents and other tools. The code that builds it from
-//! the run record lands here.
+//! prints for people, agents and other tools, and [`status`], which builds
+//! it from the run record.
+//!
+//! `status` opens the record read-only and takes no lock. It never trusts
+//! a stored state alone. A keeper that an outside `TERM` stops while
+//! another operation holds the lock drops its record notes, so the record
+//! can name a process as running after it has gone. `status` therefore
+//! checks each live host process's identity in the process table, and each
+//! live container's state with Docker. A process that phase cannot prove
+//! is its own, such as one that phase may not read or an entry with a
+//! group of 1, which `sweep` leaves until someone removes it, is reported
+//! as unknown, never hidden.
+
+mod build;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::name::{AppName, ProcessName, WorkspaceName};
+use crate::name::{AppName, ProcessName, WorkspaceId, WorkspaceName};
 use crate::plan::RunnerKind;
 use crate::record::Handle;
 use crate::source::{ImageReference, Source, Version};
+pub(crate) use crate::status::build::{Sources, status};
 
 #[cfg(test)]
 mod tests;
@@ -22,8 +35,10 @@ mod tests;
 pub struct Status {
     /// The document's version. A reader refuses any other.
     pub schema: StatusSchema,
-    /// The workspace.
-    pub workspace: WorkspaceName,
+    /// The workspace's stable id, which keys its run record.
+    pub workspace: WorkspaceId,
+    /// The workspace's name, or `None` when `status` had no plan.
+    pub name: Option<WorkspaceName>,
     /// The state of the workspace as a whole.
     pub state: WorkspaceState,
     /// One row per process.
@@ -31,12 +46,14 @@ pub struct Status {
 }
 
 impl Status {
-    /// Returns the status of `workspace` in `state`, with no rows.
+    /// Returns the status of the workspace whose stable id is `workspace`
+    /// in `state`, with no name and no rows.
     #[must_use]
-    pub const fn new(workspace: WorkspaceName, state: WorkspaceState) -> Self {
+    pub const fn new(workspace: WorkspaceId, state: WorkspaceState) -> Self {
         Self {
             schema: StatusSchema::V1,
             workspace,
+            name: None,
             state,
             rows: Vec::new(),
         }
@@ -56,9 +73,9 @@ pub enum StatusSchema {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum WorkspaceState {
-    /// An `up` is in progress.
+    /// A process is starting.
     Starting,
-    /// Every planned process is running or has completed.
+    /// Every process is running or has completed.
     Running,
     /// Some planned processes are running and others are not.
     PartlyRunning,
@@ -76,8 +93,9 @@ pub struct StatusRow {
     pub process: ProcessName,
     /// How the process runs.
     pub runner: RunnerKind,
-    /// Where its program came from.
-    pub source: SourceSummary,
+    /// Where its program came from, or `None` when `status` had no plan
+    /// or the plan lacks the app.
+    pub source: Option<SourceSummary>,
     /// What the process is doing. In JSON its fields sit beside the row's.
     #[serde(flatten)]
     pub state: ProcessState,
@@ -107,7 +125,7 @@ impl StatusRow {
         app: AppName,
         process: ProcessName,
         runner: RunnerKind,
-        source: SourceSummary,
+        source: Option<SourceSummary>,
         state: ProcessState,
     ) -> Self {
         Self {
@@ -170,10 +188,14 @@ impl From<&Source> for SourceSummary {
 #[serde(tag = "state", rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ProcessState {
-    /// The process has started and has not passed its probe yet.
+    /// The process has started and has not passed its probe yet, or its
+    /// keeper runs and has not started it yet.
     Starting,
     /// The process passed its probe, or has no probe.
     Ready,
+    /// The process runs. The run record does not say whether it passed its
+    /// probe, so `status` reports a running process in this state.
+    Running,
     /// The process exited and phase is waiting to restart it.
     Restarting,
     /// phase sent the stop signal and the process has not exited yet.
@@ -188,6 +210,30 @@ pub enum ProcessState {
         /// The exit status, or `None` when a signal ended the process.
         code: Option<i32>,
     },
+    /// phase cannot tell what the process is doing. The run record keeps
+    /// its entry, which `down` and `sweep` leave alone.
+    #[non_exhaustive]
+    Unknown {
+        /// Why phase cannot tell.
+        reason: UnknownReason,
+    },
+}
+
+/// Why `status` cannot tell what a process is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum UnknownReason {
+    /// phase may not read the process that has the recorded pid, as
+    /// inside a sandbox, or the record holds no boot id on a system that
+    /// has one.
+    Unreadable,
+    /// The record names a process or group that phase never signals, such
+    /// as group 1, which `kill(2)` reads as every process of the user.
+    Unsignallable,
+    /// Docker did not answer, so phase cannot tell whether the container
+    /// runs.
+    DockerUnavailable,
 }
 
 impl ProcessState {
@@ -196,5 +242,19 @@ impl ProcessState {
     #[must_use]
     pub const fn exited(code: Option<i32>) -> Self {
         Self::Exited { code }
+    }
+
+    /// Returns the state of a process that phase cannot tell about, for
+    /// `reason`.
+    #[must_use]
+    pub const fn unknown(reason: UnknownReason) -> Self {
+        Self::Unknown { reason }
+    }
+
+    /// Reports whether a process in this state may be running, which
+    /// includes a process whose state phase cannot tell.
+    #[must_use]
+    pub const fn may_run(self) -> bool {
+        !matches!(self, Self::Stopped | Self::Completed | Self::Exited { .. })
     }
 }

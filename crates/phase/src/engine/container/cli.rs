@@ -16,12 +16,12 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
-use crate::engine::container::ContainerError;
 use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, Finished, check_with, message, quick_with, run_program,
 };
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
+use crate::engine::container::{ContainerError, ContainerState};
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 
 #[cfg(test)]
@@ -87,6 +87,40 @@ impl DockerCli {
         })
     }
 
+    /// Inspects `object` with the Go template `format`, whose first line is
+    /// the object's id and whose second is its labels as [`fn@format`]
+    /// prints them, and returns the id and the lines after the labels, or
+    /// `None` when the daemon answered that the object does not exist or
+    /// it does not carry this workspace's labels.
+    fn inspect(
+        &self,
+        object: &DockerObject<'_>,
+        format: &str,
+    ) -> Result<Option<(String, String)>, DockerError> {
+        let (noun, _, _) = inspect_of(object.kind);
+        let target = object.id.unwrap_or_else(|| object.name.as_str());
+        let finished = quick_with(
+            self.program(),
+            [noun, "inspect", "--format", format, "--", target],
+            "inspect",
+        )
+        .map_err(|error| unavailable(&error))?;
+        if finished.missing() {
+            return Ok(None);
+        }
+        if !finished.status.success() {
+            return Err(DockerError::unavailable(message(&finished.stderr)));
+        }
+        let mut lines = finished.stdout.lines();
+        let id = lines.next().unwrap_or_default();
+        let labels = labels(lines.next().unwrap_or_default()).unwrap_or_default();
+        if id.is_empty() || !self.ours(object.workspace.as_str(), &labels) {
+            return Ok(None);
+        }
+        let rest: Vec<&str> = lines.collect();
+        Ok(Some((id.to_owned(), rest.join("\n"))))
+    }
+
     /// Returns the failure of a call that failed with `finished`: Docker
     /// did not answer when its daemon does not answer now, and otherwise
     /// it refused.
@@ -140,28 +174,26 @@ fn labels(printed: &str) -> Option<BTreeMap<String, String>> {
 
 impl Docker for DockerCli {
     fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
-        let (noun, _, _) = inspect_of(object.kind);
-        let target = object.id.unwrap_or_else(|| object.name.as_str());
-        let format = format(object.kind);
-        let finished = quick_with(
-            self.program(),
-            [noun, "inspect", "--format", &format, "--", target],
-            "inspect",
-        )
-        .map_err(|error| unavailable(&error))?;
-        if finished.missing() {
-            return Ok(None);
-        }
-        if !finished.status.success() {
-            return Err(DockerError::unavailable(message(&finished.stderr)));
-        }
-        let mut lines = finished.stdout.lines();
-        let id = lines.next().unwrap_or_default();
-        let labels = labels(lines.next().unwrap_or_default()).unwrap_or_default();
-        if id.is_empty() || !self.ours(object.workspace.as_str(), &labels) {
-            return Ok(None);
-        }
-        Ok(Some(id.to_owned()))
+        Ok(self
+            .inspect(object, &format(object.kind))?
+            .map(|(id, _)| id))
+    }
+
+    fn container_state(
+        &self,
+        object: &DockerObject<'_>,
+    ) -> Result<Option<ContainerState>, DockerError> {
+        let format = format!(
+            "{}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}",
+            format(DockerKind::Container)
+        );
+        let object = DockerObject {
+            kind: DockerKind::Container,
+            ..*object
+        };
+        Ok(self
+            .inspect(&object, &format)?
+            .map(|(_, rest)| ContainerState::parse(&rest)))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError> {

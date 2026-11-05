@@ -209,3 +209,10 @@ fn the_start_time_of_this_process_is_readable_and_a_free_pid_has_none() {
         super::process::Start::Absent
     );
 }
+
+#[test]
+fn the_boot_time_is_the_btime_line_of_proc_stat() {
+    let stat = "cpu  1 2 3\nintr 4\nbtime 1793000000\nprocesses 5\n";
+    assert_eq!(super::process::boot_seconds(stat), Some(1_793_000_000));
+    assert_eq!(super::process::boot_seconds("cpu 1\n"), None);
+}

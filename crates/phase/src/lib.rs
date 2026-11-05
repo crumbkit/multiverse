@@ -38,7 +38,7 @@ pub use crate::engine::host;
 pub use crate::engine::keeper;
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 pub use crate::error::{NotRunnable, Operation, PhaseError};
-pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream};
+pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
     WorkspaceName, is_unit_name,
@@ -70,5 +70,5 @@ pub use crate::source::{
     MOST_REPOSITORY_BYTES, MOST_VERSION_BYTES, ReleaseSpec, Source, Verification, Version,
 };
 pub use crate::status::{
-    ProcessState, SourceSummary, Status, StatusRow, StatusSchema, WorkspaceState,
+    ProcessState, SourceSummary, Status, StatusRow, StatusSchema, UnknownReason, WorkspaceState,
 };

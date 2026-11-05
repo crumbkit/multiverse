@@ -189,11 +189,7 @@ impl Engine<'_> {
 
     /// Returns the log file of `process` of `app` in `workspace`.
     fn log_path(&self, workspace: &WorkspaceId, app: &AppName, process: &ProcessName) -> PathBuf {
-        self.settings
-            .state_dir
-            .join("logs")
-            .join(workspace.as_str())
-            .join(format!("{app}.{process}.log"))
+        crate::logs::log_path(self.settings.state_dir, workspace, app, process)
     }
 }
 

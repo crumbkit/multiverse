@@ -13,15 +13,13 @@ fn checkout() -> SourceSummary {
 }
 
 fn status() -> Status {
-    let mut status = Status::new(
-        "reading-list".parse().unwrap(),
-        WorkspaceState::PartlyRunning,
-    );
+    let mut status = Status::new("0b9f3c8e".parse().unwrap(), WorkspaceState::PartlyRunning);
+    status.name = Some("reading-list".parse().unwrap());
     let mut server = StatusRow::new(
         "api".parse().unwrap(),
         "server".parse().unwrap(),
         RunnerKind::Host,
-        checkout(),
+        Some(checkout()),
         ProcessState::Ready,
     );
     server.handle = Some(Handle::pid(4242, 1_793_000_000_000_000));
@@ -34,7 +32,7 @@ fn status() -> Status {
         "api".parse().unwrap(),
         "migrate".parse().unwrap(),
         RunnerKind::Host,
-        checkout(),
+        Some(checkout()),
         ProcessState::exited(Some(1)),
     ));
     status
@@ -78,7 +76,7 @@ fn a_new_status_row_has_no_handle_address_times_restarts_or_log() {
         "api".parse().unwrap(),
         "server".parse().unwrap(),
         RunnerKind::Host,
-        checkout(),
+        Some(checkout()),
         ProcessState::Starting,
     );
     assert_eq!(row.handle, None);

@@ -492,6 +492,20 @@ process: its app, runner, source, state, pid or container, address, start
 time, restart count and log path. `phase logs` prints a process's log, and
 `--follow` keeps printing it. Container logs come from `docker logs`.
 
+`status` reads the run record and checks every entry that is not stopped:
+a host process and its keeper in the process table, by pid and start
+time, and a container with Docker, by its recorded id. It never trusts a
+stored state alone, because a keeper that an outside `TERM` stops while
+another operation holds the lock drops its record notes. A process that
+phase cannot prove is its own, such as one it may not read or an entry
+with a group of 1, which `sweep` leaves until someone removes it, shows
+as `unknown` with its reason. A container shows as `unknown` when Docker
+does not answer, and never as stopped. With the workspace's plan, the rows
+follow the plan and carry its sources and addresses, and record entries
+that the plan lacks still show. Without a plan, as when the manifest is
+invalid, the rows are the record's live entries and leave the plan's
+fields empty.
+
 ## Environment and secrets
 
 phase resolves an app's environment through starmap. starmap's resolution
@@ -676,7 +690,7 @@ pub struct Phase;
 impl Phase {
     pub fn up(&self, plan: &Plan, select: &Selection, env: &dyn EnvironmentSource, deadline: Instant) -> Result<Report, PhaseError>;
     pub fn down(&self, workspace: &Path, select: &Selection, deadline: Instant) -> Result<Report, PhaseError>;
-    pub fn status(&self, workspace: &Path) -> Result<Status, PhaseError>;
+    pub fn status(&self, workspace: &WorkspaceId, plan: Option<&Plan>) -> Result<Status, PhaseError>;
     pub fn logs(&self, workspace: &Path, request: &LogRequest, sink: &mut dyn LineSink) -> Result<(), PhaseError>;
     pub fn sweep(&self, workspace: &Path, dry_run: bool) -> Result<Swept, PhaseError>;
 }

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use rustix::process::Signal;
 
+use crate::engine::container::ContainerState;
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
 use crate::engine::keeper::{Kept, Launch};
 use crate::engine::probe::LogLines;
@@ -73,6 +74,12 @@ impl Spawned {
     /// Starts `sh -c script` in a new process group, and waits until it
     /// prints `lines` lines, the last of which it prints once it is ready.
     pub(crate) fn shell_lines(script: &str, lines: usize) -> Self {
+        Self::shell_in_group(script, lines, 0)
+    }
+
+    /// Starts `sh -c script` in the process group `group`, or in a new one
+    /// when `group` is 0, and waits until it prints `lines` lines.
+    pub(crate) fn shell_in_group(script: &str, lines: usize, group: u32) -> Self {
         #[expect(
             clippy::disallowed_methods,
             reason = "the test starts a real process for sweep to stop"
@@ -80,7 +87,7 @@ impl Spawned {
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", script])
-            .process_group(0)
+            .process_group(i32::try_from(group).unwrap())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -270,6 +277,9 @@ pub(crate) struct FakeObject {
     /// The value of phase's workspace label, or `None` for an object
     /// without it.
     pub(crate) workspace: Option<String>,
+    /// The state of a container, which is running unless a test says
+    /// otherwise.
+    pub(crate) state: ContainerState,
 }
 
 /// A fake Docker that holds objects in memory.
@@ -309,7 +319,18 @@ impl FakeDocker {
             name: name.to_owned(),
             id: id.to_owned(),
             workspace: label.map(str::to_owned),
+            state: ContainerState::Running,
         });
+        self
+    }
+
+    /// Sets the state of the container whose id is `id`.
+    pub(crate) fn in_state(self, id: &str, state: ContainerState) -> Self {
+        for object in self.objects.borrow_mut().iter_mut() {
+            if object.id == id {
+                object.state = state;
+            }
+        }
         self
     }
 
@@ -319,8 +340,10 @@ impl FakeDocker {
     }
 }
 
-impl Docker for FakeDocker {
-    fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+impl FakeDocker {
+    /// Returns the object that `object` names, as [`Docker::find`] matches
+    /// it.
+    fn matching(&self, object: &DockerObject<'_>) -> Result<Option<FakeObject>, DockerError> {
         if self.down {
             return Err(Self::failure());
         }
@@ -337,7 +360,20 @@ impl Docker for FakeDocker {
                         |id| found.id == id,
                     )
             })
-            .map(|found| found.id.clone()))
+            .cloned())
+    }
+}
+
+impl Docker for FakeDocker {
+    fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+        Ok(self.matching(object)?.map(|found| found.id))
+    }
+
+    fn container_state(
+        &self,
+        object: &DockerObject<'_>,
+    ) -> Result<Option<ContainerState>, DockerError> {
+        Ok(self.matching(object)?.map(|found| found.state))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, _wait: Duration) -> Result<(), DockerError> {
@@ -371,6 +407,13 @@ impl Unreachable {
 
 impl Docker for Unreachable {
     fn find(&self, _object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+        Err(Self::failure())
+    }
+
+    fn container_state(
+        &self,
+        _object: &DockerObject<'_>,
+    ) -> Result<Option<ContainerState>, DockerError> {
         Err(Self::failure())
     }
 
