@@ -1,9 +1,9 @@
 //! Tests of the container runner through `Phase::up`, `restart` and
 //! `down` against a real Docker daemon. Each test skips when no daemon
 //! answers, when the compose plugin is missing, or when `busybox:1.37.0`
-//! is not pulled, which the tests do not pull. CI pulls no image, so these
-//! tests skip there. Each test uses a workspace id of its own and removes
-//! what it created.
+//! is not pulled, which the tests do not pull. CI's lane pulls the image,
+//! pinned by digest, so the tests run there. Each test uses a workspace id
+//! of its own and removes what it created.
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
