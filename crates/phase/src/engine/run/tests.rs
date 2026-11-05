@@ -534,6 +534,31 @@ impl ContainerRunner for FakeContainers {
             .collect())
     }
 
+    fn started_at(
+        &self,
+        workspace: &crate::name::WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<(ProcessName, String)>, PhaseError> {
+        assert_eq!(workspace, &self::workspace());
+        // Each start of the app's containers is a new run of them.
+        let starts = self
+            .starts
+            .borrow()
+            .iter()
+            .filter(|start| {
+                start
+                    .iter()
+                    .any(|process| process.starts_with(&format!("{app}/")))
+            })
+            .count();
+        Ok(containers
+            .iter()
+            .filter(|entry| entry.id.is_some())
+            .map(|entry| (entry.process.clone(), format!("start-{starts}")))
+            .collect())
+    }
+
     fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError> {
         assert_eq!(rewrite.workspace, &workspace());
         assert!(rewrite.entry.id.is_some());
@@ -1042,12 +1067,12 @@ fn up_records_the_readiness_that_the_container_runner_observed() {
 }
 
 #[test]
-fn a_process_that_ends_before_its_probe_passes_reports_the_last_lines_of_its_log() {
+fn a_process_that_ends_before_its_probe_passes_reports_nothing_that_it_wrote() {
     let world = World::new();
     world.host.ends("api/server");
     world.host.state.borrow_mut().logs.insert(
         "api.server.log".to_owned(),
-        vec!["missing config".to_owned()],
+        vec!["password=hunter2 rejected".to_owned()],
     );
     let mut api = host_app("api", None, &[]);
     api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
@@ -1058,11 +1083,10 @@ fn a_process_that_ends_before_its_probe_passes_reports_the_last_lines_of_its_log
 
     assert_eq!(
         outcome(&report, "api"),
-        &AppOutcome::failed(
-            name("server"),
-            StartProblem::exited(None, None, vec!["missing config".to_owned()])
-        )
+        &AppOutcome::failed(name("server"), StartProblem::exited(None, None))
     );
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("hunter2"), "{json}");
 }
 
 #[test]
@@ -2572,10 +2596,7 @@ fn a_process_that_ends_during_readiness_reports_the_code_or_signal_its_keeper_re
 
         assert_eq!(
             outcome(&report, "api"),
-            &AppOutcome::failed(
-                name("server"),
-                StartProblem::exited(code, signal, Vec::new())
-            ),
+            &AppOutcome::failed(name("server"), StartProblem::exited(code, signal)),
             "{exit:?}"
         );
     }
@@ -2596,10 +2617,7 @@ fn a_process_without_a_probe_that_ends_within_its_start_grace_reports_its_exit_c
 
     assert_eq!(
         outcome(&report, "api"),
-        &AppOutcome::failed(
-            name("server"),
-            StartProblem::exited(Some(3), None, Vec::new())
-        )
+        &AppOutcome::failed(name("server"), StartProblem::exited(Some(3), None))
     );
 }
 
@@ -2672,10 +2690,7 @@ fn a_real_keeper_reports_the_code_or_signal_of_a_process_that_ends_during_readin
 
         assert_eq!(
             outcome(&report, "api"),
-            &AppOutcome::failed(
-                name("server"),
-                StartProblem::exited(code, signal, vec!["starting".to_owned()])
-            ),
+            &AppOutcome::failed(name("server"), StartProblem::exited(code, signal)),
             "{script}"
         );
     }

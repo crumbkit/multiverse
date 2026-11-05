@@ -89,28 +89,86 @@ fn a_real_oneshot_completes_before_its_dependent_starts_and_shows_as_completed()
 }
 
 #[test]
-fn a_real_oneshot_that_fails_reports_its_code_and_log_tail_and_its_dependent_never_starts() {
+fn a_real_oneshot_that_fails_reports_its_code_and_nothing_it_wrote_and_its_dependent_never_starts()
+{
     let state = tempfile::tempdir().unwrap();
     let checkout = tempfile::tempdir().unwrap();
     let (phase, plan) = migrating(
         state.path(),
         checkout.path(),
-        "echo 'the table already exists'; exit 3",
+        "echo 'could not connect: password=hunter2'; exit 3",
     );
 
     let report = up(&phase, &plan);
 
+    let problem = StartProblem::exited(Some(3), None);
     assert_eq!(
         report.apps[0].outcome,
-        AppOutcome::failed(
-            "migrate".parse().unwrap(),
-            StartProblem::exited(Some(3), None, vec!["the table already exists".to_owned()])
-        )
+        AppOutcome::failed("migrate".parse().unwrap(), problem.clone())
     );
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("hunter2"), "{json}");
+    assert!(!problem.to_string().contains("hunter2"));
     let status = phase.status(&id(), Some(&plan)).unwrap();
+    let log = std::fs::read_to_string(status.rows[0].log.as_ref().unwrap()).unwrap();
+    assert!(log.contains("password=hunter2"), "{log}");
     assert_eq!(status.rows[0].state, ProcessState::exited(Some(3)));
     assert_eq!(status.rows[1].state, ProcessState::Stopped, "{status:?}");
     assert!(!checkout.path().join("migrated").exists());
+    phase
+        .down(
+            &id(),
+            &Selection::All,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_real_oneshot_that_up_stopped_waiting_for_completes_once_its_keeper_records_the_exit() {
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let (phase, plan) = migrating(
+        state.path(),
+        checkout.path(),
+        "sleep 1; echo run >> runs; echo \"migrated $GREETING\" > migrated",
+    );
+    let short = Instant::now() + Duration::from_millis(300);
+
+    let report = phase
+        .up(
+            &plan,
+            &Selection::All,
+            &Greeting,
+            UpDeadlines::new(short, short),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        report.apps[0].outcome,
+        AppOutcome::StartUncertain,
+        "{report:?}"
+    );
+    // The keeper records the exit once `up` has released the lifecycle
+    // lock.
+    let waited = Instant::now() + Duration::from_secs(20);
+    loop {
+        let status = phase.status(&id(), Some(&plan)).unwrap();
+        if status.rows[0].state == ProcessState::Completed {
+            break;
+        }
+        assert!(Instant::now() < waited, "{status:?}");
+        crate::clock::pause(crate::clock::POLL_INTERVAL);
+    }
+
+    let again = up(&phase, &plan);
+
+    assert_eq!(again.apps[0].outcome, AppOutcome::Started, "{again:?}");
+    assert_eq!(
+        std::fs::read_to_string(checkout.path().join("runs")).unwrap(),
+        "run\n"
+    );
     phase
         .down(
             &id(),

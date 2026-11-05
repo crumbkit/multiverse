@@ -126,6 +126,25 @@ pub(crate) trait ContainerRunner {
         &self,
         stop: &ContainerStop<'_>,
     ) -> Vec<(ProcessName, Result<ContainerStopped, PhaseError>)>;
+
+    /// Returns when Docker last started each of `containers`, containers
+    /// of the app `app` of `workspace` that the run record names by id,
+    /// exactly as `docker container inspect` printed `State.StartedAt`. A
+    /// container that Docker no longer has, or that no longer carries the
+    /// app's labels, is left out. Every start of a container changes it,
+    /// including one under Docker's restart policy and one that phase did
+    /// not ask for.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure that kept Docker from answering, such as
+    /// [`PhaseError::Docker`].
+    fn started_at(
+        &self,
+        workspace: &WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<(ProcessName, String)>, PhaseError>;
 }
 
 /// The Docker objects that a container app creates.

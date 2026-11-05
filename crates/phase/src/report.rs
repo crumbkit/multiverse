@@ -391,15 +391,17 @@ pub enum StartProblem {
         /// when the operating system does not say.
         holders: Vec<u32>,
     },
-    /// The process exited before it was ready.
+    /// The process exited before it was ready, or a oneshot exited with a
+    /// status other than 0. The problem holds nothing that the process
+    /// wrote, because its output may hold a secret value: its log holds
+    /// the output, and the host program's `logs` command shows it.
     #[non_exhaustive]
     Exited {
-        /// The exit status, or `None` when a signal ended the process.
+        /// The exit status, or `None` when a signal ended the process or
+        /// phase could not read the status.
         code: Option<i32>,
         /// The signal that ended the process, or `None`.
         signal: Option<i32>,
-        /// The last lines of the process's log.
-        log_tail: Vec<String>,
     },
     /// The process did not become ready within its ready timeout.
     #[non_exhaustive]
@@ -419,6 +421,43 @@ pub enum StartProblem {
     },
 }
 
+impl std::fmt::Display for StartProblem {
+    /// Describes the problem in one sentence. It names an exit's status or
+    /// signal and points to the process's log, and holds nothing that the
+    /// process wrote.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PortTaken { port, .. } => {
+                write!(
+                    formatter,
+                    "another process already listens on its port {port}"
+                )
+            }
+            Self::Exited { code, signal } => {
+                match (code, signal) {
+                    (_, Some(signal)) => write!(formatter, "signal {signal} ended it")?,
+                    (Some(code), None) => write!(formatter, "it exited with status {code}")?,
+                    (None, None) => {
+                        formatter.write_str("it exited with a status phase could not read")?
+                    }
+                }
+                formatter.write_str(
+                    "; its log holds its output, which the host program's `logs` command shows, such as `mxv logs <app>`",
+                )
+            }
+            Self::NotReady { waited } => write!(
+                formatter,
+                "it was not ready after {} ms",
+                waited.as_millis()
+            ),
+            Self::ForeignListener { port, .. } => write!(
+                formatter,
+                "a process outside its app listens on its port {port}"
+            ),
+        }
+    }
+}
+
 impl StartProblem {
     /// Returns the problem of `port` being held by the processes `holders`
     /// before the process started.
@@ -428,14 +467,10 @@ impl StartProblem {
     }
 
     /// Returns the problem of the process exiting with `code` or `signal`
-    /// before it was ready, with the last lines of its log.
+    /// before it was ready.
     #[must_use]
-    pub const fn exited(code: Option<i32>, signal: Option<i32>, log_tail: Vec<String>) -> Self {
-        Self::Exited {
-            code,
-            signal,
-            log_tail,
-        }
+    pub const fn exited(code: Option<i32>, signal: Option<i32>) -> Self {
+        Self::Exited { code, signal }
     }
 
     /// Returns the problem of the process not becoming ready after

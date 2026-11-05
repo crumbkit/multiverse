@@ -223,8 +223,4 @@ impl LogLines for LogFollower {
     fn new_lines(&mut self) -> io::Result<Vec<String>> {
         self.lines()
     }
-
-    fn rest(&mut self) -> io::Result<Vec<String>> {
-        Self::rest(self)
-    }
 }

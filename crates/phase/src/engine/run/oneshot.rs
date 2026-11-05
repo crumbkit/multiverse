@@ -4,43 +4,52 @@
 //! A oneshot runs under a keeper like any host process, with the same
 //! sandbox and environment, and its output goes to its log. Its keeper
 //! never restarts it, because the plan refuses a oneshot with a restart
-//! policy. `up` waits until the oneshot exits, within its ready timeout
-//! and the caller's readiness deadline. An exit with status 0 completes
-//! it: `up` records the completion with the hash of the oneshot's part of
-//! the plan, stops the keeper, and goes on to the processes and apps that
-//! depend on it. Any other end fails its app with the exit code or signal
-//! and the log's tail, as a process that ends before it is ready does.
+//! policy. When phase launches a oneshot, it records the hash of the
+//! oneshot's part of the plan and, for a `once = false` oneshot, the run
+//! of each process and container that it depends on, which
+//! [`Op::dependency_runs`] describes.
+//!
+//! `up` waits until the oneshot exits, within its ready timeout and the
+//! caller's readiness deadline. An exit with status 0 completes it: `up`
+//! records the end, which records the completion, stops the keeper, and
+//! goes on to the processes and apps that depend on it. When `up` stops
+//! waiting first, the keeper records the end itself once it takes the
+//! lifecycle lock, and an exit with status 0 completes the oneshot then.
+//! Any other end fails its app with the exit code or signal, as a process
+//! that ends before it is ready does. The failure holds nothing that the
+//! process wrote, because that output may hold a secret value. The log
+//! holds it.
 //!
 //! A later `up` leaves a completed oneshot alone, without running it, when
 //! its completion is from the same part of the plan and either it declares
-//! `once`, or every other selected process of its app is already running
-//! and every app that its app depends on was already running in this `up`.
-//! `restart` runs it again either way, and `down` forgets the completion.
+//! `once`, or every process and container that it depends on runs as the
+//! same run that phase recorded when it launched the oneshot. `restart`
+//! runs it again either way, and `down` forgets the completion.
 
 use crate::clock::{deadline_in, now};
 use crate::engine::host::is_gone;
 use crate::engine::keeper::AppEnd;
-use crate::engine::probe::{LogLines, Outcome};
+use crate::engine::probe::Outcome;
+use crate::engine::run::order::sorted;
 use crate::engine::run::stop::{self, Stopped, Target, target_of};
-use crate::engine::run::{END_LINE_WAIT, Op, Recorded, Step, Tail, watch};
+use crate::engine::run::{END_LINE_WAIT, Op, Step, watch};
 use crate::error::PhaseError;
 use crate::name::AppName;
 use crate::plan::{AppPlan, ProcessKind, ProcessPlan};
-use crate::record::run::{EntryState, Exit, ObjectKey, PlanHash, RunRecord};
+use crate::record::process::Identity;
+use crate::record::run::{
+    DependencyRun, Ended, EntryState, Exit, ObjectKey, OneshotLaunch, PlanHash, RunRecord,
+};
 use crate::report::{Note, StartProblem};
+use std::collections::BTreeSet;
 
 /// Whether `up` or `restart` may leave a completed oneshot alone.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Rerun {
     /// `restart` runs every selected oneshot again.
     Always,
-    /// `up` leaves a oneshot alone as the module docs say. `depends_left`
-    /// reports whether every app that the oneshot's app depends on was
-    /// already running in this `up`.
-    Up {
-        /// Whether every app that the app depends on was already running.
-        depends_left: bool,
-    },
+    /// `up` leaves a oneshot alone as the module docs say.
+    Up,
 }
 
 /// Returns the hash of the part of the plan that `process` of `app` runs
@@ -84,65 +93,160 @@ pub(super) fn completed_targets(
 
 impl Op<'_, '_> {
     /// Reports whether this operation leaves the oneshot `process` of
-    /// `app` alone, as `rerun` and the module docs say. `others` are the
-    /// selected processes of the app.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of reading the process table.
+    /// `app` alone, as `rerun` and the module docs say.
     pub(super) fn leaves_oneshot(
         &self,
         app: &AppPlan,
         process: &ProcessPlan,
-        others: &[&ProcessPlan],
         rerun: Rerun,
-    ) -> Result<bool, PhaseError> {
+    ) -> bool {
         let ProcessKind::Oneshot { once } = process.kind else {
-            return Ok(false);
+            return false;
         };
         let Some(record) = self.journal.record() else {
-            return Ok(false);
+            return false;
         };
-        if !completed_from_plan(record, app, process) {
-            return Ok(false);
+        if matches!(rerun, Rerun::Always) || !completed_from_plan(record, app, process) {
+            return false;
         }
-        let depends_left = match rerun {
-            Rerun::Always => return Ok(false),
-            Rerun::Up { depends_left } => depends_left,
-        };
         if once {
-            return Ok(true);
+            return true;
         }
-        if !depends_left {
-            return Ok(false);
+        let (_, entry) = record.host_pair(&app.name, &process.name);
+        let launched = entry
+            .and_then(|entry| entry.oneshot.as_ref())
+            .and_then(|launch| launch.depends.as_ref());
+        launched.is_some() && launched == self.dependency_runs(app, process).as_ref()
+    }
+
+    /// Returns what phase records when it launches `process` of `app`, or
+    /// `None` for a process that is not a oneshot.
+    pub(super) fn oneshot_launch(
+        &self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+    ) -> Option<OneshotLaunch> {
+        let ProcessKind::Oneshot { once } = process.kind else {
+            return None;
+        };
+        Some(OneshotLaunch {
+            plan_hash: part_hash(app, process),
+            depends: if once {
+                None
+            } else {
+                self.dependency_runs(app, process)
+            },
+        })
+    }
+
+    /// Returns the run of each process and container that the oneshot
+    /// `process` of `app` depends on and that runs now, sorted by app and
+    /// process, or `None` when phase cannot tell.
+    ///
+    /// The oneshot depends on every process and container of each app
+    /// that its app depends on, directly or through another app, and on
+    /// each long-running process of its own app that phase starts before
+    /// it, in the dependency order of the app's processes. A
+    /// host process's run is its keeper, which phase reads from the run
+    /// record and checks still runs. A container's run is its id and when
+    /// Docker last started it, which Docker reports now, so a start that
+    /// phase did not make counts too.
+    pub(super) fn dependency_runs(
+        &self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+    ) -> Option<Vec<DependencyRun>> {
+        let Some(record) = self.journal.record() else {
+            return Some(Vec::new());
+        };
+        let mut apps = BTreeSet::new();
+        let mut next: Vec<AppName> = app.depends.clone();
+        while let Some(name) = next.pop() {
+            if apps.insert(name.clone())
+                && let Some(entry) = record.apps.iter().find(|entry| entry.name == name)
+            {
+                next.extend(entry.depends.iter().cloned());
+            }
         }
-        for other in others {
-            if matches!(other.kind, ProcessKind::Oneshot { .. }) {
+        let earlier: BTreeSet<_> = sorted(
+            &app.processes,
+            |process| &process.name,
+            |process| &process.depends,
+        )
+        .into_iter()
+        .take_while(|other| other.name != process.name)
+        .filter(|other| other.kind == ProcessKind::LongRunning)
+        .map(|other| &other.name)
+        .collect();
+        let mut runs = Vec::new();
+        for keeper in &record.keepers {
+            let depended = apps.contains(&keeper.app)
+                || (keeper.app == app.name && earlier.contains(&keeper.process));
+            let Some(host) = keeper.host.as_ref().filter(|_| depended && keeper.live()) else {
+                continue;
+            };
+            match self.engine.host.identity(host) {
+                Ok(Identity::Ours) => runs.push(DependencyRun::Host {
+                    app: keeper.app.clone(),
+                    process: keeper.process.clone(),
+                    keeper: host.clone(),
+                }),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        for name in &apps {
+            let containers: Vec<_> = record
+                .containers
+                .iter()
+                .filter(|entry| {
+                    &entry.app == name && entry.id.is_some() && entry.state != EntryState::Stopped
+                })
+                .cloned()
+                .collect();
+            if containers.is_empty() {
                 continue;
             }
-            if !matches!(self.recorded(app, other)?, Recorded::Ours) {
-                return Ok(false);
+            let started = self
+                .engine
+                .containers
+                .started_at(&self.workspace, name, &containers)
+                .ok()?;
+            for (process, started_at) in started {
+                let Some(id) = containers
+                    .iter()
+                    .find(|entry| entry.process == process)
+                    .and_then(|entry| entry.id.clone())
+                else {
+                    continue;
+                };
+                runs.push(DependencyRun::Container {
+                    app: name.clone(),
+                    process,
+                    id,
+                    started_at,
+                });
             }
         }
-        Ok(true)
+        runs.sort_by(|a, b| a.key().cmp(&b.key()));
+        Some(runs)
     }
 
     /// Waits until the started oneshot `target` exits, within its ready
     /// timeout and the caller's readiness deadline. An exit with status 0
     /// completes it, and any other end fails the start with the code or
-    /// signal that `end` reads from the keeper and the log's tail.
+    /// signal that `end` reads from the keeper. It reads nothing from the
+    /// log, because the failure holds nothing that the process wrote.
     pub(super) fn await_completion(
         &self,
         process: &ProcessPlan,
         target: &Target,
         end: AppEnd,
-        lines: Box<dyn LogLines + Send>,
     ) -> Step {
         let host = self.engine.host;
         let began = now();
         let own_deadline = began + process.ready_timeout;
         let deadline = own_deadline.min(self.deadlines.ready);
-        let mut tail = Tail::new(lines);
         let mut ended = || {
             target
                 .host
@@ -159,7 +263,6 @@ impl Op<'_, '_> {
                     Step::Failed(StartProblem::exited(
                         exit.and_then(Exit::code),
                         exit.and_then(Exit::signal),
-                        tail.finish(),
                     ))
                 }
             }
@@ -170,7 +273,8 @@ impl Op<'_, '_> {
     }
 
     /// Records that the oneshot `process` of `app`, started as `target`,
-    /// completed, and stops its keeper, which waits for the lifecycle lock
+    /// exited with status 0, which records its completion, and stops its
+    /// keeper, which waits for the lifecycle lock
     /// to record the end itself. It returns [`Step::Completed`], or
     /// [`Step::Left`] when the keeper could not be stopped, and then the
     /// operation still counts the keeper among what it started.
@@ -186,9 +290,9 @@ impl Op<'_, '_> {
         target: &Target,
         notes: &mut Vec<Note>,
     ) -> Result<Step, PhaseError> {
-        self.journal.completed(
+        self.journal.ending(
             &ObjectKey::Process(app.name.clone(), process.name.clone()),
-            part_hash(app, process),
+            Ended::by_itself(Some(Exit::Code(0))),
         )?;
         let kill_wait = self.engine.settings.kill_wait;
         let deadline = deadline_in(

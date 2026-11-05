@@ -397,7 +397,14 @@ The plan's restart policy maps to Docker's: `no` to `no`, `on-failure` to
 plan's maximum does not apply to `always`. While phase waits for a
 container to be ready, a container that Docker is restarting, or has
 restarted since it was created, has ended, so a container that crashes in
-a loop fails to start with the last lines of its output.
+a loop fails to start with its exit code.
+
+A process or container that ends before it is ready fails with its exit
+code or the signal that ended it, and the failure holds nothing that the
+process wrote, because a process may print a secret value, such as a
+connection string with a password. The failure's message points to the
+log, which the host program's `logs` command shows, such as
+`mxv logs <app>`.
 
 The run record keeps, for each container, a hash of the process's service
 in the compose file, which holds no value of a variable. `up` leaves a
@@ -832,14 +839,18 @@ host entries, version 3 added `ready` to host process and container
 entries, as the next section says, version 4 added `sandbox` to host
 process entries, which records how phase launched the process, as [The
 sandbox as built](#the-sandbox-as-built) says, and version 5 adds
-`completed` to host process entries, which records a oneshot's
-completion, as [Oneshot processes](#oneshot-processes) says. phase reads a
+`oneshot` and `completed` to host process entries. `oneshot` records what
+phase launched a oneshot from: the hash of its part of the plan and, for
+a `once = false` oneshot, the run of each process and container that it
+depends on. `completed` records the oneshot's completion. [Oneshot
+processes](#oneshot-processes) says how phase uses both. phase reads a
 `phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
 with the fields it lacks at their defaults, and writes it back as v5: a
 v1 record reads with no ends, no restart policies, no readiness, no
-sandbox and no completions, a v2 record reads with no readiness, no
-sandbox and no completions, a v3 record reads with no sandbox and no
-completions, and a v4 record reads with no completions. A
+sandbox and no oneshot launches or completions, a v2 record reads with
+no readiness, no sandbox and no oneshot launches or completions, a v3
+record reads with no sandbox and no oneshot launches or completions, and
+a v4 record reads with no oneshot launches or completions. A
 phase that reads only an older version refuses a newer record as written
 by a newer phase and asks for an upgrade. Each version only adds fields
 that read as their defaults when they are missing, so the next version,
@@ -1429,27 +1440,50 @@ still refused with `NotRunnable::Oneshot`.
   as it stops any process that `up` started. A oneshot that does not exit
   within its `ready_timeout` fails as not ready, and one that the deadline
   of `up` cuts off is uncertain.
-- An exit with status 0 completes the oneshot. `up` records the
-  completion in the oneshot's run record entry as `completed`, the hash of
-  the oneshot's own part of the plan, stops the keeper, and then starts
-  the processes and apps that depend on it. The hash covers the app's
-  runner, source, ports, permissions and override names, and the
-  oneshot's own plan, such as its command, variable names and working
-  directory. It holds no environment value, so a changed value alone does
-  not count as a change.
-- Any other end fails the oneshot's app with the exit code or signal and
-  the last lines of its log, as for a process that ends before it is
-  ready. `up` starts no app that depends on it.
+- When phase launches a oneshot, it records in the oneshot's run record
+  entry, as `oneshot`, the hash of the oneshot's own part of the plan.
+  The hash covers the app's runner, source, ports, permissions and
+  override names, and the oneshot's own plan, such as its command,
+  variable names and working directory. It holds no environment value,
+  so a changed value alone does not count as a change. For a
+  `once = false` oneshot, phase also records the run of each process and
+  container that the oneshot depends on and that runs at that moment:
+  - The oneshot depends on every process and container of each app that
+    its app depends on, directly or through another app, and on each
+    long-running process of its own app that phase starts before it.
+  - A host process's run is its keeper's pid and start time. phase's own
+    start of the process starts a new keeper, and the keeper's restart of
+    a crashed process keeps it.
+  - A container's run is its id and the `State.StartedAt` that Docker
+    reports for it. Docker changes `StartedAt` on every start, including
+    one under its restart policy that phase did not ask for.
+- An exit with status 0 completes the oneshot, and whoever records the
+  exit records the completion in the entry as `completed`, the hash from
+  `oneshot`. When `up` watched the exit, `up` records it, stops the
+  keeper, and then starts the processes and apps that depend on it. When
+  the deadline of `up` or a cancel ended the wait first, the keeper
+  records the exit once it takes the lifecycle lock, and the oneshot
+  counts as completed from then on.
+- Any other end fails the oneshot's app with the exit code or signal, as
+  for a process that ends before it is ready. The failure holds nothing
+  that the oneshot wrote, and its message points to the log. `up` starts
+  no app that depends on it.
 - A later `up` leaves a completed oneshot alone when its recorded hash
   matches its part of the new plan and either of these holds:
   - the oneshot declares `once = true`;
-  - every other selected process of its app is already running, and
-    every app that its app depends on was already running in this `up`.
+  - each process and container that the oneshot depends on runs now as
+    the same run that phase recorded when it launched the oneshot, and
+    none runs now that did not run then. phase reads each keeper from the
+    run record and checks that it still runs, and asks Docker for each
+    container's `StartedAt`.
 
   Otherwise `up` runs it again. A `once = false` oneshot therefore runs
-  again whenever `up` starts or restarts its app or an app it depends on,
-  such as a database container that `up` started again, and an `up` that
-  finds everything running and unchanged leaves it alone.
+  again after anything started again what it depends on, whichever
+  operation did it: a `down db` followed by `up db`, a `restart db`, or
+  Docker's own restart of the `db` container. It also runs again when
+  phase cannot tell, such as when Docker does not answer. An `up` that
+  finds everything it depends on running as before leaves it alone, even
+  when a process that phase starts after the oneshot was started again.
 - `restart` runs each selected oneshot that has completed again, before
   the processes of its app that depend on it, whatever `once` says. It
   does not run a oneshot that failed, which the next `up` runs again.

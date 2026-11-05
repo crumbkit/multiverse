@@ -327,25 +327,25 @@ fn a_container_that_docker_restarts_outside_phase_is_running_and_no_longer_ready
 }
 
 #[test]
-fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_output_and_is_removed() {
+fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_no_output_and_is_removed()
+{
     if !docker_ready() {
         return;
     }
     let world = World::new();
-    let plan = world.plan(vec![app("db", "echo going away; exit 3")]);
+    let plan = world.plan(vec![app("db", "echo password=hunter2-going-away; exit 3")]);
 
     let report = world.up(&plan);
 
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("hunter2"), "{json}");
     match outcome(&report, "db") {
         AppOutcome::Failed {
-            problem: StartProblem::Exited { code, log_tail, .. },
+            problem: problem @ StartProblem::Exited { code, .. },
             ..
         } => {
             assert_eq!(*code, Some(3));
-            assert!(
-                log_tail.iter().any(|line| line == "going away"),
-                "{log_tail:?}"
-            );
+            assert!(!problem.to_string().contains("hunter2"), "{problem}");
         }
         other => {
             panic!("the up reported {other:?} for the container, and the report was {report:?}")
@@ -407,7 +407,7 @@ fn a_tcp_probe_waits_for_a_listener_inside_the_container_and_not_for_dockers_pro
 }
 
 #[test]
-fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
+fn a_container_that_crashes_in_a_restart_loop_fails_to_start_as_exited() {
     if !docker_ready() {
         return;
     }
@@ -422,16 +422,13 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
 
     // Without the restart check, the wait would last until the test's
     // 60-second ready deadline, and the start would be uncertain. A start
-    // that failed because the container exited, with the crash's output,
-    // shows that the restart loop ended the wait.
+    // that failed because the container exited shows that the restart
+    // loop ended the wait.
     match outcome(&report, "db") {
         AppOutcome::Failed {
-            problem: StartProblem::Exited { log_tail, .. },
+            problem: StartProblem::Exited { .. },
             ..
-        } => assert!(
-            log_tail.iter().any(|line| line == "crashing"),
-            "{log_tail:?}"
-        ),
+        } => {}
         other => panic!("{other:?}"),
     }
 }

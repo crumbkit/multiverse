@@ -145,10 +145,6 @@ pub(crate) const STATE_INTERVAL: Duration = Duration::from_millis(250);
 /// a log probe.
 pub(crate) const LOG_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The most lines of a container's output that a report holds when the
-/// container exits before it is ready.
-const TAIL_LINES: usize = 20;
-
 /// The container runner that runs the `docker` program found on `PATH`.
 #[derive(Clone, Debug)]
 pub(crate) struct ComposeRunner {
@@ -554,8 +550,7 @@ impl ComposeRunner {
                 Err(error) => return Err(halt(&no_shell_hint(error, owner.is_some()))),
             }
             let Some(inspected) = inspected else {
-                started.problem =
-                    Some((name.clone(), StartProblem::exited(None, None, Vec::new())));
+                started.problem = Some((name.clone(), StartProblem::exited(None, None)));
                 return Ok(());
             };
             // The secrets are written before the readiness wait, and a
@@ -658,9 +653,7 @@ impl ComposeRunner {
         match outcome {
             Outcome::Ready => Readiness::Ready,
             Outcome::Cancelled => Readiness::Cancelled,
-            Outcome::Ended => {
-                Readiness::Failed(StartProblem::exited(watcher.code(), None, tail(&id)))
-            }
+            Outcome::Ended => Readiness::Failed(StartProblem::exited(watcher.code(), None)),
             // The ready deadline of the operation, which comes before the
             // process's own ready timeout, cut the wait short.
             Outcome::NotReady { .. } | Outcome::Failing { .. } if own_deadline > deadline => {
@@ -1182,6 +1175,33 @@ impl ContainerRunner for ComposeRunner {
         Ok(running)
     }
 
+    fn started_at(
+        &self,
+        workspace: &WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<(ProcessName, String)>, PhaseError> {
+        let scope = self.scope(workspace, app);
+        let mut started = Vec::new();
+        for entry in containers {
+            let (Ok(service), Some(Ok(id))) = (
+                names::ServiceName::new(entry.process.as_str()),
+                entry
+                    .id
+                    .as_ref()
+                    .map(|id| names::ContainerId::new(id.as_str())),
+            ) else {
+                continue;
+            };
+            match inspect_id(&scope, &service, &id) {
+                Ok(Some(inspected)) => started.push((entry.process.clone(), inspected.started)),
+                Ok(None) | Err(ContainerError::Foreign { .. }) => {}
+                Err(error) => return Err(docker_error(&error)),
+            }
+        }
+        Ok(started)
+    }
+
     fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError> {
         let app = rewrite.app;
         let Some(process) = app
@@ -1464,25 +1484,6 @@ fn seen(read: Option<(ContainerState, u32)>) -> Seen {
             Seen::Unsure
         }
     }
-}
-
-/// Returns the last [`TAIL_LINES`] lines of the container `id`'s output,
-/// from both of its streams in the order the container wrote them, or none
-/// when docker cannot give them. The lines are what the container wrote,
-/// which may hold values that it printed itself.
-fn tail(id: &names::ContainerId) -> Vec<String> {
-    let count = TAIL_LINES.to_string();
-    let Some(finished) = quick(
-        ["logs", "--timestamps", "--tail", &count, "--", id.as_str()],
-        "logs",
-    )
-    .ok()
-    .filter(|finished| finished.status.success()) else {
-        return Vec::new();
-    };
-    let lines = stamped(&finished.stdout, &finished.stderr, MOST_OUTPUT_BYTES);
-    let skip = lines.len().saturating_sub(TAIL_LINES);
-    lines.into_iter().skip(skip).map(|(_, text)| text).collect()
 }
 
 /// The text that ends a line longer than a docker command keeps, which

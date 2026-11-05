@@ -16,10 +16,7 @@ fn report() -> Report {
         AppReport::new("auth".parse().unwrap(), AppOutcome::Started),
         AppReport::new(
             "worker".parse().unwrap(),
-            AppOutcome::failed(
-                "run".parse().unwrap(),
-                StartProblem::exited(Some(2), None, vec!["missing config".into()]),
-            ),
+            AppOutcome::failed("run".parse().unwrap(), StartProblem::exited(Some(2), None)),
         ),
         AppReport::new(
             "web".parse().unwrap(),
@@ -187,4 +184,17 @@ fn an_errored_outcome_names_a_foreign_object_and_reads_a_context_field_that_a_ne
     let foreign = context.foreign.unwrap();
     assert_eq!(foreign.kind(), DockerKind::Unknown);
     assert_eq!(foreign.name(), "phase-0123456789abcdef.sock");
+}
+
+#[test]
+fn an_exit_names_its_status_or_signal_and_points_to_the_log() {
+    assert_eq!(
+        StartProblem::exited(Some(3), None).to_string(),
+        "it exited with status 3; its log holds its output, which the host program's `logs` command shows, such as `mxv logs <app>`"
+    );
+    assert!(
+        StartProblem::exited(None, Some(9))
+            .to_string()
+            .starts_with("signal 9 ended it;")
+    );
 }

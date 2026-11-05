@@ -37,9 +37,8 @@
 //! never signals a process that phase cannot prove is its own, and the
 //! record keeps such a process.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -76,10 +75,6 @@ mod tests;
 use oneshot::{Rerun, completed_targets};
 use order::{Chosen, choose};
 use stop::{Stopped, Target};
-
-/// The most lines of a process's log that a report holds when the process
-/// ends before it is ready. Older lines are left out.
-const TAIL_LINES: usize = 20;
 
 /// How long `up` waits for a keeper's end line once it has seen the
 /// keeper's app gone. The keeper writes the line as soon as it reaps the
@@ -344,7 +339,6 @@ impl Op<'_, '_> {
         self.journal.plan(planned)?;
         let mut reports: Vec<AppReport> = Vec::new();
         let mut unready: BTreeSet<AppName> = BTreeSet::new();
-        let mut left_alone: BTreeSet<AppName> = BTreeSet::new();
         let mut halted = false;
         for (at, choice) in chosen.iter().enumerate() {
             let name = &choice.app.name;
@@ -369,14 +363,7 @@ impl Op<'_, '_> {
                 return self.cancelled(reports, Vec::new(), rest);
             }
             attempted.insert(name.clone());
-            let rerun = Rerun::Up {
-                depends_left: choice
-                    .app
-                    .depends
-                    .iter()
-                    .all(|depend| left_alone.contains(depend)),
-            };
-            let step = match self.start_app(choice, None, rerun) {
+            let step = match self.start_app(choice, None, Rerun::Up) {
                 Ok(step) => step,
                 Err(error) => return Err(self.abort(error)),
             };
@@ -385,9 +372,6 @@ impl Op<'_, '_> {
                     if !matches!(outcome, AppOutcome::Started | AppOutcome::AlreadyRunning) {
                         unready.insert(name.clone());
                         halted = true;
-                    }
-                    if outcome == AppOutcome::AlreadyRunning {
-                        left_alone.insert(name.clone());
                     }
                     reports.push(AppReport::new(name.clone(), outcome).with_notes(notes));
                 }
@@ -453,13 +437,8 @@ impl Op<'_, '_> {
         let mut notes = Vec::new();
         let mut any = false;
         for process in &choice.processes {
-            match self.leaves_oneshot(app, process, &choice.processes, rerun) {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => {
-                    self.stop_since(mark, &mut StopsByApp::new(), &mut notes)?;
-                    return Ok(AppStep::Done(AppOutcome::errored(&error), notes));
-                }
+            if self.leaves_oneshot(app, process, rerun) {
+                continue;
             }
             let environment = fresh
                 .as_deref_mut()
@@ -686,6 +665,7 @@ impl Op<'_, '_> {
                 listen: listen.clone(),
                 restart: process.restart.clone(),
                 sandbox: sandbox::sandboxing(app, &sandbox::platform()),
+                oneshot: self.oneshot_launch(app, process),
             },
         )?;
         let (keeper, started, end, lines) = match self.launch(app, process, environment.as_ref()) {
@@ -710,7 +690,7 @@ impl Op<'_, '_> {
             Started::Host(started.clone()),
         )?;
         let step = match process.kind {
-            ProcessKind::Oneshot { .. } => self.await_completion(process, &target, end, lines),
+            ProcessKind::Oneshot { .. } => self.await_completion(process, &target, end),
             ProcessKind::LongRunning => {
                 self.await_ready(app, process, &target, environment.as_ref(), end, lines)
             }
@@ -961,7 +941,7 @@ impl Op<'_, '_> {
         let began = now();
         let own_deadline = began + process.ready_timeout;
         let deadline = own_deadline.min(self.deadlines.ready);
-        let mut tail = Tail::new(lines);
+        let mut lines = lines;
         let mut ended = || {
             target
                 .host
@@ -992,7 +972,7 @@ impl Op<'_, '_> {
                         .unwrap_or_default(),
                     dir: process_dir(app, process),
                 };
-                let mut check = match check(app, process, &probe.check, &exec, &mut tail) {
+                let mut check = match check(app, process, &probe.check, &exec, &mut *lines) {
                     Ok(check) => check,
                     Err(error) => return Step::Errored(error),
                 };
@@ -1014,7 +994,6 @@ impl Op<'_, '_> {
                 Step::Failed(StartProblem::exited(
                     exit.and_then(Exit::code),
                     exit.and_then(Exit::signal),
-                    tail.finish(),
                 ))
             }
             Outcome::NotReady { .. } | Outcome::Failing { .. } if own_deadline > deadline => {
@@ -1513,7 +1492,7 @@ fn check<'a>(
     process: &ProcessPlan,
     probe: &'a ProbeCheck,
     exec: &'a HostExec<'a>,
-    lines: &'a mut Tail,
+    lines: &'a mut dyn LogLines,
 ) -> Result<Check<'a>, PhaseError> {
     let unusable = |reason: String| PhaseError::ProcessUnstartable {
         app: app.name.clone(),
@@ -1560,51 +1539,5 @@ pub(crate) fn watch(until: Instant, ended: &mut dyn FnMut() -> bool, cancel: &Ca
             return Outcome::Ready;
         }
         pause(POLL_INTERVAL.min(left));
-    }
-}
-
-/// A follower of a process's log that keeps its last [`TAIL_LINES`]
-/// lines, for the report of a process that ends before it is ready.
-struct Tail {
-    /// The follower.
-    lines: Box<dyn LogLines + Send>,
-    /// The last lines read.
-    last: VecDeque<String>,
-}
-
-impl Tail {
-    /// Returns a tail of `lines` that has read nothing.
-    fn new(lines: Box<dyn LogLines + Send>) -> Self {
-        Self {
-            lines,
-            last: VecDeque::new(),
-        }
-    }
-
-    /// Reads the last part of the log up to its end, and returns the last
-    /// lines. A log that cannot be read leaves the lines read so far.
-    fn finish(&mut self) -> Vec<String> {
-        if let Ok(lines) = self.lines.rest() {
-            self.keep(&lines);
-        }
-        self.last.drain(..).collect()
-    }
-
-    /// Keeps the last [`TAIL_LINES`] of the lines read and `lines`.
-    fn keep(&mut self, lines: &[String]) {
-        for line in lines {
-            if self.last.len() == TAIL_LINES {
-                self.last.pop_front();
-            }
-            self.last.push_back(line.clone());
-        }
-    }
-}
-
-impl LogLines for Tail {
-    fn new_lines(&mut self) -> io::Result<Vec<String>> {
-        let lines = self.lines.new_lines()?;
-        self.keep(&lines);
-        Ok(lines)
     }
 }

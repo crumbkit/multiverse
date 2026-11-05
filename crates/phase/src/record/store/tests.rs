@@ -10,7 +10,8 @@ use crate::name::WorkspaceId;
 use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
 use crate::record::ContainerId;
 use crate::record::run::{
-    Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, PlanHash, Ready, RunRecord, Started,
+    DependencyRun, Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, OneshotLaunch,
+    PlanHash, Ready, RunRecord, Started,
 };
 use crate::record::testing::{app, empty_record, process, workspace, write_file};
 
@@ -409,7 +410,49 @@ fn launching(grace_ms: u64, hash: u8) -> Launching {
         listen: None,
         restart: Restart::No,
         sandbox: Some(crate::sandbox::Sandboxing::seatbelt()),
+        oneshot: None,
     }
+}
+
+/// What phase records when it launches a oneshot from the part of the
+/// plan with the hash `[7; 32]`, after a database container and a cache
+/// process that it depends on.
+fn oneshot_launch() -> OneshotLaunch {
+    OneshotLaunch {
+        plan_hash: PlanHash::new([7; 32]),
+        depends: Some(vec![
+            DependencyRun::Host {
+                app: app("cache"),
+                process: process("server"),
+                keeper: host(),
+            },
+            DependencyRun::Container {
+                app: app("db"),
+                process: process("postgres"),
+                id: ContainerId::try_from("c0".repeat(32)).unwrap(),
+                started_at: "2026-11-05T09:00:00.123456789Z".to_owned(),
+            },
+        ]),
+    }
+}
+
+/// Opens a journal of `store` whose record holds the oneshot `api/server`,
+/// launched as [`oneshot_launch`] says and started.
+fn launched_oneshot(store: &RunStore) -> Journal<'_> {
+    let mut journal = Journal::open(store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal
+        .launching(
+            &app("api"),
+            &process("server"),
+            &Launching {
+                oneshot: Some(oneshot_launch()),
+                ..launching(300, 1)
+            },
+        )
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal
 }
 
 #[test]
@@ -829,44 +872,95 @@ fn a_launched_host_process_records_its_sandbox_in_the_record() {
 }
 
 #[test]
-fn a_completed_oneshot_records_its_hash_and_an_exit_of_zero_until_it_launches_again() {
+fn an_exit_of_zero_of_a_launched_oneshot_records_its_completion_until_it_launches_again() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
-    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
-    journal.plan(planned()).unwrap();
-    journal.started(&server(), Started::Host(host())).unwrap();
+    let mut journal = launched_oneshot(&store);
+    assert_eq!(on_disk(&store).processes[0].oneshot, Some(oneshot_launch()));
 
     journal
-        .completed(&server(), PlanHash::new([7; 32]))
+        .ending(&server(), Ended::by_itself(Some(Exit::Code(0))))
         .unwrap();
 
     let entry = on_disk(&store).processes[0].clone();
     assert_eq!(entry.completed, Some(PlanHash::new([7; 32])));
     assert_eq!(entry.state, EntryState::Stopping);
-    assert_eq!(entry.ended, Some(Ended::by_itself(Some(Exit::Code(0)))));
     // A stop that phase begins after the completion keeps the end.
     journal.stopping(&server()).unwrap();
     journal.stopped(&server()).unwrap();
     assert_eq!(on_disk(&store).processes[0].ended, entry.ended);
+    assert_eq!(
+        on_disk(&store).processes[0].completed,
+        Some(PlanHash::new([7; 32]))
+    );
     assert!(journal.record().unwrap().holds_an_exit());
 
     journal
         .launching(&app("api"), &process("server"), &launching(300, 9))
         .unwrap();
 
-    assert_eq!(on_disk(&store).processes[0].completed, None);
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, None);
+    assert_eq!(entry.oneshot, None);
+}
+
+#[test]
+fn a_keeper_that_records_an_exit_of_zero_after_the_lock_is_free_completes_the_oneshot() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    drop(launched_oneshot(&store));
+    let mut keeper = Journal::open(&store, &workspace(), SHORT).unwrap();
+
+    keeper
+        .stopped_after(&server(), Ended::by_itself(Some(Exit::Code(0))))
+        .unwrap();
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, Some(PlanHash::new([7; 32])));
+    assert_eq!(entry.state, EntryState::Stopped);
+}
+
+#[test]
+fn no_end_but_an_exit_of_zero_by_itself_of_a_oneshot_records_a_completion() {
+    for (oneshot, ended) in [
+        (true, Ended::by_itself(Some(Exit::Code(1)))),
+        (true, Ended::by_itself(Some(Exit::Signal(9)))),
+        (true, Ended::by_itself(None)),
+        (true, Ended::requested(Some(Exit::Code(0)))),
+        (false, Ended::by_itself(Some(Exit::Code(0)))),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let store = RunStore::new(state.path());
+        let mut journal = if oneshot {
+            launched_oneshot(&store)
+        } else {
+            let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+            journal.plan(planned()).unwrap();
+            journal
+                .launching(&app("api"), &process("server"), &launching(300, 1))
+                .unwrap();
+            journal.started(&server(), Started::Host(host())).unwrap();
+            journal
+        };
+
+        journal.ending(&server(), ended).unwrap();
+
+        assert_eq!(
+            on_disk(&store).processes[0].completed,
+            None,
+            "{oneshot} {ended:?}"
+        );
+    }
 }
 
 #[test]
 fn clearing_a_completion_forgets_the_hash_and_the_end_and_leaves_other_entries_unwritten() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
-    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
-    journal.plan(planned()).unwrap();
-    journal.started(&server(), Started::Host(host())).unwrap();
+    let mut journal = launched_oneshot(&store);
     assert!(!journal.clear_completion(&server()).unwrap());
     journal
-        .completed(&server(), PlanHash::new([7; 32]))
+        .ending(&server(), Ended::by_itself(Some(Exit::Code(0))))
         .unwrap();
 
     assert!(journal.clear_completion(&server()).unwrap());
@@ -877,16 +971,61 @@ fn clearing_a_completion_forgets_the_hash_and_the_end_and_leaves_other_entries_u
 }
 
 #[test]
-fn a_v4_record_reads_as_one_whose_oneshots_have_not_completed() {
+fn a_launched_oneshot_records_its_hash_and_the_runs_it_depends_on_as_named_fields() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    drop(launched_oneshot(&store));
+    let text = fs::read_to_string(store.path(&workspace())).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(
+        json["processes"][0]["oneshot"]["depends"],
+        serde_json::json!([
+            {
+                "kind": "host",
+                "app": "cache",
+                "process": "server",
+                "keeper": {
+                    "pid": 4242,
+                    "started_at_us": 1_793_000_000_000_000_u64,
+                    "group": 4242,
+                    "boot_id": null
+                }
+            },
+            {
+                "kind": "container",
+                "app": "db",
+                "process": "postgres",
+                "id": "c0".repeat(32),
+                "started_at": "2026-11-05T09:00:00.123456789Z"
+            }
+        ])
+    );
+    assert_eq!(
+        json["processes"][0]["oneshot"]["plan_hash"],
+        serde_json::json!(PlanHash::new([7; 32]))
+    );
+}
+
+#[test]
+fn a_v4_record_reads_as_one_whose_processes_were_not_launched_as_oneshots_or_completed() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
     journal.plan(planned()).unwrap();
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 1))
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
     drop(journal);
     let path = store.path(&workspace());
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("completed"), "{text}");
+    assert!(!text.contains("oneshot"), "{text}");
     write_file(&path, &text.replace("phase/run/v5", "phase/run/v4"));
 
-    assert_eq!(on_disk(&store).processes[0].completed, None);
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.oneshot, None);
+    assert_eq!(entry.completed, None);
+    assert_eq!(entry.host, Some(host()));
 }

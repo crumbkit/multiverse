@@ -29,8 +29,8 @@ use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::name::{AppName, ProcessName};
 use crate::record::run::{
-    Ended, EntryState, HostProcess, Launching, ObjectKey, PlanHash, RUN_VERSION, Ready, RunRecord,
-    RunSchema, Started, Unplanned,
+    Ended, EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, Ready, RunRecord, RunSchema,
+    Started, Unplanned,
 };
 
 #[cfg(test)]
@@ -637,21 +637,6 @@ impl<'s> Journal<'s> {
         ended: Ended,
     ) -> Result<(), PhaseError> {
         self.change(key, EntryState::Stopped, Some(ended))
-    }
-
-    /// Records that the oneshot `key` exited with status 0 from the part of
-    /// the plan whose hash is `hash`, as [`RunRecord::mark_completed`]
-    /// says.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Journal::started`].
-    pub(crate) fn completed(&mut self, key: &ObjectKey, hash: PlanHash) -> Result<(), PhaseError> {
-        let mut record = self.current(key)?;
-        record
-            .mark_completed(key, hash)
-            .map_err(|unplanned| self.unplanned(&unplanned))?;
-        self.commit(record)
     }
 
     /// Forgets the completion of the oneshot `key`, as
