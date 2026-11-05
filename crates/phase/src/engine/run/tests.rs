@@ -978,7 +978,7 @@ fn up_records_a_process_without_a_probe_ready_once_it_outlasts_its_start_grace()
 
     assert!(world.record().unwrap().processes[0].ready.is_some());
     let specs = world.host.state.borrow().specs.join("\n");
-    assert!(specs.contains(r#""ready_on_start":true"#), "{specs}");
+    assert!(specs.contains(r#""ready_after_ms":30"#), "{specs}");
 }
 
 #[test]
@@ -998,7 +998,7 @@ fn the_keeper_of_a_process_with_a_probe_does_not_count_it_ready_on_start() {
         .unwrap();
 
     let specs = world.host.state.borrow().specs.join("\n");
-    assert!(!specs.contains("ready_on_start"), "{specs}");
+    assert!(!specs.contains("ready_after_ms"), "{specs}");
 }
 
 #[test]

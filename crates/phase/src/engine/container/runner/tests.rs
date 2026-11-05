@@ -303,6 +303,25 @@ fn up_runs_a_container_app_that_a_command_probe_finds_ready_and_down_removes_it(
 }
 
 #[test]
+fn a_container_that_docker_restarts_outside_phase_is_running_and_no_longer_ready() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![app("db", "exec sleep 60")]);
+    let report = world.up(&plan);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let state = || world.phase.status(&world.id, Some(&plan)).unwrap().rows[0].state;
+    assert_eq!(state(), ProcessState::Ready);
+    let id = world.container("db", "server").unwrap();
+
+    // `docker restart` does not add to the container's RestartCount.
+    docker(&["restart", "--time", "0", "--", &id]).unwrap();
+
+    assert_eq!(state(), ProcessState::Running);
+}
+
+#[test]
 fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_output_and_is_removed() {
     if !docker_ready() {
         return;

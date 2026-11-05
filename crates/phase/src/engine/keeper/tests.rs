@@ -934,7 +934,7 @@ fn a_keeper_leaves_a_record_entry_that_names_another_process_unchanged() {
     let key = ObjectKey::Process(app("api"), process("server"));
     Journal::open(&store, &workspace(), PATIENCE)
         .unwrap()
-        .restarted(&key, other.clone(), 7, None)
+        .restarted(&key, other.clone(), 7)
         .unwrap();
 
     // The app ends on its own, so the keeper waits for its record writes,
@@ -1089,21 +1089,38 @@ const CRASH_ONCE: &str =
     "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; touch crashed; kill -9 $$";
 
 #[test]
-fn a_keeper_records_an_app_without_a_readiness_probe_ready_when_it_restarts_it() {
+fn a_keeper_records_a_restarted_app_without_a_readiness_probe_ready_after_its_start_grace() {
     let fixture = Fixture::new();
     let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
     let spec = fixture
         .spec(CRASH_ONCE, restart, Stop::default())
-        .ready_on_start(true);
+        .ready_after(Some(Duration::from_secs(1)));
     let _running = fixture.start(&spec).unwrap();
 
     eventually("the restart", || {
         matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
     });
+    let restarted = now();
+    assert_eq!(fixture.ready(), None);
 
-    let ready = fixture.ready().unwrap();
-    assert_eq!(ready.restarts, 1);
-    assert!(ready.at_ms > 0);
+    eventually("the readiness", || fixture.ready().is_some());
+
+    assert!(now() >= restarted + Duration::from_millis(500));
+    assert_eq!(fixture.ready().unwrap().restarts, 1);
+}
+
+#[test]
+fn a_keeper_records_no_readiness_of_an_app_that_ends_within_its_start_grace() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(Some(2), Duration::from_millis(20), Resolve::Never));
+    let spec = fixture
+        .spec("sleep 0.1; exit 3", restart, Stop::default())
+        .ready_after(Some(Duration::from_millis(500)));
+    let mut running = fixture.start(&spec).unwrap();
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
+    assert_eq!(fixture.recorded().map(|(_, _, restarts)| restarts), Some(2));
+    assert_eq!(fixture.ready(), None);
 }
 
 #[test]

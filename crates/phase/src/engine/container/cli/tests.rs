@@ -889,12 +889,25 @@ fn a_running_container_with_secret_files_that_docker_restarted_is_not_running() 
 }
 
 #[test]
-fn a_containers_restarts_come_from_its_inspection_with_its_state() {
+fn a_containers_restarts_and_start_time_come_from_its_inspection_with_its_state() {
     let fake = Fake::new();
-    let (fresh, restarted) = (container_id('a'), container_id('b'));
+    let (fresh, restarted, unreadable) = (container_id('a'), container_id('b'), container_id('c'));
     let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
-    fake.labelled(&[&fresh], &fresh, &format!("{ours}\nrunning 0\n0 "));
-    fake.labelled(&[&restarted], &restarted, &format!("{ours}\nrunning 0\n3 "));
+    fake.labelled(
+        &[&fresh],
+        &fresh,
+        &format!("{ours}\nrunning 0\n0 \n2026-11-05T10:20:30.123456789Z"),
+    );
+    fake.labelled(
+        &[&restarted],
+        &restarted,
+        &format!("{ours}\nrunning 0\n3 \n1970-01-01T00:00:01.5Z"),
+    );
+    fake.labelled(
+        &[&unreadable],
+        &unreadable,
+        &format!("{ours}\nrunning 0\nmany \n0001-01-01T00:00:00Z"),
+    );
     let workspace = workspace();
     let db = name("db");
     let seen = |id: &str| {
@@ -904,10 +917,22 @@ fn a_containers_restarts_come_from_its_inspection_with_its_state() {
             .unwrap()
     };
 
-    assert_eq!(seen(&fresh), SeenContainer::new(ContainerState::Running, 0));
+    assert_eq!(
+        seen(&fresh),
+        SeenContainer::new(ContainerState::Running, Some(0), Some(1_793_874_030_123))
+    );
     assert_eq!(
         seen(&restarted),
-        SeenContainer::new(ContainerState::Running, 3)
+        SeenContainer::new(ContainerState::Running, Some(3), Some(1_500))
+    );
+    assert_eq!(
+        seen(&unreadable),
+        SeenContainer::new(ContainerState::Running, None, None)
+    );
+    assert!(
+        fake.calls().contains("{{.State.StartedAt}}"),
+        "{}",
+        fake.calls()
     );
 }
 

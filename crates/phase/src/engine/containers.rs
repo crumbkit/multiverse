@@ -186,11 +186,15 @@ impl ContainersStarted {
     /// by Docker as an end, so these are the restarts that the container
     /// had when the start inspected it.
     pub(crate) fn ready(&mut self, process: &ProcessName, restarts: u32) {
-        if let Some(container) = self
+        let container = self
             .containers
             .iter_mut()
-            .rfind(|container| &container.process == process)
-        {
+            .rfind(|container| &container.process == process);
+        debug_assert!(
+            container.is_some(),
+            "a start observed {process} ready before it recorded its container"
+        );
+        if let Some(container) = container {
             container.ready = Some(Ready::now(restarts));
         }
     }

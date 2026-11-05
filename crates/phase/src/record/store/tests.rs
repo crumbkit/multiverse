@@ -372,9 +372,7 @@ fn a_restart_records_the_new_process_and_the_count_of_restarts() {
         ..host()
     };
 
-    journal
-        .restarted(&server(), again.clone(), 3, None)
-        .unwrap();
+    journal.restarted(&server(), again.clone(), 3).unwrap();
 
     let record = on_disk(&store);
     assert_eq!(record.state(&server()), Some(EntryState::Running));
@@ -422,7 +420,7 @@ fn launching_a_process_again_writes_its_entries_back_to_planned_with_no_host() {
     let keeper = ObjectKey::Keeper(app("api"), process("server"));
     journal.started(&keeper, Started::Host(host())).unwrap();
     journal.started(&server(), Started::Host(host())).unwrap();
-    journal.restarted(&server(), host(), 2, None).unwrap();
+    journal.restarted(&server(), host(), 2).unwrap();
     journal.stopped(&server()).unwrap();
 
     journal
@@ -470,7 +468,7 @@ fn a_fresh_start_of_a_process_counts_its_restarts_from_zero() {
     let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
     journal.plan(planned()).unwrap();
     journal.started(&server(), Started::Host(host())).unwrap();
-    journal.restarted(&server(), host(), 3, None).unwrap();
+    journal.restarted(&server(), host(), 3).unwrap();
 
     journal.started(&server(), Started::Host(host())).unwrap();
 
@@ -555,7 +553,7 @@ fn a_restart_keeps_the_last_end_and_a_fresh_start_or_launch_clears_it() {
     journal.started(&server(), Started::Host(host())).unwrap();
     journal.stopped_after(&server(), crashed(3)).unwrap();
 
-    journal.restarted(&server(), host(), 1, None).unwrap();
+    journal.restarted(&server(), host(), 1).unwrap();
     assert_eq!(on_disk(&store).processes[0].ended, Some(crashed(3)));
 
     journal.started(&server(), Started::Host(host())).unwrap();
@@ -576,7 +574,7 @@ fn a_stop_that_phase_begins_records_the_end_as_requested() {
     journal.plan(planned()).unwrap();
     journal.started(&server(), Started::Host(host())).unwrap();
     journal.stopped_after(&server(), crashed(3)).unwrap();
-    journal.restarted(&server(), host(), 1, None).unwrap();
+    journal.restarted(&server(), host(), 1).unwrap();
 
     journal.stopping(&server()).unwrap();
     journal.stopped(&server()).unwrap();
@@ -666,7 +664,7 @@ fn readiness_is_recorded_with_its_time_and_the_restarts_it_saw() {
 }
 
 #[test]
-fn a_restart_clears_readiness_unless_the_restart_brings_its_own() {
+fn a_restart_clears_readiness() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
@@ -674,13 +672,9 @@ fn a_restart_clears_readiness_unless_the_restart_brings_its_own() {
     journal.started(&server(), Started::Host(host())).unwrap();
     journal.ready(&server(), Ready::new(100, 0)).unwrap();
 
-    journal.restarted(&server(), host(), 1, None).unwrap();
-    assert_eq!(on_disk(&store).processes[0].ready, None);
+    journal.restarted(&server(), host(), 1).unwrap();
 
-    journal
-        .restarted(&server(), host(), 2, Some(Ready::new(200, 2)))
-        .unwrap();
-    assert_eq!(on_disk(&store).processes[0].ready, Some(Ready::new(200, 2)));
+    assert_eq!(on_disk(&store).processes[0].ready, None);
 }
 
 #[test]

@@ -280,6 +280,9 @@ impl Supervisor<'_> {
             fresh: None,
         };
         let mut previous: Option<HostProcess> = None;
+        // Whether the app running now is a restart rather than the first
+        // start.
+        let mut restarted = false;
         loop {
             if output.is_none() && self.stop_waiting() {
                 self.diagnostics
@@ -312,14 +315,31 @@ impl Supervisor<'_> {
                 write_handshake(&mut output, &Handshake::Started(started));
                 end_output = Some(output);
             } else if let Some(previous) = previous.take() {
-                // An app without a readiness probe is ready once it runs.
-                let ready = self.spec.ready_on_start.then(|| Ready::now(runs.restarts));
                 self.recorder
-                    .restarted(app.host.clone(), previous, runs.restarts, ready);
+                    .restarted(app.host.clone(), previous, runs.restarts);
+                restarted = true;
             }
             previous = Some(app.host.clone());
             let began = now();
-            let Some(status) = self.app_ended() else {
+            // A restarted app without a readiness probe is ready once it
+            // outlasts its start grace, as `up` counts the first start.
+            let grace = self.spec.ready_grace().filter(|_| restarted);
+            let graced = match grace {
+                Some(grace) => self.ended_within(began + grace),
+                None => Within::Running,
+            };
+            let ended = match graced {
+                Within::Stop => None,
+                Within::Ended(status) => Some(status),
+                Within::Running => {
+                    if grace.is_some() {
+                        self.recorder
+                            .ready(app.host.clone(), Ready::now(runs.restarts));
+                    }
+                    self.app_ended()
+                }
+            };
+            let Some(status) = ended else {
                 return self.stop(&app, end_output.take());
             };
             self.diagnostics.note(&match status {
@@ -560,6 +580,22 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Waits until the app ends, a stop request comes or `deadline`
+    /// passes, and says which came first.
+    fn ended_within(&self, deadline: Instant) -> Within {
+        loop {
+            match self
+                .events
+                .recv_timeout(deadline.saturating_duration_since(now()))
+            {
+                Ok(Event::Ended(status)) => return Within::Ended(status),
+                Ok(Event::Recorded) => {}
+                Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => return Within::Stop,
+                Err(RecvTimeoutError::Timeout) => return Within::Running,
+            }
+        }
+    }
+
     /// Waits until the app's end arrives or `deadline` passes, and returns
     /// the app's status, which is `None` when it could not be read, or
     /// returns `None` when the end did not arrive. A stop request
@@ -604,6 +640,18 @@ impl Supervisor<'_> {
             }
         }
     }
+}
+
+/// What came first while the keeper waited out a restarted app's start
+/// grace.
+enum Within {
+    /// The app ended, with its status, which is `None` when it could not be
+    /// read.
+    Ended(Option<ExitStatus>),
+    /// A stop request came.
+    Stop,
+    /// The grace passed and the app still runs.
+    Running,
 }
 
 /// What ending an app's group found.

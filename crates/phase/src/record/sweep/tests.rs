@@ -709,9 +709,7 @@ fn sweep_records_a_running_process_it_finds_gone_as_ended_without_a_known_exit()
         journal
             .stopped_after(&server(), Ended::by_itself(Some(Exit::Code(1))))
             .unwrap();
-        journal
-            .restarted(&server(), host_at(200, 2), 1, None)
-            .unwrap();
+        journal.restarted(&server(), host_at(200, 2), 1).unwrap();
     }
     // The process of web is one phase may not read, so the record stays.
     let processes = FakeProcesses::default().with(300, Start::Unreadable, None);

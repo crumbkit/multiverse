@@ -349,6 +349,10 @@ pub(crate) struct FakeObject {
     /// How many times Docker has restarted a container, which is 0 unless
     /// a test says otherwise.
     pub(crate) restarts: u32,
+    /// When Docker last started a container, in milliseconds since the
+    /// Unix epoch, which is 0 unless a test says otherwise. `None` stands
+    /// for a time that phase cannot read.
+    pub(crate) started_at_ms: Option<u64>,
 }
 
 /// A fake Docker that holds objects in memory.
@@ -390,7 +394,18 @@ impl FakeDocker {
             workspace: label.map(str::to_owned),
             state: ContainerState::Running,
             restarts: 0,
+            started_at_ms: Some(0),
         });
+        self
+    }
+
+    /// Sets when Docker last started the container whose id is `id`.
+    pub(crate) fn started_at(self, id: &str, started_at_ms: Option<u64>) -> Self {
+        for object in self.objects.borrow_mut().iter_mut() {
+            if object.id == id {
+                object.started_at_ms = started_at_ms;
+            }
+        }
         self
     }
 
@@ -454,9 +469,9 @@ impl Docker for FakeDocker {
         &self,
         object: &DockerObject<'_>,
     ) -> Result<Option<SeenContainer>, DockerError> {
-        Ok(self
-            .matching(object)?
-            .map(|found| SeenContainer::new(found.state, found.restarts)))
+        Ok(self.matching(object)?.map(|found| {
+            SeenContainer::new(found.state, Some(found.restarts), found.started_at_ms)
+        }))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, _wait: Duration) -> Result<(), DockerError> {

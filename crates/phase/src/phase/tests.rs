@@ -187,7 +187,7 @@ fn real_keeper(state: &std::path::Path, checkout: &std::path::Path) -> (Phase, P
         state,
         checkout,
         "echo \"ready $GREETING\"; exec sleep 30",
-        "^ready hello$",
+        Some("^ready hello$"),
         &[],
     )
 }
@@ -195,12 +195,12 @@ fn real_keeper(state: &std::path::Path, checkout: &std::path::Path) -> (Phase, P
 /// A phase whose keeper is this test binary, and the plan of one app,
 /// `api`, whose process `server` receives `GREETING` and the optional
 /// variables `optional`, runs `script` in `sh`, and is ready once its log
-/// matches `ready`.
+/// matches `ready`, or has no readiness probe when `ready` is `None`.
 fn real_keeper_running(
     state: &std::path::Path,
     checkout: &std::path::Path,
     script: &str,
-    ready: &str,
+    ready: Option<&str>,
     optional: &[&str],
 ) -> (Phase, Plan) {
     use crate::plan::probe::{Probe, ProbeCheck};
@@ -234,7 +234,7 @@ fn real_keeper_running(
         server.env.insert((*name).to_owned());
         server.optional_env.insert((*name).to_owned());
     }
-    server.ready = Some(Probe::new(ProbeCheck::log(ready.to_owned())));
+    server.ready = ready.map(|ready| Probe::new(ProbeCheck::log(ready.to_owned())));
     api.processes.push(server);
     let plan = Plan::new("reading-list".parse().unwrap(), id(), vec![api]).unwrap();
     (phase, plan)
@@ -274,6 +274,64 @@ fn up_starts_a_host_process_under_a_real_keeper_and_down_stops_it() {
         System.identity(&app).unwrap(),
         Identity::Gone | Identity::Reused
     ));
+}
+
+/// Waits until the keeper's diagnostic log in `state` holds `line`, and
+/// fails the test after 10 seconds.
+fn keeper_noted(state: &std::path::Path, line: &str) {
+    let log = state
+        .join("logs")
+        .join(id().as_str())
+        .join("api.server.keeper.log");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let noted = std::fs::read_to_string(&log).unwrap_or_default();
+        if noted.contains(line) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the keeper never noted {line:?}: {noted}"
+        );
+        crate::clock::pause(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_real_keepers_note_of_its_first_start_keeps_the_readiness_that_up_recorded() {
+    use crate::status::ProcessState;
+
+    for ready in [Some("^ready hello$"), None] {
+        let state = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let (phase, plan) = real_keeper_running(
+            state.path(),
+            checkout.path(),
+            "echo \"ready $GREETING\"; exec sleep 30",
+            ready,
+            &[],
+        );
+        let soon = Instant::now() + Duration::from_secs(30);
+        phase
+            .up(
+                &plan,
+                &Selection::All,
+                &Greeting,
+                UpDeadlines::new(soon, soon),
+                &Cancel::new(),
+            )
+            .unwrap();
+
+        // The keeper writes its note of the first start once `up` has
+        // released the lifecycle lock.
+        keeper_noted(state.path(), "already names process");
+
+        let record = RunStore::new(state.path()).read(&id()).unwrap().unwrap();
+        assert!(record.processes[0].ready.is_some(), "{ready:?}: {record:?}");
+        let status = phase.status(&id(), Some(&plan)).unwrap();
+        assert_eq!(status.rows[0].state, ProcessState::Ready, "{ready:?}");
+        phase.down(&id(), &Selection::All, soon).unwrap();
+    }
 }
 
 #[test]
@@ -416,7 +474,7 @@ fn up_with_optional_lang(
     Result<crate::report::Report, PhaseError>,
     Option<crate::record::run::PlanHash>,
 ) {
-    let (phase, plan) = real_keeper_running(state, checkout, GREET_LANG, ready, &["LANG"]);
+    let (phase, plan) = real_keeper_running(state, checkout, GREET_LANG, Some(ready), &["LANG"]);
     let soon = Instant::now() + Duration::from_secs(30);
     let up = phase.up(
         &plan,

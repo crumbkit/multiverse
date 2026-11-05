@@ -811,7 +811,12 @@ impl Op<'_, '_> {
             process.stop,
             engine.settings.kill_wait,
         )
-        .ready_on_start(process.ready.is_none())
+        .ready_after(
+            process
+                .ready
+                .is_none()
+                .then_some(engine.settings.start_grace),
+        )
         .expiring(environment.expires_at())
         .requiring(process.required_env().cloned().collect())
         .inheriting(engine.settings.inherited.clone())

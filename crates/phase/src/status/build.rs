@@ -12,7 +12,7 @@ use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::restart::Restart;
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::Handle;
-use crate::record::docker::{Docker, DockerKind, DockerObject};
+use crate::record::docker::{Docker, DockerKind, DockerObject, SeenContainer};
 use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{ContainerEntry, Ended, EntryState, Exit, HostEntry, RunRecord};
 use crate::record::store::RunStore;
@@ -352,11 +352,8 @@ fn container_row(
         })
     };
     let planned = entry.state == EntryState::Planned;
-    // phase observed the container ready, and Docker has not restarted it
-    // since.
-    let ready = |restarts| entry.ready.is_some_and(|ready| ready.restarts == restarts);
     let state = match seen {
-        Ok(Some(seen)) if seen.state == ContainerState::Running && ready(seen.restarts) => {
+        Ok(Some(seen)) if seen.state == ContainerState::Running && observed(entry, &seen) => {
             ProcessState::Ready
         }
         Ok(Some(seen)) => container_state(seen.state, planned),
@@ -374,6 +371,22 @@ fn container_row(
         row.handle = entry.id.clone().map(Handle::container);
     }
     row
+}
+
+/// Reports whether phase observed the container of `entry` ready since
+/// Docker last started it: Docker has not restarted it under its restart
+/// policy since, and its last start came no later than the readiness. The
+/// start time also catches a start that Docker does not count as a
+/// restart, such as `docker restart`, a `docker start` after a stop, or a
+/// restart of the daemon. A count or a time that phase cannot read counts
+/// as not ready.
+fn observed(entry: &ContainerEntry, seen: &SeenContainer) -> bool {
+    entry.ready.is_some_and(|ready| {
+        seen.restarts == Some(ready.restarts)
+            && seen
+                .started_at_ms
+                .is_some_and(|started| started <= ready.at_ms)
+    })
 }
 
 /// Returns what a container in Docker's `state` is doing, when phase has

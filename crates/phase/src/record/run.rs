@@ -40,6 +40,12 @@ impl RunSchema {
 
 /// The newest version of the run record that this phase reads, and the one
 /// it writes.
+///
+/// A keeper that an older phase started reads the record before each
+/// write. Once a newer phase rewrites the record in this version, that
+/// keeper refuses it as written by a newer phase, notes each refused write
+/// in its diagnostic log, and records nothing more, until phase starts its
+/// process again with a keeper of its own.
 pub(crate) const RUN_VERSION: u32 = 3;
 
 /// The run record of one workspace.
@@ -151,11 +157,11 @@ pub(crate) struct HostEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) restart: Option<Restart>,
     /// When phase last observed the process ready since its last start,
-    /// or `None` when it has not. phase's own start clears it. A keeper's
-    /// restart clears it too, unless the process has no readiness probe,
-    /// in which case the keeper records it ready. It is `None` for a
-    /// keeper, and a record that lacks it, such as a `phase/run/v2`
-    /// record, reads as `None`.
+    /// or `None` when it has not. phase's own start and a keeper's restart
+    /// clear it. A keeper records a restarted process that has no
+    /// readiness probe ready once it outlasts its start grace. It is
+    /// `None` for a keeper, and a record that lacks it, such as a
+    /// `phase/run/v2` record, reads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ready: Option<Ready>,
 }
@@ -776,8 +782,8 @@ impl RunRecord {
     }
 
     /// Records that the keeper restarted the host process `key` as `host`,
-    /// after `restarts` restarts in all, and that the restarted process is
-    /// `ready`, or `None` when nothing has observed it ready yet.
+    /// after `restarts` restarts in all. Nothing has observed the restarted
+    /// process ready yet, so it clears the readiness.
     ///
     /// # Errors
     ///
@@ -788,7 +794,6 @@ impl RunRecord {
         key: &ObjectKey,
         host: HostProcess,
         restarts: u32,
-        ready: Option<Ready>,
     ) -> Result<(), Unplanned> {
         let ObjectKey::Process(app, process) = key else {
             return Err(Unplanned(key.clone()));
@@ -798,7 +803,7 @@ impl RunRecord {
         entry.host = Some(host);
         entry.state = EntryState::Running;
         entry.restarts = restarts;
-        entry.ready = ready;
+        entry.ready = None;
         Ok(())
     }
 

@@ -23,6 +23,7 @@ use crate::engine::container::command::{
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
 use crate::engine::container::objects::{AnonymousVolumes, rm_args, stop_seconds};
+use crate::engine::container::runner::docker_time_ms;
 use crate::engine::container::{ContainerError, ContainerState};
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject, SeenContainer};
 
@@ -208,32 +209,34 @@ const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
 
 /// Returns the Go template of `docker container inspect` that prints,
 /// after [`STATE_FORMAT`], how many times Docker restarted a container and
-/// the value of its secrets label, which [`status_state`] reads.
+/// the value of its secrets label, and on the next line when Docker last
+/// started it, which [`status_state`] reads.
 fn restarts_format() -> String {
-    format!("{{{{.RestartCount}}}} {{{{index .Config.Labels {SECRETS_LABEL:?}}}}}")
+    format!(
+        "{{{{.RestartCount}}}} {{{{index .Config.Labels {SECRETS_LABEL:?}}}}}\n{{{{.State.StartedAt}}}}"
+    )
 }
 
-/// Returns the state and the restarts of a container that `docker
-/// container inspect` printed as `printed` with [`STATE_FORMAT`] and
-/// [`restarts_format`]. A running container whose process receives secret
-/// files and that Docker has restarted waits for files that its restart
-/// removed, so it counts as restarting, as `up` counts it as not running.
-/// A count that cannot be read counts as no restarts.
+/// Returns the state, the restarts and the start time of a container that
+/// `docker container inspect` printed as `printed` with [`STATE_FORMAT`]
+/// and [`restarts_format`]. A running container whose process receives
+/// secret files and that Docker has restarted waits for files that its
+/// restart removed, so it counts as restarting, as `up` counts it as not
+/// running. A count or a time that cannot be read is `None`.
 fn status_state(printed: &str) -> SeenContainer {
     let mut lines = printed.lines();
     let state = ContainerState::parse(lines.next().unwrap_or_default());
     let mut fields = lines.next().unwrap_or_default().split_whitespace();
-    let restarts = fields
-        .next()
-        .and_then(|count| count.parse::<u32>().ok())
-        .unwrap_or_default();
+    let restarts = fields.next().and_then(|count| count.parse::<u32>().ok());
     let files = fields.next() == Some(SECRET_FILES);
-    let state = if state == ContainerState::Running && restarts > 0 && files {
-        ContainerState::Restarting
-    } else {
-        state
-    };
-    SeenContainer::new(state, restarts)
+    let started_at_ms = lines.next().and_then(|stamp| docker_time_ms(stamp.trim()));
+    let state =
+        if state == ContainerState::Running && restarts.is_some_and(|count| count > 0) && files {
+            ContainerState::Restarting
+        } else {
+            state
+        };
+    SeenContainer::new(state, restarts, started_at_ms)
 }
 
 /// Returns the failure of a Docker that `error` shows does not answer,

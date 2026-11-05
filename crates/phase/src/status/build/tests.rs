@@ -775,6 +775,7 @@ fn a_running_container_that_phase_observed_ready_since_docker_last_restarted_it_
         FakeDocker::default()
             .with(DockerKind::Container, "db-server", id.as_str())
             .restarted(id.as_str(), restarts)
+            .started_at(id.as_str(), Some(1_793_000_000_000))
     };
 
     write_record(state.path(), &record);
@@ -792,6 +793,20 @@ fn a_running_container_that_phase_observed_ready_since_docker_last_restarted_it_
     // Docker restarted the container after phase observed it ready.
     assert_eq!(
         container_state(state.path(), &docker(1)),
+        ProcessState::Running
+    );
+    // Something outside phase restarted the container, as `docker
+    // restart` does, which Docker does not count as a restart.
+    let restarted_outside = FakeDocker::default()
+        .with(DockerKind::Container, "db-server", id.as_str())
+        .started_at(id.as_str(), Some(1_793_000_000_124));
+    assert_eq!(
+        container_state(state.path(), &restarted_outside),
+        ProcessState::Running
+    );
+    let unreadable = docker(0).started_at(id.as_str(), None);
+    assert_eq!(
+        container_state(state.path(), &unreadable),
         ProcessState::Running
     );
     let exited = docker(0).in_state(id.as_str(), ContainerState::Exited(3));

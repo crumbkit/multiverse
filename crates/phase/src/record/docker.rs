@@ -94,21 +94,36 @@ pub(crate) trait Docker {
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError>;
 }
 
-/// What Docker reports of a container: its state, and how many times it
-/// has restarted the container under its restart policy.
+/// What Docker reports of a container: its state, how many times Docker
+/// has restarted it under its restart policy, and when Docker last started
+/// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SeenContainer {
     /// The container's state.
     pub(crate) state: ContainerState,
-    /// How many times Docker has restarted the container.
-    pub(crate) restarts: u32,
+    /// How many times Docker has restarted the container under its restart
+    /// policy, or `None` when phase cannot read the count. A `docker
+    /// restart` and a start after a stop do not add to it.
+    pub(crate) restarts: Option<u32>,
+    /// When Docker last started the container, in milliseconds since the
+    /// Unix epoch, or `None` when phase cannot read the time. Every start
+    /// changes it, including one that phase did not ask for.
+    pub(crate) started_at_ms: Option<u64>,
 }
 
 impl SeenContainer {
     /// Returns a container in `state` that Docker has restarted `restarts`
-    /// times.
-    pub(crate) const fn new(state: ContainerState, restarts: u32) -> Self {
-        Self { state, restarts }
+    /// times and last started at `started_at_ms`.
+    pub(crate) const fn new(
+        state: ContainerState,
+        restarts: Option<u32>,
+        started_at_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            state,
+            restarts,
+            started_at_ms,
+        }
     }
 }
 

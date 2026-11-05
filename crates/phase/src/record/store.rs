@@ -487,8 +487,7 @@ impl<'s> Journal<'s> {
     }
 
     /// Records that the keeper restarted the host process `key` as `host`,
-    /// after `restarts` restarts in all, and that the restarted process is
-    /// `ready`, or `None` when nothing has observed it ready yet.
+    /// after `restarts` restarts in all, which clears its readiness.
     ///
     /// # Errors
     ///
@@ -498,11 +497,10 @@ impl<'s> Journal<'s> {
         key: &ObjectKey,
         host: HostProcess,
         restarts: u32,
-        ready: Option<Ready>,
     ) -> Result<(), PhaseError> {
         let mut record = self.current(key)?;
         record
-            .mark_restarted(key, host, restarts, ready)
+            .mark_restarted(key, host, restarts)
             .map_err(|unplanned| self.unplanned(&unplanned))?;
         self.commit(record)
     }

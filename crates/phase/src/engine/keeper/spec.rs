@@ -61,13 +61,13 @@ pub(crate) struct KeeperSpec {
     /// that lacks one counts as one that could not be resolved.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(crate) required: BTreeSet<String>,
-    /// Whether the app counts as ready as soon as it runs, because its
-    /// process has no readiness probe. The keeper then records each
-    /// restarted app as ready. A keeper does not run a readiness probe, so
-    /// an app that has one counts as not ready after a restart until phase
-    /// starts it again.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) ready_on_start: bool,
+    /// The start grace of an app whose process has no readiness probe, in
+    /// milliseconds, or `None` when it has a probe. The keeper records a
+    /// restarted app without a probe as ready once it has run this long.
+    /// A keeper does not run a readiness probe, so an app that has one
+    /// counts as not ready after a restart until phase starts it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ready_after_ms: Option<u64>,
 }
 
 /// The only variables that a keeper and its app inherit from the caller.
@@ -124,16 +124,23 @@ impl KeeperSpec {
             inherited: BTreeMap::new(),
             resolved: BTreeSet::new(),
             required: BTreeSet::new(),
-            ready_on_start: false,
+            ready_after_ms: None,
         }
     }
 
-    /// Returns this specification of an app that counts as ready as soon
-    /// as it runs when `ready_on_start` is true, as one without a
-    /// readiness probe does.
-    pub(crate) const fn ready_on_start(mut self, ready_on_start: bool) -> Self {
-        self.ready_on_start = ready_on_start;
+    /// Returns this specification of an app that has no readiness probe
+    /// and counts as ready once it has run for `grace`, or of an app that
+    /// has a probe when `grace` is `None`.
+    pub(crate) fn ready_after(mut self, grace: Option<Duration>) -> Self {
+        self.ready_after_ms =
+            grace.map(|grace| u64::try_from(grace.as_millis()).unwrap_or(u64::MAX));
         self
+    }
+
+    /// Returns the start grace after which a restarted app without a
+    /// readiness probe counts as ready, or `None` when it has a probe.
+    pub(crate) fn ready_grace(&self) -> Option<Duration> {
+        self.ready_after_ms.map(Duration::from_millis)
     }
 
     /// Returns this specification with the environment expiring at
