@@ -12,10 +12,10 @@ use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::Handle;
 use crate::record::docker::{Docker, DockerKind, DockerObject};
 use crate::record::process::{self, Identity, Processes, vouched};
-use crate::record::run::{ContainerEntry, EntryState, HostEntry, RunRecord};
+use crate::record::run::{ContainerEntry, EntryState, Exit, HostEntry, RunRecord};
 use crate::record::store::RunStore;
 use crate::status::{
-    ProcessState, SourceSummary, Status, StatusRow, UnknownReason, WorkspaceState,
+    LastExit, ProcessState, SourceSummary, Status, StatusRow, UnknownReason, WorkspaceState,
 };
 
 /// What `status` reads besides the run record.
@@ -189,6 +189,10 @@ fn host_row(
     let mut row = StatusRow::new(app.clone(), process.clone(), RunnerKind::Host, None, state);
     if let Some(entry) = entry {
         row.restarts = entry.restarts;
+        row.last_exit = entry.ended.filter(|ended| !ended.requested).map(|ended| {
+            let exit = ended.exit;
+            LastExit::new(exit.and_then(Exit::code), exit.and_then(Exit::signal))
+        });
         row.address = entry.listen.as_ref().map(|listen| loopback(listen.port));
         if let Some(host) = entry
             .host
@@ -252,6 +256,18 @@ pub(crate) fn host_state(
             ProcessState::Restarting
         } else {
             ProcessState::Starting
+        }
+    } else if let Some(ended) = entry
+        .filter(|entry| entry.state == EntryState::Stopped)
+        .and_then(|entry| entry.ended)
+        .filter(|ended| !ended.requested)
+    {
+        // The keeper recorded that its app ended by itself and did not
+        // restart it.
+        match ended.exit {
+            Some(Exit::Signal(signal)) => ProcessState::killed(signal),
+            Some(Exit::Code(code)) => ProcessState::exited(Some(code)),
+            None => ProcessState::exited(None),
         }
     } else {
         ProcessState::Stopped

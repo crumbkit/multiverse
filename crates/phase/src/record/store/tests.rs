@@ -9,7 +9,7 @@ use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::plan::restart::{Stop, StopSignal};
 use crate::record::run::{
-    EntryState, HostProcess, Launching, ObjectKey, PlanHash, RunRecord, Started,
+    Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, PlanHash, RunRecord, Started,
 };
 use crate::record::testing::{app, empty_record, process, workspace, write_file};
 
@@ -491,4 +491,101 @@ fn a_write_whose_directory_sync_fails_after_the_rename_keeps_the_new_record_in_t
         journal.record().unwrap().state(&server()),
         Some(EntryState::Running)
     );
+}
+
+fn crashed(code: i32) -> Ended {
+    Ended {
+        exit: Some(Exit::Code(code)),
+        requested: false,
+    }
+}
+
+#[test]
+fn a_record_without_an_end_reads_as_a_process_that_has_not_ended() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    drop(journal);
+
+    let text = fs::read_to_string(store.path(&workspace())).unwrap();
+
+    assert!(!text.contains("ended"), "{text}");
+    assert_eq!(on_disk(&store).processes[0].ended, None);
+}
+
+#[test]
+fn an_end_is_recorded_with_its_exit_and_whether_a_stop_request_caused_it() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+
+    journal.ending(&server(), crashed(3)).unwrap();
+    assert_eq!(on_disk(&store).state(&server()), Some(EntryState::Stopping));
+    let killed = Ended {
+        exit: Some(Exit::Signal(9)),
+        requested: false,
+    };
+    journal.stopped_after(&server(), killed).unwrap();
+
+    let record = on_disk(&store);
+    assert_eq!(record.state(&server()), Some(EntryState::Stopped));
+    assert_eq!(record.processes[0].ended, Some(killed));
+    let text = fs::read_to_string(store.path(&workspace())).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        json["processes"][0]["ended"],
+        serde_json::json!({"exit": {"signal": 9}, "requested": false})
+    );
+}
+
+#[test]
+fn a_restart_keeps_the_last_end_and_a_fresh_start_or_launch_clears_it() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.stopped_after(&server(), crashed(3)).unwrap();
+
+    journal.restarted(&server(), host(), 1).unwrap();
+    assert_eq!(on_disk(&store).processes[0].ended, Some(crashed(3)));
+
+    journal.started(&server(), Started::Host(host())).unwrap();
+    assert_eq!(on_disk(&store).processes[0].ended, None);
+
+    journal.stopped_after(&server(), crashed(4)).unwrap();
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 1))
+        .unwrap();
+    assert_eq!(on_disk(&store).processes[0].ended, None);
+}
+
+#[test]
+fn a_stop_that_phase_begins_records_the_end_as_requested() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.stopped_after(&server(), crashed(3)).unwrap();
+    journal.restarted(&server(), host(), 1).unwrap();
+
+    journal.stopping(&server()).unwrap();
+    journal.stopped(&server()).unwrap();
+
+    let ended = on_disk(&store).processes[0].ended;
+    assert_eq!(
+        ended,
+        Some(Ended {
+            exit: None,
+            requested: true
+        })
+    );
+    let keeper = ObjectKey::Keeper(app("api"), process("server"));
+    journal.stopping(&keeper).unwrap();
+    assert_eq!(on_disk(&store).keepers[0].ended, None);
 }

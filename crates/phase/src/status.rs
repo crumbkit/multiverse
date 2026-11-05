@@ -115,9 +115,38 @@ pub struct StatusRow {
     pub expires_at_ms: Option<u64>,
     /// How many times phase has restarted it.
     pub restarts: u32,
+    /// How a host process last ended by itself, which no stop request
+    /// caused, or `None` when it has not since phase last started it. A
+    /// process that its keeper restarted keeps the end of its last crash
+    /// here. In JSON it is left out when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit: Option<LastExit>,
     /// The path of its log file, or `None` for a container, whose log comes
     /// from `docker logs`.
     pub log: Option<PathBuf>,
+}
+
+/// How a process ended by itself: its exit status, or the signal that
+/// ended it. One of the two is `None`, and both are `None` when phase
+/// could not read how it ended. In JSON a `None` is left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LastExit {
+    /// The exit status, or `None` when a signal ended the process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<i32>,
+    /// The signal that ended the process, or `None` when it exited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+}
+
+impl LastExit {
+    /// Returns the end of a process that exited with `code` or that
+    /// `signal` ended.
+    #[must_use]
+    pub const fn new(code: Option<i32>, signal: Option<i32>) -> Self {
+        Self { code, signal }
+    }
 }
 
 impl StatusRow {
@@ -143,6 +172,7 @@ impl StatusRow {
             started_at_ms: None,
             expires_at_ms: None,
             restarts: 0,
+            last_exit: None,
             log: None,
         }
     }
@@ -213,11 +243,17 @@ pub enum ProcessState {
     Stopped,
     /// A oneshot process exited with status 0.
     Completed,
-    /// The process exited and phase will not restart it.
+    /// The process exited by itself, which no stop request caused, and
+    /// phase will not restart it.
     #[non_exhaustive]
     Exited {
-        /// The exit status, or `None` when a signal ended the process.
+        /// The exit status, or `None` when a signal ended the process or
+        /// phase could not read the status.
         code: Option<i32>,
+        /// The signal that ended a host process, or `None`. In JSON it is
+        /// left out when it is `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<i32>,
     },
     /// phase cannot tell what the process is doing. The run record keeps
     /// its entry, which `down` and `sweep` leave alone.
@@ -256,10 +292,21 @@ pub enum UnknownReason {
 
 impl ProcessState {
     /// Returns the state of a process that exited with `code`, or with
-    /// `None` when a signal ended it, and that phase will not restart.
+    /// `None` when phase could not read it, and that phase will not
+    /// restart.
     #[must_use]
     pub const fn exited(code: Option<i32>) -> Self {
-        Self::Exited { code }
+        Self::Exited { code, signal: None }
+    }
+
+    /// Returns the state of a process that `signal` ended, and that phase
+    /// will not restart.
+    #[must_use]
+    pub const fn killed(signal: i32) -> Self {
+        Self::Exited {
+            code: None,
+            signal: Some(signal),
+        }
     }
 
     /// Returns the state of a process that phase cannot tell about, for

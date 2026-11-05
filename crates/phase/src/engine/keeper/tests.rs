@@ -30,7 +30,7 @@ use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits, Stop};
 use crate::record::process::{Processes, Start, System};
-use crate::record::run::{EntryState, HostProcess, ObjectKey};
+use crate::record::run::{Ended as AppEnded, EntryState, Exit, HostProcess, ObjectKey};
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{app, empty_record, process, workspace};
 
@@ -320,6 +320,16 @@ impl Fixture {
             .iter()
             .find(|entry| entry.process == process(self.process))?;
         Some((state, entry.host.clone(), entry.restarts))
+    }
+
+    /// Returns how the run record says the app last ended.
+    fn ended(&self) -> Option<AppEnded> {
+        let record = RunStore::new(&self.dir).read(&workspace()).unwrap()?;
+        record
+            .processes
+            .iter()
+            .find(|entry| entry.process == process(self.process))?
+            .ended
     }
 }
 
@@ -989,4 +999,87 @@ fn a_keeper_environment_shows_its_names_and_no_value() {
 
     assert!(shown.contains("GREETING"));
     assert!(!shown.contains("hello"));
+}
+
+#[test]
+fn a_keeper_records_the_exit_code_of_an_app_that_ended_by_itself() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("exit 3", Restart::No, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
+
+    eventually("the keeper's record of the end", || {
+        fixture.ended() == Some(AppEnded::by_itself(Some(Exit::Code(3))))
+    });
+    assert!(matches!(
+        fixture.recorded(),
+        Some((EntryState::Stopped, _, 0))
+    ));
+}
+
+#[test]
+fn a_keeper_records_a_stop_request_as_the_cause_of_its_apps_end() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec(
+        "trap 'exit 7' TERM; echo ready; while :; do sleep 0.05; done",
+        Restart::No,
+        Stop::default(),
+    );
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the app's start", || fixture.log_text() == "ready\n");
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(
+        fixture.ended(),
+        Some(AppEnded::requested(Some(Exit::Code(7))))
+    );
+}
+
+#[test]
+fn a_keeper_keeps_the_last_crash_of_an_app_that_it_restarted() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let spec = fixture.spec(
+        "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; touch crashed; kill -9 $$",
+        restart,
+        Stop::default(),
+    );
+    let _running = fixture.start(&spec).unwrap();
+
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+
+    assert_eq!(
+        fixture.ended(),
+        Some(AppEnded::by_itself(Some(Exit::Signal(9))))
+    );
+}
+
+#[test]
+fn the_engine_reads_from_the_keeper_how_its_app_ended_after_the_handshake() {
+    for (script, exit) in [
+        ("sleep 0.2; exit 3", Exit::Code(3)),
+        ("sleep 0.2; kill -9 $$", Exit::Signal(9)),
+    ] {
+        let fixture = Fixture::new();
+        let spec = fixture.spec(script, Restart::No, Stop::default());
+        let mut running = fixture.start(&spec).unwrap();
+        let end = std::mem::take(&mut running.kept.end);
+
+        assert_eq!(end.wait(now() + PATIENCE), Some(exit), "{script}");
+    }
+}
+
+#[test]
+fn the_engine_reads_no_end_of_an_app_that_still_runs_once_its_wait_passes() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+    let end = std::mem::take(&mut running.kept.end);
+
+    assert_eq!(end.wait(now() + Duration::from_millis(100)), None);
 }

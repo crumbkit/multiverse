@@ -45,7 +45,7 @@ use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
 use crate::engine::containers::{ContainerRunner, ContainerStart};
 use crate::engine::host::{Holder, HostRunner, is_gone};
-use crate::engine::keeper::{KeeperArgs, KeeperCommand, KeeperSpec, Launch};
+use crate::engine::keeper::{AppEnd, KeeperArgs, KeeperCommand, KeeperSpec, Launch};
 use crate::engine::probe::{self, Check, Goal, HostExec, LogLines, LogWatch, Outcome};
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::error::{NotRunnable, PhaseError};
@@ -56,8 +56,8 @@ use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
 use crate::record::process::{Identity, vouched};
 use crate::record::run::{
-    ContainerEntry, EntryState, HostProcess, Launching, Listen, ObjectKey, PlanHash, RunRecord,
-    Started,
+    ContainerEntry, EntryState, Exit, HostProcess, Launching, Listen, ObjectKey, PlanHash,
+    RunRecord, Started,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
@@ -75,6 +75,12 @@ use stop::{Stopped, Target};
 /// The most lines of a process's log that a report holds when the process
 /// ends before it is ready. Older lines are left out.
 const TAIL_LINES: usize = 20;
+
+/// How long `up` waits for a keeper's end line once it has seen the
+/// keeper's app gone. The keeper writes the line as soon as it reaps the
+/// app, so the wait is short. When the line has not come by then, the
+/// report of the failed start holds no code and no signal.
+const END_LINE_WAIT: Duration = Duration::from_secs(2);
 
 /// What the engine's operations are given besides their arguments.
 #[derive(Clone, Copy, Debug)]
@@ -588,7 +594,7 @@ impl Op<'_, '_> {
                 listen: listen.clone(),
             },
         )?;
-        let (keeper, started, lines) = match self.launch(app, process, environment.as_ref()) {
+        let (keeper, started, end, lines) = match self.launch(app, process, environment.as_ref()) {
             Ok(launched) => launched,
             Err(step) => return Ok(step),
         };
@@ -609,7 +615,7 @@ impl Op<'_, '_> {
             &ObjectKey::Process(app.name.clone(), process.name.clone()),
             Started::Host(started.clone()),
         )?;
-        let step = self.await_ready(app, process, &target, environment.as_ref(), lines);
+        let step = self.await_ready(app, process, &target, environment.as_ref(), end, lines);
         if let (Step::Ready, Some(listen)) = (&step, &listen) {
             match port_holder(host, started.group, listen.port, LookupFailed::Report) {
                 PortHolder::Free | PortHolder::Group(_) => {}
@@ -709,13 +715,14 @@ impl Op<'_, '_> {
 
     /// Starts the keeper of `process` of `app` with `environment`, after
     /// opening a follower of its log, and returns the keeper, the started
-    /// process and the follower, or the step that ends the start.
+    /// process, the reader of how it ended and the follower, or the step
+    /// that ends the start.
     fn launch(
         &self,
         app: &AppPlan,
         process: &ProcessPlan,
         environment: &dyn AppliedEnvironment,
-    ) -> Result<(HostProcess, HostProcess, Box<dyn LogLines + Send>), Step> {
+    ) -> Result<(HostProcess, HostProcess, AppEnd, Box<dyn LogLines + Send>), Step> {
         let engine = self.engine;
         let unstartable = |reason: String| {
             Step::Errored(PhaseError::KeeperUnstartable {
@@ -757,21 +764,24 @@ impl Op<'_, '_> {
         });
         match launched {
             Ok(kept) => {
-                let (keeper, app) = kept.detach();
-                Ok((keeper, app, lines))
+                let (keeper, app, end) = kept.detach();
+                Ok((keeper, app, end, lines))
             }
             Err(_) if now() >= self.deadlines.ready => Err(Step::Uncertain),
             Err(error) => Err(Step::Errored(error)),
         }
     }
 
-    /// Waits until the started `target` is ready, as `process` says.
+    /// Waits until the started `target` is ready, as `process` says. When
+    /// the process ends first, the failed start holds the code or signal
+    /// that `end` reads from the keeper within [`END_LINE_WAIT`].
     fn await_ready(
         &self,
         app: &AppPlan,
         process: &ProcessPlan,
         target: &Target,
         environment: &dyn AppliedEnvironment,
+        end: AppEnd,
         lines: Box<dyn LogLines + Send>,
     ) -> Step {
         let host = self.engine.host;
@@ -826,7 +836,14 @@ impl Op<'_, '_> {
         match outcome {
             Outcome::Ready => Step::Ready,
             Outcome::Cancelled => Step::Cancelled,
-            Outcome::Ended => Step::Failed(StartProblem::exited(None, None, tail.finish())),
+            Outcome::Ended => {
+                let exit = end.wait(now() + END_LINE_WAIT);
+                Step::Failed(StartProblem::exited(
+                    exit.and_then(Exit::code),
+                    exit.and_then(Exit::signal),
+                    tail.finish(),
+                ))
+            }
             Outcome::NotReady { .. } | Outcome::Failing { .. } if own_deadline > deadline => {
                 Step::Uncertain
             }

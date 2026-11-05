@@ -7,7 +7,7 @@ use crate::name::WorkspaceId;
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::docker::{Docker, DockerKind};
 use crate::record::process::{Processes, Start};
-use crate::record::run::{EntryState, HostProcess, Listen, RunRecord};
+use crate::record::run::{Ended, EntryState, Exit, HostProcess, Listen, RunRecord};
 use crate::record::store::RunStore;
 use crate::record::testing::{
     FakeDocker, FakeProcesses, Spawned, Unreachable, app, empty_record, host_at, process,
@@ -15,7 +15,7 @@ use crate::record::testing::{
 };
 use crate::record::{ContainerId, Handle};
 use crate::source::Source;
-use crate::status::{ProcessState, SourceSummary, UnknownReason, WorkspaceState};
+use crate::status::{LastExit, ProcessState, SourceSummary, UnknownReason, WorkspaceState};
 
 /// Writes `record` as the run record of the tests' workspace under
 /// `state`, as phase would have left it.
@@ -500,4 +500,69 @@ fn stopped_entries_are_left_out_without_a_plan() {
 
     assert!(status.rows.is_empty());
     assert_eq!(status.state, WorkspaceState::Stopped);
+}
+
+/// Returns a record whose `api/server` keeper has gone and whose process
+/// ended as `ended`, with its group gone.
+fn ended_record(ended: Ended) -> RunRecord {
+    let mut record = host_record(
+        Some((EntryState::Running, host_at(100, 1))),
+        Some((EntryState::Stopped, host_at(200, 2))),
+    );
+    record.processes[0].ended = Some(ended);
+    record
+}
+
+#[test]
+fn a_process_that_ended_by_itself_is_exited_with_its_code_or_signal() {
+    for (exit, state) in [
+        (Exit::Code(3), ProcessState::exited(Some(3))),
+        (Exit::Signal(9), ProcessState::killed(9)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write_record(dir.path(), &ended_record(Ended::by_itself(Some(exit))));
+
+        let status = read(dir.path(), None, &FakeProcesses::default(), &Unreachable);
+
+        assert_eq!(status.rows[0].state, state);
+        assert_eq!(status.state, WorkspaceState::Stopped);
+    }
+}
+
+#[test]
+fn a_process_that_a_stop_request_ended_is_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ended = Ended::requested(Some(Exit::Signal(15)));
+    write_record(dir.path(), &ended_record(ended));
+
+    let status = read(dir.path(), None, &FakeProcesses::default(), &Unreachable);
+
+    assert_eq!(status.rows[0].state, ProcessState::Stopped);
+    assert_eq!(status.rows[0].last_exit, None);
+}
+
+#[test]
+fn a_process_that_restarts_shows_how_it_last_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let processes =
+        FakeProcesses::default()
+            .with(100, Start::At(1), None)
+            .with(300, Start::At(3), None);
+    let mut record = ended_record(Ended::by_itself(Some(Exit::Code(1))));
+    write_record(dir.path(), &record);
+
+    let status = read(dir.path(), None, &processes, &Unreachable);
+    assert_eq!(status.rows[0].state, ProcessState::Restarting);
+    assert_eq!(status.rows[0].last_exit, Some(LastExit::new(Some(1), None)));
+
+    record.processes[0].state = EntryState::Running;
+    record.processes[0].host = Some(host_at(300, 3));
+    record.processes[0].restarts = 1;
+    write_record(dir.path(), &record);
+
+    let status = read(dir.path(), None, &processes, &Unreachable);
+    assert_eq!(status.rows[0].state, ProcessState::Running);
+    assert_eq!(status.rows[0].last_exit, Some(LastExit::new(Some(1), None)));
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["rows"][0]["last_exit"], serde_json::json!({"code": 1}));
 }

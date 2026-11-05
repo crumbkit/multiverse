@@ -29,7 +29,8 @@ use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::name::{AppName, ProcessName};
 use crate::record::run::{
-    EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, RunRecord, Started, Unplanned,
+    Ended, EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, RunRecord, Started,
+    Unplanned,
 };
 
 #[cfg(test)]
@@ -567,12 +568,26 @@ impl<'s> Journal<'s> {
     }
 
     /// Records that phase is about to stop or remove the object `key`.
+    /// A stop request causes the end of a host process that phase stops,
+    /// so its entry records the end as requested, with no exit, which
+    /// replaces the end of an earlier crash.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Journal::started`].
     pub(crate) fn stopping(&mut self, key: &ObjectKey) -> Result<(), PhaseError> {
-        self.set_state(key, EntryState::Stopping)
+        let ended = matches!(key, ObjectKey::Process(..)).then_some(Ended::requested(None));
+        self.change(key, EntryState::Stopping, ended)
+    }
+
+    /// Records that the host process `key` ended as `ended`, and that its
+    /// keeper is about to stop what is left of its group.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn ending(&mut self, key: &ObjectKey, ended: Ended) -> Result<(), PhaseError> {
+        self.change(key, EntryState::Stopping, Some(ended))
     }
 
     /// Records that phase checked that the object `key` is gone.
@@ -581,7 +596,21 @@ impl<'s> Journal<'s> {
     ///
     /// Returns the errors of [`Journal::started`].
     pub(crate) fn stopped(&mut self, key: &ObjectKey) -> Result<(), PhaseError> {
-        self.set_state(key, EntryState::Stopped)
+        self.change(key, EntryState::Stopped, None)
+    }
+
+    /// Records that the host process `key` ended as `ended`, and that its
+    /// group is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn stopped_after(
+        &mut self,
+        key: &ObjectKey,
+        ended: Ended,
+    ) -> Result<(), PhaseError> {
+        self.change(key, EntryState::Stopped, Some(ended))
     }
 
     /// Deletes the record when every object in it is stopped, apart from
@@ -603,12 +632,23 @@ impl<'s> Journal<'s> {
         }
     }
 
-    /// Sets the state of `key` to `state` and writes the record.
-    fn set_state(&mut self, key: &ObjectKey, state: EntryState) -> Result<(), PhaseError> {
+    /// Sets the state of `key` to `state`, and the end of the host process
+    /// `key` to `ended` when it is given, and writes the record.
+    fn change(
+        &mut self,
+        key: &ObjectKey,
+        state: EntryState,
+        ended: Option<Ended>,
+    ) -> Result<(), PhaseError> {
         let mut record = self.current(key)?;
         record
             .set_state(key, state)
             .map_err(|unplanned| self.unplanned(&unplanned))?;
+        if let Some(ended) = ended {
+            record
+                .set_ended(key, ended)
+                .map_err(|unplanned| self.unplanned(&unplanned))?;
+        }
         self.commit(record)
     }
 

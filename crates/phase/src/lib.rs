@@ -72,5 +72,6 @@ pub use crate::source::{
     MOST_REPOSITORY_BYTES, MOST_VERSION_BYTES, ReleaseSpec, Source, Verification, Version,
 };
 pub use crate::status::{
-    ProcessState, SourceSummary, Status, StatusRow, StatusSchema, UnknownReason, WorkspaceState,
+    LastExit, ProcessState, SourceSummary, Status, StatusRow, StatusSchema, UnknownReason,
+    WorkspaceState,
 };

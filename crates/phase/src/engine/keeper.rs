@@ -30,7 +30,12 @@
 //!   directory, its log, its restart policy, its stop handling, the
 //!   values of `PATH` and `HOME`, and holds no other environment value.
 //! - Streams and deadline: the keeper writes one handshake line to standard
-//!   output once its app has started or failed to start. Its standard error
+//!   output once its app has started or failed to start. Once that first
+//!   start of the app ends, the keeper writes one end line, which says how
+//!   the app ended, and writes nothing more. `up` reads the end line when
+//!   it sees the app gone during its readiness wait, and closes its end of
+//!   the pipe otherwise, so the keeper's write then fails and is ignored.
+//!   Its standard error
 //!   is appended to its diagnostic log, `<log dir>/<app>.<process>.keeper.log`,
 //!   which the `logfile` module describes. The engine reads at most
 //!   [`MOST_HANDSHAKE_BYTES`] bytes before the deadline it is given. The
@@ -107,7 +112,11 @@
 //! The keeper records the app's pid, start time, group and boot id as
 //! `running` each time it starts the app, with the count of restarts so
 //! far after a restart, `stopping` before it stops the
-//! app's group, and `stopped` once the group is gone. A thread of its own
+//! app's group, and `stopped` once the group is gone. It records how the
+//! app ended, its exit status or signal and whether a stop request caused
+//! the end, with `stopping` when the app ended by itself and with
+//! `stopped` either way. A restart keeps that end, so the record shows the
+//! last crash of an app that restarts. A thread of its own
 //! writes these through the run record's journal, which takes the
 //! workspace's lifecycle lock, so an `up` or `down` that holds the lock
 //! never blocks supervision. The engine also records the first start from
@@ -153,7 +162,7 @@ mod tests;
 
 pub use args::{BadKeeperArgs, KeeperArgs};
 pub use environment::KeeperEnvironment;
-pub(crate) use spawn::{KeeperCommand, Kept, Launch, spawn};
+pub(crate) use spawn::{AppEnd, KeeperCommand, Kept, Launch, spawn};
 pub(crate) use spec::KeeperSpec;
 
 /// The most bytes of the specification that a keeper reads from its
