@@ -159,8 +159,9 @@ pub enum PermissionProblem {
     /// workspaces, so the first stage of the sandbox allows writes only
     /// inside the checkout and `$STATE`.
     WriteOutsideCheckout(String),
-    /// An entry of `write` overlaps a path that another app of the plan may
-    /// write, so one app could replace a name in the other's directory.
+    /// An entry of `write` lies inside a path that another app of the plan
+    /// may write, or holds one, so one app could replace a name in the
+    /// other's directory. Two apps may write the same path.
     #[non_exhaustive]
     SharedWrite {
         /// The entry.
@@ -204,7 +205,7 @@ impl fmt::Display for PermissionProblem {
             ),
             Self::SharedWrite { path, other } => write!(
                 formatter,
-                "it may write {path:?}, which overlaps a path that {other} may write"
+                "it may write {path:?}, which lies inside or holds a different path that {other} may write"
             ),
             Self::NestedWrite { outer, inner } => write!(
                 formatter,
@@ -589,9 +590,11 @@ pub(super) fn check_apps(apps: &[AppPlan]) -> Result<(), PlanError> {
     check_shared_writes(apps)
 }
 
-/// Checks that no two host apps may write paths that overlap, so one
-/// sandboxed app cannot replace a name in the other's directory with a
-/// symbolic link.
+/// Checks that no host app may write a path strictly inside a path that
+/// another host app may write, so one sandboxed app cannot replace a name
+/// in the other's directory with a symbolic link. Two apps may write the
+/// same path, because neither may write the directory that holds it, and a
+/// link that either plants inside it resolves outside the other's grant.
 fn check_shared_writes(apps: &[AppPlan]) -> Result<(), PlanError> {
     let writes: Vec<(&AppPlan, Vec<(&String, PathBuf)>)> = apps
         .iter()
@@ -602,7 +605,8 @@ fn check_shared_writes(apps: &[AppPlan]) -> Result<(), PlanError> {
         for (other, other_paths) in writes.iter().skip(index + 1) {
             for (entry, path) in paths {
                 if other_paths.iter().any(|(_, other_path)| {
-                    path.starts_with(other_path) || other_path.starts_with(path)
+                    path != other_path
+                        && (path.starts_with(other_path) || other_path.starts_with(path))
                 }) {
                     return Err(PlanError::BadPermissions {
                         app: app.name.clone(),
@@ -678,15 +682,21 @@ fn check_permissions(
     if let Some(path) = permissions.write.iter().find(|path| !is_writable(path)) {
         return Err(PermissionProblem::BadWrite(path.clone()));
     }
+    // Both sides are compared with their symbolic links resolved, so an
+    // entry spelled through the checkout's real path passes when the
+    // checkout is named through a link, and the other way round.
     let checkout = match &app.source {
-        Source::Checkout { dir, .. } => Some(dir.components().collect::<PathBuf>()),
+        Source::Checkout { dir, .. } => Some(crate::sandbox::canonical(
+            &dir.components().collect::<PathBuf>(),
+        )),
         _ => None,
     };
     if let Some(path) = permissions.write.iter().find(|path| {
         let path = Path::new(path);
         path.is_absolute()
             && checkout.as_ref().is_none_or(|checkout| {
-                !path.components().collect::<PathBuf>().starts_with(checkout)
+                !crate::sandbox::canonical(&path.components().collect::<PathBuf>())
+                    .starts_with(checkout)
             })
     }) {
         return Err(PermissionProblem::WriteOutsideCheckout(path.clone()));

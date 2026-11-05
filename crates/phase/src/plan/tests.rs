@@ -1207,25 +1207,37 @@ fn a_plan_refuses_two_apps_that_may_write_overlapping_paths() {
 }
 
 #[test]
-fn a_plan_refuses_two_apps_whose_writes_name_one_directory_through_a_symbolic_link() {
+fn a_plan_accepts_two_apps_of_one_checkout_that_both_write_the_same_path() {
+    // Neither app may write the checkout that holds `target`, so neither
+    // can replace `target` with a symbolic link.
+    let mut api = sandboxed(host_app("api"));
+    api.permissions.get_or_insert_default().write = ["target".to_owned()].into();
+    let mut web = sandboxed(host_app("web"));
+    web.permissions.get_or_insert_default().write = ["target".to_owned()].into();
+
+    assert!(plan(vec![api, web]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_two_apps_whose_writes_nest_through_a_symbolic_link() {
     let root = tempfile::tempdir().unwrap();
     let real = root.path().join("api");
     std::fs::create_dir_all(real.join("target")).unwrap();
     let link = root.path().join("web");
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let with_checkout = |name: &str, dir: &std::path::Path| {
+    let with_checkout = |name: &str, dir: &std::path::Path, write: &str| {
         let mut app = sandboxed(host_app(name));
         if let Source::Checkout { dir: checkout, .. } = &mut app.source {
             *checkout = dir.to_path_buf();
         }
-        app.permissions.get_or_insert_default().write = ["target".to_owned()].into();
+        app.permissions.get_or_insert_default().write = [write.to_owned()].into();
         app
     };
 
     assert_eq!(
         plan(vec![
-            with_checkout("api", &real),
-            with_checkout("web", &link)
+            with_checkout("api", &real, "target"),
+            with_checkout("web", &link, "target/web")
         ])
         .unwrap_err(),
         PlanError::BadPermissions {
@@ -1236,4 +1248,21 @@ fn a_plan_refuses_two_apps_whose_writes_name_one_directory_through_a_symbolic_li
             },
         }
     );
+}
+
+#[test]
+fn a_plan_accepts_an_absolute_write_path_spelled_through_the_real_path_of_a_linked_checkout() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("api");
+    std::fs::create_dir_all(real.join("cache")).unwrap();
+    let link = root.path().join("api-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut api = sandboxed(host_app("api"));
+    if let Source::Checkout { dir, .. } = &mut api.source {
+        *dir = link.clone();
+    }
+    let entry = real.canonicalize().unwrap().join("cache");
+    api.permissions.get_or_insert_default().write = [entry.display().to_string()].into();
+
+    assert!(plan(vec![api]).is_ok());
 }
