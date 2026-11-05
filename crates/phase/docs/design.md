@@ -414,6 +414,43 @@ process, Docker's status is exactly `running`, and the recorded hash is
 the hash of the process's service in the new plan. `up` replaces every
 other container.
 
+`up` does not yet notice a changed value of a variable. The plan holds
+the names of a process's variables and no value, and the host program's
+`EnvironmentSource` supplies every value, including the ones that a
+manifest states literally, such as LocalStack's `SERVICES`. The plan hash
+therefore covers the names only. When a manifest changes `SERVICES` from
+`s3` to `s3,sqs`, the plan hash stays the same, `up` leaves the container
+running, and the container keeps `s3` until something else replaces it.
+The same holds for a secret that a process receives with
+`secret_delivery = "env"`, and for a host process, whose process digest
+also covers no value. The rule under
+[Starting and stopping](#starting-and-stopping) that `up` compares a
+keyed hash of each process's environment values describes the intended
+behaviour, which phase does not implement yet.
+
+The follow-up compares a keyed digest of the resolved values that are not
+secrets. `AppliedEnvironment::digest` exists for this, and phase does not
+call it yet, for three reasons:
+
+- It hashes every name and value, secrets included. A secret that a
+  process receives as a file is rewritten on each `up` and must leave the
+  container running, so a digest that covers it would replace the
+  container each time a short-lived secret is renewed. The follow-up
+  needs a digest of the variables that the app's permissions do not name
+  as secrets, and of the secrets that a process receives with
+  `secret_delivery = "env"`, which already reach the container's
+  environment. That digest is a new method of the public trait, or a
+  change to what `digest` covers.
+- phase has no key. The key needs to persist from one `up` to the next,
+  or every `up` would see a new digest and replace every container. It
+  also needs to stay out of the run record, because a digest beside its
+  key lets anyone who reads the record test a guessed value. A per-user
+  key file under phase's state directory, readable by its owner alone,
+  meets both needs, and has not been decided.
+- The digest needs a place in the run record. Folding it into each
+  container's plan hash keeps the record's version, and replaces every
+  running container once, on the first `up` after the upgrade.
+
 `up` pulls the app's image before it removes any container, within the
 build deadline, and resolves each process's environment before it removes
 the process's old container, so a pull or a resolver that fails leaves the
