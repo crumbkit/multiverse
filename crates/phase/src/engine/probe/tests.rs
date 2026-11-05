@@ -795,28 +795,38 @@ fn a_bounded_command_ends_when_it_is_cancelled() {
 
 #[test]
 fn a_bounded_command_whose_wait_fails_reports_the_failure() {
-    // nextest runs each test in a process of its own, so the only child
-    // this test reaps is the command.
+    // With SIGCHLD ignored, the system reaps each child of this process as
+    // it ends, so the runner's wait for the command fails with ECHILD. A
+    // test that reaped the command itself would race the runner, which
+    // reaps it too once it sees it end. nextest runs each test in a
+    // process of its own, so no other test's child is reaped this way.
+    set_child_signal(libc::SIG_IGN);
     #[expect(
         clippy::disallowed_methods,
         reason = "the test prepares a command for the probe's bounded runner"
     )]
     let mut command = Command::new("sleep");
-    command.arg("0.3");
-    let runner = thread::spawn(move || run_bounded(command, SLACK, &Cancel::new()).unwrap());
-    let deadline = Instant::now() + SLACK;
-    let reaped = loop {
-        match rustix::process::wait(rustix::process::WaitOptions::empty()) {
-            Ok(reaped) => break reaped,
-            Err(_) if Instant::now() < deadline => pause(Duration::from_millis(5)),
-            Err(error) => panic!("no child to reap: {error}"),
-        }
-    };
-    assert!(reaped.is_some());
-    assert!(matches!(
-        runner.join().unwrap(),
-        CommandEnd::WaitFailed { .. }
-    ));
+    command.arg("0.1");
+    let started = Instant::now();
+    let end = run_bounded(command, SLACK, &Cancel::new()).unwrap();
+    set_child_signal(libc::SIG_DFL);
+
+    assert!(matches!(end, CommandEnd::WaitFailed { .. }), "{end:?}");
+    assert!(started.elapsed() < SLACK);
+}
+
+/// Sets this process's disposition of `SIGCHLD` to `disposition`.
+fn set_child_signal(disposition: libc::sighandler_t) {
+    #[expect(
+        unsafe_code,
+        reason = "the test sets the SIGCHLD disposition, which only libc can set"
+    )]
+    // SAFETY: `signal` only changes the process's disposition of `SIGCHLD`
+    // to `SIG_IGN` or `SIG_DFL`, which are valid dispositions for it, and
+    // touches no memory of this program.
+    unsafe {
+        libc::signal(libc::SIGCHLD, disposition);
+    }
 }
 
 /// A probe command that fails until its `passes_from`th run.

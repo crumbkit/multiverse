@@ -752,6 +752,9 @@ fn the_system_runner_cuts_the_grace_short_at_the_deadline_and_returns_within_the
     assert!(!stubborn.running());
 }
 
+/// A shell loop that waits in short sleeps until a signal's trap ends it.
+const NAPS: &str = "while :; do sleep 0.05; done";
+
 #[test]
 fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
     let dir = tempfile::tempdir().unwrap();
@@ -763,9 +766,18 @@ fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
     // would be killed. Counted from the app's own signal, its grace of 3
     // seconds leaves 1.2 seconds to spare, and the keeper's end leaves 1
     // second of its grace to spare.
-    let mut keeper = Spawned::shell("trap 'sleep 2; exit 0' TERM; echo ready; sleep 30 & wait");
+    //
+    // Each script waits in a loop of short sleeps rather than on one long
+    // background sleep. A shell that forks a child as TERM arrives can leave
+    // the child without the signal, because the child runs the shell's
+    // handler until it calls exec. A long sleep that missed TERM would keep
+    // the keeper's group alive after the keeper's shell ended, so the stop
+    // would wait for the keeper until the grace ran out and kill the app
+    // without signalling it. A short sleep that missed TERM ends within
+    // 50 milliseconds, and the shell then runs its trap.
+    let mut keeper = Spawned::shell(&format!("trap 'sleep 2; exit 0' TERM; echo ready; {NAPS}"));
     let mut app = Spawned::shell(&format!(
-        "trap 'sleep 1.8; echo done > {}; exit 0' TERM; echo ready; sleep 30 & wait",
+        "trap 'sleep 1.8; echo done > {}; exit 0' TERM; echo ready; {NAPS}",
         graceful.display()
     ));
     let (keeper_host, app_host) = (keeper.host(), app.host());
