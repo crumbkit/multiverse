@@ -464,12 +464,18 @@ Docker's text. `PhaseError::Docker` holds a `DockerError` whose
 `cause()` is a `DockerCause`, such as `pull_failed` or
 `daemon_unavailable`. Its `operation()` names the docker command or step,
 such as `pull`, `compose up`, `stop`, `rm`, `container inspect`, `logs`
-or `secret write`. Its `container()` names the container the command
-worked on, and its `foreign()` names the kind and name of an object whose
-labels do not name phase's scope. None of them holds a value of a
-variable, and the error's text is unchanged. An app whose outcome is
-`errored` because of a Docker failure carries the same `cause` in the
-report, and the report's JSON leaves `cause` out for any other error.
+or `secret write`. The container the command worked on is named in one
+of two ways. `service()` gives its compose service, which is its
+process's name, for a failure of `up`, `down`, `status`, `logs` or a
+secret write. `container_id()` gives its id for a failure of `sweep`,
+which knows a container only by the id that the run record keeps. Its
+`foreign()` names the kind and name of an object whose labels do not
+name phase's scope. None of them holds a value of a variable, and the
+error's text is unchanged. An app whose outcome is `errored` because of
+a Docker failure carries the same `cause` in the report, and the
+report's JSON leaves `cause` out for any other error. A reader that
+meets a cause it does not know, written by a newer phase, reads it as
+`unknown`.
 
 ### Container secrets
 
@@ -597,13 +603,19 @@ no file when the environment has no value for it, and the wrapper's names
 leave it out, so the wrapper does not wait for it. phase refuses nothing
 for it: the app reads a file that is absent as a secret it was not given,
 which is what marking it optional asks for, and refusing would make the
-mark useless for a secret. The service keeps its tmpfs, its wrapper and
-Docker's `no` restart policy whether or not the value is there, so its
-plan hash does not depend on the value either. A later rewrite of the
-files, such as a rotation, writes the optional secrets that then have a
-value, and removes the file of one that has lost its value in the same
-script that renames the staged files, so the container never keeps an
-old value of a secret that the source no longer supplies.
+mark useless for a secret. When every secret file of a process is
+optional and none has a value, the process starts as one without secret
+files: its service has no tmpfs, no wrapper and no secrets label, it
+keeps its plan's restart policy, and phase does not ask who owns the
+files. Such a container cannot receive a file later without being
+recreated. The plan hash comes from the service as the plan describes
+it, so it does not depend on which values are there. A later rewrite of
+the files, such as a rotation, writes the optional secrets that then
+have a value, and removes the file of one that has lost its value in
+the same script that renames the staged files, so the container never
+keeps an old value of a secret that the source no longer supplies. Only
+a rewrite removes a file, because a start makes a new container, and
+the watcher that rewrites files is a follow-up.
 
 An image that can read a secret only from an environment variable falls
 back to environment references when its process sets

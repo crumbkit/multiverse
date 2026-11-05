@@ -59,7 +59,7 @@ pub(crate) struct KeeperSpec {
     /// The names of the variables that the app requires: those its plan
     /// names and does not mark optional. A fresh environment for a restart
     /// that lacks one counts as one that could not be resolved.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(crate) required: BTreeSet<String>,
 }
 

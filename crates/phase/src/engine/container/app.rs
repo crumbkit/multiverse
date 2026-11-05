@@ -313,6 +313,63 @@ pub(crate) fn compose_file(
     app: &AppPlan,
     image_config: Option<&ImageConfig>,
 ) -> Result<Value, PhaseError> {
+    compose_file_with(scope, app, image_config, None)
+}
+
+/// Returns the compose file of `app` in `scope` as the `docker compose up`
+/// child of `process` reads it once its environment is resolved, with
+/// `present` as the names of the environment's variables.
+///
+/// The service of `process` leaves out each optional variable that
+/// `present` lacks, so the container does not receive it, and an empty
+/// string never stands in for it. Each optional secret that `present`
+/// lacks gets no file, and the wrapper does not wait for it. When no
+/// secret file of the process is left, the service is the one of a process
+/// without secret files: it has no tmpfs, no wrapper, no secrets label,
+/// and its plan's restart policy. A required variable stays as it is,
+/// because phase refuses an environment that lacks one before it gets
+/// here. The other services stay as they are, and [`plan_hash`] hashes
+/// the file of [`compose_file`], so the plan hash does not depend on which
+/// optional variables have a value.
+///
+/// # Errors
+///
+/// Returns the errors of [`compose_file`].
+pub(crate) fn for_environment(
+    scope: &Scope,
+    app: &AppPlan,
+    image_config: Option<&ImageConfig>,
+    process: &ProcessName,
+    present: &BTreeSet<String>,
+) -> Result<Value, PhaseError> {
+    compose_file_with(scope, app, image_config, Some((process, present)))
+}
+
+/// Returns the names of the secrets of `process` that it receives as files
+/// and that have a value: those of [`file_secrets`] without each optional
+/// secret that `present` lacks. Without `present`, every one counts.
+pub(crate) fn present_file_secrets<'p>(
+    app: &'p AppPlan,
+    process: &'p ProcessPlan,
+    present: Option<&'p BTreeSet<String>>,
+) -> impl Iterator<Item = &'p String> {
+    file_secrets(app, process).filter(move |name| !is_absent(process, present, name))
+}
+
+/// Reports whether `name` is an optional variable of `process` that
+/// `present` lacks.
+fn is_absent(process: &ProcessPlan, present: Option<&BTreeSet<String>>, name: &str) -> bool {
+    present.is_some_and(|present| process.optional_env.contains(name) && !present.contains(name))
+}
+
+/// Returns the compose file of [`compose_file`], with the service of the
+/// process that `resolved` names as [`for_environment`] says.
+fn compose_file_with(
+    scope: &Scope,
+    app: &AppPlan,
+    image_config: Option<&ImageConfig>,
+    resolved: Option<(&ProcessName, &BTreeSet<String>)>,
+) -> Result<Value, PhaseError> {
     let Source::Image { image } = &app.source else {
         return Err(PhaseError::NotRunnable {
             app: app.name.clone(),
@@ -323,8 +380,12 @@ pub(crate) fn compose_file(
     for (index, process) in app.processes.iter().enumerate() {
         runnable(app, process)?;
         let service = service(app, &process.name)?;
+        let present = resolved
+            .filter(|(name, _)| *name == &process.name)
+            .map(|(_, present)| present);
         let environment: Map<String, Value> = variables(app, process)
             .enumerate()
+            .filter(|(_, name)| !is_absent(process, present, name))
             .map(|(variable, name)| {
                 (
                     name.clone(),
@@ -349,7 +410,7 @@ pub(crate) fn compose_file(
                 mounts.push(mount);
             }
         }
-        let secrets: Vec<&String> = file_secrets(app, process).collect();
+        let secrets: Vec<&String> = present_file_secrets(app, process, present).collect();
         if !secrets.is_empty() {
             mounts.push(json!({
                 "type": "tmpfs",
@@ -445,54 +506,6 @@ pub(crate) fn compose_file(
         );
     }
     Ok(json!({"services": services, "volumes": volumes}))
-}
-
-/// Returns `file`, the compose file of `app`, as the `docker compose up`
-/// child of `process` reads it once its environment is resolved, with
-/// `present` as the names of the environment's variables.
-///
-/// Each optional variable of `process` that `present` lacks is left out of
-/// the service's `environment`, so the container does not receive it, and
-/// an empty string never stands in for it. Each optional secret that
-/// `present` lacks is left out of the wrapper's names, so the wrapper does
-/// not wait for its file, and phase writes none. A required variable stays
-/// as it is: the source fails for it before phase gets here. The other
-/// services stay as they are, and [`plan_hash`] hashes the file before
-/// this change, so the plan hash does not depend on which optional
-/// variables have a value.
-pub(crate) fn for_environment(
-    file: &Value,
-    app: &AppPlan,
-    process: &ProcessName,
-    present: &BTreeSet<String>,
-) -> Value {
-    let mut file = file.clone();
-    let Some(plan) = app.processes.iter().find(|plan| &plan.name == process) else {
-        return file;
-    };
-    let absent = |name: &String| plan.optional_env.contains(name) && !present.contains(name);
-    let Ok(service) = service(app, process) else {
-        return file;
-    };
-    let Some(Value::Object(definition)) = file
-        .get_mut("services")
-        .and_then(|services| services.get_mut(service.as_str()))
-    else {
-        return file;
-    };
-    if let Some(Value::Object(environment)) = definition.get_mut("environment") {
-        environment.retain(|name, _| !absent(name));
-    }
-    if definition.contains_key("entrypoint") {
-        let names: Vec<&String> = file_secrets(app, plan)
-            .filter(|name| !absent(name))
-            .collect();
-        definition.insert(
-            "entrypoint".to_owned(),
-            entrypoint(names.into_iter()).into_iter().collect(),
-        );
-    }
-    file
 }
 
 /// Returns the hash of the part of `app` that makes the container of

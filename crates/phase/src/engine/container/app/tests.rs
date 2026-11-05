@@ -500,13 +500,13 @@ fn an_absent_optional_variable_is_left_out_of_the_service_and_a_required_one_sta
     let without: std::collections::BTreeSet<String> =
         ["MODE", "PGPASSWORD"].map(str::to_owned).into();
 
-    let present = for_environment(&file, &app, &name("server"), &all);
-    let absent = for_environment(&file, &app, &name("server"), &without);
+    let present = for_environment(&scope, &app, None, &name("server"), &all).unwrap();
+    let absent = for_environment(&scope, &app, None, &name("server"), &without).unwrap();
 
     assert_eq!(present, file);
     let server = &absent["services"]["server"];
-    // PGPORT is required, so an environment without it still refers to
-    // it, as before.
+    // PGPORT is required, and phase refuses an environment that lacks it
+    // before it builds this file, so the service always refers to it.
     assert_eq!(
         server["environment"],
         json!({"MODE": "${MXV_ENV_0_1:-}", "PGPORT": "${MXV_ENV_0_2:-}"})
@@ -523,5 +523,37 @@ fn an_absent_optional_variable_is_left_out_of_the_service_and_a_required_one_sta
     assert_eq!(
         plan_hash(&scope, &app, &name("server")).unwrap(),
         PlanHash::new(digest(file["services"]["server"].to_string().as_bytes()))
+    );
+}
+
+#[test]
+fn a_process_whose_every_secret_file_is_optional_and_absent_starts_without_files() {
+    let mut app = with_optional();
+    app.processes[0]
+        .optional_env
+        .insert("PGPASSWORD".to_owned());
+    app.processes[0].secret_owner = Some("999:999".to_owned());
+    let scope = scope("db");
+    let image = ImageConfig::new(&["docker-entrypoint.sh"], &["postgres"], "");
+    let without: std::collections::BTreeSet<String> = ["MODE", "PGPORT"].map(str::to_owned).into();
+
+    let file = for_environment(&scope, &app, Some(&image), &name("server"), &without).unwrap();
+
+    let server = &file["services"]["server"];
+    assert!(server.get("entrypoint").is_none(), "{server}");
+    assert!(server.get("command").is_none(), "{server}");
+    assert!(server["labels"].get("mxv.secrets").is_none(), "{server}");
+    assert!(server.get("x-phase-secret-owner").is_none(), "{server}");
+    assert!(!server["volumes"].to_string().contains("tmpfs"), "{server}");
+    assert_eq!(server["restart"], "on-failure");
+    let full = compose_file(&scope, &app, Some(&image)).unwrap();
+    assert_eq!(full["services"]["server"]["restart"], "no");
+    assert_eq!(
+        plan_hash(&scope, &app, &name("server")).unwrap(),
+        PlanHash::new(digest(
+            compose_file(&scope, &app, None).unwrap()["services"]["server"]
+                .to_string()
+                .as_bytes()
+        ))
     );
 }

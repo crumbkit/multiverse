@@ -926,3 +926,47 @@ running 0"#,
         Err(DockerError::Unavailable { .. })
     ));
 }
+
+#[test]
+fn a_refused_removal_names_the_operation_and_the_containers_id_and_no_service() {
+    let fake = Fake::new();
+    let id = container_id('2');
+    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.mark("noupdate");
+
+    let error = fake
+        .docker()
+        .remove(DockerKind::Container, &id, Duration::from_secs(7))
+        .unwrap_err();
+
+    assert_eq!(error.operation(), Some("update"));
+    assert_eq!(error.container_id(), Some(id.as_str()));
+    assert_eq!(error.service(), None);
+}
+
+#[test]
+fn a_find_that_docker_fails_names_the_inspect_command_of_the_objects_kind() {
+    let fake = Fake::new();
+    fake.mark("down");
+    let id = container_id('5');
+    let volume = name("data");
+    let workspace = workspace();
+
+    let container = fake
+        .docker()
+        .find(&object(
+            &workspace,
+            DockerKind::Container,
+            &name("phase-db"),
+            Some(&id),
+        ))
+        .unwrap_err();
+    let volume = fake
+        .docker()
+        .find(&object(&workspace, DockerKind::Volume, &volume, None))
+        .unwrap_err();
+
+    assert_eq!(container.operation(), Some("container inspect"));
+    assert_eq!(volume.operation(), Some("volume inspect"));
+    assert_eq!(volume.container_id(), None);
+}

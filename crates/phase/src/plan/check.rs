@@ -377,7 +377,7 @@ impl fmt::Display for ProcessProblem {
             ),
             Self::UndeclaredOptional(name) => write!(
                 formatter,
-                "it marks the variable {name} optional, which it does not receive"
+                "it marks the variable {name:?} optional, which it does not receive"
             ),
             Self::StopGraceOutOfRange => {
                 formatter.write_str("its stop grace is longer than an hour")

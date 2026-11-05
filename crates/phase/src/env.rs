@@ -191,6 +191,23 @@ pub(crate) fn require<'n>(
     }
 }
 
+/// Resolves the environment of `process` of `app` through `source` before
+/// `deadline`, and checks it with [`require`].
+///
+/// # Errors
+///
+/// Returns the source's [`EnvironmentError`], or that of [`require`].
+pub(crate) fn resolve_required(
+    source: &dyn EnvironmentSource,
+    app: &AppName,
+    process: &crate::ProcessPlan,
+    deadline: Instant,
+) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+    let environment = source.resolve(app, &process.name, deadline)?;
+    require(process.required_env(), environment.as_ref())?;
+    Ok(environment)
+}
+
 /// A resolver could not supply the value of a variable. The error names the
 /// variable and the resolver, and holds no value.
 #[derive(Debug)]

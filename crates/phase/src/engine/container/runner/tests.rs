@@ -583,16 +583,17 @@ fn a_docker_error_names_the_operation_the_container_and_the_foreign_object() {
     };
     let up = docker(&ContainerError::failed(
         "compose up",
-        Some("phase-0123456789abcdef-db.server"),
+        Some("server"),
         "Error response from daemon: no",
     ));
     assert_eq!(up.operation(), Some("compose up"));
-    assert_eq!(up.container(), Some("phase-0123456789abcdef-db.server"));
+    assert_eq!(up.service(), Some("server"));
+    assert_eq!(up.container_id(), None);
     assert_eq!(up.foreign(), None);
 
     let pull = docker(&ContainerError::Cancelled { operation: "pull" });
     assert_eq!(pull.operation(), Some("pull"));
-    assert_eq!(pull.container(), None);
+    assert_eq!(pull.service(), None);
 
     let volume = docker(&ContainerError::foreign(
         "volume",
@@ -2227,4 +2228,24 @@ fn a_rotation_removes_the_file_of_an_optional_secret_that_lost_its_value() {
         [".", "..", "TOKEN"]
     );
     world.down();
+}
+
+#[test]
+fn a_process_whose_every_secret_file_is_optional_and_absent_needs_no_owner() {
+    let mut db = secret_app_running("db", COPY_TOKEN);
+    db.processes[0].optional_env = ["TOKEN".to_owned(), "KEY".to_owned()].into();
+    // The image runs as root and the plan names no owner, so the files
+    // would belong to root.
+    let image = super::secrets::ImageConfig::new(&[], &["sh"], "");
+    let none = Listed::of(&[("MODE", MODE)]);
+    let token = Listed::of(&[("MODE", MODE), ("TOKEN", TOKEN)]);
+
+    let absent = super::delivered(&db, &db.processes[0], Some(&image), &none);
+    let present = super::delivered(&db, &db.processes[0], Some(&image), &token);
+
+    assert!(matches!(absent, Ok(None)));
+    assert!(matches!(
+        present,
+        Err(crate::error::PhaseError::SecretOwnerUnknown { .. })
+    ));
 }

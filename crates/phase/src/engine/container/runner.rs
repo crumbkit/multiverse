@@ -145,7 +145,8 @@ pub(crate) struct ComposeRunner {
 type NamedSecrets = Vec<(String, SecretBytes)>;
 
 /// Returns the owner of the file secrets of `process` and their values,
-/// or `None` when the process has no file secrets.
+/// or `None` when the process has no file secret with a value in
+/// `environment`.
 ///
 /// # Errors
 ///
@@ -161,7 +162,13 @@ fn delivered(
     let Some(image) = image_config else {
         return Ok(None);
     };
-    if app::file_secrets(app, process).next().is_none() {
+    // A process whose every secret file is optional and absent starts as
+    // one without secret files, so it needs no owner.
+    let present = environment.names();
+    if app::present_file_secrets(app, process, Some(&present))
+        .next()
+        .is_none()
+    {
         return Ok(None);
     }
     let owner =
@@ -355,7 +362,10 @@ impl ComposeRunner {
                     Some(objects::image_config(image.as_str()).map_err(|error| halt(&error))?);
             }
         }
-        let file = app::compose_file(&scope, app, image_config.as_ref())?;
+        // The file is checked before any volume is created. Each process's
+        // child reads its own form of it, made once its environment is
+        // resolved.
+        app::compose_file(&scope, app, image_config.as_ref())?;
         for key in app::volume_keys(app) {
             ensure_volume(&scope, &key).map_err(|error| halt(&error))?;
             let name: DockerName = scope.volume_name(&key).as_str().parse().map_err(|_| {
@@ -378,17 +388,12 @@ impl ComposeRunner {
             let plan_hash = app::plan_hash(&scope, app, name)?;
             // The environment is resolved before the old container is
             // removed, so a resolver that fails leaves it running.
-            let environment = start
-                .env
-                .resolve(&app.name, name, start.deadline)
-                .and_then(|environment| {
-                    crate::env::require(process.required_env(), environment.as_ref())
-                        .map(|()| environment)
-                })
-                .map_err(|source| PhaseError::Environment {
-                    app: app.name.clone(),
-                    source,
-                })?;
+            let environment =
+                crate::env::resolve_required(start.env, &app.name, process, start.deadline)
+                    .map_err(|source| PhaseError::Environment {
+                        app: app.name.clone(),
+                        source,
+                    })?;
             // The owner and the values of the secret files are settled
             // before the old container is removed, so a refusal, or an
             // environment that cannot write a value, leaves it running.
@@ -400,7 +405,13 @@ impl ComposeRunner {
             // An optional variable that the environment lacks is left
             // out of this child's compose file, so the container does
             // not receive it.
-            let file = app::for_environment(&file, app, name, &environment.names());
+            let file = app::for_environment(
+                &scope,
+                app,
+                image_config.as_ref(),
+                name,
+                &environment.names(),
+            )?;
             launching(name)?;
             if let Some(existing) = inspect_named(&scope, &service).map_err(|error| halt(&error))? {
                 let grace = own_grace(&existing.container).min(left(start.deadline));
@@ -473,10 +484,8 @@ impl ComposeRunner {
                     &inspected,
                     Delivery {
                         values,
-                        // A new container has no old file, so this
-                        // removes nothing, and a start and a rewrite
-                        // name the same files.
-                        removed: lost_secrets(app, process, environment.as_ref()),
+                        // A new container has no old file to remove.
+                        removed: Vec::new(),
                         owner,
                         docker_environment: self.docker_environment.as_ref(),
                     },
@@ -622,8 +631,7 @@ pub(crate) fn secret_values(
     environment: &dyn AppliedEnvironment,
 ) -> Result<Vec<(String, SecretBytes)>, String> {
     let present = environment.names();
-    app::file_secrets(app, process)
-        .filter(|name| !process.optional_env.contains(*name) || present.contains(*name))
+    app::present_file_secrets(app, process, Some(&present))
         .map(|name| {
             SecretBytes::of(environment, name)
                 .map(|bytes| (name.clone(), bytes))
@@ -644,7 +652,18 @@ pub(crate) fn secret_values(
 
 /// Returns the optional secrets of `process` of `app` that it receives as
 /// files and that `environment` has no value for, in name order. A rewrite
-/// removes their files, so a secret that lost its value keeps no old one.
+/// of a running container's files, such as a rotation, removes their
+/// files, so a secret that lost its value keeps no old one. Only a rewrite
+/// uses it: a start makes a new container, which has no old file. Nothing
+/// calls a rewrite outside the tests yet; the watcher that rotates secrets
+/// is a follow-up.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only a rewrite of a running container's files removes a file, and the watcher that rewrites them is a follow-up"
+    )
+)]
 pub(crate) fn lost_secrets(
     app: &AppPlan,
     process: &ProcessPlan,
@@ -663,7 +682,10 @@ pub(crate) fn lost_secrets(
 pub(crate) struct Delivery<'a> {
     /// Each secret's name and value.
     pub(crate) values: Vec<(String, SecretBytes)>,
-    /// The secrets whose files the commit removes.
+    /// The secrets whose files the commit removes, from [`lost_secrets`].
+    /// Only a rewrite of a running container's files, such as a rotation,
+    /// removes any; a start passes none, because a new container has no
+    /// old file. The rewrite path that would pass them is a follow-up.
     pub(crate) removed: Vec<String>,
     /// The owner of the files, in the form that `chown` reads.
     pub(crate) owner: &'a str,

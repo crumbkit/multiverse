@@ -47,8 +47,9 @@ pub enum ContainerError {
     Failed {
         /// The docker command or step, such as `compose up`.
         operation: &'static str,
-        /// The name of the container that the command worked on, when it
-        /// worked on one.
+        /// The compose service of the container that the command worked
+        /// on, which is its process's name, such as `server`, when it
+        /// worked on one. It is never a container's id or Docker name.
         container: Option<String>,
         /// The line of docker's standard error that says what failed.
         message: String,

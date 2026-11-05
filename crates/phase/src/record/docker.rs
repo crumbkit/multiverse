@@ -98,7 +98,8 @@ pub(crate) trait Docker {
 /// Beside its message and cause, it names what phase was doing, so a
 /// program can match on those facts instead of reading the message: the
 /// docker command or step ([`DockerError::operation`]), the container it
-/// worked on ([`DockerError::container`]), and for a foreign object, its
+/// worked on, by its compose service ([`DockerError::service`]) or its id
+/// ([`DockerError::container_id`]), and for a foreign object, its
 /// kind and name ([`DockerError::foreign`]). None of them holds a value of
 /// a variable.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,8 +112,9 @@ pub enum DockerError {
         message: String,
         /// What kind of failure it is.
         cause: DockerCause,
-        /// What phase was doing when Docker failed.
-        context: DockerContext,
+        /// What phase was doing when Docker failed, boxed so that the
+        /// error stays small.
+        context: Box<DockerContext>,
     },
     /// Docker answered and refused the call, such as a removal of a
     /// container that another program holds.
@@ -122,8 +124,9 @@ pub enum DockerError {
         message: String,
         /// What kind of failure it is.
         cause: DockerCause,
-        /// What phase was doing when Docker failed.
-        context: DockerContext,
+        /// What phase was doing when Docker failed, boxed so that the
+        /// error stays small.
+        context: Box<DockerContext>,
     },
 }
 
@@ -136,8 +139,15 @@ pub struct DockerContext {
     /// `compose up`, `stop`, `rm`, `container inspect`, `logs` or `secret
     /// write`, or `None` when phase did not name one.
     pub operation: Option<&'static str>,
-    /// The name of the container that the command worked on, or `None`.
-    pub container: Option<String>,
+    /// The compose service of the container that the command worked on,
+    /// which is the name of its process in the plan, such as `server`, or
+    /// `None`. `up`, `down`, `status`, `logs` and the secret writes name a
+    /// container this way.
+    pub service: Option<String>,
+    /// The 64-hex-digit id of the container that the command worked on, or
+    /// `None`. `sweep`, which knows a container only by the id the run
+    /// record keeps, names a container this way.
+    pub container_id: Option<String>,
     /// The object whose labels do not name phase's scope, for a failure
     /// whose cause is [`DockerCause::Foreign`], or `None`.
     pub foreign: Option<ForeignObject>,
@@ -173,7 +183,9 @@ impl ForeignObject {
 /// and no text of Docker's.
 ///
 /// In JSON a cause is its name in snake case, such as `"pull_failed"` or
-/// `"daemon_unavailable"`, and these names are stable.
+/// `"daemon_unavailable"`, and these names are stable. A name that this
+/// version does not know reads as [`DockerCause::Unknown`], so a report
+/// from a newer phase still parses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -207,6 +219,10 @@ pub enum DockerCause {
     /// a scope or a read of the run directory, or docker printed what
     /// phase cannot read.
     Unexpected,
+    /// A cause that this version of phase does not know, read from JSON
+    /// that a newer phase wrote. phase never gives it to a failure.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The most bytes of Docker's message that a [`DockerError`] keeps. A
@@ -247,7 +263,7 @@ impl DockerError {
         Self::Unavailable {
             message: bounded(message),
             cause: DockerCause::DaemonUnavailable,
-            context: DockerContext::default(),
+            context: Box::default(),
         }
     }
 
@@ -259,7 +275,7 @@ impl DockerError {
         Self::Refused {
             message: bounded(message),
             cause: DockerCause::Refused,
-            context: DockerContext::default(),
+            context: Box::default(),
         }
     }
 
@@ -298,11 +314,18 @@ impl DockerError {
         self.context().operation
     }
 
-    /// Returns the name of the container that the failed command worked
-    /// on, or `None`.
+    /// Returns the compose service of the container that the failed
+    /// command worked on, which is its process's name, or `None`.
     #[must_use]
-    pub fn container(&self) -> Option<&str> {
-        self.context().container.as_deref()
+    pub fn service(&self) -> Option<&str> {
+        self.context().service.as_deref()
+    }
+
+    /// Returns the id of the container that the failed command worked on,
+    /// or `None`.
+    #[must_use]
+    pub fn container_id(&self) -> Option<&str> {
+        self.context().container_id.as_deref()
     }
 
     /// Returns the object whose labels do not name phase's scope, for a
@@ -320,12 +343,24 @@ impl DockerError {
     }
 
     /// Returns this failure as one of the docker command or step
-    /// `operation` on `container`. Its message and cause stay.
+    /// `operation` on the container of the compose service `service`. Its
+    /// message and cause stay.
     #[must_use]
-    pub(crate) fn during(mut self, operation: &'static str, container: Option<&str>) -> Self {
+    pub(crate) fn during(mut self, operation: &'static str, service: Option<&str>) -> Self {
         let context = self.context_mut();
         context.operation = Some(operation);
-        context.container = container.map(str::to_owned);
+        context.service = service.map(str::to_owned);
+        self
+    }
+
+    /// Returns this failure as one of the docker command or step
+    /// `operation` on the container whose id is `id`. Its message and cause
+    /// stay.
+    #[must_use]
+    pub(crate) fn during_on_id(mut self, operation: &'static str, id: Option<&str>) -> Self {
+        let context = self.context_mut();
+        context.operation = Some(operation);
+        context.container_id = id.map(str::to_owned);
         self
     }
 

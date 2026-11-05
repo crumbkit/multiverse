@@ -1042,22 +1042,24 @@ impl Op<'_, '_> {
             BTreeMap::new();
         for (choice, targets) in &running {
             for target in targets {
-                let environment = self
-                    .env
-                    .resolve(&target.app, &target.process, self.deadlines.ready)
-                    .and_then(|environment| {
-                        let required = choice
-                            .app
-                            .processes
-                            .iter()
-                            .filter(|process| process.name == target.process)
-                            .flat_map(ProcessPlan::required_env);
-                        crate::env::require(required, environment.as_ref()).map(|()| environment)
-                    })
-                    .map_err(|source| PhaseError::Environment {
-                        app: choice.app.name.clone(),
-                        source,
-                    })?;
+                let Some(process) = choice
+                    .app
+                    .processes
+                    .iter()
+                    .find(|process| process.name == target.process)
+                else {
+                    continue;
+                };
+                let environment = crate::env::resolve_required(
+                    self.env,
+                    &target.app,
+                    process,
+                    self.deadlines.ready,
+                )
+                .map_err(|source| PhaseError::Environment {
+                    app: choice.app.name.clone(),
+                    source,
+                })?;
                 fresh
                     .entry(target.app.clone())
                     .or_default()
