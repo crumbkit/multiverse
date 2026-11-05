@@ -37,6 +37,7 @@ mod record;
 mod redacted;
 mod run_files;
 mod runs;
+mod service;
 mod store;
 mod template;
 mod workspaces;
@@ -69,6 +70,12 @@ pub use crate::runs::{
     DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, LogOutput, MOST_FOLLOW_BYTES,
     MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus, RenamedVolume, Runs,
     START_GRACE, STOP_GRACE, TAIL_LINES, Unstoppable, UpOutcome, Volumes, Waited, tail,
+};
+pub use crate::service::{
+    ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,
+    DYNAMODB_IMAGE, HOST, Index, KeyAttribute, LOCALSTACK_IMAGE, MOST_VISIBILITY_SECONDS,
+    PROVISION_APP, Placeholder, Queue, REGION, RESERVED_PREFIX, Service, ServiceKind, ServiceValue,
+    Table,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::template::{

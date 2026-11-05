@@ -733,3 +733,31 @@ fn a_write_path_that_is_the_whole_checkout_its_process_runs_in_is_unrunnable_and
     );
     assert!(!message.contains("outside"), "{message}");
 }
+
+#[test]
+fn a_manifest_that_declares_a_service_is_unrunnable_until_mxv_runs_services() {
+    let manifest = manifest(
+        "[service.store]\nkind = \"dynamodb\"\n[processes.worker]\nargv = [\"worker\"]\nneeds = [\"store\"]\n",
+    );
+    let ports = BTreeMap::new();
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let Err(unrunnable) = build(&Inputs {
+        manifest: &manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: Path::new("/work/triage/app"),
+        roots: Vec::new(),
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &CallerEnvironment::default(),
+    }) else {
+        panic!("a manifest with a service built a plan");
+    };
+    assert_eq!(unrunnable.unit, None);
+    assert_eq!(
+        unrunnable.message,
+        "the manifest declares the service `store`, and this mxv cannot run services yet"
+    );
+}
