@@ -212,9 +212,10 @@ impl Host for RunHost<'_> {
 
     fn saved_workspace_id(&self, workspace: &WorkspaceName) -> Result<WorkspaceId, Error> {
         let no_id = |message: &str| Error::DockerFailed {
-            operation: "workspace id",
+            operation: "workspace id".to_owned(),
             container: None,
             message: message.to_owned(),
+            docker_line: None,
         };
         let store = self
             .records

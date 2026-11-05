@@ -455,10 +455,7 @@ fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id() {
         assert!(
             matches!(
                 saved,
-                Err(Error::DockerFailed {
-                    operation: "workspace id",
-                    ..
-                })
+                Err(Error::DockerFailed { ref operation, .. }) if operation == "workspace id"
             ),
             "{saved:?}"
         );

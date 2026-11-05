@@ -206,6 +206,60 @@ pub struct ProcessStatus {
     /// which `mxv down` stops. It is `None` while the process runs, because
     /// the process itself is then a member.
     pub group_alive: Option<bool>,
+    /// Whether phase has seen the process ready since it last started:
+    /// `Some(true)` once its readiness check passed, or once a process
+    /// without one outlasted its start grace, and `Some(false)` while it
+    /// runs and phase has not seen it ready, such as after its keeper or
+    /// docker restarted it. It is `None` when it does not run, and for a
+    /// process that mxv started before phase ran its apps.
+    pub ready: Option<bool>,
+    /// Whether phase runs a host process under its sandbox, as phase
+    /// describes it, such as `unsandboxed (its app declares no
+    /// permissions)`, or `None` for a container and for a process that
+    /// phase does not run.
+    pub sandbox: Option<String>,
+    /// What `up` and `restart` found about the process beside its state,
+    /// such as secret files that `up` rewrote or kept. Every other command
+    /// leaves it empty.
+    pub notes: Vec<ProcessNote>,
+}
+
+/// Something that `up` or `restart` found about a process beside its
+/// state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProcessNote {
+    /// `up` rewrote the secret files of the running container from a fresh
+    /// environment, and the container kept running.
+    SecretsRewritten {
+        /// phase's sentence, which names the app and the process, such as
+        /// `rewrote 2 secret files of db/main`.
+        message: String,
+    },
+    /// `up` could not rewrite the secret files of the running container,
+    /// so it still runs with its earlier files. The next `up` tries again.
+    SecretsKept {
+        /// phase's sentence, which names the app, the process and why, and
+        /// holds no value.
+        message: String,
+    },
+}
+
+impl ProcessNote {
+    /// Returns phase's sentence.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::SecretsRewritten { message } | Self::SecretsKept { message } => message,
+        }
+    }
+
+    /// Reports whether the note is a warning, which says that something
+    /// did not happen as asked.
+    #[must_use]
+    pub const fn is_warning(&self) -> bool {
+        matches!(self, Self::SecretsKept { .. })
+    }
 }
 
 /// A volume of a container of a workspace's one checkout that holds data
@@ -792,6 +846,9 @@ impl Runs {
             ports,
             log: Some(self.log(&workspace.name, process)),
             group_alive,
+            ready: None,
+            sandbox: None,
+            notes: Vec::new(),
         })
     }
 
@@ -1515,6 +1572,9 @@ impl Runs {
             ports,
             log: Some(self.run_dir(&workspace.name).log(container)),
             group_alive: None,
+            ready: None,
+            sandbox: None,
+            notes: Vec::new(),
         }
     }
 

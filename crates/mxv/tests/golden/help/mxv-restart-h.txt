@@ -14,5 +14,6 @@ Examples:
 
 Effects: destructive, not idempotent, open-world.
 Writes: applies all items or none.
+Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv restart --help` describes them.
 Next: mxv restart --help explains each column.

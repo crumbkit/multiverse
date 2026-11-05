@@ -31,10 +31,11 @@ A host process receives:
 - its manifest `env`, with `{port.NAME}` placeholders rendered, and its
   port variables;
 - each variable of the allowlist `PASSED_THROUGH` in
-  `crates/multiverse/src/phase_plan.rs`, and each variable whose name
-  starts with `LC_`, when the `mxv` command's environment holds it.
+  `crates/multiverse/src/phase_plan.rs`, when the `mxv` command's
+  environment holds it.
 
-The allowlist covers the locale, the terminal, the user, the temporary and
+The allowlist covers the locale, which is `LANG`, `LANGUAGE`, `LC_ALL` and
+the twelve standard `LC_` categories, the terminal, the user, the temporary and
 XDG directories, the tool managers that `cargo run`, `pnpm run dev` and
 `sh -c` rely on, `SSH_AUTH_SOCK`, `RUST_LOG` and `RUST_BACKTRACE`. No other
 variable passes. A credential or a build override reaches a process only
@@ -68,29 +69,26 @@ it would make the plan change whenever any variable of the shell changed.
 
 ## Consequences
 
-The plan names each passed-through variable that is present, and holds no
-value. So the plan, and the digest that phase computes from it, depend on
-which allowlisted variables the `mxv` command's environment holds. They do
-not depend on the values. Two `mxv up` commands run from shells that differ
-only in whether `TZ` is set produce different plans and different digests.
-The test `the_plan_and_its_json_depend_on_which_passed_through_variables_the_caller_holds`
-in `crates/multiverse/src/phase_plan/tests.rs` checks this.
+The plan declares every variable of the allowlist for each host process,
+in the process's `env`, and marks each one that the manifest does not set
+as optional, in `optional_env`. The environment source returns only the
+optional variables that the `mxv` command's environment holds, and phase
+starts the process without the others. The variables that the manifest's
+`env` and `ports` set stay required, and phase refuses to start a process
+when one of them is missing.
 
-Today phase records the digest of the whole plan in its run record and in
-each host process's entry, and compares it with nothing for a host process.
-`mxv up` starts a host process only when it is not running, so an `up` from
-a shell with a different set of variables leaves the running processes as
-they are, with the variables they started with. `mxv restart` starts them
-with the current set. A container's digest covers only that container's
-compose service, which holds only its manifest `env`, so the caller's
-variables never cause phase to recreate a container.
+So the plan, and the digest that phase computes from it, are the same
+whichever shell runs `mxv up`. The test
+`the_plan_and_its_json_are_the_same_whichever_passed_through_variables_the_caller_holds`
+in `crates/multiverse/src/phase_plan/tests.rs` checks this. An `up` from a
+shell with a different set of allowlisted variables does not restart a
+running host process. `mxv restart` starts the processes with the variables
+of the current shell.
 
-phase's design says that `up` will compare each process's recorded inputs,
-the plan hash among them, and restart a process whose inputs changed. When
-that lands, an `up` from a shell with a different set of allowlisted
-variables will restart every host process of the workspace. mxv will then
-need either a plan that names a fixed set of variables, or a digest that
-leaves the passed-through names out.
+The allowlist is a fixed list of names, so that the plan can declare it in
+full. A locale variable outside the standard categories, such as
+`LC_TERMINAL`, does not pass. A container receives only its manifest
+`env`, so the caller's variables never cause phase to recreate one.
 
 These are the changes that users will see:
 
@@ -100,5 +98,5 @@ These are the changes that users will see:
   `env`.
 - A manifest that sets `PATH` or `HOME` for a process now fails with
   `mxv::manifest::unrunnable`.
-- The plan, and its digest, depend on which allowlisted variables are set
-  when `mxv up` runs.
+- A locale variable outside `LC_ALL` and the twelve standard categories,
+  such as `LC_TERMINAL`, no longer reaches a host process.

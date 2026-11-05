@@ -28,8 +28,9 @@ use phase::{
 };
 
 use super::{
-    DownOutcome, ExitReason, Follower, Kind, ProcessState, ProcessStatus, RenamedVolume, Runs,
-    TAIL_LINES, Unstoppable, UpOutcome, Waited, code_and_signal, received, tail,
+    DownOutcome, ExitReason, Follower, Kind, ProcessNote, ProcessState, ProcessStatus,
+    RenamedVolume, Runs, TAIL_LINES, Unstoppable, UpOutcome, Waited, code_and_signal, received,
+    tail,
 };
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
@@ -62,6 +63,9 @@ const CONTAINERS_RAN: &str = ".containers";
 /// `down` take, the record of the older containers' volumes, which
 /// `mxv remove --delete-volumes` reads, and [`CONTAINERS_RAN`].
 const KEPT_FILES: &[&str] = &[".lock", ".volumes", CONTAINERS_RAN];
+
+#[cfg(test)]
+mod tests;
 
 /// Returns the checkout that holds `workspace`'s manifest. A workspace
 /// holds one checkout for now.
@@ -141,6 +145,41 @@ fn state_of(row: &StatusRow) -> ProcessState {
         },
         _ => ProcessState::Stopped,
     }
+}
+
+/// Returns whether phase has seen the process of the phase row `row`
+/// ready since it last started, or `None` when it does not run.
+fn ready_of(row: &StatusRow) -> Option<bool> {
+    use phase::ProcessState as Phase;
+    match row.state {
+        Phase::Ready => Some(true),
+        Phase::Running | Phase::Paused | Phase::Starting | Phase::Restarting => Some(false),
+        _ => None,
+    }
+}
+
+/// Returns the notes of `report` that mxv shows, by unit: the secret files
+/// that `up` rewrote or kept for each app.
+fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
+    let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
+    for app in &report.apps {
+        for note in &app.notes {
+            let shown = match note {
+                Note::SecretsRewritten { message, .. } => ProcessNote::SecretsRewritten {
+                    message: message.clone(),
+                },
+                Note::SecretsKept { message, .. } => ProcessNote::SecretsKept {
+                    message: message.clone(),
+                },
+                _ => continue,
+            };
+            notes
+                .entry(app.app.as_str().to_owned())
+                .or_default()
+                .push(shown);
+        }
+    }
+    notes
 }
 
 /// Returns the exit code and the signal that mxv reports for a process
@@ -428,6 +467,11 @@ impl Runs {
             ports: Self::unit_ports(workspace, manifest, name),
             log: row.and_then(|row| row.log.clone()),
             group_alive: None,
+            ready: row.and_then(ready_of),
+            sandbox: row
+                .and_then(|row| row.sandbox.as_ref())
+                .map(ToString::to_string),
+            notes: Vec::new(),
         }
     }
 
@@ -656,11 +700,15 @@ impl Runs {
             }
         }
         let rows = self.phase_rows(workspace, Some(manifest))?;
+        let mut notes = notes_of(&report);
         Ok(UpOutcome::Up(
             order
                 .iter()
                 .map(|name| {
-                    Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name))
+                    let mut status =
+                        Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name));
+                    status.notes = notes.remove(name).unwrap_or_default();
+                    status
                 })
                 .collect(),
         ))
@@ -756,14 +804,20 @@ impl Runs {
                         self.start_problem(workspace, manifest, id, unit, problem)?,
                     ));
                 }
-                AppOutcome::Errored { code, message, .. } => {
+                AppOutcome::Errored {
+                    code,
+                    message,
+                    cause,
+                    context,
+                    ..
+                } => {
                     return Err(if code == "phase::process::unstartable" {
                         Error::ProcessUnstartable {
                             process: unit.to_owned(),
                             source: io::Error::other(message.clone()),
                         }
                     } else {
-                        errored(code, message).naming(unit)
+                        errored(code, message, *cause, context.as_ref()).naming(unit)
                     });
                 }
                 AppOutcome::StartUncertain => {
@@ -1011,7 +1065,13 @@ impl Runs {
                     "the deadline of down passed while phase was stopping {name}, so phase does not know whether it has stopped"
                 ),
             }),
-            AppOutcome::Errored { code, message, .. } => Err(errored(code, message).naming(name)),
+            AppOutcome::Errored {
+                code,
+                message,
+                cause,
+                context,
+                ..
+            } => Err(errored(code, message, *cause, context.as_ref()).naming(name)),
             _ => {
                 let mut status = Self::phase_unit_status(workspace, manifest, name, None);
                 status.log = row.and_then(|row| row.log.clone());
@@ -1202,12 +1262,16 @@ impl Runs {
 }
 
 /// Returns the error of an app that phase reported as errored with
-/// `code` and `message`: a docker failure for phase's docker codes, and
-/// [`Error::Phase`] otherwise.
-fn errored(code: &str, message: &str) -> Error {
-    match code {
-        "phase::docker::unavailable" => Error::of_docker(true, message),
-        "phase::docker::refused" => Error::of_docker(false, message),
+/// `code`, `message`, and for a Docker failure its `cause` and `context`:
+/// the docker failure that they describe, and [`Error::Phase`] otherwise.
+fn errored(
+    code: &str,
+    message: &str,
+    cause: Option<phase::DockerCause>,
+    context: Option<&phase::DockerContext>,
+) -> Error {
+    match (cause, context) {
+        (Some(cause), Some(context)) => Error::of_docker(phase_code(code), cause, context, message),
         _ => Error::Phase {
             code: phase_code(code),
             message: message.to_owned(),

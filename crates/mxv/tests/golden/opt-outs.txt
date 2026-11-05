@@ -95,11 +95,23 @@ twins/no-twin: mxv new triage --repo app --dry-run
   Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
-mxv declares 2 customisations.
+mxv declares 6 customisations.
 
 root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove, mxv clean
   Declares: Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
+
+children: mxv up
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+
+children: mxv down
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+
+children: mxv restart
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+
+children: mxv status
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 text-line: mxv logs
   Declares: The text prints each row as the line <LINE> in place of a table row.
