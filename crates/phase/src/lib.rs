@@ -61,7 +61,7 @@ pub use crate::plan::{
     RunnerKind, SecretDelivery, SourceProblem,
 };
 pub use crate::record::{
-    BadContainerId, BadDockerName, ContainerId, DockerError, DockerName, Handle,
+    BadContainerId, BadDockerName, ContainerId, DockerCause, DockerError, DockerName, Handle,
     MOST_DOCKER_MESSAGE_BYTES, MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept,
     SweptItem, SweptObject,
 };

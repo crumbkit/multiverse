@@ -22,6 +22,7 @@ use crate::engine::container::objects::{
     stop_timeout_of,
 };
 use crate::name::WorkspaceName;
+use crate::record::DockerCause;
 
 /// A store id of the tests.
 const STORE: &str = "0123456789abcdef0123456789abcdef";
@@ -801,7 +802,160 @@ fn a_command_that_misses_its_deadline_is_stopped_as_failed() {
         "{:?}",
         ended.err()
     );
+    assert_eq!(
+        ended.err().map(|error| error.cause()),
+        Some(DockerCause::TimedOut)
+    );
     assert!(now() - began < Duration::from_secs(5));
+}
+
+#[test]
+fn a_cancelled_command_has_the_cancelled_cause() {
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let ended = run_program_until(
+        "sleep".as_ref(),
+        ["30"],
+        "sleep",
+        Duration::from_secs(60),
+        &cancel,
+    );
+    assert_eq!(
+        ended.err().map(|error| error.cause()),
+        Some(DockerCause::Cancelled)
+    );
+}
+
+#[test]
+fn a_program_that_is_not_found_has_the_docker_missing_cause() {
+    let ended = run_program_until(
+        "/nonexistent/docker".as_ref(),
+        ["version"],
+        "version",
+        Duration::from_secs(5),
+        &Cancel::new(),
+    );
+    let error = ended.err().unwrap();
+    assert!(matches!(error, Error::Missing { .. }), "{error:?}");
+    assert_eq!(error.cause(), DockerCause::DockerMissing);
+    assert_eq!(error.to_string(), "docker is not installed");
+}
+
+#[test]
+fn a_program_that_cannot_start_for_another_reason_has_the_unexpected_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let ended = run_program_until(
+        dir.path().as_os_str(),
+        ["version"],
+        "version",
+        Duration::from_secs(5),
+        &Cancel::new(),
+    );
+    let error = ended.err().unwrap();
+    assert!(matches!(error, Error::Failed { .. }), "{error:?}");
+    assert_eq!(error.cause(), DockerCause::Unexpected);
+}
+
+#[test]
+fn each_container_error_has_the_cause_of_its_kind() {
+    let message = || "Error response from daemon: test".to_owned();
+    let cases = [
+        (
+            Error::Missing {
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            DockerCause::DockerMissing,
+        ),
+        (
+            Error::ComposeMissing { message: message() },
+            DockerCause::ComposeMissing,
+        ),
+        (
+            Error::NoAddressPool { message: message() },
+            DockerCause::NoAddressPool,
+        ),
+        (
+            Error::Unavailable { message: message() },
+            DockerCause::DaemonUnavailable,
+        ),
+        (
+            Error::failed("compose up", Some("db"), message()),
+            DockerCause::Refused,
+        ),
+        (
+            Error::timed_out("compose up", "docker did not finish within 1 seconds"),
+            DockerCause::TimedOut,
+        ),
+        (
+            Error::unexpected("scope check", None, "the scope does not match"),
+            DockerCause::Unexpected,
+        ),
+        (
+            Error::Cancelled { operation: "pull" },
+            DockerCause::Cancelled,
+        ),
+        (
+            Error::foreign("volume", "phase-db.data"),
+            DockerCause::Foreign,
+        ),
+        (
+            Error::Unreadable {
+                path: PathBuf::from("/run-dir"),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            },
+            DockerCause::Unexpected,
+        ),
+    ];
+    for (error, cause) in cases {
+        assert_eq!(error.cause(), cause, "{error:?}");
+    }
+}
+
+#[test]
+fn a_pull_that_docker_refuses_has_the_pull_failed_cause_and_its_text_stays() {
+    let refused = Error::failed("pull", None, "Error response from daemon: manifest unknown");
+    let text = refused.to_string();
+    let pulled = refused.in_pull();
+    assert_eq!(pulled.cause(), DockerCause::PullFailed);
+    assert_eq!(pulled.to_string(), text);
+    assert_eq!(
+        text,
+        "docker pull failed: Error response from daemon: manifest unknown"
+    );
+}
+
+#[test]
+fn a_pull_that_fails_for_another_reason_keeps_its_cause() {
+    for (error, cause) in [
+        (
+            Error::timed_out("pull", "docker did not finish within 1 seconds"),
+            DockerCause::TimedOut,
+        ),
+        (
+            Error::Cancelled { operation: "pull" },
+            DockerCause::Cancelled,
+        ),
+        (
+            Error::Unavailable {
+                message: "Cannot connect to the Docker daemon".to_owned(),
+            },
+            DockerCause::DaemonUnavailable,
+        ),
+    ] {
+        assert_eq!(error.in_pull().cause(), cause);
+    }
+}
+
+#[test]
+fn the_failure_constructors_keep_the_text_of_a_failure() {
+    assert_eq!(
+        Error::timed_out("stop", "docker did not finish within 3 seconds").to_string(),
+        "docker stop failed: docker did not finish within 3 seconds"
+    );
+    assert_eq!(
+        Error::unexpected("scope check", Some("db"), "the scope does not match").to_string(),
+        "docker scope check failed for the container db: the scope does not match"
+    );
 }
 
 /// An environment that holds `MODE`, with a test value.

@@ -98,6 +98,8 @@ pub enum DockerError {
     Unavailable {
         /// What failed.
         message: String,
+        /// What kind of failure it is.
+        cause: DockerCause,
     },
     /// Docker answered and refused the call, such as a removal of a
     /// container that another program holds.
@@ -105,7 +107,46 @@ pub enum DockerError {
     Refused {
         /// Docker's answer.
         message: String,
+        /// What kind of failure it is.
+        cause: DockerCause,
     },
+}
+
+/// What kind of failure a [`DockerError`] is, which a program can match on
+/// instead of reading the message. A cause holds no value of a variable,
+/// and no text of Docker's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DockerCause {
+    /// No `docker` program is on `PATH`.
+    DockerMissing,
+    /// The `docker` program runs, and its `compose` plugin is not
+    /// installed.
+    ComposeMissing,
+    /// The `docker` program runs, and its daemon does not answer, or its
+    /// context is unknown.
+    DaemonUnavailable,
+    /// Docker has no free address pool for a network, so it cannot
+    /// connect a container.
+    NoAddressPool,
+    /// Docker answered a pull of the app's image with an error, such as an
+    /// image that the registry does not have.
+    PullFailed,
+    /// Docker answered a command with an error.
+    Refused,
+    /// A docker command did not finish within its deadline, so phase
+    /// stopped it.
+    TimedOut,
+    /// The caller cancelled the operation while a docker command ran, so
+    /// phase stopped the command.
+    Cancelled,
+    /// A docker object has a name of phase's, and its labels do not name
+    /// the scope, so phase leaves it alone.
+    Foreign,
+    /// A step of phase around a docker command failed, such as a check of
+    /// a scope or a read of the run directory, or docker printed what
+    /// phase cannot read.
+    Unexpected,
 }
 
 /// The most bytes of Docker's message that a [`DockerError`] keeps. A
@@ -139,20 +180,43 @@ fn bounded(mut message: String) -> String {
 
 impl DockerError {
     /// Returns the failure of a Docker that did not answer, which `message`
-    /// describes, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes.
+    /// describes, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes. Its cause is
+    /// [`DockerCause::DaemonUnavailable`].
     #[must_use]
     pub fn unavailable(message: String) -> Self {
         Self::Unavailable {
             message: bounded(message),
+            cause: DockerCause::DaemonUnavailable,
         }
     }
 
     /// Returns the failure of a Docker that answered and refused, with its
-    /// answer `message`, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes.
+    /// answer `message`, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes. Its
+    /// cause is [`DockerCause::Refused`].
     #[must_use]
     pub fn refused(message: String) -> Self {
         Self::Refused {
             message: bounded(message),
+            cause: DockerCause::Refused,
+        }
+    }
+
+    /// Returns this failure with the cause `cause`. Its message stays.
+    #[must_use]
+    pub(crate) fn with_cause(mut self, cause: DockerCause) -> Self {
+        match &mut self {
+            Self::Unavailable { cause: kept, .. } | Self::Refused { cause: kept, .. } => {
+                *kept = cause;
+            }
+        }
+        self
+    }
+
+    /// Returns what kind of failure this is.
+    #[must_use]
+    pub const fn cause(&self) -> DockerCause {
+        match self {
+            Self::Unavailable { cause, .. } | Self::Refused { cause, .. } => *cause,
         }
     }
 }
@@ -160,8 +224,10 @@ impl DockerError {
 impl fmt::Display for DockerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable { message } => write!(formatter, "Docker did not answer: {message}"),
-            Self::Refused { message } => write!(formatter, "Docker refused: {message}"),
+            Self::Unavailable { message, .. } => {
+                write!(formatter, "Docker did not answer: {message}")
+            }
+            Self::Refused { message, .. } => write!(formatter, "Docker refused: {message}"),
         }
     }
 }

@@ -296,7 +296,8 @@ fn a_docker_message_is_kept_to_its_first_2_kib_on_a_character_boundary() {
         DockerError::refused(long.clone()),
         DockerError::unavailable(long.clone()),
     ] {
-        let (DockerError::Refused { message } | DockerError::Unavailable { message }) = &error;
+        let (DockerError::Refused { message, .. } | DockerError::Unavailable { message, .. }) =
+            &error;
         assert!(
             message.len() <= MOST_DOCKER_MESSAGE_BYTES,
             "{}",
@@ -307,8 +308,29 @@ fn a_docker_message_is_kept_to_its_first_2_kib_on_a_character_boundary() {
     }
     assert!(matches!(
         DockerError::refused("short".to_owned()),
-        DockerError::Refused { message } if message == "short"
+        DockerError::Refused { message, .. } if message == "short"
     ));
+}
+
+#[test]
+fn a_docker_error_has_the_cause_that_its_constructor_or_the_engine_gives_it() {
+    use crate::record::docker::{DockerCause, DockerError};
+
+    let unavailable = DockerError::unavailable("Cannot connect".to_owned());
+    assert_eq!(unavailable.cause(), DockerCause::DaemonUnavailable);
+    let refused = DockerError::refused("Error response from daemon: no".to_owned());
+    assert_eq!(refused.cause(), DockerCause::Refused);
+    let missing = DockerError::unavailable("docker is not installed".to_owned())
+        .with_cause(DockerCause::DockerMissing);
+    assert_eq!(missing.cause(), DockerCause::DockerMissing);
+    assert_eq!(
+        missing.to_string(),
+        "Docker did not answer: docker is not installed"
+    );
+    let timed_out =
+        DockerError::refused("docker stop failed".to_owned()).with_cause(DockerCause::TimedOut);
+    assert_eq!(timed_out.cause(), DockerCause::TimedOut);
+    assert_eq!(timed_out.to_string(), "Docker refused: docker stop failed");
 }
 
 #[test]

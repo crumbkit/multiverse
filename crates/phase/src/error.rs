@@ -290,10 +290,10 @@ impl fmt::Display for PhaseError {
                 )
             }
             Self::Docker {
-                source: DockerError::Refused { message },
+                source: DockerError::Refused { message, .. },
             } => write!(formatter, "Docker refused a request of the run: {message}"),
             Self::Docker {
-                source: DockerError::Unavailable { message },
+                source: DockerError::Unavailable { message, .. },
             } => write!(
                 formatter,
                 "Docker did not answer, so phase cannot tell what is running: {message}"

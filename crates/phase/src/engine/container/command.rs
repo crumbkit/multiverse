@@ -168,7 +168,7 @@ pub(super) fn write_secret(
         Err(source) if source.kind() == io::ErrorKind::NotFound => {
             return Err(Error::Missing { source });
         }
-        Err(source) => return Err(Error::failed(operation, None, source.to_string())),
+        Err(source) => return Err(Error::unexpected(operation, None, source.to_string())),
     };
     let pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
     let feeder = child
@@ -206,14 +206,13 @@ pub(super) fn write_secret(
     let stderr = joined(stderr);
     match (stopped, reaped) {
         (Some(Stop::Cancelled), _) => Err(Error::Cancelled { operation }),
-        (Some(Stop::WaitFailed(error)), _) => Err(Error::failed(
+        (Some(Stop::WaitFailed(error)), _) => Err(Error::unexpected(
             operation,
             None,
             format!("phase could not wait for docker: {error}"),
         )),
-        (Some(Stop::Late), _) => Err(Error::failed(
+        (Some(Stop::Late), _) => Err(Error::timed_out(
             operation,
-            None,
             format!(
                 "docker did not finish within {} seconds, so phase stopped it",
                 deadline.as_secs()
@@ -224,7 +223,7 @@ pub(super) fn write_secret(
             stdout,
             stderr,
         }),
-        (None, Err(source)) => Err(Error::failed(operation, None, source.to_string())),
+        (None, Err(source)) => Err(Error::unexpected(operation, None, source.to_string())),
     }
 }
 
@@ -519,7 +518,7 @@ where
             return Err(Error::Missing { source });
         }
         Err(source) => {
-            return Err(Error::failed(operation, None, source.to_string()));
+            return Err(Error::unexpected(operation, None, source.to_string()));
         }
     };
     // The input is written on a thread of its own, so a child that writes
@@ -559,9 +558,8 @@ where
             if cancelled {
                 return Err(Error::Cancelled { operation });
             }
-            return Err(Error::failed(
+            return Err(Error::timed_out(
                 operation,
-                None,
                 format!(
                     "docker did not finish within {} seconds, so mxv stopped it",
                     deadline.as_secs()

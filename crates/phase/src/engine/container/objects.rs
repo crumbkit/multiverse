@@ -223,10 +223,12 @@ pub(super) fn mint_container(
         });
     }
     let printed_id = lines.next().unwrap_or_default().trim();
-    let id = ContainerId::new(printed_id).map_err(|_| Error::Failed {
-        operation: "container inspect",
-        container: Some(service.as_str().to_owned()),
-        message: format!("docker printed {printed_id:?} as the container's id"),
+    let id = ContainerId::new(printed_id).map_err(|_| {
+        Error::unexpected(
+            "container inspect",
+            Some(service.as_str()),
+            format!("docker printed {printed_id:?} as the container's id"),
+        )
     })?;
     let printed_state = lines.next().unwrap_or_default();
     let state = ContainerState::parse(printed_state);
@@ -414,7 +416,9 @@ pub(crate) fn ensure_image(image: &str, deadline: Duration, cancel: &Cancel) -> 
         found.checked("image inspect", None)?;
         return Ok(());
     }
-    run_until(["pull", "--quiet", "--", image], "pull", deadline, cancel)?.checked("pull", None)?;
+    run_until(["pull", "--quiet", "--", image], "pull", deadline, cancel)
+        .and_then(|pulled| pulled.checked("pull", None))
+        .map_err(Error::in_pull)?;
     Ok(())
 }
 
@@ -438,7 +442,7 @@ pub(crate) fn image_config(image: &str) -> Result<ImageConfig, Error> {
     )?
     .checked("image inspect", None)?;
     ImageConfig::parse(&printed).ok_or_else(|| {
-        Error::failed(
+        Error::unexpected(
             "image inspect",
             None,
             "docker printed an entrypoint, command and user that phase cannot read",
@@ -484,14 +488,38 @@ fn stop_args(seconds: u64, container: &OwnedContainer) -> [String; 5] {
     ]
 }
 
-/// Removes `container`. Its named and anonymous volumes stay. A container
-/// that docker no longer has counts as removed.
+/// What happens to a container's anonymous volumes when [`remove`]
+/// removes the container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnonymousVolumes {
+    /// The anonymous volumes stay, for a caller that records them and
+    /// deletes them later.
+    Keep,
+    /// docker removes the anonymous volumes with the container, as
+    /// `docker rm --volumes` does. A named volume always stays.
+    Remove,
+}
+
+/// Returns the arguments of the `docker rm` of the container `id`, which
+/// removes its anonymous volumes with it when `anonymous` says so.
+pub(crate) fn rm_args(id: &str, anonymous: AnonymousVolumes) -> Vec<&str> {
+    let mut args = vec!["rm", "--force"];
+    if anonymous == AnonymousVolumes::Remove {
+        args.push("--volumes");
+    }
+    args.extend(["--", id]);
+    args
+}
+
+/// Removes `container`, and its anonymous volumes when `anonymous` says
+/// so. Its named volumes always stay. A container that docker no longer
+/// has counts as removed.
 ///
 /// # Errors
 ///
 /// Returns the errors of `docker version` and [`Error::Failed`].
-pub(crate) fn remove(container: OwnedContainer) -> Result<(), Error> {
-    let removed = quick(["rm", "--force", "--", container.id.as_str()], "rm")?;
+pub(crate) fn remove(container: OwnedContainer, anonymous: AnonymousVolumes) -> Result<(), Error> {
+    let removed = quick(rm_args(container.id.as_str(), anonymous), "rm")?;
     if !removed.missing() {
         removed.checked("rm", Some(container.service.as_str()))?;
     }
@@ -632,7 +660,7 @@ pub(crate) fn ensure_volume(scope: &Scope, key: &VolumeKey) -> Result<OwnedVolum
     args.extend(["--".to_owned(), name.as_str().to_owned()]);
     quick(args, "volume create")?.checked("volume create", None)?;
     inspect_volume(scope, &name)?.ok_or_else(|| {
-        Error::failed(
+        Error::unexpected(
             "volume create",
             None,
             format!("docker created the volume {name} and no longer has it"),
