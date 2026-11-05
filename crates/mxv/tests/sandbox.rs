@@ -149,12 +149,29 @@ impl Sandboxed {
         support::repository(&sandboxed.root());
         let (exit, document) = sandboxed.json(&["new", "triage", "--repo", "app"]);
         assert_eq!(exit, 0, "{document}");
+        sandboxed.write_manifest(manifest);
+        sandboxed
+    }
+
+    /// Writes `manifest` as the `mxv.toml` of the checkout.
+    fn write_manifest(&self, manifest: &str) {
         #[expect(
             clippy::disallowed_methods,
             reason = "the test writes the manifest that a person would write in a checkout"
         )]
-        std::fs::write(sandboxed.checkout().join("mxv.toml"), manifest).unwrap();
-        sandboxed
+        std::fs::write(self.checkout().join("mxv.toml"), manifest).unwrap();
+    }
+
+    /// Returns the row of the unit `name` in the JSON document of a
+    /// process verb.
+    fn row(document: &serde_json::Value, name: &str) -> serde_json::Value {
+        document["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("no row {name} in {document}"))
+            .clone()
     }
 
     fn root(&self) -> PathBuf {
@@ -259,4 +276,44 @@ ready = {{ log = "^ready$" }}
         sandbox("plain"),
         "unsandboxed (its app declares no permissions)"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn up_warns_that_a_running_process_whose_manifest_gained_permissions_needs_a_restart_to_be_sandboxed()
+ {
+    let without = "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\n";
+    let sandboxed = Sandboxed::new(without);
+    let (exit, first) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{first}");
+    let pid = Sandboxed::row(&first, "writer")["pid"].clone();
+
+    sandboxed.write_manifest(&format!("{without}permissions = {{}}\n"));
+    let (exit, second) = sandboxed.json(&["up", "-w", "triage"]);
+    let (restarted, third) = sandboxed.json(&["restart", "-w", "triage", "writer"]);
+
+    assert_eq!(exit, 0, "{second}");
+    let writer = Sandboxed::row(&second, "writer");
+    assert_eq!(writer["pid"], pid, "{second}");
+    assert_eq!(
+        writer["sandbox"], "unsandboxed (its app declares no permissions)",
+        "{second}"
+    );
+    assert_eq!(
+        writer["notes"],
+        serde_json::json!([{
+            "level": "warning",
+            "message": "writer still runs unsandboxed, because it was running before its manifest gave it permissions; run `mxv restart -w triage writer` to run it under the sandbox",
+        }]),
+        "{second}"
+    );
+    assert_eq!(restarted, 0, "{third}");
+    let writer = Sandboxed::row(&third, "writer");
+    assert!(
+        writer["sandbox"]
+            .as_str()
+            .is_some_and(|sandbox| sandbox.starts_with("seatbelt (partial: ")),
+        "{third}"
+    );
+    assert_eq!(writer["notes"], serde_json::json!([]), "{third}");
 }

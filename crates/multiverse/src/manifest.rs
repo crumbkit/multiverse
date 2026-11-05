@@ -123,10 +123,19 @@ pub struct Joined {
     pub ports: Vec<String>,
     /// The processes and containers of the other manifests.
     pub units: Vec<String>,
+    /// The ports that a process of the other manifests listens on or a
+    /// container of them publishes, each with that unit's name.
+    pub listened: Vec<(String, String)>,
+    /// The folders of the workspace's checkouts, when the manifest is the
+    /// workspace manifest of a workspace with several checkouts. Its write
+    /// paths are then relative to the workspace's directory, and each
+    /// must lie inside one of these folders.
+    pub checkouts: Vec<String>,
 }
 
 impl Joined {
-    /// Adds the ports and units of `manifest`.
+    /// Adds the ports and units of `manifest`, and the ports that its
+    /// units listen on or publish.
     pub fn add(&mut self, manifest: &Manifest) {
         self.ports.extend(manifest.ports.iter().cloned());
         self.units.extend(
@@ -136,6 +145,12 @@ impl Joined {
                 .chain(manifest.containers.keys())
                 .cloned(),
         );
+        self.listened.extend(manifest.listeners());
+    }
+
+    /// Adds the checkout in the folder `folder` of the workspace.
+    pub fn add_checkout(&mut self, folder: &str) {
+        self.checkouts.push(folder.to_owned());
     }
 }
 
@@ -1290,7 +1305,14 @@ impl Manifest {
         let mut processes = BTreeMap::new();
         let mut listeners: BTreeMap<String, String> = BTreeMap::new();
         for (name, raw_process) in &raw.processes {
-            let process = check_process(&errors, name, raw_process, &known, &names)?;
+            let process = check_process(
+                &errors,
+                name,
+                raw_process,
+                &known,
+                &names,
+                &joined.checkouts,
+            )?;
             if let (Some(port), Some(listen)) = (&process.listen, &raw_process.listen) {
                 if let Some(other) = listeners.get(port) {
                     return Err(errors.invalid(
@@ -1323,6 +1345,7 @@ impl Manifest {
             }
             containers.insert(name.get_ref().clone(), container);
         }
+        check_listen_grants(&errors, &raw, &listeners, joined)?;
         let globs = |raw: &[Spanned<String>],
                      parse: fn(&str) -> Result<PathGlob, BadGlob>,
                      key: &str| {
@@ -1455,6 +1478,26 @@ impl Manifest {
         }
     }
 
+    /// Returns each port that a process listens on or a container
+    /// publishes, with the unit's name.
+    fn listeners(&self) -> Vec<(String, String)> {
+        self.processes
+            .iter()
+            .filter_map(|(name, process)| {
+                process
+                    .listen
+                    .as_ref()
+                    .map(|port| (port.clone(), name.clone()))
+            })
+            .chain(self.containers.iter().flat_map(|(name, container)| {
+                container
+                    .ports
+                    .iter()
+                    .map(|published| (published.port.clone(), name.clone()))
+            }))
+            .collect()
+    }
+
     /// Returns the names of every process and container, in name order.
     fn names(&self) -> BTreeSet<&String> {
         self.processes
@@ -1535,6 +1578,7 @@ fn check_process(
     raw: &RawProcess,
     ports: &[String],
     names: &BTreeSet<&str>,
+    checkouts: &[String],
 ) -> Result<Process, ManifestError> {
     let process = name.get_ref();
     if !is_unit_name(process) {
@@ -1638,6 +1682,7 @@ fn check_process(
                 },
                 names,
                 depends_on: &depends_on,
+                checkouts,
             },
         )?),
         None => None,
@@ -1667,6 +1712,9 @@ struct Granted<'a> {
     names: &'a BTreeSet<&'a str>,
     /// The units that the process depends on.
     depends_on: &'a [String],
+    /// The folders of the workspace's checkouts, for a workspace manifest
+    /// of several checkouts, or empty.
+    checkouts: &'a [String],
 }
 
 /// Checks the permissions `raw` of the process `process` against what
@@ -1682,11 +1730,19 @@ fn check_permissions(
 ) -> Result<Permissions, ManifestError> {
     let mut permissions = Permissions::default();
     for path in &raw.get_ref().write {
-        if let Some(reason) = write_problem(path.get_ref()) {
+        if let Some(reason) = write_problem(path.get_ref(), granted.checkouts) {
+            let rule = if granted.checkouts.is_empty() {
+                "a path relative to the checkout, such as `target`".to_owned()
+            } else {
+                format!(
+                    "a path relative to the workspace's directory inside one of its checkouts, such as `{}/target`",
+                    granted.checkouts.first().map_or("api", String::as_str)
+                )
+            };
             return Err(errors.invalid(
                 &path.span(),
                 format!(
-                    "the write path {:?} of `{process}` {reason}; a write path is `$STATE` or a path relative to the checkout, such as `target`",
+                    "the write path {:?} of `{process}` {reason}; a write path is `$STATE` or {rule}",
                     path.get_ref()
                 ),
             ));
@@ -1746,46 +1802,114 @@ fn check_permissions(
     Ok(permissions)
 }
 
+/// Checks that no process's permissions let it listen on a port that
+/// another unit listens on or publishes, as `listeners` and `joined` name
+/// them by port, so a sandboxed process cannot take a dependency's port.
+fn check_listen_grants(
+    errors: &Errors<'_>,
+    raw: &RawManifest,
+    listeners: &BTreeMap<String, String>,
+    joined: &Joined,
+) -> Result<(), ManifestError> {
+    for (name, process) in &raw.processes {
+        let Some(permissions) = &process.permissions else {
+            continue;
+        };
+        for port in &permissions.get_ref().listen {
+            let other = listeners.get(port.get_ref()).or_else(|| {
+                joined
+                    .listened
+                    .iter()
+                    .find(|(listened, _)| listened == port.get_ref())
+                    .map(|(_, unit)| unit)
+            });
+            if let Some(other) = other
+                && other != name.get_ref()
+            {
+                return Err(errors.invalid(
+                    &port.span(),
+                    format!(
+                        "the permissions of `{}` let it listen on `{}`, which `{other}` listens on or publishes; a process may listen only on its own ports",
+                        name.get_ref(),
+                        port.get_ref()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Returns why `path` cannot be a write path of a process's permissions,
 /// or `None` when it can: it is `$STATE`, or a relative path that names a
-/// directory inside the checkout without `..` and holds no quote,
-/// backslash or control character, which phase's sandbox profile cannot
-/// hold.
-fn write_problem(path: &str) -> Option<&'static str> {
+/// directory inside the checkout without `..`, outside its `.git`, and
+/// holds no quote, backslash or control character, which phase's sandbox
+/// profile cannot hold. When `checkouts` names the folders of a
+/// workspace's checkouts, the path is relative to the workspace's
+/// directory, and it must lie inside one of them without naming the whole
+/// checkout.
+fn write_problem(path: &str, checkouts: &[String]) -> Option<String> {
     if path == STATE {
         return None;
     }
     if path.is_empty() {
-        return Some("is empty");
+        return Some("is empty".to_owned());
     }
     if path.starts_with('$') {
-        return Some("starts with `$`, which only `$STATE` may");
+        return Some("starts with `$`, which only `$STATE` may".to_owned());
     }
     if path.contains('\\') {
-        return Some("holds a backslash");
+        return Some("holds a backslash".to_owned());
     }
     if path
         .chars()
         .any(|character| character == '"' || character.is_control())
     {
-        return Some("holds a quote or a control character");
+        return Some("holds a quote or a control character".to_owned());
     }
     let path = Path::new(path);
     if path.is_absolute() {
-        return Some("is absolute");
+        return Some("is absolute".to_owned());
     }
-    let mut names = 0_usize;
+    let mut names = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(_) => names = names.saturating_add(1),
+            Component::Normal(name) => names.push(name.to_string_lossy()),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Some("holds `..`");
+                return Some("holds `..`".to_owned());
             }
         }
     }
-    if names == 0 {
-        return Some("names the whole checkout, whose `.git` a sandboxed process may only read");
+    let (in_checkout, checkout) = match names.split_first() {
+        Some((first, rest)) if !checkouts.is_empty() => {
+            if !checkouts.iter().any(|folder| folder == first.as_ref()) {
+                return Some(format!(
+                    "lies in none of the workspace's checkouts, {}",
+                    checkouts
+                        .iter()
+                        .map(|folder| format!("`{folder}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            (rest, Some(first))
+        }
+        _ => (names.as_slice(), None),
+    };
+    let Some(top) = in_checkout.first() else {
+        return Some(match checkout {
+            Some(folder) => format!(
+                "names the whole checkout `{folder}`, whose `.git` a sandboxed process may only read"
+            ),
+            None => "names the whole checkout, whose `.git` a sandboxed process may only read"
+                .to_owned(),
+        });
+    };
+    if top.eq_ignore_ascii_case(".git") {
+        return Some(
+            "lies in the checkout's `.git`, which a sandboxed process may only read".to_owned(),
+        );
     }
     None
 }

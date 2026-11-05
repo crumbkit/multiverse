@@ -243,6 +243,14 @@ pub enum ProcessNote {
         /// holds no value.
         message: String,
     },
+    /// `up` left a host process running that started before its manifest
+    /// gained or lost its `permissions` table, so it still runs as it
+    /// started, sandboxed or not. `mxv restart` applies the change.
+    SandboxStale {
+        /// mxv's sentence, which names the process and the restart that
+        /// applies its permissions.
+        message: String,
+    },
 }
 
 impl ProcessNote {
@@ -250,7 +258,9 @@ impl ProcessNote {
     #[must_use]
     pub fn message(&self) -> &str {
         match self {
-            Self::SecretsRewritten { message } | Self::SecretsKept { message } => message,
+            Self::SecretsRewritten { message }
+            | Self::SecretsKept { message }
+            | Self::SandboxStale { message } => message,
         }
     }
 
@@ -258,7 +268,7 @@ impl ProcessNote {
     /// did not happen as asked.
     #[must_use]
     pub const fn is_warning(&self) -> bool {
-        matches!(self, Self::SecretsKept { .. })
+        matches!(self, Self::SecretsKept { .. } | Self::SandboxStale { .. })
     }
 }
 

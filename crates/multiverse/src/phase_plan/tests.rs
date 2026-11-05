@@ -684,13 +684,14 @@ fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit
     assert_eq!(permissions.connect, strings(["api-server"]));
 }
 
-#[test]
-fn a_workspace_manifests_write_path_outside_the_checkout_its_process_runs_in_is_unrunnable() {
+/// Returns why the plan refuses the process `server` of
+/// [`SANDBOXED_SERVER`] when it runs in the checkout `web` of a workspace
+/// and may write the absolute path `write`.
+fn unrunnable_write(write: &str) -> crate::phase_plan::Unrunnable {
     let mut manifest = manifest(SANDBOXED_SERVER);
     let server = manifest.processes.get_mut("server").unwrap();
     server.cwd = PathBuf::from("/work/triage/web");
-    server.permissions.as_mut().unwrap().write =
-        BTreeSet::from(["/work/triage/api/target".to_owned()]);
+    server.permissions.as_mut().unwrap().write = BTreeSet::from([write.to_owned()]);
     let ports = BTreeMap::from([("http".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
     let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
     let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
@@ -710,12 +711,25 @@ fn a_workspace_manifests_write_path_outside_the_checkout_its_process_runs_in_is_
         grace: Duration::from_secs(5),
         caller: &caller,
     }) else {
-        panic!("a write path in another checkout built a plan");
+        panic!("the write path {write} built a plan");
     };
     assert_eq!(unrunnable.unit.as_deref(), Some("server"));
+    unrunnable
+}
+
+#[test]
+fn a_workspace_manifests_write_path_outside_the_checkout_its_process_runs_in_is_unrunnable() {
+    let message = unrunnable_write("/work/triage/api/target").message;
+    assert!(message.contains("/work/triage/api/target"), "{message}");
+    assert!(message.contains("outside /work/triage/web"), "{message}");
+}
+
+#[test]
+fn a_write_path_that_is_the_whole_checkout_its_process_runs_in_is_unrunnable_and_says_so() {
+    let message = unrunnable_write("/work/triage/web").message;
     assert!(
-        unrunnable.message.contains("/work/triage/api/target"),
-        "{}",
-        unrunnable.message
+        message.contains("the whole checkout it runs in"),
+        "{message}"
     );
+    assert!(!message.contains("outside"), "{message}");
 }

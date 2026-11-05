@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::manifest::{
-    DEFAULT_READY_TIMEOUT, Manifest, ManifestError, ManifestProblem, Permissions, Published,
-    ReadyCheck, Unit,
+    DEFAULT_READY_TIMEOUT, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
+    Published, ReadyCheck, Unit,
 };
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
@@ -1075,5 +1075,131 @@ fn renaming_a_manifest_renames_the_listen_ports_and_connections_of_its_permissio
     assert_eq!(
         server.connect,
         BTreeSet::from(["inbox-auth", "inbox-dynamodb", "inbox-localstack"].map(str::to_owned))
+    );
+}
+
+#[test]
+fn a_listen_permission_on_another_processs_listen_port_fails_with_its_line() {
+    let text = "ports = [\"api\", \"web\"]\n\n[processes.api]\nargv = [\"true\"]\nports = { PORT = \"api\" }\nlisten = \"api\"\n\n[processes.web]\nargv = [\"true\"]\nports = { PORT = \"web\", API_PORT = \"api\" }\nlisten = \"web\"\ndepends_on = [\"api\"]\npermissions = { listen = [\"web\", \"api\"] }\n";
+    let (line, problem) = problem(text);
+    assert_eq!(line, Some(13));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(
+        message.contains("`api` listens on or publishes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_listen_permission_on_a_containers_published_port_fails_with_its_line() {
+    let text = "ports = [\"db\"]\n\n[containers.db]\nimage = \"postgres:17.2\"\nports = { 5432 = \"db\" }\n\n[processes.app]\nargv = [\"true\"]\nports = { DB_PORT = \"db\" }\ndepends_on = [\"db\"]\npermissions = { listen = [\"db\"] }\n";
+    let (line, problem) = problem(text);
+    assert_eq!(line, Some(11));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(
+        message.contains("`db` listens on or publishes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_listen_permission_on_a_port_that_a_joined_unit_listens_on_fails_with_its_line() {
+    let joined = Joined {
+        ports: vec!["api-http".to_owned()],
+        units: vec!["api-server".to_owned()],
+        listened: vec![("api-http".to_owned(), "api-server".to_owned())],
+        checkouts: vec!["api".to_owned()],
+    };
+    let error = Manifest::parse_joining(
+        "[processes.proxy]\nargv = [\"true\"]\nports = { UPSTREAM = \"api-http\" }\npermissions = { listen = [\"api-http\"] }\n",
+        Path::new("/ws/mxv.toml"),
+        &joined,
+    )
+    .unwrap_err();
+    assert_eq!(error.line, Some(4));
+    let ManifestProblem::Invalid { message } = error.problem else {
+        panic!("{:?}", error.problem);
+    };
+    assert!(
+        message.contains("`api-server` listens on or publishes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_write_path_inside_the_checkouts_git_fails_with_its_line_in_any_case() {
+    for path in [".git", ".git/hooks", "./.GIT/x", ".Git"] {
+        let (line, message) = permissions_message(&format!(
+            "\n[processes.app.permissions]\nwrite = [{path:?}]\nlisten = [\"api\"]\n"
+        ));
+        assert_eq!(line, Some(14), "{path}");
+        assert!(message.contains("`.git`"), "{path}: {message}");
+    }
+}
+
+/// Returns the problem of a workspace manifest of the checkouts `api` and
+/// `web` whose process `proxy` runs in `api` and may write `write`.
+fn workspace_write_message(write: &str) -> String {
+    let joined = Joined {
+        checkouts: vec!["api".to_owned(), "web".to_owned()],
+        ..Joined::default()
+    };
+    let error = Manifest::parse_joining(
+        &format!("[processes.proxy]\nargv = [\"true\"]\ncwd = \"api\"\npermissions = {{ write = [{write:?}] }}\n"),
+        Path::new("/ws/mxv.toml"),
+        &joined,
+    )
+    .unwrap_err();
+    assert_eq!(error.line, Some(4), "{write}");
+    match error.problem {
+        ManifestProblem::Invalid { message } => message,
+        other => panic!("{write}: {other:?}"),
+    }
+}
+
+#[test]
+fn a_workspace_manifests_write_path_that_names_a_whole_checkout_fails_with_its_line() {
+    let message = workspace_write_message("api");
+    assert!(message.contains("whole checkout `api`"), "{message}");
+    assert!(
+        message.contains("relative to the workspace's directory"),
+        "{message}"
+    );
+    assert!(!message.contains("relative to the checkout"), "{message}");
+}
+
+#[test]
+fn a_workspace_manifests_write_path_outside_every_checkout_fails_with_its_line() {
+    let message = workspace_write_message("notes/out");
+    assert!(
+        message.contains("none of the workspace's checkouts"),
+        "{message}"
+    );
+    assert!(message.contains("`api`, `web`"), "{message}");
+}
+
+#[test]
+fn a_workspace_manifests_write_path_inside_a_checkout_parses() {
+    let joined = Joined {
+        checkouts: vec!["api".to_owned(), "web".to_owned()],
+        ..Joined::default()
+    };
+    let manifest = Manifest::parse_joining(
+        "[processes.proxy]\nargv = [\"true\"]\ncwd = \"api\"\npermissions = { write = [\"api/target\"] }\n",
+        Path::new("/ws/mxv.toml"),
+        &joined,
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.processes["proxy"]
+            .permissions
+            .as_ref()
+            .unwrap()
+            .write,
+        BTreeSet::from(["api/target".to_owned()])
     );
 }

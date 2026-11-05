@@ -261,8 +261,8 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
 | `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
 | `processes.<name>.permissions` | Runs the process under phase's sandbox, with the grants of `write`, `listen` and `connect`. An empty table runs it sandboxed with no grants, and a process without the table runs unsandboxed. [Sandboxed processes](#sandboxed-processes) describes it. |
-| `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
-| `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. |
+| `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself, a path inside `.git` in any case, and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
+| `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. A port that another process listens on or a container publishes fails with `mxv::manifest::invalid` and its line. |
 | `processes.<name>.permissions.connect` | Processes and containers that the process may connect to. Each must be a unit that the process depends on through `depends_on`. |
 | `disposable` | Globs of more disposable directories of this repository, such as `["web/test-results/"]`. Each glob must end with `/` and have a literal last name. [Disk space](#disk-space) describes them. |
 | `clone_on_new` | Globs of more ignored directories that `mxv new` clones from this repository, such as `["web/.venv/"]`, under the same rule. |
@@ -368,10 +368,12 @@ write its own state and temporary directories. `permissions` adds:
 - `write`: the directories that the process may write, relative to the
   repository root, such as `target`. phase creates a missing directory
   when it starts the process. `$STATE` names the process's own state
-  directory, which it may always write.
+  directory, which it may always write. The checkout's `.git` stays
+  read-only, so a path inside it fails.
 - `listen`: the ports that the process may listen on, on the loopback
   address. A process with a `listen` port must name it here, and the
-  manifest fails without it.
+  manifest fails without it. A port that another process listens on or a
+  container publishes fails, so a process cannot take a dependency's port.
 - `connect`: the processes and containers that the process may connect to
   over the loopback address.
 
@@ -384,6 +386,19 @@ process cannot reach any host off the machine until phase runs its
 allowlist proxy, so a name in `connect` that is not a unit of the manifest
 fails. `permissions` has no `secrets` key, because mxv has no secrets yet,
 and that key fails with `mxv::manifest::unknown_key`.
+
+A write grant is only as safe as whatever later runs the directory's
+contents outside the sandbox. For example, a sandboxed process that may
+write `target` can leave a build script there, and an unsandboxed
+`cargo build` then runs it.
+
+A change to a process's `permissions` takes effect when the process
+restarts. `mxv up` leaves a running process as it is, so a process that
+was running when its manifest gained or lost its `permissions` table keeps
+running as it started. `up` then prints a `warning:` line under that
+process, which names the `mxv restart` that applies the change. `up` cannot
+see a change to the grants of a process that already runs sandboxed, so
+restart such a process after you change its grants.
 
 This manifest runs four sandboxed processes beside two containers:
 
@@ -612,8 +627,11 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
 - `mxv up` and `mxv restart` print a line under a container whose secret
   files they found running: `info:` when `up` rewrote them, and `warning:`
   when it could not, so the container still runs with its earlier files.
-  The JSON holds these lines in each row's `notes`. mxv's manifest
-  declares no secrets yet, so neither line appears until it does.
+  mxv's manifest declares no secrets yet, so neither line appears until it
+  does. `mxv up` also prints a `warning:` line under a running host
+  process whose manifest gained or lost its `permissions` table since it
+  started, as [Sandboxed processes](#sandboxed-processes) describes. The
+  JSON holds these lines in each row's `notes`.
 - `mxv status` and `mxv down` read phase's run record when the manifest does
   not parse, so a broken manifest never keeps processes running.
 - `mxv logs` prints the last 50 lines of a log, or `--lines N`. With `-f`
@@ -763,7 +781,9 @@ reports `merged`, with every file it read in `manifest_paths`.
   checkout `api` has `cwd = "api"`. A write path of a process's
   `permissions` is relative to the workspace directory too, and it must
   lie inside the checkout that the process runs in, so that process
-  writes `api/target`.
+  writes `api/target`. A write path that lies in no checkout, or that
+  names a whole checkout, such as `api`, fails with
+  `mxv::manifest::invalid` and its line.
 - The `listen` ports and `connect` units of a checkout's `permissions`
   follow the new names too, and its write paths stay relative to its own
   checkout.

@@ -999,8 +999,11 @@ pub(crate) struct ProcessRow {
     sandbox: Option<String>,
     /// What `up` and `restart` found about the process beside its state:
     /// a warning when the process's running container still has its
-    /// earlier secret files, because `up` could not rewrite them, and an
-    /// info line when `up` rewrote them. Every other command prints none.
+    /// earlier secret files, because `up` could not rewrite them, an info
+    /// line when `up` rewrote them, and a warning when `up` left a host
+    /// process running that started before its manifest gained or lost
+    /// its `permissions` table, which names the `mxv restart` that applies
+    /// the change. Every other command prints none.
     notes: Vec<NoteRow>,
 }
 

@@ -511,19 +511,25 @@ fn app_permissions(
             granted.write.insert(path.clone());
             continue;
         }
-        let relative = lexical(written)
-            .strip_prefix(lexical(source))
-            .ok()
-            .filter(|rest| !rest.as_os_str().is_empty())
-            .map(|rest| rest.display().to_string())
-            .ok_or_else(|| Unrunnable {
+        let written = lexical(written);
+        let Ok(rest) = written.strip_prefix(lexical(source)) else {
+            return Err(Unrunnable {
                 unit: Some(name.to_owned()),
                 message: format!(
                     "the process `{name}` may write {path}, which is outside {}, the checkout it runs in",
                     source.display()
                 ),
-            })?;
-        granted.write.insert(relative);
+            });
+        };
+        if rest.as_os_str().is_empty() {
+            return Err(Unrunnable {
+                unit: Some(name.to_owned()),
+                message: format!(
+                    "the process `{name}` may write {path}, which is the whole checkout it runs in, whose `.git` a sandboxed process may only read"
+                ),
+            });
+        }
+        granted.write.insert(rest.display().to_string());
     }
     for port in &permissions.listen {
         granted.listen.insert(port_name(name, port)?);
