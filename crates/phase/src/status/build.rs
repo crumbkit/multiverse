@@ -5,17 +5,19 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use crate::engine::container::ContainerState;
+use crate::engine::restart::{AfterExit, after_exit};
 use crate::error::PhaseError;
 use crate::logs::log_path;
 use crate::name::{AppName, ProcessName, WorkspaceId};
+use crate::plan::restart::Restart;
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::Handle;
 use crate::record::docker::{Docker, DockerKind, DockerObject};
 use crate::record::process::{self, Identity, Processes, vouched};
-use crate::record::run::{ContainerEntry, EntryState, HostEntry, RunRecord};
+use crate::record::run::{ContainerEntry, Ended, EntryState, Exit, HostEntry, RunRecord};
 use crate::record::store::RunStore;
 use crate::status::{
-    ProcessState, SourceSummary, Status, StatusRow, UnknownReason, WorkspaceState,
+    LastExit, ProcessState, SourceSummary, Status, StatusRow, UnknownReason, WorkspaceState,
 };
 
 /// What `status` reads besides the run record.
@@ -77,7 +79,11 @@ pub(crate) fn status(
             let Some(named) = keeper.or(entry) else {
                 continue;
             };
-            let live = [keeper, entry].into_iter().flatten().any(HostEntry::live);
+            // An entry that records how its process ended by itself shows
+            // as exited, so it stays among the rows.
+            let exited =
+                entry.is_some_and(|entry| entry.ended.is_some_and(|ended| !ended.requested));
+            let live = exited || [keeper, entry].into_iter().flatten().any(HostEntry::live);
             if live && !planned(&named.app, &named.process) {
                 let mut row = host_row(
                     workspace,
@@ -189,6 +195,10 @@ fn host_row(
     let mut row = StatusRow::new(app.clone(), process.clone(), RunnerKind::Host, None, state);
     if let Some(entry) = entry {
         row.restarts = entry.restarts;
+        row.last_exit = entry.ended.filter(|ended| !ended.requested).map(|ended| {
+            let exit = ended.exit;
+            LastExit::new(exit.and_then(Exit::code), exit.and_then(Exit::signal))
+        });
         row.address = entry.listen.as_ref().map(|listen| loopback(listen.port));
         if let Some(host) = entry
             .host
@@ -248,14 +258,69 @@ pub(crate) fn host_state(
     } else if keeper_ours {
         let started =
             entry.is_some_and(|entry| entry.host.is_some() && entry.state != EntryState::Planned);
-        if started {
-            ProcessState::Restarting
-        } else {
-            ProcessState::Starting
+        match entry.filter(|_| started) {
+            Some(entry) => after_end(entry),
+            None => ProcessState::Starting,
         }
+    } else if let Some(ended) = entry
+        .filter(|entry| matches!(entry.state, EntryState::Stopping | EntryState::Stopped))
+        .and_then(|entry| entry.ended)
+        .filter(|ended| !ended.requested)
+    {
+        // The keeper recorded that its app ended by itself and did not
+        // restart it, or something killed the keeper while it stopped what
+        // the app left.
+        exited(ended)
+    } else if entry.is_some_and(|entry| {
+        entry.host.is_some()
+            && (entry.state == EntryState::Running
+                || (entry.state == EntryState::Stopping && entry.ended.is_none()))
+    }) {
+        // The record names the process as running, or as stopping with no
+        // end, and neither it nor its keeper is there: the keeper ended
+        // before it recorded the end, as when something killed it. An end
+        // that a running entry holds is an earlier crash's, which the
+        // keeper restarted from.
+        ProcessState::unrecorded()
     } else {
         ProcessState::Stopped
     })
+}
+
+/// Returns what a started host process whose keeper runs and whose app
+/// has gone is doing, from its `entry`. The keeper restarts the app or
+/// stops what is left of its group, as the restart policy that the entry
+/// records says. Before the keeper records the end, the entry is still
+/// `running`, and the process is restarting only when the policy restarts
+/// it however it ended. A record without a policy, which an older phase
+/// wrote, reads as restarting.
+fn after_end(entry: &HostEntry) -> ProcessState {
+    let restarts = |restart: &Restart, failed: bool| {
+        matches!(
+            after_exit(restart, failed, entry.restarts),
+            AfterExit::Restart { .. }
+        )
+    };
+    let ended = entry.ended.filter(|_| entry.state != EntryState::Running);
+    match (&entry.restart, ended) {
+        (_, Some(ended)) if ended.requested => ProcessState::Stopping,
+        (None, _) => ProcessState::Restarting,
+        (Some(restart), None) if restarts(restart, false) => ProcessState::Restarting,
+        (Some(_), None) => ProcessState::Stopping,
+        (Some(restart), Some(ended)) if restarts(restart, ended.exit != Some(Exit::Code(0))) => {
+            ProcessState::Restarting
+        }
+        (Some(_), Some(ended)) => exited(ended),
+    }
+}
+
+/// Returns the state of a process that ended by itself as `ended`.
+const fn exited(ended: Ended) -> ProcessState {
+    match ended.exit {
+        Some(Exit::Signal(signal)) => ProcessState::killed(signal),
+        Some(Exit::Code(code)) => ProcessState::exited(Some(code)),
+        None => ProcessState::unrecorded(),
+    }
 }
 
 /// Returns the row of the container `entry`, whose state Docker gives. A

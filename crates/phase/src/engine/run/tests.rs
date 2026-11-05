@@ -16,7 +16,7 @@ use crate::engine::containers::{
     ContainersStarted, StartedContainer,
 };
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
-use crate::engine::keeper::{KeeperCommand, Kept, Launch};
+use crate::engine::keeper::{AppEnd, KeeperCommand, Kept, Launch};
 use crate::engine::probe::LogLines;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
@@ -29,7 +29,7 @@ use crate::record::docker::DockerError;
 use crate::record::process::Identity;
 use crate::record::run::ContainerEntry;
 use crate::record::run::PlanHash;
-use crate::record::run::{EntryState, HostProcess, ObjectKey, RunRecord};
+use crate::record::run::{EntryState, Exit, HostProcess, ObjectKey, RunRecord};
 use crate::record::store::RunStore;
 use crate::record::testing::workspace;
 use crate::report::{AppOutcome, Note, Report, StartProblem};
@@ -85,6 +85,8 @@ struct HostState {
     specs: Vec<String>,
     /// The `app/process` whose app ends right after it starts.
     ends: BTreeSet<String>,
+    /// How the keeper of each `app/process` reports that its app ended.
+    exits: BTreeMap<String, Exit>,
     /// The `app/process` that cannot start.
     unstartable: BTreeSet<String>,
     /// The `app/process` whose stop finds a process phase may not read.
@@ -151,6 +153,13 @@ impl FakeHost {
         self.state.borrow_mut().ends.insert(name.to_owned());
     }
 
+    /// Ends the app of `name` right after it starts, and has its keeper
+    /// report that it ended as `exit`.
+    fn ends_as(&self, name: &str, exit: Exit) {
+        self.ends(name);
+        self.state.borrow_mut().exits.insert(name.to_owned(), exit);
+    }
+
     fn launches(&self) -> Vec<String> {
         self.state.borrow().launches.clone()
     }
@@ -214,7 +223,11 @@ impl HostRunner for FakeHost {
             group: pid,
             boot_id: None,
         };
-        Ok(Kept::detached(host(keeper), host(app)))
+        let kept = Kept::detached(host(keeper), host(app));
+        Ok(match state.exits.get(&name) {
+            Some(exit) => kept.ending(AppEnd::known(*exit)),
+            None => kept,
+        })
     }
 
     fn stop(&self, stop: &HostStop<'_>, _deadline: Instant) -> Result<HostStopped, PhaseError> {
@@ -1981,7 +1994,21 @@ fn up_forgets_the_entries_of_apps_it_never_tried_to_start() {
 }
 
 #[test]
-fn an_up_that_leaves_nothing_running_removes_the_record() {
+fn an_up_that_leaves_nothing_running_and_no_exit_removes_the_record() {
+    let world = World::new();
+    let mut api = host_app("api", None, &[]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    api.processes[0].ready_timeout = Duration::from_millis(50);
+
+    world
+        .up(&plan(vec![api]), &Selection::All, &Env::default())
+        .unwrap();
+
+    assert_eq!(world.record(), None);
+}
+
+#[test]
+fn an_up_whose_process_ended_by_itself_keeps_the_record_of_its_end() {
     let world = World::new();
     world.host.ends("api/server");
 
@@ -1993,7 +2020,12 @@ fn an_up_that_leaves_nothing_running_removes_the_record() {
         )
         .unwrap();
 
-    assert_eq!(world.record(), None);
+    let record = world.record().unwrap();
+    assert_eq!(record.processes[0].state, EntryState::Stopped);
+    assert_eq!(
+        record.processes[0].ended,
+        Some(crate::record::run::Ended::by_itself(None))
+    );
 }
 
 #[test]
@@ -2200,4 +2232,162 @@ fn a_container_process_with_literal_variables_is_runnable_and_reaches_its_runner
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     assert_eq!(*env.resolved.borrow(), ["db/server"]);
+}
+
+#[test]
+fn a_process_that_ends_during_readiness_reports_the_code_or_signal_its_keeper_read() {
+    for (exit, code, signal) in [
+        (Exit::Code(3), Some(3), None),
+        (Exit::Signal(9), None, Some(9)),
+    ] {
+        let world = World::new();
+        world.host.ends_as("api/server", exit);
+        let mut api = host_app("api", None, &[]);
+        api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+
+        let report = world
+            .up(&plan(vec![api]), &Selection::All, &Env::default())
+            .unwrap();
+
+        assert_eq!(
+            outcome(&report, "api"),
+            &AppOutcome::failed(
+                name("server"),
+                StartProblem::exited(code, signal, Vec::new())
+            ),
+            "{exit:?}"
+        );
+    }
+}
+
+#[test]
+fn a_process_without_a_probe_that_ends_within_its_start_grace_reports_its_exit_code() {
+    let world = World::new();
+    world.host.ends_as("api/server", Exit::Code(3));
+
+    let report = world
+        .up(
+            &plan(vec![host_app("api", None, &[])]),
+            &Selection::All,
+            &Env::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome(&report, "api"),
+        &AppOutcome::failed(
+            name("server"),
+            StartProblem::exited(Some(3), None, Vec::new())
+        )
+    );
+}
+
+/// The full name of the keeper tests' entry, which runs this test binary as
+/// a keeper when its arguments hold `keep`.
+const KEEPER_ENTRY: &str =
+    "engine::keeper::tests::the_test_binary_runs_a_keeper_when_it_is_started_as_one";
+
+/// Starts the host app `api`, whose process runs `sh -c script` and waits
+/// for a log line that never comes, under a real keeper that this test
+/// binary runs, and returns the report of its start.
+fn up_with_a_real_keeper(script: &str) -> Report {
+    let state = tempfile::tempdir().unwrap();
+    let keeper = KeeperCommand::new(
+        std::env::current_exe().unwrap(),
+        ["--exact", "--nocapture", "--", KEEPER_ENTRY, "keep"]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    );
+    let inherited = BTreeMap::from([
+        ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+        ("HOME".to_owned(), state.path().display().to_string()),
+    ]);
+    let containers = FakeContainers::default();
+    let engine = Engine {
+        settings: Settings {
+            state_dir: state.path(),
+            lock_wait: Duration::from_secs(5),
+            start_grace: Duration::from_millis(30),
+            kill_wait: Duration::from_secs(1),
+            keeper: Some(&keeper),
+            inherited: &inherited,
+        },
+        host: &crate::record::process::System,
+        containers: &containers,
+    };
+    let mut api = AppPlan::new(
+        name("api"),
+        RunnerKind::Host,
+        Source::checkout(state.path().to_path_buf(), None),
+    );
+    let mut server = ProcessPlan::new(
+        name("server"),
+        vec!["/bin/sh".into(), "-c".into(), script.into()],
+    );
+    server.ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    server.ready_timeout = Duration::from_secs(20);
+    api.processes.push(server);
+    let deadline = now() + Duration::from_secs(30);
+    engine
+        .up(
+            &plan(vec![api]),
+            &Selection::All,
+            &Env::default(),
+            UpDeadlines::new(deadline, deadline),
+            &Cancel::new(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_real_keeper_reports_the_code_or_signal_of_a_process_that_ends_during_readiness() {
+    for (script, code, signal) in [
+        ("echo starting; sleep 0.2; exit 3", Some(3), None),
+        ("echo starting; sleep 0.2; kill -9 $$", None, Some(9)),
+    ] {
+        let report = up_with_a_real_keeper(script);
+
+        assert_eq!(
+            outcome(&report, "api"),
+            &AppOutcome::failed(
+                name("server"),
+                StartProblem::exited(code, signal, vec!["starting".to_owned()])
+            ),
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_up_leaves_the_process_that_ended_exited_with_its_code_until_down() {
+    let world = World::new();
+    world.host.ends_as("api/server", Exit::Code(3));
+    let mut api = host_app("api", None, &[]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    let plan = plan(vec![api]);
+
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    let sources = crate::status::Sources {
+        state_dir: world.state.path(),
+        processes: &crate::record::testing::FakeProcesses::default(),
+        docker: &crate::record::testing::Unreachable,
+    };
+    let store = RunStore::new(world.state.path());
+    let status = crate::status::status(&store, &workspace(), Some(&plan), sources).unwrap();
+    assert_eq!(
+        status.rows[0].state,
+        crate::status::ProcessState::exited(Some(3))
+    );
+    let status = crate::status::status(&store, &workspace(), None, sources).unwrap();
+    assert_eq!(status.rows.len(), 1);
+    assert_eq!(
+        status.rows[0].state,
+        crate::status::ProcessState::exited(Some(3))
+    );
+
+    world.down(&Selection::All);
+
+    assert_eq!(world.record(), None);
 }

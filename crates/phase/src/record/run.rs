@@ -1,4 +1,4 @@
-//! The run record `phase/run/v1`: what one workspace's run planned and
+//! The run record `phase/run/v2`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -8,19 +8,26 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, PortName, ProcessName, WorkspaceId};
-use crate::plan::restart::Stop;
+use crate::plan::restart::{Restart, Stop};
 use crate::record::{BadHex, ContainerId, DockerName, hex_id};
 
-/// The version of the run record.
+/// The version of the run record. phase reads both versions and writes
+/// only `phase/run/v2`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum RunSchema {
-    /// `phase/run/v1`.
+    /// `phase/run/v1`, whose host entries hold neither how the process
+    /// ended nor its restart policy. It reads as v2 with neither.
     #[serde(rename = "phase/run/v1")]
     V1,
+    /// `phase/run/v2`, which adds `ended` and `restart` to host entries. A
+    /// phase that reads only v1 refuses it as written by a newer phase.
+    #[serde(rename = "phase/run/v2")]
+    V2,
 }
 
-/// The newest version of the run record that this phase reads and writes.
-pub(crate) const RUN_VERSION: u32 = 1;
+/// The newest version of the run record that this phase reads, and the one
+/// it writes.
+pub(crate) const RUN_VERSION: u32 = 2;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +124,19 @@ pub(crate) struct HostEntry {
     /// yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) plan_hash: Option<PlanHash>,
+    /// How the process last ended, or `None` when it has not ended since
+    /// phase last started it. A keeper's restart keeps it, so `status`
+    /// shows the last crash of a process that restarts, and phase's own
+    /// start clears it. It is `None` for a keeper, and a record that lacks
+    /// it reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ended: Option<Ended>,
+    /// The restart policy that phase last started the process with, so
+    /// `status` tells whether the keeper restarts a process that ended. It
+    /// is `None` for a keeper, for a process that phase has not started
+    /// yet, and in a `phase/run/v1` record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) restart: Option<Restart>,
 }
 
 impl HostEntry {
@@ -124,6 +144,79 @@ impl HostEntry {
     /// checked that it is gone.
     pub(crate) fn live(&self) -> bool {
         self.state != EntryState::Stopped
+    }
+}
+
+/// How a host process ended: its exit, and whether a stop request caused
+/// the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Ended {
+    /// The process's exit status or the signal that ended it, or `None`
+    /// when phase could not read it. A stop that phase began itself
+    /// records `None`, because the keeper that reads the status leaves the
+    /// record to that operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) exit: Option<Exit>,
+    /// Whether a stop request caused the end: `down`, `restart`, `sweep`,
+    /// or a `TERM` or `INT` that the keeper received.
+    pub(crate) requested: bool,
+}
+
+impl Ended {
+    /// Returns the end of a process that a stop request ended, with
+    /// `exit`.
+    pub(crate) const fn requested(exit: Option<Exit>) -> Self {
+        Self {
+            exit,
+            requested: true,
+        }
+    }
+
+    /// Returns the end of a process that ended by itself, with `exit`.
+    pub(crate) const fn by_itself(exit: Option<Exit>) -> Self {
+        Self {
+            exit,
+            requested: false,
+        }
+    }
+}
+
+/// How a process exited. In JSON it is `{"code": 3}` or `{"signal": 9}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum Exit {
+    /// The process exited with this status.
+    Code(i32),
+    /// This signal ended the process.
+    Signal(i32),
+}
+
+impl Exit {
+    /// Returns how a process with `status` exited, or `None` when the
+    /// status holds neither a code nor a signal.
+    pub(crate) fn of(status: std::process::ExitStatus) -> Option<Self> {
+        use std::os::unix::process::ExitStatusExt as _;
+        status
+            .code()
+            .map(Self::Code)
+            .or_else(|| status.signal().map(Self::Signal))
+    }
+
+    /// Returns the exit status, or `None` when a signal ended the process.
+    pub(crate) const fn code(self) -> Option<i32> {
+        match self {
+            Self::Code(code) => Some(code),
+            Self::Signal(_) => None,
+        }
+    }
+
+    /// Returns the signal that ended the process, or `None` when it exited.
+    pub(crate) const fn signal(self) -> Option<i32> {
+        match self {
+            Self::Code(_) => None,
+            Self::Signal(signal) => Some(signal),
+        }
     }
 }
 
@@ -137,6 +230,8 @@ pub(crate) struct Launching {
     pub(crate) stop: Stop,
     /// The port that the process listens on, or `None`.
     pub(crate) listen: Option<Listen>,
+    /// The restart policy that its keeper follows.
+    pub(crate) restart: Restart,
 }
 
 /// A started host process.
@@ -358,7 +453,7 @@ impl RunRecord {
     /// is `plan_hash`, with no objects.
     pub(crate) const fn new(workspace: WorkspaceId, plan_hash: PlanHash) -> Self {
         Self {
-            schema: RunSchema::V1,
+            schema: RunSchema::V2,
             workspace,
             plan_hash,
             keepers: Vec::new(),
@@ -396,6 +491,8 @@ impl RunRecord {
             stop,
             listen,
             plan_hash: None,
+            ended: None,
+            restart: None,
         };
         self.keepers.push(entry(None, None));
         self.processes.push(entry(stop, listen));
@@ -580,6 +677,7 @@ impl RunRecord {
                 entry.host = Some(host);
                 entry.state = EntryState::Running;
                 entry.restarts = 0;
+                entry.ended = None;
             }
             (ObjectKey::Container(app, process), Started::Container(id, plan_hash)) => {
                 let entry = self
@@ -660,6 +758,8 @@ impl RunRecord {
         entry.state = EntryState::Planned;
         entry.host = None;
         entry.restarts = 0;
+        entry.ended = None;
+        entry.restart = Some(launching.restart.clone());
         entry.stop = Some(launching.stop);
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
@@ -762,6 +862,55 @@ impl RunRecord {
                 .map(|entry| &mut entry.state),
         };
         *slot.ok_or_else(|| Unplanned(key.clone()))? = state;
+        Ok(())
+    }
+
+    /// Records that phase begins to stop the host process `key`, so a stop
+    /// request causes its end: it records the end as requested with no
+    /// exit. An entry that is already `stopping` or `stopped` with an end
+    /// that no stop request caused keeps that end, because the process had
+    /// ended by itself before phase stopped it, as after a failed start.
+    /// The end of an earlier crash that a running entry keeps is replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process.
+    pub(crate) fn mark_stop_requested(&mut self, key: &ObjectKey) -> Result<(), Unplanned> {
+        let ObjectKey::Process(app, process) = key else {
+            return Err(Unplanned(key.clone()));
+        };
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(key.clone()))?;
+        let ended_by_itself = entry.ended.is_some_and(|ended| !ended.requested)
+            && matches!(entry.state, EntryState::Stopping | EntryState::Stopped);
+        if !ended_by_itself {
+            entry.ended = Some(Ended::requested(None));
+        }
+        Ok(())
+    }
+
+    /// Reports whether a host process's entry records an end that no stop
+    /// request caused, which `status` shows as exited.
+    pub(crate) fn holds_an_exit(&self) -> bool {
+        self.processes
+            .iter()
+            .any(|entry| entry.ended.is_some_and(|ended| !ended.requested))
+    }
+
+    /// Records `ended` as how the host process `key` last ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process.
+    pub(crate) fn set_ended(&mut self, key: &ObjectKey, ended: Ended) -> Result<(), Unplanned> {
+        let ObjectKey::Process(app, process) = key else {
+            return Err(Unplanned(key.clone()));
+        };
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(key.clone()))?;
+        entry.ended = Some(ended);
         Ok(())
     }
 

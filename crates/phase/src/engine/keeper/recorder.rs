@@ -24,7 +24,7 @@ use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::logfile::Diagnostics;
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::run::{HostProcess, ObjectKey, Started};
+use crate::record::run::{Ended, EntryState, HostProcess, ObjectKey, Started};
 use crate::record::store::{Journal, RunStore};
 
 /// How long the writer waits for the lifecycle lock before it drops a
@@ -35,7 +35,7 @@ pub(crate) const RECORD_LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// A change of the app's state.
 #[derive(Clone, Debug)]
-enum Note {
+pub(super) enum Note {
     /// The app started as this process. It applies when the entry names
     /// no process or this one.
     Started(HostProcess),
@@ -43,26 +43,44 @@ enum Note {
     /// second, after this many restarts in all. It applies when the entry
     /// names either process.
     Restarted(HostProcess, HostProcess, u32),
-    /// The keeper is about to stop the group of this process. It applies
-    /// when the entry names this process.
+    /// A stop request came, and the keeper is about to stop the group of
+    /// this process. It applies when the entry names this process.
     Stopping(HostProcess),
-    /// The group of this process is gone. It applies when the entry names
-    /// this process.
-    Stopped(HostProcess),
+    /// This process ended by itself as the end says, and the keeper is
+    /// about to stop what is left of its group. It applies when the entry
+    /// names this process and another operation has not recorded it
+    /// stopped.
+    Ending(HostProcess, Ended),
+    /// This process ended as the end says, and its group is gone. It
+    /// applies when the entry names this process and another operation has
+    /// not recorded it stopped.
+    Stopped(HostProcess, Ended),
 }
 
 impl Note {
-    /// Reports whether the note applies to an entry that names `recorded`.
-    fn applies_to(&self, recorded: Option<&HostProcess>) -> bool {
+    /// Reports whether the note applies to an entry that names `recorded`
+    /// and is in `state`. An entry that another operation already recorded
+    /// as stopped keeps the end that operation recorded.
+    pub(super) fn applies_to(&self, recorded: Option<&HostProcess>, state: EntryState) -> bool {
+        if matches!(self, Self::Ending(..) | Self::Stopped(..)) && state == EntryState::Stopped {
+            return false;
+        }
         match (self, recorded) {
             (Self::Started(_), None) => true,
-            (Self::Started(host) | Self::Stopping(host) | Self::Stopped(host), Some(recorded)) => {
-                host == recorded
-            }
+            (
+                Self::Started(host)
+                | Self::Stopping(host)
+                | Self::Ending(host, _)
+                | Self::Stopped(host, _),
+                Some(recorded),
+            ) => host == recorded,
             (Self::Restarted(host, previous, _), Some(recorded)) => {
                 host == recorded || previous == recorded
             }
-            (Self::Restarted(..) | Self::Stopping(_) | Self::Stopped(_), None) => false,
+            (
+                Self::Restarted(..) | Self::Stopping(_) | Self::Ending(..) | Self::Stopped(..),
+                None,
+            ) => false,
         }
     }
 
@@ -72,7 +90,8 @@ impl Note {
             Self::Started(host) => format!("the start of process {}", host.pid),
             Self::Restarted(host, _, _) => format!("the restart as process {}", host.pid),
             Self::Stopping(host) => format!("the stopping of process {}", host.pid),
-            Self::Stopped(host) => format!("the stop of process {}", host.pid),
+            Self::Ending(host, _) => format!("the end of process {}", host.pid),
+            Self::Stopped(host, _) => format!("the stop of process {}", host.pid),
         }
     }
 }
@@ -145,14 +164,21 @@ impl Recorder {
         let _ = self.notes.send(Note::Restarted(host, previous, restarts));
     }
 
-    /// Records that the keeper is about to stop the group of `host`.
+    /// Records that a stop request came and the keeper is about to stop
+    /// the group of `host`.
     pub(crate) fn stopping(&self, host: HostProcess) {
         let _ = self.notes.send(Note::Stopping(host));
     }
 
-    /// Records that the group of `host` is gone.
-    pub(crate) fn stopped(&self, host: HostProcess) {
-        let _ = self.notes.send(Note::Stopped(host));
+    /// Records that `host` ended by itself as `ended`, and that the keeper
+    /// is about to stop what is left of its group.
+    pub(crate) fn ending(&self, host: HostProcess, ended: Ended) {
+        let _ = self.notes.send(Note::Ending(host, ended));
+    }
+
+    /// Records that `host` ended as `ended` and its group is gone.
+    pub(crate) fn stopped(&self, host: HostProcess, ended: Ended) {
+        let _ = self.notes.send(Note::Stopped(host, ended));
     }
 
     /// Tells the writer that no change follows, so it ends once it has
@@ -221,9 +247,13 @@ fn write(
     while let Some(current) = note {
         note = queue.try_recv().ok();
         let recorded = recorded_host(&journal, key);
-        if !current.applies_to(recorded.as_ref()) {
+        let state = journal
+            .record()
+            .and_then(|record| record.state(key))
+            .unwrap_or(EntryState::Planned);
+        if !current.applies_to(recorded.as_ref(), state) {
             diagnostics.note(&format!(
-                "the run record names another process, so the keeper skips {}",
+                "the run record names another process or already records its stop, so the keeper skips {}",
                 current.describe()
             ));
             continue;
@@ -232,7 +262,8 @@ fn write(
             Note::Started(host) => journal.started(key, Started::Host(host)),
             Note::Restarted(host, _, restarts) => journal.restarted(key, host, restarts),
             Note::Stopping(_) => journal.stopping(key),
-            Note::Stopped(_) => journal.stopped(key),
+            Note::Ending(_, ended) => journal.ending(key, ended),
+            Note::Stopped(_, ended) => journal.stopped_after(key, ended),
         };
         if let Err(error) = written {
             diagnostics.note(&format!(

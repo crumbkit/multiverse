@@ -1,6 +1,6 @@
 //! The keeper's specification, which the engine writes to the keeper's
-//! standard input, and the handshake line, which the keeper writes to its
-//! standard output. Neither holds an environment value.
+//! standard input, and the handshake line and the end line, which the
+//! keeper writes to its standard output. None holds an environment value.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::keeper::MOST_SPEC_BYTES;
 use crate::plan::restart::{Restart, Stop};
-use crate::record::run::HostProcess;
+use crate::record::run::{Ended, HostProcess};
 
 /// The version of the specification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +238,29 @@ pub(crate) struct StartedApp {
 /// because the engine that reads it reports a missing handshake.
 pub(crate) fn write_handshake(mut output: impl Write, handshake: &Handshake) {
     let Ok(json) = serde_json::to_string(handshake) else {
+        return;
+    };
+    let line = format!("{HANDSHAKE_PREFIX}{json}\n");
+    let _ = output
+        .write_all(line.as_bytes())
+        .and_then(|()| output.flush());
+}
+
+/// What a keeper tells the engine once the first start of its app has
+/// ended: how it ended. The keeper writes it after the handshake line,
+/// with the same prefix, and writes it once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EndLine {
+    /// How the app ended.
+    pub(crate) ended: Ended,
+}
+
+/// Writes `ended` to `output` as one end line. A failed write is ignored,
+/// because an engine that no longer reads the line has stopped waiting
+/// for it.
+pub(crate) fn write_end(mut output: impl Write, ended: Ended) {
+    let Ok(json) = serde_json::to_string(&EndLine { ended }) else {
         return;
     };
     let line = format!("{HANDSHAKE_PREFIX}{json}\n");

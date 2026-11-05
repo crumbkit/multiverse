@@ -1,28 +1,31 @@
 //! The engine's side of a keeper: [`spawn`] starts a keeper detached in a
 //! group of its own, hands it its specification and environment, and waits
-//! for its handshake. The module docs of [`crate::engine::keeper`] state
-//! the program, arguments, environment, streams, deadline and end.
+//! for its handshake. [`AppEnd`] reads the keeper's end line, which says
+//! how the first start of the app ended. The module docs of
+//! [`crate::engine::keeper`] state the program, arguments, environment,
+//! streams, deadline and end.
 
 use std::ffi::OsString;
-use std::io::{self, BufRead as _, BufReader, Read, Write as _};
+use std::io::{self, BufReader, Read, Take, Write as _};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
 use rustix::process::Signal;
 
+use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
 use crate::engine::keeper::args::{APP, PROCESS, STATE_DIR, WORKSPACE};
 use crate::engine::keeper::logfile::{diagnostic_log, open_append};
-use crate::engine::keeper::spec::{HANDSHAKE_PREFIX, Handshake, KeeperSpec};
+use crate::engine::keeper::spec::{EndLine, HANDSHAKE_PREFIX, Handshake, KeeperSpec};
 use crate::env::AppliedEnvironment;
 use crate::error::PhaseError;
 use crate::record::process::{Processes, Start, System};
-use crate::record::run::HostProcess;
+use crate::record::run::{Exit, HostProcess};
 
 /// The program that runs a keeper, and the words of its hidden subcommand
 /// that come before the keeper's arguments, such as `mxv` and `phase keep`.
@@ -71,6 +74,96 @@ pub(crate) struct Kept {
         reason = "crates/phase/src/engine/keeper/spawn.rs holds the keeper it started (PROC-1)"
     )]
     child: Option<std::process::Child>,
+    /// The reader of the keeper's end line.
+    pub(crate) end: AppEnd,
+}
+
+/// The keeper's standard output after its handshake line, as the engine
+/// reads it: at most [`MOST_HANDSHAKE_BYTES`] bytes in all.
+type KeeperOutput = BufReader<Take<ChildStdout>>;
+
+/// The engine's reader of how the first start of a keeper's app ended,
+/// which the keeper writes as its end line. Dropping it closes the
+/// engine's end of the keeper's standard output, and the keeper's later
+/// write fails and is ignored.
+#[derive(Debug, Default)]
+pub(crate) struct AppEnd(EndSource);
+
+/// Where an [`AppEnd`] reads the end from.
+#[derive(Debug, Default)]
+enum EndSource {
+    /// No keeper reports it, as for a keeper that a test's runner made up.
+    #[default]
+    Unreported,
+    /// The keeper's standard output.
+    Keeper(KeeperOutput),
+    /// A test's runner gives this end.
+    #[cfg(test)]
+    Known(Exit),
+}
+
+impl AppEnd {
+    /// Returns the end that a test's runner gives.
+    #[cfg(test)]
+    pub(crate) const fn known(exit: Exit) -> Self {
+        Self(EndSource::Known(exit))
+    }
+
+    /// Waits until `deadline` for the keeper's end line, and returns how
+    /// the app exited, or `None` when the line does not come by then,
+    /// `cancel` is cancelled first, the keeper's output ends first, or the
+    /// keeper could not read the exit.
+    ///
+    /// A thread reads the line, because a pipe gives no read with a
+    /// deadline. When the wait ends first, the thread is left behind, and
+    /// it ends once the keeper writes its end line or exits, so the
+    /// keeper's life bounds it.
+    pub(crate) fn wait(self, deadline: Instant, cancel: &Cancel) -> Option<Exit> {
+        let mut output = match self.0 {
+            EndSource::Unreported => return None,
+            #[cfg(test)]
+            EndSource::Known(exit) => return Some(exit),
+            EndSource::Keeper(output) => output,
+        };
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(read_end(&mut output));
+        });
+        // A cancel gives no event, so the wait looks at it between slices
+        // of the poll interval (BASE-11).
+        loop {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            let left = deadline.saturating_duration_since(now());
+            if left.is_zero() {
+                return None;
+            }
+            match receiver.recv_timeout(left.min(POLL_INTERVAL)) {
+                Ok(exit) => return exit,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+}
+
+/// Reads lines from the keeper's `output` until its end line, and returns
+/// the exit it holds, or `None` when the output ends, cannot be read, or
+/// the end line holds no exit.
+fn read_end(output: &mut impl io::BufRead) -> Option<Exit> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if output.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if let Some(json) = line.trim_end().strip_prefix(HANDSHAKE_PREFIX)
+            && let Ok(end) = serde_json::from_str::<EndLine>(json)
+        {
+            return end.ended.exit;
+        }
+    }
 }
 
 impl Kept {
@@ -82,15 +175,29 @@ impl Kept {
             keeper,
             app,
             child: None,
+            end: AppEnd(EndSource::Unreported),
         }
     }
 
-    /// Returns the keeper and the app, and drops the child handle, which
-    /// leaves the keeper running without phase as its waiting parent.
-    pub(crate) fn detach(self) -> (HostProcess, HostProcess) {
-        let Self { keeper, app, child } = self;
+    /// Returns this keeper with `end` as the reader of its app's end.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn ending(self, end: AppEnd) -> Self {
+        Self { end, ..self }
+    }
+
+    /// Returns the keeper, the app and the reader of the app's end, and
+    /// drops the child handle, which leaves the keeper running without
+    /// phase as its waiting parent.
+    pub(crate) fn detach(self) -> (HostProcess, HostProcess, AppEnd) {
+        let Self {
+            keeper,
+            app,
+            child,
+            end,
+        } = self;
         drop(child);
-        (keeper, app)
+        (keeper, app, end)
     }
 
     /// Returns the keeper's exit status once it has exited, reaping it, or
@@ -160,9 +267,15 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
         // handshake or its missing handshake says why.
         let _ = stdin.write_all(&spec);
         drop(stdin);
-        let _ = sender.send(read_handshake(stdout));
+        let mut output = BufReader::new(stdout.take(MOST_HANDSHAKE_BYTES));
+        let handshake = read_handshake_from(&mut output);
+        let _ = sender.send((handshake, output));
     });
-    let handshake = receiver.recv_timeout(launch.deadline.saturating_duration_since(now()));
+    let (handshake, output) =
+        match receiver.recv_timeout(launch.deadline.saturating_duration_since(now())) {
+            Ok((handshake, output)) => (Ok(handshake), Some(output)),
+            Err(error) => (Err(error), None),
+        };
     let keeper = match (started, boot_id) {
         (Ok(Start::At(started_at_us)), Ok(boot_id)) => HostProcess {
             pid,
@@ -185,6 +298,7 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
             },
             app: started.app,
             child: Some(child),
+            end: AppEnd(output.map_or(EndSource::Unreported, EndSource::Keeper)),
         }),
         Ok(Ok(Some(Handshake::Unstartable(reason)))) => {
             kill(&mut child);
@@ -312,8 +426,19 @@ pub(crate) fn command_line(args: &KeeperArgs) -> Vec<OsString> {
 /// # Errors
 ///
 /// Returns the error of a read that fails.
+#[cfg(test)]
 pub(crate) fn read_handshake(input: impl Read) -> io::Result<Option<Handshake>> {
-    let mut reader = BufReader::new(input.take(MOST_HANDSHAKE_BYTES));
+    read_handshake_from(&mut BufReader::new(input.take(MOST_HANDSHAKE_BYTES)))
+}
+
+/// Reads lines from `reader` until the handshake line, and returns the
+/// handshake, or `None` when the input ends first. It leaves the lines
+/// after the handshake in `reader`, where the keeper's end line follows.
+///
+/// # Errors
+///
+/// Returns the error of a read that fails.
+fn read_handshake_from(reader: &mut impl io::BufRead) -> io::Result<Option<Handshake>> {
     let mut line = String::new();
     loop {
         line.clear();

@@ -93,3 +93,20 @@ fn a_status_document_of_another_schema_is_refused() {
     json["schema"] = "phase/status/v2".into();
     assert!(serde_json::from_value::<Status>(json).is_err());
 }
+
+#[test]
+fn an_exited_row_names_the_signal_that_ended_its_process_and_leaves_out_an_absent_one() {
+    let mut killed = status();
+    killed.rows[1].state = ProcessState::killed(9);
+
+    let json = serde_json::to_value(&killed).unwrap();
+
+    assert_eq!(json["rows"][1]["state"], "exited");
+    assert_eq!(json["rows"][1]["code"], serde_json::Value::Null);
+    assert_eq!(json["rows"][1]["signal"], 9);
+    let plain = serde_json::to_value(status()).unwrap();
+    assert!(plain["rows"][1].get("signal").is_none());
+    assert!(plain["rows"][0].get("last_exit").is_none());
+    let read: Status = serde_json::from_value(json).unwrap();
+    assert_eq!(read, killed);
+}

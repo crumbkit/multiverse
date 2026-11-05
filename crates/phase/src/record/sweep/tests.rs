@@ -6,7 +6,8 @@ use super::{Reach, Waits, sweep};
 use crate::record::docker::{Docker, DockerKind};
 use crate::record::process::{Processes, Start, System};
 use crate::record::run::{
-    EntryState, HostProcess, NetworkId, ObjectKey, PlanHash, RunRecord, Started, VolumeLifetime,
+    Ended, EntryState, Exit, HostProcess, NetworkId, ObjectKey, PlanHash, RunRecord, Started,
+    VolumeLifetime,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{
@@ -686,4 +687,36 @@ fn sweep_leaves_a_process_recorded_in_group_1_as_unknown_and_signals_nothing() {
     assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unknown);
     assert!(processes.signals.borrow().is_empty());
     assert!(store.read(&workspace()).unwrap().is_some());
+}
+
+#[test]
+fn sweep_records_a_running_process_it_finds_gone_as_ended_without_a_known_exit() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let web = ObjectKey::Process(app("web"), process("server"));
+    record(
+        &store,
+        empty_record()
+            .host_process(&app("api"), &process("server"))
+            .host_process(&app("web"), &process("server")),
+        vec![
+            (server(), Started::Host(host_at(200, 2))),
+            (web, Started::Host(host_at(300, 3))),
+        ],
+    );
+    {
+        let mut journal = Journal::open(&store, &workspace(), WAITS.lock).unwrap();
+        journal
+            .stopped_after(&server(), Ended::by_itself(Some(Exit::Code(1))))
+            .unwrap();
+        journal.restarted(&server(), host_at(200, 2), 1).unwrap();
+    }
+    // The process of web is one phase may not read, so the record stays.
+    let processes = FakeProcesses::default().with(300, Start::Unreadable, None);
+
+    sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    let kept = store.read(&workspace()).unwrap().unwrap();
+    assert_eq!(kept.state(&server()), Some(EntryState::Stopped));
+    assert_eq!(kept.processes[0].ended, Some(Ended::by_itself(None)));
 }

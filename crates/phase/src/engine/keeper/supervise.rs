@@ -11,19 +11,23 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
-use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::consts::{SIGINT, SIGPIPE, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use crate::clock::{POLL_INTERVAL, now, pause, wall_now};
 use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
 use crate::engine::keeper::recorder::{Hurry, RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::apply_sandbox;
-use crate::engine::keeper::spec::{Handshake, KeeperSpec, StartedApp, read_spec, write_handshake};
+use crate::engine::keeper::spec::{
+    Handshake, KeeperSpec, StartedApp, read_spec, write_end, write_handshake,
+};
 use crate::engine::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, RESOLVE_WAIT};
 use crate::engine::restart::{
     AfterExit, after_exit, backoff_delay, needs_environment, streak_after_run,
@@ -31,7 +35,7 @@ use crate::engine::restart::{
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::plan::restart::StopSignal;
 use crate::record::process::{Processes, Start, System};
-use crate::record::run::HostProcess;
+use crate::record::run::{Ended, Exit, HostProcess};
 
 /// What the keeper waits for.
 #[derive(Debug)]
@@ -66,6 +70,22 @@ pub(crate) fn run(
             )),
         );
         return KeeperExit::BadInput;
+    }
+    // The engine closes its end of the keeper's standard output once it
+    // stops reading, and the end line may come after that. With `SIGPIPE`
+    // at its default, that write would end the keeper. A handler of its
+    // own makes the write fail with `EPIPE` instead, which the keeper
+    // ignores, and unlike an ignored signal it reverts to the default in
+    // the app when the app's program starts. signal-hook chains a SIGPIPE
+    // handler that the program linking phase installed earlier, so that
+    // handler still runs, but the program should not rely on it to change
+    // what a write to a closed pipe does in the keeper.
+    if let Err(error) = signal_hook::flag::register(SIGPIPE, Arc::new(AtomicBool::new(false))) {
+        write_handshake(
+            output,
+            &Handshake::Unstartable(format!("the keeper cannot handle SIGPIPE: {error}")),
+        );
+        return KeeperExit::Unstartable;
     }
     keep(args, environment, source, input, output)
 }
@@ -247,9 +267,12 @@ struct Runs {
 
 impl Supervisor<'_> {
     /// Starts the app, writes the handshake to `output` after the first
-    /// start, and supervises the app until the keeper exits.
-    fn supervise(&mut self, output: impl Write) -> KeeperExit {
+    /// start and the end line once that start ends, and supervises the app
+    /// until the keeper exits.
+    fn supervise<W: Write>(&mut self, output: W) -> KeeperExit {
         let mut output = Some(output);
+        // The output after the handshake, until the end line is written.
+        let mut end_output: Option<W> = None;
         let mut runs = Runs {
             restarts: self.spec.restarts,
             streak: 0,
@@ -280,13 +303,14 @@ impl Supervisor<'_> {
             };
             self.diagnostics
                 .note(&format!("the app started as process {}", app.host.pid));
-            if let Some(output) = output.take() {
+            if let Some(mut output) = output.take() {
                 self.recorder.started(app.host.clone());
                 let started = StartedApp {
                     keeper_group: keeper_group(),
                     app: app.host.clone(),
                 };
-                write_handshake(output, &Handshake::Started(started));
+                write_handshake(&mut output, &Handshake::Started(started));
+                end_output = Some(output);
             } else if let Some(previous) = previous.take() {
                 self.recorder
                     .restarted(app.host.clone(), previous, runs.restarts);
@@ -294,20 +318,26 @@ impl Supervisor<'_> {
             previous = Some(app.host.clone());
             let began = now();
             let Some(status) = self.app_ended() else {
-                return self.stop(&app);
+                return self.stop(&app, end_output.take());
             };
             self.diagnostics.note(&match status {
                 Some(status) => format!("the app ended with {status}"),
                 None => "the app ended with an unreadable status".to_owned(),
             });
-            self.recorder.stopping(app.host.clone());
-            if !self.end_group(&app, false) {
+            let ended = Ended::by_itself(status.and_then(Exit::of));
+            if let Some(output) = end_output.take() {
+                write_end(output, ended);
+            }
+            self.recorder.ending(app.host.clone(), ended);
+            if !self.end_group(&app, false).gone {
                 self.diagnostics
                     .note("the app's group was still there after KILL");
                 return KeeperExit::Unstoppable;
             }
-            self.recorder.stopped(app.host.clone());
-            let failed = !status.is_some_and(|status| status.success());
+            self.recorder.stopped(app.host.clone(), ended);
+            // The restart policy's failure is any end but status 0, which
+            // includes a signal and a status that could not be read.
+            let failed = ended.exit != Some(Exit::Code(0));
             if let Some(exit) =
                 self.resume(&mut runs, failed, now().saturating_duration_since(began))
             {
@@ -470,26 +500,34 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Stops the running `app` after a stop request.
-    fn stop(&self, app: &App) -> KeeperExit {
+    /// Stops the running `app` after a stop request, and writes how it
+    /// ended to `end_output` when the end line is still owed.
+    fn stop(&self, app: &App, end_output: Option<impl Write>) -> KeeperExit {
         self.diagnostics
             .note("a stop request came, and the keeper stops the app");
         self.recorder.stopping(app.host.clone());
-        if !self.end_group(app, true) {
+        let group = self.end_group(app, true);
+        let ended = Ended::requested(group.status.and_then(Exit::of));
+        if let Some(output) = end_output {
+            write_end(output, ended);
+        }
+        if !group.gone {
             self.diagnostics
                 .note("the app's group was still there after KILL");
             return KeeperExit::Unstoppable;
         }
-        self.recorder.stopped(app.host.clone());
+        self.recorder.stopped(app.host.clone(), ended);
         KeeperExit::Stopped
     }
 
     /// Ends `app`'s group: it sends the stop signal and waits the grace,
     /// then sends `KILL` and waits the kill wait, and reports whether the
-    /// group is gone. `running` says whether the app's leader is still
-    /// running. A group with no member left receives no signal.
-    fn end_group(&self, app: &App, running: bool) -> bool {
+    /// group is gone and the status of a leader that ended meanwhile.
+    /// `running` says whether the app's leader is still running. A group
+    /// with no member left receives no signal.
+    fn end_group(&self, app: &App, running: bool) -> GroupEnd {
         let mut running = running;
+        let mut status = None;
         let steps = [
             (
                 StopSignal::signal(self.spec.stop.signal),
@@ -499,31 +537,37 @@ impl Supervisor<'_> {
         ];
         for (signal, wait) in steps {
             if !running && !System.group_exists(app.host.group) {
-                return true;
+                return GroupEnd { gone: true, status };
             }
             let _ = System.signal(&app.host, signal);
             let deadline = now() + wait;
-            if running {
-                running = !self.ended_by(deadline);
+            if running && let Some(ended) = self.ended_by(deadline) {
+                running = false;
+                status = ended;
             }
             if !running && group_gone_by(app.host.group, deadline) {
-                return true;
+                return GroupEnd { gone: true, status };
             }
         }
-        false
+        GroupEnd {
+            gone: false,
+            status,
+        }
     }
 
-    /// Waits until the app's end arrives or `deadline` passes, and reports
-    /// whether it arrived. A stop request meanwhile changes nothing.
-    fn ended_by(&self, deadline: Instant) -> bool {
+    /// Waits until the app's end arrives or `deadline` passes, and returns
+    /// the app's status, which is `None` when it could not be read, or
+    /// returns `None` when the end did not arrive. A stop request
+    /// meanwhile changes nothing.
+    fn ended_by(&self, deadline: Instant) -> Option<Option<ExitStatus>> {
         loop {
             match self
                 .events
                 .recv_timeout(deadline.saturating_duration_since(now()))
             {
-                Ok(Event::Ended(_)) => return true,
+                Ok(Event::Ended(status)) => return Some(status),
                 Ok(Event::Stop | Event::Recorded) => {}
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return false,
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
             }
         }
     }
@@ -555,6 +599,16 @@ impl Supervisor<'_> {
             }
         }
     }
+}
+
+/// What ending an app's group found.
+struct GroupEnd {
+    /// Whether the group is gone.
+    gone: bool,
+    /// The status of the app's leader when it ended while the keeper ended
+    /// the group, which is `None` when it could not be read or the leader
+    /// had already ended.
+    status: Option<ExitStatus>,
 }
 
 /// Polls until the group `group` has no member or `deadline` passes, and
