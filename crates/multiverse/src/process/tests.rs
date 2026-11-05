@@ -230,3 +230,24 @@ fn a_raw_start_becomes_the_start_that_run_records_hold() {
         cfg!(target_os = "macos").then_some(UNREADABLE)
     );
 }
+
+// A group of 1 would make `kill(2)` signal every process the test may
+// signal, so this test passes 0 and 1 only to `group_exists`, which sends
+// no signal, and checks that the signalling adapters refuse an id past
+// `i32::MAX`, which names no process at all.
+#[test]
+fn mxv_finds_no_group_at_0_or_1_and_refuses_an_id_that_names_no_process() {
+    assert!(!group_exists(0));
+    assert!(!group_exists(1));
+    let past = u32::try_from(i32::MAX).unwrap() + 1;
+    assert_eq!(
+        signal(past, Signal::TERM).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        crate::process::signal_process(past, Signal::TERM)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+}

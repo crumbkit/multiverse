@@ -76,6 +76,15 @@ fn a_log_that_does_not_exist_yet_counts_as_empty_and_is_read_from_its_start_once
     assert_eq!(follower.new_lines().unwrap(), ["ready"]);
 }
 
+/// Renames the log at `path` to `older`, as a restart's rotation does.
+fn rotate(path: &Path, older: &Path) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test renames the log that a follower reads, as a rotation does"
+    )]
+    fs::rename(path, older).unwrap();
+}
+
 #[test]
 fn a_follower_starts_again_at_the_start_of_a_log_that_became_shorter() {
     let dir = tempfile::tempdir().unwrap();
@@ -98,13 +107,47 @@ fn a_line_longer_than_one_read_comes_back_in_parts() {
     let mut follower = LogFollower::at_end_or_empty(&path).unwrap();
     let most = usize::try_from(MOST_FOLLOW_BYTES).unwrap();
     append(&path, &"x".repeat(most + 10));
-    assert!(follower.lines().unwrap().is_empty());
     let parts = follower.lines().unwrap();
     assert_eq!(parts.len(), 1);
-    assert_eq!(parts[0].len(), most + 10);
+    assert_eq!(parts[0].len(), most);
+    assert!(follower.lines().unwrap().is_empty());
     append(&path, "\n");
-    assert_eq!(follower.lines().unwrap(), [""]);
+    assert_eq!(follower.lines().unwrap(), ["x".repeat(10)]);
     fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn an_unfinished_line_and_a_read_never_hold_more_than_the_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.log");
+    append(&path, "");
+    let mut follower = LogFollower::at_end_or_empty(&path).unwrap();
+    let most = usize::try_from(MOST_FOLLOW_BYTES).unwrap();
+    append(&path, &"x".repeat(most - 5));
+    assert!(follower.lines().unwrap().is_empty());
+    append(&path, &format!("{}\n", "y".repeat(20)));
+    let parts = follower.lines().unwrap();
+    assert_eq!(
+        parts,
+        [format!("{}{}", "x".repeat(most - 5), "y".repeat(5))]
+    );
+    assert_eq!(follower.lines().unwrap(), ["y".repeat(15)]);
+}
+
+#[test]
+fn a_follower_moves_to_the_new_log_after_the_old_one_is_renamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.log");
+    append(&path, "one\nhal");
+    let mut follower = LogFollower::from_start(&path).unwrap();
+    assert_eq!(follower.lines().unwrap(), ["one"]);
+    append(&path, "f\nend");
+    rotate(&path, &dir.path().join("a.log.1"));
+    // The old file stays open while no new log exists.
+    assert_eq!(follower.lines().unwrap(), ["half"]);
+    append(&path, "new\n");
+    assert_eq!(follower.lines().unwrap(), ["end"]);
+    assert_eq!(follower.lines().unwrap(), ["new"]);
 }
 
 #[test]

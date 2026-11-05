@@ -17,5 +17,6 @@ mod tests;
 pub use crate::engine::host::follow::{LogFollower, MOST_FOLLOW_BYTES};
 pub use crate::engine::host::listen::{Holder, listen_holder};
 pub use crate::record::process::{
-    ProcessError, RawStart, group_exists, raw_start, reap, signal_group, signal_pid,
+    BadProcessId, ProcessError, ProcessGroup, ProcessId, RawStart, group_exists, raw_start, reap,
+    signal_group, signal_pid,
 };

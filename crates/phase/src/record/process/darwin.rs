@@ -39,6 +39,14 @@ pub(crate) enum Failure {
         /// The bytes of the struct that phase reads.
         expected: usize,
     },
+    /// The list filled every buffer that phase gave it, because it kept
+    /// growing between the call that sized it and the call that read it.
+    Growing {
+        /// The call.
+        call: &'static str,
+        /// The times phase sized a buffer and read the list into it.
+        tries: usize,
+    },
 }
 
 impl Failure {
@@ -47,7 +55,7 @@ impl Failure {
     pub(crate) fn errno(&self) -> Option<i32> {
         match self {
             Self::Os(error) => error.raw_os_error(),
-            Self::Size { .. } => None,
+            Self::Size { .. } | Self::Growing { .. } => None,
         }
     }
 }
@@ -56,13 +64,10 @@ impl Failure {
 /// `proc_pidinfo(PROC_PIDTBSDINFO)`.
 pub(crate) fn bsd_info(pid: i32) -> Result<[u8; BSDINFO_BYTES], Failure> {
     let mut info = [0_u8; BSDINFO_BYTES];
-    // SAFETY: `__error` returns the calling thread's errno, which this
-    // thread may write. `info` is a live, writable buffer of
-    // `BSDINFO_BYTES` bytes, and the kernel writes at most the size it is
-    // given. errno is cleared first, so a failure that sets no errno reads
-    // as errno 0 and never as a stale ESRCH or EPERM.
+    clear_errno();
+    // SAFETY: `info` is a live, writable buffer of `BSDINFO_BYTES` bytes,
+    // and the kernel writes at most the size it is given.
     let written = unsafe {
-        *libc::__error() = 0;
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
@@ -77,7 +82,7 @@ pub(crate) fn bsd_info(pid: i32) -> Result<[u8; BSDINFO_BYTES], Failure> {
 
 /// Returns the ids of every process.
 pub(crate) fn all_processes() -> Result<Vec<i32>, Failure> {
-    let bytes = listing(|buffer, size| {
+    let bytes = listing("proc_listpids(PROC_ALL_PIDS)", |buffer, size| {
         // SAFETY: `buffer` is null with `size` 0, or a live, writable buffer
         // of `size` bytes, and the kernel writes at most `size` bytes.
         unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, buffer, size) }
@@ -93,7 +98,7 @@ pub(crate) fn all_processes() -> Result<Vec<i32>, Failure> {
 /// Returns the descriptor list of `pid` as bytes: `struct proc_fdinfo`
 /// entries of 8 bytes each, from `proc_pidinfo(PROC_PIDLISTFDS)`.
 pub(crate) fn descriptors(pid: i32) -> Result<Vec<u8>, Failure> {
-    listing(|buffer, size| {
+    listing("proc_pidinfo(PROC_PIDLISTFDS)", |buffer, size| {
         // SAFETY: `buffer` is null with `size` 0, or a live, writable buffer
         // of `size` bytes, and the kernel writes at most `size` bytes.
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, buffer, size) }
@@ -104,6 +109,7 @@ pub(crate) fn descriptors(pid: i32) -> Result<Vec<u8>, Failure> {
 /// bytes, from `proc_pidfdinfo(PROC_PIDFDSOCKETINFO)`.
 pub(crate) fn socket_info(pid: i32, fd: i32) -> Result<Vec<u8>, Failure> {
     let mut info = vec![0_u8; SOCKET_FDINFO_BYTES];
+    clear_errno();
     // SAFETY: `info` is a live, writable buffer of `SOCKET_FDINFO_BYTES`
     // bytes, and the kernel writes at most the size it is given.
     let written = unsafe {
@@ -137,21 +143,62 @@ fn whole(call: &'static str, written: i32, expected: usize) -> Result<(), Failur
     }
 }
 
-/// Runs `call` once with a null buffer, which returns the bytes the list
-/// needs now, and again with a buffer of that size and room for 32 more
-/// entries, and returns the bytes that the second call wrote.
-fn listing(call: impl Fn(*mut c_void, i32) -> i32) -> Result<Vec<u8>, Failure> {
-    let needed = call(std::ptr::null_mut(), 0);
-    let Ok(needed) = usize::try_from(needed) else {
-        return Err(Failure::Os(io::Error::last_os_error()));
-    };
-    let mut buffer = vec![0_u8; needed + 32 * 8];
-    let written = call(buffer.as_mut_ptr().cast::<c_void>(), c_int(buffer.len()));
-    let Ok(written) = usize::try_from(written) else {
-        return Err(Failure::Os(io::Error::last_os_error()));
-    };
-    buffer.truncate(written.min(buffer.len()));
-    Ok(buffer)
+/// The times [`listing`] sizes a buffer and reads a list into it before it
+/// gives up on a list that keeps growing.
+const MOST_LISTING_TRIES: usize = 4;
+
+/// The entries of room that [`listing`] adds to the size that a list needs
+/// now, so that a list that grows a little between the two calls still
+/// fits.
+const LISTING_SLACK_ENTRIES: usize = 32;
+
+/// The size of each entry of a list: a pid, or a `struct proc_fdinfo`.
+const MOST_LISTING_ENTRY_BYTES: usize = 8;
+
+/// Runs `call` with a null buffer, which returns the bytes the list needs
+/// now, and again with a buffer of that size and room for
+/// [`LISTING_SLACK_ENTRIES`] more entries, and returns the bytes that the
+/// second call wrote. libproc writes no more than the buffer holds and does
+/// not say whether the list had more, so a call that fills the buffer may
+/// have cut the list short. Then `listing` tries again with a buffer at
+/// least twice as large, [`MOST_LISTING_TRIES`] times in all.
+///
+/// errno is cleared before each call, so a failure that sets no errno reads
+/// as errno 0 and never as a stale ESRCH or EPERM.
+fn listing(name: &'static str, call: impl Fn(*mut c_void, i32) -> i32) -> Result<Vec<u8>, Failure> {
+    let mut least = 0;
+    for _ in 0..MOST_LISTING_TRIES {
+        clear_errno();
+        let needed = call(std::ptr::null_mut(), 0);
+        let Ok(needed) = usize::try_from(needed) else {
+            return Err(Failure::Os(io::Error::last_os_error()));
+        };
+        let size = (needed + LISTING_SLACK_ENTRIES * MOST_LISTING_ENTRY_BYTES).max(least);
+        let mut buffer = vec![0_u8; size];
+        clear_errno();
+        let written = call(buffer.as_mut_ptr().cast::<c_void>(), c_int(buffer.len()));
+        let Ok(written) = usize::try_from(written) else {
+            return Err(Failure::Os(io::Error::last_os_error()));
+        };
+        if written < buffer.len() {
+            buffer.truncate(written);
+            return Ok(buffer);
+        }
+        least = size.saturating_mul(2);
+    }
+    Err(Failure::Growing {
+        call: name,
+        tries: MOST_LISTING_TRIES,
+    })
+}
+
+/// Sets this thread's errno to 0.
+fn clear_errno() {
+    // SAFETY: `__error` returns a pointer to the calling thread's errno,
+    // which this thread may write.
+    unsafe {
+        *libc::__error() = 0;
+    }
 }
 
 /// Returns `size` as the C `int` that libproc takes. Every size here is a
@@ -159,3 +206,6 @@ fn listing(call: impl Fn(*mut c_void, i32) -> i32) -> Result<Vec<u8>, Failure> {
 fn c_int(size: usize) -> i32 {
     i32::try_from(size).unwrap_or(i32::MAX)
 }
+
+#[cfg(test)]
+mod tests;

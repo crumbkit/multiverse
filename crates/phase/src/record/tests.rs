@@ -120,29 +120,57 @@ fn a_process_table_failure_keeps_its_message_and_an_unsupported_struct_names_its
     ));
 }
 
+// These tests check the refusal of 0 and 1 at construction and never pass
+// either id to a call that signals, because a group of 1 would make
+// `kill(2)` signal every process that the test may signal.
 #[test]
-fn a_signal_to_a_pid_that_names_no_process_or_group_fails_and_no_such_group_exists() {
-    use rustix::process::Signal;
-    for pid in [0, u32::MAX] {
-        assert_eq!(
-            super::process::signal_group(pid, Signal::TERM)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidInput
-        );
-        assert_eq!(
-            super::process::signal_pid(pid, Signal::TERM)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidInput
-        );
-        assert!(!super::process::group_exists(pid));
+fn an_id_of_0_or_1_or_past_i32_max_is_refused_before_any_signal() {
+    use super::process::{BadProcessId, ProcessGroup, ProcessId};
+    let past = u32::try_from(i32::MAX).unwrap() + 1;
+    for id in [0, 1, past, u32::MAX] {
+        assert_eq!(ProcessId::new(id), Err(BadProcessId { id }));
+        assert_eq!(ProcessGroup::new(id), Err(BadProcessId { id }));
     }
-    assert!(super::process::signal_pid(0x7fff_fff0, Signal::TERM).is_err());
-    assert!(!super::process::group_exists(0x7fff_fff0));
-    assert!(super::process::group_exists(
-        u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap()
-    ));
+    let most = u32::try_from(i32::MAX).unwrap();
+    for id in [2, most] {
+        assert_eq!(ProcessId::new(id).unwrap().get(), id);
+        assert_eq!(ProcessGroup::new(id).unwrap().get(), id);
+    }
+}
+
+#[test]
+fn a_refused_id_becomes_an_invalid_input_error_that_names_the_id() {
+    use super::process::ProcessGroup;
+    let refused = ProcessGroup::new(1).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "phase refuses to signal the id 1, because 0, 1 and ids past 2147483647 name no single process or group"
+    );
+    let error = std::io::Error::from(refused);
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(error.to_string(), refused.to_string());
+}
+
+#[test]
+fn the_process_table_reports_no_group_at_0_or_1_and_reaps_neither() {
+    use super::process::{Processes, System};
+    // Neither call signals: `group_exists` sends no signal, and `reap`
+    // waits only for an ended child.
+    assert!(!System.group_exists(0));
+    assert!(!System.group_exists(1));
+    System.reap(0);
+    System.reap(1);
+}
+
+#[test]
+fn a_signal_to_a_pid_that_names_no_process_fails_and_no_such_group_exists() {
+    use super::process::{ProcessGroup, ProcessId, group_exists, signal_pid};
+    use rustix::process::Signal;
+    let unused = 0x7fff_fff0;
+    assert!(signal_pid(ProcessId::new(unused).unwrap(), Signal::TERM).is_err());
+    assert!(!group_exists(ProcessGroup::new(unused).unwrap()));
+    let own = u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap();
+    assert!(group_exists(ProcessGroup::new(own).unwrap()));
 }
 
 #[test]

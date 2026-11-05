@@ -106,6 +106,9 @@ pub(crate) fn darwin_error(failure: &darwin::Failure, pid: u32) -> ProcessError 
         darwin::Failure::Os(error) => {
             ProcessError::table(format!("libproc cannot read the process {pid}: {error}"))
         }
+        darwin::Failure::Growing { call, tries } => ProcessError::table(format!(
+            "{call} filled every buffer in {tries} tries, because the list kept growing"
+        )),
     }
 }
 
@@ -350,15 +353,97 @@ pub(crate) fn ticks_to_micros(ticks: u64, per_second: u64) -> Option<u64> {
     ticks.checked_mul(1_000_000)?.checked_div(per_second)
 }
 
+/// A process id that phase may signal. It is never 0, which `kill(2)` reads
+/// as the caller's own group, never 1, which is init and which as a group
+/// id makes `kill(2)` signal every process the caller may signal, and never
+/// an id past `i32::MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProcessId(Pid);
+
+/// A process group id that may be signalled, with the same limits as
+/// [`ProcessId`]: a group of 0 names the caller's own group and a group of
+/// 1 makes `kill(2)` signal every process the caller may signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProcessGroup(Pid);
+
+/// The refusal of an id that [`ProcessId`] or [`ProcessGroup`] does not
+/// accept: 0, 1, or an id past `i32::MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadProcessId {
+    /// The refused id.
+    pub id: u32,
+}
+
+impl fmt::Display for BadProcessId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "phase refuses to signal the id {}, because 0, 1 and ids past {} name no single process or group",
+            self.id,
+            i32::MAX
+        )
+    }
+}
+
+impl std::error::Error for BadProcessId {}
+
+impl From<BadProcessId> for io::Error {
+    fn from(refused: BadProcessId) -> Self {
+        Self::new(io::ErrorKind::InvalidInput, refused)
+    }
+}
+
+impl ProcessId {
+    /// Returns `pid` as an id that may be signalled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadProcessId`] for 0, 1 and any id past `i32::MAX`.
+    pub fn new(pid: u32) -> Result<Self, BadProcessId> {
+        checked(pid).map(Self)
+    }
+
+    /// Returns the id as a number.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.as_raw_nonzero().get().unsigned_abs()
+    }
+}
+
+impl ProcessGroup {
+    /// Returns `group` as a group id that may be signalled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadProcessId`] for 0, 1 and any id past `i32::MAX`.
+    pub fn new(group: u32) -> Result<Self, BadProcessId> {
+        checked(group).map(Self)
+    }
+
+    /// Returns the id as a number.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.as_raw_nonzero().get().unsigned_abs()
+    }
+}
+
+/// Returns `id` as rustix's process id when it is above 1 and at most
+/// `i32::MAX`.
+fn checked(id: u32) -> Result<Pid, BadProcessId> {
+    i32::try_from(id)
+        .ok()
+        .filter(|raw| *raw > 1)
+        .and_then(Pid::from_raw)
+        .ok_or(BadProcessId { id })
+}
+
 /// Sends `signal` to the process group `group`.
 ///
 /// # Errors
 ///
-/// Returns the failure of `kill(2)`, such as ESRCH when the group is gone,
-/// and [`io::ErrorKind::InvalidInput`] for 0 or an id past `i32::MAX`.
-pub fn signal_group(group: u32, signal: Signal) -> io::Result<()> {
-    let group = pid_of(group).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    rustix::process::kill_process_group(group, signal).map_err(io::Error::from)
+/// Returns the failure of `kill(2)`, such as ESRCH when the group is gone.
+pub fn signal_group(group: ProcessGroup, signal: Signal) -> io::Result<()> {
+    rustix::process::kill_process_group(group.0, signal).map_err(io::Error::from)
 }
 
 /// Sends `signal` to the process `pid` alone.
@@ -366,20 +451,16 @@ pub fn signal_group(group: u32, signal: Signal) -> io::Result<()> {
 /// # Errors
 ///
 /// Returns the failure of `kill(2)`, such as ESRCH when no process has the
-/// id, and [`io::ErrorKind::InvalidInput`] for 0 or an id past `i32::MAX`.
-pub fn signal_pid(pid: u32, signal: Signal) -> io::Result<()> {
-    let process = pid_of(pid).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    rustix::process::kill_process(process, signal).map_err(io::Error::from)
+/// id.
+pub fn signal_pid(pid: ProcessId, signal: Signal) -> io::Result<()> {
+    rustix::process::kill_process(pid.0, signal).map_err(io::Error::from)
 }
 
 /// Reports whether the process group `group` still has a member. A group
 /// that the caller may not signal still exists.
 #[must_use]
-pub fn group_exists(group: u32) -> bool {
-    let Some(group) = pid_of(group) else {
-        return false;
-    };
-    match rustix::process::test_kill_process_group(group) {
+pub fn group_exists(group: ProcessGroup) -> bool {
+    match rustix::process::test_kill_process_group(group.0) {
         Ok(()) => true,
         Err(error) => error != rustix::io::Errno::SRCH,
     }
@@ -388,16 +469,11 @@ pub fn group_exists(group: u32) -> bool {
 /// Reaps `pid` when it is an ended child of this process, because an
 /// unreaped child keeps its pid and stays a member of its group. A pid
 /// that is not this process's child is left alone.
-pub fn reap(pid: u32) {
-    if let Some(process) = pid_of(pid) {
-        let _ = rustix::process::waitpid(Some(process), rustix::process::WaitOptions::NOHANG);
-    }
-}
-
-/// Returns `pid` as rustix's process id, or `None` for 0 or an id past
-/// `i32::MAX`, which name no single process.
-fn pid_of(pid: u32) -> Option<Pid> {
-    i32::try_from(pid).ok().and_then(Pid::from_raw)
+///
+/// A caller that holds a [`std::process::Child`] for the same pid loses its
+/// exit status to this call: the child's own `wait` then fails with ECHILD.
+pub fn reap(pid: ProcessId) {
+    let _ = rustix::process::waitpid(Some(pid.0), rustix::process::WaitOptions::NOHANG);
 }
 
 /// The calls that `sweep` makes on the process table, behind a trait so
@@ -455,17 +531,19 @@ impl Processes for System {
     }
 
     fn group_exists(&self, group: u32) -> bool {
-        group_exists(group)
+        ProcessGroup::new(group).is_ok_and(group_exists)
     }
 
     fn reap(&self, pid: u32) {
-        reap(pid);
+        if let Ok(pid) = ProcessId::new(pid) {
+            reap(pid);
+        }
     }
 
     fn signal(&self, host: &HostProcess, signal: Signal) -> Result<(), PhaseError> {
-        let Some(process) = pid_of(host.pid) else {
-            return Ok(());
-        };
+        let process = checked(host.pid).map_err(|refused| PhaseError::ProcessTable {
+            message: refused.to_string(),
+        })?;
         // A group keeps its id while it has a member. Between sweep's check
         // and this signal, the id can name another group only if every
         // member ended and a new process took the id in that time.

@@ -58,7 +58,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 pub(crate) use phase::host::Holder;
-use phase::host::{ProcessError, RawStart};
+use phase::host::{ProcessError, ProcessGroup, ProcessId, RawStart};
 use rustix::process::Signal;
 
 use crate::error::Error;
@@ -422,27 +422,34 @@ fn tool(program: &str, args: &[&str]) -> Result<Option<(bool, String)>, Error> {
 /// # Errors
 ///
 /// Returns the failure of `kill(2)`, such as `ESRCH` when the group is
-/// gone.
+/// gone, and [`io::ErrorKind::InvalidInput`] for 0, 1 or an id past
+/// `i32::MAX`, which mxv never signals.
 pub(crate) fn signal(pid: u32, signal: Signal) -> io::Result<()> {
-    phase::host::signal_group(pid, signal)
+    phase::host::signal_group(ProcessGroup::new(pid)?, signal)
 }
 
 /// Sends `signal` to the process `pid` alone.
 ///
 /// # Errors
 ///
-/// Returns the error of `kill`, such as ESRCH when no process has the id.
+/// Returns the error of `kill`, such as ESRCH when no process has the id,
+/// and [`io::ErrorKind::InvalidInput`] for 0, 1 or an id past `i32::MAX`,
+/// which mxv never signals.
 pub(crate) fn signal_process(pid: u32, signal: Signal) -> io::Result<()> {
-    phase::host::signal_pid(pid, signal)
+    phase::host::signal_pid(ProcessId::new(pid)?, signal)
 }
 
 /// Reports whether the process group `pid` still has a member. A group
 /// that mxv may not signal still exists. When the group's leader is a
 /// child of this mxv that has ended, the check reaps it first, because an
-/// unreaped child stays a member of its group.
+/// unreaped child stays a member of its group. An id that mxv never
+/// signals, such as 0 or 1, names no group of mxv's.
 pub(crate) fn group_exists(pid: u32) -> bool {
-    phase::host::reap(pid);
-    phase::host::group_exists(pid)
+    let (Ok(process), Ok(group)) = (ProcessId::new(pid), ProcessGroup::new(pid)) else {
+        return false;
+    };
+    phase::host::reap(process);
+    phase::host::group_exists(group)
 }
 
 /// Returns the exit code that the script wrote to `exit_file`, or `None`

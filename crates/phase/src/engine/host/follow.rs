@@ -84,9 +84,13 @@ impl LogFollower {
     /// Returns the complete lines written since the last read, without
     /// their line endings, up to [`MOST_FOLLOW_BYTES`] bytes of them; the
     /// rest waits for the next read. A line longer than
-    /// [`MOST_FOLLOW_BYTES`] comes back in parts. When the log becomes
-    /// shorter than what was read, as when a cap empties it, the next read
-    /// starts at its start.
+    /// [`MOST_FOLLOW_BYTES`] comes back in parts of at most that many
+    /// bytes. When the log becomes shorter than what was read, as when a
+    /// cap empties it, the next read starts at its start. When the follower
+    /// has read all of its open file and the path now names another file,
+    /// as after the log is renamed and a new one is created, the follower
+    /// returns the old file's unfinished last line, if any, and the next
+    /// read starts at the new file's start.
     ///
     /// # Errors
     ///
@@ -107,24 +111,47 @@ impl LogFollower {
             file.seek(SeekFrom::Start(0))?;
             self.partial.clear();
         }
+        // The buffer holds the unfinished line and this read, and never
+        // more than `MOST_FOLLOW_BYTES` bytes in all.
+        let held = u64::try_from(self.partial.len()).unwrap_or(u64::MAX);
+        let room = MOST_FOLLOW_BYTES.saturating_sub(held);
         let mut bytes = Vec::new();
-        file.take(MOST_FOLLOW_BYTES).read_to_end(&mut bytes)?;
+        file.take(room).read_to_end(&mut bytes)?;
+        let drained = u64::try_from(bytes.len()).unwrap_or(u64::MAX) < room;
+        let replaced = drained && replaced(file, &self.path)?;
         self.partial.extend_from_slice(&bytes);
-        let Some(end) = self.partial.iter().rposition(|byte| *byte == b'\n') else {
-            if u64::try_from(self.partial.len()).unwrap_or(u64::MAX) > MOST_FOLLOW_BYTES {
-                // A line longer than the bound is returned in parts, so the
-                // buffer never holds more than one read's worth of bytes.
-                let part = std::mem::take(&mut self.partial);
-                return Ok(vec![String::from_utf8_lossy(&part).into_owned()]);
-            }
-            return Ok(Vec::new());
-        };
-        let rest = self.partial.split_off(end + 1);
-        let complete = std::mem::replace(&mut self.partial, rest);
-        Ok(String::from_utf8_lossy(&complete)
-            .lines()
-            .map(str::to_owned)
-            .collect())
+        let mut lines = Vec::new();
+        if let Some(end) = self.partial.iter().rposition(|byte| *byte == b'\n') {
+            let rest = self.partial.split_off(end + 1);
+            let complete = std::mem::replace(&mut self.partial, rest);
+            lines.extend(
+                String::from_utf8_lossy(&complete)
+                    .lines()
+                    .map(str::to_owned),
+            );
+        }
+        let full = u64::try_from(self.partial.len()).unwrap_or(u64::MAX) >= MOST_FOLLOW_BYTES;
+        if full || (replaced && !self.partial.is_empty()) {
+            let part = std::mem::take(&mut self.partial);
+            lines.push(String::from_utf8_lossy(&part).into_owned());
+        }
+        if replaced {
+            self.file = None;
+        }
+        Ok(lines)
+    }
+}
+
+/// Reports whether `path` names a file other than the open `file`. A path
+/// that names no file is not a replacement, because the follower keeps
+/// reading its open file until a new one appears.
+fn replaced(file: &File, path: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    let open = file.metadata()?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok((named.dev(), named.ino()) != (open.dev(), open.ino())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
