@@ -745,6 +745,7 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
         protected: Vec::new(),
         read_only: BTreeSet::new(),
         deny: BTreeSet::new(),
+        links: BTreeSet::new(),
         listen: BTreeSet::new(),
         connect: BTreeSet::new(),
         tmp: tmp.clone(),

@@ -1140,8 +1140,48 @@ The sandbox allows (decision P18):
   `registry` and `git` directories and rustup's home, never Cargo's
   credentials. For mise they are its data directory. For Homebrew they are
   the prefix's `bin`, `sbin`, `Cellar`, `opt`, `lib`, `libexec`, `share`,
-  `include` and `Frameworks`, never its `var` or `etc`. A `PATH` entry that
-  would reach a protected path, such as the home directory, adds nothing;
+  `include` and `Frameworks`, never its `var` or `etc`, with one exception
+  inside `etc`. A sandboxed process may read the prefix's `etc/openssl`
+  and each `etc/openssl@<version>`, which hold OpenSSL's configuration and
+  the CA bundle that Homebrew copies from the system keychain. Neither is
+  secret, and every TLS client that links Homebrew's OpenSSL opens them
+  when it starts: Homebrew's node exits with "OpenSSL configuration error"
+  when it cannot read `openssl.cnf`. Each OpenSSL directory also holds
+  `private`, OpenSSL's conventional directory for private keys, which a
+  user may fill, so no sandboxed process may read it. phase therefore
+  grants only the directory's `openssl.cnf`, `cert.pem` and `certs`, on
+  macOS and Linux alike, and the macOS profile also denies each `private`.
+  Homebrew's `cert.pem` is a link to the bundle in `etc/ca-certificates`.
+  phase grants the file the link names, and the macOS profile lets the
+  app read the metadata of the link itself, as it does for `/var`, so the
+  app can follow it. The rest of `etc` stays unreadable. A `PATH` entry that
+  would reach a protected path, such as the home directory, adds nothing.
+  On macOS the system directories also include the developer directory
+  that `/var/select/developer_dir` names, which `xcode-select --switch`
+  sets and which `xcode-select`, `xcrun` and the developer tools' shims in
+  `/usr/bin`, such as `cc`, read. When that directory is the
+  `Contents/Developer` of an app bundle, such as
+  `/Applications/Xcode_26.6.app` on GitHub's runner, phase grants the whole
+  bundle, because `xcodebuild` reads the bundle's `Info.plist` and loads
+  its `SharedFrameworks`. It also grants the one file
+  `/Library/Preferences/com.apple.dt.Xcode.plist`, which records whether
+  the Xcode license was accepted. phase grants a bundle only when it lies
+  inside `/Applications` or `~/Applications`, and grants any other
+  developer directory only when it lies inside `/Library/Developer`, such
+  as the Command Line Tools. A relative or dangling link, or a link to any
+  other place such as `/` or `/Users/Shared`, grants nothing. Seatbelt
+  checks the metadata of every name of a path as the kernel resolves it, so
+  reading
+  the link through `/var` also needs the metadata of the `/var` link
+  itself, and the profile allows that one literal path. nono allows a
+  link's metadata only when a granted path or a `PATH` entry is spelt
+  through it. Without the rule, `xcode-select` failed with "unable to read
+  data link" on a machine whose `PATH` names no directory under `/var`,
+  such as GitHub's macOS runner. The profile allows again each grant that
+  lies inside a denied path, such as an OpenSSL file inside the denied
+  `/usr/local/etc`, and Seatbelt applies the last rule that matches, so
+  the profile writes each deny that lies inside such a grant after the
+  grant's allow;
 - writing the app's state directory `<phase state>/apps/<workspace
   id>/<app>/state`, which `$STATE` names, its temporary directory `.../tmp`,
   which becomes the app's `TMPDIR`, and the paths of `write`. phase sets

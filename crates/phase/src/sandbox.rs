@@ -233,9 +233,15 @@ pub(crate) struct SandboxSpec {
     /// program and its directory, the `PATH` directories, the toolchain
     /// directories and the checkout's `.git`.
     pub(crate) read_only: BTreeSet<PathBuf>,
+    /// The symbolic links whose own metadata the process may read, so it
+    /// can follow each to the path that `read` grants. Landlock does not
+    /// check a link's metadata, so only the macOS profile names them.
+    #[serde(default)]
+    pub(crate) links: BTreeSet<PathBuf>,
     /// The paths that the process is always denied, which the macOS
     /// profile names explicitly: the protected paths, and on macOS the
-    /// directories inside a system directory that it must not read.
+    /// directories inside a system directory or a Homebrew prefix's grants
+    /// that it must not read.
     pub(crate) deny: BTreeSet<PathBuf>,
     /// The loopback ports that the process may listen on.
     pub(crate) listen: BTreeSet<u16>,
@@ -521,9 +527,11 @@ impl AppDirs {
     }
 }
 
-/// The system directories that every sandboxed process may read on macOS.
-/// `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
-/// profile allows the resolved paths. Of `/Library` it allows only what
+/// The system directories that every sandboxed process may read on macOS,
+/// and the one file of `/Library/Preferences` that records whether the
+/// Xcode license was accepted, which `xcodebuild` reads before `xcrun`
+/// runs a tool. `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
+/// profile allows the resolved paths and the metadata of the `/var` link. Of `/Library` it allows only what
 /// toolchains read.
 #[cfg(target_os = "macos")]
 const SYSTEM_READ: &[&str] = &[
@@ -537,6 +545,7 @@ const SYSTEM_READ: &[&str] = &[
     "/private/etc",
     "/private/var/db/timezone",
     "/private/var/select",
+    "/Library/Preferences/com.apple.dt.Xcode.plist",
     "/dev",
 ];
 
@@ -545,6 +554,23 @@ const SYSTEM_READ: &[&str] = &[
 const SYSTEM_READ: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/dev", "/proc",
 ];
+
+/// The link that `xcode-select --switch` sets to the active developer
+/// directory, which `xcode-select`, `xcrun` and the `/usr/bin` shims of
+/// the developer tools read. On macOS [`SYSTEM_READ`] grants the link, and
+/// the spec grants the directory it names, which [`developer_dir`] finds.
+/// Linux has no such link, so there the spec grants nothing for it.
+const DEVELOPER_DIR_LINK: &str = "/private/var/select/developer_dir";
+
+/// The directory whose app bundles, and the same directory in the home
+/// directory, may hold the developer directory that
+/// [`DEVELOPER_DIR_LINK`] names.
+const DEVELOPER_BUNDLES: &str = "/Applications";
+
+/// The directory inside which the developer directory that
+/// [`DEVELOPER_DIR_LINK`] names may also lie, such as the Command Line
+/// Tools.
+const DEVELOPER_TOOLS: &str = "/Library/Developer";
 
 /// The directories inside [`SYSTEM_READ`] that the macOS profile denies
 /// again: the data and configuration of a Homebrew under `/usr/local`.
@@ -624,7 +650,16 @@ fn always_protected(home: Option<&Path>) -> Vec<Protected> {
 
 /// The directories of a Homebrew prefix that a sandboxed process may read.
 /// Its `var` and `etc`, which hold services' data and configuration, are
-/// left out.
+/// left out. [`homebrew_read`] adds one exception inside `etc`: OpenSSL's
+/// directories, `etc/openssl` and each `etc/openssl@<version>`, which hold
+/// OpenSSL's configuration and the CA bundle that Homebrew copies from the
+/// system keychain. Neither is secret, and every TLS client that links
+/// Homebrew's OpenSSL, such as Homebrew's node, opens them when it starts.
+/// Each OpenSSL directory also holds `private`, OpenSSL's conventional
+/// directory for private keys, which no sandboxed process may read, so
+/// phase grants only the entries that [`OPENSSL_READ`] names, and the
+/// macOS profile also denies each `private`, which [`homebrew_deny`]
+/// names.
 const HOMEBREW_READ: &[&str] = &[
     "bin",
     "sbin",
@@ -637,11 +672,76 @@ const HOMEBREW_READ: &[&str] = &[
     "Frameworks",
 ];
 
+/// The Homebrew prefixes that phase knows.
+const HOMEBREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+
+/// The entries of an OpenSSL directory of a Homebrew prefix that a
+/// sandboxed process may read: OpenSSL's configuration, the CA bundle and
+/// the directory of hashed CA certificates. phase grants these instead of
+/// the directory, so no grant reaches its `private`. Homebrew's `cert.pem`
+/// is a link to the bundle in `etc/ca-certificates`, and the spec also
+/// records the link, which [`add_toolchain`] does.
+const OPENSSL_READ: &[&str] = &["openssl.cnf", "cert.pem", "certs"];
+
+/// Returns the Homebrew prefix that the `PATH` entry `entry` lies in.
+fn homebrew_prefix(entry: &Path) -> Option<&'static Path> {
+    HOMEBREW_PREFIXES
+        .iter()
+        .map(Path::new)
+        .find(|prefix| entry.starts_with(prefix))
+}
+
+/// Returns the OpenSSL directories of the Homebrew prefix `prefix`: the
+/// entries of its `etc` named `openssl` or `openssl@<version>`.
+fn openssl_dirs(prefix: &Path) -> Vec<PathBuf> {
+    let is_openssl = |name: &str| name == "openssl" || name.starts_with("openssl@");
+    std::fs::read_dir(prefix.join("etc"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_str().is_some_and(is_openssl))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_else(|_| Vec::new())
+}
+
+/// Returns the paths of the Homebrew prefix `prefix` that a sandboxed
+/// process may read: [`HOMEBREW_READ`], and the entries of each OpenSSL
+/// directory that [`OPENSSL_READ`] names. No other entry of `etc` is
+/// returned.
+fn homebrew_read(prefix: &Path) -> Vec<PathBuf> {
+    let openssl = openssl_dirs(prefix)
+        .into_iter()
+        .flat_map(|dir| OPENSSL_READ.iter().map(move |name| dir.join(name)));
+    HOMEBREW_READ
+        .iter()
+        .map(|name| prefix.join(name))
+        .chain(openssl)
+        .collect()
+}
+
+/// Returns the paths of the Homebrew prefix `prefix` that the macOS
+/// profile denies: the `private` directory of each OpenSSL directory. No
+/// grant of phase reaches one, and the deny keeps any other grant that
+/// covers an OpenSSL directory from reaching it. Landlock cannot deny a
+/// path, so it returns none on Linux.
+fn homebrew_deny(prefix: &Path) -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        openssl_dirs(prefix)
+            .into_iter()
+            .map(|dir| dir.join("private"))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Returns the toolchain directories that the `PATH` entry `entry` lets a
 /// sandboxed process read: for Cargo its `bin`, `registry` and `git`
 /// directories and rustup's home, never Cargo's credentials; mise's data
-/// directory; the program directories of a Homebrew prefix; and otherwise
-/// the entry itself.
+/// directory; the program directories and OpenSSL's directories of a
+/// Homebrew prefix; and otherwise the entry itself.
 fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     if let Some(home) = home {
         let cargo = home.join(".cargo");
@@ -659,15 +759,39 @@ fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
             }
         }
     }
-    for root in ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"] {
-        if entry.starts_with(root) {
-            return HOMEBREW_READ
-                .iter()
-                .map(|name| Path::new(root).join(name))
-                .collect();
-        }
+    if let Some(prefix) = homebrew_prefix(entry) {
+        return homebrew_read(prefix);
     }
     vec![entry.to_path_buf()]
+}
+
+/// Adds the toolchain paths `paths` to a spec's sets. Each path goes into
+/// `read_only` resolved, and into `read` when it exists and `reaches`
+/// says it reaches no protected path. A path that is itself a symbolic
+/// link, such as the `cert.pem` of a Homebrew OpenSSL directory, also goes
+/// into `links` with its directory resolved, so the macOS profile lets the
+/// app read the link's own metadata and follow it to the file that `read`
+/// grants.
+fn add_toolchain(
+    read: &mut BTreeSet<PathBuf>,
+    read_only: &mut BTreeSet<PathBuf>,
+    links: &mut BTreeSet<PathBuf>,
+    paths: &[PathBuf],
+    reaches: &dyn Fn(&Path) -> bool,
+) {
+    for path in paths {
+        let resolved = canonical(path);
+        read_only.insert(resolved.clone());
+        if !resolved.exists() || reaches(&resolved) {
+            continue;
+        }
+        if path.is_symlink()
+            && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        {
+            links.insert(canonical(parent).join(name));
+        }
+        read.insert(resolved);
+    }
 }
 
 /// Returns the sandbox of `process` of the host `app`, whose permissions
@@ -732,6 +856,15 @@ pub(crate) fn spec(
         .filter(|path| path.exists())
         .map(|path| canonical(path))
         .collect();
+    let bundles: Vec<PathBuf> = std::iter::once(PathBuf::from(DEVELOPER_BUNDLES))
+        .chain(context.home.map(|home| home.join("Applications")))
+        .collect();
+    let tools = [PathBuf::from(DEVELOPER_TOOLS)];
+    if let Some(dir) =
+        developer_dir(Path::new(DEVELOPER_DIR_LINK), &bundles, &tools).filter(|dir| !reaches(dir))
+    {
+        read.insert(dir);
+    }
     read.insert(checkout.clone());
     if let Some(program) = process.run.first().map(Path::new)
         && program.is_absolute()
@@ -747,10 +880,15 @@ pub(crate) fn spec(
     }
     read_only.insert(checkout.join(".git"));
     let mut path_dirs = Vec::new();
+    let mut links: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut deny: BTreeSet<PathBuf> = BTreeSet::new();
     for entry in context.path.unwrap_or_default().split(':') {
         let entry = Path::new(entry);
         if !entry.is_absolute() {
             continue;
+        }
+        if let Some(prefix) = homebrew_prefix(entry) {
+            deny.extend(homebrew_deny(prefix).iter().map(|path| canonical(path)));
         }
         read_only.insert(canonical(entry));
         // A `PATH` entry that reaches a protected path, such as the home
@@ -758,17 +896,17 @@ pub(crate) fn spec(
         if !reaches(&canonical(entry)) {
             path_dirs.push(entry.to_path_buf());
         }
-        for dir in toolchain(entry, context.home) {
-            let dir = canonical(&dir);
-            read_only.insert(dir.clone());
-            // A `PATH` entry that reaches a protected path, such as one
-            // that names the home directory, gives the app nothing.
-            if dir.exists() && !reaches(&dir) {
-                read.insert(dir);
-            }
-        }
+        // A `PATH` entry that reaches a protected path, such as one that
+        // names the home directory, gives the app nothing.
+        add_toolchain(
+            &mut read,
+            &mut read_only,
+            &mut links,
+            &toolchain(entry, context.home),
+            &reaches,
+        );
     }
-    let mut deny: BTreeSet<PathBuf> = protected.iter().map(|found| found.path.clone()).collect();
+    deny.extend(protected.iter().map(|found| found.path.clone()));
     deny.extend(SYSTEM_DENY.iter().map(PathBuf::from));
     let listen = permissions
         .listen
@@ -783,6 +921,7 @@ pub(crate) fn spec(
         protected,
         read_only,
         deny,
+        links,
         listen,
         connect: context.connect.clone(),
         tmp: canonical(&dirs.tmp),
@@ -815,6 +954,7 @@ pub(crate) fn spec(
         .chain(&spec.deny)
         .chain(&spec.read_only)
         .chain(&spec.path_dirs)
+        .chain(&spec.links)
     {
         if !is_profile_path(path) {
             return Err(SandboxError::Unwritable(path.clone()));
@@ -989,6 +1129,38 @@ fn system_read() -> Vec<PathBuf> {
     } else {
         paths.collect()
     }
+}
+
+/// Returns the developer directory that the symbolic link `link` names,
+/// resolved, when it is one of two kinds. The `Contents/Developer` of an
+/// app bundle that lies inside one of `bundles`, such as
+/// `/Applications/Xcode.app`, names the whole bundle, because Xcode's
+/// tools also read the bundle's `Info.plist` and load its
+/// `SharedFrameworks`. A directory inside one of `tools`, such as
+/// `/Library/Developer/CommandLineTools`, names itself. Any other target,
+/// and a relative or dangling link, names nothing.
+fn developer_dir(link: &Path, bundles: &[PathBuf], tools: &[PathBuf]) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    if !target.is_absolute() {
+        return None;
+    }
+    let dir = target.canonicalize().ok()?;
+    if !dir.is_dir() {
+        return None;
+    }
+    let inside = |roots: &[PathBuf], path: &Path| {
+        roots.iter().any(|root| {
+            let root = canonical(root);
+            path.starts_with(&root) && path != root
+        })
+    };
+    if dir.ends_with("Contents/Developer")
+        && let Some(bundle) = dir.ancestors().nth(2)
+        && bundle.extension() == Some(std::ffi::OsStr::new("app"))
+    {
+        return inside(bundles, bundle).then(|| bundle.to_path_buf());
+    }
+    inside(tools, &dir).then_some(dir)
 }
 
 /// Returns the entries of `usr`, with `local` replaced by its entries
