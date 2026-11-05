@@ -27,8 +27,9 @@ use serde::Deserialize;
 use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
+use crate::name::{AppName, ProcessName};
 use crate::record::run::{
-    EntryState, HostProcess, ObjectKey, RUN_VERSION, RunRecord, Started, Unplanned,
+    EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, RunRecord, Started, Unplanned,
 };
 
 #[cfg(test)]
@@ -149,11 +150,21 @@ impl RunStore {
     ///
     /// Returns [`PhaseError::StateUnwritable`] when a step fails. The
     /// temporary file is removed after a failed step.
-    pub(crate) fn write(
-        &self,
-        record: &RunRecord,
-        _lock: &LifecycleLock,
-    ) -> Result<(), PhaseError> {
+    #[cfg(test)]
+    pub(crate) fn write(&self, record: &RunRecord, lock: &LifecycleLock) -> Result<(), PhaseError> {
+        self.replace(record, lock)?;
+        self.sync_dir()
+    }
+
+    /// Writes `record` to a temporary file and renames it over the record
+    /// of its workspace, without syncing the directory. The caller holds
+    /// the workspace's lifecycle lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::StateUnwritable`] when a step fails. The
+    /// temporary file is removed after a failed step.
+    fn replace(&self, record: &RunRecord, _lock: &LifecycleLock) -> Result<(), PhaseError> {
         let target = self.path(&record.workspace);
         let unwritable = |path: &Path, source| PhaseError::StateUnwritable {
             path: path.to_path_buf(),
@@ -200,7 +211,7 @@ impl RunStore {
             let _ = fs::remove_file(&temp);
             return Err(unwritable(&target, error));
         }
-        self.sync_dir()
+        Ok(())
     }
 
     /// Deletes the record of `workspace`. Deleting a record that does not
@@ -236,6 +247,22 @@ impl RunStore {
         workspace: &WorkspaceId,
         wait: Duration,
     ) -> Result<LifecycleLock, PhaseError> {
+        self.lock_unless(workspace, wait, &|| false)
+    }
+
+    /// Takes the lifecycle lock of `workspace` as [`RunStore::lock`] does,
+    /// and stops waiting after the first failed try once `give_up` holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`RunStore::lock`], and [`PhaseError::Busy`]
+    /// when `give_up` holds while another holder keeps the lock.
+    pub(crate) fn lock_unless(
+        &self,
+        workspace: &WorkspaceId,
+        wait: Duration,
+        give_up: &dyn Fn() -> bool,
+    ) -> Result<LifecycleLock, PhaseError> {
         let path = self.lock_path(workspace);
         self.create_dir()?;
         #[expect(
@@ -267,7 +294,7 @@ impl RunStore {
                     return Err(PhaseError::StateUnwritable { path, source });
                 }
             }
-            if now() >= deadline {
+            if now() >= deadline || give_up() {
                 return Err(PhaseError::Busy {
                     workspace: workspace.clone(),
                     waited: wait,
@@ -364,13 +391,6 @@ pub(crate) struct Journal<'s> {
     lock: LifecycleLock,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the engine writes its runs through the write-ahead journal when `up` lands"
-    )
-)]
 impl<'s> Journal<'s> {
     /// Takes the lifecycle lock of `workspace`, waiting at most `wait`, and
     /// reads its record.
@@ -384,6 +404,37 @@ impl<'s> Journal<'s> {
         wait: Duration,
     ) -> Result<Self, PhaseError> {
         let lock = store.lock(workspace, wait)?;
+        Self::locked(store, workspace, lock)
+    }
+
+    /// Takes the lifecycle lock of `workspace` as [`RunStore::lock_unless`]
+    /// does, and reads its record.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`RunStore::lock_unless`] and
+    /// [`RunStore::read`].
+    pub(crate) fn open_unless(
+        store: &'s RunStore,
+        workspace: &WorkspaceId,
+        wait: Duration,
+        give_up: &dyn Fn() -> bool,
+    ) -> Result<Self, PhaseError> {
+        let lock = store.lock_unless(workspace, wait, give_up)?;
+        Self::locked(store, workspace, lock)
+    }
+
+    /// Returns the journal of `workspace` that holds `lock`, with its
+    /// record read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`RunStore::read`].
+    fn locked(
+        store: &'s RunStore,
+        workspace: &WorkspaceId,
+        lock: LifecycleLock,
+    ) -> Result<Self, PhaseError> {
         let record = store.read(workspace)?;
         Ok(Self {
             store,
@@ -449,6 +500,45 @@ impl<'s> Journal<'s> {
         self.commit(record)
     }
 
+    /// Writes the keeper and the entry of `process` of `app` back to
+    /// planned with no process, with what `launching` holds, before phase
+    /// launches the process again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn launching(
+        &mut self,
+        app: &AppName,
+        process: &ProcessName,
+        launching: &Launching,
+    ) -> Result<(), PhaseError> {
+        let key = ObjectKey::Process(app.clone(), process.clone());
+        let mut record = self.current(&key)?;
+        record
+            .mark_launching(app, process, launching)
+            .map_err(|unplanned| self.unplanned(&unplanned))?;
+        self.commit(record)
+    }
+
+    /// Removes the entries of `apps` that phase planned and never tried to
+    /// start, as [`RunRecord::forget_unstarted`] says.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::StateUnwritable`] when the record cannot be
+    /// written.
+    pub(crate) fn forget_unstarted(&mut self, apps: &[AppName]) -> Result<(), PhaseError> {
+        let Some(mut record) = self.record.clone() else {
+            return Ok(());
+        };
+        record.forget_unstarted(apps);
+        if self.record.as_ref() == Some(&record) {
+            return Ok(());
+        }
+        self.commit(record)
+    }
+
     /// Records that phase is about to stop or remove the object `key`.
     ///
     /// # Errors
@@ -505,15 +595,15 @@ impl<'s> Journal<'s> {
 
     /// Writes `record` and keeps it as the record on disk.
     ///
-    /// When the write fails after its rename, because the directory sync
-    /// failed, the file already holds `record` while `self.record` keeps
-    /// the previous record. The caller treats the error as fatal to the
-    /// operation and drops the journal, and the next journal reads the
-    /// file again, so the stale copy in memory is never written back.
+    /// When the directory sync fails after the rename, the file already
+    /// holds `record`, so the journal keeps `record` in memory too and
+    /// returns the error. An operation that then stops what it started
+    /// writes its next changes over `record`, never over the record before
+    /// it.
     fn commit(&mut self, record: RunRecord) -> Result<(), PhaseError> {
-        self.store.write(&record, &self.lock)?;
+        self.store.replace(&record, &self.lock)?;
         self.record = Some(record);
-        Ok(())
+        self.store.sync_dir()
     }
 
     /// Returns the error of a change to an object the record does not

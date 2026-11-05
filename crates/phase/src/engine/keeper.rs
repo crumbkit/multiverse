@@ -115,11 +115,14 @@
 //! record's entry names the keeper's own app, so a process that another
 //! operation recorded meanwhile keeps its entry, and the keeper notes the
 //! skipped change in its diagnostic log. When the keeper exits after a stop
-//! request, it waits at most [`EXIT_RECORD_WAIT`] for its last writes,
-//! because the operation that stops it holds the lock and records the stop
-//! itself. After any other end, nothing else records it, so the keeper
-//! waits as long as the writer waits for the lock, unless a stop request
-//! comes meanwhile, which cuts the wait to [`EXIT_RECORD_WAIT`].
+//! request (`TERM` or `INT`), it tries the lock once more without waiting.
+//! When the lock is free, it writes the changes still queued. When another
+//! operation holds the lock, as the `down` that stopped it usually does,
+//! it drops them and notes each one in its diagnostic log, because that
+//! operation records the stop itself. After any other end, nothing else
+//! records it, so the keeper waits as long as the writer waits for the
+//! lock, unless a stop request comes meanwhile, which ends the wait in the
+//! same way.
 //!
 //! A restart that cannot start the app counts as a failed run under the
 //! backoff. Only a failure of the first start makes the keeper exit with
@@ -141,13 +144,6 @@ mod environment;
 mod logfile;
 mod recorder;
 mod sandbox;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the host runner starts keepers through `spawn` when `up` lands"
-    )
-)]
 mod spawn;
 mod spec;
 mod supervise;
@@ -157,21 +153,7 @@ mod tests;
 
 pub use args::{BadKeeperArgs, KeeperArgs};
 pub use environment::KeeperEnvironment;
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "the host runner starts keepers through `spawn` when `up` lands"
-    )
-)]
 pub(crate) use spawn::{KeeperCommand, Kept, Launch, spawn};
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "the host runner builds a keeper's specification when `up` lands"
-    )
-)]
 pub(crate) use spec::KeeperSpec;
 
 /// The most bytes of the specification that a keeper reads from its
@@ -182,11 +164,6 @@ pub const MOST_SPEC_BYTES: u64 = 1024 * 1024;
 /// while it looks for the handshake line. The engine stops reading there
 /// and fails the start.
 pub const MOST_HANDSHAKE_BYTES: u64 = 64 * 1024;
-
-/// How long a keeper that is exiting waits for its last writes to the run
-/// record. An operation that holds the lifecycle lock for longer, such as
-/// the `down` that stopped the keeper, records the stop itself.
-pub const EXIT_RECORD_WAIT: Duration = Duration::from_secs(2);
 
 /// How long a keeper gives its environment source to resolve a fresh
 /// environment before a restart. A source that has not answered by then

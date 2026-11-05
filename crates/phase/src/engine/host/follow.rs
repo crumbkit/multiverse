@@ -140,6 +140,44 @@ impl LogFollower {
         }
         Ok(lines)
     }
+
+    /// Returns the last complete lines of the log, up to its current end,
+    /// once the reader is done with it. When more than
+    /// [`MOST_FOLLOW_BYTES`] bytes are unread, the follower skips to the
+    /// last [`MOST_FOLLOW_BYTES`] bytes and drops the piece of a line that
+    /// the skip lands inside, so the lines end at the log's end.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error that kept the log from being read.
+    pub fn rest(&mut self) -> io::Result<Vec<String>> {
+        let file = match &mut self.file {
+            Some(file) => file,
+            None => match File::open(&self.path) {
+                Ok(file) => self.file.insert(file),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) => return Err(error),
+            },
+        };
+        let position = file.stream_position()?;
+        let from = file.metadata()?.len().saturating_sub(MOST_FOLLOW_BYTES);
+        let Some(before) = from.checked_sub(1).filter(|_| from > position) else {
+            return self.lines();
+        };
+        // The skip may land inside a line, whose first piece is no whole
+        // line and is dropped. It lands on a line's start when the byte
+        // before it ends a line.
+        file.seek(SeekFrom::Start(before))?;
+        let mut byte = [0_u8];
+        file.read_exact(&mut byte)?;
+        let at_line_start = byte == *b"\n";
+        self.partial.clear();
+        let mut lines = self.lines()?;
+        if !at_line_start && !lines.is_empty() {
+            lines.remove(0);
+        }
+        Ok(lines)
+    }
 }
 
 /// Reports whether `path` names a file other than the open `file`. A path
@@ -158,5 +196,9 @@ fn replaced(file: &File, path: &Path) -> io::Result<bool> {
 impl LogLines for LogFollower {
     fn new_lines(&mut self) -> io::Result<Vec<String>> {
         self.lines()
+    }
+
+    fn rest(&mut self) -> io::Result<Vec<String>> {
+        Self::rest(self)
     }
 }

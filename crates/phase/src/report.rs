@@ -37,13 +37,117 @@ pub struct AppReport {
     /// What happened to it.
     #[serde(flatten)]
     pub outcome: AppOutcome,
+    /// What else phase found about the app's processes, such as a port
+    /// whose listener it could not find. JSON leaves out an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
 }
 
 impl AppReport {
-    /// Returns the report that `outcome` happened to `app`.
+    /// Returns the report that `outcome` happened to `app`, with no notes.
     #[must_use]
     pub const fn new(app: AppName, outcome: AppOutcome) -> Self {
-        Self { app, outcome }
+        Self {
+            app,
+            outcome,
+            notes: Vec::new(),
+        }
+    }
+
+    /// Returns this report with `notes`.
+    #[must_use]
+    pub fn with_notes(mut self, notes: Vec<Note>) -> Self {
+        self.notes = notes;
+        self
+    }
+}
+
+/// Something phase found about one process of an app, beside the app's
+/// outcome. In JSON its kind is `note`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "note", rename_all = "kebab-case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum Note {
+    /// phase could not find what listens on the process's port, so it did
+    /// not check the port before the start, or after readiness or a stop.
+    /// It did not let that block the start.
+    #[non_exhaustive]
+    ListenerUnknown {
+        /// The process.
+        process: ProcessName,
+        /// The app port.
+        port: PortName,
+        /// Why phase could not tell, which holds no environment value.
+        reason: String,
+    },
+    /// The process's group is gone after a stop, and another process still
+    /// holds its port. phase cannot prove that the holder is its own, so it
+    /// did not signal it.
+    #[non_exhaustive]
+    DetachedListener {
+        /// The process.
+        process: ProcessName,
+        /// The app port.
+        port: PortName,
+        /// The pids of the processes that hold the port.
+        holders: Vec<u32>,
+    },
+    /// phase may not read the process that the run record names, so it
+    /// cannot prove the process is its own. phase left it alone, and the
+    /// run record keeps it.
+    #[non_exhaustive]
+    NotOurs {
+        /// The process.
+        process: ProcessName,
+    },
+    /// Something of the process's group was still there after `KILL` and
+    /// the kill wait. The run record keeps it, and `sweep` can try again.
+    #[non_exhaustive]
+    Unstoppable {
+        /// The process.
+        process: ProcessName,
+        /// The group that is left.
+        group: u32,
+    },
+}
+
+impl Note {
+    /// Returns the note that phase could not find the listener of `port`
+    /// of `process`, because of `reason`.
+    #[must_use]
+    pub const fn listener_unknown(process: ProcessName, port: PortName, reason: String) -> Self {
+        Self::ListenerUnknown {
+            process,
+            port,
+            reason,
+        }
+    }
+
+    /// Returns the note that `holders` still hold `port` of `process`
+    /// after its group is gone.
+    #[must_use]
+    pub const fn detached_listener(
+        process: ProcessName,
+        port: PortName,
+        holders: Vec<u32>,
+    ) -> Self {
+        Self::DetachedListener {
+            process,
+            port,
+            holders,
+        }
+    }
+
+    /// Returns the note that phase cannot prove `process` is its own.
+    #[must_use]
+    pub const fn not_ours(process: ProcessName) -> Self {
+        Self::NotOurs { process }
+    }
+
+    /// Returns the note that `group` of `process` survived `KILL`.
+    #[must_use]
+    pub const fn unstoppable(process: ProcessName, group: u32) -> Self {
+        Self::Unstoppable { process, group }
     }
 }
 
@@ -82,6 +186,9 @@ pub enum AppOutcome {
     },
     /// phase stopped the app and checked that its processes are gone.
     Stopped,
+    /// The caller cancelled the operation before phase reached the app, so
+    /// phase left it as it was.
+    Untouched,
     /// The app was not running.
     NotRunning,
     /// `down` left the shared service running because these running apps
@@ -97,6 +204,20 @@ pub enum AppOutcome {
     /// A deadline passed while phase was stopping the app, so phase does not
     /// know whether it has stopped. phase does not retry it.
     StopUncertain,
+    /// phase stopped what it could of the app, and left processes that it
+    /// could not stop or could not prove are its own. The app's notes name
+    /// each one, and the run record keeps them.
+    Left,
+    /// phase could not act on the app because of a failure that is not a
+    /// process's start problem, such as a source that a later release
+    /// settles. phase started nothing more of the app.
+    #[non_exhaustive]
+    Errored {
+        /// The failure's stable code, such as `phase::app::not_runnable`.
+        code: String,
+        /// The failure's message, which holds no environment value.
+        message: String,
+    },
 }
 
 impl AppOutcome {
@@ -111,6 +232,16 @@ impl AppOutcome {
     #[must_use]
     pub const fn failed(process: ProcessName, problem: StartProblem) -> Self {
         Self::Failed { process, problem }
+    }
+
+    /// Returns the outcome of an app that phase could not act on because of
+    /// `error`.
+    #[must_use]
+    pub fn errored(error: &crate::PhaseError) -> Self {
+        Self::Errored {
+            code: error.code().to_owned(),
+            message: error.to_string(),
+        }
     }
 
     /// Returns the outcome of a shared service that `down` left running

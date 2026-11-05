@@ -64,19 +64,46 @@ pub(crate) struct Kept {
     /// The app, which leads its own group.
     pub(crate) app: HostProcess,
     /// The keeper's child handle, which the engine may drop to leave the
-    /// keeper running, or poll to learn its exit.
+    /// keeper running, or poll to learn its exit. A keeper that a test's
+    /// runner made up has none.
     #[expect(
         clippy::disallowed_types,
         reason = "crates/phase/src/engine/keeper/spawn.rs holds the keeper it started (PROC-1)"
     )]
-    child: std::process::Child,
+    child: Option<std::process::Child>,
 }
 
 impl Kept {
+    /// Returns a started keeper and app that no child handle backs, as a
+    /// test's runner reports them.
+    #[cfg(test)]
+    pub(crate) const fn detached(keeper: HostProcess, app: HostProcess) -> Self {
+        Self {
+            keeper,
+            app,
+            child: None,
+        }
+    }
+
+    /// Returns the keeper and the app, and drops the child handle, which
+    /// leaves the keeper running without phase as its waiting parent.
+    pub(crate) fn detach(self) -> (HostProcess, HostProcess) {
+        let Self { keeper, app, child } = self;
+        drop(child);
+        (keeper, app)
+    }
+
     /// Returns the keeper's exit status once it has exited, reaping it, or
-    /// `None` while it runs.
+    /// `None` while it runs or when no child handle backs it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the engine drops the handle to leave the keeper running, and only tests poll the keeper's exit"
+        )
+    )]
     pub(crate) fn exited(&mut self) -> Option<ExitStatus> {
-        self.child.try_wait().ok().flatten()
+        self.child.as_mut()?.try_wait().ok().flatten()
     }
 }
 
@@ -157,7 +184,7 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
                 ..keeper
             },
             app: started.app,
-            child,
+            child: Some(child),
         }),
         Ok(Ok(Some(Handshake::Unstartable(reason)))) => {
             kill(&mut child);

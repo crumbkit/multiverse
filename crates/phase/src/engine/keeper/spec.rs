@@ -87,13 +87,6 @@ fn check_inherited(inherited: &BTreeMap<String, String>) -> Result<(), NotInheri
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the host runner builds a keeper's specification when `up` lands"
-    )
-)]
 impl KeeperSpec {
     /// Returns the specification of an app that runs `run` in `cwd`, logs
     /// to `log`, restarts under `restart`, stops with `stop`, and has
@@ -149,6 +142,13 @@ impl KeeperSpec {
     }
 
     /// Returns this specification counting `restarts` earlier restarts.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "`up` and `restart` start each keeper with no earlier restarts, and only the keeper's tests count them"
+        )
+    )]
     pub(crate) const fn after_restarts(mut self, restarts: u32) -> Self {
         self.restarts = restarts;
         self

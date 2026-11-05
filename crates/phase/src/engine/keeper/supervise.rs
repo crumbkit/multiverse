@@ -21,12 +21,10 @@ use signal_hook::iterator::Signals;
 
 use crate::clock::{POLL_INTERVAL, now, pause, wall_now};
 use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
-use crate::engine::keeper::recorder::{RECORD_LOCK_WAIT, Recorder};
+use crate::engine::keeper::recorder::{Hurry, RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::apply_sandbox;
 use crate::engine::keeper::spec::{Handshake, KeeperSpec, StartedApp, read_spec, write_handshake};
-use crate::engine::keeper::{
-    EXIT_RECORD_WAIT, KeeperArgs, KeeperEnvironment, KeeperExit, RESOLVE_WAIT,
-};
+use crate::engine::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, RESOLVE_WAIT};
 use crate::engine::restart::{
     AfterExit, after_exit, backoff_delay, needs_environment, streak_after_run,
 };
@@ -145,29 +143,34 @@ fn start_and_supervise(
     };
     let exit = supervisor.supervise(output);
     let Supervisor { events, .. } = supervisor;
-    recorder.close();
-    await_records(&events, exit, diagnostics);
+    let hurry = recorder.close();
+    await_records(&events, exit, &hurry, diagnostics);
     exit
 }
 
 /// Waits for the record writer to write its last changes. A stop request
-/// usually comes from a `down`, which holds the lifecycle lock and records
-/// the stop itself, so after one the keeper waits at most
-/// [`EXIT_RECORD_WAIT`]. After any other end nothing else records how the
-/// app ended, so the keeper waits as long as the writer waits for the
-/// lock, until a stop request cuts the wait to [`EXIT_RECORD_WAIT`].
-fn await_records(events: &Receiver<Event>, exit: KeeperExit, diagnostics: &Diagnostics) {
+/// comes from an operation such as `down`, which usually holds the
+/// lifecycle lock and records the stop itself. So after one the keeper
+/// tells the writer to hurry: the writer tries the lock once more without
+/// waiting, writes its changes when the lock is free, and drops them when
+/// another operation holds it. After any other end nothing else records
+/// how the app ended, so the keeper waits as long as the writer waits for
+/// the lock, unless a stop request comes meanwhile.
+fn await_records(
+    events: &Receiver<Event>,
+    exit: KeeperExit,
+    hurry: &Hurry,
+    diagnostics: &Diagnostics,
+) {
     diagnostics.note("the keeper waits for its last record writes");
-    let mut deadline = now()
-        + if exit == KeeperExit::Stopped {
-            EXIT_RECORD_WAIT
-        } else {
-            RECORD_LOCK_WAIT
-        };
+    if exit == KeeperExit::Stopped {
+        hurry.now();
+    }
+    let deadline = now() + RECORD_LOCK_WAIT;
     loop {
         match events.recv_timeout(deadline.saturating_duration_since(now())) {
             Ok(Event::Recorded) | Err(RecvTimeoutError::Disconnected) => return,
-            Ok(Event::Stop) => deadline = deadline.min(now() + EXIT_RECORD_WAIT),
+            Ok(Event::Stop) => hurry.now(),
             Ok(Event::Ended(_)) => {}
             Err(RecvTimeoutError::Timeout) => {
                 diagnostics.note("the keeper exits before its last record writes");
@@ -488,7 +491,10 @@ impl Supervisor<'_> {
     fn end_group(&self, app: &App, running: bool) -> bool {
         let mut running = running;
         let steps = [
-            (stop_signal(self.spec.stop.signal), self.spec.stop.grace),
+            (
+                StopSignal::signal(self.spec.stop.signal),
+                self.spec.stop.grace,
+            ),
             (Signal::KILL, self.spec.kill_wait),
         ];
         for (signal, wait) in steps {
@@ -563,17 +569,5 @@ fn group_gone_by(group: u32, deadline: Instant) -> bool {
             return false;
         }
         pause(POLL_INTERVAL);
-    }
-}
-
-/// Returns the signal that `stop` names.
-const fn stop_signal(stop: StopSignal) -> Signal {
-    match stop {
-        StopSignal::Term => Signal::TERM,
-        StopSignal::Int => Signal::INT,
-        StopSignal::Quit => Signal::QUIT,
-        StopSignal::Hup => Signal::HUP,
-        StopSignal::Usr1 => Signal::USR1,
-        StopSignal::Usr2 => Signal::USR2,
     }
 }

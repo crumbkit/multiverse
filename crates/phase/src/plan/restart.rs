@@ -294,3 +294,18 @@ pub enum StopSignal {
     /// `SIGUSR2`.
     Usr2,
 }
+
+impl StopSignal {
+    /// Returns the signal that this names.
+    pub(crate) const fn signal(self) -> rustix::process::Signal {
+        use rustix::process::Signal;
+        match self {
+            Self::Term => Signal::TERM,
+            Self::Int => Signal::INT,
+            Self::Quit => Signal::QUIT,
+            Self::Hup => Signal::HUP,
+            Self::Usr1 => Signal::USR1,
+            Self::Usr2 => Signal::USR2,
+        }
+    }
+}

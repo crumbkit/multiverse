@@ -1,11 +1,18 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;
+use std::time::Duration;
+
+use rustix::process::Signal;
 
 use super::follow::{LogFollower, MOST_FOLLOW_BYTES};
 use super::listen::{listening_inodes, socket_descriptors, socket_listens_on};
-use super::{Holder, listen_holder};
+use super::{Holder, HostRunner as _, HostStop, HostStopped, listen_holder};
+use crate::clock::now;
 use crate::engine::probe::LogLines as _;
+use crate::plan::restart::StopSignal;
+use crate::record::process::{Identity, Processes as _, Start, System};
+use crate::record::testing::{FakeProcesses, Spawned, host_at, write_file};
 
 /// Appends `text` to the log at `path`, creating it when it is missing.
 fn append(path: &Path, text: &str) {
@@ -199,4 +206,237 @@ fn this_process_holds_its_own_listening_socket_as_a_member_of_its_group() {
         assert_eq!((held, other), (None, None));
     }
     drop(listener);
+}
+
+fn stop<'a>(
+    keeper: Option<&'a crate::record::run::HostProcess>,
+    app: Option<&'a crate::record::run::HostProcess>,
+) -> HostStop<'a> {
+    HostStop {
+        keeper,
+        app,
+        signal: StopSignal::Term,
+        grace: Duration::from_millis(20),
+        kill_wait: Duration::from_millis(20),
+    }
+}
+
+#[test]
+fn stopping_a_keeper_and_an_app_that_are_both_gone_signals_nothing() {
+    let processes = FakeProcesses::default();
+    let keeper = host_at(100, 1);
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(
+            &stop(Some(&keeper), Some(&app)),
+            now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::AlreadyGone);
+    assert!(processes.signals.borrow().is_empty());
+}
+
+#[test]
+fn stopping_sends_term_to_the_keeper_and_then_the_stop_signal_to_an_app_the_keeper_left() {
+    let processes = FakeProcesses::default()
+        .with(100, Start::At(1), Some(Signal::TERM))
+        .with(200, Start::At(2), Some(Signal::TERM));
+    let keeper = host_at(100, 1);
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(
+            &stop(Some(&keeper), Some(&app)),
+            now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Stopped);
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(100, Signal::TERM), (200, Signal::TERM)]
+    );
+}
+
+#[test]
+fn stopping_an_app_whose_keeper_is_gone_sends_its_stop_signal_to_the_app() {
+    let processes = FakeProcesses::default().with(200, Start::At(2), Some(Signal::INT));
+    let app = host_at(200, 2);
+    let request = HostStop {
+        signal: StopSignal::Int,
+        ..stop(None, Some(&app))
+    };
+
+    let stopped = processes
+        .stop(&request, now() + Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Stopped);
+    assert_eq!(*processes.signals.borrow(), vec![(200, Signal::INT)]);
+}
+
+#[test]
+fn an_app_that_survives_kill_is_unstoppable_and_names_its_group() {
+    let processes = FakeProcesses::default().with(200, Start::At(2), None);
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(&stop(None, Some(&app)), now() + Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Unstoppable { group: 200 });
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(200, Signal::TERM), (200, Signal::KILL)]
+    );
+}
+
+#[test]
+fn stopping_leaves_a_process_that_phase_may_not_read_and_reports_it_as_not_ours() {
+    let processes = FakeProcesses::default().with(200, Start::Unreadable, Some(Signal::TERM));
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(&stop(None, Some(&app)), now() + Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::NotOurs);
+    assert!(processes.signals.borrow().is_empty());
+}
+
+#[test]
+fn stopping_leaves_a_process_whose_pid_was_reused() {
+    let processes = FakeProcesses::default().with(200, Start::At(99), Some(Signal::TERM));
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(&stop(None, Some(&app)), now() + Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::AlreadyGone);
+    assert!(processes.signals.borrow().is_empty());
+}
+
+#[test]
+fn the_system_runner_stops_a_real_process_group_and_reports_it_gone() {
+    let mut sleeper = Spawned::sleeper();
+    let app = sleeper.host();
+
+    let stopped = System
+        .stop(&stop(None, Some(&app)), now() + Duration::from_secs(5))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Stopped);
+    assert!(!sleeper.running());
+    assert_eq!(System.identity(&app).unwrap(), Identity::Gone);
+}
+
+#[test]
+fn the_rest_of_a_long_log_is_its_last_lines_up_to_the_end_of_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("api.server.log");
+    let mut lines = LogFollower::at_end_or_empty(&log).unwrap();
+    let filler = "x".repeat(99) + "\n";
+    let count = usize::try_from(MOST_FOLLOW_BYTES).unwrap() * 2 / filler.len();
+    write_file(&log, &(filler.repeat(count) + "last words\n"));
+
+    let rest = lines.rest().unwrap();
+
+    assert_eq!(rest.last().map(String::as_str), Some("last words"));
+    assert!(
+        rest.iter()
+            .all(|line| line == "last words" || line.len() == 99)
+    );
+}
+
+#[test]
+fn the_system_runner_finds_a_port_in_use_on_the_loopback_address() {
+    let held = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+
+    assert!(System.port_in_use(port).unwrap());
+    drop(held);
+}
+
+#[test]
+fn the_system_runner_finds_a_port_in_use_on_the_wildcard_address() {
+    let held = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = held.local_addr().unwrap().port();
+
+    assert!(System.port_in_use(port).unwrap());
+    drop(held);
+}
+
+#[test]
+fn the_system_runner_finds_a_port_in_use_on_the_ipv6_wildcard_address() {
+    // A machine without IPv6 cannot hold the port this way.
+    let Ok(held) = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)) else {
+        return;
+    };
+    let port = held.local_addr().unwrap().port();
+
+    assert!(System.port_in_use(port).unwrap());
+    drop(held);
+}
+
+#[test]
+fn the_rest_of_a_long_log_keeps_the_line_that_starts_where_the_last_part_begins() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("api.server.log");
+    let mut lines = LogFollower::at_end_or_empty(&log).unwrap();
+    // Each line takes 1024 bytes with its line ending, so the last
+    // mebibyte begins exactly at the start of line 2048.
+    let text: String = (0..3072).map(|line| format!("{line:0>1023}\n")).collect();
+    write_file(&log, &text);
+
+    let rest = lines.rest().unwrap();
+
+    assert_eq!(rest.len(), 1024);
+    assert_eq!(rest.first(), Some(&format!("{:0>1023}", 2048)));
+}
+
+#[test]
+fn stopping_a_recorded_pid_or_group_of_0_or_1_signals_nothing_and_reports_not_ours() {
+    let processes = FakeProcesses::default()
+        .with(1, Start::At(1), Some(Signal::TERM))
+        .with(200, Start::At(2), Some(Signal::TERM));
+    let init = host_at(1, 1);
+    let in_group_one = crate::record::run::HostProcess {
+        group: 1,
+        ..host_at(200, 2)
+    };
+    let in_group_zero = crate::record::run::HostProcess {
+        group: 0,
+        ..host_at(200, 2)
+    };
+
+    for (keeper, app) in [
+        (Some(&init), None),
+        (None, Some(&in_group_one)),
+        (None, Some(&in_group_zero)),
+    ] {
+        let stopped = processes
+            .stop(&stop(keeper, app), now() + Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(stopped, HostStopped::NotOurs);
+    }
+    assert!(processes.signals.borrow().is_empty());
+}
+
+#[test]
+fn the_system_process_table_refuses_to_signal_pid_or_group_0_or_1() {
+    let init = host_at(1, 1);
+    let in_group_one = crate::record::run::HostProcess {
+        group: 1,
+        ..host_at(4242, 2)
+    };
+
+    assert!(!crate::record::process::signallable(&init));
+    assert!(!crate::record::process::signallable(&in_group_one));
+    assert!(crate::record::process::signallable(&host_at(4242, 2)));
+    assert!(!System.group_exists(1));
+    assert!(!System.group_exists(0));
 }

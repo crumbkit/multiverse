@@ -104,6 +104,21 @@ pub enum PhaseError {
         /// Why, which holds no environment value.
         reason: String,
     },
+    /// phase cannot run the app yet, because what it needs is a later
+    /// release's work.
+    #[non_exhaustive]
+    NotRunnable {
+        /// The app.
+        app: AppName,
+        /// What the app needs.
+        reason: NotRunnable,
+    },
+    /// The selection names an app or a process that the plan lacks.
+    #[non_exhaustive]
+    UnknownTarget {
+        /// The target as `APP` or `APP/PROCESS`.
+        target: String,
+    },
     /// phase tried to record a change to an object that the run record does
     /// not name, which is a fault in phase.
     #[non_exhaustive]
@@ -134,8 +149,37 @@ impl PhaseError {
             Self::Docker { .. } => "phase::docker::unavailable",
             Self::KeeperUnstartable { .. } => "phase::keeper::unstartable",
             Self::ProcessUnstartable { .. } => "phase::process::unstartable",
+            Self::NotRunnable { .. } => "phase::app::not_runnable",
+            Self::UnknownTarget { .. } => "phase::select::unknown",
             Self::Unplanned { .. } => "phase::record::unplanned",
         }
+    }
+}
+
+/// What an app needs that phase cannot do yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NotRunnable {
+    /// The app's program comes from a release, which phase does not
+    /// download and verify yet.
+    Release,
+    /// The app's program is built from its checkout, which phase does not
+    /// do yet.
+    CheckoutBuild,
+    /// The app runs in containers, which phase does not run yet.
+    Containers,
+    /// A process of the app is a oneshot, which phase does not run yet.
+    Oneshot,
+}
+
+impl fmt::Display for NotRunnable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Release => "phase does not download and verify a release yet",
+            Self::CheckoutBuild => "phase does not build a checkout's program yet",
+            Self::Containers => "phase does not run container apps yet",
+            Self::Oneshot => "phase does not run oneshot processes yet",
+        })
     }
 }
 
@@ -236,6 +280,12 @@ impl fmt::Display for PhaseError {
                 formatter,
                 "the process {app}/{process} could not start: {reason}"
             ),
+            Self::NotRunnable { app, reason } => {
+                write!(formatter, "phase cannot run {app}: {reason}")
+            }
+            Self::UnknownTarget { target } => {
+                write!(formatter, "the plan has no {target}")
+            }
             Self::Unplanned { workspace, object } => write!(
                 formatter,
                 "the run record of the workspace {workspace} does not name {object}"
@@ -257,6 +307,8 @@ impl std::error::Error for PhaseError {
             | Self::ProcessTable { .. }
             | Self::KeeperUnstartable { .. }
             | Self::ProcessUnstartable { .. }
+            | Self::NotRunnable { .. }
+            | Self::UnknownTarget { .. }
             | Self::Unplanned { .. } => None,
         }
     }

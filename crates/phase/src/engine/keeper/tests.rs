@@ -16,7 +16,6 @@ use std::time::{Duration, Instant, SystemTime};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
-use super::EXIT_RECORD_WAIT;
 use super::spawn::{command_line, read_handshake};
 use super::spec::{Handshake, NotInherited, read_spec, write_handshake};
 use super::supervise::keep;
@@ -543,7 +542,7 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
 }
 
 #[test]
-fn a_keeper_stops_its_app_with_the_stop_signal_and_records_it_stopped() {
+fn a_keeper_stops_its_app_with_the_stop_signal_and_records_it_stopped_while_the_lock_is_free() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
         "trap 'echo stopping; exit 0' TERM; echo ready; while :; do sleep 0.05; done",
@@ -560,9 +559,10 @@ fn a_keeper_stops_its_app_with_the_stop_signal_and_records_it_stopped() {
     assert!(log.starts_with("ready\n"));
     assert!(log.ends_with("stopping\n"));
     assert!(!System.group_exists(running.kept.app.group));
-    eventually("the keeper's record of the stop", || {
-        matches!(fixture.recorded(), Some((EntryState::Stopped, _, _)))
-    });
+    assert!(matches!(
+        fixture.recorded(),
+        Some((EntryState::Stopped, _, _))
+    ));
 }
 
 #[test]
@@ -897,9 +897,11 @@ fn a_keeper_leaves_a_record_entry_that_names_another_process_unchanged() {
         .restarted(&key, other.clone(), 7)
         .unwrap();
 
-    running.signal_keeper(Signal::TERM);
+    // The app ends on its own, so the keeper waits for its record writes,
+    // which a keeper that a stop request ends does not.
+    System.signal(&app_process, Signal::KILL).unwrap();
 
-    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
     assert_eq!(
         fixture.recorded(),
         Some((EntryState::Running, Some(other), 7))
@@ -937,7 +939,7 @@ fn a_specification_cannot_be_made_to_inherit_a_variable_other_than_path_and_home
 }
 
 #[test]
-fn a_stop_request_cuts_short_the_keepers_wait_for_its_last_record_writes() {
+fn a_stop_request_ends_the_keepers_wait_for_its_last_record_writes_at_once() {
     let fixture = Fixture::new();
     let spec = fixture.spec("echo run; exit 1", Restart::No, Stop::default());
     let store = RunStore::new(&fixture.dir);
@@ -953,7 +955,14 @@ fn a_stop_request_cuts_short_the_keepers_wait_for_its_last_record_writes() {
     running.signal_keeper(Signal::TERM);
 
     assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
-    assert!(asked.elapsed() < EXIT_RECORD_WAIT + Duration::from_secs(5));
+    // Without the stop request the writer would wait 30 minutes for the
+    // lock. The bound is loose so that a busy machine does not fail it.
+    assert!(asked.elapsed() < Duration::from_secs(10));
+    assert!(
+        fixture
+            .diagnostics_text()
+            .contains("another operation holds the lifecycle lock")
+    );
     drop(held);
 }
 
