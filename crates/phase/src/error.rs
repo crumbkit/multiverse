@@ -161,10 +161,13 @@ pub enum PhaseError {
         /// Why, which holds no environment value.
         reason: String,
     },
-    /// `exec` refused a sandboxed host command whose caller's standard
-    /// input is a terminal. A sandboxed command runs in a session of its
+    /// `exec` refused a sandboxed host command under
+    /// [`ExecIo::Inherit`](crate::ExecIo::Inherit) whose caller said its
+    /// standard input is a terminal, or whose caller's standard input,
+    /// output or error is one. A sandboxed command runs in a session of its
     /// own with no controlling terminal, so that it cannot push input into
-    /// the caller's shell, and phase does not relay a terminal to it yet.
+    /// the caller's shell or read what the user types, and phase does not
+    /// relay a terminal to it yet.
     #[non_exhaustive]
     ExecNeedsTerminal {
         /// The app.
@@ -375,7 +378,7 @@ impl fmt::Display for PhaseError {
             ),
             Self::ExecNeedsTerminal { app, process } => write!(
                 formatter,
-                "{app}/{process} runs under the sandbox, and a sandboxed command cannot have the terminal yet; run it without a terminal on standard input, since a relay of the terminal is not built yet"
+                "{app}/{process} runs under the sandbox, and a sandboxed command cannot have the terminal yet; run it with no terminal on its standard input, output or error, since a relay of the terminal is not built yet"
             ),
             Self::Unplanned { workspace, object } => write!(
                 formatter,

@@ -105,9 +105,11 @@ pub enum ExecIo {
     /// should set the cancel flag on `SIGINT`, and `exec` ends the
     /// command's whole process group. [`Phase::exec_sandboxed`] tells the
     /// caller which case applies. `exec` refuses a sandboxed host command
-    /// whose caller's standard input is a terminal, with
-    /// [`PhaseError::ExecNeedsTerminal`], because such a command would run
-    /// without the terminal it expects.
+    /// with [`PhaseError::ExecNeedsTerminal`] when `terminal` holds, or
+    /// when any of the caller's standard input, output and error is a
+    /// terminal, which `exec` checks itself. A sandboxed command that
+    /// inherited the terminal could read what the user types into it, and
+    /// one that runs without it would not get the terminal it expects.
     ///
     /// A command that the cancel flag kills may leave the terminal in the
     /// raw mode that it set, which the caller can reset.
@@ -117,7 +119,8 @@ pub enum ExecIo {
         /// Whether the caller's standard input is a terminal. A container
         /// command then runs with a terminal of its own, through `docker
         /// exec --tty`, and a sandboxed host command is refused. The host
-        /// program knows this, and phase reads no standard stream.
+        /// program knows this. phase reads no standard stream, and checks
+        /// only whether each is a terminal before a sandboxed command.
         terminal: bool,
     },
     /// The command reads and writes these streams, such as
@@ -180,7 +183,10 @@ pub(crate) fn exec(
     if request.run.is_empty() {
         return Err(unstartable(app, process, "the command is empty".to_owned()));
     }
-    if is_sandboxed(app) && matches!(request.io, ExecIo::Inherit { terminal: true }) {
+    if is_sandboxed(app)
+        && let ExecIo::Inherit { terminal } = request.io
+        && (terminal || caller_has_terminal())
+    {
         return Err(PhaseError::ExecNeedsTerminal {
             app: app.name.clone(),
             process: process.name.clone(),
@@ -243,6 +249,20 @@ pub(crate) fn exec(
             Ok(status)
         }
     }
+}
+
+/// Reports whether any of the caller's standard input, output and error is
+/// a terminal. A sandboxed command that inherited one could read what the
+/// user types into it, so `exec` checks the streams themselves rather than
+/// trust the caller's flag.
+fn caller_has_terminal() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/exec.rs asks whether the caller's standard streams are terminals, and reads and writes none of them"
+    )]
+    let streams = (std::io::stdin(), std::io::stdout(), std::io::stderr());
+    streams.0.is_terminal() || streams.1.is_terminal() || streams.2.is_terminal()
 }
 
 /// Reports whether `exec` runs a command in the context of `process` of

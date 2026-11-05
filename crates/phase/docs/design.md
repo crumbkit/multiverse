@@ -994,8 +994,12 @@ outside the sandbox once the command ends, and Seatbelt allows `ioctl` on
 terminal devices. Without a controlling terminal, `TIOCSTI` fails even
 when the command's standard input is the terminal. A keeper's app already
 leads its own process group and cannot start a session, so the launcher
-instead checks that `/dev/tty` cannot be opened, which holds because the
-keeper's own session has no controlling terminal.
+goes on only when opening `/dev/tty` fails with `ENXIO`, which says that
+the keeper's own session has no controlling terminal, and refuses on any
+other answer. The sandbox also denies the terminal devices of other
+sessions, so a sandboxed command cannot open the user's terminal by its
+`/dev/ttys*` path and read what the user types, as [The sandbox as
+built](#the-sandbox-as-built) says.
 
 A command with `ExecIo::Inherit` shares the host program's standard
 streams. An unsandboxed command, and the `docker exec` of a container
@@ -1008,9 +1012,12 @@ processes it started may survive it. A sandboxed command does not receive
 the terminal's Ctrl-C, so the host program sets the cancel flag on
 `SIGINT`, and phase ends the command's whole process group.
 `Phase::exec_sandboxed` tells the host program which case applies. phase
-refuses a sandboxed command whose host program says its standard input is
-a terminal, with `phase::exec::sandboxed_terminal`, because the command
-would run without the terminal it expects.
+refuses a sandboxed command with `phase::exec::sandboxed_terminal` when
+the host program says its standard input is a terminal, or when any of
+the host program's standard input, output and error is a terminal, which
+phase checks itself rather than trust the flag. A command that inherited
+the terminal could read what the user types, and one that runs without it
+would not get the terminal it expects.
 
 A command with `ExecIo::Streams` reads and writes the streams the host
 program gives and runs in a process group of its own. When the caller
@@ -1237,9 +1244,18 @@ The sandbox allows (decision P18):
 - reading the system's directories, the toolchain directories that `PATH`
   names and the app's checkout. On macOS the system directories include
   only `/Library/Developer`, `/Library/Frameworks` and `/Library/Apple` of
-  `/Library`. For Cargo the toolchain directories are its `bin`,
-  `registry` and `git` directories and rustup's home, never Cargo's
-  credentials. For mise they are its data directory. For Homebrew they are
+  `/Library`. Of `/dev` they include only `null`, `zero`, `random` and
+  `urandom`, and on macOS also `fd` and `dtracehelper`, which dyld and
+  some runtimes open at startup. On Linux `/dev/fd` links into `/proc`,
+  which is readable. `/dev/null`, `/dev/zero` and `/dev/tty` are also
+  writable. No terminal device of another session is readable, so a
+  sandboxed process cannot read what the user types into a terminal. On
+  macOS the profile also denies reading, writing and `ioctl` on every
+  `/dev/ttys*` and BSD pseudo-terminal device, because nono's base profile
+  allows `ioctl` on them. `/dev/tty` opens only the process's own
+  controlling terminal, and the launcher leaves the caller's first. For
+  Cargo the toolchain directories are its `bin`, `registry` and `git`
+  directories and rustup's home, never Cargo's credentials. For mise they are its data directory. For Homebrew they are
   the prefix's `bin`, `sbin`, `Cellar`, `opt`, `lib`, `libexec`, `share`,
   `include` and `Frameworks`, never its `var` or `etc`, with one exception
   inside `etc`. A sandboxed process may read the prefix's `etc/openssl`
@@ -1733,5 +1749,5 @@ Each decision states what this draft assumes until it is decided.
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
-| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the refusal of an app that runs at the workspace's top, and the launcher's second check. |
+| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |

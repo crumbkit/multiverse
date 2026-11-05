@@ -14,8 +14,8 @@
 //! `setsid`, which leaves it with no controlling terminal. A launcher that
 //! already leads its process group cannot start a session, as when a keeper
 //! starts its app in a group of its own. The keeper's own session has no
-//! controlling terminal, and the launcher checks that `/dev/tty` cannot be
-//! opened before it goes on.
+//! controlling terminal, and the launcher goes on only when opening
+//! `/dev/tty` fails with `ENXIO`, which says that the session has none.
 
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -121,18 +121,24 @@ fn leave_terminal() -> Result<(), String> {
         return Ok(());
     }
     // The launcher leads its group, so it stays in its session. It may go
-    // on only when that session has no controlling terminal.
+    // on only when that session has no controlling terminal, which
+    // opening `/dev/tty` reports with `ENXIO`. Any other answer, such as
+    // a descriptor or a refusal to open the file, leaves the question open,
+    // so the launcher refuses.
     let opened = rustix::fs::open(
         "/dev/tty",
         rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     );
     match opened {
+        Err(rustix::io::Errno::NXIO) => Ok(()),
         Ok(_) => Err(
             "the launcher cannot leave the controlling terminal, so it does not start the app under the sandbox"
                 .to_owned(),
         ),
-        Err(_) => Ok(()),
+        Err(error) => Err(format!(
+            "the launcher cannot tell whether it has a controlling terminal ({error}), so it does not start the app under the sandbox"
+        )),
     }
 }
 

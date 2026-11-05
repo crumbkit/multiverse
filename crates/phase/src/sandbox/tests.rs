@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
@@ -304,6 +304,68 @@ fn a_spec_reads_the_checkout_and_writes_only_the_apps_own_directories() {
     assert!(dirs.state.is_dir() && dirs.tmp.is_dir());
     assert!(!spec.read.contains(&fixture.workspace_dir()));
     assert!(spec.deny.contains(&fixture.home().join(".ssh")));
+}
+
+#[test]
+fn a_spec_reads_no_terminal_device_and_none_of_dev_but_the_nodes_toolchains_use() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    let spec = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+
+    let dev: Vec<&PathBuf> = spec
+        .read
+        .iter()
+        .filter(|path| path.starts_with("/dev"))
+        .collect();
+    assert!(!dev.is_empty());
+    for path in dev {
+        assert!(
+            [
+                "/dev/null",
+                "/dev/zero",
+                "/dev/random",
+                "/dev/urandom",
+                "/dev/fd",
+                "/dev/dtracehelper"
+            ]
+            .iter()
+            .any(|node| path == Path::new(node)),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_profile_denies_every_terminal_device_but_the_processs_own() {
+    use crate::sandbox::seatbelt::{TERMINAL_DEVICES, rules};
+
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let spec = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+    let pattern = regex::Regex::new(TERMINAL_DEVICES).unwrap();
+
+    assert!(rules(&spec).contains(&format!(
+        "(deny file-read* file-write* file-ioctl (regex #\"{TERMINAL_DEVICES}\"))"
+    )));
+    for device in ["/dev/ttys004", "/dev/ttys1000", "/dev/ptyp0", "/dev/ttyp0"] {
+        assert!(pattern.is_match(device), "{device}");
+    }
+    for device in [
+        "/dev/tty",
+        "/dev/ptmx",
+        "/dev/null",
+        "/dev/ttys",
+        "/dev/ttys004x",
+    ] {
+        assert!(!pattern.is_match(device), "{device}");
+    }
 }
 
 #[test]

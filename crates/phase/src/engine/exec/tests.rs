@@ -589,19 +589,18 @@ fn exec_refuses_a_sandboxed_command_whose_callers_input_is_a_terminal_and_runs_n
     assert_eq!(error.code(), "phase::exec::sandboxed_terminal");
     assert_eq!(
         error.to_string(),
-        "api/server runs under the sandbox, and a sandboxed command cannot have the terminal yet; run it without a terminal on standard input, since a relay of the terminal is not built yet"
+        "api/server runs under the sandbox, and a sandboxed command cannot have the terminal yet; run it with no terminal on its standard input, output or error, since a relay of the terminal is not built yet"
     );
     assert!(!marker.exists());
 }
 
-/// The full name of the test that probes its terminal when this test
-/// binary is started as a sandboxed command.
+/// The full name of the test that probes the caller's terminal when this
+/// test binary is started as a command.
 #[cfg(target_os = "macos")]
-const PROBE_ENTRY: &str =
-    "engine::exec::tests::the_test_binary_probes_its_terminal_when_it_is_started_as_a_command";
+const PROBE_ENTRY: &str = "engine::exec::tests::the_test_binary_probes_the_callers_terminal_when_it_is_started_as_a_command";
 
-/// The full name of the test that runs execs from a terminal of its own
-/// when this test binary is started as one.
+/// The full name of the test that runs execs as a caller with a
+/// controlling terminal when this test binary is started as one.
 #[cfg(target_os = "macos")]
 const TERMINAL_ENTRY: &str =
     "engine::exec::tests::the_test_binary_runs_execs_from_a_terminal_when_it_is_started_as_one";
@@ -610,9 +609,16 @@ const TERMINAL_ENTRY: &str =
 #[cfg(target_os = "macos")]
 const PROBE_VAR: &str = "PHASE_EXEC_TEST_PROBE";
 
-/// The variable that starts the terminal's caller.
+/// The variable that names the path of the caller's terminal, such as
+/// `/dev/ttys004`.
 #[cfg(target_os = "macos")]
-const TERMINAL_VAR: &str = "PHASE_EXEC_TEST_TERMINAL";
+const TTY_VAR: &str = "PHASE_EXEC_TEST_TTY";
+
+/// The variable that starts the caller, which says how it runs: `probe`
+/// with no terminal on its standard streams, or `refuse` with the terminal
+/// as its standard input.
+#[cfg(target_os = "macos")]
+const CALLER_VAR: &str = "PHASE_EXEC_TEST_CALLER";
 
 /// macOS's `TIOCSTI`, `_IOW('t', 114, char)`, which pushes one byte into
 /// a terminal's input. libc does not declare it for macOS.
@@ -629,24 +635,40 @@ fn own_var(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-/// Pushes `byte` into the input of the terminal on standard input, and
-/// reports whether the kernel allowed it.
+/// Pushes `byte` into the input of the terminal that `fd` is, and reports
+/// whether the kernel allowed it.
 #[cfg(target_os = "macos")]
-fn push_byte(byte: u8) -> bool {
+fn push_byte(fd: std::os::fd::BorrowedFd<'_>, byte: u8) -> bool {
+    use std::os::fd::AsRawFd as _;
+
     #[expect(
         unsafe_code,
         reason = "the test pushes a byte into a terminal with TIOCSTI, which only libc can call"
     )]
-    // SAFETY: `ioctl` reads one byte from `&byte`, which lives for the call,
-    // and touches no other memory of this program.
-    let result = unsafe { libc::ioctl(0, TIOCSTI, &raw const byte) };
+    // SAFETY: `ioctl` reads one byte from `&byte`, which lives for the
+    // call, on a descriptor that `fd` keeps open, and touches no other
+    // memory of this program.
+    let result = unsafe { libc::ioctl(fd.as_raw_fd(), TIOCSTI, &raw const byte) };
     result == 0
+}
+
+/// Opens the terminal at `path` for reading and writing without making it
+/// the controlling terminal.
+#[cfg(target_os = "macos")]
+fn open_terminal(path: &str) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY,
+        rustix::fs::Mode::empty(),
+    )
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn the_test_binary_probes_its_terminal_when_it_is_started_as_a_command() {
-    let Some(byte) = own_var(PROBE_VAR) else {
+fn the_test_binary_probes_the_callers_terminal_when_it_is_started_as_a_command() {
+    use std::os::fd::AsFd as _;
+
+    let (Some(byte), Some(path)) = (own_var(PROBE_VAR), own_var(TTY_VAR)) else {
         return;
     };
     // The launcher is this test binary too, and its arguments name this
@@ -655,14 +677,72 @@ fn the_test_binary_probes_its_terminal_when_it_is_started_as_a_command() {
     if std::env::args().any(|arg| arg == "--sandboxed") {
         return;
     }
-    let tty = rustix::fs::open(
-        "/dev/tty",
-        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY,
+    let byte = byte.as_bytes()[0];
+    match open_terminal("/dev/tty") {
+        Ok(tty) => println!(
+            "probe tty=open sti={}",
+            if push_byte(tty.as_fd(), byte) {
+                "ok"
+            } else {
+                "denied"
+            }
+        ),
+        Err(error) => println!("probe tty=denied ({error})"),
+    }
+    // Reading what the user types needs only a read-only descriptor.
+    let read_only = rustix::fs::open(
+        path.as_str(),
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOCTTY,
         rustix::fs::Mode::empty(),
     );
-    println!("probe tty={}", if tty.is_ok() { "open" } else { "denied" });
-    let pushed = push_byte(byte.as_bytes()[0]);
-    println!("probe sti={}", if pushed { "ok" } else { "denied" });
+    match read_only {
+        Ok(_) => println!("probe path-read=open"),
+        Err(error) => println!("probe path-read=denied ({error})"),
+    }
+    match open_terminal(&path) {
+        Ok(tty) => println!(
+            "probe path=open sti={}",
+            if push_byte(tty.as_fd(), byte) {
+                "ok"
+            } else {
+                "denied"
+            }
+        ),
+        Err(error) => println!("probe path=denied ({error})"),
+    }
+}
+
+/// Runs the probe through `phase.exec` in the context of the app of
+/// `plan`, with the caller's own streams, and returns the result.
+#[cfg(target_os = "macos")]
+fn exec_probe(
+    phase: &Phase,
+    plan: &Plan,
+    byte: &'static str,
+    tty: &'static str,
+) -> Result<ExitStatus, PhaseError> {
+    let mut source = greeting();
+    source.0.push((PROBE_VAR, byte));
+    source.0.push((TTY_VAR, tty));
+    let request = ExecRequest::new(
+        "api".parse().unwrap(),
+        "server".parse().unwrap(),
+        vec![
+            std::env::current_exe().unwrap().display().to_string(),
+            "--exact".into(),
+            "--nocapture".into(),
+            "--".into(),
+            PROBE_ENTRY.into(),
+        ],
+        ExecIo::Inherit { terminal: false },
+    );
+    phase.exec(
+        plan,
+        request,
+        &source,
+        Instant::now() + Duration::from_secs(10),
+        &Cancel::new(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -670,138 +750,203 @@ fn the_test_binary_probes_its_terminal_when_it_is_started_as_a_command() {
 fn the_test_binary_runs_execs_from_a_terminal_when_it_is_started_as_one() {
     use std::os::fd::AsFd as _;
 
-    if own_var(TERMINAL_VAR).is_none() {
+    let (Some(mode), Some(path)) = (own_var(CALLER_VAR), own_var(TTY_VAR)) else {
+        return;
+    };
+    // The probe's source holds `'static` values.
+    let path: &'static str = Box::leak(path.into_boxed_str());
+    if mode == "refuse" {
+        // Standard input is the terminal.
+        let (phase, plan, _root) = workspace(true);
+        let refused = exec_probe(&phase, &plan, "R", path);
+        println!(
+            "refuse code={}",
+            refused.map_or_else(|error| error.code().to_owned(), |_| "ran".to_owned())
+        );
         return;
     }
-    // Standard input is the slave of the test's pty, which becomes this
-    // process's controlling terminal, as a user's terminal is a shell's.
+    // The terminal becomes this process's controlling terminal, as a
+    // user's terminal is a shell's, while none of its standard streams is
+    // a terminal.
     rustix::process::setsid().unwrap();
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test binary started as a helper makes its standard input its controlling terminal"
-    )]
-    let stdin = std::io::stdin();
-    rustix::process::ioctl_tiocsctty(stdin.as_fd()).unwrap();
+    let tty = open_terminal(path).unwrap();
+    rustix::process::ioctl_tiocsctty(tty.as_fd()).unwrap();
     println!(
         "control sti={}",
-        if push_byte(b'A') { "ok" } else { "denied" }
+        if push_byte(tty.as_fd(), b'A') {
+            "ok"
+        } else {
+            "denied"
+        }
     );
     for (sandboxed, byte) in [(false, "U"), (true, "Z")] {
         let (phase, plan, _root) = workspace(sandboxed);
-        let mut source = greeting();
-        source.0.push((PROBE_VAR, byte));
-        let request = ExecRequest::new(
-            "api".parse().unwrap(),
-            "server".parse().unwrap(),
-            vec![
-                std::env::current_exe().unwrap().display().to_string(),
-                "--exact".into(),
-                "--nocapture".into(),
-                "--".into(),
-                PROBE_ENTRY.into(),
-            ],
-            ExecIo::Inherit { terminal: false },
-        );
-        let status = phase
-            .exec(
-                &plan,
-                request,
-                &source,
-                Instant::now() + Duration::from_secs(10),
-                &Cancel::new(),
-            )
-            .unwrap();
+        let status = exec_probe(&phase, &plan, byte, path).unwrap();
         println!("exec sandboxed={sandboxed} code={:?}", status.code());
     }
 }
 
+/// A pty whose master a thread reads until every descriptor of its slave
+/// has closed, since a process whose controlling terminal has unread
+/// output waits for it to drain when it exits.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_sandboxed_exec_cannot_reach_the_callers_controlling_terminal() {
-    use std::io::Read as _;
-    use std::os::fd::{FromRawFd as _, OwnedFd};
+struct Pty {
+    /// The slave's path, such as `/dev/ttys004`.
+    path: String,
+    /// The slave, which the test passes to the caller or drops.
+    slave: std::os::fd::OwnedFd,
+    /// The thread that returns what the master read.
+    reader: std::thread::JoinHandle<Vec<u8>>,
+}
 
-    use crate::sandbox::{Platform, platform};
+#[cfg(target_os = "macos")]
+impl Pty {
+    fn open() -> Self {
+        use std::io::Read as _;
+        use std::os::fd::{FromRawFd as _, OwnedFd};
 
-    if !matches!(platform(), Platform::Available(_)) {
-        return;
-    }
-    let (mut master, mut slave) = (-1, -1);
-    #[expect(
-        unsafe_code,
-        reason = "the test opens a pty, which only libc's openpty does without a feature of rustix that phase does not use"
-    )]
-    // SAFETY: `openpty` writes two descriptors into `master` and `slave`,
-    // which live for the call, and reads no name, termios or window size,
-    // since each of those pointers is null.
-    let opened = unsafe {
-        libc::openpty(
-            &raw mut master,
-            &raw mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(opened, 0);
-    #[expect(
-        unsafe_code,
-        reason = "the test takes ownership of the descriptors that openpty returned"
-    )]
-    // SAFETY: openpty returned both descriptors open, and nothing else owns
-    // them.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    // A process whose controlling terminal has unread output waits for it
-    // to drain when it exits, so a thread reads the master until every
-    // slave descriptor has closed.
-    let reader = std::thread::spawn(move || {
-        let mut master = File::from(master);
-        let mut echoed = Vec::new();
-        let mut buffer = [0_u8; 256];
-        while let Ok(read) = master.read(&mut buffer) {
-            if read == 0 {
-                break;
+        let (mut master, mut slave) = (-1, -1);
+        let mut name = [0 as libc::c_char; 128];
+        #[expect(
+            unsafe_code,
+            reason = "the test opens a pty, which only libc's openpty does without a feature of rustix that phase does not use"
+        )]
+        // SAFETY: `openpty` writes two descriptors into `master` and
+        // `slave` and at most 128 bytes of the slave's name into `name`,
+        // all of which live for the call, and reads no termios or window
+        // size, since those pointers are null.
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                name.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        #[expect(
+            unsafe_code,
+            reason = "the test takes ownership of the descriptors that openpty returned"
+        )]
+        // SAFETY: openpty returned both descriptors open, and nothing else
+        // owns them.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let path = std::ffi::CStr::from_bytes_until_nul(&name.map(i8::cast_unsigned))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let reader = std::thread::spawn(move || {
+            let mut master = File::from(master);
+            let mut read_all = Vec::new();
+            let mut buffer = [0_u8; 256];
+            while let Ok(read) = master.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                read_all.extend_from_slice(&buffer[..read]);
             }
-            echoed.extend_from_slice(&buffer[..read]);
+            read_all
+        });
+        Self {
+            path,
+            slave,
+            reader,
         }
-        echoed
-    });
+    }
+}
+
+/// Starts this test binary as the caller of [`TERMINAL_ENTRY`] in `mode`,
+/// with `stdin` as its standard input, and returns what it printed and
+/// what reached the pty's master.
+#[cfg(target_os = "macos")]
+fn run_caller(pty: Pty, mode: &str, terminal_stdin: bool) -> (String, String) {
+    // The test keeps its own slave open until the caller ends, so the
+    // master's reader does not end and close the pty before the caller
+    // opens it.
+    let stdin = if terminal_stdin {
+        Stdio::from(pty.slave.try_clone().unwrap())
+    } else {
+        Stdio::null()
+    };
     #[expect(
         clippy::disallowed_methods,
         reason = "the test starts this test binary as a caller whose terminal is the pty"
     )]
     let spawned = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "--nocapture", "--", TERMINAL_ENTRY])
-        .env(TERMINAL_VAR, "1")
-        .stdin(Stdio::from(slave))
+        .env(CALLER_VAR, mode)
+        .env(TTY_VAR, &pty.path)
+        .stdin(stdin)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn();
     let output = spawned.unwrap().wait_with_output().unwrap();
     let printed = String::from_utf8_lossy(&output.stdout).into_owned();
-    let echoed = reader.join().unwrap();
-    let echoed = String::from_utf8_lossy(&echoed).into_owned();
+    assert!(
+        output.status.success(),
+        "{printed}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(pty.slave);
+    let echoed = String::from_utf8_lossy(&pty.reader.join().unwrap()).into_owned();
+    (printed, echoed)
+}
 
-    assert!(output.status.success(), "{printed}");
-    let lines: Vec<&str> = printed.lines().collect();
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_exec_cannot_reach_the_callers_terminal_by_dev_tty_or_by_its_path() {
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+
+    let (printed, echoed) = run_caller(Pty::open(), "probe", false);
+
     // The caller itself, and an unsandboxed command in its session, may
-    // push input into the terminal, so the test can see a push.
-    assert!(lines.contains(&"control sti=ok"), "{printed}");
+    // reach the terminal, so the test can see a push.
+    assert!(printed.contains("control sti=ok"), "{printed}");
     assert!(echoed.contains('A'), "{echoed:?}");
-    assert!(echoed.contains('U'), "{echoed:?}");
     let (unsandboxed, sandboxed) = printed
         .split_once("exec sandboxed=false code=Some(0)")
         .unwrap_or_else(|| panic!("{printed}"));
-    assert!(unsandboxed.contains("probe tty=open"), "{printed}");
-    assert!(unsandboxed.contains("probe sti=ok"), "{printed}");
-    // The sandboxed command has no controlling terminal.
+    assert!(unsandboxed.contains("probe tty=open sti=ok"), "{printed}");
+    assert!(unsandboxed.contains("probe path-read=open"), "{printed}");
+    assert!(unsandboxed.contains("probe path=open sti=ok"), "{printed}");
+    assert!(echoed.contains('U'), "{echoed:?}");
+    // The sandboxed command has no controlling terminal, and may not open
+    // the terminal by its path.
     assert!(sandboxed.contains("probe tty=denied"), "{printed}");
-    assert!(sandboxed.contains("probe sti=denied"), "{printed}");
-    assert!(!sandboxed.contains("probe tty=open"), "{printed}");
-    assert!(!sandboxed.contains("probe sti=ok"), "{printed}");
-    assert!(!echoed.contains('Z'), "{echoed:?}");
+    assert!(sandboxed.contains("probe path-read=denied"), "{printed}");
+    assert!(sandboxed.contains("probe path=denied"), "{printed}");
+    assert!(!sandboxed.contains("=open"), "{printed}");
     assert!(
-        lines.contains(&"exec sandboxed=true code=Some(0)"),
+        sandboxed.contains("exec sandboxed=true code=Some(0)"),
         "{printed}"
     );
+    assert!(!echoed.contains('Z'), "{echoed:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_refuses_a_sandboxed_command_when_a_standard_stream_of_the_caller_is_a_terminal() {
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+
+    // The caller's standard input is the terminal, while it says that
+    // none is.
+    let (printed, echoed) = run_caller(Pty::open(), "refuse", true);
+
+    assert!(
+        printed.contains("refuse code=phase::exec::sandboxed_terminal"),
+        "{printed}"
+    );
+    assert!(!printed.contains("probe "), "{printed}");
+    assert!(!echoed.contains('R'), "{echoed:?}");
 }
