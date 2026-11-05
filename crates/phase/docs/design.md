@@ -859,7 +859,13 @@ records the hash of the process's own part of the plan that phase last
 launched it from, as [Plan changes of a running host
 process](#plan-changes-of-a-running-host-process) says. It arrived after
 the first v5 records, so phase reads a v5 entry without it as one that
-records no part. phase reads a
+records no part. A host entry refuses fields it does not know, so a
+phase from before `part_hash` cannot read a v5 record that holds it, and
+reports it as unreadable, not as written by a newer phase. A keeper that
+such a phase started notes each write it cannot make, and records nothing
+more until phase starts its process again, as it does with a newer
+version. The first `up` after the upgrade restarts each such process,
+which starts a new keeper. phase reads a
 `phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
 with the fields it lacks at their defaults, and writes it back as v5: a
 v1 record reads with no ends, no restart policies, no readiness, no
