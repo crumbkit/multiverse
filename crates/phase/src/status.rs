@@ -132,7 +132,8 @@ pub struct StatusRow {
     pub log: Option<PathBuf>,
     /// Whether a host process runs under the sandbox, and why not when it
     /// does not, or `None` for a container or when `status` had no plan.
-    /// macOS shows Seatbelt as partial. Linux shows a process under
+    /// macOS shows Seatbelt as partial, because an app's listening ports
+    /// accept connections from other machines on the network. Linux shows a process under
     /// Landlock as unsandboxed, because Landlock leaves Unix sockets open.
     /// In JSON it is left out when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

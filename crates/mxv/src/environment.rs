@@ -181,6 +181,15 @@ impl Environment {
         Ok(runs)
     }
 
+    /// Returns the run files that [`Environment::runs`] builds, or `None`
+    /// when mxv's state or data directory is unknown. It is public only so
+    /// that a test can start a sandboxed app under mxv's own layout.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn runs_for_tests(&self) -> Option<Runs> {
+        self.runs().ok()
+    }
+
     /// Returns the directory that mxv started in, when `main` could read
     /// it.
     pub(crate) fn current_dir(&self) -> Option<&Path> {

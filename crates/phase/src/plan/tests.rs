@@ -1110,14 +1110,34 @@ fn a_plan_refuses_a_write_path_that_leaves_the_checkout() {
 }
 
 #[test]
-fn a_plan_accepts_the_state_directory_an_absolute_path_and_a_path_inside_the_checkout_as_writes() {
+fn a_plan_accepts_the_state_directory_and_relative_and_absolute_paths_inside_the_checkout_as_writes()
+ {
     let mut api = sandboxed(host_app("api"));
-    api.permissions.get_or_insert_default().write = ["$STATE", "/srv/cache", "target"]
-        .into_iter()
-        .map(String::from)
-        .collect();
+    api.permissions.get_or_insert_default().write =
+        ["$STATE", "/workspaces/reading-list/api/cache", "target"]
+            .into_iter()
+            .map(String::from)
+            .collect();
 
     assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_an_absolute_write_path_outside_the_checkout() {
+    for path in [
+        "/srv/cache",
+        "/workspaces/reading-list/web",
+        "/workspaces/reading-list/api-other",
+    ] {
+        let mut api = sandboxed(host_app("api"));
+        api.permissions.get_or_insert_default().write = [path.to_owned()].into();
+
+        assert_eq!(
+            permission_problem(vec![api]),
+            PermissionProblem::WriteOutsideCheckout(path.to_owned()),
+            "{path}"
+        );
+    }
 }
 
 #[test]
@@ -1168,17 +1188,50 @@ fn a_plan_refuses_an_absolute_write_path_inside_the_checkouts_write_path() {
 
 #[test]
 fn a_plan_refuses_two_apps_that_may_write_overlapping_paths() {
+    // Both apps run from one checkout.
     let mut api = sandboxed(host_app("api"));
-    api.permissions.get_or_insert_default().write = ["/srv/cache".to_owned()].into();
+    api.permissions.get_or_insert_default().write = ["target".to_owned()].into();
     let mut web = sandboxed(host_app("web"));
-    web.permissions.get_or_insert_default().write = ["/srv/cache/web".to_owned()].into();
+    web.permissions.get_or_insert_default().write = ["target/web".to_owned()].into();
 
     assert_eq!(
         plan(vec![api, web]).unwrap_err(),
         PlanError::BadPermissions {
             app: "api".parse().unwrap(),
             problem: PermissionProblem::SharedWrite {
-                path: "/srv/cache".to_owned(),
+                path: "target".to_owned(),
+                other: "web".parse().unwrap(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_plan_refuses_two_apps_whose_writes_name_one_directory_through_a_symbolic_link() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("api");
+    std::fs::create_dir_all(real.join("target")).unwrap();
+    let link = root.path().join("web");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let with_checkout = |name: &str, dir: &std::path::Path| {
+        let mut app = sandboxed(host_app(name));
+        if let Source::Checkout { dir: checkout, .. } = &mut app.source {
+            *checkout = dir.to_path_buf();
+        }
+        app.permissions.get_or_insert_default().write = ["target".to_owned()].into();
+        app
+    };
+
+    assert_eq!(
+        plan(vec![
+            with_checkout("api", &real),
+            with_checkout("web", &link)
+        ])
+        .unwrap_err(),
+        PlanError::BadPermissions {
+            app: "api".parse().unwrap(),
+            problem: PermissionProblem::SharedWrite {
+                path: "target".to_owned(),
                 other: "web".parse().unwrap(),
             },
         }

@@ -490,6 +490,15 @@ impl Runs {
         self
     }
 
+    /// Returns the phase that these run files use. It is public only so
+    /// that a test can start a plan that mxv's manifest cannot write yet,
+    /// such as an app with permissions.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn phase(&self) -> &Phase {
+        &self.phase
+    }
+
     /// Returns these run files with `wait` as how long a lock waits for
     /// another command to release it.
     #[must_use]

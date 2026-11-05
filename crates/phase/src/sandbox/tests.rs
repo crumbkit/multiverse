@@ -252,7 +252,7 @@ fn linux_reports_a_process_under_landlock_as_unsandboxed_and_says_why() {
     );
     assert_eq!(
         Sandboxing::seatbelt().to_string(),
-        "seatbelt (partial: a listening port accepts connections on every address)"
+        "seatbelt (partial: its listening ports accept connections from other machines on the network)"
     );
 }
 
@@ -660,12 +660,13 @@ fn the_launchers_check_refuses_a_write_directory_that_a_symbolic_link_moved_else
     )
     .unwrap();
 
-    assert_eq!(
-        verify(&spec),
-        Err(SandboxError::Moved {
-            path: fixture.checkout().join("target"),
-            now: fixture.home().join(".ssh"),
-        })
+    assert!(
+        matches!(
+            verify(&spec),
+            Err(SandboxError::Unusable { path, .. }) if path == fixture.checkout().join("target")
+        ),
+        "{:?}",
+        verify(&spec)
     );
 }
 
@@ -741,6 +742,108 @@ fn a_spec_lets_an_app_use_its_own_directories_inside_a_directory_that_the_host_p
     let dirs = AppDirs::of(&fixture.state(), &workspace(), &app("api"));
     assert!(spec.write.contains(&dirs.state));
     assert!(spec.deny.contains(&host_state));
+}
+
+#[test]
+fn a_spec_keeps_the_directory_that_holds_an_apps_own_directories_protected() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let host_state = fixture.state();
+
+    let spec = fixture
+        .spec_with(
+            &api,
+            "/usr/bin",
+            BTreeSet::new(),
+            test_launcher(),
+            std::slice::from_ref(&host_state),
+        )
+        .unwrap();
+
+    let dirs = AppDirs::of(&fixture.state(), &workspace(), &app("api"));
+    let reached =
+        |path: &std::path::Path| spec.protected.iter().any(|found| found.reached_by(path));
+    assert!(reached(&dirs.base));
+    assert!(reached(&dirs.base.join("other")));
+    assert!(!reached(&dirs.state));
+    assert!(!reached(&dirs.tmp));
+}
+
+#[test]
+fn a_spec_refuses_a_write_that_a_symbolic_link_in_the_checkout_leads_outside_it() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.outside()).unwrap();
+    std::os::unix::fs::symlink(fixture.outside(), fixture.checkout().join("target")).unwrap();
+
+    assert_eq!(
+        writing(&fixture, &["target".to_owned()], "/usr/bin"),
+        Err(SandboxError::OutsideCheckout {
+            path: fixture.outside(),
+            checkout: fixture.checkout(),
+        })
+    );
+}
+
+#[test]
+fn an_apps_own_directory_that_is_a_symbolic_link_is_refused_and_its_target_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    let dirs = AppDirs::of(&fixture.state(), &workspace(), &app("api"));
+    std::fs::create_dir_all(&dirs.base).unwrap();
+    std::fs::create_dir_all(fixture.outside()).unwrap();
+    std::fs::set_permissions(fixture.outside(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(fixture.outside(), &dirs.state).unwrap();
+
+    let result = dirs.create();
+
+    assert!(
+        matches!(&result, Err(SandboxError::Unusable { path, .. }) if *path == dirs.state),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(fixture.outside())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[test]
+fn the_launchers_check_creates_nothing_through_a_symbolic_link_planted_above_a_write_directory() {
+    let fixture = Fixture::new();
+    let spec = writing(&fixture, &["cache/inner".to_owned()], "/usr/bin").unwrap();
+    std::fs::create_dir_all(fixture.outside()).unwrap();
+    std::os::unix::fs::symlink(fixture.outside(), fixture.checkout().join("cache")).unwrap();
+
+    let result = verify(&spec);
+
+    assert!(
+        matches!(&result, Err(SandboxError::Unusable { path, .. }) if *path == fixture.checkout().join("cache/inner")),
+        "{result:?}"
+    );
+    assert!(!fixture.outside().join("inner").exists());
+}
+
+#[test]
+fn the_launchers_check_refuses_a_checkout_that_a_symbolic_link_moved_elsewhere() {
+    let fixture = Fixture::new();
+    let spec = writing(&fixture, &[], "/usr/bin").unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test moves the checkout as an app could"
+    )]
+    std::fs::rename(fixture.checkout(), fixture.outside()).unwrap();
+    std::os::unix::fs::symlink(fixture.outside(), fixture.checkout()).unwrap();
+
+    assert_eq!(
+        verify(&spec),
+        Err(SandboxError::Moved {
+            path: fixture.checkout(),
+            now: fixture.outside(),
+        })
+    );
 }
 
 #[test]
@@ -1211,9 +1314,7 @@ mod seatbelt {
             .env("PATH", &path)
             .env("HOME", &home)
             .env("TMPDIR", &spec.tmp)
-            .env("CARGO_HOME", spec.tmp.join("cargo"))
             .env("CARGO_TARGET_DIR", fixture.checkout().join("target"))
-            .env("RUSTUP_TOOLCHAIN", "1.99.1")
             .current_dir(fixture.checkout())
             .stdin(Stdio::null());
         #[expect(
@@ -1298,7 +1399,13 @@ mod seatbelt {
             .unwrap();
         }
 
-        let (output, code) = with_real_toolchains(&fixture, "cargo build --offline");
+        // cargo runs with the user's own `~/.cargo`, which the sandbox lets
+        // it read and never write, so a sandboxed app cannot poison the
+        // registry cache that unsandboxed builds use.
+        let (output, code) = with_real_toolchains(
+            &fixture,
+            r#"cargo build && if touch "$HOME/.cargo/registry/phase-sandbox-probe" 2>/dev/null; then echo registry=writable; exit 1; fi"#,
+        );
 
         assert_eq!(code, 0, "{output}");
     }

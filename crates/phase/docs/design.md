@@ -1044,14 +1044,22 @@ The sandbox allows (decision P18):
 - writing the app's state directory `<phase state>/apps/<workspace
   id>/<app>/state`, which `$STATE` names, its temporary directory `.../tmp`,
   which becomes the app's `TMPDIR`, and the paths of `write`. phase sets
-  both directories to mode 0700 at each launch. Each entry of `write` is an
-  absolute path without `..` or a path inside the checkout. No entry may
-  lie inside another, and no two apps of a plan may write overlapping
-  paths, so one app cannot plant a symbolic link in another's directory.
-  That also refuses two apps of one checkout that both write `target`.
-  phase refuses a write path inside a sticky, group-writable or
-  world-writable directory, such as `/tmp`. The launcher creates a missing
-  write directory with mode 0700 before it checks the spec. The
+  both directories to mode 0700 at each launch, and refuses either when a
+  name of its path is a symbolic link. Each entry of `write` is `$STATE`
+  or a path inside the checkout, relative or absolute without `..`, and it
+  must still resolve inside the checkout once its symbolic links are
+  resolved. phase cannot yet compare the writes of apps in different
+  workspaces, which would need it to read every workspace's run record, so
+  the first stage refuses an absolute write path outside the checkout.
+  That limit is lifted once phase can compare writes across run records.
+  No entry may lie inside another, and no two apps of a plan may write
+  overlapping paths once their symbolic links are resolved, so one app
+  cannot plant a symbolic link in another's directory. That also refuses
+  two apps of one checkout that both write `target`. phase refuses a write
+  path inside a sticky, group-writable or world-writable directory, such
+  as `/tmp`. The launcher creates a missing write directory with mode 0700
+  before it checks the spec, one name at a time without following a
+  symbolic link, so nothing is created through a link. The
   directories carry the workspace's id because app names are unique only
   within a workspace;
 - listening on the loopback ports that `listen` names, and connecting over
@@ -1069,9 +1077,11 @@ read nor write:
 - `/Library/Keychains` on macOS;
 - the per-user temporary directory that holds the agent's socket: all of
   `/private/var/folders` on macOS, and `/run/user/<uid>` on Linux;
-- phase's state directory, apart from the app's own directories;
+- phase's state directory, apart from the app's own `state` and `tmp`
+  directories. Their parent stays denied, so the app cannot replace either
+  with a symbolic link;
 - the paths that the host program protects, apart from the app's own
-  directories when they lie inside one. mxv protects its state directory,
+  `state` and `tmp` directories when they lie inside one. mxv protects its state directory,
   which holds the workspace records and phase's state, and its mirrors;
 - the workspace's own directory outside the app's checkout, which holds
   every other checkout, and the workspace's manifest and `AGENTS.md`, which
@@ -1109,7 +1119,14 @@ keeper's environment with `ps -E`. Other macOS tests check that `cargo
 build` of a crate whose build script runs `cc` through xcrun, `xcrun
 --show-sdk-path`, `python3` and `node` still run under the sandbox where
 they exist. xcrun warns that it cannot write its cache in the per-user
-temporary directory, and succeeds.
+temporary directory, and succeeds. The sandboxed cargo uses the user's own `~/.cargo`,
+which the sandbox lets it read and never write, so an app cannot poison
+the registry cache that unsandboxed builds share. cargo builds when the
+lock file and the crates it needs are already in that cache: a manual run
+with a registry dependency built, with or without `--offline`. A
+sandboxed app cannot download a crate, because its network is loopback
+only, and it cannot write the cache. An app that must fetch crates needs
+the proxy of the second stage and its own `CARGO_HOME` under `$STATE`.
 
 The plan refuses a `connect` that names an external host, with an error
 that says the proxy is not built yet, a `connect` that names an app the
@@ -1127,13 +1144,14 @@ can read the profile that nono writes. A unit test, which runs on the
 Linux pull-request lane too, checks that each of phase's network rules
 starts with that prefix. A macOS test runs a sandboxed process that may
 listen on one loopback port and connect to one, and checks that it is
-refused another port, a bind of its own port on every address, and its
-dependency's port on another host. A nono release that changed the order
+refused another port for each and its dependency's port on another
+host. A nono release that changed the order
 would fail the macOS test, and the exact pin means only a pull request
 that moves the pin can bring one in.
 
-On macOS the sandbox is partial too, and `status` shows it as `seatbelt
-(partial: a listening port accepts connections on every address)`.
+On macOS the sandbox is partial, and `status` shows it as `seatbelt
+(partial: its listening ports accept connections from other machines on
+the network)`.
 Seatbelt restricts a bind by port and never by address, and its
 `localhost` matches every address of the machine. An inbound rule that
 also names the remote side refuses the `listen` itself, because `listen`
@@ -1382,6 +1400,6 @@ Each decision states what this draft assumes until it is decided.
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v4, since v3 records readiness), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
-| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets a listening port accept connections on every address, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
+| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the refusal of an app that runs at the workspace's top, and the launcher's second check. |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |

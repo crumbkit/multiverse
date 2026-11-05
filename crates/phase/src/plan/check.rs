@@ -154,6 +154,11 @@ pub enum PermissionProblem {
     /// backslash or a control character, which the sandbox's profile cannot
     /// hold.
     BadWrite(String),
+    /// An entry of `write` is an absolute path outside the app's checkout.
+    /// phase cannot yet compare the writes of apps in different
+    /// workspaces, so the first stage of the sandbox allows writes only
+    /// inside the checkout and `$STATE`.
+    WriteOutsideCheckout(String),
     /// An entry of `write` overlaps a path that another app of the plan may
     /// write, so one app could replace a name in the other's directory.
     #[non_exhaustive]
@@ -192,6 +197,10 @@ impl fmt::Display for PermissionProblem {
             Self::BadWrite(path) => write!(
                 formatter,
                 "it may write {path:?}, which is neither $STATE, an absolute path without `..`, nor a path inside its checkout that a sandbox profile can hold"
+            ),
+            Self::WriteOutsideCheckout(path) => write!(
+                formatter,
+                "it may write {path:?}, which lies outside its checkout, and a sandboxed app may write only inside its checkout and $STATE until phase can compare the writes of other workspaces"
             ),
             Self::SharedWrite { path, other } => write!(
                 formatter,
@@ -610,7 +619,9 @@ fn check_shared_writes(apps: &[AppPlan]) -> Result<(), PlanError> {
 }
 
 /// Returns each entry of the `write` of `app` apart from `$STATE`, with
-/// the path it names: a relative entry joined to the app's checkout.
+/// the path it names: a relative entry joined to the app's checkout, with
+/// its symbolic links resolved, so two names of one directory compare
+/// equal.
 fn write_paths(app: &AppPlan) -> Vec<(&String, PathBuf)> {
     let checkout = match &app.source {
         Source::Checkout { dir, .. } => dir.clone(),
@@ -620,7 +631,10 @@ fn write_paths(app: &AppPlan) -> Vec<(&String, PathBuf)> {
         .iter()
         .flat_map(|permissions| &permissions.write)
         .filter(|entry| entry.as_str() != STATE)
-        .map(|entry| (entry, checkout.join(entry).components().collect()))
+        .map(|entry| {
+            let path: PathBuf = checkout.join(entry).components().collect();
+            (entry, crate::sandbox::canonical(&path))
+        })
         .collect()
 }
 
@@ -663,6 +677,19 @@ fn check_permissions(
     }
     if let Some(path) = permissions.write.iter().find(|path| !is_writable(path)) {
         return Err(PermissionProblem::BadWrite(path.clone()));
+    }
+    let checkout = match &app.source {
+        Source::Checkout { dir, .. } => Some(dir.components().collect::<PathBuf>()),
+        _ => None,
+    };
+    if let Some(path) = permissions.write.iter().find(|path| {
+        let path = Path::new(path);
+        path.is_absolute()
+            && checkout.as_ref().is_none_or(|checkout| {
+                !path.components().collect::<PathBuf>().starts_with(checkout)
+            })
+    }) {
+        return Err(PermissionProblem::WriteOutsideCheckout(path.clone()));
     }
     // A relative entry is inside the checkout, so it is compared as the
     // checkout's path joined with it. `$STATE` lies outside every other

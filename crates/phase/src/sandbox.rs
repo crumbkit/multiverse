@@ -125,7 +125,8 @@ impl fmt::Display for Sandboxing {
 /// and never by address, and its `localhost` matches every address of the
 /// machine, so a process that may listen on a port can listen on it on
 /// every address and accept a peer on any of them.
-pub const SEATBELT_PARTIAL: &str = "a listening port accepts connections on every address";
+pub const SEATBELT_PARTIAL: &str =
+    "its listening ports accept connections from other machines on the network";
 
 /// Why Linux reports a process under Landlock as unsandboxed (Luke's
 /// choice, 5 November 2026). Before its ABI 9 Landlock cannot restrict
@@ -289,6 +290,16 @@ pub(crate) enum SandboxError {
         /// The shared directory.
         dir: PathBuf,
     },
+    /// A writable path resolves outside the app's checkout and its own
+    /// directories, for example through a symbolic link in the checkout.
+    /// Writes of two workspaces cannot be compared yet, so the first stage
+    /// allows no write elsewhere.
+    OutsideCheckout {
+        /// The writable path.
+        path: PathBuf,
+        /// The app's checkout.
+        checkout: PathBuf,
+    },
     /// A path that the sandbox needs cannot be read or created.
     Unusable {
         /// The path.
@@ -338,6 +349,12 @@ impl fmt::Display for SandboxError {
                 path.display(),
                 dir.display()
             ),
+            Self::OutsideCheckout { path, checkout } => write!(
+                formatter,
+                "the sandbox would let the app write {}, which lies outside its checkout {} and its own state and temporary directories",
+                path.display(),
+                checkout.display()
+            ),
             Self::Unusable { path, reason } => write!(
                 formatter,
                 "the sandbox needs {}, which phase cannot use: {reason}",
@@ -358,16 +375,16 @@ impl fmt::Display for SandboxError {
 
 impl std::error::Error for SandboxError {}
 
-/// A path that the sandbox always denies, apart from one directory inside
+/// A path that the sandbox always denies, apart from the directories inside
 /// it that the app may use.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Protected {
     /// The path, canonical.
     path: PathBuf,
-    /// The directory inside it that the app may use, or `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    except: Option<PathBuf>,
+    /// The directories inside it that the app may use, canonical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    except: Vec<PathBuf>,
 }
 
 impl Protected {
@@ -375,28 +392,25 @@ impl Protected {
     pub(crate) fn path(path: &Path) -> Self {
         Self {
             path: canonical(path),
-            except: None,
+            except: Vec::new(),
         }
     }
 
-    /// Returns the protection of `path` apart from `except`.
-    fn except(path: &Path, except: &Path) -> Self {
+    /// Returns the protection of `path` apart from each of `except`.
+    fn except(path: &Path, except: &[&Path]) -> Self {
         Self {
             path: canonical(path),
-            except: Some(canonical(except)),
+            except: except.iter().map(|path| canonical(path)).collect(),
         }
     }
 
     /// Reports whether allowing `allowed`, a canonical path, would reach
     /// the protected path: it covers the protected path, or lies inside it
-    /// and outside its exception.
+    /// and outside its exceptions.
     fn reached_by(&self, allowed: &Path) -> bool {
         let covers = self.path.starts_with(allowed);
         let inside = allowed.starts_with(&self.path)
-            && self
-                .except
-                .as_ref()
-                .is_none_or(|except| !allowed.starts_with(except));
+            && !self.except.iter().any(|except| allowed.starts_with(except));
         covers || inside
     }
 }
@@ -474,9 +488,11 @@ pub(crate) struct AppDirs {
 
 impl AppDirs {
     /// Returns the directories of `app` in `workspace` under `state_dir`:
-    /// `apps/<workspace>/<app>/state` and `.../tmp`.
+    /// `apps/<workspace>/<app>/state` and `.../tmp`. `state_dir` is
+    /// resolved, so no name of the paths below it is a symbolic link that
+    /// phase made.
     pub(crate) fn of(state_dir: &Path, workspace: &WorkspaceId, app: &AppName) -> Self {
-        let base = state_dir
+        let base = canonical(state_dir)
             .join("apps")
             .join(workspace.to_string())
             .join(app.as_str());
@@ -488,21 +504,18 @@ impl AppDirs {
     }
 
     /// Creates both directories and sets them readable only by the user,
-    /// also when they exist already.
-    fn create(&self) -> Result<(), SandboxError> {
-        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    /// also when they exist already. It refuses a directory when any name
+    /// of its path is a symbolic link, and never changes the mode of a
+    /// link's target.
+    pub(crate) fn create(&self) -> Result<(), SandboxError> {
         for dir in [&self.state, &self.tmp] {
             let unusable = |error: std::io::Error| SandboxError::Unusable {
                 path: dir.clone(),
                 reason: error.to_string(),
             };
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(unusable)?;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(unusable)?;
+            let opened = create_dir_nofollow(dir).map_err(unusable)?;
+            rustix::fs::fchmod(&opened, rustix::fs::Mode::from_raw_mode(0o700))
+                .map_err(|errno| unusable(errno.into()))?;
         }
         Ok(())
     }
@@ -687,9 +700,11 @@ pub(crate) fn spec(
     }
     let dirs = AppDirs::of(context.state_dir, context.workspace, &app.name);
     let mut protected = always_protected(context.home);
-    // The app's own directories lie inside phase's state directory, which
-    // is protected apart from them.
-    protected.push(Protected::except(context.state_dir, &dirs.base));
+    // The app's own state and tmp directories lie inside phase's state
+    // directory, which is protected apart from them. Their parent stays
+    // protected, so the app cannot replace either with a symbolic link.
+    let own: [&Path; 2] = [&dirs.state, &dirs.tmp];
+    protected.push(Protected::except(context.state_dir, &own));
     // The host program may protect a directory that holds phase's state,
     // as mxv protects its state directory, so its protection also leaves
     // out the app's own directories.
@@ -698,10 +713,10 @@ pub(crate) fn spec(
             .protected
             .iter()
             .chain(&context.workspace_paths.protected)
-            .map(|path| Protected::except(path, &dirs.base)),
+            .map(|path| Protected::except(path, &own)),
     );
     if let Some(workspace) = &workspace_dir {
-        protected.push(Protected::except(workspace, &checkout));
+        protected.push(Protected::except(workspace, &[&checkout]));
     }
     let reaches = |path: &Path| protected.iter().any(|found| found.reached_by(path));
     let mut write: BTreeSet<PathBuf> = [canonical(&dirs.state), canonical(&dirs.tmp)].into();
@@ -782,6 +797,17 @@ pub(crate) fn spec(
             });
         }
     }
+    let own = [canonical(&dirs.state), canonical(&dirs.tmp)];
+    if let Some(path) = spec
+        .write
+        .iter()
+        .find(|path| !path.starts_with(&checkout) && !own.contains(path))
+    {
+        return Err(SandboxError::OutsideCheckout {
+            path: path.clone(),
+            checkout: checkout.clone(),
+        });
+    }
     for path in spec
         .read
         .iter()
@@ -842,19 +868,14 @@ pub(crate) fn check(spec: &SandboxSpec) -> Result<(), SandboxError> {
 /// errors of [`check`], and [`SandboxError::Unusable`] for a directory that
 /// cannot be created.
 pub(crate) fn verify(spec: &SandboxSpec) -> Result<(), SandboxError> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    // The directories are created first, so a symbolic link that the app
-    // planted where one was missing shows as a moved path below, and no
-    // directory appears after the check.
+    // The directories are created first, so no directory appears after the
+    // check. Each name is created and opened without following a symbolic
+    // link, so nothing is created through a link that the app planted.
     for path in &spec.write {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)
-            .map_err(|error| SandboxError::Unusable {
-                path: path.clone(),
-                reason: error.to_string(),
-            })?;
+        create_dir_nofollow(path).map_err(|error| SandboxError::Unusable {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
     }
     for path in spec.read.iter().chain(&spec.write) {
         let now = canonical(path);
@@ -875,6 +896,44 @@ pub(crate) fn verify(spec: &SandboxSpec) -> Result<(), SandboxError> {
         }
     }
     Ok(())
+}
+
+/// Creates the absolute directory `path` and each missing directory above
+/// it with mode 0700, and returns it opened. Each name is opened with
+/// `O_NOFOLLOW` and created with `mkdirat`, so a symbolic link anywhere in
+/// the path is refused and nothing is created through one.
+fn create_dir_nofollow(path: &Path) -> std::io::Result<rustix::fd::OwnedFd> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    use rustix::io::Errno;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut names = path.components();
+    if names.next() != Some(std::path::Component::RootDir) {
+        return Err(std::io::Error::other("the path is not absolute"));
+    }
+    let mut dir = rustix::fs::openat(CWD, "/", flags, Mode::empty())?;
+    for name in names {
+        let std::path::Component::Normal(name) = name else {
+            return Err(std::io::Error::other("the path is not canonical"));
+        };
+        let opened = match rustix::fs::openat(&dir, name, flags, Mode::empty()) {
+            Err(Errno::NOENT) => {
+                match rustix::fs::mkdirat(&dir, name, Mode::from_raw_mode(0o700)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(errno) => return Err(errno.into()),
+                }
+                rustix::fs::openat(&dir, name, flags, Mode::empty())
+            }
+            other => other,
+        };
+        dir = opened.map_err(|errno| match errno {
+            Errno::LOOP | Errno::NOTDIR => std::io::Error::other(format!(
+                "{} is a symbolic link or not a directory",
+                Path::new(name).display()
+            )),
+            errno => errno.into(),
+        })?;
+    }
+    Ok(dir)
 }
 
 /// Returns the first directory from the root down to `path` that is
