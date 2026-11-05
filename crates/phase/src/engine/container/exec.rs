@@ -39,6 +39,38 @@ pub(crate) struct ContainerExec<'a> {
     pub(crate) docker_environment: Option<&'a BTreeMap<String, String>>,
 }
 
+/// The `docker exec` of one command, and the container it runs in, which
+/// the caller inspects again when the command's status may be docker's.
+pub(crate) struct ContainerCommand {
+    /// The `docker exec` command, which has not started.
+    pub(crate) command: Command,
+    /// The container, as the inspection before the command found it.
+    pub(crate) container: Recheck,
+}
+
+/// A container that `exec` inspected, which it can inspect again.
+pub(crate) struct Recheck {
+    /// The app's scope.
+    scope: Scope,
+    /// The container's service.
+    service: names::ServiceName,
+    /// The container's id.
+    id: names::ContainerId,
+}
+
+impl Recheck {
+    /// Reports whether docker still has the container and it runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::Docker`] when the inspection fails.
+    pub(crate) fn runs(&self) -> Result<bool, PhaseError> {
+        let inspected = inspect_id(&self.scope, &self.service, &self.id)
+            .map_err(|error| docker_error(&error))?;
+        Ok(inspected.is_some_and(|inspected| inspected.state == ContainerState::Running))
+    }
+}
+
 /// Returns the `docker exec --interactive` command that runs `exec.run` in
 /// the container that the run record names for the process, after it
 /// inspects the container with the app's scope. The command does not start
@@ -50,7 +82,7 @@ pub(crate) struct ContainerExec<'a> {
 /// container of the process, when docker no longer has it, or when it is
 /// not running, and [`PhaseError::Docker`] when the inspection fails, such
 /// as for a container whose labels name another workspace or app.
-pub(crate) fn exec_command(exec: &ContainerExec<'_>) -> Result<Command, PhaseError> {
+pub(crate) fn exec_command(exec: &ContainerExec<'_>) -> Result<ContainerCommand, PhaseError> {
     let not_running = || PhaseError::NotRunning {
         app: exec.app.clone(),
         process: exec.process.clone(),
@@ -103,7 +135,14 @@ pub(crate) fn exec_command(exec: &ContainerExec<'_>) -> Result<Command, PhaseErr
         exec.run,
         exec.terminal,
     ));
-    Ok(command)
+    Ok(ContainerCommand {
+        command,
+        container: Recheck {
+            scope,
+            service,
+            id: docker_id,
+        },
+    })
 }
 
 /// Returns the arguments of `docker` that run `run` in the container `id`,

@@ -161,6 +161,17 @@ pub enum PhaseError {
         /// Why, which holds no environment value.
         reason: String,
     },
+    /// `exec` refused a sandboxed host command whose caller's standard
+    /// input is a terminal. A sandboxed command runs in a session of its
+    /// own with no controlling terminal, so that it cannot push input into
+    /// the caller's shell, and phase does not relay a terminal to it yet.
+    #[non_exhaustive]
+    ExecNeedsTerminal {
+        /// The app.
+        app: AppName,
+        /// The process whose context the command would run in.
+        process: ProcessName,
+    },
     /// phase tried to record a change to an object that the run record does
     /// not name, which is a fault in phase.
     #[non_exhaustive]
@@ -197,6 +208,7 @@ impl PhaseError {
             Self::UnknownTarget { .. } => "phase::select::unknown",
             Self::NotRunning { .. } => "phase::exec::not_running",
             Self::ExecUnstartable { .. } => "phase::exec::unstartable",
+            Self::ExecNeedsTerminal { .. } => "phase::exec::sandboxed_terminal",
             Self::Unplanned { .. } => "phase::record::unplanned",
         }
     }
@@ -361,6 +373,10 @@ impl fmt::Display for PhaseError {
                 formatter,
                 "the command in the context of {app}/{process} could not start: {reason}"
             ),
+            Self::ExecNeedsTerminal { app, process } => write!(
+                formatter,
+                "{app}/{process} runs under the sandbox, and a sandboxed command cannot have the terminal yet; run it without a terminal on standard input, since a relay of the terminal is not built yet"
+            ),
             Self::Unplanned { workspace, object } => write!(
                 formatter,
                 "the run record of the workspace {workspace} does not name {object}"
@@ -389,6 +405,7 @@ impl std::error::Error for PhaseError {
             | Self::UnknownTarget { .. }
             | Self::NotRunning { .. }
             | Self::ExecUnstartable { .. }
+            | Self::ExecNeedsTerminal { .. }
             | Self::Unplanned { .. } => None,
         }
     }

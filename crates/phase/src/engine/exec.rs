@@ -85,26 +85,45 @@ impl ExecRequest {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExecIo {
-    /// The command shares the caller's standard input, output and error,
-    /// and runs in the caller's process group. When the caller runs in the
-    /// foreground of a terminal, the command does too, so the terminal
-    /// sends Ctrl-C and Ctrl-Z to both. A container's `docker exec`
-    /// passes them on.
+    /// The command shares the caller's standard input, output and error.
     ///
-    /// The caller should catch `SIGINT` while the command runs, rather than
-    /// ignore it, because a command inherits an ignored signal, and should
-    /// not set the `exec`'s cancel flag from that handler, because the
-    /// command has received the Ctrl-C itself and decides what it means.
+    /// An unsandboxed host command, and the `docker exec` of a container
+    /// command, run in the caller's process group. When the caller runs in
+    /// the foreground of a terminal, they do too, so the terminal sends
+    /// Ctrl-C and Ctrl-Z to the caller and the command alike. A container's
+    /// `docker exec` passes them on. The caller should then catch `SIGINT`
+    /// rather than ignore it, because a command inherits an ignored
+    /// signal, and should not set the cancel flag from that handler,
+    /// because the command has received the Ctrl-C itself. A cancel stops
+    /// only the command's own process, so processes that it started may
+    /// survive it.
+    ///
+    /// A sandboxed host command runs in a session of its own, which its
+    /// launcher starts before it applies the sandbox, so the command has no
+    /// controlling terminal and cannot push input into the caller's shell.
+    /// The terminal's Ctrl-C then reaches only the caller, so the caller
+    /// should set the cancel flag on `SIGINT`, and `exec` ends the
+    /// command's whole process group. [`Phase::exec_sandboxed`] tells the
+    /// caller which case applies. `exec` refuses a sandboxed host command
+    /// whose caller's standard input is a terminal, with
+    /// [`PhaseError::ExecNeedsTerminal`], because such a command would run
+    /// without the terminal it expects.
+    ///
+    /// A command that the cancel flag kills may leave the terminal in the
+    /// raw mode that it set, which the caller can reset.
+    ///
+    /// [`Phase::exec_sandboxed`]: crate::Phase::exec_sandboxed
     Inherit {
         /// Whether the caller's standard input is a terminal. A container
         /// command then runs with a terminal of its own, through `docker
-        /// exec --tty`. The host program knows this, and phase reads no
-        /// standard stream.
+        /// exec --tty`, and a sandboxed host command is refused. The host
+        /// program knows this, and phase reads no standard stream.
         terminal: bool,
     },
     /// The command reads and writes these streams, such as
     /// [`Stdio::null`] or a file, and runs in a process group of its own,
-    /// which no terminal signals.
+    /// which no terminal signals. A cancel ends the whole group. A
+    /// sandboxed host command's group leads a session of its own.
     Streams {
         /// The command's standard input.
         stdin: Stdio,
@@ -113,6 +132,20 @@ pub enum ExecIo {
         /// The command's standard error.
         stderr: Stdio,
     },
+}
+
+/// Where the command that [`run`] starts stands towards the caller's
+/// session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Session {
+    /// The command runs where its streams put it: in the caller's process
+    /// group with [`ExecIo::Inherit`], and in a group of its own with
+    /// [`ExecIo::Streams`].
+    Caller,
+    /// The command starts a session of its own, as the sandbox's launcher
+    /// does, so it leads its own process group and has no controlling
+    /// terminal.
+    Own,
 }
 
 /// What `exec` needs besides its request: the settings that a keeper's
@@ -147,34 +180,97 @@ pub(crate) fn exec(
     if request.run.is_empty() {
         return Err(unstartable(app, process, "the command is empty".to_owned()));
     }
+    if is_sandboxed(app) && matches!(request.io, ExecIo::Inherit { terminal: true }) {
+        return Err(PhaseError::ExecNeedsTerminal {
+            app: app.name.clone(),
+            process: process.name.clone(),
+        });
+    }
     // The lock is taken and released at once, so `exec` runs after an
     // operation in progress and blocks none while its command runs.
     drop(
         RunStore::new(exec.settings.state_dir)
             .lock(plan.id(), deadline.saturating_duration_since(now()))?,
     );
-    let command = match app.runner {
-        RunnerKind::Host => host_command(
-            &exec.settings,
-            plan,
-            app,
-            process,
-            &request.run,
-            env,
-            deadline,
-        )?,
-        RunnerKind::Container => exec_command(&ContainerExec {
-            state_dir: exec.settings.state_dir,
-            workspace: plan.id(),
-            app: &app.name,
-            process: &process.name,
-            run: &request.run,
-            terminal: matches!(request.io, ExecIo::Inherit { terminal: true }),
-            docker_environment: exec.docker_environment,
-        })?,
-    };
-    run(command, request.io, cancel, exec.settings.kill_wait)
-        .map_err(|error| unstartable(app, process, error.to_string()))
+    let failed = |error: io::Error| unstartable(app, process, error.to_string());
+    match app.runner {
+        RunnerKind::Host => {
+            let (command, session) = host_command(
+                &exec.settings,
+                plan,
+                app,
+                process,
+                &request.run,
+                env,
+                deadline,
+            )?;
+            run(
+                command,
+                session,
+                request.io,
+                cancel,
+                exec.settings.kill_wait,
+            )
+            .map_err(failed)
+        }
+        RunnerKind::Container => {
+            let prepared = exec_command(&ContainerExec {
+                state_dir: exec.settings.state_dir,
+                workspace: plan.id(),
+                app: &app.name,
+                process: &process.name,
+                run: &request.run,
+                terminal: matches!(request.io, ExecIo::Inherit { terminal: true }),
+                docker_environment: exec.docker_environment,
+            })?;
+            let status = run(
+                prepared.command,
+                Session::Caller,
+                request.io,
+                cancel,
+                exec.settings.kill_wait,
+            )
+            .map_err(failed)?;
+            // docker exits 125 when it fails itself, and 126 or 127 when it
+            // cannot run the command, which it also does when the
+            // container stopped or went since the inspection.
+            if matches!(status.code(), Some(125..=127)) && !prepared.container.runs()? {
+                return Err(PhaseError::NotRunning {
+                    app: app.name.clone(),
+                    process: process.name.clone(),
+                });
+            }
+            Ok(status)
+        }
+    }
+}
+
+/// Reports whether `exec` runs a command in the context of `process` of
+/// `app` in `plan` under the sandbox, in a session of its own.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::UnknownTarget`] when the plan lacks the app or the
+/// process.
+pub(crate) fn sandboxed(
+    plan: &Plan,
+    app: &AppName,
+    process: &ProcessName,
+) -> Result<bool, PhaseError> {
+    let (app, _) = target(plan, app, process)?;
+    Ok(is_sandboxed(app))
+}
+
+/// Reports whether the processes of `app` run under the sandbox: it is a
+/// host app that declares permissions, on a machine that offers a sandbox.
+/// [`process_sandbox`] builds a sandbox for exactly these.
+fn is_sandboxed(app: &AppPlan) -> bool {
+    app.runner == RunnerKind::Host
+        && app.permissions.is_some()
+        && matches!(
+            crate::sandbox::platform(),
+            crate::sandbox::Platform::Available(_)
+        )
 }
 
 /// Returns the app and the process that `app` and `process` name in
@@ -211,8 +307,8 @@ fn unstartable(app: &AppPlan, process: &ProcessPlan, reason: String) -> PhaseErr
 /// `PATH` and `HOME` and the process's environment, which it resolves
 /// through `env` before `deadline` and checks as a start does. When the
 /// app is sandboxed, the command is the launcher of the process's own
-/// sandbox, which receives the sandbox's `TMPDIR`. The command does not
-/// start here.
+/// sandbox, which receives the sandbox's `TMPDIR`, and which starts a
+/// session of its own. The command does not start here.
 ///
 /// # Errors
 ///
@@ -229,7 +325,7 @@ pub(crate) fn host_command(
     run: &[String],
     env: &dyn EnvironmentSource,
     deadline: Instant,
-) -> Result<Command, PhaseError> {
+) -> Result<(Command, Session), PhaseError> {
     let refuse = |reason| PhaseError::NotRunnable {
         app: app.name.clone(),
         reason,
@@ -254,12 +350,7 @@ pub(crate) fn host_command(
         // Without a keeper program there is no launcher, so an app that
         // needs the sandbox cannot run, and phase refuses it rather than
         // run it unsandboxed.
-        None if app.permissions.is_some()
-            && matches!(
-                crate::sandbox::platform(),
-                crate::sandbox::Platform::Available(_)
-            ) =>
-        {
+        None if is_sandboxed(app) => {
             return Err(unstartable(
                 app,
                 process,
@@ -295,10 +386,14 @@ pub(crate) fn host_command(
         .env_clear()
         .envs(settings.inherited);
     environment.apply(&mut command);
-    if let Some(spec) = &sandbox {
-        command.env("TMPDIR", &spec.tmp);
-    }
-    Ok(command)
+    let session = match &sandbox {
+        Some(spec) => {
+            command.env("TMPDIR", &spec.tmp);
+            Session::Own
+        }
+        None => Session::Caller,
+    };
+    Ok((command, session))
 }
 
 /// Returns the sandbox of `process` of `app`, as its keeper builds it, or
@@ -328,11 +423,14 @@ fn sandbox(
 /// Starts `command` with `io` as its streams, waits for it to end, and
 /// returns its exit status: its code, or the signal that ended it.
 ///
-/// With [`ExecIo::Inherit`] the command runs in the caller's process
-/// group, and with [`ExecIo::Streams`] in a group of its own. When `cancel`
-/// is set, `run` sends the command `TERM`, or its group `TERM` when it has
-/// one, waits up to `kill_wait`, then sends `KILL` the same way, and
-/// returns the status that the signal gave.
+/// A command whose `session` is [`Session::Own`] leads its own process
+/// group once it has started its session. Otherwise the command runs in the
+/// caller's process group with [`ExecIo::Inherit`], and in a group of its
+/// own with [`ExecIo::Streams`]. When `cancel` is set, `run` sends `TERM`
+/// to the command's group when it has one of its own, and to the command,
+/// waits up to `kill_wait`, then sends `KILL` the same way, and returns the
+/// status that the signal gave. A command in the caller's group receives
+/// the signals alone, so processes that it started may survive it.
 ///
 /// # Errors
 ///
@@ -340,22 +438,24 @@ fn sandbox(
 /// not exist, or of waiting for it.
 pub(crate) fn run(
     mut command: Command,
+    session: Session,
     io: ExecIo,
     cancel: &Cancel,
     kill_wait: Duration,
 ) -> io::Result<ExitStatus> {
     let own_group = match io {
-        ExecIo::Inherit { .. } => false,
+        ExecIo::Inherit { .. } => session == Session::Own,
         ExecIo::Streams {
             stdin,
             stdout,
             stderr,
         } => {
-            command
-                .stdin(stdin)
-                .stdout(stdout)
-                .stderr(stderr)
-                .process_group(0);
+            command.stdin(stdin).stdout(stdout).stderr(stderr);
+            // A process that leads its group cannot start a session, so a
+            // command that starts its own stays out of a group here.
+            if session == Session::Caller {
+                command.process_group(0);
+            }
             true
         }
     };
@@ -375,12 +475,13 @@ pub(crate) fn run(
     let signal = |signal: Signal| {
         if let Some(pid) = pid {
             // The command may have ended meanwhile, which the next wait
-            // reports.
-            let _ = if own_group {
-                rustix::process::kill_process_group(pid, signal)
-            } else {
-                rustix::process::kill_process(pid, signal)
-            };
+            // reports. A command that starts its own session may not have
+            // started it yet, so the command itself receives the signal
+            // too.
+            if own_group {
+                let _ = rustix::process::kill_process_group(pid, signal);
+            }
+            let _ = rustix::process::kill_process(pid, signal);
         }
     };
     let mut killed_at: Option<Instant> = None;

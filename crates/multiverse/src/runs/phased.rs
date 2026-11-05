@@ -1340,6 +1340,7 @@ fn phase_code(code: &str) -> &'static str {
         "phase::select::unknown",
         "phase::exec::not_running",
         "phase::exec::unstartable",
+        "phase::exec::sandboxed_terminal",
         "phase::record::unplanned",
     ];
     CODES

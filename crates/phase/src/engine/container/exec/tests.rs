@@ -302,3 +302,56 @@ fn exec_into_a_container_whose_labels_name_another_workspace_is_refused() {
     assert!(docker(&["exec", "--", foreign, "test", "-e", "/ran"]).is_none());
     let _ = docker(&["rm", "--force", "--", foreign]);
 }
+
+#[test]
+fn a_status_that_docker_also_uses_passes_through_while_the_container_runs() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    world.up();
+
+    for code in [125, 126, 127] {
+        let (status, output) = world.exec(&format!("exit {code}"));
+
+        assert_eq!(status.unwrap().code(), Some(code), "{output}");
+    }
+}
+
+#[test]
+fn a_command_that_docker_cannot_find_in_a_running_container_exits_127() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    world.up();
+    let out = world.state.path().join("missing.out");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test gives the command a file of its own for its output"
+    )]
+    let file = File::create(&out).unwrap();
+    let request = ExecRequest::new(
+        "api".parse().unwrap(),
+        "server".parse().unwrap(),
+        vec!["/no/such/program".into()],
+        ExecIo::Streams {
+            stdin: Stdio::null(),
+            stdout: Stdio::from(file.try_clone().unwrap()),
+            stderr: Stdio::from(file),
+        },
+    );
+
+    let status = world
+        .phase
+        .exec(
+            &world.plan,
+            request,
+            &Mode,
+            Instant::now() + Duration::from_secs(30),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(status.code(), Some(127));
+}

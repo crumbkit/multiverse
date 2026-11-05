@@ -986,15 +986,42 @@ container already holds, and phase passes no value on the command line.
 `exec` never starts a container, and a one-off `docker compose run` is out
 of scope.
 
+A sandboxed command runs in a session of its own. The launcher calls
+`setsid` before it applies the sandbox, so the command has no controlling
+terminal. A command whose controlling terminal is the user's could push
+input into the user's shell with `TIOCSTI`, which the shell would run
+outside the sandbox once the command ends, and Seatbelt allows `ioctl` on
+terminal devices. Without a controlling terminal, `TIOCSTI` fails even
+when the command's standard input is the terminal. A keeper's app already
+leads its own process group and cannot start a session, so the launcher
+instead checks that `/dev/tty` cannot be opened, which holds because the
+keeper's own session has no controlling terminal.
+
 A command with `ExecIo::Inherit` shares the host program's standard
-streams and process group, so when the host program runs in the
-foreground of a terminal, the terminal sends Ctrl-C to the command
-directly. The host program catches `SIGINT` while the command runs,
-rather than ignore it, because a command inherits an ignored signal. A
-command with `ExecIo::Streams` reads and writes the streams the host
+streams. An unsandboxed command, and the `docker exec` of a container
+command, also share the host program's process group, so when the host
+program runs in the foreground of a terminal, the terminal sends Ctrl-C to
+the command directly. The host program then catches `SIGINT` rather than
+ignore it, because a command inherits an ignored signal, and leaves the
+cancel flag alone. A cancel reaches only that command's own process, so
+processes it started may survive it. A sandboxed command does not receive
+the terminal's Ctrl-C, so the host program sets the cancel flag on
+`SIGINT`, and phase ends the command's whole process group.
+`Phase::exec_sandboxed` tells the host program which case applies. phase
+refuses a sandboxed command whose host program says its standard input is
+a terminal, with `phase::exec::sandboxed_terminal`, because the command
+would run without the terminal it expects.
+
+A command with `ExecIo::Streams` reads and writes the streams the host
 program gives and runs in a process group of its own. When the caller
-sets the cancel flag, phase sends the command `TERM`, and `KILL` after the
-kill wait.
+sets the cancel flag, phase sends the command's group `TERM`, and `KILL`
+after the kill wait. A command that the cancel kills may leave the
+terminal in raw mode.
+
+`docker exec` exits 125 when it fails itself, 126 when the command cannot
+be run, and 127 when the command is not found. After one of those, phase
+inspects the container again and reports `phase::exec::not_running` when
+the container stopped or went in the meantime, and the status otherwise.
 
 `exec` is not a lifecycle operation. It writes nothing to the run record,
 and starts and stops no app. It takes the workspace's lifecycle lock,
@@ -1003,13 +1030,32 @@ waiting up to its deadline, and releases it at once, so it runs after an
 operation left. It does not hold the lock while the command runs, because
 a held lock, exclusive or shared, would block every `up` and `down` of the
 workspace and every keeper's record of a restart for as long as a test run
-or a shell lasts.
+or a shell lasts. The run record does not name the command, so a host
+command outlives a `down` of its app.
 
 The engine builds the command in the process's context separately from
 running it, and running it knows nothing of apps or terminals. A later
 init step that `up` runs once a process's dependencies are ready can build
 the same command and run it with `ExecIo::Streams` and its output in the
 process's log.
+
+These follow-ups remain:
+
+- A pty relay owned by phase, which gives a sandboxed command a terminal of
+  its own and relays bytes and window size between it and the user's
+  terminal, as `docker exec --tty` does. Until it exists, a sandboxed
+  command cannot have the terminal.
+- A record of the host commands that `exec` started, so that `down` can
+  end them.
+- A refusal of an exec whose plan differs from the plan that the running
+  process started from, so that the command cannot run under a different
+  sandbox than the process. The run record holds the hash of the whole
+  plan, so this needs a hash of the process's own part first.
+- A Seatbelt rule that denies `TIOCSTI` as a second defence, such as
+  `(deny file-ioctl (ioctl-command 2147578994))`. The profile language
+  accepts the filter, and nono writes phase's own rules after its
+  `file-ioctl` allowances, but phase's rules are written for the network
+  only today.
 
 ## Environment and secrets
 
