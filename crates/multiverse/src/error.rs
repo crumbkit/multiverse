@@ -480,12 +480,12 @@ impl From<phase::container::ContainerError> for Error {
             Container::Unavailable { message, .. } => Self::DockerUnavailable { message },
             Container::Failed {
                 operation,
-                container,
+                service,
                 message,
                 ..
             } => Self::DockerFailed {
                 operation,
-                container,
+                container: service,
                 message,
             },
             Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },

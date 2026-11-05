@@ -576,20 +576,13 @@ impl Op<'_, '_> {
             return Ok(Step::Failed(problem));
         }
         let environment = match environment {
-            Some(environment) => environment,
-            None => self
-                .env
-                .resolve(&app.name, &process.name, self.deadlines.ready)
-                .map_err(|source| PhaseError::Environment {
-                    app: app.name.clone(),
-                    source,
-                })?,
-        };
-        crate::env::require(process.required_env(), environment.as_ref()).map_err(|source| {
-            PhaseError::Environment {
-                app: app.name.clone(),
-                source,
-            }
+            Some(environment) => crate::env::require(process.required_env(), environment.as_ref())
+                .map(|()| environment),
+            None => crate::env::resolve_required(self.env, &app.name, process, self.deadlines.ready),
+        }
+        .map_err(|source| PhaseError::Environment {
+            app: app.name.clone(),
+            source,
         })?;
         self.journal.launching(
             &app.name,

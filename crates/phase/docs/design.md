@@ -466,9 +466,9 @@ Docker's text. `PhaseError::Docker` holds a `DockerError` whose
 such as `pull`, `compose up`, `stop`, `rm`, `container inspect`, `logs`
 or `secret write`. The container the command worked on is named in one
 of two ways. `service()` gives its compose service, which is its
-process's name, for a failure of `up`, `down`, `status`, `logs` or a
-secret write. `container_id()` gives its id for a failure of `sweep`,
-which knows a container only by the id that the run record keeps. Its
+process's name, for a failure of `up`, `down` or a secret write.
+`container_id()` gives its id for a failure of `sweep`, which knows a
+container only by the id that the run record keeps. Its
 `foreign()` names the kind and name of an object whose labels do not
 name phase's scope. None of them holds a value of a variable, and the
 error's text is unchanged. An app whose outcome is `errored` because of

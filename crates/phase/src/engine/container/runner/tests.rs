@@ -558,9 +558,9 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
         match &error {
             ContainerError::Failed {
                 operation,
-                container,
+                service,
                 ..
-            } => expected = expected.during(operation, container.as_deref()),
+            } => expected = expected.during(operation, service.as_deref()),
             ContainerError::Cancelled { operation } => expected = expected.during(operation, None),
             ContainerError::Foreign { name, .. } => {
                 expected = expected.about_foreign(DockerKind::Container, name);

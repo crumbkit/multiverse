@@ -639,12 +639,12 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
     match error {
         ContainerError::Failed {
             operation,
-            container,
+            service,
             message,
             cause,
         } if files && message.contains("/bin/sh") => ContainerError::Failed {
             operation,
-            container,
+            service,
             message: format!("{message}; {NO_SHELL_HINT}"),
             cause,
         },

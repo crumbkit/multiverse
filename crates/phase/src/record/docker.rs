@@ -141,8 +141,8 @@ pub struct DockerContext {
     pub operation: Option<&'static str>,
     /// The compose service of the container that the command worked on,
     /// which is the name of its process in the plan, such as `server`, or
-    /// `None`. `up`, `down`, `status`, `logs` and the secret writes name a
-    /// container this way.
+    /// `None`. `up`, `down` and the secret writes name a container this
+    /// way.
     pub service: Option<String>,
     /// The 64-hex-digit id of the container that the command worked on, or
     /// `None`. `sweep`, which knows a container only by the id the run
@@ -221,6 +221,8 @@ pub enum DockerCause {
     Unexpected,
     /// A cause that this version of phase does not know, read from JSON
     /// that a newer phase wrote. phase never gives it to a failure.
+    /// Serializing it again writes `"unknown"`, so the cause's original
+    /// name is not kept.
     #[serde(other)]
     Unknown,
 }
