@@ -913,11 +913,17 @@ fn each_container_error_has_the_cause_of_its_kind() {
             DockerCause::ComposeMissing,
         ),
         (
-            Error::NoAddressPool { message: message() },
+            Error::NoAddressPool {
+                message: message(),
+                docker_line: None,
+            },
             DockerCause::NoAddressPool,
         ),
         (
-            Error::Unavailable { message: message() },
+            Error::Unavailable {
+                message: message(),
+                docker_line: None,
+            },
             DockerCause::DaemonUnavailable,
         ),
         (
@@ -980,6 +986,7 @@ fn a_pull_that_fails_for_another_reason_keeps_its_cause() {
         (
             Error::Unavailable {
                 message: "Cannot connect to the Docker daemon".to_owned(),
+                docker_line: None,
             },
             DockerCause::DaemonUnavailable,
         ),

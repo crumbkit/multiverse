@@ -472,12 +472,74 @@ process's name, for a failure of `up`, `down` or a secret write.
 `container_id()` gives its id for a failure of `sweep`, which knows a
 container only by the id that the run record keeps. Its
 `foreign()` names the kind and name of an object whose labels do not
-name phase's scope. None of them holds a value of a variable, and the
-error's text is unchanged. An app whose outcome is `errored` because of
-a Docker failure carries the same `cause` in the report, and the
-report's JSON leaves `cause` out for any other error. A reader that
-meets a cause it does not know, written by a newer phase, reads it as
-`unknown`.
+name phase's scope. `docker_line()` gives the line that Docker printed
+for its own error, such as `Error response from daemon: ... port is
+already allocated`, apart from phase's sentence around it. All of these
+live in a `DockerContext`, which `context()` returns. None of them holds a
+value of a variable, and the error's text is unchanged.
+
+An app whose outcome is `errored` because of a Docker failure carries the
+same `cause` and `context` in the report. The report's JSON leaves both
+out for any other error, and leaves out each field of `context` that is
+empty:
+
+```json
+{
+  "app": "web",
+  "outcome": "errored",
+  "code": "phase::docker::refused",
+  "message": "Docker refused a request of the run: docker compose up failed for the container server: Error response from daemon: ...",
+  "cause": "refused",
+  "context": {
+    "operation": "compose up",
+    "service": "server",
+    "docker_line": "Error response from daemon: ... port is already allocated"
+  }
+}
+```
+
+A reader that meets a cause it does not know, written by a newer phase,
+reads it as `unknown`, and a reader ignores a field of `context` that it
+does not know.
+
+The Docker line can never hold what a container or an app wrote, because
+a container's output can hold a credential. phase takes it only from a
+docker command's standard error, and only from a line that starts with
+one of Docker's own error forms:
+
+- `Error response from daemon:`
+- `error from daemon in stream:`
+- `Error: No such container:`
+- `Cannot connect to the Docker daemon`
+- `failed to connect to the docker API at`, which Docker 29 prints where
+  older clients print `Cannot connect to the Docker daemon`
+
+A line that starts with only `Error:`, `docker:` or white space is not one
+of them, because containers print such lines too. Docker 29.8 with Compose
+5.5 prints a port conflict, an image that the registry does not have and
+an image that Docker does not have as an `Error response from daemon:`
+line at the end of `docker compose up`'s standard error. Compose's own
+errors, such as `no such service:`, have no fixed form, so phase does not
+take them.
+
+Each command adds its own rule:
+
+- `docker compose up --detach` passes on nothing that a container writes.
+  Its line is the last line of standard error, after Compose's progress
+  lines, when that line is in one of the forms.
+- `docker logs` passes on the container's standard error. Its line is
+  a line in one of the first four forms that is the last line of standard
+  error, after which docker exits with code 1, as it does after it prints
+  its own error. The same line becomes the failure's message, and phase
+  holds it back from the log's lines.
+- Every other command, including the `docker exec` of the secret write
+  and commit scripts, gives a line only when every line of its standard
+  error is in one of the forms. Docker prints its own error for a `docker
+  exec` only when it cannot run the process, and then the process wrote
+  nothing, so a line that a secret script wrote never becomes the Docker
+  line.
+
+Any other failure leaves the Docker line out.
 
 ### Container secrets
 

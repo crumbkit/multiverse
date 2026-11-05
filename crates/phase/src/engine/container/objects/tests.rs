@@ -212,3 +212,36 @@ fn a_follow_passes_a_containers_error_at_once_and_a_lookalike_line_soon_after_it
         "{lookalike:?} {after:?}"
     );
 }
+
+fn docker_line(result: Result<(), ContainerError>) -> Option<String> {
+    match result {
+        Err(ContainerError::Failed { docker_line, .. }) => docker_line,
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_logs_failure_carries_dockers_own_line_and_never_a_line_of_the_container() {
+    let (result, _) = logs_of(&format!(
+        "echo '{SECRET_LINE}' >&2; \
+         echo 'Error response from daemon: No such container: abc' >&2; exit 1"
+    ));
+    assert_eq!(
+        docker_line(result).as_deref(),
+        Some("Error response from daemon: No such container: abc")
+    );
+
+    let (result, _) = logs_of(&format!("echo '{SECRET_LINE}' >&2; exit 1"));
+    assert_eq!(docker_line(result), None);
+
+    // A lookalike line that another line follows is the container's.
+    let (result, _) = logs_of(&format!(
+        "echo '{SECRET_LOOKALIKE}' >&2; echo '{SECRET_LINE}' >&2; exit 1"
+    ));
+    assert_eq!(docker_line(result), None);
+
+    // A lookalike line before an exit other than docker's own is the
+    // container's.
+    let (result, _) = logs_of(&format!("echo '{SECRET_LOOKALIKE}' >&2; exit 2"));
+    assert_eq!(docker_line(result), None);
+}

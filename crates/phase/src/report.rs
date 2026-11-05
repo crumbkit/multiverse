@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, PortName, ProcessName};
 use crate::plan::Permissions;
-use crate::record::DockerCause;
+use crate::record::{DockerCause, DockerContext};
 
 #[cfg(test)]
 mod tests;
@@ -326,6 +326,13 @@ pub enum AppOutcome {
         /// leaves it out when it is `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<DockerCause>,
+        /// What phase was doing when a Docker failure caused the error,
+        /// such as the docker command and the compose service of its
+        /// container, and the line that Docker printed for its own error,
+        /// so a program need not read the message. It is `Some` exactly
+        /// when `cause` is, and JSON leaves it out when it is `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<DockerContext>,
     },
 }
 
@@ -344,17 +351,20 @@ impl AppOutcome {
     }
 
     /// Returns the outcome of an app that phase could not act on because of
-    /// `error`, with the cause of a Docker failure.
+    /// `error`, with the cause and the context of a Docker failure.
     #[must_use]
     pub fn errored(error: &crate::PhaseError) -> Self {
-        let cause = match error {
-            crate::PhaseError::Docker { source } => Some(source.cause()),
-            _ => None,
+        let (cause, context) = match error {
+            crate::PhaseError::Docker { source } => {
+                (Some(source.cause()), Some(source.context().clone()))
+            }
+            _ => (None, None),
         };
         Self::Errored {
             code: error.code().to_owned(),
             message: error.to_string(),
             cause,
+            context,
         }
     }
 

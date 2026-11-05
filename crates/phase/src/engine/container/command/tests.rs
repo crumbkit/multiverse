@@ -238,3 +238,108 @@ fn a_broken_stream_returns_soon_when_a_child_of_the_program_holds_its_pipes() {
     let pid = rustix::process::Pid::from_raw(pid).unwrap();
     let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
 }
+
+/// What `docker compose up` printed on standard error for a port that
+/// another container publishes, as Docker 29.8 and Compose 5.5 print it.
+const PORT_CONFLICT: &str = " Network phase_default Creating \n Container phase-web-1 Creating \n Container phase-web-1 Created \n Container phase-web-1 Starting \nError response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint phase-web-1 (0123): Bind for 127.0.0.1:47391 failed: port is already allocated\n";
+
+/// What `docker compose up` printed on standard error for an image that
+/// the registry does not have.
+const PULL_FAILURE: &str = " Image redis:no-such-tag Pulling \n Image redis:no-such-tag Error failed to resolve reference \"docker.io/library/redis:no-such-tag\": not found\nError response from daemon: failed to resolve reference \"docker.io/library/redis:no-such-tag\": not found\n";
+
+/// What `docker compose up --pull never` printed on standard error for an
+/// image that Docker does not have.
+const MISSING_IMAGE: &str = " Container phase-web-1 Creating \n service:web:1 Error response from daemon: No such image: example:1.0 \nError response from daemon: No such image: example:1.0\n";
+
+/// A value that stands in for a secret.
+const SECRET: &str = "hunter2-secret-value";
+
+#[test]
+fn a_port_conflict_a_pull_failure_and_a_missing_image_yield_dockers_own_line() {
+    assert_eq!(
+        super::compose_docker_line(PORT_CONFLICT).as_deref(),
+        Some(
+            "Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint phase-web-1 (0123): Bind for 127.0.0.1:47391 failed: port is already allocated"
+        )
+    );
+    assert_eq!(
+        super::compose_docker_line(PULL_FAILURE).as_deref(),
+        Some(
+            "Error response from daemon: failed to resolve reference \"docker.io/library/redis:no-such-tag\": not found"
+        )
+    );
+    assert_eq!(
+        super::compose_docker_line(MISSING_IMAGE).as_deref(),
+        Some("Error response from daemon: No such image: example:1.0")
+    );
+}
+
+#[test]
+fn each_of_dockers_own_error_forms_is_dockers_line() {
+    for line in [
+        "Error response from daemon: No such container: abc",
+        "Error: No such container: abc",
+        "error from daemon in stream: Error grabbing logs: EOF",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
+    ] {
+        assert_eq!(
+            super::docker_line(&format!("{line}\n")).as_deref(),
+            Some(line)
+        );
+        assert_eq!(
+            super::compose_docker_line(&format!("{line}\n")).as_deref(),
+            Some(line)
+        );
+    }
+}
+
+#[test]
+fn a_line_that_a_container_wrote_never_becomes_dockers_line() {
+    for stderr in [
+        format!("Error: could not log in with password {SECRET}\n"),
+        format!("ERROR token={SECRET}\n"),
+        format!("docker: {SECRET}\n"),
+        format!("error response from daemon: {SECRET}\n"),
+        format!("  Error response from daemon: {SECRET}\n"),
+        // A script inside the container wrote a line, then a line that
+        // imitates Docker's. Docker prints nothing else when the process it
+        // ran fails, so the whole of standard error is not Docker's.
+        format!(
+            "phase: the secret TOKEN arrived with 3 of 9 bytes\nError response from daemon: {SECRET}\n"
+        ),
+        format!("cat: write error\nCannot connect to the Docker daemon {SECRET}\n"),
+        String::new(),
+    ] {
+        assert_eq!(super::docker_line(&stderr), None, "{stderr}");
+    }
+    // Compose prints its own progress lines, so only its last line counts,
+    // and only when it is one of Docker's forms.
+    for stderr in [
+        format!("Error response from daemon: {SECRET}\nweb-1  | Error: {SECRET}\n"),
+        format!(" Container phase-web-1 Starting \nError: {SECRET}\n"),
+    ] {
+        assert_eq!(super::compose_docker_line(&stderr), None, "{stderr}");
+    }
+}
+
+#[test]
+fn a_failed_command_carries_dockers_line_only_when_standard_error_is_dockers_alone() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let finished = |stderr: &str| super::Finished {
+        status: std::process::ExitStatus::from_raw(1 << 8),
+        stdout: String::new(),
+        stderr: stderr.to_owned(),
+    };
+    let docker_line = |stderr: &str| match finished(stderr).ok("secret write", Some("web")) {
+        Err(super::Error::Failed { docker_line, .. }) => docker_line,
+        other => panic!("{:?}", other.map(drop)),
+    };
+    assert_eq!(
+        docker_line("Error response from daemon: container abc is not running\n").as_deref(),
+        Some("Error response from daemon: container abc is not running")
+    );
+    let leaked = docker_line(&format!("{SECRET}\nError response from daemon: {SECRET}\n"));
+    assert_eq!(leaked, None);
+}

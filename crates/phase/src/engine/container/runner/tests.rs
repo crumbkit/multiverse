@@ -547,6 +547,7 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
         (
             ContainerError::Unavailable {
                 message: "Cannot connect".to_owned(),
+                docker_line: None,
             },
             true,
             DockerCause::DaemonUnavailable,
@@ -561,6 +562,7 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
         (
             ContainerError::NoAddressPool {
                 message: "all predefined address pools have been fully subnetted".to_owned(),
+                docker_line: None,
             },
             false,
             DockerCause::NoAddressPool,
@@ -2169,10 +2171,12 @@ fn a_required_variable_that_the_source_cannot_supply_fails_the_start_as_before()
             code,
             message,
             cause,
+            context,
         } => {
             assert_eq!(code, "phase::environment");
             assert!(message.contains("db"), "{message}");
             assert_eq!(*cause, None);
+            assert_eq!(*context, None);
         }
         other => panic!("{other:?}"),
     }
@@ -2778,4 +2782,96 @@ fn only_a_running_container_counts_as_running_and_only_an_end_counts_as_ended() 
     ] {
         assert_eq!(seen(read), expected, "{read:?}");
     }
+}
+
+#[test]
+fn a_failed_secret_write_reports_its_context_without_a_docker_line_or_a_secret_value() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+
+    // The feed of `TOKEN` is cut short, so the stage script inside the
+    // container fails and writes its own line on standard error.
+    let values = SecretValues {
+        token: Some(ROTATED),
+        key: Some(KEY),
+    };
+    let failed = super::write_secrets(
+        &world.inspected(&db),
+        super::Delivery {
+            values: vec![(
+                "TOKEN".to_owned(),
+                super::SecretBytes::of(&values, "TOKEN").unwrap().cut(4),
+            )],
+            removed: Vec::new(),
+            owner: "1000:1000",
+            docker_environment: None,
+            starting: false,
+        },
+        (Instant::now() + Duration::from_secs(30), &Cancel::new()),
+    )
+    .unwrap_err();
+
+    let crate::error::PhaseError::Docker { source } = super::docker_error(&failed) else {
+        panic!("{failed:?}");
+    };
+    assert_eq!(source.operation(), Some("secret write"));
+    assert_eq!(source.service(), Some("server"));
+    assert_eq!(source.docker_line(), None);
+    let errored = AppOutcome::errored(&crate::error::PhaseError::Docker { source });
+    let json = serde_json::to_string(&crate::report::AppReport::new(
+        "db".parse().unwrap(),
+        errored,
+    ))
+    .unwrap();
+    assert!(!json.contains(ROTATED), "{json}");
+    assert!(!json.contains(KEY), "{json}");
+    assert!(!json.contains("docker_line"), "{json}");
+    world.down();
+}
+
+#[test]
+fn a_container_failure_passes_dockers_own_line_to_the_docker_error_and_keeps_its_text() {
+    use super::ContainerError;
+    use crate::error::PhaseError;
+
+    let line =
+        "Error response from daemon: Bind for 127.0.0.1:8080 failed: port is already allocated";
+    let cases = [
+        ContainerError::failed("compose up", Some("web"), line)
+            .with_docker_line(Some(line.to_owned())),
+        ContainerError::unexpected(
+            "compose up",
+            Some("web"),
+            "docker reported a port that the process does not publish as allocated",
+        )
+        .with_docker_line(Some(line.to_owned())),
+        ContainerError::Unavailable {
+            message: "Cannot connect to the Docker daemon".to_owned(),
+            docker_line: Some(line.to_owned()),
+        },
+        ContainerError::NoAddressPool {
+            message: "all predefined address pools have been fully subnetted".to_owned(),
+            docker_line: Some(line.to_owned()),
+        },
+    ];
+    for error in cases {
+        let PhaseError::Docker { source } = super::docker_error(&error) else {
+            panic!("{error:?}");
+        };
+        assert_eq!(source.docker_line(), Some(line), "{error:?}");
+        let plain = super::docker_error(&error.with_docker_line(None));
+        assert_eq!(PhaseError::Docker { source }.to_string(), plain.to_string());
+    }
+    let cancelled =
+        ContainerError::Cancelled { operation: "pull" }.with_docker_line(Some(line.to_owned()));
+    let PhaseError::Docker { source } = super::docker_error(&cancelled) else {
+        panic!("{cancelled:?}");
+    };
+    assert_eq!(source.docker_line(), None);
 }

@@ -34,12 +34,20 @@ pub enum ContainerError {
     NoAddressPool {
         /// The line of docker's standard error that says what failed.
         message: String,
+        /// The line of docker's standard error in one of Docker's own
+        /// error forms, which [`crate::DockerContext::docker_line`]
+        /// describes, or `None`.
+        docker_line: Option<String>,
     },
     /// The `docker` program runs, and its daemon does not answer.
     #[non_exhaustive]
     Unavailable {
         /// The line of docker's standard error that says what failed.
         message: String,
+        /// The line of docker's standard error in one of Docker's own
+        /// error forms, which [`crate::DockerContext::docker_line`]
+        /// describes, or `None`.
+        docker_line: Option<String>,
     },
     /// A docker command failed or missed its deadline, or a step of the
     /// engine around it failed.
@@ -57,6 +65,10 @@ pub enum ContainerError {
         /// [`DockerCause::PullFailed`], [`DockerCause::TimedOut`] or
         /// [`DockerCause::Unexpected`].
         cause: DockerCause,
+        /// The line of docker's standard error in one of Docker's own
+        /// error forms, which [`crate::DockerContext::docker_line`]
+        /// describes, or `None`.
+        docker_line: Option<String>,
     },
     /// The caller cancelled the operation while a docker command ran, so
     /// the engine stopped the command.
@@ -127,6 +139,38 @@ impl ContainerError {
             service: service.map(str::to_owned),
             message: message.into(),
             cause,
+            docker_line: None,
+        }
+    }
+
+    /// Returns this failure with `line` as Docker's own error line, which
+    /// the caller took from a docker command's standard error under the
+    /// rules of [`crate::DockerContext::docker_line`]. A failure that holds
+    /// no line of docker's standard error stays as it is.
+    #[must_use]
+    pub(crate) fn with_docker_line(mut self, line: Option<String>) -> Self {
+        if let Self::Unavailable { docker_line, .. }
+        | Self::NoAddressPool { docker_line, .. }
+        | Self::Failed { docker_line, .. } = &mut self
+        {
+            *docker_line = line;
+        }
+        self
+    }
+
+    /// Returns the line of docker's standard error in one of Docker's own
+    /// error forms that this failure holds, or `None`.
+    #[must_use]
+    pub fn docker_line(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable { docker_line, .. }
+            | Self::NoAddressPool { docker_line, .. }
+            | Self::Failed { docker_line, .. } => docker_line.as_deref(),
+            Self::Missing { .. }
+            | Self::ComposeMissing { .. }
+            | Self::Cancelled { .. }
+            | Self::Foreign { .. }
+            | Self::Unreadable { .. } => None,
         }
     }
 
@@ -159,8 +203,10 @@ impl ContainerError {
     }
 
     /// Returns `error` with what this failure says phase was doing: the
-    /// docker command or step and its container, or the foreign object.
+    /// docker command or step and its container, or the foreign object,
+    /// and with Docker's own error line when this failure holds one.
     pub(crate) fn describe(&self, error: DockerError) -> DockerError {
+        let error = error.with_docker_line(self.docker_line().map(str::to_owned));
         match self {
             Self::Failed {
                 operation, service, ..
@@ -209,10 +255,10 @@ impl fmt::Display for ContainerError {
                     "docker's compose plugin is not installed: {message}"
                 )
             }
-            Self::NoAddressPool { message } => {
+            Self::NoAddressPool { message, .. } => {
                 write!(formatter, "docker has no free address pool: {message}")
             }
-            Self::Unavailable { message } => {
+            Self::Unavailable { message, .. } => {
                 write!(formatter, "the docker daemon does not answer: {message}")
             }
             Self::Failed {

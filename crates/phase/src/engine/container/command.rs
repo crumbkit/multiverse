@@ -16,6 +16,7 @@ use crate::clock::{now, pause};
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::ContainerId;
+use crate::engine::container::objects::DOCKER_ERROR_PREFIXES;
 use crate::engine::container::secrets::SecretBytes;
 use crate::engine::probe::{CommandEnd, ProbeExec, exited, run_bounded};
 use crate::env::AppliedEnvironment;
@@ -261,7 +262,8 @@ impl Finished {
         if self.status.success() {
             Ok(self.stdout)
         } else {
-            Err(Error::failed(operation, container, message(&self.stderr)))
+            Err(Error::failed(operation, container, message(&self.stderr))
+                .with_docker_line(docker_line(&self.stderr)))
         }
     }
 
@@ -343,6 +345,57 @@ pub(crate) fn message(stderr: &str) -> String {
         .or_else(|| lines.next_back())
         .unwrap_or_default()
         .to_owned()
+}
+
+/// The starts of the lines that the docker client prints for its own
+/// errors, beyond [`DOCKER_ERROR_PREFIXES`]. Docker 29 prints `failed to
+/// connect to the docker API at` where older clients print `Cannot connect
+/// to the Docker daemon`.
+const CLIENT_ERROR_PREFIXES: [&str; 1] = ["failed to connect to the docker API at"];
+
+/// Reports whether `line`, as docker printed it, starts with one of
+/// Docker's own error forms: [`DOCKER_ERROR_PREFIXES`] or
+/// [`CLIENT_ERROR_PREFIXES`]. A line that starts with only `Error:`,
+/// `docker:` or white space is not one of them, because containers print
+/// such lines too.
+fn is_docker_form(line: &str) -> bool {
+    DOCKER_ERROR_PREFIXES
+        .iter()
+        .chain(CLIENT_ERROR_PREFIXES.iter())
+        .any(|prefix| line.starts_with(prefix))
+}
+
+/// Returns Docker's own error line from `stderr`, the standard error of a
+/// docker command other than `docker compose up` and `docker logs`: its
+/// last line that is not empty, and only when every line that is not
+/// empty is in one of Docker's own forms, as [`is_docker_form`] says.
+///
+/// A `docker exec` passes on what the process it runs writes to standard
+/// error, such as the scripts of a secret write. Docker prints its own
+/// error only when it cannot run the process, and then the process wrote
+/// nothing. So a line of the process never becomes Docker's line, unless
+/// the process wrote nothing but lines in Docker's forms. Every other
+/// command prints only Docker's own lines on standard error.
+pub(super) fn docker_line(stderr: &str) -> Option<String> {
+    let mut lines = stderr.lines().filter(|line| !line.trim().is_empty());
+    if !lines.clone().all(is_docker_form) {
+        return None;
+    }
+    lines.next_back().map(|line| line.trim_end().to_owned())
+}
+
+/// Returns Docker's own error line from `stderr`, the standard error of a
+/// `docker compose up --detach`: its last line that is not empty, and only
+/// when that line is in one of Docker's own forms, as [`is_docker_form`]
+/// says. Compose prints its progress lines first, such as ` Container
+/// phase-web-1 Starting`, and Docker's error last. A detached `compose up`
+/// does not pass on what a container writes.
+pub(super) fn compose_docker_line(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .filter(|line| is_docker_form(line))
+        .map(|line| line.trim_end().to_owned())
 }
 
 /// Runs `docker <args>` with `deadline` and the variables `env` on top of
@@ -649,6 +702,7 @@ pub(super) fn check_with(program: &OsStr) -> Result<(), Error> {
     } else {
         Err(Error::Unavailable {
             message: message(&finished.stderr),
+            docker_line: docker_line(&finished.stderr),
         })
     }
 }

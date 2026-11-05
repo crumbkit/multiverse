@@ -92,3 +92,92 @@ fn an_errored_outcome_carries_the_docker_cause_and_leaves_it_out_of_json_otherwi
     let json = serde_json::to_value(AppReport::new("db".parse().unwrap(), outcome)).unwrap();
     assert!(json.get("cause").is_none(), "{json}");
 }
+
+#[test]
+fn an_errored_outcome_carries_the_docker_context_and_leaves_it_out_of_json_otherwise() {
+    use crate::error::PhaseError;
+    use crate::record::DockerError;
+
+    let line =
+        "Error response from daemon: Bind for 127.0.0.1:8080 failed: port is already allocated";
+    let up = PhaseError::Docker {
+        source: DockerError::refused(format!(
+            "docker compose up failed for the container web: {line}"
+        ))
+        .during("compose up", Some("web"))
+        .with_docker_line(Some(line.to_owned())),
+    };
+    let outcome = AppOutcome::errored(&up);
+    let AppOutcome::Errored {
+        context: Some(context),
+        ..
+    } = &outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(context.operation.as_deref(), Some("compose up"));
+    assert_eq!(context.service.as_deref(), Some("web"));
+    assert_eq!(context.docker_line.as_deref(), Some(line));
+    let json =
+        serde_json::to_value(AppReport::new("db".parse().unwrap(), outcome.clone())).unwrap();
+    assert_eq!(
+        json["context"],
+        serde_json::json!({
+            "operation": "compose up",
+            "service": "web",
+            "docker_line": line,
+        })
+    );
+    let back: AppReport = serde_json::from_value(json).unwrap();
+    assert_eq!(back.outcome, outcome);
+
+    let other = PhaseError::UnknownTarget {
+        target: "db/server".to_owned(),
+    };
+    let outcome = AppOutcome::errored(&other);
+    assert!(matches!(
+        &outcome,
+        AppOutcome::Errored { context: None, .. }
+    ));
+    let json = serde_json::to_value(AppReport::new("db".parse().unwrap(), outcome)).unwrap();
+    assert!(json.get("context").is_none(), "{json}");
+}
+
+#[test]
+fn an_errored_outcome_names_a_foreign_object_and_reads_a_context_field_that_a_newer_phase_wrote() {
+    use crate::error::PhaseError;
+    use crate::record::{DockerError, DockerKind};
+
+    let foreign = PhaseError::Docker {
+        source: DockerError::refused("the labels do not name its scope".to_owned())
+            .about_foreign(DockerKind::Volume, "phase-0123456789abcdef.data"),
+    };
+    let json = serde_json::to_value(AppReport::new(
+        "db".parse().unwrap(),
+        AppOutcome::errored(&foreign),
+    ))
+    .unwrap();
+    assert_eq!(
+        json["context"],
+        serde_json::json!({
+            "foreign": { "kind": "volume", "name": "phase-0123456789abcdef.data" },
+        })
+    );
+
+    let report: AppReport = serde_json::from_value(serde_json::json!({
+        "app": "db",
+        "outcome": "errored",
+        "code": "phase::docker::refused",
+        "message": "Docker refused a request of the run: no",
+        "context": { "operation": "image push", "registry": "example" },
+    }))
+    .unwrap();
+    let AppOutcome::Errored {
+        context: Some(context),
+        ..
+    } = report.outcome
+    else {
+        panic!("{report:?}");
+    };
+    assert_eq!(context.operation.as_deref(), Some("image push"));
+}

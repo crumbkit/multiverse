@@ -314,6 +314,20 @@ pub(crate) fn recorded_logs(
     Ok(None)
 }
 
+/// Returns the failure of a `docker compose up` of `service` that Docker
+/// failed because a port is allocated, when the port is not one that the
+/// process publishes, with Docker's own error line `docker_line`.
+fn unpublished_port(service: &names::ServiceName, docker_line: Option<String>) -> Halt {
+    Halt::Failed(docker_error(
+        &ContainerError::unexpected(
+            "compose up",
+            Some(service.as_str()),
+            "docker reported a port that the process does not publish as allocated",
+        )
+        .with_docker_line(docker_line),
+    ))
+}
+
 /// Returns the record's id of the container that `inspected` names.
 fn record_id(inspected: &Inspected) -> Result<ContainerId, PhaseError> {
     ContainerId::try_from(inspected.container.id().as_str().to_owned()).map_err(|_| {
@@ -518,17 +532,16 @@ impl ComposeRunner {
             }
             match up {
                 Ok(Up::Started) => {}
-                Ok(Up::PortAllocated(number)) => {
+                Ok(Up::PortAllocated {
+                    port: number,
+                    docker_line,
+                }) => {
                     if let Some(port) = port_named(app, process, number) {
                         started.problem =
                             Some((name.clone(), StartProblem::port_taken(port, Vec::new())));
                         return Ok(());
                     }
-                    return Err(Halt::Failed(docker_error(&ContainerError::unexpected(
-                        "compose up",
-                        Some(service.as_str()),
-                        "docker reported a port that the process does not publish as allocated",
-                    ))));
+                    return Err(unpublished_port(&service, docker_line));
                 }
                 Err(error @ ContainerError::Cancelled { .. }) => return Err(halt(&error)),
                 // The ready deadline stopped `compose up`, so phase does
@@ -712,11 +725,13 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
             service,
             message,
             cause,
+            docker_line,
         } if files && message.contains("/bin/sh") => ContainerError::Failed {
             operation,
             service,
             message: format!("{message}; {NO_SHELL_HINT}"),
             cause,
+            docker_line,
         },
         other => other,
     }
