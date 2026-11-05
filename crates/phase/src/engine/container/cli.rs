@@ -23,7 +23,9 @@ use crate::engine::container::command::{
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
 use crate::engine::container::objects::{AnonymousVolumes, rm_args, stop_seconds};
+use crate::engine::container::volume_owner;
 use crate::engine::container::{ContainerError, ContainerState};
+use crate::name::WorkspaceId;
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject, SeenContainer};
 
 #[cfg(test)]
@@ -350,5 +352,17 @@ impl Docker for DockerCli {
             };
             Err(self.failure(&removed, operation, None))
         }
+    }
+
+    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
+        volume_owner::remove_helpers_with(self.program(), workspace, None)
+            .map(|_| ())
+            .map_err(|error| match error {
+                ContainerError::Missing { .. } | ContainerError::Unavailable { .. } => {
+                    unavailable(&error)
+                }
+                _ => error
+                    .describe(DockerError::refused(error.to_string()).with_cause(error.cause())),
+            })
     }
 }

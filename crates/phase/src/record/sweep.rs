@@ -22,7 +22,7 @@ use crate::clock::deadline_in;
 use crate::engine::host::{HostRunner, HostStop, HostStopped};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::docker::{Docker, DockerKind, DockerObject};
+use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{
     Ended, EntryState, HostEntry, HostProcess, ObjectKey, RunRecord, VolumeLifetime,
@@ -146,6 +146,27 @@ impl Sweeper<'_, '_, '_> {
                 handle,
                 outcome,
             ));
+        }
+        // A volume-owner helper that an interrupted `up` left behind is
+        // not in the record, so the sweep finds it by its labels. A helper
+        // matters only while the run it belongs to may still have a live
+        // container or volume, so a record whose containers and volumes
+        // have all stopped needs no Docker for it, and a host-only
+        // workspace sweeps without Docker. When Docker does not answer,
+        // there is nothing to remove: a helper cannot hold a volume while
+        // Docker is down, and the next `up` removes a leftover helper
+        // before it sets any owner.
+        let live = record
+            .containers
+            .iter()
+            .map(|entry| entry.state)
+            .chain(record.volumes.iter().map(|entry| entry.state))
+            .any(|state| state != EntryState::Stopped);
+        if live && self.journal.is_some() {
+            match self.reach.docker.remove_volume_helpers(self.workspace) {
+                Ok(()) | Err(DockerError::Unavailable { .. }) => {}
+                Err(source) => return Err(PhaseError::Docker { source }),
+            }
         }
         for entry in &record.networks {
             let key = ObjectKey::Network(entry.name.clone());

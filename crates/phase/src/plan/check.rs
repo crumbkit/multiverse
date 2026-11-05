@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+use super::container::KEEP_OWNER;
 use super::probe::{
     BadLogPattern, LEAST_PUBLISHED_PROBE_TIMEOUT, LogPattern, ProbeCheck, is_sendable_path,
 };
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, MOST_STOP_GRACE, ProcessKind, ProcessPlan, RunnerKind};
 use crate::name::{AppName, PortName, ProcessName};
+use crate::record::run::VolumeOwner;
 use crate::source::Source;
 
 /// The reason that a set of apps is not a valid plan.
@@ -248,6 +250,11 @@ pub enum ContainerProblem {
     RelativeContainerPath(PathBuf),
     /// The run-as user is empty.
     EmptyUser,
+    /// The volume owner is neither `keep` nor a numeric `uid` or
+    /// `uid:gid`. A user's name is refused, because an image's own
+    /// `/etc/passwd` could map it to root.
+    #[non_exhaustive]
+    BadOwner(String),
 }
 
 /// What is wrong with a process in a plan.
@@ -458,6 +465,10 @@ impl fmt::Display for ContainerProblem {
                 )
             }
             Self::EmptyUser => formatter.write_str("the run-as user is empty"),
+            Self::BadOwner(owner) => write!(
+                formatter,
+                "the volume owner {owner:?} is not keep or a numeric uid or uid:gid such as 999:999"
+            ),
         }
     }
 }
@@ -900,8 +911,10 @@ fn check_source(source: &Source) -> Result<(), SourceProblem> {
 fn check_container(app: &AppPlan) -> Result<(), ContainerProblem> {
     let options = &app.container;
     if app.runner == RunnerKind::Host {
-        let empty =
-            options.mounts.is_empty() && options.caches.is_empty() && options.user.is_none();
+        let empty = options.mounts.is_empty()
+            && options.caches.is_empty()
+            && options.user.is_none()
+            && options.owner.is_none();
         return if empty {
             Ok(())
         } else {
@@ -925,6 +938,13 @@ fn check_container(app: &AppPlan) -> Result<(), ContainerProblem> {
     }
     if options.user.as_ref().is_some_and(String::is_empty) {
         return Err(ContainerProblem::EmptyUser);
+    }
+    if let Some(owner) = options
+        .owner
+        .as_ref()
+        .filter(|owner| owner.as_str() != KEEP_OWNER && owner.parse::<VolumeOwner>().is_err())
+    {
+        return Err(ContainerProblem::BadOwner(owner.clone()));
     }
     Ok(())
 }

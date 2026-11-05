@@ -42,7 +42,7 @@ use crate::engine::container::objects::{
     delete_volume, follow_args, inspect_anonymous, inspect_id, inspect_named, inspect_volume,
     reinspect_volume, remove, stop,
 };
-use crate::engine::container::{ContainerError, RunDir};
+use crate::engine::container::{ContainerError, RunDir, volume_owner};
 use crate::name::{AppName, WorkspaceId, WorkspaceName};
 use crate::phase::Phase;
 use crate::random::RANDOM_DEVICE;
@@ -334,6 +334,11 @@ pub fn delete_app_volumes(volumes: WorkspaceVolumes) -> Result<(), ContainerErro
         .find(|volume| matches!(volume, Volume::Anonymous(_)))
     {
         return Err(ContainerError::foreign("volume", anonymous.name().as_str()));
+    }
+    // A volume-owner helper that an interrupted `up` left behind keeps
+    // its volume in use, and Docker refuses to delete a volume in use.
+    if let Some(workspace) = scope.workspace_id() {
+        volume_owner::remove_helpers(workspace, None)?;
     }
     for volume in &volumes.volumes {
         if let Some(volume) = reinspect_volume(scope, volume)? {

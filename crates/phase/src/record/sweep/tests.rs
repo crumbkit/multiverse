@@ -236,11 +236,11 @@ fn started_docker_objects() -> Vec<(ObjectKey, Started)> {
         ),
         (
             ObjectKey::Volume(name("mxv-0b9f3c8e-cache")),
-            Started::Volume,
+            Started::Volume(None),
         ),
         (
             ObjectKey::Volume(name("mxv-0b9f3c8e-data")),
-            Started::Volume,
+            Started::Volume(None),
         ),
     ]
 }
@@ -719,4 +719,110 @@ fn sweep_records_a_running_process_it_finds_gone_as_ended_without_a_known_exit()
     let kept = store.read(&workspace()).unwrap().unwrap();
     assert_eq!(kept.state(&server()), Some(EntryState::Stopped));
     assert_eq!(kept.processes[0].ended, Some(Ended::by_itself(None)));
+}
+
+#[test]
+fn sweep_removes_the_volume_owner_helpers_that_an_interrupted_up_left_behind() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(&store, docker_run(), started_docker_objects());
+    let docker = running_docker();
+
+    run(&store, false, &docker);
+
+    assert_eq!(
+        *docker.helpers_removed.borrow(),
+        vec![workspace().as_str().to_owned()]
+    );
+}
+
+#[test]
+fn a_dry_run_and_a_record_without_docker_objects_leave_volume_owner_helpers_alone() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(&store, docker_run(), started_docker_objects());
+    let docker = running_docker();
+
+    run(&store, true, &docker);
+
+    assert!(docker.helpers_removed.borrow().is_empty());
+
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(
+        &store,
+        empty_record().host_process(&app("api"), &process("server")),
+        Vec::new(),
+    );
+    let docker = FakeDocker {
+        down: true,
+        ..FakeDocker::default()
+    };
+
+    sweep(&store, &workspace(), false, real(&docker), WAITS).unwrap();
+
+    assert!(docker.helpers_removed.borrow().is_empty());
+}
+
+/// Writes a record whose `db/server` container started and then stopped,
+/// and whose only volume is the workspace volume `data`, which stopped too
+/// when `volume_stopped` says so.
+fn record_stopped_container(store: &RunStore, volume_stopped: bool) {
+    let container = ObjectKey::Container(app("db"), process("server"));
+    let volume = ObjectKey::Volume(name("mxv-0b9f3c8e-data"));
+    let mut journal = Journal::open(store, &workspace(), WAITS.lock).unwrap();
+    journal
+        .plan(
+            empty_record()
+                .container(
+                    &app("db"),
+                    &process("server"),
+                    name("mxv-0b9f3c8e-db-server-1"),
+                )
+                .volume(name("mxv-0b9f3c8e-data"), VolumeLifetime::Workspace),
+        )
+        .unwrap();
+    journal
+        .started(
+            &container,
+            Started::Container(
+                ContainerId::try_from(container_id()).unwrap(),
+                PlanHash::new([3; 32]),
+            ),
+        )
+        .unwrap();
+    journal.started(&volume, Started::Volume(None)).unwrap();
+    journal.stopped(&container).unwrap();
+    if volume_stopped {
+        journal.stopped(&volume).unwrap();
+    }
+}
+
+#[test]
+fn a_record_with_stopped_containers_and_a_workspace_volume_sweeps_while_docker_is_down() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_stopped_container(&store, false);
+    let docker = FakeDocker {
+        down: true,
+        ..FakeDocker::default()
+    };
+
+    let swept = sweep(&store, &workspace(), false, real(&docker), WAITS).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Gone);
+    assert_eq!(swept.objects.len(), 1, "{swept:?}");
+    assert_eq!(swept.objects[0].outcome, SweepOutcome::Kept);
+}
+
+#[test]
+fn a_record_whose_containers_and_volumes_have_all_stopped_does_not_look_for_helpers() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_stopped_container(&store, true);
+    let docker = FakeDocker::default();
+
+    sweep(&store, &workspace(), false, real(&docker), WAITS).unwrap();
+
+    assert!(docker.helpers_removed.borrow().is_empty());
 }

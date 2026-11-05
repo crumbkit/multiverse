@@ -44,7 +44,9 @@ use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
-use crate::engine::containers::{ContainerRewrite, ContainerRunner, ContainerStart, Rewritten};
+use crate::engine::containers::{
+    Before, ContainerRewrite, ContainerRunner, ContainerStart, Rewritten,
+};
 use crate::engine::host::{Holder, HostRunner, is_gone};
 use crate::engine::keeper::{AppEnd, KeeperArgs, KeeperCommand, KeeperSpec, Launch};
 use crate::engine::probe::{self, Check, Goal, HostExec, LogLines, LogWatch, Outcome};
@@ -55,10 +57,11 @@ use crate::phase::UpDeadlines;
 use crate::plan::probe::{LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
+use crate::record::DockerName;
 use crate::record::process::{Identity, vouched};
 use crate::record::run::{
     ContainerEntry, Ended, EntryState, Exit, HostProcess, Launching, Listen, ObjectKey, PlanHash,
-    Ready, RunRecord, Started,
+    Ready, RunRecord, Started, VolumeOwner,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
@@ -547,6 +550,7 @@ impl Op<'_, '_> {
         if processes.is_empty() {
             return Ok(AppStep::Done(AppOutcome::AlreadyRunning, notes));
         }
+        let owners = self.recorded_volume_owners();
         let start = ContainerStart {
             workspace: &self.workspace,
             app,
@@ -555,12 +559,18 @@ impl Op<'_, '_> {
             build: self.deadlines.build,
             deadline: self.deadlines.ready,
             cancel: self.cancel,
+            owners: &owners,
         };
         let journal = &mut self.journal;
-        let mut launching = |process: &ProcessName| {
-            journal.containers_launching(&app.name, std::slice::from_ref(process))
+        let mut before = |step: Before<'_>| match step {
+            Before::Container(process) => {
+                journal.containers_launching(&app.name, std::slice::from_ref(process))
+            }
+            Before::VolumeOwner(volume) => {
+                journal.started(&ObjectKey::Volume(volume.clone()), Started::Volume(None))
+            }
         };
-        let started = self.engine.containers.start(&start, &mut launching);
+        let started = self.engine.containers.start(&start, &mut before);
         if started.containers.len() > started.removed.len() {
             self.started.push(Begun::Containers(app.name.clone()));
         }
@@ -568,9 +578,9 @@ impl Op<'_, '_> {
             self.journal
                 .started(&ObjectKey::Network(name), Started::Network(id))?;
         }
-        for name in started.volumes {
+        for (name, owner) in started.volumes {
             self.journal
-                .started(&ObjectKey::Volume(name), Started::Volume)?;
+                .started(&ObjectKey::Volume(name), Started::Volume(owner))?;
         }
         for container in started.containers {
             let key = ObjectKey::Container(app.name.clone(), container.process);
@@ -1067,6 +1077,21 @@ impl Op<'_, '_> {
                 stop::stop_containers(self.engine, &mut self.journal, app, &containers, deadline)
             }
         }
+    }
+
+    /// Returns the owner that the run record says phase gave each
+    /// volume, by the volume's name, leaving out a volume without one.
+    fn recorded_volume_owners(&self) -> BTreeMap<DockerName, VolumeOwner> {
+        self.journal
+            .record()
+            .map(|record| {
+                record
+                    .volumes
+                    .iter()
+                    .filter_map(|entry| Some((entry.name.clone(), entry.owner.clone()?)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Returns the containers of `app` that the record names as not
