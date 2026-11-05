@@ -531,17 +531,18 @@ impl ContainerRunner for FakeContainers {
         assert!(rewrite.entry.id.is_some());
         let process = format!("{}/{}", rewrite.app.name, rewrite.entry.process);
         self.rewrites.borrow_mut().push(process.clone());
-        let Some(ending) = self.rewrite_ending.borrow().get(&process).copied() else {
+        let Some(ending) = self.rewrite_ending.borrow().get(&process).cloned() else {
             return Ok(Rewritten::NoFiles);
         };
-        rewrite
+        match rewrite
             .env
             .resolve(&rewrite.app.name, &rewrite.entry.process, rewrite.deadline)
-            .map_err(|source| PhaseError::Environment {
-                app: rewrite.app.name.clone(),
-                source,
-            })?;
-        Ok(ending)
+        {
+            Ok(_) => Ok(ending),
+            Err(source) => Ok(Rewritten::Kept {
+                reason: source.to_string(),
+            }),
+        }
     }
 
     fn stop(
@@ -577,6 +578,8 @@ impl ContainerRunner for FakeContainers {
 struct Env {
     /// The apps whose environment cannot be resolved.
     failing: BTreeSet<String>,
+    /// The `app/process` processes whose environment cannot be resolved.
+    failing_processes: BTreeSet<String>,
     /// Each `app/process` resolved, in order.
     resolved: RefCell<Vec<String>>,
     /// The apps whose environment the source resolves without any
@@ -592,7 +595,9 @@ impl EnvironmentSource for Env {
         _deadline: Instant,
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
         self.resolved.borrow_mut().push(format!("{app}/{process}"));
-        if self.failing.contains(app.as_str()) {
+        if self.failing.contains(app.as_str())
+            || self.failing_processes.contains(&format!("{app}/{process}"))
+        {
             return Err(EnvironmentError::new(
                 "API_TOKEN".to_owned(),
                 "vault".to_owned(),
@@ -1401,16 +1406,28 @@ fn up_rewrites_the_secret_files_of_a_container_that_still_runs_and_leaves_it_run
         .running
         .borrow_mut()
         .extend(["db/server".to_owned(), "db/worker".to_owned()]);
-    world
-        .containers
-        .rewrite_ending
-        .borrow_mut()
-        .insert("db/server".to_owned(), Rewritten::Written);
+    world.containers.rewrite_ending.borrow_mut().insert(
+        "db/server".to_owned(),
+        Rewritten::Written {
+            files: 2,
+            removed: 0,
+        },
+    );
     let env = Env::default();
 
     let report = world.up(&plan, &Selection::All, &env).unwrap();
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::AlreadyRunning);
+    assert_eq!(
+        notes(&report, "db"),
+        [Note::secrets_rewritten(&name("db"), name("server"), 2, 0)]
+    );
+    match &notes(&report, "db")[0] {
+        Note::SecretsRewritten { message, .. } => {
+            assert_eq!(message, "rewrote 2 secret files of db/server");
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(world.containers.starts.borrow().len(), 1);
     assert_eq!(
         *world.containers.rewrites.borrow(),
@@ -1456,34 +1473,57 @@ fn up_replaces_a_running_container_that_cannot_receive_its_secret_files() {
 }
 
 #[test]
-fn a_secret_rewrite_whose_environment_fails_leaves_the_container_running_and_errs_the_app() {
+fn a_secret_rewrite_that_fails_keeps_the_container_running_with_a_note_and_rewrites_the_others() {
     let world = World::new();
-    let plan = plan(vec![container_app("db")]);
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db, host_app("api", None, &["db"])]);
     world.up(&plan, &Selection::All, &Env::default()).unwrap();
     world
         .containers
         .running
         .borrow_mut()
-        .insert("db/server".to_owned());
-    world
-        .containers
-        .rewrite_ending
-        .borrow_mut()
-        .insert("db/server".to_owned(), Rewritten::Written);
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+    for process in ["db/server", "db/worker"] {
+        world.containers.rewrite_ending.borrow_mut().insert(
+            process.to_owned(),
+            Rewritten::Written {
+                files: 1,
+                removed: 1,
+            },
+        );
+    }
     let locked = Env {
-        failing: BTreeSet::from(["db".to_owned()]),
+        failing_processes: BTreeSet::from(["db/server".to_owned()]),
         ..Env::default()
     };
 
     let report = world.up(&plan, &Selection::All, &locked).unwrap();
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, message, .. } => {
-            assert_eq!(code, "phase::environment");
-            assert!(!message.contains(SECRET), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    assert_eq!(outcome(&report, "db"), &AppOutcome::AlreadyRunning);
+    assert_eq!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(
+        *world.containers.rewrites.borrow(),
+        vec!["db/server".to_owned(), "db/worker".to_owned()]
+    );
+    let messages: Vec<&str> = notes(&report, "db")
+        .iter()
+        .map(|note| match note {
+            Note::SecretsKept { message, .. } | Note::SecretsRewritten { message, .. } => {
+                message.as_str()
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "db/server still runs with its earlier secret files: vault could not supply the variable API_TOKEN",
+            "rewrote 1 secret file of db/worker and removed 1 file of lapsed optional secrets",
+        ]
+    );
+    assert!(messages.iter().all(|message| !message.contains(SECRET)));
     assert_eq!(world.containers.starts.borrow().len(), 1);
     assert!(world.containers.stopped.borrow().is_empty());
     assert_eq!(

@@ -591,23 +591,56 @@ secret files that Docker has restarted as not running and replaces it,
 and `status` shows it as restarting. A container with secret files that
 someone stopped and started again by hand, with `docker start`, also
 waits for files that its restart removed, but Docker does not count that
-start as a restart, so `up` and `status` read it as running. The run
-record keeps no start time to compare with, so the next `restart`
-recreates it.
+start as a restart, so `up` and `status` read it as running. An `up`
+within the wrapper's 60 seconds rewrites the files, and the wrapper then
+starts the app. After that, the wrapper has exited with status 70, and
+the next `up` replaces the container because it no longer runs. The run
+record keeps no start time to compare with, so `status` cannot tell such
+a container from one that runs.
 
 Each `up` rewrites the secret files of every container that it leaves
-running. For each such process that receives secret files, `up`
-resolves the process's environment again and writes the files the same
-way, in the two steps above, so the container keeps running and a reader
-sees each file's old value or its new one. A rewrite that cannot resolve
-the environment or write a value leaves the old files whole and the
-container running, and `up` reports the app as errored with that
-failure, which names no value. `up` resolves no environment for a
-process without secret files. A short-lived value that a resolver
-renews therefore reaches a running container at the next `up`, and
-nothing rewrites the files between two runs of `up` yet. The watcher
-that rewrites them before `AppliedEnvironment::expires_at` and after a
-Docker restart is a follow-up, and needs the decision recorded as P15.
+running. For each such process that receives secret files, `up` first
+inspects the container. A container that no longer runs, or that has
+secret files and that Docker has restarted, is not running as planned,
+and `up` replaces it without resolving anything. Otherwise `up` resolves
+the process's environment again and writes the files in the two steps
+above, and the container keeps running. The files keep the owner that
+the container was created with: the process's `secret_owner`, or else
+the user that the container runs as, which Docker fixed when it created
+the container. A tag that has since moved to an image with another user
+changes nothing. `up` resolves no environment for a process without
+secret files. Each rewrite that writes adds a note to the app's report,
+such as `rewrote 2 secret files of db/server`.
+
+A reader of one file sees its old value or its new one. The set of
+files is not swapped as one unit: the commit script renames the staged
+files one after another, so a reader that reads two files while the
+commit runs can see the new value of one and the old value of the other.
+
+A rewrite that fails while the container still runs does not fail the
+app. When the environment cannot be resolved, a value cannot be read, or
+Docker cannot write the files, the container keeps its earlier files and
+keeps running. `up` reports the app as already running or started, with
+a note such as `db/server still runs with its earlier secret files:
+vault could not supply the variable TOKEN`, which names no value. `up`
+goes on to the app's other containers and processes, and the apps that
+depend on it start as usual. The next `up` tries the rewrite again. A
+rewrite that fails before the commit leaves every earlier file whole. A
+removal of a lapsed optional secret's file that fails after the renames
+ends the commit script with status 67 and a line that names the secret,
+so the note says which file remains. An app fails only when a container
+that must be replaced cannot be, as with any start.
+
+A short-lived value that a resolver renews therefore reaches a running
+container at the next `up`, and nothing rewrites the files between two
+runs of `up` yet. Decision P15 settles the watcher that will: a
+detached `phase watch` process per app that re-resolves the environment
+through the host program's `EnvironmentSource` before
+`AppliedEnvironment::expires_at` and after a Docker restart, and holds
+no value between rewrites. It waits for two things: a resolver that
+works in a process that outlives `up`, which starmap's resolver will
+provide, and run record v3, which records the watcher so that `down`
+and `sweep` stop it.
 
 An optional secret, one that the process names in `optional_env`, gets
 no file when the environment has no value for it, and the wrapper's names
@@ -1097,7 +1130,8 @@ and redesigns are the evidence for each one.
   policy, so it keeps the environment the container was created with, and
   only `phase restart` or a changed plan resolves it again. The secret
   files of a running container are the exception: each `up` resolves the
-  process's environment again and rewrites them in place.
+  process's environment again and rewrites them in place, and a rewrite
+  that fails leaves the container running with a note.
 
 ### Concurrency
 
@@ -1168,4 +1202,4 @@ Each decision states what this draft assumes until it is decided.
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
-| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values. It can run as a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, which mxv cannot yet supply to a process that outlives `up`, or it can receive the values from `up`, which adds a long-lived process that holds an app's secret values. | Open; to be decided by the owner. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
+| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for run record v3, which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |

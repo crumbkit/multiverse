@@ -786,6 +786,21 @@ fn an_inspection_tells_a_container_with_secret_files_by_its_secrets_label() {
 }
 
 #[test]
+fn an_inspection_keeps_the_user_that_the_container_was_created_with() {
+    let scope = scope("reading-list");
+    let labels = container_labels(STORE, "reading-list", "db");
+    let printed = |user: &str| {
+        format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n{user}\n")
+    };
+
+    let named = mint_container(&scope, &service("db"), ID, &printed("\"1000:1000\"")).unwrap();
+    let root = mint_container(&scope, &service("db"), ID, &printed("\"\"")).unwrap();
+
+    assert_eq!(named.user, "1000:1000");
+    assert_eq!(root.user, "");
+}
+
+#[test]
 fn a_command_whose_caller_cancels_stops_at_once_as_cancelled() {
     let cancel = Cancel::new();
     cancel.cancel();

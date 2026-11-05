@@ -364,9 +364,12 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
     db.processes[0].ready_timeout = Duration::from_secs(300);
     let plan = world.plan(vec![db]);
 
-    let began = Instant::now();
     let report = world.up(&plan);
 
+    // Without the restart check, the wait would last until the test's
+    // 60-second ready deadline, and the start would be uncertain. A start
+    // that failed because the container exited, with the crash's output,
+    // shows that the restart loop ended the wait.
     match outcome(&report, "db") {
         AppOutcome::Failed {
             problem: StartProblem::Exited { log_tail, .. },
@@ -377,10 +380,6 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
         ),
         other => panic!("{other:?}"),
     }
-    // Without the restart check, the wait would last the 300-second
-    // ready timeout, or the 60-second deadline of the test. The bound
-    // leaves room for a slow pull and `compose up` on a busy runner.
-    assert!(began.elapsed() < Duration::from_secs(45));
 }
 
 #[test]
@@ -2286,6 +2285,21 @@ fn up_rewrites_the_secret_files_of_a_running_container_from_a_fresh_environment_
         "{report:?}"
     );
     assert!(!format!("{report:?}").contains(ROTATED));
+    let notes = &report
+        .apps
+        .iter()
+        .find(|app| app.app.as_str() == "db")
+        .unwrap()
+        .notes;
+    assert_eq!(
+        notes,
+        &[crate::report::Note::secrets_rewritten(
+            &"db".parse().unwrap(),
+            "server".parse().unwrap(),
+            2,
+            0,
+        )]
+    );
     assert_eq!(
         world.container("db", "server").as_deref(),
         Some(id.as_str())
@@ -2388,4 +2402,156 @@ fn up_replaces_a_container_that_started_without_secret_files_once_a_secret_has_a
     let read = docker(&["exec", "--", &second, "cat", "/run/secrets/TOKEN"]).unwrap();
     assert_eq!(read, TOKEN);
     world.down();
+}
+
+/// An environment source that a test expects never to be asked.
+struct Unasked;
+
+impl EnvironmentSource for Unasked {
+    fn resolve(
+        &self,
+        app: &AppName,
+        process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        panic!("the environment of {app}/{process} was resolved");
+    }
+}
+
+impl World {
+    /// Rewrites the secret files of the recorded container of the first
+    /// process of `app` through the runner, with `env`.
+    fn rewrite(
+        &self,
+        app: &AppPlan,
+        env: &dyn EnvironmentSource,
+    ) -> Result<crate::engine::containers::Rewritten, crate::error::PhaseError> {
+        use crate::engine::containers::{ContainerRewrite, ContainerRunner as _};
+        let record = RunStore::new(self.state.path())
+            .read(&self.id)
+            .unwrap()
+            .unwrap();
+        let entry = record
+            .containers
+            .iter()
+            .find(|entry| entry.app == app.name && entry.process == app.processes[0].name)
+            .unwrap();
+        self.runner().rewrite(&ContainerRewrite {
+            workspace: &self.id,
+            app,
+            entry,
+            env,
+            deadline: Instant::now() + Duration::from_secs(30),
+            cancel: &Cancel::new(),
+        })
+    }
+}
+
+#[test]
+fn a_rewrite_of_a_container_stopped_by_hand_asks_for_its_replacement_and_resolves_nothing() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    docker(&["stop", "--time", "0", "--", &id]).unwrap();
+
+    let rewritten = world.rewrite(&db, &Unasked).unwrap();
+
+    assert_eq!(rewritten, crate::engine::containers::Rewritten::Replace);
+    world.down();
+}
+
+#[test]
+fn up_keeps_a_running_container_whose_environment_fails_with_its_earlier_files_and_a_note() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![secret_app("db")]);
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let mut locked = Listed::of(&[("MODE", MODE)]);
+    locked.refused = Some("TOKEN");
+
+    let report = world.up_with(&plan, &locked);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    let app = report
+        .apps
+        .iter()
+        .find(|app| app.app.as_str() == "db")
+        .unwrap();
+    assert_eq!(
+        app.notes,
+        [crate::report::Note::secrets_kept(
+            &"db".parse().unwrap(),
+            "server".parse().unwrap(),
+            "vault could not supply the variable TOKEN",
+        )]
+    );
+    assert_eq!(
+        world.container("db", "server").as_deref(),
+        Some(id.as_str())
+    );
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, TOKEN);
+    world.down();
+}
+
+#[test]
+fn a_rewrite_gives_the_files_the_owner_the_container_was_created_with_after_its_tag_moves() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(first) = BuiltImage::build(&format!("FROM {IMAGE}\nUSER 1000:1000\n")) else {
+        return;
+    };
+    let Some(second) = BuiltImage::build(&format!("FROM {IMAGE}\nUSER 2000:2000\n")) else {
+        return;
+    };
+    let world = World::new();
+    let mut db = secret_app_running("db", COPY_SECRETS);
+    db.source = Source::image(first.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let created_from = docker(&["image", "inspect", "--format", "{{.Id}}", &first.tag]).unwrap();
+    // The tag now names an image whose user is 2000.
+    docker(&["tag", &second.tag, &first.tag]).unwrap();
+    env.set(SecretValues {
+        token: Some(ROTATED),
+        key: Some(KEY),
+    });
+
+    let report = world.up_with(&plan, &env);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    let listed = docker(&["exec", "--", &id, "ls", "-ln", "/run/secrets"]).unwrap();
+    assert!(
+        listed
+            .lines()
+            .filter(|line| line.starts_with('-'))
+            .all(|line| line.split_whitespace().nth(2) == Some("1000")),
+        "{listed}"
+    );
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, ROTATED);
+    world.down();
+    let _ = docker(&["image", "rm", "--force", created_from.trim()]);
 }

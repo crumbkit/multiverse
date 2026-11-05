@@ -26,9 +26,9 @@
 //! phase's wrapper, which waits for the files, as [`super::secrets`] says.
 //! [`file_secrets`] returns the names that `up` writes after the container
 //! starts. The service carries the label `mxv.secrets=files`, which
-//! `status` and the rewrite of a running container's files read, and Docker's `no` restart policy, because a Docker
-//! restart empties the tmpfs. A process whose plan sets
-//! [`SecretDelivery::Env`] receives its
+//! `status` and the rewrite of a running container's files read, and
+//! Docker's `no` restart policy, because a Docker restart empties the
+//! tmpfs. A process whose plan sets [`SecretDelivery::Env`] receives its
 //! secrets through private references like its other variables instead.
 
 use std::collections::BTreeSet;

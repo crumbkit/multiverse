@@ -122,6 +122,36 @@ pub enum Note {
         /// The group that is left.
         group: u32,
     },
+    /// `up` rewrote the secret files of the process's running container
+    /// from a fresh environment, and the container kept running.
+    #[non_exhaustive]
+    SecretsRewritten {
+        /// The process.
+        process: ProcessName,
+        /// How many secret files `up` wrote.
+        files: usize,
+        /// How many files of optional secrets that lost their value `up`
+        /// removed.
+        removed: usize,
+        /// What happened, as a sentence that names the app and the process,
+        /// such as `rewrote 2 secret files of db/server`.
+        message: String,
+    },
+    /// `up` could not rewrite the secret files of the process's running
+    /// container, so the container still runs with its earlier files. A
+    /// failed rewrite leaves those files whole, apart from a file of a
+    /// lapsed optional secret whose removal failed, which the message
+    /// names. The next `up` tries again.
+    #[non_exhaustive]
+    SecretsKept {
+        /// The process.
+        process: ProcessName,
+        /// What happened and why, as a sentence that names the app and the
+        /// process and holds no value, such as `db/server still runs with
+        /// its earlier secret files: vault could not supply the variable
+        /// TOKEN`.
+        message: String,
+    },
 }
 
 impl Note {
@@ -168,6 +198,42 @@ impl Note {
     #[must_use]
     pub const fn unstoppable(process: ProcessName, group: u32) -> Self {
         Self::Unstoppable { process, group }
+    }
+
+    /// Returns the note that `up` wrote `files` secret files of `process`
+    /// of `app` and removed `removed` files of lapsed optional secrets.
+    #[must_use]
+    pub fn secrets_rewritten(
+        app: &AppName,
+        process: ProcessName,
+        files: usize,
+        removed: usize,
+    ) -> Self {
+        let plural = |count: usize| if count == 1 { "" } else { "s" };
+        let mut message = format!(
+            "rewrote {files} secret file{} of {app}/{process}",
+            plural(files)
+        );
+        if removed > 0 {
+            message.push_str(&format!(
+                " and removed {removed} file{} of lapsed optional secrets",
+                plural(removed)
+            ));
+        }
+        Self::SecretsRewritten {
+            process,
+            files,
+            removed,
+            message,
+        }
+    }
+
+    /// Returns the note that `process` of `app` still runs with its earlier
+    /// secret files, because of `reason`, which holds no value.
+    #[must_use]
+    pub fn secrets_kept(app: &AppName, process: ProcessName, reason: &str) -> Self {
+        let message = format!("{app}/{process} still runs with its earlier secret files: {reason}");
+        Self::SecretsKept { process, message }
     }
 }
 

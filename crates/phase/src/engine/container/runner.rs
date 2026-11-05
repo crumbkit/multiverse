@@ -53,12 +53,17 @@
 //! `rewrite` writes the secret files of a container that `running`
 //! reported, from a fresh environment of its process, as [`write_secrets`]
 //! does, and removes the file of each optional secret that lost its value,
-//! as [`lost_secrets`] names them. It resolves nothing for a process
-//! without secret files. A container whose labels lack the secrets label
-//! started while every one of its secrets was optional and absent, so it
-//! has no tmpfs and no wrapper. When its fresh environment has a value for
-//! a secret, `rewrite` reports that the container must be replaced, and
-//! `up` asks `start` to replace it.
+//! as [`lost_secrets`] names them. It inspects the container first and
+//! resolves nothing for a process without secret files, or for a
+//! container that no longer runs as planned, which `up` replaces. The
+//! files keep the owner that the container was created with, read from
+//! its own user, so a tag that has moved to another image changes
+//! nothing. A container whose labels lack the secrets label started while
+//! every one of its secrets was optional and absent, so it has no tmpfs and
+//! no wrapper. When its fresh environment has a value for a secret,
+//! `rewrite` reports that the container must be replaced, and `up` asks
+//! `start` to replace it. A rewrite that fails while the container still
+//! runs reports why, and the container keeps its earlier files.
 //!
 //! When a docker command fails after some containers started, `start`
 //! removes those containers, and reports each container that it created
@@ -991,37 +996,49 @@ impl ContainerRunner for ComposeRunner {
         else {
             return Ok(Rewritten::NoFiles);
         };
-        // A start writes secret files only into a container of an image,
-        // whose config names the files' owner.
-        let Source::Image { image } = &app.source else {
-            return Ok(Rewritten::NoFiles);
-        };
-        if app::file_secrets(app, process).next().is_none() {
+        // A start writes secret files only into a container of an image.
+        if !matches!(app.source, Source::Image { .. })
+            || app::file_secrets(app, process).next().is_none()
+        {
             return Ok(Rewritten::NoFiles);
         }
         let scope = self.scope(rewrite.workspace, &app.name);
-        let service = app::service(app, &process.name)?;
-        let Some(Ok(id)) = rewrite
-            .entry
-            .id
-            .as_ref()
-            .map(|id| names::ContainerId::new(id.as_str()))
-        else {
+        let (Ok(service), Some(Ok(id))) = (
+            names::ServiceName::new(process.name.as_str()),
+            rewrite
+                .entry
+                .id
+                .as_ref()
+                .map(|id| names::ContainerId::new(id.as_str())),
+        ) else {
             return Ok(Rewritten::Replace);
         };
-        let environment =
-            crate::env::resolve_required(rewrite.env, &app.name, process, rewrite.deadline)
-                .map_err(|source| PhaseError::Environment {
-                    app: app.name.clone(),
-                    source,
-                })?;
         let inspected = match inspect_id(&scope, &service, &id) {
             Ok(Some(inspected)) => inspected,
             // A container that is gone, or no longer carries the app's
             // labels, is not the one the record names, so `up` replaces it.
             Ok(None) | Err(ContainerError::Foreign { .. }) => return Ok(Rewritten::Replace),
-            Err(error) => return Err(docker_error(&error)),
+            Err(error) => {
+                return Ok(Rewritten::Kept {
+                    reason: error.to_string(),
+                });
+            }
         };
+        // A container that no longer runs, or whose tmpfs a Docker restart
+        // emptied, is not running as planned, as `running` judges it.
+        if inspected.state != ContainerState::Running || (inspected.files && inspected.restarts > 0)
+        {
+            return Ok(Rewritten::Replace);
+        }
+        let environment =
+            match crate::env::resolve_required(rewrite.env, &app.name, process, rewrite.deadline) {
+                Ok(environment) => environment,
+                Err(source) => {
+                    return Ok(Rewritten::Kept {
+                        reason: source.to_string(),
+                    });
+                }
+            };
         let present = environment.names();
         let has_values = app::present_file_secrets(app, process, Some(&present))
             .next()
@@ -1036,19 +1053,34 @@ impl ContainerRunner for ComposeRunner {
                 Rewritten::NoFiles
             });
         }
-        let image_config = if has_values {
-            Some(objects::image_config(image.as_str()).map_err(|error| docker_error(&error))?)
-        } else {
-            None
+        let values = match secret_values(app, process, environment.as_ref()) {
+            Ok(values) => values,
+            Err(reason) => return Ok(Rewritten::Kept { reason }),
         };
-        let (owner, values) = delivered(app, process, image_config.as_ref(), environment.as_ref())?
-            .unwrap_or_default();
+        // The files keep the owner that the container was created with,
+        // whatever image its tag names now.
+        let owner = if values.is_empty() {
+            String::new()
+        } else {
+            match secrets::container_owner(process, &inspected.user) {
+                Some(owner) => owner,
+                None => {
+                    return Ok(Rewritten::Kept {
+                        reason: "the container runs as root and the plan names no secret_owner, so the files would belong to root".to_owned(),
+                    });
+                }
+            }
+        };
         let removed = lost_secrets(app, process, environment.as_ref());
         drop(environment);
+        let written = Rewritten::Written {
+            files: values.len(),
+            removed: removed.len(),
+        };
         if values.is_empty() && removed.is_empty() {
-            return Ok(Rewritten::Written);
+            return Ok(written);
         }
-        write_secrets(
+        match write_secrets(
             &inspected,
             Delivery {
                 values,
@@ -1057,9 +1089,18 @@ impl ContainerRunner for ComposeRunner {
                 docker_environment: self.docker_environment.as_ref(),
             },
             (rewrite.deadline, rewrite.cancel),
-        )
-        .map_err(|error| docker_error(&error))?;
-        Ok(Rewritten::Written)
+        ) {
+            Ok(()) => Ok(written),
+            Err(error @ ContainerError::Cancelled { .. }) => Err(docker_error(&error)),
+            // A container that ended during the write must be replaced.
+            Err(error) => match reinspect(&inspected.container) {
+                Ok(Some(fresh)) if fresh.state != ContainerState::Running => Ok(Rewritten::Replace),
+                Ok(None) => Ok(Rewritten::Replace),
+                _ => Ok(Rewritten::Kept {
+                    reason: error.to_string(),
+                }),
+            },
+        }
     }
 
     fn stop(

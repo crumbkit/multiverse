@@ -82,25 +82,35 @@ pub(crate) trait ContainerRunner {
     /// it resolves through `rewrite.env`, until `rewrite.deadline` or
     /// `rewrite.cancel`. It writes the file of each secret that has a
     /// value and removes the file of each optional secret that has lost
-    /// its value, and the container keeps running. `up` calls it for each
+    /// its value, and the container keeps running. The files belong to the
+    /// owner that the container was created with. `up` calls it for each
     /// container that [`ContainerRunner::running`] reports, so each `up`
     /// keeps the files of a running container current.
     ///
-    /// It resolves no environment for a process that receives no secret
-    /// files, and returns [`Rewritten::NoFiles`] for it, and for a
-    /// container without secret files whose fresh environment has no value
-    /// for any of its optional secrets. It returns
-    /// [`Rewritten::Replace`] when the container cannot receive a file that
-    /// the fresh environment has a value for, because it started while
-    /// every one of its secrets was optional and absent, and so has no
-    /// tmpfs and no wrapper. `up` then replaces the container.
+    /// It inspects the container first, and resolves the environment only
+    /// when a write or a replacement may follow:
+    ///
+    /// - [`Rewritten::NoFiles`] for a process that receives no secret
+    ///   files, and for a container without secret files whose fresh
+    ///   environment has no value for any of its optional secrets.
+    /// - [`Rewritten::Replace`] for a container that is gone, no longer
+    ///   runs, or has secret files and was restarted by Docker, as
+    ///   [`ContainerRunner::running`] judges it, and for a container
+    ///   without secret files whose fresh environment has a value for one
+    ///   of its secrets. Such a container started while every one of its
+    ///   secrets was optional and absent, so it has no tmpfs and no
+    ///   wrapper. `up` then replaces the container.
+    /// - [`Rewritten::Kept`] when the environment cannot be resolved, a
+    ///   value cannot be read, or Docker cannot write the files while the
+    ///   container still runs. The container keeps its earlier files whole,
+    ///   apart from a lapsed optional secret's file whose removal failed,
+    ///   which the reason names.
+    /// - [`Rewritten::Written`] otherwise.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::Environment`] when the environment cannot be
-    /// resolved, the errors of reading its values, and
-    /// [`PhaseError::Docker`] when a write fails. A failed write leaves
-    /// the container's old files whole, and the container keeps running.
+    /// Returns [`PhaseError::Docker`] with the cancelled cause only when
+    /// the caller cancels.
     fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError>;
 
     /// Stops and removes the containers of `stop.containers`, in reverse
@@ -196,17 +206,29 @@ pub(crate) struct ContainerRewrite<'a> {
 }
 
 /// How [`ContainerRunner::rewrite`] ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Rewritten {
     /// The container has no secret files and needs none, so nothing was
     /// written. phase resolves no environment for a process that receives
     /// no secret files.
     NoFiles,
     /// The container's secret files hold the fresh environment's values.
-    Written,
+    Written {
+        /// How many files the rewrite wrote.
+        files: usize,
+        /// How many files of lapsed optional secrets it removed.
+        removed: usize,
+    },
     /// The container cannot receive the files that the fresh environment
-    /// has values for, so `up` must replace it.
+    /// has values for, or no longer runs as planned, so `up` must replace
+    /// it.
     Replace,
+    /// The rewrite failed and the container still runs with its earlier
+    /// files.
+    Kept {
+        /// Why, which holds no value.
+        reason: String,
+    },
 }
 
 /// What [`ContainerRunner::stop`] stops.

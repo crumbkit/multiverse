@@ -478,7 +478,9 @@ impl Op<'_, '_> {
         };
         // Each `up` writes the secret files of a container that still runs
         // again from a fresh environment, and replaces one that cannot
-        // receive them.
+        // receive them. A rewrite that fails leaves the container running
+        // with its earlier files, which a note reports.
+        let mut notes = Vec::new();
         for entry in &recorded {
             if !running.contains(&entry.process) {
                 continue;
@@ -492,14 +494,25 @@ impl Op<'_, '_> {
                 cancel: self.cancel,
             };
             match self.engine.containers.rewrite(&rewrite) {
-                Ok(Rewritten::NoFiles | Rewritten::Written) => {}
+                Ok(Rewritten::NoFiles) => {}
+                Ok(Rewritten::Written { files, removed }) => notes.push(Note::secrets_rewritten(
+                    &app.name,
+                    entry.process.clone(),
+                    files,
+                    removed,
+                )),
+                Ok(Rewritten::Kept { reason }) => notes.push(Note::secrets_kept(
+                    &app.name,
+                    entry.process.clone(),
+                    &reason,
+                )),
                 Ok(Rewritten::Replace) => {
                     running.remove(&entry.process);
                 }
                 Err(_) if self.cancel.is_cancelled() => {
-                    return Ok(AppStep::Cancelled(Vec::new()));
+                    return Ok(AppStep::Cancelled(notes));
                 }
-                Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
+                Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), notes)),
             }
         }
         let processes: Vec<ProcessName> = choice
@@ -509,7 +522,7 @@ impl Op<'_, '_> {
             .filter(|process| !running.contains(process))
             .collect();
         if processes.is_empty() {
-            return Ok(AppStep::Done(AppOutcome::AlreadyRunning, Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::AlreadyRunning, notes));
         }
         let start = ContainerStart {
             workspace: &self.workspace,
@@ -546,18 +559,17 @@ impl Op<'_, '_> {
                 .stopped(&ObjectKey::Container(app.name.clone(), process))?;
         }
         if let Some(error) = started.failure {
-            return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::errored(&error), notes));
         }
         if self.cancel.is_cancelled() {
-            return Ok(AppStep::Cancelled(Vec::new()));
+            return Ok(AppStep::Cancelled(notes));
         }
         if started.uncertain.is_some() {
-            return Ok(AppStep::Done(AppOutcome::StartUncertain, Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::StartUncertain, notes));
         }
         let Some((process, problem)) = started.problem else {
-            return Ok(AppStep::Done(AppOutcome::Started, Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::Started, notes));
         };
-        let mut notes = Vec::new();
         self.stop_since(mark, &mut StopsByApp::new(), &mut notes)?;
         Ok(AppStep::Done(AppOutcome::failed(process, problem), notes))
     }

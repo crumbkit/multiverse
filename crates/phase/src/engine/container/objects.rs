@@ -143,6 +143,11 @@ pub struct Inspected {
     /// phase's wrapper. A container without it has no tmpfs, so it cannot
     /// receive a secret file without being recreated.
     pub(crate) files: bool,
+    /// The user that it runs as, in Docker's `USER[:GROUP]` form, which is
+    /// empty for root: the app's run-as user, or else the user of its image
+    /// when it was created. A later image under the same tag does not
+    /// change it.
+    pub(crate) user: String,
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
     pub(crate) started: String,
@@ -197,7 +202,7 @@ impl Volume {
 /// [`mint_container`] reads.
 fn container_format() -> String {
     format!(
-        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.RestartCount}}}}",
+        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.RestartCount}}}}\n{{{{json .Config.User}}}}",
         labels_format(".Config.Labels")
     )
 }
@@ -249,6 +254,10 @@ pub(super) fn mint_container(
         .next()
         .and_then(|line| line.trim().parse().ok())
         .unwrap_or_default();
+    let user = lines
+        .next()
+        .and_then(|line| serde_json::from_str::<String>(line.trim()).ok())
+        .unwrap_or_default();
     Ok(Inspected {
         container: OwnedContainer {
             scope: scope.clone(),
@@ -258,6 +267,7 @@ pub(super) fn mint_container(
         state,
         restarts,
         files: has_secret_files(labels),
+        user,
         started,
         anonymous,
     })

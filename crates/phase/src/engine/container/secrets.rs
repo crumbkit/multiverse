@@ -165,7 +165,9 @@ const REMOVALS: &str = "--";
 
 /// Returns the script that renames each staged file in `dir` named by its
 /// arguments over its secret's file, and removes the file of each secret
-/// named after [`REMOVALS`].
+/// named after [`REMOVALS`]. A removal that fails after the renames exits
+/// with 67 and one line on standard error that names the secret whose
+/// file remains, so the failure reaches the caller.
 fn commit_script(dir: &str) -> String {
     format!(
         r#"set -eu
@@ -173,7 +175,8 @@ d='{dir}'
 r=
 for n do
 if [ "$n" = '{REMOVALS}' ]; then r=1; continue; fi
-if [ -n "$r" ]; then rm -f "$d/$n"; else mv -f "$d/.$n.new" "$d/$n"; fi
+if [ -z "$r" ]; then mv -f "$d/.$n.new" "$d/$n"; continue; fi
+rm -f "$d/$n" || {{ echo "phase: the file of the lapsed optional secret $n could not be removed and remains in $d" >&2; exit 67; }}
 done
 "#
     )
@@ -378,9 +381,23 @@ fn is_root(user: &str) -> bool {
 /// none. It returns `None` when the files would belong to
 /// root and the plan did not say so with `secret_owner`.
 pub(crate) fn owner(app: &AppPlan, process: &ProcessPlan, image: &ImageConfig) -> Option<String> {
+    container_owner(
+        process,
+        app.container.user.as_deref().unwrap_or(&image.user),
+    )
+}
+
+/// Returns the owner of the secret files of `process` in a container that
+/// runs as `user`, in Docker's `USER[:GROUP]` form: the process's
+/// `secret_owner`, or else `user`. It returns `None` when the files would
+/// belong to root and the plan did not say so with `secret_owner`.
+///
+/// A rewrite passes the user that the running container was created
+/// with, so the files keep the owner that the start gave them, even when
+/// the image's tag has since moved to an image with another user.
+pub(crate) fn container_owner(process: &ProcessPlan, user: &str) -> Option<String> {
     if let Some(owner) = &process.secret_owner {
         return Some(owner.clone());
     }
-    let user = app.container.user.as_deref().unwrap_or(&image.user);
     (!is_root(user)).then(|| user.to_owned())
 }
