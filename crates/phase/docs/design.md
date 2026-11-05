@@ -357,6 +357,16 @@ phase labels every Compose project, container, network and volume it
 creates with the workspace and app, and records each container by its
 immutable id.
 
+phase names an app's project `phase-<hash>-<app>`, where `<hash>` is 16
+hex digits of a hash of the workspace's stable id, and the container of
+each process `<project>.<process>`. The workspace's volumes are named
+`phase-<hash>.<volume>`, because every app of the workspace may mount them.
+phase creates them before `docker compose up`, the compose file declares
+them `external`, and they carry the workspace's labels and no app label.
+Every container runs on Docker's default bridge network, so phase creates
+no network. `docker compose up` reads the compose file from standard
+input, so the file never reaches the disk.
+
 The labels are `mxv.workspace-id`, the workspace's stable id, which is 32
 lowercase hex digits that mxv mints when it creates the workspace and keeps
 in the workspace's record; `mxv.run-record`, the absolute path of the

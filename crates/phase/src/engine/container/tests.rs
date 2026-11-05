@@ -594,3 +594,118 @@ fn a_volume_key_follows_the_rule_of_a_service_name() {
         assert!(VolumeKey::new(bad).is_err(), "{bad:?}");
     }
 }
+
+/// The workspace id of the app scope's tests.
+const WORKSPACE_ID: &str = "fedcba9876543210fedcba9876543210";
+
+/// Returns the scope of the app `app` of the workspace [`WORKSPACE_ID`].
+fn app_scope(app: &str) -> Scope {
+    Scope::app(
+        Identity {
+            id: WORKSPACE_ID.parse().unwrap(),
+            run_record: PathBuf::from(format!("/state/runs/{WORKSPACE_ID}.json")),
+        },
+        &app.parse().unwrap(),
+    )
+}
+
+#[test]
+fn an_app_scope_names_its_project_after_the_workspace_and_the_app_and_its_volumes_after_the_workspace()
+ {
+    let scope = app_scope("api");
+    let project = scope.project();
+    assert!(project.as_str().starts_with("phase-"), "{project}");
+    assert!(project.as_str().ends_with("-api"), "{project}");
+    assert_eq!(
+        scope.container_name(&service("server")),
+        format!("{project}.server").as_str()
+    );
+    let workspace = project.as_str().strip_suffix("-api").unwrap();
+    assert_eq!(
+        scope.volume_name(&key("data")),
+        format!("{workspace}.data").as_str()
+    );
+    assert_eq!(
+        app_scope("web").volume_name(&key("data")),
+        scope.volume_name(&key("data"))
+    );
+    assert_ne!(app_scope("web").project(), project);
+    let other = Scope::app(
+        Identity {
+            id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+            run_record: PathBuf::from("/state/runs/other.json"),
+        },
+        &"api".parse().unwrap(),
+    );
+    assert_ne!(other.project(), project);
+    assert_ne!(
+        other.volume_name(&key("data")),
+        scope.volume_name(&key("data"))
+    );
+}
+
+#[test]
+fn an_app_scope_labels_a_container_with_the_workspace_id_run_record_and_app_and_a_volume_without_the_app()
+ {
+    let scope = app_scope("api");
+    let run_record = format!("/state/runs/{WORKSPACE_ID}.json");
+    assert_eq!(
+        scope.labels("mxv.container", "server"),
+        json!({
+            "mxv.workspace-id": WORKSPACE_ID,
+            "mxv.run-record": run_record,
+            "mxv.app": "api",
+            "mxv.container": "server",
+        })
+    );
+    assert_eq!(
+        scope.labels("mxv.volume", "data"),
+        json!({
+            "mxv.workspace-id": WORKSPACE_ID,
+            "mxv.run-record": run_record,
+            "mxv.volume": "data",
+        })
+    );
+}
+
+#[test]
+fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_of_its_workspace() {
+    let scope = app_scope("api");
+    let container = |workspace: &str, app: &str, process: &str| {
+        json!({"mxv.workspace-id": workspace, "mxv.app": app, "mxv.container": process}).to_string()
+    };
+    assert!(scope.owns(
+        &container(WORKSPACE_ID, "api", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container(WORKSPACE_ID, "web", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container(WORKSPACE_ID, "api", "worker"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container("0123456789abcdef0123456789abcdef", "api", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container(&format!("{WORKSPACE_ID} "), "api", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container_labels(STORE, "reading-list", "server"),
+        "mxv.container",
+        "server"
+    ));
+    let volume = json!({"mxv.workspace-id": WORKSPACE_ID, "mxv.volume": "data"}).to_string();
+    assert!(scope.owns(&volume, "mxv.volume", "data"));
+    assert!(app_scope("web").owns(&volume, "mxv.volume", "data"));
+    assert!(!scope.owns(&volume, "mxv.volume", "cache"));
+}

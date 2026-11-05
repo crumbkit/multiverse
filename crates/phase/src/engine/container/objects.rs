@@ -24,7 +24,7 @@ use crate::engine::container::ContainerError as Error;
 use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run};
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
-    CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeName,
+    CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeKey, VolumeName,
 };
 
 /// The label that docker gives the anonymous volumes of an image's
@@ -115,6 +115,9 @@ pub struct Inspected {
     /// The volumes that it mounts and that carry no name of the scope,
     /// which are the anonymous volumes of its image.
     pub(crate) anonymous: Vec<AnonymousVolume>,
+    /// The seconds that `docker stop` waits after the stop signal, as the
+    /// container was created with, or `None` when it has Docker's default.
+    pub(crate) stop_timeout: Option<u64>,
 }
 
 /// A named volume of the scope whose labels name the scope and the
@@ -163,7 +166,7 @@ impl Volume {
 /// [`mint_container`] reads.
 fn container_format() -> String {
     format!(
-        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}",
+        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.Config.StopTimeout}}}}",
         labels_format(".Config.Labels")
     )
 }
@@ -202,7 +205,7 @@ pub(super) fn mint_container(
     })?;
     let state = ContainerState::parse(lines.next().unwrap_or_default());
     let started = lines.next().unwrap_or_default().trim().to_owned();
-    let prefix = scope.prefix();
+    let prefix = scope.volume_prefix();
     let anonymous = lines
         .next()
         .unwrap_or_default()
@@ -211,6 +214,7 @@ pub(super) fn mint_container(
         .filter_map(|volume| VolumeName::new(volume).ok())
         .map(|name| AnonymousVolume { name })
         .collect();
+    let stop_timeout = lines.next().and_then(|line| line.trim().parse().ok());
     Ok(Inspected {
         container: OwnedContainer {
             scope: scope.clone(),
@@ -220,6 +224,7 @@ pub(super) fn mint_container(
         state,
         started,
         anonymous,
+        stop_timeout,
     })
 }
 
@@ -350,7 +355,7 @@ pub(super) fn mint_volume(
 ) -> Result<OwnedVolume, Error> {
     let owned = name
         .as_str()
-        .strip_prefix(&scope.prefix())
+        .strip_prefix(&scope.volume_prefix())
         .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), VOLUME_LABEL, volume));
     if owned {
         Ok(OwnedVolume { name: name.clone() })
@@ -421,6 +426,39 @@ pub(crate) fn reinspect_volume(scope: &Scope, volume: &Volume) -> Result<Option<
     Ok(match volume {
         Volume::Named(named) => inspect_volume(scope, &named.name)?.map(Volume::Named),
         Volume::Anonymous(anonymous) => inspect_anonymous(&anonymous.name)?.map(Volume::Anonymous),
+    })
+}
+
+/// Returns the named volume `name` of `scope`, after creating it with the
+/// scope's labels for the volume `key` when it does not exist. The volume
+/// is inspected again after its creation, because `docker volume create`
+/// succeeds for a volume that another program created meanwhile.
+///
+/// # Errors
+///
+/// Returns [`Error::Foreign`] when a volume with the name lacks the
+/// scope's labels, and the errors of `docker version` and
+/// [`Error::Failed`].
+pub(crate) fn ensure_volume(scope: &Scope, key: &VolumeKey) -> Result<OwnedVolume, Error> {
+    let name = scope.volume_name(key);
+    if let Some(volume) = inspect_volume(scope, &name)? {
+        return Ok(volume);
+    }
+    let mut args = vec!["volume".to_owned(), "create".to_owned()];
+    if let serde_json::Value::Object(labels) = scope.labels(VOLUME_LABEL, key.as_str()) {
+        for (label, value) in labels {
+            args.push("--label".to_owned());
+            args.push(format!("{label}={}", value.as_str().unwrap_or_default()));
+        }
+    }
+    args.extend(["--".to_owned(), name.as_str().to_owned()]);
+    quick(args, "volume create")?.checked("volume create", None)?;
+    inspect_volume(scope, &name)?.ok_or_else(|| {
+        Error::failed(
+            "volume create",
+            None,
+            format!("docker created the volume {name} and no longer has it"),
+        )
     })
 }
 

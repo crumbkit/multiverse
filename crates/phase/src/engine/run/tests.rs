@@ -326,6 +326,11 @@ struct FakeContainers {
     stopped: RefCell<Vec<String>>,
     /// Whether a stop leaves each container in place.
     stubborn: bool,
+    /// The state directory, whose run record each start reads.
+    state_dir: RefCell<Option<PathBuf>>,
+    /// The state and id of each process's container entry, as the run
+    /// record held them when the runner was asked to start it.
+    entries_at_start: RefCell<Vec<(EntryState, bool)>>,
 }
 
 impl ContainerRunner for FakeContainers {
@@ -354,6 +359,22 @@ impl ContainerRunner for FakeContainers {
         assert!(start.deadline > now());
         if start.cancel.is_cancelled() {
             return Ok(ContainersStarted::default());
+        }
+        if let Some(state_dir) = self.state_dir.borrow().as_ref() {
+            let record = RunStore::new(state_dir)
+                .read(start.workspace)
+                .unwrap()
+                .unwrap();
+            for process in start.processes {
+                let entry = record
+                    .containers
+                    .iter()
+                    .find(|entry| entry.app == start.app.name && &entry.process == process)
+                    .unwrap();
+                self.entries_at_start
+                    .borrow_mut()
+                    .push((entry.state, entry.id.is_some()));
+            }
         }
         for process in start.processes {
             start
@@ -466,10 +487,12 @@ impl World {
         let state = tempfile::tempdir().unwrap();
         let host = FakeHost::default();
         host.state.borrow_mut().state_dir = Some(state.path().to_path_buf());
+        let containers = FakeContainers::default();
+        *containers.state_dir.borrow_mut() = Some(state.path().to_path_buf());
         Self {
             state,
             host,
-            containers: FakeContainers::default(),
+            containers,
             keeper: KeeperCommand::new(PathBuf::from("/usr/local/bin/mxv"), vec!["keep".into()]),
             inherited: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
         }
@@ -1113,6 +1136,34 @@ fn a_container_app_starts_through_the_container_runner_and_is_recorded() {
     assert_eq!(*world.containers.started.borrow(), vec!["db"]);
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
     assert_eq!(outcome(&report, "api"), &AppOutcome::Started);
+    let record = world.record().unwrap();
+    assert_eq!(
+        record.state(&ObjectKey::Container(name("db"), name("server"))),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn a_container_start_writes_its_entry_back_to_planned_without_an_id_before_the_runner_starts_it() {
+    let world = World::new();
+    let plan = plan(vec![container_app("db")]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .engine()
+        .restart(
+            &plan,
+            &Selection::All,
+            &Env::default(),
+            soon(),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        *world.containers.entries_at_start.borrow(),
+        vec![(EntryState::Planned, false); 3]
+    );
     let record = world.record().unwrap();
     assert_eq!(
         record.state(&ObjectKey::Container(name("db"), name("server"))),

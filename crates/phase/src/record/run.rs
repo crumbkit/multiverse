@@ -658,6 +658,29 @@ impl RunRecord {
         Ok(())
     }
 
+    /// Writes the container entry of `process` of `app` back to planned
+    /// with no id, before phase starts its container again, so a record
+    /// that names a stopped or replaced container never stands for the new
+    /// one, and `sweep` finds the new one by its name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name the entry.
+    pub(crate) fn mark_container_launching(
+        &mut self,
+        app: &AppName,
+        process: &ProcessName,
+    ) -> Result<(), Unplanned> {
+        let entry = self
+            .containers
+            .iter_mut()
+            .find(|entry| &entry.app == app && &entry.process == process)
+            .ok_or_else(|| Unplanned(ObjectKey::Container(app.clone(), process.clone())))?;
+        entry.state = EntryState::Planned;
+        entry.id = None;
+        Ok(())
+    }
+
     /// Removes the keeper and the entry of each host process of `apps`
     /// that is planned and names no process, and the containers of `apps`
     /// that are planned and have no id, because phase never tried to start

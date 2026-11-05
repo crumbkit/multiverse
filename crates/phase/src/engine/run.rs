@@ -451,6 +451,7 @@ impl Op<'_, '_> {
             .iter()
             .map(|process| process.name.clone())
             .collect();
+        self.journal.containers_launching(&app.name, &processes)?;
         let start = ContainerStart {
             workspace: &self.workspace,
             app,
@@ -1254,7 +1255,7 @@ fn check<'a>(
 
 /// Watches a process that has no readiness probe until `until`, and
 /// returns [`Outcome::Ended`] when it ends first.
-fn watch(until: Instant, ended: &mut dyn FnMut() -> bool, cancel: &Cancel) -> Outcome {
+pub(crate) fn watch(until: Instant, ended: &mut dyn FnMut() -> bool, cancel: &Cancel) -> Outcome {
     loop {
         if cancel.is_cancelled() {
             return Outcome::Cancelled;

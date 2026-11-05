@@ -1,14 +1,12 @@
 //! The seam through which `up`, `down` and `restart` run container apps.
-//! The engine calls [`ContainerRunner`], and the container module supplies
-//! the implementation that runs Docker Compose when it lands. Until then
-//! [`Unbuilt`] refuses every container app with
-//! [`PhaseError::NotRunnable`], and the engine reports that app as errored.
+//! The engine calls [`ContainerRunner`], and the container module's
+//! `ComposeRunner` implements it with Docker Compose.
 
 use std::time::Instant;
 
 use crate::cancel::Cancel;
 use crate::env::EnvironmentSource;
-use crate::error::{NotRunnable, PhaseError};
+use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::AppPlan;
 use crate::record::run::{ContainerEntry, NetworkId, VolumeLifetime};
@@ -73,13 +71,6 @@ pub(crate) struct ContainerObjects {
 }
 
 /// What [`ContainerRunner::start`] starts.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the container module reads this when it lands, and until then only the tests' runner does"
-    )
-)]
 pub(crate) struct ContainerStart<'a> {
     /// The workspace.
     pub(crate) workspace: &'a WorkspaceId,
@@ -110,13 +101,6 @@ pub(crate) struct ContainersStarted {
 }
 
 /// What [`ContainerRunner::stop`] stops.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the container module reads this when it lands, and until then only the tests' runner does"
-    )
-)]
 pub(crate) struct ContainerStop<'a> {
     /// The workspace.
     pub(crate) workspace: &'a WorkspaceId,
@@ -129,13 +113,6 @@ pub(crate) struct ContainerStop<'a> {
 }
 
 /// How a container's stop ended.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the container module reports these when it lands, and until then only the tests' runner does"
-    )
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ContainerStopped {
     /// Docker removed it, and phase checked that it is gone.
@@ -144,38 +121,4 @@ pub(crate) enum ContainerStopped {
     AlreadyGone,
     /// It was still there after Docker's removal.
     Unstoppable,
-}
-
-/// The container runner until the container module lands. It refuses
-/// every container app.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Unbuilt;
-
-impl ContainerRunner for Unbuilt {
-    fn objects(
-        &self,
-        _workspace: &WorkspaceId,
-        app: &AppPlan,
-    ) -> Result<ContainerObjects, PhaseError> {
-        Err(not_runnable(&app.name))
-    }
-
-    fn start(&self, start: &ContainerStart<'_>) -> Result<ContainersStarted, PhaseError> {
-        Err(not_runnable(&start.app.name))
-    }
-
-    fn stop(
-        &self,
-        stop: &ContainerStop<'_>,
-    ) -> Result<Vec<(ProcessName, ContainerStopped)>, PhaseError> {
-        Err(not_runnable(stop.app))
-    }
-}
-
-/// Returns the failure of running the container app `app`.
-fn not_runnable(app: &AppName) -> PhaseError {
-    PhaseError::NotRunnable {
-        app: app.clone(),
-        reason: NotRunnable::Containers,
-    }
 }

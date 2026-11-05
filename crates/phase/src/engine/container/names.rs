@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 #[cfg(doc)]
 use crate::name::MOST_NAME_BYTES;
-use crate::name::{WorkspaceId, WorkspaceName, is_unit_name};
+use crate::name::{AppName, WorkspaceId, WorkspaceName, is_unit_name};
 
 /// The label that names the store id of an object's state directory.
 pub(crate) const STORE_LABEL: &str = "mxv.store";
@@ -192,6 +192,12 @@ pub struct VolumeKey(String);
 name_type!(VolumeKey, pub as_str);
 
 impl VolumeKey {
+    /// Returns the key of the plan's volume `volume`, whose name follows
+    /// the same rule.
+    pub(crate) fn of(volume: &crate::name::VolumeName) -> Self {
+        Self(volume.as_str().to_owned())
+    }
+
     /// Returns the volume name `text` of a manifest.
     ///
     /// # Errors
@@ -279,37 +285,92 @@ pub(crate) struct Identity {
     pub(crate) run_record: PathBuf,
 }
 
-/// One workspace of one store: its compose project and the labels and
-/// names of its containers and volumes. Two scopes are equal when they
-/// name the same store and workspace.
+/// The objects that a scope names: one workspace of one store, which is
+/// one compose project of mxv's, or one app of a workspace, which is one
+/// compose project of phase's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Owner {
+    /// One workspace of one store.
+    Store {
+        /// The store id.
+        store: StoreId,
+        /// The workspace.
+        workspace: WorkspaceName,
+    },
+    /// One app of a workspace, which the scope's identity names.
+    App {
+        /// The workspace's stable id.
+        id: WorkspaceId,
+        /// The app.
+        app: AppName,
+    },
+}
+
+/// The objects of a scope: one workspace of one store, mxv's compose
+/// project, or one app of a workspace, phase's compose project. A scope
+/// gives the project its name and its containers and volumes their names
+/// and labels. Two scopes are equal when they name the same store and
+/// workspace, or the same workspace id and app.
+///
+/// An app scope names its project `phase-<hash>-<app>`, where `<hash>` is
+/// 16 hex digits of a hash of the workspace's stable id. Its containers are
+/// `<project>.<process>`, and its volumes, which every app of the
+/// workspace shares, are `phase-<hash>.<volume>`. Its containers carry the
+/// labels `mxv.workspace-id`, `mxv.run-record`, `mxv.app` and
+/// `mxv.container`, and its volumes carry `mxv.workspace-id`,
+/// `mxv.run-record` and `mxv.volume`.
 #[derive(Clone, Debug)]
 pub(crate) struct Scope {
-    /// The store id.
-    store: StoreId,
-    /// The workspace.
-    workspace: WorkspaceName,
+    /// What the scope names.
+    owner: Owner,
     /// The workspace's stable id and run record, which label the objects
-    /// that the scope creates, or `None` for a scope that only finds and
-    /// checks objects.
+    /// that the scope creates, or `None` for a store scope that only finds
+    /// and checks objects. An app scope always has one.
     identity: Option<Identity>,
 }
 
 impl PartialEq for Scope {
     fn eq(&self, other: &Self) -> bool {
-        self.store == other.store && self.workspace == other.workspace
+        self.owner == other.owner
     }
 }
 
 impl Eq for Scope {}
+
+/// Returns 16 hex digits of the 64-bit FNV-1a hash of `text`, which names
+/// a workspace in a compose project's name. A workspace's stable id may be
+/// up to 64 bytes, and the hash keeps the names of its objects short.
+fn short_hash(text: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = text.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    });
+    format!("{hash:016x}")
+}
 
 impl Scope {
     /// Returns the scope of the workspace `workspace` in the store with the
     /// id `store`.
     pub(crate) fn new(store: &StoreId, workspace: &WorkspaceName) -> Self {
         Self {
-            store: store.clone(),
-            workspace: workspace.clone(),
+            owner: Owner::Store {
+                store: store.clone(),
+                workspace: workspace.clone(),
+            },
             identity: None,
+        }
+    }
+
+    /// Returns the scope of the app `app` of the workspace that `identity`
+    /// names, whose objects are labelled with `identity`.
+    pub(crate) fn app(identity: Identity, app: &AppName) -> Self {
+        Self {
+            owner: Owner::App {
+                id: identity.id.clone(),
+                app: app.clone(),
+            },
+            identity: Some(identity),
         }
     }
 
@@ -319,33 +380,46 @@ impl Scope {
         self
     }
 
-    /// Returns the scope's store id.
-    pub(crate) const fn store(&self) -> &StoreId {
-        &self.store
+    /// Returns the store id and the workspace of a store scope, whose
+    /// older labels an object without phase's workspace label carries, or
+    /// `None` for an app scope.
+    pub(crate) const fn legacy(&self) -> Option<(&StoreId, &WorkspaceName)> {
+        match &self.owner {
+            Owner::Store { store, workspace } => Some((store, workspace)),
+            Owner::App { .. } => None,
+        }
     }
 
-    /// Returns the scope's workspace.
-    pub(crate) const fn workspace(&self) -> &WorkspaceName {
-        &self.workspace
-    }
-
-    /// Returns the name of the scope's compose project,
-    /// `mxv-<id8>-<workspace>`, with the workspace's `_` written `__` and
-    /// its `.` written `_d`.
+    /// Returns the name of the scope's compose project: for a store
+    /// scope `mxv-<id8>-<workspace>`, with the workspace's `_` written `__`
+    /// and its `.` written `_d`, and for an app scope `phase-<hash>-<app>`.
     pub(crate) fn project(&self) -> ProjectName {
-        let short = self.store.0.get(..SHORT_ID).unwrap_or(&self.store.0);
-        let workspace = self
-            .workspace
-            .as_str()
-            .replace('_', "__")
-            .replace('.', "_d");
-        ProjectName(format!("mxv-{short}-{workspace}"))
+        match &self.owner {
+            Owner::Store { store, workspace } => {
+                let short = store.0.get(..SHORT_ID).unwrap_or(&store.0);
+                let workspace = workspace.as_str().replace('_', "__").replace('.', "_d");
+                ProjectName(format!("mxv-{short}-{workspace}"))
+            }
+            Owner::App { id, app } => {
+                ProjectName(format!("phase-{}-{app}", short_hash(id.as_str())))
+            }
+        }
     }
 
-    /// Returns the prefix of every container and volume name of the
-    /// scope, `<project>.`.
+    /// Returns the prefix of every container name of the scope,
+    /// `<project>.`.
     pub(super) fn prefix(&self) -> String {
         format!("{}.", self.project())
+    }
+
+    /// Returns the prefix of every named volume of the scope: the prefix
+    /// of its containers for a store scope, and `phase-<hash>.` for an app
+    /// scope, whose volumes every app of the workspace shares.
+    pub(super) fn volume_prefix(&self) -> String {
+        match &self.owner {
+            Owner::Store { .. } => self.prefix(),
+            Owner::App { id, .. } => format!("phase-{}.", short_hash(id.as_str())),
+        }
     }
 
     /// Returns the name of the container of the service `service`,
@@ -354,44 +428,62 @@ impl Scope {
         ContainerName(format!("{}{service}", self.prefix()))
     }
 
-    /// Returns the docker name of the manifest's volume `volume`,
-    /// `<project>.<volume>`.
+    /// Returns the docker name of the volume `volume`, its key after the
+    /// scope's volume prefix.
     pub(crate) fn volume_name(&self, volume: &VolumeKey) -> VolumeName {
-        VolumeName(format!("{}{volume}", self.prefix()))
+        VolumeName(format!("{}{volume}", self.volume_prefix()))
     }
 
-    /// Returns the labels of the scope's object `object` under `label`:
-    /// the store, workspace and object labels, and the workspace's stable
-    /// id, run record and app when the scope has its identity.
+    /// Returns the labels of the scope's object `object` under `label`.
+    /// A store scope gives the store, workspace and object labels, and the
+    /// workspace's stable id, run record and app when the scope has its
+    /// identity. An app scope gives the workspace's stable id, run record
+    /// and object labels, and the app label to a container.
     pub(super) fn labels(&self, label: &str, object: &str) -> Value {
         let mut labels = Map::new();
         let mut put = |key: &str, value: &str| {
             labels.insert(key.to_owned(), Value::String(value.to_owned()));
         };
-        put(STORE_LABEL, self.store.as_str());
-        put(WORKSPACE_LABEL, self.workspace.as_str());
+        let app = match &self.owner {
+            Owner::Store { store, workspace } => {
+                put(STORE_LABEL, store.as_str());
+                put(WORKSPACE_LABEL, workspace.as_str());
+                Some(workspace.as_str())
+            }
+            Owner::App { app, .. } => (label == CONTAINER_LABEL).then_some(app.as_str()),
+        };
         put(label, object);
         if let Some(identity) = &self.identity {
             put(WORKSPACE_ID_LABEL, identity.id.as_str());
             put(RUN_RECORD_LABEL, &identity.run_record.to_string_lossy());
-            put(APP_LABEL, self.workspace.as_str());
+            if let Some(app) = app {
+                put(APP_LABEL, app);
+            }
         }
         Value::Object(labels)
     }
 
     /// Reports whether `labels`, an object's labels as the JSON that
-    /// [`super::objects`] prints, name this scope's store and workspace
-    /// and, under `label`, such as `mxv.container`, the object `object`.
-    /// Each value must equal the expected one exactly, with nothing
-    /// trimmed.
+    /// [`super::objects`] prints, name this scope and, under `label`, such
+    /// as `mxv.container`, the object `object`. A store scope's object
+    /// names its store and workspace. An app scope's object names its
+    /// workspace's stable id, and a container also names its app. Each
+    /// value must equal the expected one exactly, with nothing trimmed.
     pub(super) fn owns(&self, labels: &str, label: &str, object: &str) -> bool {
         let Ok(Some(labels)) = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
         else {
             return false;
         };
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        is(STORE_LABEL, self.store.as_str())
-            && is(WORKSPACE_LABEL, self.workspace.as_str())
-            && is(label, object)
+        let scoped = match &self.owner {
+            Owner::Store { store, workspace } => {
+                is(STORE_LABEL, store.as_str()) && is(WORKSPACE_LABEL, workspace.as_str())
+            }
+            Owner::App { id, app } => {
+                is(WORKSPACE_ID_LABEL, id.as_str())
+                    && (label != CONTAINER_LABEL || is(APP_LABEL, app.as_str()))
+            }
+        };
+        scoped && is(label, object)
     }
 }

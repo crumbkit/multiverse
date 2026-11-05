@@ -81,10 +81,12 @@ impl DockerCli {
             return workspace_id == workspace;
         }
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        self.legacy.as_ref().is_some_and(|scope| {
-            is(STORE_LABEL, scope.store().as_str())
-                && is(WORKSPACE_LABEL, scope.workspace().as_str())
-        })
+        self.legacy
+            .as_ref()
+            .and_then(Scope::legacy)
+            .is_some_and(|(store, workspace)| {
+                is(STORE_LABEL, store.as_str()) && is(WORKSPACE_LABEL, workspace.as_str())
+            })
     }
 
     /// Inspects `object` with the Go template `format`, whose first line is

@@ -521,6 +521,33 @@ impl<'s> Journal<'s> {
         self.commit(record)
     }
 
+    /// Writes the container entries of `processes` of `app` back to
+    /// planned with no id, as [`RunRecord::mark_container_launching`]
+    /// says, before phase starts their containers again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn containers_launching(
+        &mut self,
+        app: &AppName,
+        processes: &[ProcessName],
+    ) -> Result<(), PhaseError> {
+        let Some(first) = processes.first() else {
+            return Ok(());
+        };
+        let mut record = self.current(&ObjectKey::Container(app.clone(), first.clone()))?;
+        for process in processes {
+            record
+                .mark_container_launching(app, process)
+                .map_err(|unplanned| self.unplanned(&unplanned))?;
+        }
+        if self.record.as_ref() == Some(&record) {
+            return Ok(());
+        }
+        self.commit(record)
+    }
+
     /// Removes the entries of `apps` that phase planned and never tried to
     /// start, as [`RunRecord::forget_unstarted`] says.
     ///
