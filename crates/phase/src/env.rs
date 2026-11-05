@@ -37,7 +37,8 @@ mod tests;
 /// `LANG`.
 pub trait EnvironmentSource {
     /// Resolves every variable that `process` of `app` receives, before
-    /// `deadline`.
+    /// `deadline`. An optional variable without a value is left out of
+    /// the environment's [`AppliedEnvironment::names`].
     ///
     /// # Errors
     ///
@@ -78,6 +79,16 @@ pub trait EnvironmentSource {
 /// ```
 pub trait AppliedEnvironment: Send {
     /// Returns the names of the variables, which are never secret.
+    ///
+    /// A variable whose name this set lacks is absent. The source leaves
+    /// out a variable that the plan marks optional, in
+    /// [`ProcessPlan::optional_env`](crate::ProcessPlan::optional_env),
+    /// when it has no value for it, such as `LANG` when the caller's shell
+    /// does not set it. phase then starts a host process with the variable
+    /// unset, leaves the variable out of a container's service, and writes
+    /// no secret file for it. For a required variable without a value the
+    /// source returns an [`EnvironmentError`] from
+    /// [`EnvironmentSource::resolve`] instead.
     fn names(&self) -> BTreeSet<String>;
 
     /// Returns the earliest time at which one of the values expires, such as
@@ -116,7 +127,8 @@ pub trait AppliedEnvironment: Send {
     /// # Errors
     ///
     /// Returns [`io::ErrorKind::NotFound`] when the environment has no
-    /// variable `name`, the error of `out`, and, by default,
+    /// variable `name`, which phase never asks for an absent optional
+    /// secret, the error of `out`, and, by default,
     /// [`io::ErrorKind::Unsupported`] for an environment that cannot write
     /// a value, which phase reports as a container secret it cannot
     /// deliver as a file.

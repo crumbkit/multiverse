@@ -237,7 +237,7 @@ pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
         _ => DockerError::refused(error.to_string()),
     };
     PhaseError::Docker {
-        source: source.with_cause(error.cause()),
+        source: error.describe(source.with_cause(error.cause())),
     }
 }
 
@@ -394,6 +394,10 @@ impl ComposeRunner {
                     Some((owner, values)) => (Some(owner), values),
                     None => (None, Vec::new()),
                 };
+            // An optional variable that the environment lacks is left
+            // out of this child's compose file, so the container does
+            // not receive it.
+            let file = app::for_environment(&file, app, name, &environment.names());
             launching(name)?;
             if let Some(existing) = inspect_named(&scope, &service).map_err(|error| halt(&error))? {
                 let grace = own_grace(&existing.container).min(left(start.deadline));
@@ -596,7 +600,10 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
 /// Returns the value of each secret of `process` of `app` that it
 /// receives as a file, read from `environment` in name order. `up` reads
 /// them before it removes the process's old container, so an environment
-/// that cannot write a value leaves that container running.
+/// that cannot write a value leaves that container running. An optional
+/// secret that the environment's names lack is absent: it has no value
+/// here and gets no file. A rewrite of a running container's files leaves
+/// the old file of such a secret in place.
 ///
 /// # Errors
 ///
@@ -607,7 +614,9 @@ pub(crate) fn secret_values(
     process: &ProcessPlan,
     environment: &dyn AppliedEnvironment,
 ) -> Result<Vec<(String, SecretBytes)>, String> {
+    let present = environment.names();
     app::file_secrets(app, process)
+        .filter(|name| !process.optional_env.contains(*name) || present.contains(*name))
         .map(|name| {
             SecretBytes::of(environment, name)
                 .map(|bytes| (name.clone(), bytes))

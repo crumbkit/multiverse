@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{compose_file, file_secrets, objects, plan_hash, reference, references};
+use super::{
+    compose_file, file_secrets, for_environment, objects, plan_hash, reference, references,
+};
 use crate::engine::container::names::{Identity, Scope};
 use crate::engine::container::secrets::{ImageConfig, entrypoint};
 use crate::error::{NotRunnable, PhaseError};
@@ -447,4 +449,79 @@ fn the_references_of_an_app_are_every_private_variable_its_compose_file_names() 
     for name in &all {
         assert!(file.contains(&format!("${{{name}:-}}")), "{name}");
     }
+}
+
+/// Returns the app of [`with_secrets`] whose `server` also receives the
+/// optional `LANG` and treats the secret `TOKEN` as optional.
+fn with_optional() -> AppPlan {
+    let mut app = with_secrets();
+    app.processes[0].env.insert("LANG".to_owned());
+    app.processes[0].optional_env = ["LANG".to_owned(), "TOKEN".to_owned()].into();
+    app
+}
+
+#[test]
+fn an_optional_variable_is_named_in_the_service_so_the_plan_hash_covers_the_flag() {
+    let optional = with_optional();
+    let mut required = optional.clone();
+    required.processes[0].optional_env.clear();
+    let scope = scope("db");
+
+    let file = compose_file(&scope, &optional, None).unwrap();
+
+    assert_eq!(
+        file["services"]["server"]["x-phase-optional-env"],
+        json!(["LANG", "TOKEN"])
+    );
+    assert!(
+        file["services"]["worker"]
+            .get("x-phase-optional-env")
+            .is_none()
+    );
+    assert!(
+        compose_file(&scope, &db(), None).unwrap()["services"]["server"]
+            .get("x-phase-optional-env")
+            .is_none()
+    );
+    assert_ne!(
+        plan_hash(&scope, &optional, &name("server")).unwrap(),
+        plan_hash(&scope, &required, &name("server")).unwrap()
+    );
+}
+
+#[test]
+fn an_absent_optional_variable_is_left_out_of_the_service_and_a_required_one_stays() {
+    let app = with_optional();
+    let scope = scope("db");
+    let file = compose_file(&scope, &app, None).unwrap();
+    let all: std::collections::BTreeSet<String> = ["LANG", "MODE", "PGPASSWORD", "TOKEN"]
+        .map(str::to_owned)
+        .into();
+    let without: std::collections::BTreeSet<String> =
+        ["MODE", "PGPASSWORD"].map(str::to_owned).into();
+
+    let present = for_environment(&file, &app, &name("server"), &all);
+    let absent = for_environment(&file, &app, &name("server"), &without);
+
+    assert_eq!(present, file);
+    let server = &absent["services"]["server"];
+    // PGPORT is required, so an environment without it still refers to
+    // it, as before.
+    assert_eq!(
+        server["environment"],
+        json!({"MODE": "${MXV_ENV_0_1:-}", "PGPORT": "${MXV_ENV_0_2:-}"})
+    );
+    assert_eq!(
+        file["services"]["server"]["environment"]["LANG"],
+        "${MXV_ENV_0_0:-}"
+    );
+    assert_eq!(
+        server["entrypoint"],
+        json!(entrypoint(["PGPASSWORD".to_owned()].iter()))
+    );
+    assert_eq!(absent["services"]["worker"], file["services"]["worker"]);
+    assert_eq!(
+        plan_hash(&scope, &app, &name("server")).unwrap(),
+        PlanHash::new(digest(file["services"]["server"].to_string().as_bytes()))
+    );
 }

@@ -183,6 +183,26 @@ impl AppliedEnvironment for GreetingValue {
 /// A phase whose keeper is this test binary, and the plan of one app,
 /// `api`, whose process `server` writes `ready hello` and then sleeps.
 fn real_keeper(state: &std::path::Path, checkout: &std::path::Path) -> (Phase, Plan) {
+    real_keeper_running(
+        state,
+        checkout,
+        "echo \"ready $GREETING\"; exec sleep 30",
+        "^ready hello$",
+        &[],
+    )
+}
+
+/// A phase whose keeper is this test binary, and the plan of one app,
+/// `api`, whose process `server` receives `GREETING` and the optional
+/// variables `optional`, runs `script` in `sh`, and is ready once its log
+/// matches `ready`.
+fn real_keeper_running(
+    state: &std::path::Path,
+    checkout: &std::path::Path,
+    script: &str,
+    ready: &str,
+    optional: &[&str],
+) -> (Phase, Plan) {
     use crate::plan::probe::{Probe, ProbeCheck};
     use crate::plan::{AppPlan, ProcessPlan, RunnerKind};
     use crate::source::Source;
@@ -207,14 +227,14 @@ fn real_keeper(state: &std::path::Path, checkout: &std::path::Path) -> (Phase, P
     );
     let mut server = ProcessPlan::new(
         "server".parse().unwrap(),
-        vec![
-            "/bin/sh".into(),
-            "-c".into(),
-            "echo \"ready $GREETING\"; exec sleep 30".into(),
-        ],
+        vec!["/bin/sh".into(), "-c".into(), script.into()],
     );
     server.env.insert("GREETING".to_owned());
-    server.ready = Some(Probe::new(ProbeCheck::log("^ready hello$".to_owned())));
+    for name in optional {
+        server.env.insert((*name).to_owned());
+        server.optional_env.insert((*name).to_owned());
+    }
+    server.ready = Some(Probe::new(ProbeCheck::log(ready.to_owned())));
     api.processes.push(server);
     let plan = Plan::new("reading-list".parse().unwrap(), id(), vec![api]).unwrap();
     (phase, plan)
@@ -313,4 +333,187 @@ fn sweeping_a_workspace_with_no_run_record_finds_nothing() {
 
     assert!(swept.items.is_empty());
     assert!(swept.objects.is_empty());
+}
+
+/// An environment source and environment that give the variables they
+/// list, and fail for a variable that `refused` names.
+#[derive(Clone)]
+struct Listed {
+    values: Vec<(&'static str, &'static str)>,
+    refused: Option<&'static str>,
+}
+
+impl Listed {
+    fn of(values: &[(&'static str, &'static str)]) -> Self {
+        Self {
+            values: values.to_vec(),
+            refused: None,
+        }
+    }
+}
+
+impl EnvironmentSource for Listed {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        _process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        if let Some(variable) = self.refused {
+            return Err(EnvironmentError::new(
+                variable.to_owned(),
+                "vault".to_owned(),
+                "the vault has no such item".into(),
+            ));
+        }
+        Ok(Box::new(self.clone()))
+    }
+}
+
+impl AppliedEnvironment for Listed {
+    fn names(&self) -> std::collections::BTreeSet<String> {
+        self.values
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(
+        &self,
+        command: &mut std::process::Command,
+        reference: &dyn Fn(&str) -> Option<String>,
+    ) {
+        for (name, value) in &self.values {
+            if let Some(reference) = reference(name) {
+                command.env(reference, value);
+            }
+        }
+    }
+}
+
+/// The script of a host process that writes its greeting and its `LANG`,
+/// or `unset`, and then sleeps.
+const GREET_LANG: &str = "echo \"ready $GREETING lang=${LANG-unset}\"; exec sleep 30";
+
+/// Starts the plan of [`real_keeper_running`] in `state` with the
+/// optional `LANG` from `source`, ready once its log matches `ready`, and
+/// returns the result of `up` and the recorded plan hash of the process.
+/// It stops the app again before it returns.
+fn up_with_optional_lang(
+    state: &std::path::Path,
+    checkout: &std::path::Path,
+    source: &Listed,
+    ready: &str,
+) -> (
+    Result<crate::report::Report, PhaseError>,
+    Option<crate::record::run::PlanHash>,
+) {
+    let (phase, plan) = real_keeper_running(state, checkout, GREET_LANG, ready, &["LANG"]);
+    let soon = Instant::now() + Duration::from_secs(30);
+    let up = phase.up(
+        &plan,
+        &Selection::All,
+        source,
+        UpDeadlines::new(soon, soon),
+        &Cancel::new(),
+    );
+    let hash = RunStore::new(state)
+        .read(&id())
+        .unwrap()
+        .and_then(|record| {
+            record
+                .processes
+                .first()
+                .and_then(|entry| entry.plan_hash.clone())
+        });
+    phase.down(&id(), &Selection::All, soon).unwrap();
+    (up, hash)
+}
+
+#[test]
+fn an_optional_variable_that_has_a_value_reaches_a_host_process() {
+    use crate::report::AppOutcome;
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+
+    let (up, _) = up_with_optional_lang(
+        state.path(),
+        checkout.path(),
+        &Listed::of(&[("GREETING", "hello"), ("LANG", "C")]),
+        "^ready hello lang=C$",
+    );
+
+    let up = up.unwrap();
+    assert_eq!(up.apps[0].outcome, AppOutcome::Started, "{up:?}");
+}
+
+#[test]
+fn an_absent_optional_variable_is_unset_in_a_host_process_and_the_start_succeeds() {
+    use crate::report::AppOutcome;
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+
+    let (up, _) = up_with_optional_lang(
+        state.path(),
+        checkout.path(),
+        &Listed::of(&[("GREETING", "hello")]),
+        "^ready hello lang=unset$",
+    );
+
+    let up = up.unwrap();
+    assert_eq!(up.apps[0].outcome, AppOutcome::Started, "{up:?}");
+}
+
+#[test]
+fn a_host_process_records_one_plan_hash_whether_or_not_the_shell_sets_an_optional_variable() {
+    // Both starts use one plan, as a caller that declares LANG optional
+    // builds whether or not its shell sets LANG.
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let (up, with_lang) = up_with_optional_lang(
+        state.path(),
+        checkout.path(),
+        &Listed::of(&[("GREETING", "hello"), ("LANG", "C")]),
+        "^ready hello lang=",
+    );
+    up.unwrap();
+
+    let (up, without) = up_with_optional_lang(
+        state.path(),
+        checkout.path(),
+        &Listed::of(&[("GREETING", "hello")]),
+        "^ready hello lang=",
+    );
+
+    up.unwrap();
+    assert!(with_lang.is_some());
+    assert_eq!(with_lang, without);
+}
+
+#[test]
+fn a_required_variable_that_the_source_cannot_supply_fails_a_host_start_as_before() {
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let mut source = Listed::of(&[("LANG", "C")]);
+    source.refused = Some("GREETING");
+
+    let (up, _) = up_with_optional_lang(state.path(), checkout.path(), &source, "^ready");
+
+    let error = up.unwrap_err();
+    assert_eq!(error.code(), "phase::environment");
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("GREETING"),
+        "{error}"
+    );
 }

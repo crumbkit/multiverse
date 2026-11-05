@@ -9,7 +9,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use crate::record::DockerCause;
+use crate::record::{DockerCause, DockerError, DockerKind};
 
 /// A failure of a step of the container engine.
 #[derive(Debug)]
@@ -155,6 +155,28 @@ impl ContainerError {
         }
     }
 
+    /// Returns `error` with what this failure says phase was doing: the
+    /// docker command or step and its container, or the foreign object.
+    pub(crate) fn describe(&self, error: DockerError) -> DockerError {
+        match self {
+            Self::Failed {
+                operation,
+                container,
+                ..
+            } => error.during(operation, container.as_deref()),
+            Self::Cancelled { operation } => error.during(operation, None),
+            Self::Foreign { kind, name } => match foreign_kind(kind) {
+                Some(kind) => error.about_foreign(kind, name),
+                None => error,
+            },
+            Self::Missing { .. }
+            | Self::ComposeMissing { .. }
+            | Self::NoAddressPool { .. }
+            | Self::Unavailable { .. }
+            | Self::Unreadable { .. } => error,
+        }
+    }
+
     /// Returns the failure of an object of `kind` named `name` whose labels
     /// do not name the scope.
     pub(crate) fn foreign(kind: &'static str, name: &str) -> Self {
@@ -162,6 +184,17 @@ impl ContainerError {
             kind,
             name: name.to_owned(),
         }
+    }
+}
+
+/// Returns the kind of object that [`ContainerError::Foreign`] names as
+/// `kind`, or `None` for a kind that phase does not label.
+fn foreign_kind(kind: &str) -> Option<DockerKind> {
+    match kind {
+        "container" => Some(DockerKind::Container),
+        "network" => Some(DockerKind::Network),
+        "volume" => Some(DockerKind::Volume),
+        _ => None,
     }
 }
 

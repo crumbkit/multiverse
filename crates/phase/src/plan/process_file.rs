@@ -50,6 +50,9 @@ pub(super) struct ProcessFile {
     /// The variables' names.
     #[serde(default)]
     env: BTreeSet<String>,
+    /// The names of the variables that may be absent.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    optional_env: BTreeSet<String>,
     /// The listen port.
     #[serde(default)]
     port: Option<PortName>,
@@ -113,6 +116,7 @@ impl TryFrom<ProcessFile> for ProcessPlan {
             depends: file.depends,
             cwd: file.cwd,
             env: file.env,
+            optional_env: file.optional_env,
             port: file.port,
             publish: file.publish,
             volumes: file.volumes,
@@ -140,6 +144,7 @@ impl From<ProcessPlan> for ProcessFile {
             depends: process.depends,
             cwd: process.cwd,
             env: process.env,
+            optional_env: process.optional_env,
             port: process.port,
             publish: process.publish,
             volumes: process.volumes,

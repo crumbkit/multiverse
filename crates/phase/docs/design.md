@@ -459,6 +459,18 @@ answer and a missing `docker` program are errors, so neither `sweep` nor
 mxv's own commands report a running container as gone because Docker
 could not be asked.
 
+A Docker failure carries its facts as types, so a program never reads
+Docker's text. `PhaseError::Docker` holds a `DockerError` whose
+`cause()` is a `DockerCause`, such as `pull_failed` or
+`daemon_unavailable`. Its `operation()` names the docker command or step,
+such as `pull`, `compose up`, `stop`, `rm`, `container inspect`, `logs`
+or `secret write`. Its `container()` names the container the command
+worked on, and its `foreign()` names the kind and name of an object whose
+labels do not name phase's scope. None of them holds a value of a
+variable, and the error's text is unchanged. An app whose outcome is
+`errored` because of a Docker failure carries the same `cause` in the
+report, and the report's JSON leaves `cause` out for any other error.
+
 ### Container secrets
 
 Decided 4 November 2026 (P3): phase delivers each secret to a container as
@@ -578,6 +590,17 @@ recreates it.
 Rotation is `write_secrets` in the container runner, which writes the
 files of a running container again from a fresh environment. Nothing calls
 it on a timer yet, which the same watcher would do.
+
+An optional secret, one that the process names in `optional_env`, gets
+no file when the environment has no value for it, and the wrapper's names
+leave it out, so the wrapper does not wait for it. phase refuses nothing
+for it: the app reads a file that is absent as a secret it was not given,
+which is what marking it optional asks for, and refusing would make the
+mark useless for a secret. The service keeps its tmpfs, its wrapper and
+Docker's `no` restart policy whether or not the value is there, so its
+plan hash does not depend on the value either. A later rewrite of the
+files, such as a rotation, writes the optional secrets that then have a
+value, and leaves the old file of one that has lost its value in place.
 
 An image that can read a secret only from an environment variable falls
 back to environment references when its process sets
@@ -771,7 +794,19 @@ predates it compiles, and phase reports a container secret file that it
 then cannot write.
 
 The plan names each process's variables and holds no value, literal or
-secret. The host program's `EnvironmentSource` supplies every value, and
+secret. A process may mark some of its variables optional in
+`optional_env`, a subset of `env`, such as `LANG` or `CARGO_HOME`, which
+the caller's shell may or may not set. The plan therefore names the same
+variables whatever the shell sets, so its hash, and each process's plan
+hash, does not change with the shell. The hash covers the names and the
+optional flag, and no value. When the source has no value for an
+optional variable, it leaves the variable out of
+`AppliedEnvironment::names`. phase then starts a host process with the
+variable unset, and leaves the variable out of the service in the compose
+file that a container process's `docker compose up` child reads, so the
+container does not receive it, and does not receive an empty string in
+its place. A required variable without a value still makes the source
+fail, and `up` reports that error as before. The host program's `EnvironmentSource` supplies every value, and
 mxv's renders its manifest's literal values and their `{port.NAME}`
 placeholders before phase sees them. phase resolves each process's
 environment separately, so two processes of one app can receive different

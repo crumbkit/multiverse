@@ -31,6 +31,7 @@
 //! [`SecretDelivery::Env`] receives its
 //! secrets through private references like its other variables instead.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -57,6 +58,12 @@ mod tests;
 /// `secret_owner`, which Compose ignores, so that a new owner changes the
 /// service's plan hash and `up` replaces its container.
 const SECRET_OWNER_FIELD: &str = "x-phase-secret-owner";
+
+/// The extension field of a service that lists its process's optional
+/// variables, which Compose ignores, so that marking a variable optional
+/// changes the service's plan hash. The field is absent when the process
+/// has no optional variable, so the hash of such a service is unchanged.
+const OPTIONAL_ENV_FIELD: &str = "x-phase-optional-env";
 
 /// The label of a container whose process receives secret files, which
 /// `status` reads to tell a container that waits for its files after a
@@ -395,6 +402,16 @@ pub(crate) fn compose_file(
                 command.iter().map(|argument| literal(argument)).collect(),
             );
         }
+        if !process.optional_env.is_empty() {
+            definition.insert(
+                OPTIONAL_ENV_FIELD.to_owned(),
+                process
+                    .optional_env
+                    .iter()
+                    .map(|name| literal(name))
+                    .collect(),
+            );
+        }
         if let Some(user) = &app.container.user {
             definition.insert("user".to_owned(), Value::String(literal(user)));
         }
@@ -428,6 +445,54 @@ pub(crate) fn compose_file(
         );
     }
     Ok(json!({"services": services, "volumes": volumes}))
+}
+
+/// Returns `file`, the compose file of `app`, as the `docker compose up`
+/// child of `process` reads it once its environment is resolved, with
+/// `present` as the names of the environment's variables.
+///
+/// Each optional variable of `process` that `present` lacks is left out of
+/// the service's `environment`, so the container does not receive it, and
+/// an empty string never stands in for it. Each optional secret that
+/// `present` lacks is left out of the wrapper's names, so the wrapper does
+/// not wait for its file, and phase writes none. A required variable stays
+/// as it is: the source fails for it before phase gets here. The other
+/// services stay as they are, and [`plan_hash`] hashes the file before
+/// this change, so the plan hash does not depend on which optional
+/// variables have a value.
+pub(crate) fn for_environment(
+    file: &Value,
+    app: &AppPlan,
+    process: &ProcessName,
+    present: &BTreeSet<String>,
+) -> Value {
+    let mut file = file.clone();
+    let Some(plan) = app.processes.iter().find(|plan| &plan.name == process) else {
+        return file;
+    };
+    let absent = |name: &String| plan.optional_env.contains(name) && !present.contains(name);
+    let Ok(service) = service(app, process) else {
+        return file;
+    };
+    let Some(Value::Object(definition)) = file
+        .get_mut("services")
+        .and_then(|services| services.get_mut(service.as_str()))
+    else {
+        return file;
+    };
+    if let Some(Value::Object(environment)) = definition.get_mut("environment") {
+        environment.retain(|name, _| !absent(name));
+    }
+    if definition.contains_key("entrypoint") {
+        let names: Vec<&String> = file_secrets(app, plan)
+            .filter(|name| !absent(name))
+            .collect();
+        definition.insert(
+            "entrypoint".to_owned(),
+            entrypoint(names.into_iter()).into_iter().collect(),
+        );
+    }
+    file
 }
 
 /// Returns the hash of the part of `app` that makes the container of

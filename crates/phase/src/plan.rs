@@ -313,6 +313,20 @@ pub struct ProcessPlan {
     /// of its environment, so the source supplies any other inherited
     /// variable the app relies on, such as `LANG`.
     pub env: BTreeSet<String>,
+    /// The names in `env` that the process may receive without a value,
+    /// such as `LANG` when the caller's shell may not set it. When the
+    /// [`EnvironmentSource`](crate::EnvironmentSource) resolves such a
+    /// variable to absent, by leaving it out of
+    /// [`AppliedEnvironment::names`](crate::AppliedEnvironment::names), a
+    /// host process starts with the variable unset, and a container
+    /// process's service leaves the variable out, so the container does
+    /// not receive an empty string. An optional secret that is absent gets
+    /// no file, and phase's wrapper does not wait for one. A variable that
+    /// this set does not name is required, and the source fails for it
+    /// with an [`EnvironmentError`](crate::EnvironmentError) when it has no
+    /// value. Each name is also in `env`, and the plan holds no value. In
+    /// JSON it is `"optional_env"`, left out when it is empty.
+    pub optional_env: BTreeSet<String>,
     /// The app port the process listens on, or `None`.
     pub port: Option<PortName>,
     /// For a container process, the port inside the container that each of
@@ -387,7 +401,8 @@ impl SecretDelivery {
 impl ProcessPlan {
     /// Returns a long-running process named `name` that runs `run` in its
     /// app's directory, with no dependencies, variables, ports, volumes or
-    /// probe and a ready timeout of [`DEFAULT_READY_TIMEOUT`], which is
+    /// probe, no optional variables, and a ready timeout of
+    /// [`DEFAULT_READY_TIMEOUT`], which is
     /// never restarted and stops with the default [`Stop`].
     #[must_use]
     pub fn new(name: ProcessName, run: Vec<String>) -> Self {
@@ -398,6 +413,7 @@ impl ProcessPlan {
             depends: Vec::new(),
             cwd: None,
             env: BTreeSet::new(),
+            optional_env: BTreeSet::new(),
             port: None,
             publish: BTreeMap::new(),
             volumes: BTreeMap::new(),

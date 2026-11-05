@@ -113,7 +113,10 @@ impl DockerCli {
             return Ok(None);
         }
         if !finished.status.success() {
-            return Err(DockerError::unavailable(message(&finished.stderr)));
+            let container = (object.kind == DockerKind::Container).then_some(target);
+            return Err(
+                DockerError::unavailable(message(&finished.stderr)).during("inspect", container)
+            );
         }
         let mut lines = finished.stdout.lines();
         let id = lines.next().unwrap_or_default();
@@ -125,12 +128,17 @@ impl DockerCli {
         Ok(Some((id.to_owned(), rest.join("\n"))))
     }
 
-    /// Returns the failure of a call that failed with `finished`: Docker
-    /// did not answer when its daemon does not answer now, and otherwise
-    /// it refused.
-    fn failure(&self, finished: &Finished) -> DockerError {
+    /// Returns the failure of the call `operation` on `container` that
+    /// failed with `finished`: Docker did not answer when its daemon does
+    /// not answer now, and otherwise it refused.
+    fn failure(
+        &self,
+        finished: &Finished,
+        operation: &'static str,
+        container: Option<&str>,
+    ) -> DockerError {
         match check_with(self.program()) {
-            Ok(()) => DockerError::refused(message(&finished.stderr)),
+            Ok(()) => DockerError::refused(message(&finished.stderr)).during(operation, container),
             Err(error) => unavailable(&error),
         }
     }
@@ -163,12 +171,12 @@ impl DockerCli {
             return Ok(());
         }
         if !inspected.status.success() {
-            return Err(self.failure(&inspected));
+            return Err(self.failure(&inspected, "inspect", Some(id)));
         }
         let state = ContainerState::parse(&inspected.stdout);
         if state.runs() {
             if !updated.status.success() && !updated.missing() {
-                return Err(self.failure(&updated));
+                return Err(self.failure(&updated, "update", Some(id)));
             }
             let seconds = stop_seconds(wait).to_string();
             let stopped = run_program(
@@ -180,7 +188,7 @@ impl DockerCli {
             )
             .map_err(|error| unavailable(&error))?;
             if !stopped.status.success() && !stopped.missing() {
-                return Err(self.failure(&stopped));
+                return Err(self.failure(&stopped, "stop", Some(id)));
             }
         }
         let removed = quick_with(self.program(), rm_args(id, AnonymousVolumes::Remove), "rm")
@@ -188,7 +196,7 @@ impl DockerCli {
         if removed.status.success() || removed.missing() {
             Ok(())
         } else {
-            Err(self.failure(&removed))
+            Err(self.failure(&removed, "rm", Some(id)))
         }
     }
 }
@@ -228,7 +236,7 @@ fn status_state(printed: &str) -> ContainerState {
 /// Returns the failure of a Docker that `error` shows does not answer,
 /// with the cause of `error`.
 fn unavailable(error: &ContainerError) -> DockerError {
-    DockerError::unavailable(error.to_string()).with_cause(error.cause())
+    error.describe(DockerError::unavailable(error.to_string()).with_cause(error.cause()))
 }
 
 /// Returns the words of the inspect command of `kind`, and the Go template
@@ -297,7 +305,11 @@ impl Docker for DockerCli {
         if removed.status.success() || removed.missing() {
             Ok(())
         } else {
-            Err(self.failure(&removed))
+            let operation = match kind {
+                DockerKind::Network => "network rm",
+                _ => "volume rm",
+            };
+            Err(self.failure(&removed, operation, None))
         }
     }
 }
