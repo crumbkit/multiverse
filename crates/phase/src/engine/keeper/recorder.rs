@@ -24,7 +24,7 @@ use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::logfile::Diagnostics;
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::run::{Ended, EntryState, HostProcess, ObjectKey, Started};
+use crate::record::run::{Ended, EntryState, HostProcess, ObjectKey, Ready, Started};
 use crate::record::store::{Journal, RunStore};
 
 /// How long the writer waits for the lifecycle lock before it drops a
@@ -43,6 +43,10 @@ pub(super) enum Note {
     /// second, after this many restarts in all. It applies when the entry
     /// names either process.
     Restarted(HostProcess, HostProcess, u32),
+    /// The app, which has no readiness probe, outlasted its start grace as
+    /// this process after a restart, so it is ready as the readiness says.
+    /// It applies when the entry names this process as running.
+    Ready(HostProcess, Ready),
     /// A stop request came, and the keeper is about to stop the group of
     /// this process. It applies when the entry names this process.
     Stopping(HostProcess),
@@ -65,10 +69,14 @@ impl Note {
         if matches!(self, Self::Ending(..) | Self::Stopped(..)) && state == EntryState::Stopped {
             return false;
         }
+        if matches!(self, Self::Ready(..)) && state != EntryState::Running {
+            return false;
+        }
         match (self, recorded) {
             (Self::Started(_), None) => true,
             (
                 Self::Started(host)
+                | Self::Ready(host, _)
                 | Self::Stopping(host)
                 | Self::Ending(host, _)
                 | Self::Stopped(host, _),
@@ -78,7 +86,11 @@ impl Note {
                 host == recorded || previous == recorded
             }
             (
-                Self::Restarted(..) | Self::Stopping(_) | Self::Ending(..) | Self::Stopped(..),
+                Self::Restarted(..)
+                | Self::Ready(..)
+                | Self::Stopping(_)
+                | Self::Ending(..)
+                | Self::Stopped(..),
                 None,
             ) => false,
         }
@@ -88,7 +100,8 @@ impl Note {
     fn describe(&self) -> String {
         match self {
             Self::Started(host) => format!("the start of process {}", host.pid),
-            Self::Restarted(host, _, _) => format!("the restart as process {}", host.pid),
+            Self::Restarted(host, ..) => format!("the restart as process {}", host.pid),
+            Self::Ready(host, _) => format!("the readiness of process {}", host.pid),
             Self::Stopping(host) => format!("the stopping of process {}", host.pid),
             Self::Ending(host, _) => format!("the end of process {}", host.pid),
             Self::Stopped(host, _) => format!("the stop of process {}", host.pid),
@@ -162,6 +175,12 @@ impl Recorder {
     /// `previous`, after `restarts` restarts in all.
     pub(crate) fn restarted(&self, host: HostProcess, previous: HostProcess, restarts: u32) {
         let _ = self.notes.send(Note::Restarted(host, previous, restarts));
+    }
+
+    /// Records that the app, which has no readiness probe, is ready as
+    /// `host`, as `ready` says.
+    pub(crate) fn ready(&self, host: HostProcess, ready: Ready) {
+        let _ = self.notes.send(Note::Ready(host, ready));
     }
 
     /// Records that a stop request came and the keeper is about to stop
@@ -251,6 +270,19 @@ fn write(
             .record()
             .and_then(|record| record.state(key))
             .unwrap_or(EntryState::Planned);
+        // `up` records the first start itself while it holds the lifecycle
+        // lock, and may record readiness after it. The keeper's note of the
+        // same start would clear that readiness, so it is skipped.
+        if let Note::Started(host) = &current
+            && recorded.as_ref() == Some(host)
+        {
+            diagnostics.note(&format!(
+                "the run record already names process {}, so the keeper skips {}",
+                host.pid,
+                current.describe()
+            ));
+            continue;
+        }
         if !current.applies_to(recorded.as_ref(), state) {
             diagnostics.note(&format!(
                 "the run record names another process or already records its stop, so the keeper skips {}",
@@ -261,6 +293,7 @@ fn write(
         let written = match current {
             Note::Started(host) => journal.started(key, Started::Host(host)),
             Note::Restarted(host, _, restarts) => journal.restarted(key, host, restarts),
+            Note::Ready(_, ready) => journal.ready(key, ready),
             Note::Stopping(_) => journal.stopping(key),
             Note::Ending(_, ended) => journal.ending(key, ended),
             Note::Stopped(_, ended) => journal.stopped_after(key, ended),

@@ -9,7 +9,7 @@ use crate::env::EnvironmentSource;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::AppPlan;
-use crate::record::run::{ContainerEntry, NetworkId, PlanHash, VolumeLifetime};
+use crate::record::run::{ContainerEntry, NetworkId, PlanHash, Ready, VolumeLifetime};
 use crate::record::{ContainerId, DockerName};
 use crate::report::StartProblem;
 
@@ -180,6 +180,34 @@ pub(crate) struct ContainersStarted {
     pub(crate) removed: Vec<ProcessName>,
 }
 
+impl ContainersStarted {
+    /// Records that the container of `process` became ready after
+    /// `restarts` restarts by Docker, in the start that Docker printed as
+    /// `started_at`. The readiness wait counts a restart by Docker as an
+    /// end, so these are the restarts and the start that the container had
+    /// when the start inspected it. A start that docker did not print
+    /// leaves the readiness without one, which `status` counts as not
+    /// ready.
+    pub(crate) fn ready(&mut self, process: &ProcessName, restarts: u32, started_at: &str) {
+        let container = self
+            .containers
+            .iter_mut()
+            .rfind(|container| &container.process == process);
+        debug_assert!(
+            container.is_some(),
+            "a start observed {process} ready before it recorded its container"
+        );
+        if let Some(container) = container {
+            let ready = Ready::now(restarts);
+            container.ready = Some(if started_at.is_empty() {
+                ready
+            } else {
+                ready.with_container_start(started_at.to_owned())
+            });
+        }
+    }
+}
+
 /// A container that [`ContainerRunner::start`] created.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StartedContainer {
@@ -190,6 +218,9 @@ pub(crate) struct StartedContainer {
     /// The hash of the process's part of the plan, which the run record
     /// keeps for [`ContainerRunner::running`].
     pub(crate) plan_hash: PlanHash,
+    /// When the start observed the container ready, with the restarts
+    /// that Docker had counted then, or `None` when it did not.
+    pub(crate) ready: Option<Ready>,
 }
 
 /// What [`ContainerRunner::rewrite`] rewrites.

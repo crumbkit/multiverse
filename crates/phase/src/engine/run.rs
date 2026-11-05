@@ -57,7 +57,7 @@ use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
 use crate::record::process::{Identity, vouched};
 use crate::record::run::{
     ContainerEntry, Ended, EntryState, Exit, HostProcess, Launching, Listen, ObjectKey, PlanHash,
-    RunRecord, Started,
+    Ready, RunRecord, Started,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
@@ -555,6 +555,9 @@ impl Op<'_, '_> {
             let key = ObjectKey::Container(app.name.clone(), container.process);
             self.journal
                 .started(&key, Started::Container(container.id, container.plan_hash))?;
+            if let Some(ready) = container.ready {
+                self.journal.ready(&key, ready)?;
+            }
         }
         for process in started.removed {
             self.journal
@@ -686,6 +689,16 @@ impl Op<'_, '_> {
                 PortHolder::Unknown(error) => notes.push(listener_unknown(process, listen, &error)),
             }
         }
+        if matches!(step, Step::Ready) {
+            // The process has no restarts yet. A restart by the keeper
+            // after the readiness wait is recorded only once this
+            // operation releases the lifecycle lock, and that record
+            // replaces this readiness.
+            self.journal.ready(
+                &ObjectKey::Process(app.name.clone(), process.name.clone()),
+                Ready::now(0),
+            )?;
+        }
         Ok(step)
     }
 
@@ -797,6 +810,12 @@ impl Op<'_, '_> {
             process.restart.clone(),
             process.stop,
             engine.settings.kill_wait,
+        )
+        .ready_after(
+            process
+                .ready
+                .is_none()
+                .then_some(engine.settings.start_grace),
         )
         .expiring(environment.expires_at())
         .requiring(process.required_env().cloned().collect())

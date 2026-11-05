@@ -22,11 +22,12 @@ use crate::phase::{Phase, UpDeadlines};
 use crate::plan::probe::{Probe, ProbeCheck};
 use crate::plan::restart::{Restart, RestartLimits};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
-use crate::record::run::EntryState;
+use crate::record::run::{EntryState, Ready};
 use crate::record::store::RunStore;
 use crate::report::{AppOutcome, Report, StartProblem};
 use crate::select::Selection;
 use crate::source::Source;
+use crate::status::ProcessState;
 
 /// The image of the tests.
 const IMAGE: &str = "busybox:1.37.0";
@@ -34,6 +35,18 @@ const IMAGE: &str = "busybox:1.37.0";
 /// The value of `MODE` that the tests' environment source gives, which is
 /// not a secret.
 const MODE: &str = "test-mode-7c1e";
+
+/// How long an `up` or a `restart` of the tests may take to start its
+/// containers. A loaded Docker host, such as one that runs other test lanes
+/// at the same time, can take over a minute to create and start a
+/// container, and an `up` whose deadline passes first reports the start as
+/// uncertain. No test waits this long when Docker answers promptly.
+const START_WAIT: Duration = Duration::from_secs(180);
+
+/// Returns the deadline of an `up` or a `restart` that begins now.
+fn start_deadline() -> Instant {
+    Instant::now() + START_WAIT
+}
 
 /// Runs the real `docker <args>` and returns its standard output when it
 /// succeeded.
@@ -134,7 +147,7 @@ impl World {
     }
 
     fn up(&self, plan: &Plan) -> Report {
-        let ready = Instant::now() + Duration::from_secs(60);
+        let ready = start_deadline();
         self.phase
             .up(
                 plan,
@@ -166,6 +179,18 @@ impl World {
             .filter(|entry| entry.state == EntryState::Running)
             .and_then(|entry| entry.id.as_ref())
             .map(|id| id.as_str().to_owned())
+    }
+
+    /// Returns when the run record says phase observed the container of
+    /// `process` of `app` ready.
+    fn ready(&self, app: &str, process: &str) -> Option<Ready> {
+        let record = RunStore::new(self.state.path()).read(&self.id).unwrap()?;
+        record
+            .containers
+            .iter()
+            .find(|entry| entry.app.as_str() == app && entry.process.as_str() == process)?
+            .ready
+            .clone()
     }
 
     /// Removes every container and volume that carries this workspace's
@@ -267,11 +292,34 @@ fn up_runs_a_container_app_that_a_command_probe_finds_ready_and_down_removes_it(
     assert!(!labels.contains(MODE), "{labels}");
     let mounts = docker(&["container", "inspect", "--format", "{{json .Mounts}}", &id]).unwrap();
     assert!(mounts.contains(".data"), "{mounts}");
+    let ready = world.ready("db", "server").unwrap();
+    assert_eq!(ready.restarts, 0);
+    let status = world.phase.status(&world.id, Some(&plan)).unwrap();
+    assert_eq!(status.rows[0].state, ProcessState::Ready, "{status:?}");
 
     let report = world.down();
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Stopped, "{report:?}");
     assert!(docker(&["container", "inspect", &id]).is_none());
+}
+
+#[test]
+fn a_container_that_docker_restarts_outside_phase_is_running_and_no_longer_ready() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![app("db", "exec sleep 60")]);
+    let report = world.up(&plan);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let state = || world.phase.status(&world.id, Some(&plan)).unwrap().rows[0].state;
+    assert_eq!(state(), ProcessState::Ready);
+    let id = world.container("db", "server").unwrap();
+
+    // `docker restart` does not add to the container's RestartCount.
+    docker(&["restart", "--time", "0", "--", &id]).unwrap();
+
+    assert_eq!(state(), ProcessState::Running);
 }
 
 #[test]
@@ -425,7 +473,7 @@ fn restart_replaces_the_container_with_a_new_one() {
             &plan,
             &Selection::All,
             &Mode,
-            Instant::now() + Duration::from_secs(60),
+            start_deadline(),
             &Cancel::new(),
         )
         .unwrap();
@@ -875,7 +923,7 @@ impl AppliedEnvironment for SecretValues {
 
 impl World {
     fn up_with(&self, plan: &Plan, env: &dyn EnvironmentSource) -> Report {
-        let ready = Instant::now() + Duration::from_secs(60);
+        let ready = start_deadline();
         self.phase
             .up(
                 plan,
@@ -1841,7 +1889,7 @@ fn restart_removes_the_anonymous_volume_of_the_replaced_container_and_keeps_the_
             &plan,
             &Selection::All,
             &Mode,
-            Instant::now() + Duration::from_secs(60),
+            start_deadline(),
             &Cancel::new(),
         )
         .unwrap();

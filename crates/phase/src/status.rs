@@ -227,13 +227,21 @@ impl From<&Source> for SourceSummary {
 #[serde(tag = "state", rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum ProcessState {
-    /// The process has started and has not passed its probe yet, or its
-    /// keeper runs and has not started it yet.
+    /// The process's keeper runs and has not started it yet, or the run
+    /// record plans a container that Docker has not started.
     Starting,
-    /// The process passed its probe, or has no probe.
+    /// The process runs, and phase observed it ready since its last start
+    /// or restart: its readiness probe passed, or it has no probe and
+    /// outlasted its start grace after `up` started it or its keeper
+    /// restarted it. A container also needs Docker to report the same
+    /// start that phase observed ready, so any later start, such as one
+    /// under Docker's restart policy or a `docker restart`, makes it not
+    /// ready.
     Ready,
-    /// The process runs. The run record does not say whether it passed its
-    /// probe, so `status` reports a running process in this state.
+    /// The process runs, and phase has not observed it ready since its
+    /// last start or restart. Its readiness probe has not passed yet, or
+    /// its keeper or Docker restarted it after the probe passed, or an
+    /// older phase wrote the run record.
     Running,
     /// The process exited and phase is waiting to restart it, or Docker is
     /// restarting the container under its restart policy.

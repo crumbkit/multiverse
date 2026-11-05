@@ -32,7 +32,7 @@ use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits, Stop};
 use crate::record::process::{Processes, Start, System};
-use crate::record::run::{Ended, EntryState, Exit, HostProcess, ObjectKey};
+use crate::record::run::{Ended, EntryState, Exit, HostProcess, ObjectKey, Ready};
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{app, empty_record, process, workspace};
 
@@ -340,6 +340,17 @@ impl Fixture {
             .iter()
             .find(|entry| entry.process == process(self.process))?;
         Some((state, entry.host.clone(), entry.restarts))
+    }
+
+    /// Returns when the run record says the app was last observed ready.
+    fn ready(&self) -> Option<Ready> {
+        let record = RunStore::new(&self.dir).read(&workspace()).unwrap()?;
+        record
+            .processes
+            .iter()
+            .find(|entry| entry.process == process(self.process))?
+            .ready
+            .clone()
     }
 
     /// Returns how the run record says the app last ended.
@@ -1072,6 +1083,94 @@ fn a_keeper_keeps_the_last_crash_of_an_app_that_it_restarted() {
         fixture.ended(),
         Some(Ended::by_itself(Some(Exit::Signal(9))))
     );
+}
+
+/// A script that crashes on its first run and runs until stopped after.
+const CRASH_ONCE: &str =
+    "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; touch crashed; kill -9 $$";
+
+#[test]
+fn a_keeper_records_a_restarted_app_without_a_readiness_probe_ready_after_its_start_grace() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let spec = fixture
+        .spec(CRASH_ONCE, restart, Stop::default())
+        .ready_after(Some(Duration::from_secs(1)));
+    let _running = fixture.start(&spec).unwrap();
+
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+    let restarted = now();
+    assert_eq!(fixture.ready(), None);
+
+    eventually("the readiness", || fixture.ready().is_some());
+
+    assert!(now() >= restarted + Duration::from_millis(500));
+    assert_eq!(fixture.ready().unwrap().restarts, 1);
+}
+
+#[test]
+fn a_keeper_records_no_readiness_of_an_app_whose_stop_comes_within_its_start_grace() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let spec = fixture
+        .spec(CRASH_ONCE, restart, Stop::default())
+        .ready_after(Some(Duration::from_secs(5)));
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(fixture.ready(), None);
+}
+
+#[test]
+fn a_keeper_spec_whose_start_grace_is_too_long_for_a_deadline_does_not_panic() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let mut spec = fixture.spec(CRASH_ONCE, restart, Stop::default());
+    spec.ready_after_ms = Some(u64::MAX);
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(fixture.ready(), None);
+}
+
+#[test]
+fn a_keeper_records_no_readiness_of_an_app_that_ends_within_its_start_grace() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(Some(2), Duration::from_millis(20), Resolve::Never));
+    let spec = fixture
+        .spec("sleep 0.1; exit 3", restart, Stop::default())
+        .ready_after(Some(Duration::from_millis(500)));
+    let mut running = fixture.start(&spec).unwrap();
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
+    assert_eq!(fixture.recorded().map(|(_, _, restarts)| restarts), Some(2));
+    assert_eq!(fixture.ready(), None);
+}
+
+#[test]
+fn a_keeper_leaves_an_app_with_a_readiness_probe_unready_when_it_restarts_it() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let spec = fixture.spec(CRASH_ONCE, restart, Stop::default());
+    let _running = fixture.start(&spec).unwrap();
+
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+
+    assert_eq!(fixture.ready(), None);
 }
 
 #[test]

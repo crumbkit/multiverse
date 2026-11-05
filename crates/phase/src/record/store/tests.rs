@@ -8,8 +8,9 @@ use super::{Journal, RunStore};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
+use crate::record::ContainerId;
 use crate::record::run::{
-    Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, PlanHash, RunRecord, Started,
+    Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, PlanHash, Ready, RunRecord, Started,
 };
 use crate::record::testing::{app, empty_record, process, workspace, write_file};
 
@@ -100,7 +101,7 @@ fn the_record_holds_the_schema_and_no_environment() {
     let text = fs::read_to_string(store.path(&workspace())).unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v2");
+    assert_eq!(json["schema"], "phase/run/v3");
     assert_eq!(json["workspace"], "0b9f3c8e");
     assert_eq!(
         json["processes"][0]["host"]["started_at_us"],
@@ -186,7 +187,7 @@ fn a_record_from_a_newer_phase_asks_for_an_upgrade() {
     fs::create_dir_all(state.path().join("runs")).unwrap();
     write_file(
         &store.path(&workspace()),
-        r#"{"schema":"phase/run/v3","something":"new"}"#,
+        r#"{"schema":"phase/run/v4","something":"new"}"#,
     );
 
     let error = store.read(&workspace()).unwrap_err();
@@ -593,22 +594,160 @@ fn a_stop_that_phase_begins_records_the_end_as_requested() {
 
 #[test]
 fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_version() {
+    for older in ["phase/run/v1", "phase/run/v2"] {
+        let state = tempfile::tempdir().unwrap();
+        let store = RunStore::new(state.path());
+        let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+        journal.plan(planned()).unwrap();
+        drop(journal);
+        let path = store.path(&workspace());
+        let text = fs::read_to_string(&path).unwrap();
+        write_file(&path, &text.replace("phase/run/v3", older));
+
+        let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+        assert_eq!(journal.record(), Some(&planned()), "{older}");
+        journal.started(&server(), Started::Host(host())).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["schema"], "phase/run/v3", "{older}");
+    }
+}
+
+#[test]
+fn a_record_that_an_older_phase_wrote_reads_as_one_that_has_observed_no_readiness() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal
+        .plan(planned().container(
+            &app("db"),
+            &process("server"),
+            "mxv-0b9f3c8e-db-server-1".parse().unwrap(),
+        ))
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("ready"), "{text}");
+    write_file(&path, &text.replace("phase/run/v3", "phase/run/v2"));
+
+    let record = on_disk(&store);
+
+    assert_eq!(record.processes[0].ready, None);
+    assert_eq!(record.containers[0].ready, None);
+}
+
+#[test]
+fn readiness_is_recorded_with_its_time_and_the_restarts_it_saw() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
     journal.plan(planned()).unwrap();
-    drop(journal);
-    let path = store.path(&workspace());
-    let text = fs::read_to_string(&path).unwrap();
-    write_file(&path, &text.replace("phase/run/v2", "phase/run/v1"));
-
-    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
-    assert_eq!(journal.record(), Some(&planned()));
     journal.started(&server(), Started::Host(host())).unwrap();
 
+    journal
+        .ready(&server(), Ready::new(1_793_000_000_123, 0))
+        .unwrap();
+
+    assert_eq!(
+        on_disk(&store).processes[0].ready,
+        Some(Ready::new(1_793_000_000_123, 0))
+    );
     let json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(json["schema"], "phase/run/v2");
+        serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
+    assert_eq!(
+        json["processes"][0]["ready"],
+        serde_json::json!({"at_ms": 1_793_000_000_123_u64, "restarts": 0})
+    );
+}
+
+#[test]
+fn a_restart_clears_readiness() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.ready(&server(), Ready::new(100, 0)).unwrap();
+
+    journal.restarted(&server(), host(), 1).unwrap();
+
+    assert_eq!(on_disk(&store).processes[0].ready, None);
+}
+
+#[test]
+fn a_start_or_a_launch_by_phase_clears_readiness() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.ready(&server(), Ready::new(100, 0)).unwrap();
+
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 1))
+        .unwrap();
+    assert_eq!(on_disk(&store).processes[0].ready, None);
+
+    journal.ready(&server(), Ready::new(100, 0)).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    assert_eq!(on_disk(&store).processes[0].ready, None);
+}
+
+#[test]
+fn a_container_records_readiness_until_phase_starts_it_again() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal
+        .plan(empty_record().container(
+            &app("db"),
+            &process("server"),
+            "mxv-0b9f3c8e-db-server-1".parse().unwrap(),
+        ))
+        .unwrap();
+    let key = ObjectKey::Container(app("db"), process("server"));
+    let id = || ContainerId::try_from("a".repeat(64)).unwrap();
+    let hash = || PlanHash::new([7; 32]);
+    journal
+        .started(&key, Started::Container(id(), hash()))
+        .unwrap();
+
+    let ready = Ready::new(100, 1).with_container_start("2026-11-05T10:20:30Z".to_owned());
+    journal.ready(&key, ready.clone()).unwrap();
+    assert_eq!(on_disk(&store).containers[0].ready, Some(ready));
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
+    assert_eq!(
+        json["containers"][0]["ready"]["container_started_at"],
+        "2026-11-05T10:20:30Z"
+    );
+
+    journal
+        .containers_launching(&app("db"), &[process("server")])
+        .unwrap();
+    assert_eq!(on_disk(&store).containers[0].ready, None);
+
+    journal.ready(&key, Ready::new(100, 1)).unwrap();
+    journal
+        .started(&key, Started::Container(id(), hash()))
+        .unwrap();
+    assert_eq!(on_disk(&store).containers[0].ready, None);
+}
+
+#[test]
+fn readiness_of_a_keeper_or_a_network_is_unplanned() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+
+    let keeper = ObjectKey::Keeper(app("api"), process("server"));
+    let error = journal.ready(&keeper, Ready::new(100, 0)).unwrap_err();
+
+    assert_eq!(error.code(), "phase::record::unplanned");
 }
 
 #[test]

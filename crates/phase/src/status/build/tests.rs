@@ -8,7 +8,7 @@ use crate::plan::restart::{Restart, RestartLimits};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::docker::{Docker, DockerKind};
 use crate::record::process::{Processes, Start};
-use crate::record::run::{Ended, EntryState, Exit, HostProcess, Listen, RunRecord};
+use crate::record::run::{Ended, EntryState, Exit, HostProcess, Listen, Ready, RunRecord};
 use crate::record::store::RunStore;
 use crate::record::testing::{
     FakeDocker, FakeProcesses, Spawned, Unreachable, app, empty_record, host_at, process,
@@ -723,4 +723,98 @@ fn a_stopping_process_whose_keeper_and_app_have_gone_shows_how_it_ended() {
             "{ended:?}"
         );
     }
+}
+
+#[test]
+fn a_running_process_that_phase_observed_ready_since_its_last_start_is_ready() {
+    let state = tempfile::tempdir().unwrap();
+    let sleeper = Spawned::sleeper();
+    let mut record = host_record(None, Some((EntryState::Running, sleeper.host())));
+    record.processes[0].restarts = 2;
+    let system = crate::record::process::System;
+
+    write_record(state.path(), &record);
+    assert_eq!(only_state(state.path(), &system), ProcessState::Running);
+
+    record.processes[0].ready = Some(Ready::new(1_793_000_000_123, 2));
+    write_record(state.path(), &record);
+    assert_eq!(only_state(state.path(), &system), ProcessState::Ready);
+    assert_eq!(
+        read(state.path(), None, &system, &Unreachable).state,
+        WorkspaceState::Running
+    );
+
+    // Readiness from before the keeper's last restart no longer counts.
+    record.processes[0].ready = Some(Ready::new(1_793_000_000_123, 1));
+    write_record(state.path(), &record);
+    assert_eq!(only_state(state.path(), &system), ProcessState::Running);
+}
+
+#[test]
+fn a_process_that_was_ready_and_has_gone_is_not_ready() {
+    let state = tempfile::tempdir().unwrap();
+    let mut record = host_record(None, Some((EntryState::Running, host_at(4242, 1))));
+    record.processes[0].ready = Some(Ready::new(1_793_000_000_123, 0));
+    write_record(state.path(), &record);
+
+    assert_eq!(
+        only_state(state.path(), &FakeProcesses::default()),
+        ProcessState::unrecorded()
+    );
+}
+
+#[test]
+fn a_running_container_is_ready_only_while_docker_reports_the_start_that_phase_saw_ready() {
+    const STARTED: &str = "2026-11-05T10:20:30.123456789Z";
+    let state = tempfile::tempdir().unwrap();
+    let id = container_id();
+    let mut record =
+        empty_record().container(&app("db"), &process("server"), "db-server".parse().unwrap());
+    record.containers[0].state = EntryState::Running;
+    record.containers[0].id = Some(id.clone());
+    let docker = |started: Option<&str>| {
+        FakeDocker::default()
+            .with(DockerKind::Container, "db-server", id.as_str())
+            .started_at(id.as_str(), started)
+    };
+
+    write_record(state.path(), &record);
+    assert_eq!(
+        container_state(state.path(), &docker(Some(STARTED))),
+        ProcessState::Running
+    );
+
+    // The readiness time comes from the host's clock, and Docker's clock
+    // may run ahead of it, so only the start that Docker reports counts.
+    record.containers[0].ready =
+        Some(Ready::new(1_000, 0).with_container_start(STARTED.to_owned()));
+    write_record(state.path(), &record);
+    assert_eq!(
+        container_state(state.path(), &docker(Some(STARTED))),
+        ProcessState::Ready
+    );
+    // Docker started the container again, under its restart policy or
+    // because something outside phase restarted it.
+    assert_eq!(
+        container_state(state.path(), &docker(Some("2026-11-05T10:20:31Z"))),
+        ProcessState::Running
+    );
+    assert_eq!(
+        container_state(state.path(), &docker(None)),
+        ProcessState::Running
+    );
+    let exited = docker(Some(STARTED)).in_state(id.as_str(), ContainerState::Exited(3));
+    assert_eq!(
+        container_state(state.path(), &exited),
+        ProcessState::exited(Some(3))
+    );
+
+    // Readiness without a recorded start, which no container entry should
+    // hold, counts as not ready.
+    record.containers[0].ready = Some(Ready::new(1_000, 0));
+    write_record(state.path(), &record);
+    assert_eq!(
+        container_state(state.path(), &docker(Some(STARTED))),
+        ProcessState::Running
+    );
 }

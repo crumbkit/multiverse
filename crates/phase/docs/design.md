@@ -346,7 +346,9 @@ phase uses the probe and restart vocabulary of process-compose:
 - restart policies: `no`, `on-failure` and `always`, with exponential
   backoff and a maximum count.
 
-A process with no readiness probe is ready as soon as it starts.
+A process with no readiness probe is ready as soon as it starts. The run
+record keeps when phase last observed a process ready, as the section on
+readiness in the run record says.
 
 A readiness wait during `up` attempts the probe every 100 ms, or every
 period when the period is shorter, until the passes in a row reach the
@@ -647,7 +649,8 @@ through the host program's `EnvironmentSource` before
 `AppliedEnvironment::expires_at` and after a Docker restart, and holds
 no value between rewrites. It waits for two things: a resolver that
 works in a process that outlives `up`, which starmap's resolver will
-provide, and run record v3, which records the watcher so that `down`
+provide, and a later version of the run record, which records the
+watcher so that `down`
 and `sweep` stop it.
 
 An optional secret, one that the process names in `optional_env`, gets
@@ -698,7 +701,7 @@ The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 ### Run record and sweep
 
-phase writes a run record (`phase/run/v2`) for each workspace. It names every
+phase writes a run record (`phase/run/v3`) for each workspace. It names every
 keeper and app process by pid, process start time and process group, every
 container by id, and the hash of the plan that started them. It holds no
 environment values.
@@ -738,73 +741,60 @@ with it those ends, unless the `down` did not select a process that holds
 such an end. mxv's `down` of the apps that a failed `up` started is such a
 `down`, so `status` still shows the process that failed.
 
-The record is `phase/run/v2`, which adds `ended` and `restart`. phase
-reads a `phase/run/v1` record as one with neither and writes it back as
-v2. A phase that reads only v1 refuses a v2 record as written by a newer
-phase and asks for an upgrade.
+The record is `phase/run/v3`. Version 2 added `ended` and `restart` to
+host entries, and version 3 adds `ready` to host process and container
+entries, as the next section says. phase reads a `phase/run/v1` or
+`phase/run/v2` record with the fields it lacks at their defaults, and
+writes it back as v3: a v1 record reads with no ends, no restart
+policies and no readiness, and a v2 record reads with no readiness. A
+phase that reads only an older version refuses a newer record as written
+by a newer phase and asks for an upgrade. Each version only adds fields
+that read as their defaults when they are missing, so the next version,
+such as the one that records P15's watcher, adds a schema name and needs
+no other read path.
 
-A process's start time is in microseconds: since the Unix epoch on macOS,
-where `proc_pidinfo` reports it, and since boot on Linux, where
-`/proc/<pid>/stat` reports it in clock ticks. On Linux the record also holds
-the boot id from `/proc/sys/kernel/random/boot_id`, and a process recorded
-in an earlier boot is gone. phase only compares a start time with one it
-read on the same machine.
+### Readiness in the run record
 
-When phase may not read the process that has a recorded pid, as inside an
-agent's sandbox, `sweep` reports the process as unknown, leaves it alone,
-and keeps its entry unchanged.
+The run record keeps when phase last observed each host process and each
+container ready, as `ready`, so `status` can tell a process that has
+become ready from one that only runs. `ready` holds the time in
+milliseconds since the Unix epoch, the number of restarts the process
+had then, and for a container the start that Docker reported, exactly as
+`docker container inspect` printed `State.StartedAt`. It holds no
+environment value.
 
-A process that leads its group can end and leave members in the group.
-The group keeps its id while it has a member, but once the last member
-ends, another program can start a group with the same id. So when no
-process has the recorded pid and a group with that id still has a member,
-phase counts the group as its own only when something proves it:
+- `up` records it when a process passes its readiness probe, after the
+  port check that follows. For a container, the restarts and the start
+  are the ones Docker reported when phase inspected the started
+  container.
+- A process with no readiness probe counts as ready once it runs for its
+  start grace. `up` records it once the process has outlasted its start
+  grace. The keeper's specification carries the grace of such a process,
+  and the keeper records a process it restarts as ready once the process
+  has outlasted the grace again.
+- phase's own start of a process or a container clears it, and so does a
+  keeper's restart. A keeper does not run the readiness probe, so a
+  process that has one counts as not ready after a restart until phase
+  starts it again. A later change may let the keeper probe a restarted
+  process.
+- `up` records the first start of a host process itself while it holds
+  the lifecycle lock, and may record readiness after it. The keeper skips
+  its own note of that start, which it would otherwise write once `up`
+  releases the lock, so the note does not clear the readiness.
+- `status` counts the readiness of a host process only while the
+  keeper's count of restarts matches the one it recorded. It counts the
+  readiness of a container only while Docker's `State.StartedAt` is
+  exactly the start that the readiness records. Every start changes it:
+  a restart under Docker's restart policy, `docker restart`, a `docker
+  start` after a stop, and a restart of the Docker daemon. Comparing the
+  two texts uses no clock, so a Docker clock that differs from the host's,
+  as a virtual machine's can after the host sleeps, changes nothing. A
+  start time that Docker does not print counts as not ready.
 
-- The keeper that started the app is still the one phase started. It
-  recorded the app's group and still supervises it, so it vouches for it.
-- Within one stop, phase already found the leader to be its own before it
-  ended. The group cannot have emptied since, because phase saw the leader
-  in it.
-
-Without that proof, phase never signals the group. `down` and `restart`
-keep the entry, report the app as left, and add a note that names the
-group. `up` starts nothing in its place and reports it the same way.
-`sweep` reports the process as unknown, and `status` shows it as `unknown`
-with the reason `leader-gone`.
-
-A member of a group that has ended and that its parent has not reaped yet,
-a zombie, runs nothing, and no signal ends it. A group whose only members
-are zombies counts as gone. macOS refuses a signal to such a group with
-`EPERM`, which phase treats as nothing left to signal.
-
-Each volume in the record has a lifetime. A `run` volume, such as a scratch
-cache, belongs to one run, and `sweep` removes it. A `workspace` volume
-holds data that outlives a run, such as a database's, and `sweep` leaves
-it; only `reset` removes it.
-
-`sweep` stops keepers first, so no keeper restarts its process, then host
-processes, containers, networks and volumes. For a host process it sends
-`TERM` to the process group when the process leads its group, and to the
-process alone otherwise. On Linux it signals a single process through a
-pidfd after checking the start time again. It waits up to the kill wait, sends `KILL`, and
-waits again. A process that is still there is reported as unstoppable, and
-the record keeps it. `sweep` removes the record once every object in it is
-stopped. `sweep --dry-run` reads the record without the lock and changes
-nothing.
-
-`sweep` finds a container or network whose id the record does not hold yet
-by its name, and only when it carries phase's workspace label with the
-workspace's stable id. It removes a container as `down` does: it turns
-off the restart policy, reads the status again, stops a running or paused
-container, and removes any container with `docker rm --force`. When
-Docker refuses to update a container that has stopped, `sweep` still
-removes it. When Docker does not answer, `sweep` fails with
-`phase::docker::unavailable`; when Docker refuses a removal, it fails with
-`phase::docker::refused`. Either way the record keeps what is left.
-
-A keeper that started but whose pid phase had not yet recorded when it
-crashed is missing from the record. A later change will let `sweep` find
-such keepers by their command line, which names the workspace's stable id.
+A keeper that an older phase started reads the record before each write.
+Once a newer phase rewrites the record in a newer version, that keeper
+refuses the record, notes each refused write in its diagnostic log, and
+records nothing more, until phase starts its process again.
 
 ### Status and logs
 
@@ -844,7 +834,13 @@ far. Otherwise it shows as `stopping` while the keeper stops what is
 left, and as `exited` once the keeper has recorded it. A host process
 that its keeper restarted shows its last crash as `last_exit`, with its
 code or signal, while it runs or waits to restart. A `down` while the
-keeper waits out a backoff replaces that crash with a requested end. A container that the record plans and
+keeper waits out a backoff replaces that crash with a requested end. A running process or container shows as
+`ready` when the record holds readiness that phase observed since its
+last start or restart, and as `running` otherwise: before its readiness
+probe has passed, after a restart that the probe has not seen, and in a
+record that an older phase wrote. A process with no readiness probe shows
+as `ready` once it has outlasted its start grace since its last start or
+restart. A container that the record plans and
 Docker has not started shows as `starting`. A container that Docker is
 restarting under its restart policy shows as `restarting`, and a paused
 container shows as `paused`, which counts as partly running. The workspace's state comes
@@ -1210,4 +1206,4 @@ Each decision states what this draft assumes until it is decided.
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
-| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for run record v3, which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
+| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v4, since v3 records readiness), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |

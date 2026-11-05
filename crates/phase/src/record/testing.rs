@@ -16,7 +16,7 @@ use crate::engine::keeper::{Kept, Launch};
 use crate::engine::probe::LogLines;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
-use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
+use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject, SeenContainer};
 use crate::record::process::{self, Identity, Processes, Start, System};
 use crate::record::run::{HostProcess, PlanHash, RunRecord};
 
@@ -346,6 +346,10 @@ pub(crate) struct FakeObject {
     /// The state of a container, which is running unless a test says
     /// otherwise.
     pub(crate) state: ContainerState,
+    /// When Docker last started a container, as Docker prints it, which
+    /// is a fixed time unless a test says otherwise. `None` stands for a
+    /// time that phase cannot read.
+    pub(crate) started_at: Option<String>,
 }
 
 /// A fake Docker that holds objects in memory.
@@ -386,7 +390,18 @@ impl FakeDocker {
             id: id.to_owned(),
             workspace: label.map(str::to_owned),
             state: ContainerState::Running,
+            started_at: Some("2026-11-05T10:00:00Z".to_owned()),
         });
+        self
+    }
+
+    /// Sets when Docker last started the container whose id is `id`.
+    pub(crate) fn started_at(self, id: &str, started_at: Option<&str>) -> Self {
+        for object in self.objects.borrow_mut().iter_mut() {
+            if object.id == id {
+                object.started_at = started_at.map(str::to_owned);
+            }
+        }
         self
     }
 
@@ -435,11 +450,13 @@ impl Docker for FakeDocker {
         Ok(self.matching(object)?.map(|found| found.id))
     }
 
-    fn container_state(
+    fn container_seen(
         &self,
         object: &DockerObject<'_>,
-    ) -> Result<Option<ContainerState>, DockerError> {
-        Ok(self.matching(object)?.map(|found| found.state))
+    ) -> Result<Option<SeenContainer>, DockerError> {
+        Ok(self
+            .matching(object)?
+            .map(|found| SeenContainer::new(found.state, Some(0), found.started_at.clone())))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, _wait: Duration) -> Result<(), DockerError> {
@@ -476,10 +493,10 @@ impl Docker for Unreachable {
         Err(Self::failure())
     }
 
-    fn container_state(
+    fn container_seen(
         &self,
         _object: &DockerObject<'_>,
-    ) -> Result<Option<ContainerState>, DockerError> {
+    ) -> Result<Option<SeenContainer>, DockerError> {
         Err(Self::failure())
     }
 
