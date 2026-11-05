@@ -670,7 +670,7 @@ impl RunRecord {
             .host_pairs()
             .into_iter()
             .filter(|(keeper, process)| {
-                keeper.is_none_or(&unstarted) && process.is_none_or(&unstarted)
+                keeper.is_none_or(unstarted) && process.is_none_or(unstarted)
             })
             .filter_map(|(keeper, process)| {
                 keeper
