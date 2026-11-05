@@ -904,7 +904,8 @@ fn logs_with(
     };
     match (status, held) {
         (Some(status), Some(earlier)) if status.code() == Some(DOCKER_ERROR_EXIT) => {
-            Err(Error::failed("logs", Some(id.as_str()), earlier))
+            Err(Error::failed("logs", Some(id.as_str()), earlier.clone())
+                .with_docker_line(Some(earlier)))
         }
         (Some(status), held) => {
             if let Some(earlier) = held {

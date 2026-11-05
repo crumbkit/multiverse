@@ -547,6 +547,7 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
         (
             ContainerError::Unavailable {
                 message: "Cannot connect".to_owned(),
+                docker_line: None,
             },
             true,
             DockerCause::DaemonUnavailable,
@@ -561,6 +562,7 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
         (
             ContainerError::NoAddressPool {
                 message: "all predefined address pools have been fully subnetted".to_owned(),
+                docker_line: None,
             },
             false,
             DockerCause::NoAddressPool,
@@ -1289,8 +1291,7 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
 
     let error = failed.unwrap_err().to_string();
     assert!(error.contains("the secret TOKEN arrived with"), "{error}");
-    assert!(!error.contains(ROTATED), "{error}");
-    assert!(!error.contains("test-key-rotated"), "{error}");
+    holds_no_value(&error);
     let key = docker(&["exec", "--", &id, "cat", "/run/secrets/KEY"]).unwrap();
     assert_eq!(key, KEY);
     let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
@@ -1325,13 +1326,7 @@ fn a_secret_feed_cut_short_fails_and_leaves_no_staged_file() {
     )
     .unwrap();
 
-    assert_eq!(finished.status.code(), Some(66));
-    assert!(
-        finished.stderr.contains("arrived with"),
-        "{}",
-        finished.stderr
-    );
-    assert!(!finished.stderr.contains("rotated"));
+    assert_eq!(finished.code(), Some(super::secrets::SHORT_FEED));
     let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
     assert!(!listed.contains(".new"), "{listed}");
     let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
@@ -1566,7 +1561,7 @@ fn an_image_without_bin_sh_fails_its_start_with_a_pointer_to_environment_secrets
 }
 
 #[test]
-fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
+fn an_image_without_sleep_fails_its_start_with_status_70_in_phases_own_words() {
     if !docker_ready() {
         return;
     }
@@ -1587,6 +1582,10 @@ fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
     match outcome(&report, "db") {
         AppOutcome::Errored { message, .. } => {
             assert!(message.contains("status 70"), "{message}");
+            assert!(
+                message.contains("gave up waiting for the secret files KEY, TOKEN"),
+                "{message}"
+            );
             assert!(message.contains("has no sleep program"), "{message}");
         }
         other => panic!("{other:?}"),
@@ -2169,10 +2168,12 @@ fn a_required_variable_that_the_source_cannot_supply_fails_the_start_as_before()
             code,
             message,
             cause,
+            context,
         } => {
             assert_eq!(code, "phase::environment");
             assert!(message.contains("db"), "{message}");
             assert_eq!(*cause, None);
+            assert_eq!(*context, None);
         }
         other => panic!("{other:?}"),
     }
@@ -2778,4 +2779,239 @@ fn only_a_running_container_counts_as_running_and_only_an_end_counts_as_ended() 
     ] {
         assert_eq!(seen(read), expected, "{read:?}");
     }
+}
+
+#[test]
+fn a_failed_secret_write_reports_its_context_without_a_docker_line_or_a_secret_value() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+
+    // The feed of `TOKEN` is cut short, so the stage script inside the
+    // container fails and writes its own line on standard error.
+    let values = SecretValues {
+        token: Some(ROTATED),
+        key: Some(KEY),
+    };
+    let failed = super::write_secrets(
+        &world.inspected(&db),
+        super::Delivery {
+            values: vec![(
+                "TOKEN".to_owned(),
+                super::SecretBytes::of(&values, "TOKEN").unwrap().cut(4),
+            )],
+            removed: Vec::new(),
+            owner: "1000:1000",
+            docker_environment: None,
+            starting: false,
+        },
+        (Instant::now() + Duration::from_secs(30), &Cancel::new()),
+    )
+    .unwrap_err();
+
+    let crate::error::PhaseError::Docker { source } = super::docker_error(&failed) else {
+        panic!("{failed:?}");
+    };
+    assert_eq!(source.operation(), Some("secret write"));
+    assert_eq!(source.service(), Some("server"));
+    assert_eq!(source.docker_line(), None);
+    let errored = AppOutcome::errored(&crate::error::PhaseError::Docker { source });
+    let json = serde_json::to_string(&crate::report::AppReport::new(
+        "db".parse().unwrap(),
+        errored,
+    ))
+    .unwrap();
+    holds_no_value(&json);
+    assert!(!json.contains("docker_line"), "{json}");
+    world.down();
+}
+
+#[test]
+fn a_container_failure_passes_dockers_own_line_to_the_docker_error_and_keeps_its_text() {
+    use super::ContainerError;
+    use crate::error::PhaseError;
+
+    let line =
+        "Error response from daemon: Bind for 127.0.0.1:8080 failed: port is already allocated";
+    let cases = [
+        ContainerError::failed("compose up", Some("web"), line)
+            .with_docker_line(Some(line.to_owned())),
+        ContainerError::unexpected(
+            "compose up",
+            Some("web"),
+            "docker reported a port that the process does not publish as allocated",
+        )
+        .with_docker_line(Some(line.to_owned())),
+        ContainerError::Unavailable {
+            message: "Cannot connect to the Docker daemon".to_owned(),
+            docker_line: Some(line.to_owned()),
+        },
+        ContainerError::NoAddressPool {
+            message: "all predefined address pools have been fully subnetted".to_owned(),
+            docker_line: Some(line.to_owned()),
+        },
+    ];
+    for error in cases {
+        let PhaseError::Docker { source } = super::docker_error(&error) else {
+            panic!("{error:?}");
+        };
+        assert_eq!(source.docker_line(), Some(line), "{error:?}");
+        let plain = super::docker_error(&error.with_docker_line(None));
+        assert_eq!(PhaseError::Docker { source }.to_string(), plain.to_string());
+    }
+    let cancelled =
+        ContainerError::Cancelled { operation: "pull" }.with_docker_line(Some(line.to_owned()));
+    let PhaseError::Docker { source } = super::docker_error(&cancelled) else {
+        panic!("{cancelled:?}");
+    };
+    assert_eq!(source.docker_line(), None);
+}
+
+/// The distinctive marks inside the test values [`TOKEN`], [`ROTATED`] and
+/// [`KEY`], and a prefix of each, none of which any phase sentence holds.
+const VALUE_MARKS: [&str; 6] = [
+    "3f9a2c71",
+    "b04e",
+    "55d1e0",
+    "test-token",
+    "test-key",
+    "test-tok",
+];
+
+/// Asserts that `text` holds no mark or prefix of a test value.
+fn holds_no_value(text: &str) {
+    for mark in VALUE_MARKS {
+        assert!(!text.contains(mark), "{mark} in {text}");
+    }
+}
+
+/// Builds an image whose `/bin/sh` runs `leak` in place of the stage
+/// script of a secret write, with the framed value on its standard input,
+/// and runs every other script with busybox's own shell.
+fn leaking_shell(leak: &str) -> Option<BuiltImage> {
+    BuiltImage::build(&format!(
+        "FROM {IMAGE}\n\
+         RUN [\"/bin/busybox\", \"mkdir\", \"/real\"]\n\
+         RUN [\"/bin/busybox\", \"ln\", \"-s\", \"/bin/busybox\", \"/real/sh\"]\n\
+         RUN [\"/bin/busybox\", \"rm\", \"/bin/sh\"]\n\
+         COPY --chmod=755 <<'SHIM' /bin/sh\n\
+         #!/real/sh\n\
+         if [ \"$3\" = {stage} ]; then {leak}; exit 1; fi\n\
+         exec /real/sh \"$@\"\n\
+         SHIM\n",
+        stage = super::secrets::STAGE_NAME,
+    ))
+}
+
+/// Starts an app on `image` with the secrets of [`Secrets`], whose stage
+/// script the image's shell replaces, and asserts that the failed start
+/// reports no value of a secret anywhere.
+fn assert_start_reports_no_value(image: &BuiltImage) {
+    let world = World::new();
+    let plan = world.plan(vec![built_app(
+        "db",
+        image,
+        vec!["sleep".to_owned(), "60".to_owned()],
+    )]);
+
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored {
+            message, context, ..
+        } => {
+            holds_no_value(message);
+            let context = context.as_ref().unwrap();
+            assert_eq!(context.operation.as_deref(), Some("secret write"));
+            assert_eq!(context.docker_line, None);
+            assert!(
+                message.contains("the script exited with status 1"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    holds_no_value(&format!("{report:?}"));
+    holds_no_value(&serde_json::to_string(&report).unwrap());
+    assert!(!world.has_containers());
+}
+
+#[test]
+fn a_shell_that_copies_the_secret_to_standard_error_leaks_nothing_into_the_report() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = leaking_shell("cat >&2") else {
+        return;
+    };
+    assert_start_reports_no_value(&image);
+}
+
+#[test]
+fn a_shell_that_prints_the_secret_as_dockers_error_leaks_nothing_into_the_report() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = leaking_shell("echo \"Error response from daemon: $(cat)\" >&2") else {
+        return;
+    };
+    assert_start_reports_no_value(&image);
+}
+
+#[test]
+fn the_message_for_status_70_is_phases_own_and_never_the_containers_log() {
+    let names = ["KEY".to_owned(), "TOKEN".to_owned()];
+    assert_eq!(
+        super::ended_message(super::secrets::WRAPPER_FAILED, &names),
+        "the container exited with status 70 before its secrets were written: its wrapper gave up waiting for the secret files KEY, TOKEN, or the image has no sleep program or no command to run"
+    );
+}
+
+#[test]
+fn a_wrapper_that_prints_a_lookalike_line_and_exits_with_70_leaks_nothing_into_the_report() {
+    if !docker_ready() {
+        return;
+    }
+    // The image's shell runs the wrapper as a line that imitates the
+    // wrapper's own and holds a value's mark, then exits with 70. It fails
+    // the stage script a second later, once the container has exited.
+    let Some(image) = BuiltImage::build(&format!(
+        "FROM {IMAGE}\n\
+         RUN [\"/bin/busybox\", \"mkdir\", \"/real\"]\n\
+         RUN [\"/bin/busybox\", \"ln\", \"-s\", \"/bin/busybox\", \"/real/sh\"]\n\
+         RUN [\"/bin/busybox\", \"rm\", \"/bin/sh\"]\n\
+         COPY --chmod=755 <<'SHIM' /bin/sh\n\
+         #!/real/sh\n\
+         if [ \"$3\" = phase-secrets ]; then echo 'phase: test-token-3f9a2c71' >&2; exit 70; fi\n\
+         if [ \"$3\" = {stage} ]; then /real/sh -c 'sleep 1'; exit 1; fi\n\
+         exec /real/sh \"$@\"\n\
+         SHIM\n",
+        stage = super::secrets::STAGE_NAME,
+    )) else {
+        return;
+    };
+    let world = World::new();
+    let plan = world.plan(vec![built_app(
+        "db",
+        &image,
+        vec!["sleep".to_owned(), "60".to_owned()],
+    )]);
+
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(message.contains("status 70"), "{message}");
+            assert!(message.contains("gave up waiting"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    holds_no_value(&format!("{report:?}"));
+    holds_no_value(&serde_json::to_string(&report).unwrap());
+    assert!(!world.has_containers());
 }

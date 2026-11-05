@@ -107,7 +107,8 @@ use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::container::ContainerError;
 use crate::engine::container::app::{self, reference};
 use crate::engine::container::command::{
-    DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message, quick, write_secret,
+    DOCKER_DEADLINE, DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message,
+    quick, secret_exec, write_secret,
 };
 use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
@@ -314,6 +315,20 @@ pub(crate) fn recorded_logs(
     Ok(None)
 }
 
+/// Returns the failure of a `docker compose up` of `service` that Docker
+/// failed because a port is allocated, when the port is not one that the
+/// process publishes, with Docker's own error line `docker_line`.
+fn unpublished_port(service: &names::ServiceName, docker_line: Option<String>) -> Halt {
+    Halt::Failed(docker_error(
+        &ContainerError::unexpected(
+            "compose up",
+            Some(service.as_str()),
+            "docker reported a port that the process does not publish as allocated",
+        )
+        .with_docker_line(docker_line),
+    ))
+}
+
 /// Returns the record's id of the container that `inspected` names.
 fn record_id(inspected: &Inspected) -> Result<ContainerId, PhaseError> {
     ContainerId::try_from(inspected.container.id().as_str().to_owned()).map_err(|_| {
@@ -518,17 +533,16 @@ impl ComposeRunner {
             }
             match up {
                 Ok(Up::Started) => {}
-                Ok(Up::PortAllocated(number)) => {
+                Ok(Up::PortAllocated {
+                    port: number,
+                    docker_line,
+                }) => {
                     if let Some(port) = port_named(app, process, number) {
                         started.problem =
                             Some((name.clone(), StartProblem::port_taken(port, Vec::new())));
                         return Ok(());
                     }
-                    return Err(Halt::Failed(docker_error(&ContainerError::unexpected(
-                        "compose up",
-                        Some(service.as_str()),
-                        "docker reported a port that the process does not publish as allocated",
-                    ))));
+                    return Err(unpublished_port(&service, docker_line));
                 }
                 Err(error @ ContainerError::Cancelled { .. }) => return Err(halt(&error)),
                 // The ready deadline stopped `compose up`, so phase does
@@ -712,11 +726,13 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
             service,
             message,
             cause,
+            docker_line,
         } if files && message.contains("/bin/sh") => ContainerError::Failed {
             operation,
             service,
             message: format!("{message}; {NO_SHELL_HINT}"),
             cause,
+            docker_line,
         },
         other => other,
     }
@@ -825,7 +841,6 @@ pub(crate) fn write_secrets(
     until: (Instant, &Cancel),
 ) -> Result<(), ContainerError> {
     let id = inspected.container.id().as_str();
-    let service = inspected.container.service().as_str();
     let names: Vec<String> = delivery
         .values
         .iter()
@@ -841,59 +856,151 @@ pub(crate) fn write_secrets(
             delivery.docker_environment,
             (left(deadline), cancel),
         )
-        .and_then(|finished| finished.checked("secret write", Some(service)).map(drop));
+        .and_then(|status| {
+            script_ended(inspected, "secret write", status, |code| match code {
+                secrets::NO_LENGTH => Some(format!(
+                    "the length of the secret {name} did not reach the stage script"
+                )),
+                secrets::SHORT_FEED => Some(format!(
+                    "the secret {name} arrived with fewer or more bytes than its length"
+                )),
+                _ => None,
+            })
+        });
         if staged.is_err() {
             break;
         }
     }
+    let removed = delivery.removed.join(", ");
     let committed = staged.and_then(|()| {
-        quick(
-            secrets::commit(id, names.iter(), delivery.removed.iter()),
+        let status = secret_exec(
+            &secrets::commit(id, names.iter(), delivery.removed.iter()),
+            None,
+            delivery.docker_environment,
             "secret commit",
-        )?
-        .checked("secret commit", Some(service))
-        .map(drop)
+            (left(deadline), cancel),
+        )?;
+        script_ended(inspected, "secret commit", status, |code| {
+            (code == secrets::REMOVAL_REMAINED).then(|| {
+                format!(
+                    "the file of one of the lapsed optional secrets {removed} could not be removed and remains in {}",
+                    secrets::SECRETS_DIR
+                )
+            })
+        })
     });
     committed.map_err(|error| {
-        let _ = quick(secrets::discard(id), "secret discard");
+        // The discard runs even after the caller cancelled, so it has a
+        // cancel flag and a deadline of its own.
+        let _ = secret_exec(
+            &secrets::discard(id),
+            None,
+            delivery.docker_environment,
+            "secret discard",
+            (DOCKER_DEADLINE, &Cancel::new()),
+        );
         if delivery_starting {
-            ended_early(inspected).unwrap_or(error)
+            ended_early(inspected, &names).unwrap_or(error)
         } else {
             error
         }
     })
 }
 
+/// The exit statuses that `docker exec` gives when it cannot run the
+/// process itself: 125 when Docker's own run fails, 126 when the process
+/// cannot be invoked, and 127 when it is not found.
+const EXEC_OWN_STATUSES: [i32; 3] = [125, 126, 127];
+
+/// Returns `Ok` when the `docker exec` of a secret script for `operation`
+/// on the container `inspected` exited with `status` 0, and its failure
+/// otherwise.
+///
+/// The failure's message is phase's own sentence, chosen from the exit
+/// status and from Docker's view of the container afterwards, and never
+/// from what the exec printed, which [`secret_exec`] discards. `own` gives
+/// the sentence for a status that the script itself exits with, such as
+/// [`secrets::SHORT_FEED`]. A status of `docker exec` itself, one of
+/// [`EXEC_OWN_STATUSES`], says that Docker could not run the script. Any
+/// other status, such as 1, may be the script's or Docker's, so phase
+/// inspects the container: one that Docker no longer has, or that no
+/// longer runs, explains the failure, and otherwise the message names the
+/// status.
+///
+/// # Errors
+///
+/// Returns the errors of checking that docker answers, and
+/// [`ContainerError::Failed`] for any status other than 0.
+fn script_ended(
+    inspected: &Inspected,
+    operation: &'static str,
+    status: std::process::ExitStatus,
+    own: impl Fn(i32) -> Option<String>,
+) -> Result<(), ContainerError> {
+    if status.success() {
+        return Ok(());
+    }
+    check()?;
+    let code = status.code();
+    let message = match code.and_then(&own) {
+        Some(said) => said,
+        None => match code {
+            Some(code) if EXEC_OWN_STATUSES.contains(&code) => {
+                format!("docker exec could not run the script and exited with status {code}")
+            }
+            _ => match reinspect(&inspected.container) {
+                Ok(None) => "docker no longer has the container".to_owned(),
+                Ok(Some(fresh)) if !fresh.state.runs() => {
+                    "the container stopped before the script finished".to_owned()
+                }
+                _ => code.map_or_else(
+                    || "a signal ended the script".to_owned(),
+                    |code| format!("the script exited with status {code}"),
+                ),
+            },
+        },
+    };
+    Err(ContainerError::failed(
+        operation,
+        Some(inspected.container.service().as_str()),
+        message,
+    ))
+}
+
 /// Returns the failure of a container `inspected` that ended before its
 /// secret files were written, which explains a start's write that failed:
-/// the wrapper's own line when it gave up, and [`NO_SHELL_HINT`] when
-/// Docker could not run it. It returns `None` when the container still
+/// phase's own sentence for the wrapper's status [`secrets::WRAPPER_FAILED`],
+/// which names the secrets of `names`, and [`NO_SHELL_HINT`] when Docker
+/// could not run the wrapper. It returns `None` when the container still
 /// runs. Only a start calls it, as [`Delivery::starting`] says.
-fn ended_early(inspected: &Inspected) -> Option<ContainerError> {
+///
+/// The message never holds a line of the container's log. The wrapper
+/// runs under the image's own `/bin/sh`, and some secret files may already
+/// be written when it exits, so a hostile shell could print a value in a
+/// line that looks like the wrapper's.
+fn ended_early(inspected: &Inspected, names: &[String]) -> Option<ContainerError> {
     let fresh = reinspect(&inspected.container).ok()??;
     let ContainerState::Exited(code) = fresh.state else {
         return None;
     };
-    let service = inspected.container.service().as_str();
-    let message = match code {
-        secrets::NO_SHELL => format!("the container exited with status {code}; {NO_SHELL_HINT}"),
-        secrets::WRAPPER_FAILED => {
-            let said = tail(inspected.container.id())
-                .into_iter()
-                .rev()
-                .find(|line| line.starts_with("phase:"))
-                .unwrap_or_default();
-            format!(
-                "the container exited with status {code} before its secrets were written: {said}"
-            )
-        }
-        code => format!("the container exited with status {code} before its secrets were written"),
-    };
     Some(ContainerError::failed(
         "secret write",
-        Some(service),
-        message,
+        Some(inspected.container.service().as_str()),
+        ended_message(code, names),
     ))
+}
+
+/// Returns phase's sentence for a container that exited with `code` before
+/// the secret files of `names` were written.
+fn ended_message(code: i32, names: &[String]) -> String {
+    match code {
+        secrets::NO_SHELL => format!("the container exited with status {code}; {NO_SHELL_HINT}"),
+        secrets::WRAPPER_FAILED => format!(
+            "the container exited with status {code} before its secrets were written: its wrapper gave up waiting for the secret files {}, or the image has no sleep program or no command to run",
+            names.join(", ")
+        ),
+        code => format!("the container exited with status {code} before its secrets were written"),
+    }
 }
 
 /// Turns off Docker's restart policy of `container` and returns the

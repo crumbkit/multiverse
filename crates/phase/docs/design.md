@@ -472,12 +472,72 @@ process's name, for a failure of `up`, `down` or a secret write.
 `container_id()` gives its id for a failure of `sweep`, which knows a
 container only by the id that the run record keeps. Its
 `foreign()` names the kind and name of an object whose labels do not
-name phase's scope. None of them holds a value of a variable, and the
-error's text is unchanged. An app whose outcome is `errored` because of
-a Docker failure carries the same `cause` in the report, and the
-report's JSON leaves `cause` out for any other error. A reader that
-meets a cause it does not know, written by a newer phase, reads it as
-`unknown`.
+name phase's scope. `docker_line()` gives the line that Docker printed
+for its own error, such as `Error response from daemon: ... port is
+already allocated`, apart from phase's sentence around it. All of these
+live in a `DockerContext`, which `context()` returns. None of them holds a
+value of a variable, and the error's text is unchanged.
+
+An app whose outcome is `errored` because of a Docker failure carries the
+same `cause` and `context` in the report. The report's JSON leaves both
+out for any other error, and leaves out each field of `context` that is
+empty:
+
+```json
+{
+  "app": "web",
+  "outcome": "errored",
+  "code": "phase::docker::refused",
+  "message": "Docker refused a request of the run: docker compose up failed for the container server: Error response from daemon: ...",
+  "cause": "refused",
+  "context": {
+    "operation": "compose up",
+    "service": "server",
+    "docker_line": "Error response from daemon: ... port is already allocated"
+  }
+}
+```
+
+A reader that meets a cause it does not know, written by a newer phase,
+reads it as `unknown`, and a reader ignores a field of `context` that it
+does not know.
+
+The Docker line can never hold what a container or an app wrote, because
+a container's output can hold a credential. phase takes it only from a
+docker command's standard error, and only from a line that starts with
+one of Docker's own error forms:
+
+- `Error response from daemon:`
+- `error from daemon in stream:`
+- `Error: No such container:`
+- `Cannot connect to the Docker daemon`
+- `failed to connect to the docker API at`, which Docker 29 prints where
+  older clients print `Cannot connect to the Docker daemon`
+
+A line that starts with only `Error:`, `docker:` or white space is not one
+of them, because containers print such lines too. Docker 29.8 with Compose
+5.5 prints a port conflict, an image that the registry does not have and
+an image that Docker does not have as an `Error response from daemon:`
+line at the end of `docker compose up`'s standard error. Compose's own
+errors, such as `no such service:`, have no fixed form, so phase does not
+take them.
+
+Each command adds its own rule:
+
+- `docker compose up --detach` passes on nothing that a container writes.
+  Its line is the last line of standard error, after Compose's progress
+  lines, when that line is in one of the forms.
+- `docker logs` passes on the container's standard error. Its line is
+  a line in one of the first four forms that is the last line of standard
+  error, after which docker exits with code 1, as it does after it prints
+  its own error. The same line becomes the failure's message, and phase
+  holds it back from the log's lines.
+- The `docker exec` of a secret script never gives a line, because phase
+  never reads what it prints, as the section on container secrets says.
+- Every other command gives a line only when every line of its standard
+  error is in one of the forms.
+
+Any other failure leaves the Docker line out.
 
 ### Container secrets
 
@@ -554,13 +614,39 @@ phase writes the files in two steps, each a `docker exec --interactive
    `/run/secrets/<NAME>`, and removes the file of each optional secret
    that has lost its value.
 
+phase never reads what a `docker exec` into a container prints into an
+error's `message` or into the Docker line. A `docker exec` passes on the
+standard error of the process it runs, and that process is the image's
+own `/bin/sh` with a secret's value on its standard input, so an image
+could print the value. The `docker exec` of each secret script writes its
+standard output and standard error to `/dev/null`, and a failure's message
+is phase's own sentence about its exit status:
+
+- 65 says that the secret's length did not reach the stage script.
+- 66 says that the secret arrived with fewer or more bytes than its
+  length.
+- 67 says that the file of a lapsed optional secret could not be removed.
+- 125, 126 and 127 are the statuses of `docker exec` itself, and say that
+  Docker could not run the script.
+- Any other status, such as 1, may be the script's or Docker's, so phase
+  inspects the container. A container that Docker no longer has, or that
+  no longer runs, explains the failure. Otherwise the message says that
+  the script exited with that status.
+
+A command probe of a container sends its output to `/dev/null` too, and
+phase runs no other `docker exec`.
+
 When a staging fails, phase removes every staged file and renames
 nothing, so the container keeps its whole old set of files. A reader of
 one file sees its old value or its new one. A write that fails during a
 start fails the start, and phase removes the container. When the
-container has already exited, the error says why: the wrapper's own line
-for status 70, and a pointer to `secret_delivery = "env"` when the image
-has no `/bin/sh`.
+container has already exited, the error says why in phase's own words.
+For status 70 it says that the wrapper gave up waiting for the secret
+files, which it names from phase's own list, or that the image has no
+`sleep` or no command. When the image has no `/bin/sh`, it points to
+`secret_delivery = "env"`. phase never copies the wrapper's line from
+the container's log into the error, because the wrapper runs under the
+image's own `/bin/sh` and some secret files may already exist by then.
 
 On the Mac, phase asks the `AppliedEnvironment` to write each value's
 bytes into memory that it overwrites with zeros afterwards, and when that

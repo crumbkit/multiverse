@@ -752,7 +752,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
             });
         match started {
             Ok(Up::Started) => {}
-            Ok(Up::PortAllocated(number)) => {
+            Ok(Up::PortAllocated { port: number, .. }) => {
                 // docker publishes the port for a container that the port
                 // check before `compose up` could not see, such as one
                 // that is created and not started.

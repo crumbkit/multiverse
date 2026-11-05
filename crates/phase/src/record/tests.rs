@@ -447,3 +447,26 @@ fn a_docker_cause_that_a_newer_phase_wrote_reads_as_unknown() {
         }
     ));
 }
+
+#[test]
+fn a_docker_error_keeps_dockers_own_line_apart_from_phases_sentence() {
+    use crate::record::docker::{DockerError, MOST_DOCKER_MESSAGE_BYTES};
+
+    let line = "Error response from daemon: driver failed programming external connectivity on endpoint web: Bind for 127.0.0.1:8080 failed: port is already allocated";
+    let plain = DockerError::refused(format!(
+        "docker compose up failed for the container web: {line}"
+    ))
+    .during("compose up", Some("web"));
+    assert_eq!(plain.docker_line(), None);
+    assert_eq!(plain.context().docker_line, None);
+
+    let with_line = plain.clone().with_docker_line(Some(line.to_owned()));
+    assert_eq!(with_line.docker_line(), Some(line));
+    assert_eq!(with_line.to_string(), plain.to_string());
+    assert_eq!(with_line.operation(), Some("compose up"));
+    assert_eq!(with_line.service(), Some("web"));
+
+    let long = format!("Error response from daemon: {}", "x".repeat(4000));
+    let bounded = DockerError::refused("no".to_owned()).with_docker_line(Some(long));
+    assert!(bounded.docker_line().unwrap().len() <= MOST_DOCKER_MESSAGE_BYTES);
+}

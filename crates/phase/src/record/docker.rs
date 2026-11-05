@@ -1,6 +1,7 @@
 //! The Docker calls that `sweep` makes, behind a trait. The container
 //! module's `DockerCli` runs `docker`, and tests supply a fake.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::time::Duration;
 
@@ -11,8 +12,11 @@ use crate::name::WorkspaceId;
 use crate::record::DockerName;
 
 /// A kind of Docker object that the run record names, and that a
-/// [`DockerError`] about a foreign object names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// [`DockerError`] about a foreign object names. In JSON a kind is its name
+/// in snake case, such as `"volume"`, and a name that this version does not
+/// know reads as [`DockerKind::Unknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DockerKind {
     /// A container.
@@ -21,6 +25,12 @@ pub enum DockerKind {
     Network,
     /// A volume.
     Volume,
+    /// A kind that this version of phase does not know, read from JSON
+    /// that a newer phase wrote. phase never gives it to an object.
+    /// Serializing it again writes `"unknown"`, so the kind's original name
+    /// is not kept.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A Docker object that the run record names: by its id once phase has
@@ -135,7 +145,8 @@ impl SeenContainer {
 /// worked on, by its compose service ([`DockerError::service`]) or its id
 /// ([`DockerError::container_id`]), and for a foreign object, its
 /// kind and name ([`DockerError::foreign`]). None of them holds a value of
-/// a variable.
+/// a variable. [`DockerError::docker_line`] gives Docker's own error line
+/// apart from phase's sentence, when Docker printed one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DockerError {
@@ -164,32 +175,61 @@ pub enum DockerError {
     },
 }
 
-/// What phase was doing when a Docker call failed. It holds names only,
+/// What phase was doing when a Docker call failed, and the line that Docker
+/// printed for its own error. It holds names and Docker's own line only,
 /// and no value of a variable.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// In JSON each field is left out when it is `None`, and a field that this
+/// version does not know is ignored, so a report from a newer phase still
+/// parses.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DockerContext {
     /// The docker command or step as phase names it, such as `pull`,
     /// `compose up`, `stop`, `rm`, `container inspect`, `logs` or `secret
     /// write`, or `None` when phase did not name one.
-    pub operation: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<Cow<'static, str>>,
     /// The compose service of the container that the command worked on,
     /// which is the name of its process in the plan, such as `server`, or
     /// `None`. `up`, `down` and the secret writes name a container this
     /// way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
     /// The 64-hex-digit id of the container that the command worked on, or
     /// `None`. `sweep`, which knows a container only by the id the run
     /// record keeps, names a container this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_id: Option<String>,
     /// The object whose labels do not name phase's scope, for a failure
     /// whose cause is [`DockerCause::Foreign`], or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreign: Option<ForeignObject>,
+    /// The line that Docker printed for its own error, such as `Error
+    /// response from daemon: ... port is already allocated`, kept to
+    /// [`MOST_DOCKER_MESSAGE_BYTES`] bytes, or `None`.
+    ///
+    /// It comes only from a docker command's standard error, and only
+    /// from a line in one of Docker's own error forms: `Error response
+    /// from daemon:`, `error from daemon in stream:`, `Error: No such
+    /// container:`, `Cannot connect to the Docker daemon` or `failed to
+    /// connect to the docker API at`. `docker compose up --detach` gives
+    /// its last line of standard error in one of these forms. `docker
+    /// logs` gives such a line only when it is the last of standard error
+    /// and docker then exits with code 1. The `docker exec` of a secret
+    /// script never gives one, because phase never reads what it prints.
+    /// Every other command gives its last line only when every line of its
+    /// standard error is in one of these forms. Any
+    /// other failure leaves it `None`, so a line that a container or an
+    /// app wrote, which may hold a credential, does not become it. The
+    /// section on containers in phase's design says more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_line: Option<String>,
 }
 
 /// A Docker object that has a name of phase's and whose labels do not name
 /// phase's scope, so phase leaves it alone.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ForeignObject {
     /// The object's kind.
@@ -277,7 +317,7 @@ const CUT: &str = "...";
 /// label: a value reaches only the environment of a `docker compose up`
 /// child, under a private reference that the compose file names. So a
 /// message that echoes what phase sent holds no value.
-fn bounded(mut message: String) -> String {
+pub(crate) fn bounded(mut message: String) -> String {
     if message.len() <= MOST_DOCKER_MESSAGE_BYTES {
         return message;
     }
@@ -346,8 +386,8 @@ impl DockerError {
     /// such as `pull`, `compose up`, `stop`, `rm`, `container inspect`,
     /// `logs` or `secret write`, or `None` when phase did not name one.
     #[must_use]
-    pub const fn operation(&self) -> Option<&'static str> {
-        self.context().operation
+    pub fn operation(&self) -> Option<&str> {
+        self.context().operation.as_deref()
     }
 
     /// Returns the compose service of the container that the failed
@@ -371,6 +411,25 @@ impl DockerError {
         self.context().foreign.as_ref()
     }
 
+    /// Returns the line that Docker printed for its own error, apart from
+    /// phase's sentence, such as `Error response from daemon: ... port is
+    /// already allocated`, or `None`. [`DockerContext::docker_line`] says
+    /// which lines it can be.
+    #[must_use]
+    pub fn docker_line(&self) -> Option<&str> {
+        self.context().docker_line.as_deref()
+    }
+
+    /// Returns this failure with `line` as Docker's own error line, kept
+    /// to [`MOST_DOCKER_MESSAGE_BYTES`] bytes. Its message and cause stay.
+    /// The caller passes only a line that [`DockerContext::docker_line`]
+    /// allows.
+    #[must_use]
+    pub(crate) fn with_docker_line(mut self, line: Option<String>) -> Self {
+        self.context_mut().docker_line = line.map(bounded);
+        self
+    }
+
     /// Returns a mutable view of what phase was doing.
     const fn context_mut(&mut self) -> &mut DockerContext {
         match self {
@@ -384,7 +443,7 @@ impl DockerError {
     #[must_use]
     pub(crate) fn during(mut self, operation: &'static str, service: Option<&str>) -> Self {
         let context = self.context_mut();
-        context.operation = Some(operation);
+        context.operation = Some(Cow::Borrowed(operation));
         context.service = service.map(str::to_owned);
         self
     }
@@ -395,7 +454,7 @@ impl DockerError {
     #[must_use]
     pub(crate) fn during_on_id(mut self, operation: &'static str, id: Option<&str>) -> Self {
         let context = self.context_mut();
-        context.operation = Some(operation);
+        context.operation = Some(Cow::Borrowed(operation));
         context.container_id = id.map(str::to_owned);
         self
     }

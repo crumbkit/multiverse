@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::cancel::Cancel;
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::command::{
-    ChildEnv, Finished, PULL_DEADLINE, check, message, run, run_input,
+    ChildEnv, Finished, PULL_DEADLINE, check, compose_docker_line, message, run, run_input,
 };
 use crate::engine::container::names::{
     CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey,
@@ -266,13 +266,18 @@ pub(crate) fn up_failure(stderr: &str) -> UpFailure {
 }
 
 /// What a `docker compose up` that did not fail as an error did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Up {
     /// The container started.
     Started,
     /// docker already publishes the host port, which it names when it
     /// can, for another container.
-    PortAllocated(Option<u16>),
+    PortAllocated {
+        /// The host port, when docker names it.
+        port: Option<u16>,
+        /// Docker's own error line, as [`compose_docker_line`] takes it.
+        docker_line: Option<String>,
+    },
 }
 
 /// Starts the service `service` of the compose file `file` with `docker
@@ -379,9 +384,13 @@ fn up_result(scope: &Scope, service: &ServiceName, finished: &Finished) -> Resul
         inspect_named(scope, service)?;
     }
     match up_failure(&finished.stderr) {
-        UpFailure::PortAllocated(port) => Ok(Up::PortAllocated(port)),
+        UpFailure::PortAllocated(port) => Ok(Up::PortAllocated {
+            port,
+            docker_line: compose_docker_line(&finished.stderr),
+        }),
         UpFailure::NoAddressPool => Err(Error::NoAddressPool {
             message: message(&finished.stderr),
+            docker_line: compose_docker_line(&finished.stderr),
         }),
         UpFailure::Other => {
             check()?;
@@ -389,7 +398,8 @@ fn up_result(scope: &Scope, service: &ServiceName, finished: &Finished) -> Resul
                 "compose up",
                 Some(service.as_str()),
                 message(&finished.stderr),
-            ))
+            )
+            .with_docker_line(compose_docker_line(&finished.stderr)))
         }
     }
 }
