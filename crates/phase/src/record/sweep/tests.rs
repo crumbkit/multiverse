@@ -236,11 +236,11 @@ fn started_docker_objects() -> Vec<(ObjectKey, Started)> {
         ),
         (
             ObjectKey::Volume(name("mxv-0b9f3c8e-cache")),
-            Started::Volume,
+            Started::Volume(None),
         ),
         (
             ObjectKey::Volume(name("mxv-0b9f3c8e-data")),
-            Started::Volume,
+            Started::Volume(None),
         ),
     ]
 }
@@ -719,4 +719,47 @@ fn sweep_records_a_running_process_it_finds_gone_as_ended_without_a_known_exit()
     let kept = store.read(&workspace()).unwrap().unwrap();
     assert_eq!(kept.state(&server()), Some(EntryState::Stopped));
     assert_eq!(kept.processes[0].ended, Some(Ended::by_itself(None)));
+}
+
+#[test]
+fn sweep_removes_the_volume_owner_helpers_that_an_interrupted_up_left_behind() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(&store, docker_run(), started_docker_objects());
+    let docker = running_docker();
+
+    run(&store, false, &docker);
+
+    assert_eq!(
+        *docker.helpers_removed.borrow(),
+        vec![workspace().as_str().to_owned()]
+    );
+}
+
+#[test]
+fn a_dry_run_and_a_record_without_docker_objects_leave_volume_owner_helpers_alone() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(&store, docker_run(), started_docker_objects());
+    let docker = running_docker();
+
+    run(&store, true, &docker);
+
+    assert!(docker.helpers_removed.borrow().is_empty());
+
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record(
+        &store,
+        empty_record().host_process(&app("api"), &process("server")),
+        Vec::new(),
+    );
+    let docker = FakeDocker {
+        down: true,
+        ..FakeDocker::default()
+    };
+
+    sweep(&store, &workspace(), false, real(&docker), WAITS).unwrap();
+
+    assert!(docker.helpers_removed.borrow().is_empty());
 }

@@ -147,6 +147,19 @@ impl Sweeper<'_, '_, '_> {
                 outcome,
             ));
         }
+        // A volume-owner helper that an interrupted `up` left behind is
+        // not in the record, so the sweep finds it by its labels. A record
+        // that names no Docker object needs no Docker, so a host-only
+        // workspace sweeps without one.
+        let names_docker = !(record.containers.is_empty()
+            && record.networks.is_empty()
+            && record.volumes.is_empty());
+        if names_docker && self.journal.is_some() {
+            self.reach
+                .docker
+                .remove_volume_helpers(self.workspace)
+                .map_err(|source| PhaseError::Docker { source })?;
+        }
         for entry in &record.networks {
             let key = ObjectKey::Network(entry.name.clone());
             let object = DockerObject {

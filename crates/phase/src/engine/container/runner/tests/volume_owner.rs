@@ -1,0 +1,401 @@
+//! Tests of the volume-owner step through `Phase::up`, `restart`, `down`
+//! and `sweep` against a real Docker daemon. They skip as the runner's
+//! other tests do, and also when the helper image, busybox pinned by
+//! digest, is not pulled, which CI's lane pulls.
+
+use std::path::PathBuf;
+
+use super::{BuiltImage, IMAGE, Mode, World, app, docker, docker_ready, outcome, start_deadline};
+use crate::cancel::Cancel;
+use crate::engine::container::volume_owner::HELPER_IMAGE;
+use crate::plan::AppPlan;
+use crate::record::run::{ObjectKey, Started, VolumeOwner};
+use crate::record::store::{Journal, RunStore};
+use crate::report::{AppOutcome, Report};
+use crate::select::Selection;
+use crate::source::Source;
+
+/// Reports whether the tests can run, and prints why when they cannot.
+fn ready() -> bool {
+    if !docker_ready() {
+        return false;
+    }
+    if docker(&["image", "inspect", HELPER_IMAGE]).is_none() {
+        println!("skipping: {HELPER_IMAGE} is not pulled");
+        return false;
+    }
+    true
+}
+
+/// Returns the container app `name` whose `server` runs `script` and
+/// mounts the workspace volume `data` at `/data`.
+fn mounting(name: &str, script: &str) -> AppPlan {
+    let mut app = app(name, script);
+    app.processes[0]
+        .volumes
+        .insert("data".parse().unwrap(), PathBuf::from("/data"));
+    app
+}
+
+/// The script of a process that fails unless it can write `/data`.
+const WRITES: &str = "touch /data/written || exit 3; exec sleep 60";
+
+impl World {
+    /// Returns the Docker name of the workspace volume `data`.
+    fn data_volume(&self) -> String {
+        let record = RunStore::new(self.state.path())
+            .read(&self.id)
+            .unwrap()
+            .unwrap();
+        record
+            .volumes
+            .iter()
+            .find(|entry| entry.name.as_str().ends_with(".data"))
+            .unwrap()
+            .name
+            .as_str()
+            .to_owned()
+    }
+
+    /// Returns the owner that the run record holds for the volume `data`.
+    fn recorded_owner(&self) -> Option<VolumeOwner> {
+        let record = RunStore::new(self.state.path()).read(&self.id).unwrap()?;
+        record
+            .volumes
+            .iter()
+            .find(|entry| entry.name.as_str().ends_with(".data"))?
+            .owner
+            .clone()
+    }
+
+    /// Returns the owner and mode of the root of the volume `data`, as
+    /// `uid:gid`.
+    fn data_owner(&self) -> String {
+        let mount = format!("{}:/v", self.data_volume());
+        docker(&[
+            "run", "--rm", "--volume", &mount, IMAGE, "stat", "-c", "%u:%g", "/v",
+        ])
+        .unwrap()
+        .trim()
+        .to_owned()
+    }
+
+    /// Gives the root of the volume `data` to `owner` outside phase.
+    fn chown_data(&self, owner: &str) {
+        let mount = format!("{}:/v", self.data_volume());
+        docker(&[
+            "run", "--rm", "--volume", &mount, IMAGE, "chown", owner, "/v",
+        ])
+        .unwrap();
+    }
+
+    /// Returns the ids of the workspace's volume-owner helpers.
+    fn helpers(&self) -> Vec<String> {
+        let workspace = format!("label=mxv.workspace-id={}", self.id);
+        docker(&[
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--filter",
+            &workspace,
+            "--filter",
+            "label=mxv.role=volume-owner",
+        ])
+        .unwrap()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    /// Creates a volume-owner helper of the app `app` that mounts the
+    /// volume `data` and never ran, as a run of `up` that ended between
+    /// the helper's creation and its removal leaves one.
+    fn leave_helper(&self, app: &str) {
+        let mount = format!("{}:/volume", self.data_volume());
+        let run_record = RunStore::new(self.state.path()).path(&self.id);
+        docker(&[
+            "create",
+            "--label",
+            &format!("mxv.workspace-id={}", self.id),
+            "--label",
+            &format!("mxv.run-record={}", run_record.display()),
+            "--label",
+            &format!("mxv.app={app}"),
+            "--label",
+            "mxv.role=volume-owner",
+            "--label",
+            "mxv.volume=data",
+            "--volume",
+            &mount,
+            "--entrypoint",
+            "true",
+            "--",
+            HELPER_IMAGE,
+        ])
+        .unwrap();
+    }
+
+    /// Restarts every app of `plan`.
+    fn restart(&self, plan: &crate::plan::Plan) -> Report {
+        self.phase
+            .restart(
+                plan,
+                &Selection::All,
+                &Mode,
+                start_deadline(),
+                &Cancel::new(),
+            )
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_container_that_runs_as_another_user_than_root_can_write_its_new_named_volume() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.data_owner(), "1000:1000");
+    assert_eq!(world.recorded_owner(), Some("1000:1000".parse().unwrap()));
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    world.down();
+}
+
+#[test]
+fn an_owner_of_keep_leaves_the_volume_owned_by_root() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    db.container.owner = Some("keep".to_owned());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.data_owner(), "0:0");
+    assert_eq!(world.recorded_owner(), None);
+    world.down();
+}
+
+#[test]
+fn an_images_user_that_is_a_name_resolves_to_its_numbers_in_the_image() {
+    if !ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&format!(
+        "FROM {IMAGE}\nRUN adduser -D -u 1234 app\nUSER app\n"
+    )) else {
+        return;
+    };
+    let gid = docker(&["run", "--rm", "--entrypoint", "id", &image.tag, "-g"]).unwrap();
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.data_owner(), format!("1234:{}", gid.trim()));
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    world.down();
+}
+
+#[test]
+fn a_user_whose_name_resolves_to_uid_0_is_refused_and_nothing_starts() {
+    if !ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&format!(
+        "FROM {IMAGE}\nRUN echo 'toor:x:0:0:toor:/root:/bin/sh' >> /etc/passwd\nUSER toor\n"
+    )) else {
+        return;
+    };
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, message, .. } => {
+            assert_eq!(code, "phase::container::volume_owner_root");
+            assert!(message.contains("toor"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+}
+
+#[test]
+fn an_up_that_finds_a_leftover_helper_removes_it_and_sets_the_owner_again() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    let report = world.up(&plan);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    // The run record still says that phase gave the volume to 1000:1000,
+    // so only the leftover helper makes the next start set it again.
+    world.chown_data("0:0");
+    world.leave_helper("db");
+    let id = world.container("db", "server").unwrap();
+    docker(&["rm", "--force", "--", &id]).unwrap();
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    assert_eq!(world.data_owner(), "1000:1000");
+    world.down();
+}
+
+#[test]
+fn a_run_that_ended_while_a_helper_ran_leaves_no_recorded_owner_so_the_next_start_sets_it() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    // phase records the volume without an owner before a helper starts, so
+    // a run that ends while the helper runs leaves this record and the
+    // helper behind.
+    let store = RunStore::new(world.state.path());
+    let mut journal = Journal::open(&store, &world.id, std::time::Duration::from_secs(5)).unwrap();
+    journal
+        .started(
+            &ObjectKey::Volume(world.data_volume().parse().unwrap()),
+            Started::Volume(None),
+        )
+        .unwrap();
+    drop(journal);
+    world.chown_data("0:0");
+    world.leave_helper("db");
+
+    let report = world.restart(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    assert_eq!(world.data_owner(), "1000:1000");
+    assert_eq!(world.recorded_owner(), Some("1000:1000".parse().unwrap()));
+    world.down();
+}
+
+#[test]
+fn down_and_sweep_remove_a_leftover_helper() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    world.leave_helper("db");
+
+    world.phase.sweep(&world.id, false).unwrap();
+
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+
+    world.up(&plan);
+    world.leave_helper("db");
+
+    let report = world.down();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Stopped, "{report:?}");
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+}
+
+#[test]
+fn a_volume_whose_recorded_owner_matches_gets_no_helper_on_a_second_up_or_a_restart() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    assert_eq!(world.data_owner(), "1000:1000");
+    // An owner set outside phase stays while the record says phase gave
+    // the volume its owner, which shows that no helper ran.
+    world.chown_data("4321:4321");
+
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(world.data_owner(), "4321:4321");
+
+    let report = world.restart(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
+    assert_eq!(world.data_owner(), "4321:4321");
+    world.down();
+}
+
+#[test]
+fn what_id_prints_in_the_image_never_reaches_the_report() {
+    if !ready() {
+        return;
+    }
+    for (status, code) in [
+        (3, "phase::container::volume_owner_unresolved"),
+        (0, "phase::container::volume_owner_unresolved"),
+    ] {
+        let Some(image) = BuiltImage::build(&format!(
+            "FROM {IMAGE}\n\
+             RUN adduser -D -u 1234 app && rm /bin/id && \
+             printf '#!/bin/sh\\necho password=made-up-4f2a\\necho password=made-up-4f2a >&2\\nexit {status}\\n' > /bin/id && \
+             chmod 755 /bin/id\n\
+             USER app\n"
+        )) else {
+            return;
+        };
+        let world = World::new();
+        let mut db = mounting("db", WRITES);
+        db.source = Source::image(image.tag.parse().unwrap());
+        let plan = world.plan(vec![db]);
+
+        let report = world.up(&plan);
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("made-up"), "{json}");
+        assert!(!json.contains("password"), "{json}");
+        match outcome(&report, "db") {
+            AppOutcome::Errored {
+                code: found,
+                message,
+                ..
+            } => {
+                assert_eq!(found, code, "{message}");
+                if status == 3 {
+                    assert!(message.contains("status 3"), "{message}");
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    }
+}

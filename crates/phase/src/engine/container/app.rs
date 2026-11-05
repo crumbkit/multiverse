@@ -59,6 +59,13 @@ mod tests;
 /// service's plan hash and `up` replaces its container.
 const SECRET_OWNER_FIELD: &str = "x-phase-secret-owner";
 
+/// The extension field of a service that holds its app's volume owner,
+/// which Compose ignores, so that a new owner changes the plan hash of
+/// each process that mounts a volume, and `up` replaces its container and
+/// gives the volumes the new owner first. The field is absent when the
+/// plan names no owner, so the hash of such a service is unchanged.
+const VOLUME_OWNER_FIELD: &str = "x-phase-volume-owner";
+
 /// The extension field of a service that lists its process's optional
 /// variables, which Compose ignores, so that marking a variable optional
 /// changes the service's plan hash. The field is absent when the process
@@ -476,6 +483,14 @@ fn compose_file_with(
         }
         if let Some(user) = &app.container.user {
             definition.insert("user".to_owned(), Value::String(literal(user)));
+        }
+        if let Some(owner) = app
+            .container
+            .owner
+            .as_ref()
+            .filter(|_| mounted(app, process).next().is_some())
+        {
+            definition.insert(VOLUME_OWNER_FIELD.to_owned(), Value::String(literal(owner)));
         }
         definition.insert("environment".to_owned(), Value::Object(environment));
         definition.insert("ports".to_owned(), Value::Array(ports));

@@ -2,6 +2,7 @@
 //! The engine calls [`ContainerRunner`], and the container module's
 //! `ComposeRunner` implements it with Docker Compose.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crate::cancel::Cancel;
@@ -9,7 +10,7 @@ use crate::env::EnvironmentSource;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::AppPlan;
-use crate::record::run::{ContainerEntry, NetworkId, PlanHash, Ready, VolumeLifetime};
+use crate::record::run::{ContainerEntry, NetworkId, PlanHash, Ready, VolumeLifetime, VolumeOwner};
 use crate::record::{ContainerId, DockerName};
 use crate::report::StartProblem;
 
@@ -47,15 +48,19 @@ pub(crate) trait ContainerRunner {
     /// failure, and [`ContainersStarted::problem`] names it.
     ///
     /// Just before it removes or creates the container of a process, it
-    /// calls `launching` with the process, which writes the process's
-    /// entry back to planned with no id. A failure before that, such as a
-    /// pull or an environment that cannot be resolved, leaves the entries
-    /// of the running containers as they were. A failure of `launching`
-    /// ends the start as [`ContainersStarted::failure`].
+    /// calls `before` with [`Before::Container`], which writes the
+    /// process's entry back to planned with no id. A failure before that,
+    /// such as a pull or an environment that cannot be resolved, leaves
+    /// the entries of the running containers as they were. Just before it
+    /// changes the owner of a volume, it calls `before` with
+    /// [`Before::VolumeOwner`], which records the volume with no owner, so
+    /// a run that ends while the owner changes leaves a record that no
+    /// longer says which owner the volume has. A failure of `before` ends
+    /// the start as [`ContainersStarted::failure`].
     fn start(
         &self,
         start: &ContainerStart<'_>,
-        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+        before: &mut dyn FnMut(Before<'_>) -> Result<(), PhaseError>,
     ) -> ContainersStarted;
 
     /// Returns the processes of `containers`, containers of `app` of
@@ -158,6 +163,18 @@ pub(crate) struct ContainerObjects {
     pub(crate) volumes: Vec<(DockerName, VolumeLifetime)>,
 }
 
+/// A step of [`ContainerRunner::start`] that the run record shows before
+/// the step acts.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Before<'a> {
+    /// The start is about to remove or create the container of this
+    /// process.
+    Container(&'a ProcessName),
+    /// The start is about to change the owner of this volume, which
+    /// exists.
+    VolumeOwner(&'a DockerName),
+}
+
 /// What [`ContainerRunner::start`] starts.
 pub(crate) struct ContainerStart<'a> {
     /// The workspace.
@@ -174,6 +191,10 @@ pub(crate) struct ContainerStart<'a> {
     pub(crate) deadline: Instant,
     /// The flag that asks the start to stop.
     pub(crate) cancel: &'a Cancel,
+    /// The owner that the run record says phase gave each volume, by the
+    /// volume's name. The start leaves alone a volume whose recorded owner
+    /// is the one it wants.
+    pub(crate) owners: &'a BTreeMap<DockerName, VolumeOwner>,
 }
 
 /// What [`ContainerRunner::start`] started.
@@ -183,8 +204,10 @@ pub(crate) struct ContainersStarted {
     pub(crate) containers: Vec<StartedContainer>,
     /// Each network that exists, by name.
     pub(crate) networks: Vec<(DockerName, NetworkId)>,
-    /// Each volume that exists, by name.
-    pub(crate) volumes: Vec<DockerName>,
+    /// Each volume that exists, by name, with the owner that the start
+    /// gave its root directory or found recorded as the one it wants, or
+    /// `None` when the start did not set it.
+    pub(crate) volumes: Vec<(DockerName, Option<VolumeOwner>)>,
     /// The process that failed to become ready, and why, or `None` when
     /// every process is ready.
     pub(crate) problem: Option<(ProcessName, StartProblem)>,
