@@ -1,12 +1,13 @@
 //! The seam through which an app's environment reaches its process.
 //!
 //! phase defines these traits, and starmap implements them. A value takes
-//! only one path: from the [`EnvironmentSource`]'s resolvers into an
+//! only these paths: from the [`EnvironmentSource`]'s resolvers into an
 //! [`AppliedEnvironment`], and from there into the `Command` of a keeper or
-//! a `docker compose up` child. Neither trait has a method that returns a
-//! value, and neither requires `Debug`, `Display` or `Serialize`, so phase
-//! cannot put a value in a plan, a record, a status document, a log or an
-//! error.
+//! a `docker compose up` child, or, for a container's secret file, through
+//! [`AppliedEnvironment::write_value`] into the standard input of `docker
+//! exec`. Neither trait has a method that returns a value, and neither
+//! requires `Debug`, `Display` or `Serialize`, so phase cannot put a value
+//! in a plan, a record, a status document, a log or an error.
 //!
 //! Once a value is applied to a `Command`, the `Command` holds it, and
 //! `Command`'s own `Debug` output and `get_envs` show it. The engine's
@@ -16,6 +17,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use std::io;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
 
@@ -101,6 +103,27 @@ pub trait AppliedEnvironment: Send {
     /// reference, such as `MXV_ENV_postgres_1`, on its `docker compose up`
     /// child.
     fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>);
+
+    /// Writes the bytes of the value of the variable `name` to `out`, and
+    /// nothing else. phase calls it only to deliver a container's secret
+    /// as a file: it buffers the bytes in memory that it overwrites with
+    /// zeros afterwards, also when the buffer grows, writes them to the
+    /// standard input of `docker exec`, and never logs, formats or stores
+    /// them. The zeroing is best effort: the implementation, the operating
+    /// system's pipe buffers and the `docker` program may keep copies of
+    /// their own. An implementation must not log the value either.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::NotFound`] when the environment has no
+    /// variable `name`, the error of `out`, and, by default,
+    /// [`io::ErrorKind::Unsupported`] for an environment that cannot write
+    /// a value, which phase reports as a container secret it cannot
+    /// deliver as a file.
+    fn write_value(&self, name: &str, out: &mut dyn io::Write) -> io::Result<()> {
+        let _ = (name, out);
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// Sets each variable on `command` under its own name. A host process's
     /// keeper receives its environment this way.

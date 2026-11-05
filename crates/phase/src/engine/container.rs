@@ -70,7 +70,9 @@
 //! writes the compose file, holds the values of the containers' variables
 //! in a [`ComposeValue`] each, and runs `docker compose up`. `lifecycle`
 //! keeps the run records of a workspace's containers through the host
-//! program's [`Host`], and [`Lifecycle`] is what mxv's runs call. `cli` is
+//! program's [`Host`], and [`Lifecycle`] is what mxv's runs call.
+//! `secrets` holds the wrapper and the writer that deliver a container's
+//! secrets as files in a tmpfs (decision P3). `cli` is
 //! the `DockerCli` of phase's `sweep`. A [`Prepared`] from
 //! [`Lifecycle::prepare`] or
 //! [`Lifecycle::existing`] is the only way to name the workspace's scope,
@@ -88,6 +90,7 @@ mod names;
 mod objects;
 mod run_dir;
 mod runner;
+mod secrets;
 
 #[cfg(test)]
 mod tests;

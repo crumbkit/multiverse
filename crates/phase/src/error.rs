@@ -112,6 +112,18 @@ pub enum PhaseError {
         /// Why, which holds no environment value.
         reason: String,
     },
+    /// A container process that receives secrets as files would have them
+    /// owned by root, because neither its plan's `secret_owner`, its app's
+    /// run-as user nor its image names another user. An image that starts
+    /// as root often switches to another user before it reads its secrets,
+    /// and could not read them then.
+    #[non_exhaustive]
+    SecretOwnerUnknown {
+        /// The app.
+        app: AppName,
+        /// The process.
+        process: ProcessName,
+    },
     /// phase cannot run the app yet, because what it needs is a later
     /// release's work.
     #[non_exhaustive]
@@ -158,6 +170,7 @@ impl PhaseError {
             Self::Docker { .. } => "phase::docker::unavailable",
             Self::KeeperUnstartable { .. } => "phase::keeper::unstartable",
             Self::ProcessUnstartable { .. } => "phase::process::unstartable",
+            Self::SecretOwnerUnknown { .. } => "phase::container::secret_owner_unknown",
             Self::NotRunnable { .. } => "phase::app::not_runnable",
             Self::UnknownTarget { .. } => "phase::select::unknown",
             Self::Unplanned { .. } => "phase::record::unplanned",
@@ -175,10 +188,6 @@ pub enum NotRunnable {
     /// The app's program is built from its checkout, which phase does not
     /// do yet.
     CheckoutBuild,
-    /// A process of the container app receives a variable that the app's
-    /// permissions name as a secret. phase delivers a container's secrets
-    /// as files in a tmpfs, which it does not do yet.
-    ContainerSecrets,
     /// A process of the container app names a working directory, which
     /// phase does not set for a container yet.
     ContainerWorkingDirectory,
@@ -193,7 +202,6 @@ impl fmt::Display for NotRunnable {
         formatter.write_str(match self {
             Self::Release => "phase does not download and verify a release yet",
             Self::CheckoutBuild => "phase does not build a checkout's program yet",
-            Self::ContainerSecrets => "phase does not deliver secrets to a container yet",
             Self::ContainerWorkingDirectory => {
                 "phase does not set a container's working directory yet"
             }
@@ -306,6 +314,10 @@ impl fmt::Display for PhaseError {
                 formatter,
                 "the process {app}/{process} could not start: {reason}"
             ),
+            Self::SecretOwnerUnknown { app, process } => write!(
+                formatter,
+                "the secret files of {app}/{process} would belong to root; set its secret_owner to the uid:gid the app reads them as, such as 999:999 for an image that switches to user 999, or set its secret_delivery = \"env\""
+            ),
             Self::NotRunnable { app, reason } => {
                 write!(formatter, "phase cannot run {app}: {reason}")
             }
@@ -335,6 +347,7 @@ impl std::error::Error for PhaseError {
             | Self::Docker { .. }
             | Self::KeeperUnstartable { .. }
             | Self::ProcessUnstartable { .. }
+            | Self::SecretOwnerUnknown { .. }
             | Self::NotRunnable { .. }
             | Self::UnknownTarget { .. }
             | Self::Unplanned { .. } => None,

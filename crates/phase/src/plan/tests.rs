@@ -7,7 +7,7 @@ use super::probe::{Probe, ProbeCheck};
 use super::restart::{Restart, RestartLimits};
 use super::{
     AppPlan, ContainerProblem, MOST_READY_TIMEOUT, Plan, PlanError, ProcessKind, ProcessPlan,
-    ProcessProblem, RunnerKind, SourceProblem,
+    ProcessProblem, RunnerKind, SecretDelivery, SourceProblem,
 };
 use crate::source::{BuildSpec, ReleaseSpec, Source, Verification};
 
@@ -873,4 +873,77 @@ fn a_plan_refuses_a_stop_grace_longer_than_an_hour() {
     );
     api.processes[0].stop.grace = Duration::from_secs(3600);
     assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_process_receives_its_container_secrets_as_files_unless_it_opts_into_the_environment() {
+    let mut db = container_app("db");
+    assert_eq!(db.processes[0].secret_delivery, SecretDelivery::File);
+    db.processes[0].secret_delivery = SecretDelivery::Env;
+    let original = plan(vec![db, host_app("api")]).unwrap();
+
+    let json = serde_json::to_value(&original).unwrap();
+
+    assert_eq!(json["apps"][0]["processes"][0]["secret_delivery"], "env");
+    assert!(
+        json["apps"][1]["processes"][0]
+            .get("secret_delivery")
+            .is_none()
+    );
+    assert_eq!(serde_json::from_value::<Plan>(json).unwrap(), original);
+}
+
+#[test]
+fn a_plan_refuses_environment_secret_delivery_on_a_host_process() {
+    let mut api = host_app("api");
+    api.processes[0].secret_delivery = SecretDelivery::Env;
+
+    assert_eq!(process_problem(api), ProcessProblem::ContainerFieldOnHost);
+}
+
+#[test]
+fn a_process_names_the_owner_of_its_secret_files_as_numeric_uid_and_gid() {
+    let mut db = container_app("db");
+    db.processes[0].secret_owner = Some("999:999".to_owned());
+    let original = plan(vec![db, host_app("api")]).unwrap();
+
+    let json = serde_json::to_value(&original).unwrap();
+
+    assert_eq!(json["apps"][0]["processes"][0]["secret_owner"], "999:999");
+    assert!(
+        json["apps"][1]["processes"][0]
+            .get("secret_owner")
+            .is_none()
+    );
+    assert_eq!(serde_json::from_value::<Plan>(json).unwrap(), original);
+}
+
+#[test]
+fn a_plan_refuses_a_secret_owner_that_is_not_a_numeric_uid_and_gid() {
+    for owner in [
+        "postgres",
+        "999",
+        "999:",
+        ":999",
+        "999:999:1",
+        "-1:0",
+        " 1:1",
+    ] {
+        let mut db = container_app("db");
+        db.processes[0].secret_owner = Some(owner.to_owned());
+
+        assert_eq!(
+            process_problem(db),
+            ProcessProblem::BadSecretOwner(owner.to_owned()),
+            "{owner}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_secret_owner_on_a_host_process() {
+    let mut api = host_app("api");
+    api.processes[0].secret_owner = Some("1000:1000".to_owned());
+
+    assert_eq!(process_problem(api), ProcessProblem::ContainerFieldOnHost);
 }

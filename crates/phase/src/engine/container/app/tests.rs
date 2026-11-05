@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{compose_file, objects, plan_hash, reference, references};
+use super::{compose_file, file_secrets, objects, plan_hash, reference, references};
 use crate::engine::container::names::{Identity, Scope};
+use crate::engine::container::secrets::{ImageConfig, entrypoint};
 use crate::error::{NotRunnable, PhaseError};
 use crate::plan::container::BindMount;
 use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
-use crate::plan::{AppPlan, ProcessKind, ProcessPlan, RunnerKind};
-use crate::record::run::VolumeLifetime;
+use crate::plan::{AppPlan, ProcessKind, ProcessPlan, RunnerKind, SecretDelivery, digest};
+use crate::record::run::{PlanHash, VolumeLifetime};
 use crate::source::Source;
 
 /// The workspace id of the tests.
@@ -101,7 +102,7 @@ fn an_apps_compose_file_runs_each_process_as_a_labelled_service_and_holds_no_val
         mounts
     };
     assert_eq!(
-        compose_file(&scope, &app).unwrap(),
+        compose_file(&scope, &app, None).unwrap(),
         json!({
             "services": {
                 "server": {
@@ -195,7 +196,7 @@ fn an_app_creates_a_container_per_process_and_the_workspace_volumes_it_mounts_wh
 /// Returns the reason that `objects` and `compose_file` refuse `app`.
 fn refusal(app: &AppPlan) -> NotRunnable {
     let scope = scope("db");
-    let file = compose_file(&scope, app);
+    let file = compose_file(&scope, app, None);
     match (objects(&scope, app), file) {
         (
             Err(PhaseError::NotRunnable { reason, .. }),
@@ -205,13 +206,131 @@ fn refusal(app: &AppPlan) -> NotRunnable {
     }
 }
 
-#[test]
-fn a_process_that_receives_a_secret_is_not_runnable_and_the_secret_never_reaches_the_compose_file()
-{
+/// Returns the app `db` whose `server` receives `PGPASSWORD` and `TOKEN`,
+/// which the app's permissions name as secrets.
+fn with_secrets() -> AppPlan {
     let mut app = db();
-    app.permissions.secrets.insert("PGPORT".to_owned());
-    assert_eq!(refusal(&app), NotRunnable::ContainerSecrets);
-    assert_eq!(reference(&app, &name("server"), "PGPORT"), None);
+    app.processes[0].env.insert("PGPASSWORD".to_owned());
+    app.processes[0].env.insert("TOKEN".to_owned());
+    app.permissions.secrets = ["PGPASSWORD".to_owned(), "TOKEN".to_owned()].into();
+    app
+}
+
+#[test]
+fn a_process_that_receives_secrets_mounts_a_tmpfs_and_waits_for_their_files_through_the_wrapper() {
+    let app = with_secrets();
+    let scope = scope("db");
+
+    let file = compose_file(&scope, &app, None).unwrap();
+
+    let server = &file["services"]["server"];
+    assert_eq!(
+        server["environment"],
+        json!({"MODE": "${MXV_ENV_0_0:-}", "PGPORT": "${MXV_ENV_0_1:-}"})
+    );
+    assert!(
+        server["volumes"].as_array().unwrap().contains(
+            &json!({"type": "tmpfs", "target": "/run/secrets", "tmpfs": {"mode": 0o700}})
+        )
+    );
+    let names: Vec<String> = ["PGPASSWORD".to_owned(), "TOKEN".to_owned()].into();
+    assert_eq!(server["entrypoint"], json!(entrypoint(names.iter())));
+    assert!(server.get("command").is_none());
+    assert_eq!(server["restart"], "no");
+    assert_eq!(server["labels"]["mxv.secrets"], "files");
+    assert!(server.get("x-phase-secret-owner").is_none());
+    let worker = &file["services"]["worker"];
+    assert!(worker["labels"].get("mxv.secrets").is_none());
+    assert!(worker.get("entrypoint").is_none());
+    assert!(!worker["volumes"].to_string().contains("tmpfs"));
+    assert_eq!(reference(&app, &name("server"), "TOKEN"), None);
+    assert_eq!(
+        file_secrets(&app, &app.processes[0]).collect::<Vec<_>>(),
+        ["PGPASSWORD", "TOKEN"]
+    );
+    assert_eq!(file_secrets(&app, &app.processes[1]).count(), 0);
+}
+
+#[test]
+fn the_wrapper_runs_the_images_entrypoint_and_the_plans_command_or_else_the_images_command() {
+    let mut app = with_secrets();
+    let image = ImageConfig::new(&["docker-entrypoint.sh"], &["postgres"], "");
+    let scope = scope("db");
+
+    let file = compose_file(&scope, &app, Some(&image)).unwrap();
+    assert_eq!(
+        file["services"]["server"]["command"],
+        json!(["docker-entrypoint.sh", "postgres"])
+    );
+    assert_eq!(
+        file["services"]["worker"]["command"],
+        json!(["sh", "-c", "echo $$HOME"])
+    );
+
+    app.processes[0].run = vec!["postgres".to_owned(), "-c".to_owned(), "x=$1".to_owned()];
+    let file = compose_file(&scope, &app, Some(&image)).unwrap();
+    assert_eq!(
+        file["services"]["server"]["command"],
+        json!(["docker-entrypoint.sh", "postgres", "-c", "x=$$1"])
+    );
+}
+
+#[test]
+fn a_process_that_opts_into_environment_secrets_receives_them_through_private_references() {
+    let mut app = with_secrets();
+    app.processes[0].secret_delivery = SecretDelivery::Env;
+
+    let file = compose_file(&scope("db"), &app, None).unwrap();
+
+    let server = &file["services"]["server"];
+    assert_eq!(
+        server["environment"],
+        json!({
+            "MODE": "${MXV_ENV_0_0:-}",
+            "PGPASSWORD": "${MXV_ENV_0_1:-}",
+            "PGPORT": "${MXV_ENV_0_2:-}",
+            "TOKEN": "${MXV_ENV_0_3:-}",
+        })
+    );
+    assert!(server.get("entrypoint").is_none());
+    assert!(!server["volumes"].to_string().contains("tmpfs"));
+    assert_eq!(
+        reference(&app, &name("server"), "TOKEN").as_deref(),
+        Some("MXV_ENV_0_3")
+    );
+    assert_eq!(file_secrets(&app, &app.processes[0]).count(), 0);
+}
+
+#[test]
+fn a_new_secret_owner_changes_the_plan_hash_of_its_process_alone() {
+    let mut app = with_secrets();
+    let scope = scope("db");
+    let before = plan_hash(&scope, &app, &name("server")).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker")).unwrap();
+
+    app.processes[0].secret_owner = Some("999:999".to_owned());
+
+    let file = compose_file(&scope, &app, None).unwrap();
+    assert_eq!(
+        file["services"]["server"]["x-phase-secret-owner"],
+        "999:999"
+    );
+    assert_ne!(plan_hash(&scope, &app, &name("server")).unwrap(), before);
+    assert_eq!(plan_hash(&scope, &app, &name("worker")).unwrap(), worker);
+}
+
+#[test]
+fn a_processs_plan_hash_does_not_depend_on_its_images_command() {
+    let app = with_secrets();
+    let scope = scope("db");
+    let file = compose_file(&scope, &app, None).unwrap();
+
+    let hash = plan_hash(&scope, &app, &name("server")).unwrap();
+
+    assert_eq!(
+        hash,
+        PlanHash::new(digest(file["services"]["server"].to_string().as_bytes()))
+    );
 }
 
 #[test]
@@ -244,11 +363,11 @@ fn each_restart_policy_maps_to_dockers_own_policy() {
         max: std::num::NonZeroU32::new(3),
         ..RestartLimits::default()
     });
-    let file = compose_file(&scope("db"), &app).unwrap();
+    let file = compose_file(&scope("db"), &app, None).unwrap();
     assert_eq!(file["services"]["server"]["restart"], "unless-stopped");
     assert_eq!(file["services"]["worker"]["restart"], "on-failure:3");
     app.processes[1].restart = Restart::No;
-    let file = compose_file(&scope("db"), &app).unwrap();
+    let file = compose_file(&scope("db"), &app, None).unwrap();
     assert_eq!(file["services"]["worker"]["restart"], "no");
 }
 
@@ -257,11 +376,11 @@ fn a_stop_grace_is_written_in_whole_seconds_rounded_up_and_at_least_one() {
     let mut app = db();
     app.processes[0].stop.grace = Duration::from_millis(1);
     app.processes[1].stop.grace = Duration::ZERO;
-    let file = compose_file(&scope("db"), &app).unwrap();
+    let file = compose_file(&scope("db"), &app, None).unwrap();
     assert_eq!(file["services"]["server"]["stop_grace_period"], "1s");
     assert_eq!(file["services"]["worker"]["stop_grace_period"], "1s");
     app.processes[0].stop.grace = Duration::from_millis(4001);
-    let file = compose_file(&scope("db"), &app).unwrap();
+    let file = compose_file(&scope("db"), &app, None).unwrap();
     assert_eq!(file["services"]["server"]["stop_grace_period"], "5s");
 }
 
@@ -312,7 +431,7 @@ fn a_label_value_with_a_dollar_sign_reaches_the_compose_file_escaped() {
         },
         &name("db"),
     );
-    let file = compose_file(&scope, &db()).unwrap();
+    let file = compose_file(&scope, &db(), None).unwrap();
     assert_eq!(
         file["services"]["server"]["labels"]["mxv.run-record"],
         "/state/$$HOME/runs.json"
@@ -322,7 +441,7 @@ fn a_label_value_with_a_dollar_sign_reaches_the_compose_file_escaped() {
 #[test]
 fn the_references_of_an_app_are_every_private_variable_its_compose_file_names() {
     let app = db();
-    let file = compose_file(&scope("db"), &app).unwrap().to_string();
+    let file = compose_file(&scope("db"), &app, None).unwrap().to_string();
     let all = references(&app);
     assert_eq!(all, ["MXV_ENV_0_0", "MXV_ENV_0_1", "MXV_ENV_1_0"]);
     for name in &all {

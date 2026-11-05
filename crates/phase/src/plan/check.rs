@@ -185,12 +185,16 @@ pub enum ProcessProblem {
     /// The process, or its probe, names a port its app does not have.
     #[non_exhaustive]
     UnknownPort(PortName),
-    /// A host process publishes a port or mounts a volume, which only a
-    /// container process does.
+    /// A host process publishes a port, mounts a volume, asks for its
+    /// secrets in its container's environment or names the owner of its
+    /// secret files, which only a container process does.
     ContainerFieldOnHost,
     /// A volume is mounted at a relative path inside the container.
     #[non_exhaustive]
     RelativeContainerPath(PathBuf),
+    /// The process's `secret_owner` is not a numeric `uid:gid`.
+    #[non_exhaustive]
+    BadSecretOwner(String),
     /// The process has an HTTP probe but no port.
     HttpProbeWithoutPort,
     /// A container process's HTTP or TCP probe asks a port that the
@@ -379,7 +383,9 @@ impl fmt::Display for ProcessProblem {
             }
             Self::UnknownPort(port) => write!(formatter, "it names the unknown port {port}"),
             Self::ContainerFieldOnHost => {
-                formatter.write_str("it runs on the host but publishes a port or mounts a volume")
+                formatter.write_str(
+                "it runs on the host but publishes a port, mounts a volume or sets secret_delivery or secret_owner",
+            )
             }
             Self::RelativeContainerPath(path) => {
                 write!(
@@ -388,6 +394,10 @@ impl fmt::Display for ProcessProblem {
                     path.display()
                 )
             }
+            Self::BadSecretOwner(owner) => write!(
+                formatter,
+                "its secret_owner {owner:?} is not a numeric uid:gid such as 999:999"
+            ),
             Self::HttpProbeWithoutPort => formatter.write_str("it has an http probe but no port"),
             Self::ProbePortUnpublished(port) => write!(
                 formatter,
@@ -423,6 +433,14 @@ fn is_variable_name(name: &str) -> bool {
         && name
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// Reports whether `owner` is a numeric `uid:gid`, such as `999:999`.
+fn is_uid_gid(owner: &str) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    owner
+        .split_once(':')
+        .is_some_and(|(uid, gid)| digits(uid) && digits(gid))
 }
 
 /// Checks the rules of [`Plan::new`](super::Plan::new).
@@ -681,6 +699,13 @@ fn check_process(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProb
     if let Some(name) = process.env.iter().find(|name| !is_variable_name(name)) {
         return Err(ProcessProblem::BadVariableName(name.clone()));
     }
+    if let Some(owner) = process
+        .secret_owner
+        .as_ref()
+        .filter(|owner| !is_uid_gid(owner))
+    {
+        return Err(ProcessProblem::BadSecretOwner(owner.clone()));
+    }
     if process.ready_timeout.is_zero() || process.ready_timeout > MOST_READY_TIMEOUT {
         return Err(ProcessProblem::ReadyTimeoutOutOfRange);
     }
@@ -709,7 +734,11 @@ fn check_ports(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
         return Err(ProcessProblem::UnknownPort(port.clone()));
     }
     if app.runner == RunnerKind::Host {
-        if process.publish.is_empty() && process.volumes.is_empty() {
+        if process.publish.is_empty()
+            && process.volumes.is_empty()
+            && process.secret_delivery.is_file()
+            && process.secret_owner.is_none()
+        {
             return Ok(());
         }
         return Err(ProcessProblem::ContainerFieldOnHost);

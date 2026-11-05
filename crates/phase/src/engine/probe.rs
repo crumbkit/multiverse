@@ -57,7 +57,7 @@ mod runner;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use command::{CommandEnd, HostExec, ProbeExec, run_bounded};
+pub(crate) use command::{CommandEnd, HostExec, ProbeExec, exited, run_bounded};
 pub(crate) use log::{LogLines, LogWatch};
 pub(crate) use runner::{Goal, Outcome, wait};
 #[cfg(test)]

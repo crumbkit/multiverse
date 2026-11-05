@@ -15,8 +15,11 @@
 //! `docker compose up` with the values of the process's variables on that
 //! child alone, each under its private reference. The pull and the
 //! resolution come before any removal, so a failure in either leaves the
-//! old containers running. It then waits for the container to be ready
-//! through the probe runner before it starts the next process. A pull,
+//! old containers running. A process that receives secrets as files then
+//! has each one written into its container's tmpfs through `docker exec`
+//! with the value on standard input, as [`super::secrets`] says, and a
+//! write that fails ends the start. It then waits for the container to be
+//! ready through the probe runner before it starts the next process. A pull,
 //! `docker compose up` and a removal stop when the caller cancels.
 //!
 //! - An `http` probe asks the published port on 127.0.0.1.
@@ -43,7 +46,9 @@
 //! asks: Docker has the recorded id, the container's labels name the
 //! workspace, app and process, Docker's status is exactly `running`, and
 //! the recorded plan hash is the hash of the process's service in the
-//! plan. `up` leaves those alone and asks `start` only for the others.
+//! plan. A container with secret files that Docker has restarted does not
+//! count, because the restart emptied its tmpfs. `up` leaves those alone
+//! and asks `start` only for the others.
 //!
 //! When a docker command fails after some containers started, `start`
 //! removes those containers, and reports each container that it created
@@ -62,6 +67,7 @@
 //! container's result, and `stop` goes on to the next. Volumes stay.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -73,7 +79,7 @@ use crate::clock::now;
 use crate::engine::container::ContainerError;
 use crate::engine::container::app::{self, reference};
 use crate::engine::container::command::{
-    DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message, quick,
+    DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message, quick, write_secret,
 };
 use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
@@ -81,12 +87,14 @@ use crate::engine::container::objects::{
     self, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id, inspect_named,
     no_restart, reinspect, remove, stop, stop_until,
 };
+use crate::engine::container::secrets::{self, ImageConfig, SecretBytes};
 use crate::engine::containers::{
     ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
     ContainersStarted, StartedContainer,
 };
 use crate::engine::probe::{self, Check, Goal, LogLines, LogWatch, Outcome};
 use crate::engine::run::watch;
+use crate::env::AppliedEnvironment;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::probe::{LogPattern, ProbeCheck};
@@ -122,6 +130,47 @@ pub(crate) struct ComposeRunner {
     state_dir: PathBuf,
     /// How long `start` watches a process without a readiness probe.
     start_grace: Duration,
+    /// The only environment of the `docker exec` that writes a secret, or
+    /// `None` for the host program's whole environment.
+    docker_environment: Option<BTreeMap<String, String>>,
+}
+
+/// The values of the file secrets of a process, by secret name.
+type NamedSecrets = Vec<(String, SecretBytes)>;
+
+/// Returns the owner of the file secrets of `process` and their values,
+/// or `None` when the process has no file secrets.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::SecretOwnerUnknown`] when the owner would be
+/// root, and [`PhaseError::ProcessUnstartable`] when `environment` cannot
+/// write a value.
+fn delivered(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    image_config: Option<&ImageConfig>,
+    environment: &dyn AppliedEnvironment,
+) -> Result<Option<(String, NamedSecrets)>, PhaseError> {
+    let Some(image) = image_config else {
+        return Ok(None);
+    };
+    if app::file_secrets(app, process).next().is_none() {
+        return Ok(None);
+    }
+    let owner =
+        secrets::owner(app, process, image).ok_or_else(|| PhaseError::SecretOwnerUnknown {
+            app: app.name.clone(),
+            process: process.name.clone(),
+        })?;
+    let values = secret_values(app, process, environment).map_err(|reason| {
+        PhaseError::ProcessUnstartable {
+            app: app.name.clone(),
+            process: process.name.clone(),
+            reason,
+        }
+    })?;
+    Ok(Some((owner, values)))
 }
 
 impl ComposeRunner {
@@ -131,7 +180,19 @@ impl ComposeRunner {
         Self {
             state_dir,
             start_grace,
+            docker_environment: None,
         }
+    }
+
+    /// Returns this runner with `vars` as the only environment of the
+    /// `docker exec` that writes a secret, or with the host program's
+    /// whole environment when `vars` is `None`.
+    pub(crate) fn with_docker_environment(
+        mut self,
+        vars: Option<BTreeMap<String, String>>,
+    ) -> Self {
+        self.docker_environment = vars;
+        self
     }
 
     /// Returns the scope of `app` in `workspace`.
@@ -269,15 +330,24 @@ impl ComposeRunner {
         let scope = self.scope(start.workspace, &app.name);
         check().map_err(|error| halt(&error))?;
         check_compose().map_err(|error| halt(&error))?;
-        let file = app::compose_file(&scope, app)?;
         let cleared = app::references(app);
         let dir = self.project_dir()?;
         // The image is pulled before any container is removed, so a pull
         // that fails leaves the old containers running.
+        let mut image_config = None;
         if let Source::Image { image } = &app.source {
             ensure_image(image.as_str(), left(start.build), start.cancel)
                 .map_err(|error| halt(&error))?;
+            let has_files = app
+                .processes
+                .iter()
+                .any(|process| app::file_secrets(app, process).next().is_some());
+            if has_files {
+                image_config =
+                    Some(objects::image_config(image.as_str()).map_err(|error| halt(&error))?);
+            }
         }
+        let file = app::compose_file(&scope, app, image_config.as_ref())?;
         for key in app::volume_keys(app) {
             ensure_volume(&scope, &key).map_err(|error| halt(&error))?;
             let name: DockerName = scope.volume_name(&key).as_str().parse().map_err(|_| {
@@ -308,6 +378,14 @@ impl ComposeRunner {
                         app: app.name.clone(),
                         source,
                     })?;
+            // The owner and the values of the secret files are settled
+            // before the old container is removed, so a refusal, or an
+            // environment that cannot write a value, leaves it running.
+            let (owner, values) =
+                match delivered(app, process, image_config.as_ref(), environment.as_ref())? {
+                    Some((owner, values)) => (Some(owner), values),
+                    None => (None, Vec::new()),
+                };
             launching(name)?;
             if let Some(existing) = inspect_named(&scope, &service).map_err(|error| halt(&error))? {
                 let grace = own_grace(&existing.container).min(left(start.deadline));
@@ -335,7 +413,6 @@ impl ComposeRunner {
                 },
                 (remaining, start.cancel),
             );
-            drop(environment);
             // `compose up` may have created the container before it failed,
             // so the container is reported, and stopped, whatever it said.
             let inspected = inspect_named(&scope, &service).map_err(|error| halt(&error))?;
@@ -367,13 +444,28 @@ impl ComposeRunner {
                     started.uncertain = Some(name.clone());
                     return Ok(());
                 }
-                Err(error) => return Err(halt(&error)),
+                Err(error) => return Err(halt(&no_shell_hint(error, owner.is_some()))),
             }
             let Some(inspected) = inspected else {
                 started.problem =
                     Some((name.clone(), StartProblem::exited(None, None, Vec::new())));
                 return Ok(());
             };
+            // The secrets are written before the readiness wait, and a
+            // write that fails ends the start, which removes the container.
+            if let Some(owner) = &owner {
+                write_secrets(
+                    &inspected,
+                    Delivery {
+                        values,
+                        owner,
+                        docker_environment: self.docker_environment.as_ref(),
+                    },
+                    (start.deadline, start.cancel),
+                )
+                .map_err(|error| halt(&error))?;
+            }
+            drop(environment);
             match self.ready(app, process, &inspected, start) {
                 Readiness::Ready => {}
                 Readiness::Cancelled => return Err(Halt::Cancelled),
@@ -467,6 +559,158 @@ impl ComposeRunner {
             Outcome::Failing { .. } => Readiness::Failed(StartProblem::not_ready(now() - began)),
         }
     }
+}
+
+/// The hint that ends the failure of a container that receives secret
+/// files and whose image cannot run the wrapper.
+const NO_SHELL_HINT: &str = "the image has no /bin/sh, which phase's wrapper for secret files needs, so set secret_delivery = \"env\" for this process";
+
+/// Returns `error`, the failure of `docker compose up`, with
+/// [`NO_SHELL_HINT`] added when the process receives secret files, as
+/// `files` tells, and Docker could not find `/bin/sh` to run the wrapper.
+fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
+    match error {
+        ContainerError::Failed {
+            operation,
+            container,
+            message,
+        } if files && message.contains("/bin/sh") => ContainerError::Failed {
+            operation,
+            container,
+            message: format!("{message}; {NO_SHELL_HINT}"),
+        },
+        other => other,
+    }
+}
+
+/// Returns the value of each secret of `process` of `app` that it
+/// receives as a file, read from `environment` in name order. `up` reads
+/// them before it removes the process's old container, so an environment
+/// that cannot write a value leaves that container running.
+///
+/// # Errors
+///
+/// Returns why the environment could not write a value, which names the
+/// secret and holds no value.
+pub(crate) fn secret_values(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    environment: &dyn AppliedEnvironment,
+) -> Result<Vec<(String, SecretBytes)>, String> {
+    app::file_secrets(app, process)
+        .map(|name| {
+            SecretBytes::of(environment, name)
+                .map(|bytes| (name.clone(), bytes))
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::NotFound => {
+                        format!("the environment source supplied no value for the secret {name}")
+                    }
+                    io::ErrorKind::Unsupported => format!(
+                        "the environment source cannot write the value of the secret {name} to a file, so set secret_delivery = \"env\" for this process"
+                    ),
+                    kind => format!(
+                        "the environment source failed to write the value of the secret {name}: {kind}"
+                    ),
+                })
+        })
+        .collect()
+}
+
+/// What [`write_secrets`] writes: the values of a process's secrets, from
+/// [`secret_values`], and the owner its files get.
+pub(crate) struct Delivery<'a> {
+    /// Each secret's name and value.
+    pub(crate) values: Vec<(String, SecretBytes)>,
+    /// The owner of the files, in the form that `chown` reads.
+    pub(crate) owner: &'a str,
+    /// The only environment of the `docker exec` that writes each secret,
+    /// or `None` for the host program's whole environment.
+    pub(crate) docker_environment: Option<&'a BTreeMap<String, String>>,
+}
+
+/// Writes the secret files of `delivery` into the container `inspected`,
+/// until the deadline or the cancel flag of `until`.
+///
+/// It stages every secret first and renames the staged files over the
+/// old ones only once all of them are staged, as the secrets module says.
+/// A staging or a rename that fails removes the staged files, so the
+/// container keeps its old set of files whole, apart from the files that
+/// a failed rename already replaced. Writing again with fresh values
+/// therefore rotates the secrets of a running container without
+/// restarting it.
+///
+/// # Errors
+///
+/// Returns [`ContainerError::Failed`] when a staging or the renames fail,
+/// or the container ended before its files were written,
+/// [`ContainerError::Cancelled`], and the errors of checking that docker
+/// answers. No error holds a value.
+pub(crate) fn write_secrets(
+    inspected: &Inspected,
+    delivery: Delivery<'_>,
+    until: (Instant, &Cancel),
+) -> Result<(), ContainerError> {
+    let id = inspected.container.id().as_str();
+    let service = inspected.container.service().as_str();
+    let names: Vec<String> = delivery
+        .values
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let (deadline, cancel) = until;
+    let mut staged = Ok(());
+    for (name, bytes) in delivery.values {
+        staged = write_secret(
+            &secrets::stage(id, &name, delivery.owner),
+            bytes,
+            delivery.docker_environment,
+            (left(deadline), cancel),
+        )
+        .and_then(|finished| finished.checked("secret write", Some(service)).map(drop));
+        if staged.is_err() {
+            break;
+        }
+    }
+    let committed = staged.and_then(|()| {
+        quick(secrets::commit(id, names.iter()), "secret commit")?
+            .checked("secret commit", Some(service))
+            .map(drop)
+    });
+    committed.map_err(|error| {
+        let _ = quick(secrets::discard(id), "secret discard");
+        ended_early(inspected).unwrap_or(error)
+    })
+}
+
+/// Returns the failure of a container `inspected` that ended before its
+/// secret files were written, which explains a write that failed: the
+/// wrapper's own line when it gave up, and [`NO_SHELL_HINT`] when Docker
+/// could not run it. It returns `None` when the container still runs.
+fn ended_early(inspected: &Inspected) -> Option<ContainerError> {
+    let fresh = reinspect(&inspected.container).ok()??;
+    let ContainerState::Exited(code) = fresh.state else {
+        return None;
+    };
+    let service = inspected.container.service().as_str();
+    let message = match code {
+        secrets::NO_SHELL => format!("the container exited with status {code}; {NO_SHELL_HINT}"),
+        secrets::WRAPPER_FAILED => {
+            let said = tail(inspected.container.id())
+                .into_iter()
+                .rev()
+                .find(|line| line.starts_with("phase:"))
+                .unwrap_or_default();
+            format!(
+                "the container exited with status {code} before its secrets were written: {said}"
+            )
+        }
+        code => format!("the container exited with status {code} before its secrets were written"),
+    };
+    Some(ContainerError::failed(
+        "secret write",
+        Some(service),
+        message,
+    ))
 }
 
 /// Turns off Docker's restart policy of `container` and returns the
@@ -603,7 +847,16 @@ impl ContainerRunner for ComposeRunner {
             if planned.is_none() || entry.plan_hash != planned {
                 continue;
             }
+            // Docker's restart of a container empties its tmpfs, so a
+            // container that waits for its secrets' files after a restart
+            // is not running as planned, and `start` replaces it.
+            let files = app
+                .processes
+                .iter()
+                .find(|process| process.name == entry.process)
+                .is_some_and(|process| app::file_secrets(app, process).next().is_some());
             match inspect_id(&scope, &service, &id) {
+                Ok(Some(inspected)) if files && inspected.restarts > 0 => {}
                 Ok(Some(inspected)) if inspected.state == ContainerState::Running => {
                     running.push(entry.process.clone());
                 }

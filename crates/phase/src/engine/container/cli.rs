@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
+use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
 use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, Finished, check_with, message, quick_with, run_program,
 };
@@ -194,6 +195,34 @@ impl DockerCli {
 /// status and exit code, which [`ContainerState::parse`] reads.
 const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
 
+/// Returns the Go template of `docker container inspect` that prints,
+/// after [`STATE_FORMAT`], how many times Docker restarted a container and
+/// the value of its secrets label, which [`status_state`] reads.
+fn restarts_format() -> String {
+    format!("{{{{.RestartCount}}}} {{{{index .Config.Labels {SECRETS_LABEL:?}}}}}")
+}
+
+/// Returns the state of a container that `docker container inspect`
+/// printed as `printed` with [`STATE_FORMAT`] and [`restarts_format`]. A
+/// running container whose process receives secret files and that Docker
+/// has restarted waits for files that its restart removed, so it counts as
+/// restarting, as `up` counts it as not running.
+fn status_state(printed: &str) -> ContainerState {
+    let mut lines = printed.lines();
+    let state = ContainerState::parse(lines.next().unwrap_or_default());
+    let mut restarts = lines.next().unwrap_or_default().split_whitespace();
+    let restarted = restarts
+        .next()
+        .and_then(|count| count.parse::<u32>().ok())
+        .is_some_and(|count| count > 0);
+    let files = restarts.next() == Some(SECRET_FILES);
+    if state == ContainerState::Running && restarted && files {
+        ContainerState::Restarting
+    } else {
+        state
+    }
+}
+
 /// Returns the failure of a Docker that `error` shows does not answer.
 fn unavailable(error: &ContainerError) -> DockerError {
     DockerError::unavailable(error.to_string())
@@ -237,14 +266,18 @@ impl Docker for DockerCli {
         &self,
         object: &DockerObject<'_>,
     ) -> Result<Option<ContainerState>, DockerError> {
-        let format = format!("{}\n{STATE_FORMAT}", format(DockerKind::Container));
+        let format = format!(
+            "{}\n{STATE_FORMAT}\n{}",
+            format(DockerKind::Container),
+            restarts_format()
+        );
         let object = DockerObject {
             kind: DockerKind::Container,
             ..*object
         };
         Ok(self
             .inspect(&object, &format)?
-            .map(|(_, rest)| ContainerState::parse(&rest)))
+            .map(|(_, rest)| status_state(&rest)))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError> {

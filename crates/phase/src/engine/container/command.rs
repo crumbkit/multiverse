@@ -3,18 +3,21 @@
 
 use std::ffi::OsStr;
 use std::io::{self, Read as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use rustix::process::{Pid, Signal};
 use wait_timeout::ChildExt as _;
 
 use crate::cancel::Cancel;
-use crate::clock::now;
+use crate::clock::{now, pause};
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::ContainerId;
-use crate::engine::probe::{CommandEnd, ProbeExec, run_bounded};
+use crate::engine::container::secrets::SecretBytes;
+use crate::engine::probe::{CommandEnd, ProbeExec, exited, run_bounded};
 use crate::env::AppliedEnvironment;
 
 /// The variables that a docker command receives on top of the host
@@ -53,6 +56,175 @@ impl ChildEnv for Referenced<'_> {
             command.env_remove(name);
         }
         self.environment.apply_as(command, self.reference);
+    }
+}
+
+/// How long the feeder of a secret pauses between two bytes, which a test
+/// sets through [`FeedPause`] to catch the processes of a write while they
+/// run. It is zero outside tests.
+#[cfg(test)]
+static FEED_PAUSE_MILLIS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The pause between two bytes of every secret's feed while a test holds
+/// it, which ends when it is dropped, so no other write is slowed.
+#[cfg(test)]
+pub(crate) struct FeedPause;
+
+#[cfg(test)]
+impl FeedPause {
+    /// Pauses `millis` milliseconds between two bytes of a feed until the
+    /// returned value is dropped.
+    pub(crate) fn set(millis: u64) -> Self {
+        FEED_PAUSE_MILLIS.store(millis, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for FeedPause {
+    fn drop(&mut self) {
+        FEED_PAUSE_MILLIS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Writes `input` to `stdin` and closes it. In a test that holds a
+/// `FeedPause`, it writes one byte at a time with that pause.
+fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
+    #[cfg(test)]
+    {
+        let millis = FEED_PAUSE_MILLIS.load(std::sync::atomic::Ordering::Relaxed);
+        if millis > 0 {
+            for byte in input.framed() {
+                if stdin.write_all(&[*byte]).is_err() {
+                    return;
+                }
+                let _ = stdin.flush();
+                crate::clock::pause(Duration::from_millis(millis));
+            }
+            return;
+        }
+    }
+    let _ = stdin.write_all(input.framed());
+}
+
+/// Why [`write_secret`] stopped `docker` before it exited.
+enum Stop {
+    /// The caller cancelled the write.
+    Cancelled,
+    /// The deadline passed.
+    Late,
+    /// phase could not wait for `docker`.
+    WaitFailed(io::Error),
+}
+
+/// Runs `docker <args>`, where `args` are a `docker exec --interactive`
+/// that stages a secret, with `input`, the secret's framed bytes, on its
+/// standard input, which it then closes, within the deadline of `until` or
+/// until its cancel flag is set.
+///
+/// `docker` starts in a process group of its own. With `environment`, it
+/// receives those variables alone, which the host program chose, and
+/// otherwise the host program's environment, as phase's other `docker`
+/// commands do. No secret's value is in either. When the deadline passes
+/// or the caller cancels, phase kills the group, reaps `docker`, and joins
+/// the threads that fed and read it, whose pipes the kill closed. The
+/// feeder's next write to the closed pipe then fails with `EPIPE` and the
+/// feeder ends, because Rust's runtime ignores `SIGPIPE` in every program
+/// it starts, so the write does not kill the host program.
+pub(super) fn write_secret(
+    args: &[String],
+    input: SecretBytes,
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+    until: (Duration, &Cancel),
+) -> Result<Finished, Error> {
+    let (deadline, cancel) = until;
+    let operation = "secret write";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
+    )]
+    let mut command = Command::new(DOCKER);
+    if let Some(environment) = environment {
+        command.env_clear().envs(environment);
+    }
+    command
+        .args(args)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
+    )]
+    let spawned = command.spawn();
+    #[expect(
+        clippy::disallowed_types,
+        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its deadline and cleanup (PROC-1)"
+    )]
+    let mut child: std::process::Child = match spawned {
+        Ok(child) => child,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Missing { source });
+        }
+        Err(source) => return Err(Error::failed(operation, None, source.to_string())),
+    };
+    let pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
+    let feeder = child
+        .stdin
+        .take()
+        .map(|stdin| thread::spawn(move || feed(stdin, &input)));
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
+    let ends = now() + deadline;
+    let stopped = loop {
+        match exited(pid) {
+            Ok(true) => break None,
+            Ok(false) => {}
+            Err(error) => break Some(Stop::WaitFailed(error)),
+        }
+        if cancel.is_cancelled() {
+            break Some(Stop::Cancelled);
+        }
+        if now() >= ends {
+            break Some(Stop::Late);
+        }
+        pause(CANCEL_POLL.min(ends.saturating_duration_since(now())));
+    };
+    // The group is killed however the write ended, so nothing that docker
+    // started outlives it. docker stays unreaped until then, so its pid,
+    // which is the group's id, is not reused in between.
+    if let Some(group) = pid {
+        let _ = rustix::process::kill_process_group(group, Signal::KILL);
+    }
+    let reaped = child.wait();
+    if let Some(feeder) = feeder {
+        let _ = feeder.join();
+    }
+    let stdout = joined(stdout);
+    let stderr = joined(stderr);
+    match (stopped, reaped) {
+        (Some(Stop::Cancelled), _) => Err(Error::Cancelled { operation }),
+        (Some(Stop::WaitFailed(error)), _) => Err(Error::failed(
+            operation,
+            None,
+            format!("phase could not wait for docker: {error}"),
+        )),
+        (Some(Stop::Late), _) => Err(Error::failed(
+            operation,
+            None,
+            format!(
+                "docker did not finish within {} seconds, so phase stopped it",
+                deadline.as_secs()
+            ),
+        )),
+        (None, Ok(status)) => Ok(Finished {
+            status,
+            stdout,
+            stderr,
+        }),
+        (None, Err(source)) => Err(Error::failed(operation, None, source.to_string())),
     }
 }
 

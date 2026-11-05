@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::probe::Probe;
 use super::restart::{Restart, Stop};
-use super::{ProcessKind, ProcessPlan, default_ready_timeout};
+use super::{ProcessKind, ProcessPlan, SecretDelivery, default_ready_timeout};
 use crate::name::{PortName, ProcessName, VolumeName};
 
 /// The name of a process's kind in JSON.
@@ -75,6 +75,12 @@ pub(super) struct ProcessFile {
     /// The stop handling.
     #[serde(default)]
     stop: Stop,
+    /// How a container process receives its secrets.
+    #[serde(default, skip_serializing_if = "SecretDelivery::is_file")]
+    secret_delivery: SecretDelivery,
+    /// The owner of the secret files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_owner: Option<String>,
 }
 
 /// A process that is not a oneshot states `once`.
@@ -114,6 +120,8 @@ impl TryFrom<ProcessFile> for ProcessPlan {
             ready_timeout: file.ready_timeout,
             restart: file.restart,
             stop: file.stop,
+            secret_delivery: file.secret_delivery,
+            secret_owner: file.secret_owner,
         })
     }
 }
@@ -139,6 +147,8 @@ impl From<ProcessPlan> for ProcessFile {
             ready_timeout: process.ready_timeout,
             restart: process.restart,
             stop: process.stop,
+            secret_delivery: process.secret_delivery,
+            secret_owner: process.secret_owner,
         }
     }
 }
