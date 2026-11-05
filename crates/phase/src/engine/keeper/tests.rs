@@ -335,7 +335,16 @@ impl Fixture {
             environment,
             deadline,
         })
-        .map(|kept| Running { kept })
+        .map(|kept| {
+            // The guard of `Running` ends the keeper's session, so it
+            // tests nothing unless the keeper leads one.
+            assert_eq!(
+                session_of(kept.keeper.pid),
+                Some(kept.keeper.pid),
+                "the keeper leads no session of its own"
+            );
+            Running { kept }
+        })
     }
 
     /// Returns the state of the app in the run record, its process and its
@@ -441,17 +450,34 @@ fn end_session(session: u32, deadline: Instant) -> Vec<u32> {
     }
 }
 
-/// Returns the processes of the session `session` other than its leader.
+/// Returns the processes of the session `session` other than its leader
+/// that have not ended. A zombie that waits to be reaped runs nothing, so
+/// it is left out.
 fn session_members(session: u32) -> Vec<u32> {
     all_processes()
         .into_iter()
         .filter(|pid| *pid != session)
+        .filter(|pid| session_of(*pid) == Some(session))
         .filter(|pid| {
             rustix::process::Pid::from_raw(i32::try_from(*pid).unwrap())
-                .and_then(|pid| rustix::process::getsid(Some(pid)).ok())
-                .is_some_and(|sid| u32::try_from(sid.as_raw_nonzero().get()) == Ok(session))
+                .and_then(|pid| rustix::process::getpgid(Some(pid)).ok())
+                .and_then(|group| {
+                    crate::record::process::ProcessGroup::new(
+                        group.as_raw_nonzero().get().cast_unsigned(),
+                    )
+                    .ok()
+                })
+                .and_then(crate::record::process::live_members)
+                .is_some_and(|members| members.iter().any(|member| member.pid == *pid))
         })
         .collect()
+}
+
+/// Returns the session of `pid`, or `None` when it has ended.
+fn session_of(pid: u32) -> Option<u32> {
+    rustix::process::Pid::from_raw(i32::try_from(pid).unwrap())
+        .and_then(|pid| rustix::process::getsid(Some(pid)).ok())
+        .and_then(|sid| u32::try_from(sid.as_raw_nonzero().get()).ok())
 }
 
 /// Returns the ids of every process on this machine.
@@ -659,6 +685,8 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
 fn a_keeper_stops_its_app_with_the_stop_signal_and_records_it_stopped_while_the_lock_is_free() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
+        // The app ends on the stop signal long before its loop ends, so
+        // its policy never restarts it.
         concat!("trap 'echo stopping; exit 0' TERM; echo ready; ", spin!()),
         Restart::always(RestartLimits::default()),
         Stop::default(),
@@ -703,6 +731,9 @@ fn a_keeper_kills_an_app_that_ignores_its_stop_signal_once_the_grace_passes() {
 fn killing_the_keeper_leaves_its_app_running_and_appending_to_its_log() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
+        // The loop ends after a minute, and the app's policy would then
+        // restart it, but the test kills the keeper first and the guard of
+        // `Running` ends the app.
         "i=0; while [ $i -lt 1200 ]; do i=$((i + 1)); echo tick; sleep 0.05; done",
         Restart::always(RestartLimits::default()),
         Stop::default(),

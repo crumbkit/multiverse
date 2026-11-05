@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-use super::watch_grace;
+use super::{Seen, seen, watch_grace};
 use crate::cancel::Cancel;
 use crate::clock::now;
+use crate::engine::container::ContainerState;
 use crate::engine::probe::Outcome;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::name::{AppName, ProcessName, WorkspaceId};
@@ -2692,4 +2693,80 @@ fn a_cancelled_watch_of_a_containers_grace_ends_at_once() {
     );
 
     assert!(matches!(outcome, Outcome::Cancelled), "{outcome:?}");
+}
+
+#[test]
+fn a_watch_whose_deadline_comes_before_the_end_of_the_grace_is_not_ready_at_the_deadline() {
+    let grace_end = now() + PATIENCE;
+    let mut ended = || false;
+    let read_now = || Some(now());
+
+    let outcome = watch_grace(
+        grace_end,
+        now() + GRACE,
+        &mut ended,
+        &read_now,
+        &Cancel::new(),
+    );
+
+    assert!(matches!(outcome, Outcome::NotReady { .. }), "{outcome:?}");
+    assert!(now() < grace_end);
+}
+
+#[test]
+fn a_container_is_ready_once_a_read_after_its_grace_follows_one_from_within_it() {
+    let grace_end = now() + GRACE;
+    let mut ended = || false;
+    // The first read began within the grace, and the next one after it.
+    let reads = || {
+        Some(if now() < grace_end + GRACE {
+            grace_end - GRACE / 2
+        } else {
+            now()
+        })
+    };
+
+    let outcome = watch_grace(
+        grace_end,
+        now() + PATIENCE,
+        &mut ended,
+        &reads,
+        &Cancel::new(),
+    );
+
+    assert!(matches!(outcome, Outcome::Ready), "{outcome:?}");
+    assert!(now() >= grace_end + GRACE);
+}
+
+#[test]
+fn an_end_wins_over_a_read_after_the_grace_that_found_the_container_running() {
+    let grace_end = now() + GRACE;
+    let mut ended = || now() >= grace_end;
+    let read_now = || Some(now());
+
+    let outcome = watch_grace(
+        grace_end,
+        now() + PATIENCE,
+        &mut ended,
+        &read_now,
+        &Cancel::new(),
+    );
+
+    assert!(matches!(outcome, Outcome::Ended), "{outcome:?}");
+}
+
+#[test]
+fn only_a_running_container_counts_as_running_and_only_an_end_counts_as_ended() {
+    for (read, expected) in [
+        (None, Seen::Ended(None)),
+        (Some((ContainerState::Exited(3), 0)), Seen::Ended(Some(3))),
+        (Some((ContainerState::Restarting, 0)), Seen::Ended(None)),
+        (Some((ContainerState::Running, 1)), Seen::Ended(None)),
+        (Some((ContainerState::Running, 0)), Seen::Running),
+        (Some((ContainerState::Paused, 0)), Seen::Unsure),
+        (Some((ContainerState::Created, 0)), Seen::Unsure),
+        (Some((ContainerState::Unknown, 0)), Seen::Unsure),
+    ] {
+        assert_eq!(seen(read), expected, "{read:?}");
+    }
 }

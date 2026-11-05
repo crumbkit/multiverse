@@ -35,8 +35,11 @@
 //!   container that exits meanwhile fails to start. It is ready only once
 //!   a read of its state that began after the grace found it running,
 //!   because a slow Docker can answer a read after the grace with a state
-//!   it took before the container exited. When the caller's deadline
-//!   passes before such a read, the start is uncertain.
+//!   it took before the container exited. Only Docker's `running` status
+//!   counts. When no such read comes before the process's ready timeout,
+//!   which includes a Docker whose every read fails, the process fails as
+//!   not ready, or the start is uncertain when the caller's deadline
+//!   comes first.
 //!
 //! While it waits, `start` reads the container's state at most once each
 //! [`STATE_INTERVAL`]. A container that docker no longer has, that exited,
@@ -591,19 +594,16 @@ impl ComposeRunner {
         let watcher = Watcher::new(inspected);
         let mut ended = || watcher.ended();
         let outcome = match &process.ready {
-            None => match watch_grace(
+            // A wait that no read after the grace ends before the deadline
+            // is not ready, and the match below makes it uncertain when the
+            // operation's deadline came before the process's ready timeout.
+            None => watch_grace(
                 began + self.start_grace,
-                start.deadline,
+                deadline,
                 &mut ended,
                 &|| watcher.running_since(),
                 start.cancel,
-            ) {
-                // The operation's deadline passed before a read of the
-                // container's state that began after its start grace found
-                // it running, so the container may have ended within it.
-                Outcome::NotReady { .. } => return Readiness::Uncertain,
-                outcome => outcome,
-            },
+            ),
             Some(probe) => {
                 let exec = DockerExec { id: id.clone() };
                 let mut logs = DockerLogs::new(id.clone());
@@ -664,8 +664,11 @@ impl ComposeRunner {
 /// `running_since` tells. A read that a slow Docker answers late can
 /// report a container running that has since exited, so the wall clock
 /// passing `grace_end` proves nothing by itself. The watch ends early when
-/// `ended` reports the container ended or `cancel` is set, and returns
-/// [`Outcome::NotReady`] once `deadline` passes with no such read.
+/// `ended` reports the container ended or `cancel` is set, and an end
+/// that `ended` reports wins over a read that found the container running.
+/// It returns [`Outcome::NotReady`] once `deadline` passes with no such
+/// read, which is also how it ends when every read of a Docker that keeps
+/// failing fails.
 pub(crate) fn watch_grace(
     grace_end: Instant,
     deadline: Instant,
@@ -1277,8 +1280,9 @@ impl Watcher {
     }
 
     /// Reports whether docker no longer has the container, or the container
-    /// exited, is restarting, or has restarted since it was created. A read that fails reports the container as running, and a
-    /// later read reports it again.
+    /// exited, is restarting, or has restarted since it was created, as
+    /// [`seen`] reads the state. A read that fails reports the container
+    /// as not ended, and a later read reports it again.
     fn ended(&self) -> bool {
         if self.ended.get() {
             return true;
@@ -1292,22 +1296,18 @@ impl Watcher {
             return false;
         }
         self.last.set(Some(at));
-        match reinspect(&self.container) {
-            Ok(None) => self.ended.set(true),
-            Ok(Some(inspected)) => {
-                if let ContainerState::Exited(code) = inspected.state {
+        if let Ok(read) = reinspect(&self.container) {
+            match seen(
+                read.as_ref()
+                    .map(|inspected| (inspected.state, inspected.restarts)),
+            ) {
+                Seen::Ended(code) => {
                     self.ended.set(true);
-                    self.code.set(Some(code));
-                } else if inspected.state == ContainerState::Restarting || inspected.restarts > 0 {
-                    // Docker restarts a container that exits under its
-                    // restart policy, so a container that crashes in a loop
-                    // never shows as exited. Its first exit ends the wait.
-                    self.ended.set(true);
-                } else {
-                    self.running_since.set(Some(at));
+                    self.code.set(code);
                 }
+                Seen::Running => self.running_since.set(Some(at)),
+                Seen::Unsure => {}
             }
-            Err(_) => {}
         }
         self.ended.get()
     }
@@ -1322,6 +1322,40 @@ impl Watcher {
     /// Returns the exit code of a container that exited.
     fn code(&self) -> Option<i32> {
         self.code.get()
+    }
+}
+
+/// What one read of a waiting container's state tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    /// The container has ended, with the exit code that docker reported
+    /// when it exited.
+    Ended(Option<i32>),
+    /// The container runs.
+    Running,
+    /// The read shows neither, so a later read decides.
+    Unsure,
+}
+
+/// Returns what a read that found the container in `state` after
+/// `restarts` restarts tells, or `None` when docker no longer has it. A
+/// container that docker no longer has, that exited, that Docker is
+/// restarting, or that Docker has restarted has ended. Docker restarts a
+/// container that exits under its restart policy, so a container that
+/// crashes in a loop never shows as exited, and its first exit ends the
+/// wait. Only `running` counts as running. A paused container, one that
+/// docker created and has not started, and one in a state phase does not
+/// know, such as `removing`, prove nothing about the start grace.
+fn seen(read: Option<(ContainerState, u32)>) -> Seen {
+    match read {
+        None => Seen::Ended(None),
+        Some((ContainerState::Exited(code), _)) => Seen::Ended(Some(code)),
+        Some((ContainerState::Restarting, _)) => Seen::Ended(None),
+        Some((_, restarts)) if restarts > 0 => Seen::Ended(None),
+        Some((ContainerState::Running, _)) => Seen::Running,
+        Some((ContainerState::Paused | ContainerState::Created | ContainerState::Unknown, _)) => {
+            Seen::Unsure
+        }
     }
 }
 
