@@ -573,3 +573,84 @@ fn a_oneshot_that_up_stopped_waiting_for_completes_when_its_keeper_records_an_ex
     assert_eq!(outcome(&report, "tables"), &AppOutcome::AlreadyRunning);
     assert_eq!(world.host.launches(), vec!["tables/provision"]);
 }
+
+/// Ends the app of the host dependency `db/server` in `world` and leaves
+/// its keeper running, as a crash of the app does. When `recorded`, the
+/// keeper then restarts the app as a new process and records it.
+fn keeper_restarts_db(world: &World, recorded: bool) {
+    world.host.end_app_and_keep_keeper("db/server");
+    if !recorded {
+        return;
+    }
+    let pid = {
+        let mut state = world.host.state.borrow_mut();
+        let pid = state.last_pid + 1;
+        state.last_pid = pid;
+        state.alive.insert(pid);
+        pid
+    };
+    world.edit(|record| {
+        let server = record
+            .processes
+            .iter_mut()
+            .find(|entry| entry.app.as_str() == "db" && entry.process.as_str() == "server")
+            .unwrap();
+        server.host = Some(crate::record::run::HostProcess {
+            pid,
+            started_at_us: u64::from(pid),
+            group: pid,
+            boot_id: None,
+        });
+        server.restarts += 1;
+    });
+}
+
+#[test]
+fn a_oneshot_without_once_runs_again_after_the_keeper_of_its_dependency_restarts_it() {
+    for recorded in [true, false] {
+        let world = World::new();
+        world.host.ends_as("tables/provision", Exit::Code(0));
+        let plan = plan(vec![
+            host_app("db", None, &[]),
+            provisioning_app("tables", false, &["db"]),
+        ]);
+        world.up(&plan, &Selection::All, &Env::default()).unwrap();
+        keeper_restarts_db(&world, recorded);
+
+        let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+        assert_eq!(
+            outcome(&report, "db"),
+            &AppOutcome::AlreadyRunning,
+            "{recorded}"
+        );
+        assert_eq!(
+            outcome(&report, "tables"),
+            &AppOutcome::Started,
+            "{recorded}"
+        );
+        assert_eq!(
+            world.host.launches(),
+            vec!["db/server", "tables/provision", "tables/provision"],
+            "{recorded}"
+        );
+    }
+}
+
+#[test]
+fn a_oneshot_without_once_is_left_alone_while_its_restarted_dependency_runs_as_recorded() {
+    let world = World::new();
+    world.host.ends_as("tables/provision", Exit::Code(0));
+    let plan = plan(vec![
+        host_app("db", None, &[]),
+        provisioning_app("tables", false, &["db"]),
+    ]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    keeper_restarts_db(&world, true);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "tables"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.host.launches().len(), 3);
+}

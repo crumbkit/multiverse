@@ -425,6 +425,11 @@ fn oneshot_launch() -> OneshotLaunch {
                 app: app("cache"),
                 process: process("server"),
                 keeper: host(),
+                host: HostProcess {
+                    pid: 4243,
+                    group: 4243,
+                    ..host()
+                },
             },
             DependencyRun::Container {
                 app: app("db"),
@@ -989,6 +994,12 @@ fn a_launched_oneshot_records_its_hash_and_the_runs_it_depends_on_as_named_field
                     "pid": 4242,
                     "started_at_us": 1_793_000_000_000_000_u64,
                     "group": 4242,
+                    "boot_id": null
+                },
+                "host": {
+                    "pid": 4243,
+                    "started_at_us": 1_793_000_000_000_000_u64,
+                    "group": 4243,
                     "boot_id": null
                 }
             },

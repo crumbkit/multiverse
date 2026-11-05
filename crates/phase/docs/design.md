@@ -1451,9 +1451,13 @@ still refused with `NotRunnable::Oneshot`.
   - The oneshot depends on every process and container of each app that
     its app depends on, directly or through another app, and on each
     long-running process of its own app that phase starts before it.
-  - A host process's run is its keeper's pid and start time. phase's own
-    start of the process starts a new keeper, and the keeper's restart of
-    a crashed process keeps it.
+  - A host process's run is the pid and start time of its keeper and of
+    the process that the keeper runs. phase's own start of the process
+    starts a new keeper, and the keeper's restart of a process that ended
+    starts a new process, so either changes the run. While the keeper
+    runs and its process does not run as the record says, such as just
+    after a restart that the keeper has not recorded yet, phase cannot
+    tell.
   - A container's run is its id and the `State.StartedAt` that Docker
     reports for it. Docker changes `StartedAt` on every start, including
     one under its restart policy that phase did not ask for.
@@ -1473,9 +1477,9 @@ still refused with `NotRunnable::Oneshot`.
   - the oneshot declares `once = true`;
   - each process and container that the oneshot depends on runs now as
     the same run that phase recorded when it launched the oneshot, and
-    none runs now that did not run then. phase reads each keeper from the
-    run record and checks that it still runs, and asks Docker for each
-    container's `StartedAt`.
+    none runs now that did not run then. phase reads each keeper and its
+    process from the run record and checks that they still run, and asks
+    Docker for each container's `StartedAt`.
 
   Otherwise `up` runs it again. A `once = false` oneshot therefore runs
   again after anything started again what it depends on, whichever

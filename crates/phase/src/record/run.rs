@@ -219,8 +219,9 @@ pub(crate) struct OneshotLaunch {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum DependencyRun {
-    /// A host process, by its keeper. A keeper's restart of its app keeps
-    /// the keeper, and phase's own start of the process starts a new one.
+    /// A host process, by its keeper and the process that the keeper
+    /// runs. phase's own start of the process starts a new keeper, and the
+    /// keeper's restart of a process that ended starts a new process.
     Host {
         /// The app.
         app: AppName,
@@ -228,6 +229,8 @@ pub(crate) enum DependencyRun {
         process: ProcessName,
         /// The keeper.
         keeper: HostProcess,
+        /// The process that the keeper runs.
+        host: HostProcess,
     },
     /// A container, by its id and when Docker last started it, exactly as
     /// `docker container inspect` printed `State.StartedAt`.

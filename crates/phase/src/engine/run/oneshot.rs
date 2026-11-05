@@ -146,9 +146,12 @@ impl Op<'_, '_> {
     /// The oneshot depends on every process and container of each app
     /// that its app depends on, directly or through another app, and on
     /// each long-running process of its own app that phase starts before
-    /// it, in the dependency order of the app's processes. A
-    /// host process's run is its keeper, which phase reads from the run
-    /// record and checks still runs. A container's run is its id and when
+    /// it, in the dependency order of the app's processes. A host
+    /// process's run is its keeper and the process that the keeper runs,
+    /// which phase reads from the run record and checks still run. When
+    /// the keeper runs and its process does not run as recorded, such as
+    /// after a restart by the keeper that the record does not hold yet,
+    /// phase cannot tell and returns `None`. A container's run is its id and when
     /// Docker last started it, which Docker reports now, so a start that
     /// phase did not make counts too.
     pub(super) fn dependency_runs(
@@ -182,18 +185,30 @@ impl Op<'_, '_> {
         for keeper in &record.keepers {
             let depended = apps.contains(&keeper.app)
                 || (keeper.app == app.name && earlier.contains(&keeper.process));
-            let Some(host) = keeper.host.as_ref().filter(|_| depended && keeper.live()) else {
+            let Some(keeper_host) = keeper.host.as_ref().filter(|_| depended && keeper.live())
+            else {
                 continue;
             };
-            match self.engine.host.identity(host) {
-                Ok(Identity::Ours) => runs.push(DependencyRun::Host {
-                    app: keeper.app.clone(),
-                    process: keeper.process.clone(),
-                    keeper: host.clone(),
-                }),
-                Ok(_) => {}
-                Err(_) => return None,
+            if self.engine.host.identity(keeper_host).ok()? != Identity::Ours {
+                continue;
             }
+            // A keeper that runs keeps its app, so the app's own run must
+            // be recorded and still run. A restart by the keeper changes
+            // it, and one that the keeper has not recorded yet leaves the
+            // recorded process gone.
+            let (_, entry) = record.host_pair(&keeper.app, &keeper.process);
+            let host = entry
+                .filter(|entry| entry.live())
+                .and_then(|entry| entry.host.as_ref())?;
+            if self.engine.host.identity(host).ok()? != Identity::Ours {
+                return None;
+            }
+            runs.push(DependencyRun::Host {
+                app: keeper.app.clone(),
+                process: keeper.process.clone(),
+                keeper: keeper_host.clone(),
+                host: host.clone(),
+            });
         }
         for name in &apps {
             let containers: Vec<_> = record
