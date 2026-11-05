@@ -4,16 +4,16 @@
   "description": "The workspace with the checkout that the run added, or would add on a dry run, and the ignored directories that it cloned into the new checkout.",
   "type": "object",
   "properties": {
-    "data": {
-      "$ref": "#/$defs/NewRow"
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/add/v1"
     },
     "dry_run": {
       "description": "Present, and true, when the run was a dry run that changed nothing.",
       "const": true
     },
-    "schema": {
-      "description": "The id of this document.",
-      "const": "mxv/add/v1"
+    "data": {
+      "$ref": "#/$defs/NewRow"
     }
   },
   "required": [
@@ -21,58 +21,137 @@
     "data"
   ],
   "$defs": {
-    "CheckoutRow": {
-      "description": "One checkout of a workspace.",
+    "NewRow": {
+      "description": "The workspace that `new` created, or would create on a dry run, and the\nignored directories that it cloned into the checkout.",
       "type": "object",
       "properties": {
-        "backend": {
-          "description": "The version-control system that made the checkout, which is `git`.",
-          "type": "string"
-        },
-        "base": {
-          "description": "The remote branch that the branch started from, such as\n`refs/remotes/origin/main`.",
+        "name": {
+          "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
           "type": "string"
         },
         "branch": {
-          "description": "The branch that the checkout was created on.",
-          "type": "string"
-        },
-        "commit": {
-          "description": "The commit that the branch started at, or null in a dry run, which\ndoes not fetch.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mirror": {
-          "description": "The bare mirror whose objects a clone borrows, or null for a\nworktree.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "The repository's name, which names the checkout's directory.",
+          "description": "The branch that the workspace's checkouts were created on.",
           "type": "string"
         },
         "path": {
-          "description": "The checkout's directory.",
+          "description": "The workspace's directory, which `mxv cd` prints. It comes from the\nworkspace's record, so it stays where the workspace was created when\nthe root changes later.",
           "type": "string"
         },
-        "source": {
-          "description": "The repository's top-level directory.",
+        "root": {
+          "description": "The workspace root that the run used, in which `new` creates a\nworkspace's directory.",
           "type": "string"
+        },
+        "root_source": {
+          "description": "Where the root came from: `env` for `MXV_ROOT`, `config` for the\nconfig file's `root`, or `default` for\n`$XDG_DATA_HOME/mxv/workspaces`.",
+          "$ref": "#/$defs/RootSource"
+        },
+        "repositories": {
+          "description": "The top-level directory of each repository that the workspace checks\nout.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones.",
+          "$ref": "#/$defs/KindRow"
+        },
+        "manifest": {
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, `merged` for the files of a workspace\nwith several checkouts, or `none` for a bare workspace.",
+          "$ref": "#/$defs/ManifestRow"
+        },
+        "manifest_path": {
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none. For a merged manifest, it is the\nworkspace manifest when it exists, or else the first checkout's\n`mxv.toml`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest_paths": {
+          "description": "Every file that the workspace's commands read: the one manifest of\na workspace with one checkout, or the workspace manifest and each\ncheckout's `mxv.toml` that exist in a workspace with several.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "checkouts": {
+          "description": "The workspace's checkouts, one for each repository.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckoutRow"
+          }
+        },
+        "ports": {
+          "description": "The host port that the workspace holds for each named port of its\nmanifest, which the first `mxv up` allocates.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          }
+        },
+        "cloned": {
+          "description": "Each ignored directory of the repository that `new` cloned into the\ncheckout, or would clone on a dry run, with the checkout's name in\nfront, such as `app: web/node_modules/`. A clone shares its disk\nwith the repository's copy until a file in either changes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "clone_warning": {
+          "description": "Why `new` cloned fewer directories than the globs name, such as a\nfile system that cannot clone, or null. `new` never copies the\ndirectories in full.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest_from": {
+          "description": "The file that `new` copied into the workspace manifest: the\n`--manifest` file, or the template whose `[template]` table lists\nthe repository's origin, or null when it copied none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "description": "The sentences, joined with `; `, for each template that `new`\nskipped because it cannot use it, and for each table of the copied\nmanifest that mxv ignores although its name is close to one of\nmxv's own, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "name",
-        "backend",
-        "source",
-        "path",
         "branch",
-        "base",
-        "commit",
-        "mirror"
+        "path",
+        "root",
+        "root_source",
+        "manifest",
+        "ports",
+        "cloned",
+        "clone_warning",
+        "manifest_from",
+        "warnings"
+      ]
+    },
+    "RootSource": {
+      "description": "Where the workspace root came from.",
+      "oneOf": [
+        {
+          "description": "The `MXV_ROOT` environment variable named it.",
+          "type": "string",
+          "const": "env"
+        },
+        {
+          "description": "The config file's `root` named it.",
+          "type": "string",
+          "const": "config"
+        },
+        {
+          "description": "Neither named one, so it is `$XDG_DATA_HOME/mxv/workspaces`.",
+          "type": "string",
+          "const": "default"
+        }
       ]
     },
     "KindRow": {
@@ -115,99 +194,43 @@
         }
       ]
     },
-    "NewRow": {
-      "description": "The workspace that `new` created, or would create on a dry run, and the\nignored directories that it cloned into the checkout.",
+    "CheckoutRow": {
+      "description": "One checkout of a workspace.",
       "type": "object",
       "properties": {
-        "branch": {
-          "description": "The branch that the workspace's checkouts were created on.",
+        "name": {
+          "description": "The repository's name, which names the checkout's directory.",
           "type": "string"
         },
-        "checkouts": {
-          "description": "The workspace's checkouts, one for each repository.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CheckoutRow"
-          }
+        "backend": {
+          "description": "The version-control system that made the checkout, which is `git`.",
+          "type": "string"
         },
-        "clone_warning": {
-          "description": "Why `new` cloned fewer directories than the globs name, such as a\nfile system that cannot clone, or null. `new` never copies the\ndirectories in full.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "cloned": {
-          "description": "Each ignored directory of the repository that `new` cloned into the\ncheckout, or would clone on a dry run, with the checkout's name in\nfront, such as `app: web/node_modules/`. A clone shares its disk\nwith the repository's copy until a file in either changes.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "kind": {
-          "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones.",
-          "$ref": "#/$defs/KindRow"
-        },
-        "manifest": {
-          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, `merged` for the files of a workspace\nwith several checkouts, or `none` for a bare workspace.",
-          "$ref": "#/$defs/ManifestRow"
-        },
-        "manifest_from": {
-          "description": "The file that `new` copied into the workspace manifest: the\n`--manifest` file, or the template whose `[template]` table lists\nthe repository's origin, or null when it copied none.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "manifest_path": {
-          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none. For a merged manifest, it is the\nworkspace manifest when it exists, or else the first checkout's\n`mxv.toml`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "manifest_paths": {
-          "description": "Every file that the workspace's commands read: the one manifest of\na workspace with one checkout, or the workspace manifest and each\ncheckout's `mxv.toml` that exist in a workspace with several.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "name": {
-          "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
+        "source": {
+          "description": "The repository's top-level directory.",
           "type": "string"
         },
         "path": {
-          "description": "The workspace's directory, which `mxv cd` prints. It comes from the\nworkspace's record, so it stays where the workspace was created when\nthe root changes later.",
+          "description": "The checkout's directory.",
           "type": "string"
         },
-        "ports": {
-          "description": "The host port that the workspace holds for each named port of its\nmanifest, which the first `mxv up` allocates.",
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint16",
-            "maximum": 65535,
-            "minimum": 0
-          }
-        },
-        "repositories": {
-          "description": "The top-level directory of each repository that the workspace checks\nout.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "root": {
-          "description": "The workspace root that the run used, in which `new` creates a\nworkspace's directory.",
+        "branch": {
+          "description": "The branch that the checkout was created on.",
           "type": "string"
         },
-        "root_source": {
-          "description": "Where the root came from: `env` for `MXV_ROOT`, `config` for the\nconfig file's `root`, or `default` for\n`$XDG_DATA_HOME/mxv/workspaces`.",
-          "$ref": "#/$defs/RootSource"
+        "base": {
+          "description": "The remote branch that the branch started from, such as\n`refs/remotes/origin/main`.",
+          "type": "string"
         },
-        "warnings": {
-          "description": "The sentences, joined with `; `, for each template that `new`\nskipped because it cannot use it, and for each table of the copied\nmanifest that mxv ignores although its name is close to one of\nmxv's own, or null.",
+        "commit": {
+          "description": "The commit that the branch started at, or null in a dry run, which\ndoes not fetch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mirror": {
+          "description": "The bare mirror whose objects a clone borrows, or null for a\nworktree.",
           "type": [
             "string",
             "null"
@@ -216,36 +239,13 @@
       },
       "required": [
         "name",
-        "branch",
+        "backend",
+        "source",
         "path",
-        "root",
-        "root_source",
-        "manifest",
-        "ports",
-        "cloned",
-        "clone_warning",
-        "manifest_from",
-        "warnings"
-      ]
-    },
-    "RootSource": {
-      "description": "Where the workspace root came from.",
-      "oneOf": [
-        {
-          "description": "The `MXV_ROOT` environment variable named it.",
-          "type": "string",
-          "const": "env"
-        },
-        {
-          "description": "The config file's `root` named it.",
-          "type": "string",
-          "const": "config"
-        },
-        {
-          "description": "Neither named one, so it is `$XDG_DATA_HOME/mxv/workspaces`.",
-          "type": "string",
-          "const": "default"
-        }
+        "branch",
+        "base",
+        "commit",
+        "mirror"
       ]
     }
   }

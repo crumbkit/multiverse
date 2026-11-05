@@ -214,7 +214,8 @@ fn with_secrets() -> AppPlan {
     let mut app = db();
     app.processes[0].env.insert("PGPASSWORD".to_owned());
     app.processes[0].env.insert("TOKEN".to_owned());
-    app.permissions.secrets = ["PGPASSWORD".to_owned(), "TOKEN".to_owned()].into();
+    app.permissions.get_or_insert_default().secrets =
+        ["PGPASSWORD".to_owned(), "TOKEN".to_owned()].into();
     app
 }
 

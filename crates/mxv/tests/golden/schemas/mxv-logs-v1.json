@@ -4,16 +4,16 @@
   "description": "The last lines of a process's log, then with --follow each line that the process writes.",
   "type": "object",
   "properties": {
-    "data": {
-      "$ref": "#/$defs/LogLine"
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/logs/v1"
     },
     "dry_run": {
       "description": "Present, and true, when the run was a dry run that changed nothing.",
       "const": true
     },
-    "schema": {
-      "description": "The id of this document.",
-      "const": "mxv/logs/v1"
+    "data": {
+      "$ref": "#/$defs/LogLine"
     }
   },
   "required": [

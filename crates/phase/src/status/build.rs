@@ -16,6 +16,7 @@ use crate::record::docker::{Docker, DockerKind, DockerObject, SeenContainer};
 use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{ContainerEntry, Ended, EntryState, Exit, HostEntry, RunRecord};
 use crate::record::store::RunStore;
+use crate::sandbox;
 use crate::status::{
     LastExit, ProcessState, SourceSummary, Status, StatusRow, UnknownReason, WorkspaceState,
 };
@@ -168,6 +169,7 @@ fn enrich(row: &mut StatusRow, app: Option<&AppPlan>, planned: Option<&ProcessPl
     };
     row.source = Some(SourceSummary::from(&app.source));
     row.runner = app.runner;
+    row.sandbox = sandbox::sandboxing(app, &sandbox::platform());
     if row.address.is_none() && app.runner == RunnerKind::Host {
         let port = planned
             .and_then(|planned| planned.port.as_ref())

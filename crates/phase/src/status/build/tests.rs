@@ -15,6 +15,7 @@ use crate::record::testing::{
     workspace, write_file,
 };
 use crate::record::{ContainerId, Handle};
+use crate::sandbox::Sandboxing;
 use crate::source::Source;
 use crate::status::{
     ExitReason, LastExit, ProcessState, SourceSummary, UnknownReason, WorkspaceState,
@@ -348,6 +349,51 @@ fn a_plan_orders_the_rows_and_gives_their_sources_and_addresses_and_unplanned_en
     assert_eq!(status.rows[1].runner, RunnerKind::Container);
     assert_eq!(status.rows[1].log, None);
     assert_eq!(status.rows[2].source, None);
+}
+
+#[test]
+fn status_shows_a_host_process_whose_app_declares_no_permissions_as_unsandboxed() {
+    let state = tempfile::tempdir().unwrap();
+
+    let status = read(
+        state.path(),
+        Some(&plan()),
+        &FakeProcesses::default(),
+        &Unreachable,
+    );
+
+    assert_eq!(
+        status.rows[0].sandbox,
+        Some(Sandboxing::Unsandboxed {
+            reason: "its app declares no permissions".to_owned()
+        })
+    );
+    assert_eq!(status.rows[1].sandbox, None);
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["rows"][0]["sandbox"]["kind"], "unsandboxed");
+    assert!(json["rows"][1].get("sandbox").is_none());
+}
+
+#[test]
+fn status_shows_a_host_process_whose_app_declares_permissions_under_this_machines_sandbox() {
+    let state = tempfile::tempdir().unwrap();
+    let mut apps = plan().apps().to_vec();
+    let mut permissions = crate::plan::Permissions::default();
+    permissions.listen.insert("http".parse().unwrap());
+    apps[0].permissions = Some(permissions);
+    let plan = Plan::new("reading-list".parse().unwrap(), workspace(), apps).unwrap();
+
+    let status = read(
+        state.path(),
+        Some(&plan),
+        &FakeProcesses::default(),
+        &Unreachable,
+    );
+
+    let expected = crate::sandbox::sandboxing(&plan.apps()[0], &crate::sandbox::platform());
+    assert_eq!(status.rows[0].sandbox, expected);
+    #[cfg(target_os = "macos")]
+    assert_eq!(status.rows[0].sandbox, Some(Sandboxing::Seatbelt));
 }
 
 #[test]

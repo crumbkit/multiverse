@@ -10,7 +10,7 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -24,7 +24,7 @@ use signal_hook::iterator::Signals;
 use crate::clock::{POLL_INTERVAL, deadline_in, now, pause, wall_now};
 use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
 use crate::engine::keeper::recorder::{Hurry, RECORD_LOCK_WAIT, Recorder};
-use crate::engine::keeper::sandbox::apply_sandbox;
+use crate::engine::keeper::sandbox::{app_command, sandbox_environment};
 use crate::engine::keeper::spec::{
     Handshake, KeeperSpec, StartedApp, read_spec, write_end, write_handshake,
 };
@@ -446,21 +446,16 @@ impl Supervisor<'_> {
     /// The app receives only the inherited variables and either `fresh` or
     /// the environment resolved first, which the keeper holds as its own.
     fn start(&self, fresh: Option<&dyn AppliedEnvironment>) -> Result<App, String> {
-        let (program, arguments) = self
+        let program = self
             .spec
             .run
-            .split_first()
+            .first()
             .ok_or_else(|| "the specification's command is empty".to_owned())?;
         let unopened = |error: std::io::Error| format!("the log cannot be shared: {error}");
         let stdout = self.log.try_clone().map_err(unopened)?;
         let stderr = self.log.try_clone().map_err(unopened)?;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/phase/src/engine/keeper/supervise.rs starts the keeper's app process (PROC-1)"
-        )]
-        let mut command = Command::new(program);
+        let mut command = app_command(self.spec)?;
         command
-            .args(arguments)
             .current_dir(&self.spec.cwd)
             .stdin(Stdio::null())
             .stdout(stdout)
@@ -474,7 +469,7 @@ impl Supervisor<'_> {
                 .environment
                 .apply_named(&self.spec.resolved, &mut command),
         }
-        apply_sandbox(&mut command);
+        sandbox_environment(self.spec, &mut command);
         #[expect(
             clippy::disallowed_methods,
             reason = "crates/phase/src/engine/keeper/supervise.rs starts the keeper's app process (PROC-1)"

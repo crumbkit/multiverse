@@ -43,6 +43,16 @@ impl KeeperCommand {
     pub(crate) const fn new(program: PathBuf, leading: Vec<OsString>) -> Self {
         Self { program, leading }
     }
+
+    /// Returns the program's path.
+    pub(crate) fn program(&self) -> &std::path::Path {
+        &self.program
+    }
+
+    /// Returns the words before the keeper's arguments.
+    pub(crate) fn leading(&self) -> &[OsString] {
+        &self.leading
+    }
 }
 
 /// What [`spawn`] needs to start one keeper.

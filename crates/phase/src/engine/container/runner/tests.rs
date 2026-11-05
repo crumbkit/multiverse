@@ -991,7 +991,10 @@ fn secret_app_running(name: &str, script: &str) -> AppPlan {
     let mut app = app(name, script);
     for secret in ["TOKEN", "KEY"] {
         app.processes[0].env.insert(secret.to_owned());
-        app.permissions.secrets.insert(secret.to_owned());
+        app.permissions
+            .get_or_insert_default()
+            .secrets
+            .insert(secret.to_owned());
     }
     app.processes[0].ready = Some(Probe::new(ProbeCheck::command(vec![
         "test".to_owned(),
@@ -1406,7 +1409,10 @@ fn a_container_that_opts_into_environment_secrets_receives_them_as_variables() {
     let world = World::new();
     let mut db = app("db", "exec sleep 60");
     db.processes[0].env.insert("TOKEN".to_owned());
-    db.permissions.secrets.insert("TOKEN".to_owned());
+    db.permissions
+        .get_or_insert_default()
+        .secrets
+        .insert("TOKEN".to_owned());
     db.processes[0].secret_delivery = crate::plan::SecretDelivery::Env;
     let plan = world.plan(vec![db]);
 
@@ -1930,7 +1936,10 @@ fn a_failed_start_removes_the_anonymous_volumes_of_the_containers_it_cleans_up()
     broken.name = "broken".parse().unwrap();
     broken.secret_owner = Some("1000:1000".to_owned());
     for secret in ["TOKEN", "KEY"] {
-        db.permissions.secrets.insert(secret.to_owned());
+        db.permissions
+            .get_or_insert_default()
+            .secrets
+            .insert(secret.to_owned());
     }
     db.processes.push(broken);
     let plan = world.plan(vec![db]);

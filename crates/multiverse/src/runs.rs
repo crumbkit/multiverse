@@ -481,6 +481,15 @@ impl Runs {
         self
     }
 
+    /// Returns these run files with `protected` as the paths that phase's
+    /// sandboxed apps may never read or write, such as mxv's state
+    /// directory and its mirrors.
+    #[must_use]
+    pub fn with_protected(mut self, protected: Vec<PathBuf>) -> Self {
+        self.phase = self.phase.with_protected(protected);
+        self
+    }
+
     /// Returns these run files with `wait` as how long a lock waits for
     /// another command to release it.
     #[must_use]

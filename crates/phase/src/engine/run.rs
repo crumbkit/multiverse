@@ -61,6 +61,7 @@ use crate::record::run::{
 };
 use crate::record::store::{Journal, RunStore};
 use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
+use crate::sandbox::{self, Context, Platform, SandboxError, SandboxSpec};
 use crate::select::Selection;
 use crate::source::Source;
 
@@ -97,6 +98,9 @@ pub(crate) struct Settings<'a> {
     pub(crate) keeper: Option<&'a KeeperCommand>,
     /// The variables that keepers and apps inherit, `PATH` and `HOME`.
     pub(crate) inherited: &'a BTreeMap<String, String>,
+    /// The paths that the host program protects from sandboxed apps, such
+    /// as its own state and data directories.
+    pub(crate) protected: &'a [PathBuf],
 }
 
 /// The engine of one operation: its settings and what it reaches the
@@ -140,6 +144,7 @@ impl Engine<'_> {
             deadlines,
             cancel,
             started: Vec::new(),
+            ports: app_ports(plan),
         };
         op.up(plan, &chosen)
     }
@@ -173,6 +178,7 @@ impl Engine<'_> {
             deadlines: UpDeadlines::new(deadline, deadline),
             cancel,
             started: Vec::new(),
+            ports: app_ports(plan),
         };
         op.restart(&chosen)
     }
@@ -217,6 +223,9 @@ struct Op<'e, 's> {
     cancel: &'e Cancel,
     /// What this operation started, in order.
     started: Vec<Begun>,
+    /// The loopback ports of each app of the plan, which a sandboxed app
+    /// may connect to when it depends on that app.
+    ports: BTreeMap<AppName, BTreeSet<u16>>,
 }
 
 /// Something that an operation started, which it stops again when the
@@ -661,6 +670,11 @@ impl Op<'_, '_> {
             Started::Host(started.clone()),
         )?;
         let step = self.await_ready(app, process, &target, environment.as_ref(), end, lines);
+        if let Step::Failed(StartProblem::Exited { code, .. }) = &step
+            && let Some(message) = denial_hint(app, *code)
+        {
+            notes.push(Note::sandboxed(process.name.clone(), message));
+        }
         if let Step::Failed(StartProblem::Exited { code, signal, .. }) = &step {
             // The keeper cannot record the end while this operation holds
             // the lifecycle lock, so the engine records what the keeper's
@@ -821,6 +835,11 @@ impl Op<'_, '_> {
         .requiring(process.required_env().cloned().collect())
         .inheriting(engine.settings.inherited.clone())
         .map_err(|error| unstartable(error.to_string()))?;
+        let spec = match self.sandbox(app, process, command) {
+            Ok(Some(sandbox)) => spec.sandboxed(sandbox),
+            Ok(None) => spec,
+            Err(error) => return Err(unstartable(error.to_string())),
+        };
         let lines = engine.host.follow_log(&log).map_err(Step::Errored)?;
         let args = KeeperArgs::new(
             self.workspace.clone(),
@@ -843,6 +862,40 @@ impl Op<'_, '_> {
             Err(_) if now() >= self.deadlines.ready => Err(Step::Uncertain),
             Err(error) => Err(Step::Errored(error)),
         }
+    }
+
+    /// Returns the sandbox of `process` of `app`, whose keeper runs as
+    /// `command`, or `None` when it runs unsandboxed: its app declares no
+    /// permissions, or this machine offers no sandbox.
+    fn sandbox(
+        &self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        command: &KeeperCommand,
+    ) -> Result<Option<SandboxSpec>, SandboxError> {
+        let Some(permissions) = &app.permissions else {
+            return Ok(None);
+        };
+        if !matches!(sandbox::platform(), Platform::Available(_)) {
+            return Ok(None);
+        }
+        let settings = &self.engine.settings;
+        let context = Context {
+            state_dir: settings.state_dir,
+            workspace: &self.workspace,
+            path: settings.inherited.get("PATH").map(String::as_str),
+            home: settings.inherited.get("HOME").map(Path::new),
+            protected: settings.protected,
+            connect: app
+                .depends
+                .iter()
+                .filter_map(|depends| self.ports.get(depends))
+                .flatten()
+                .copied()
+                .collect(),
+            launcher: sandbox::launcher(command.program(), command.leading())?,
+        };
+        sandbox::spec(app, process, permissions, &context).map(Some)
     }
 
     /// Waits until the started `target` is ready, as `process` says. When
@@ -1284,6 +1337,40 @@ fn listen(app: &AppPlan, process: &ProcessPlan) -> Option<Listen> {
 
 /// Returns the directory that `process` of `app` starts in: the app's
 /// checkout, or the process's directory within it.
+/// Returns where the sandbox's denials show for a process of `app` that
+/// exited with `code` before it was ready, or `None` when it ran
+/// unsandboxed.
+fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
+    let kind = match sandbox::sandboxing(app, &sandbox::platform())? {
+        sandbox::Sandboxing::Seatbelt => "Seatbelt",
+        sandbox::Sandboxing::Landlock => "Landlock",
+        sandbox::Sandboxing::Unsandboxed { .. } => return None,
+    };
+    if code == Some(i32::from(sandbox::SANDBOX_REFUSED)) {
+        return Some(format!(
+            "the process was to run under {kind}, and its log says why the sandbox or the program could not start"
+        ));
+    }
+    Some(if kind == "Seatbelt" {
+        "the process ran under Seatbelt, which fails each access it denies with \"Operation not permitted\", and `log show --last 5m --style compact --predicate 'sender == \"Sandbox\"'` lists the denials".to_owned()
+    } else {
+        "the process ran under Landlock, which fails each access it denies with \"Permission denied\" or \"Operation not permitted\"".to_owned()
+    })
+}
+
+/// Returns the loopback ports of each app of `plan`.
+fn app_ports(plan: &Plan) -> BTreeMap<AppName, BTreeSet<u16>> {
+    plan.apps()
+        .iter()
+        .map(|app| {
+            (
+                app.name.clone(),
+                app.ports.values().map(|port| port.get()).collect(),
+            )
+        })
+        .collect()
+}
+
 fn process_dir(app: &AppPlan, process: &ProcessPlan) -> PathBuf {
     let base = match &app.source {
         Source::Checkout { dir, .. } => dir.clone(),

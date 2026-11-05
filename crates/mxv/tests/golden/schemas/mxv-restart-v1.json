@@ -4,25 +4,13 @@
   "description": "The restarted processes and their dependencies, in the order they started, each running.",
   "type": "object",
   "properties": {
-    "cut": {
-      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
-      "type": "object",
-      "properties": {
-        "budget": {
-          "description": "The most bytes that the run printed on standard output.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "code": {
-          "description": "The over-budget code, in the tool's spelling.",
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "code",
-        "budget"
-      ]
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/restart/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
     },
     "data": {
       "description": "The rows, in order.",
@@ -31,13 +19,25 @@
         "$ref": "#/$defs/ProcessRow"
       }
     },
-    "dry_run": {
-      "description": "Present, and true, when the run was a dry run that changed nothing.",
-      "const": true
-    },
-    "schema": {
-      "description": "The id of this document.",
-      "const": "mxv/restart/v1"
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The over-budget code, in the tool's spelling.",
+          "type": "string"
+        },
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "code",
+        "budget"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -45,6 +45,88 @@
     "data"
   ],
   "$defs": {
+    "ProcessRow": {
+      "description": "One process or container of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The process's or container's name in the manifest.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`process` or `container`.",
+          "$ref": "#/$defs/KindName"
+        },
+        "state": {
+          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, `stopped`, `starting` while it is not\nready yet, `stopping`, `restarting` while docker restarts a\ncontainer, or `unknown` when mxv cannot tell.",
+          "$ref": "#/$defs/StateName"
+        },
+        "pid": {
+          "description": "The process id, which is also its process group's id, while a\nprocess runs, and null for a container.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "code": {
+          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited. A container's code is the one docker reports,\nsuch as 137 for a container that SIGKILL ended.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "signal": {
+          "description": "The number of the signal that ended an exited process, such as 15\nfor SIGTERM, or null.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "reason": {
+          "description": "Why mxv cannot tell the state of an `unknown` process, or why it\ndoes not know the exit code of an exited process that an earlier\nversion of mxv started, such as one whose group SIGKILL ended\nbefore its shell wrote the exit file, or null when it knows.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group_alive": {
+          "description": "Whether the process group of an exited process that an earlier\nversion of mxv started still has a member, such as a child it\nstarted in the background, which `mxv down` stops. It is null while\nthe process runs, and for every process that phase runs, because\nphase stops what is left of a process's group when the process\nends.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ports": {
+          "description": "The ports that a process receives, as `VARIABLE=port`, or that a\ncontainer publishes, as `port-name=port`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "log": {
+          "description": "The process's log file, which `mxv logs` prints, or null for a\ncontainer, whose output docker keeps and `mxv logs` also prints.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "state",
+        "pid",
+        "code",
+        "signal",
+        "reason",
+        "group_alive",
+        "ports"
+      ]
+    },
     "KindName": {
       "description": "Whether a row is a process or a container.",
       "oneOf": [
@@ -58,88 +140,6 @@
           "type": "string",
           "const": "container"
         }
-      ]
-    },
-    "ProcessRow": {
-      "description": "One process or container of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
-      "type": "object",
-      "properties": {
-        "code": {
-          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited. A container's code is the one docker reports,\nsuch as 137 for a container that SIGKILL ended.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int32"
-        },
-        "group_alive": {
-          "description": "Whether the process group of an exited process that an earlier\nversion of mxv started still has a member, such as a child it\nstarted in the background, which `mxv down` stops. It is null while\nthe process runs, and for every process that phase runs, because\nphase stops what is left of a process's group when the process\nends.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "kind": {
-          "description": "`process` or `container`.",
-          "$ref": "#/$defs/KindName"
-        },
-        "log": {
-          "description": "The process's log file, which `mxv logs` prints, or null for a\ncontainer, whose output docker keeps and `mxv logs` also prints.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "The process's or container's name in the manifest.",
-          "type": "string"
-        },
-        "pid": {
-          "description": "The process id, which is also its process group's id, while a\nprocess runs, and null for a container.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "ports": {
-          "description": "The ports that a process receives, as `VARIABLE=port`, or that a\ncontainer publishes, as `port-name=port`.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "reason": {
-          "description": "Why mxv cannot tell the state of an `unknown` process, or why it\ndoes not know the exit code of an exited process that an earlier\nversion of mxv started, such as one whose group SIGKILL ended\nbefore its shell wrote the exit file, or null when it knows.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "signal": {
-          "description": "The number of the signal that ended an exited process, such as 15\nfor SIGTERM, or null.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int32"
-        },
-        "state": {
-          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, `stopped`, `starting` while it is not\nready yet, `stopping`, `restarting` while docker restarts a\ncontainer, or `unknown` when mxv cannot tell.",
-          "$ref": "#/$defs/StateName"
-        }
-      },
-      "required": [
-        "name",
-        "kind",
-        "state",
-        "pid",
-        "code",
-        "signal",
-        "reason",
-        "group_alive",
-        "ports"
       ]
     },
     "StateName": {

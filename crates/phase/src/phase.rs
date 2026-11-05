@@ -64,6 +64,9 @@ pub struct Phase {
     /// secret receives, or `None` for the host program's whole
     /// environment.
     docker_environment: Option<BTreeMap<String, String>>,
+    /// The paths that sandboxed apps may never read or write, besides those
+    /// that phase always protects.
+    protected: Vec<PathBuf>,
 }
 
 /// The deadlines of one `up`. A deadline that cuts off a start makes that
@@ -100,7 +103,20 @@ impl Phase {
             keeper: None,
             inherited: BTreeMap::new(),
             docker_environment: None,
+            protected: Vec::new(),
         }
+    }
+
+    /// Returns this `Phase` with `protected` as paths that a sandboxed app
+    /// may never read or write, such as the host program's own state and
+    /// data directories. phase always protects its own state directory,
+    /// `~/.ssh`, the Keychains, the directory of the agent's socket and
+    /// the workspace directory outside the app's checkout, and refuses to
+    /// start a sandboxed app whose allowed paths would reach one.
+    #[must_use]
+    pub fn with_protected(mut self, protected: Vec<PathBuf>) -> Self {
+        self.protected = protected;
+        self
     }
 
     /// Returns this `Phase` with `program` as the program that runs
@@ -324,6 +340,7 @@ impl Phase {
                 kill_wait: self.kill_wait,
                 keeper: self.keeper.as_ref(),
                 inherited: &self.inherited,
+                protected: &self.protected,
             },
             host: &System,
             containers,

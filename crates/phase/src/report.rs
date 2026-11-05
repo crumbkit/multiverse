@@ -152,9 +152,27 @@ pub enum Note {
         /// TOKEN`.
         message: String,
     },
+    /// The process ran under the sandbox and ended before it was ready, so
+    /// the sandbox may have denied it something. The message says where
+    /// the denials show.
+    #[non_exhaustive]
+    Sandboxed {
+        /// The process.
+        process: ProcessName,
+        /// Where the sandbox's denials show, as a sentence that holds no
+        /// value.
+        message: String,
+    },
 }
 
 impl Note {
+    /// Returns the note that `process` ran under the sandbox, with
+    /// `message`, which says where the sandbox's denials show.
+    #[must_use]
+    pub const fn sandboxed(process: ProcessName, message: String) -> Self {
+        Self::Sandboxed { process, message }
+    }
+
     /// Returns the note that phase could not find the listener of `port`
     /// of `process`, because of `reason`.
     #[must_use]

@@ -164,7 +164,14 @@ impl Environment {
     /// starts each keeper as `mxv phase keep` and passes the caller's
     /// variables to host processes.
     pub(crate) fn runs(&self) -> Result<Runs, MxvFailure> {
-        let mut runs = Runs::new(&self.state()?).with_caller(self.caller.clone());
+        // A sandboxed app may never touch mxv's workspace records and run
+        // files, which the state directory holds, or the mirrors that
+        // clones borrow objects from. The workspaces themselves also lie
+        // under mxv's data directory, so only the mirrors are protected
+        // there.
+        let mut runs = Runs::new(&self.state()?)
+            .with_caller(self.caller.clone())
+            .with_protected(vec![self.state()?, self.mirrors()?]);
         if let Some(program) = &self.program {
             runs = runs.with_keeper(
                 program.clone(),

@@ -108,6 +108,14 @@ pub enum PlanError {
         /// What is wrong with them.
         problem: ContainerProblem,
     },
+    /// The app's permissions cannot be enforced as written.
+    #[non_exhaustive]
+    BadPermissions {
+        /// The app.
+        app: AppName,
+        /// What is wrong with them.
+        problem: PermissionProblem,
+    },
     /// A process of the app cannot run as planned.
     #[non_exhaustive]
     BadProcess {
@@ -118,6 +126,57 @@ pub enum PlanError {
         /// What is wrong with it.
         problem: ProcessProblem,
     },
+}
+
+/// What is wrong with an app's permissions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PermissionProblem {
+    /// `connect` names a host that is not an app of the plan. phase reaches
+    /// external hosts only through an allowlist proxy, which is not built
+    /// yet, so a sandboxed app may connect only to the apps it depends on.
+    ExternalHost(String),
+    /// `connect` names an app of the plan that the app does not depend on.
+    /// A sandboxed app may connect only to the ports of the apps it
+    /// depends on.
+    NotADependency(AppName),
+    /// A process listens on a port that the app's `listen` does not name,
+    /// so the sandbox would refuse it.
+    #[non_exhaustive]
+    ListenNotGranted {
+        /// The process.
+        process: ProcessName,
+        /// The port.
+        port: PortName,
+    },
+    /// An entry of `write` is neither `$STATE`, an absolute path, nor a
+    /// path that stays inside the app's checkout, or it holds a quote, a
+    /// backslash or a control character, which the sandbox's profile cannot
+    /// hold.
+    BadWrite(String),
+}
+
+impl fmt::Display for PermissionProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExternalHost(host) => write!(
+                formatter,
+                "it may connect to {host:?}, which is not an app of the plan, and phase reaches external hosts only through its allowlist proxy, which is not built yet"
+            ),
+            Self::NotADependency(app) => write!(
+                formatter,
+                "it may connect to {app}, which it does not depend on, and a sandboxed app may connect only to the apps it depends on"
+            ),
+            Self::ListenNotGranted { process, port } => write!(
+                formatter,
+                "{process} listens on {port}, which its permissions do not let it listen on"
+            ),
+            Self::BadWrite(path) => write!(
+                formatter,
+                "it may write {path:?}, which is neither $STATE, an absolute path, nor a path inside its checkout that a sandbox profile can hold"
+            ),
+        }
+    }
 }
 
 /// What is wrong with an app's source.
@@ -286,6 +345,10 @@ impl fmt::Display for PlanError {
                     "the container options of {app} cannot be used because {problem}"
                 )
             }
+            Self::BadPermissions { app, problem } => write!(
+                formatter,
+                "the permissions of {app} cannot be enforced because {problem}"
+            ),
             Self::BadProcess {
                 app,
                 process,
@@ -481,8 +544,82 @@ pub(super) fn check_apps(apps: &[AppPlan]) -> Result<(), PlanError> {
     }
     for app in apps {
         check_app(app)?;
+        check_permissions(app, |name| by_name.contains_key(name)).map_err(|problem| {
+            PlanError::BadPermissions {
+                app: app.name.clone(),
+                problem,
+            }
+        })?;
     }
     Ok(())
+}
+
+/// Checks the permissions of the host `app`, whose plan holds the apps for
+/// which `planned` is true: each `connect` names an app it depends on, each
+/// of its processes listens only on a port it may listen on, and each
+/// `write` is one the sandbox can hold. An app without permissions, and a
+/// container app, pass.
+fn check_permissions(
+    app: &AppPlan,
+    planned: impl Fn(&AppName) -> bool,
+) -> Result<(), PermissionProblem> {
+    let Some(permissions) = &app.permissions else {
+        return Ok(());
+    };
+    // phase's sandbox holds only host apps. A container app's network is
+    // Docker's, so its permissions are not enforced here yet.
+    if app.runner != RunnerKind::Host {
+        return Ok(());
+    }
+    for target in &permissions.connect {
+        match target.parse::<AppName>() {
+            Ok(name) if planned(&name) => {
+                if !app.depends.contains(&name) {
+                    return Err(PermissionProblem::NotADependency(name));
+                }
+            }
+            _ => return Err(PermissionProblem::ExternalHost(target.clone())),
+        }
+    }
+    for process in &app.processes {
+        if let Some(port) = &process.port
+            && !permissions.listen.contains(port)
+        {
+            return Err(PermissionProblem::ListenNotGranted {
+                process: process.name.clone(),
+                port: port.clone(),
+            });
+        }
+    }
+    if let Some(path) = permissions.write.iter().find(|path| !is_writable(path)) {
+        return Err(PermissionProblem::BadWrite(path.clone()));
+    }
+    Ok(())
+}
+
+/// The entry of `write` that stands for the app's own state directory.
+pub(crate) const STATE: &str = "$STATE";
+
+/// Reports whether `path`, an entry of `write`, is `$STATE`, an absolute
+/// path, or a relative path that stays inside the checkout, and holds no
+/// quote, backslash or control character.
+fn is_writable(path: &str) -> bool {
+    if path == STATE {
+        return true;
+    }
+    if path.is_empty()
+        || path.starts_with('$')
+        || path
+            .chars()
+            .any(|character| character == '"' || character == '\\' || character.is_control())
+    {
+        return false;
+    }
+    let path = Path::new(path);
+    path.is_absolute()
+        || path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
 /// Returns the first cycle in `graph`, which maps each name to the names it
@@ -550,8 +687,8 @@ fn check_app(app: &AppPlan) -> Result<(), PlanError> {
     })?;
     if let Some(port) = app
         .permissions
-        .listen
         .iter()
+        .flat_map(|permissions| permissions.listen.iter())
         .find(|port| !app.ports.contains_key(*port))
     {
         return Err(PlanError::UnknownPort {
@@ -565,11 +702,7 @@ fn check_app(app: &AppPlan) -> Result<(), PlanError> {
             name: name.clone(),
         });
     }
-    if let Some(name) = app
-        .overrides
-        .iter()
-        .find(|name| app.permissions.secrets.contains(*name))
-    {
+    if let Some(name) = app.overrides.iter().find(|name| app.is_secret(name)) {
         return Err(PlanError::SecretOverride {
             app: app.name.clone(),
             name: name.clone(),

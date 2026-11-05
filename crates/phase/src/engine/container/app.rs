@@ -98,7 +98,7 @@ fn variables<'p>(app: &AppPlan, process: &'p ProcessPlan) -> impl Iterator<Item 
     process
         .env
         .iter()
-        .filter(move |name| secrets_too || !app.permissions.secrets.contains(*name))
+        .filter(move |name| secrets_too || !app.is_secret(name))
 }
 
 /// Returns the variables of `process` that phase writes as files into its
@@ -113,7 +113,7 @@ pub(crate) fn file_secrets<'p>(
     process
         .env
         .iter()
-        .filter(move |name| files && app.permissions.secrets.contains(*name))
+        .filter(move |name| files && app.is_secret(name))
 }
 
 /// Returns the name of the variable of the `docker compose up` child of

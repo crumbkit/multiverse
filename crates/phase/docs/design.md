@@ -971,8 +971,12 @@ released kernel. On Linux, starmap therefore leaves the agent off unless the
 kernel's Landlock ABI has that right, so a sandboxed app has no agent to
 reach. If the agent is wanted on older kernels later, phase would mount an
 empty tmpfs over the agent's directory in the app's own mount namespace.
-An eval checks on both platforms that a process under phase's generated
-profile fails to connect to the agent's socket.
+On macOS a test of phase, recorded in `/evals/phase-sandbox-first-stage`
+in the owner's board, checks that a process under phase's sandbox fails to
+connect to a socket in the per-user temporary directory, which a process
+outside the sandbox reaches. The sandbox denies every Unix socket on macOS,
+since its only network rules are TCP ports. Linux has no such test yet,
+because the directory `/run/user/<uid>` may not exist on a test runner.
 
 phase and multiverse will share one generator for Seatbelt profiles.
 
@@ -989,8 +993,84 @@ Tested on macOS 27 (`/evals/nono-library-for-phase` in the owner's board):
 - Symlinked system files, such as `/etc/ssl/cert.pem`, must be allowed by
   their resolved path.
 
-Decision P9 chooses between building the sandbox on the `nono` library and
-generating the profile in phase.
+### The sandbox as built
+
+Decision P9 builds the sandbox on the `nono` library, pinned to an exact
+version, in two stages. The first stage, built now, applies Seatbelt on
+macOS and Landlock on Linux. The second adds `nono-proxy` for the
+allowlist of external hosts.
+
+Only a host app that declares `[permissions]` runs under the sandbox
+(decision P17). A plan writes an app without permissions as
+`"permissions": null`, so the plan's hash, which each process's run record
+entry keeps, records that the app runs unsandboxed. `status` shows each host
+process's sandbox as `seatbelt`, `landlock` or `unsandboxed` with the
+reason. An app that declares permissions also runs unsandboxed, and
+`status` says why, on a platform where phase has no sandbox, and on a Linux
+kernel without Landlock or whose Landlock ABI is older than 4, which is the
+first that restricts TCP ports.
+
+The keeper applies the sandbox in the child before the app runs, so each
+restart is sandboxed too. Its specification names the sandbox: the paths
+and ports below, and never an environment value. The keeper starts the
+program that links phase as the launcher, `mxv phase keep --sandboxed
+<sandbox> -- <command>`. The launcher applies the sandbox to itself and
+replaces itself with the app, which keeps the launcher's pid, environment
+and log. A launcher that cannot apply the sandbox or start the program
+writes why to the app's log and exits with status 78.
+
+The sandbox allows (decision P18):
+
+- reading the system's directories, the toolchain directories that `PATH`
+  names and the app's checkout. For Cargo that is its `bin`, `registry`
+  and `git` directories and rustup's home, never Cargo's credentials. For
+  mise it is its data directory, and for Homebrew its prefix. A `PATH`
+  entry that would reach a protected path, such as the home directory,
+  adds nothing;
+- writing the app's state directory `<phase state>/apps/<workspace
+  id>/<app>/state`, which `$STATE` names, its temporary directory `.../tmp`,
+  which becomes the app's `TMPDIR`, and the paths of `write`, each an
+  absolute path or a path inside the checkout. The directories carry the
+  workspace's id because app names are unique only within a workspace;
+- listening on the ports that `listen` names, and connecting over loopback
+  to the ports of the apps it depends on (decision P16).
+
+The sandbox always denies `~/.ssh`, the Keychains, the per-user temporary
+directory that holds the agent's socket (all of `/private/var/folders` on
+macOS, `/run/user/<uid>` on Linux), phase's state directory, the paths
+that the host program protects (mxv protects its state directory and its
+mirrors), and the workspace directory outside the app's checkout, which
+holds the workspace manifest. phase refuses to start a sandboxed app whose
+allowed paths cover or lie inside one of them, which is the only control
+that Landlock can express. On macOS the profile also denies them
+explicitly, after the grants, and then allows again the checkout and the
+app's directories that lie inside them.
+
+The plan refuses a `connect` that names an external host, with an error
+that says the proxy is not built yet, a `connect` that names an app the
+app does not depend on, and a process that listens on a port its `listen`
+omits. A process may not reach the host's DNS resolver on macOS, so it
+reaches its dependencies by `127.0.0.1` and cannot resolve `localhost`.
+
+On macOS phase writes its own Seatbelt rules for the ports, because
+nono's port rules allow binding any port, as
+`/evals/nono-library-for-phase` found. Seatbelt applies the last rule
+that matches, so phase's rules work only because nono writes every rule
+that starts with `(allow network` after its `(deny network*)`. A unit test
+checks that each of phase's network rules starts that way, and a macOS
+test runs a sandboxed process that may listen on and connect to one port
+each and is refused another. A nono release that changed the order would
+fail that test, and the exact pin means only a pull request that moves
+the pin can bring one in.
+
+On Linux, Landlock restricts a TCP port on every address, so an app that
+may connect to a dependency's port may also connect to that port on
+another host, and Landlock does not restrict UDP.
+
+When a sandboxed process ends before it is ready, `up` adds a note that
+says the process ran under the sandbox and where its denials show: as
+"Operation not permitted" in its log, and on macOS in `log show
+--predicate 'sender == "Sandbox"'`.
 
 ## Trust
 
@@ -1185,7 +1265,8 @@ run everything they run today. It contains:
 
 Later releases add, in this order (decision P8): release sources with
 verification, shared services with a database and role per app, the
-sandbox, and trust grants.
+sandbox, and trust grants. The sandbox's first stage is built ahead of
+that order, and runs only an app from its checkout.
 
 
 Each decision states what this draft assumes until it is decided.
@@ -1200,10 +1281,13 @@ Each decision states what this draft assumes until it is decided.
 | P6 | Where the per-app choice between release and checkout lives. | Decided 4 November 2026: in multiverse's workspace record, changed with `mxv app edit` and `mxv app release`. |
 | P7 | When multiverse's process commands move into phase. | Decided 4 November 2026: immediately. phase takes over `up`, `down`, `restart`, `status` and `logs` from its first release, and multiverse's own process commands are removed. |
 | P8 | The order of the work. | Decided 4 November 2026: host runner and probes first, then sources, then containers and shared services, then the sandbox. |
-| P9 | The sandbox mechanism: the `nono` library, or a profile generator in phase. | Open; to be decided by the owner. |
+| P9 | The sandbox mechanism: the `nono` library, or a profile generator in phase. | Decided 5 November 2026: the `nono` library for both platforms, staged. The first stage applies Seatbelt on macOS and Landlock on Linux through the keeper, in the child before the app runs, so restarts are sandboxed too. The second stage adds `nono-proxy` for the allowlist of external hosts. See [The sandbox as built](#the-sandbox-as-built). |
 | P10 | The trust model described above. | Decided 4 November 2026: as described in [Trust](#trust). |
 | P11 | Where an app's release, build and permission fields live: in `mxv.toml`, or in a separate file. | Decided 4 November 2026: in `mxv.toml`. |
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v4, since v3 records readiness), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
+| P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
+| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. |
+| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh`, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. |
