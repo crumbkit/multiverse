@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use super::{
-    AppDirs, Context, LANDLOCK_PARTIAL, Launcher, Platform, SandboxError, SandboxSpec, Sandboxing,
-    UNDECLARED, WorkspacePaths, launch, launcher_command, sandboxing, spec, toolchain,
+    AppDirs, Context, LANDLOCK_UNSANDBOXED, Launcher, Platform, SandboxError, SandboxSpec,
+    Sandboxing, UNDECLARED, WorkspacePaths, launch, launcher_command, sandboxing, spec, toolchain,
     usr_without_local_data, verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
@@ -237,16 +237,18 @@ fn an_app_with_permissions_runs_unsandboxed_on_a_platform_without_a_sandbox_and_
 }
 
 #[test]
-fn landlock_status_says_that_it_sandboxes_only_in_part_and_what_it_leaves_open() {
+fn linux_reports_a_process_under_landlock_as_unsandboxed_and_says_why() {
     let landlock = Sandboxing::landlock();
 
     assert_eq!(
         landlock.to_string(),
-        "landlock (partial: Unix sockets and UDP unrestricted, TCP ports on every address)"
+        format!("unsandboxed ({LANDLOCK_UNSANDBOXED})")
     );
+    assert!(LANDLOCK_UNSANDBOXED.contains("Unix sockets"));
+    assert!(LANDLOCK_UNSANDBOXED.contains("Docker or D-Bus"));
     assert_eq!(
         serde_json::to_value(&landlock).unwrap(),
-        serde_json::json!({ "kind": "landlock", "partial": LANDLOCK_PARTIAL })
+        serde_json::json!({ "kind": "unsandboxed", "reason": LANDLOCK_UNSANDBOXED })
     );
     assert_eq!(
         Sandboxing::seatbelt().to_string(),
@@ -1364,7 +1366,7 @@ mod landlock {
     use crate::sandbox::{Platform, Sandboxing, launcher_command, platform};
 
     #[test]
-    fn this_kernels_landlock_is_reported_as_a_partial_sandbox_or_as_unavailable() {
+    fn this_kernels_landlock_is_reported_as_unsandboxed_or_as_unavailable() {
         match platform() {
             Platform::Available(sandboxing) => assert_eq!(sandboxing, Sandboxing::landlock()),
             Platform::Unavailable(reason) => assert!(!reason.is_empty()),
@@ -1399,13 +1401,13 @@ mod landlock {
         output
     }
 
-    /// Records what the partial Linux sandbox leaves open: a sandboxed
-    /// process can connect to a Unix socket outside every path it may use,
+    /// Records why Linux reports a process under Landlock as unsandboxed:
+    /// it can connect to a Unix socket outside every path it may use,
     /// because Landlock before ABI 9 cannot restrict `connect` and nono 0.81
     /// does not. When nono restricts Unix sockets this test fails, and
-    /// `status` can stop calling Landlock partial.
+    /// Linux can report Landlock as a sandbox.
     #[test]
-    fn a_process_under_the_partial_linux_sandbox_can_still_connect_to_a_unix_socket() {
+    fn a_process_under_landlock_can_still_connect_to_a_unix_socket() {
         if !matches!(platform(), Platform::Available(_)) {
             return;
         }

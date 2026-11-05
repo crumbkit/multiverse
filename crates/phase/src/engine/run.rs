@@ -1343,14 +1343,22 @@ fn listen(app: &AppPlan, process: &ProcessPlan) -> Option<Listen> {
 }
 
 /// Returns where the sandbox's denials show for a process of `app` that
-/// exited with `code` before it was ready, or `None` when it ran
-/// unsandboxed. The process may have ended for another reason, so the
-/// note says only that a denial may be why.
+/// exited with `code` before it was ready, or `None` when phase applied no
+/// sandbox to it. Linux reports a process under Landlock as unsandboxed,
+/// but Landlock can still deny it an access, so the note names Landlock.
+/// The process may have ended for another reason, so the note says only
+/// that a denial may be why.
 fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
-    let kind = match sandbox::sandboxing(app, &sandbox::platform())? {
-        sandbox::Sandboxing::Seatbelt { .. } => "Seatbelt",
-        sandbox::Sandboxing::Landlock { .. } => "Landlock",
-        sandbox::Sandboxing::Unsandboxed { .. } => return None,
+    if app.runner != RunnerKind::Host
+        || app.permissions.is_none()
+        || !matches!(sandbox::platform(), Platform::Available(_))
+    {
+        return None;
+    }
+    let kind = if cfg!(target_os = "linux") {
+        "Landlock"
+    } else {
+        "Seatbelt"
     };
     if code == Some(i32::from(sandbox::SANDBOX_REFUSED)) {
         return Some(format!(

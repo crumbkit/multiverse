@@ -1016,8 +1016,9 @@ or whose Landlock ABI is older than 4, which is the first that restricts
 TCP ports.
 
 The run record entry of each host process records how phase launched it:
-`seatbelt` or `landlock`, each with what it leaves open, or `unsandboxed`
-with the reason. `status` shows that recorded value, and for a process
+`seatbelt` with what it leaves open, or `unsandboxed` with the reason. On
+Linux a process under Landlock is recorded as `unsandboxed`, as described
+below. `status` shows that recorded value, and for a process
 that phase has not launched it shows how phase would launch it now.
 
 The keeper applies the sandbox in the child before the app runs, so each
@@ -1141,9 +1142,11 @@ therefore listen on it on every address, and a macOS test shows that a
 peer on the machine's `en0` address reaches it. A peer on another machine
 was not tested. A connection out to another host stays refused.
 
-On Linux the sandbox is partial, and `status` shows it as `landlock
-(partial: Unix sockets and UDP unrestricted, TCP ports on every
-address)`. Landlock before its ABI 9 cannot restrict `connect` to a Unix
+On Linux `status` shows a process under Landlock as `unsandboxed
+(Landlock cannot restrict Unix sockets (nono does not yet enforce
+ResolveUnix), so a process could leave the sandbox through Docker or
+D-Bus; phase still applies Landlock to files and TCP ports)`. Luke chose
+this report on 5 November 2026 (P19). Landlock before its ABI 9 cannot restrict `connect` to a Unix
 socket, and nono 0.81 does not enforce one, so a sandboxed app can reach
 any Unix socket it can name, such as Docker's socket, the user's D-Bus
 bus, which `systemd-run --user` uses to start a process outside the
@@ -1151,10 +1154,11 @@ sandbox, and the ssh and gpg agents. Landlock does not restrict UDP, and
 it restricts a TCP port on every address, so an app that may connect to a
 dependency's port may also connect to that port on another host. phase
 still applies Landlock, because it confines the app's files and TCP
-ports. A full Linux sandbox waits for nono to enforce Unix-socket
-restrictions, or for a seccomp filter in a later pull request. One
-function, `platform`, decides how Linux is reported, so reporting Linux
-as unsandboxed and running apps without Landlock is a change to it alone.
+ports, as a speed bump. A Linux sandbox that `status` reports as one
+waits for nono to enforce Unix-socket restrictions, or for a seccomp
+filter in a later pull request. A Linux test records that a process under
+Landlock can still connect to a Unix socket, so it fails once nono
+restricts them.
 
 When a sandboxed process ends before it is ready, `up` adds a note that
 says the sandbox may have denied an access the process needed, and where
@@ -1378,5 +1382,6 @@ Each decision states what this draft assumes until it is decided.
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v4, since v3 records readiness), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
-| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` shows the sandbox as partial, and a full Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Each process's run record entry records how it was launched, and `status` shows that. |
+| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets a listening port accept connections on every address, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the refusal of an app that runs at the workspace's top, and the launcher's second check. |
+| P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |

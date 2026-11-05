@@ -7,8 +7,9 @@
 //! On a platform with no sandbox that phase supports, or a Linux kernel
 //! whose Landlock cannot restrict TCP ports, an app with permissions runs
 //! unsandboxed too, and `status` shows why. Landlock leaves Unix sockets
-//! and UDP open, so `status` shows it as a partial sandbox
-//! ([`LANDLOCK_PARTIAL`]).
+//! open, so phase still applies it on Linux but `status` reports the
+//! process as unsandboxed ([`LANDLOCK_UNSANDBOXED`]). Seatbelt is reported
+//! as a partial sandbox ([`SEATBELT_PARTIAL`]).
 //!
 //! The engine turns the plan into a [`SandboxSpec`]: the paths the process
 //! may read and write, the paths it may only read, the ports it may listen
@@ -83,14 +84,8 @@ pub enum Sandboxing {
         /// What Seatbelt leaves unrestricted.
         partial: String,
     },
-    /// The process runs under Linux's Landlock, which confines it only in
-    /// part: [`LANDLOCK_PARTIAL`] says what Landlock leaves open.
-    #[non_exhaustive]
-    Landlock {
-        /// What Landlock leaves unrestricted.
-        partial: String,
-    },
-    /// The process runs without a sandbox, for this reason.
+    /// The process runs without a sandbox, for this reason. On Linux phase
+    /// still applies Landlock, which [`LANDLOCK_UNSANDBOXED`] explains.
     #[non_exhaustive]
     Unsandboxed {
         /// Why, which names no environment value.
@@ -107,12 +102,12 @@ impl Sandboxing {
         }
     }
 
-    /// Returns the partial sandbox of Linux, which [`LANDLOCK_PARTIAL`]
-    /// describes.
+    /// Returns how Linux reports a process that runs under Landlock: as
+    /// unsandboxed, for the reason [`LANDLOCK_UNSANDBOXED`] gives.
     #[must_use]
     pub fn landlock() -> Self {
-        Self::Landlock {
-            partial: LANDLOCK_PARTIAL.to_owned(),
+        Self::Unsandboxed {
+            reason: LANDLOCK_UNSANDBOXED.to_owned(),
         }
     }
 }
@@ -121,7 +116,6 @@ impl fmt::Display for Sandboxing {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Seatbelt { partial } => write!(formatter, "seatbelt (partial: {partial})"),
-            Self::Landlock { partial } => write!(formatter, "landlock (partial: {partial})"),
             Self::Unsandboxed { reason } => write!(formatter, "unsandboxed ({reason})"),
         }
     }
@@ -133,12 +127,14 @@ impl fmt::Display for Sandboxing {
 /// every address and accept a peer on any of them.
 pub const SEATBELT_PARTIAL: &str = "a listening port accepts connections on every address";
 
-/// What Landlock leaves open on Linux. Before its ABI 9 Landlock cannot
-/// restrict `connect` to a Unix socket, and nono 0.81 does not enforce
-/// one, so a process can reach any Unix socket it can name, such as
-/// Docker's, the user's D-Bus bus or an ssh or gpg agent. Landlock does
-/// not restrict UDP, and it restricts a TCP port on every address.
-pub const LANDLOCK_PARTIAL: &str = "Unix sockets and UDP unrestricted, TCP ports on every address";
+/// Why Linux reports a process under Landlock as unsandboxed (Luke's
+/// choice, 5 November 2026). Before its ABI 9 Landlock cannot restrict
+/// `connect` to a Unix socket, and nono 0.81 does not enforce
+/// `ResolveUnix`, so a process can reach any Unix socket it can name, such
+/// as Docker's, the user's D-Bus bus or an ssh or gpg agent, and leave the
+/// sandbox through it. phase still applies Landlock, which confines files
+/// and TCP ports.
+pub const LANDLOCK_UNSANDBOXED: &str = "Landlock cannot restrict Unix sockets (nono does not yet enforce ResolveUnix), so a process could leave the sandbox through Docker or D-Bus; phase still applies Landlock to files and TCP ports";
 
 /// The reason of a process whose app declares no permissions.
 pub(crate) const UNDECLARED: &str = "its app declares no permissions";
@@ -146,8 +142,10 @@ pub(crate) const UNDECLARED: &str = "its app declares no permissions";
 /// The sandbox that this machine offers, or why it offers none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Platform {
-    /// The sandbox, which is [`Sandboxing::Seatbelt`] or
-    /// [`Sandboxing::Landlock`].
+    /// phase applies this machine's sandbox, Seatbelt or Landlock, and
+    /// reports a process under it as this value: [`Sandboxing::Seatbelt`]
+    /// on macOS, and [`Sandboxing::Unsandboxed`] on Linux, because
+    /// Landlock leaves Unix sockets open.
     Available(Sandboxing),
     /// This machine has no sandbox that phase supports, for this reason.
     Unavailable(String),
@@ -164,12 +162,8 @@ pub(crate) fn platform() -> Platform {
 }
 
 /// Returns the sandbox that this machine offers. Landlock counts only when
-/// it can restrict TCP ports, which needs its ABI 4.
-///
-/// This is the one place that decides how Linux is reported. Returning
-/// [`Platform::Unavailable`] for every kernel would run each app
-/// unsandboxed and report it so, instead of applying Landlock and
-/// reporting it as partial.
+/// it can restrict TCP ports, which needs its ABI 4. phase applies it, and
+/// reports each process under it as unsandboxed ([`LANDLOCK_UNSANDBOXED`]).
 #[cfg(target_os = "linux")]
 pub(crate) fn platform() -> Platform {
     match nono::Sandbox::detect_abi() {
