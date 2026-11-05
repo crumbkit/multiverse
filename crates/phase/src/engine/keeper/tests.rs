@@ -71,8 +71,9 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
             unsafe_code,
             reason = "the test keeper restores the default SIGPIPE disposition, which only libc can set"
         )]
-        // SAFETY: the keeper has started no thread yet, and `SIG_DFL` is a
-        // valid disposition for `SIGPIPE`.
+        // SAFETY: `signal` only changes the process's disposition of
+        // `SIGPIPE` to `SIG_DFL`, which is a valid disposition for it, and
+        // touches no memory of this program.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }

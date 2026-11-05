@@ -76,7 +76,10 @@ pub(crate) fn run(
     // at its default, that write would end the keeper. A handler of its
     // own makes the write fail with `EPIPE` instead, which the keeper
     // ignores, and unlike an ignored signal it reverts to the default in
-    // the app when the app's program starts.
+    // the app when the app's program starts. signal-hook chains a SIGPIPE
+    // handler that the program linking phase installed earlier, so that
+    // handler still runs, but the program should not rely on it to change
+    // what a write to a closed pipe does in the keeper.
     if let Err(error) = signal_hook::flag::register(SIGPIPE, Arc::new(AtomicBool::new(false))) {
         write_handshake(
             output,

@@ -627,7 +627,9 @@ impl<'s> Journal<'s> {
     /// Deletes the record as [`Journal::finish`] does, unless a host
     /// process's entry records an end that no stop request caused, which
     /// `status` shows as exited until `down` or a later start, and reports
-    /// whether it deleted it.
+    /// whether it deleted it. `down` and `sweep` use [`Journal::finish`],
+    /// so any of them that leaves everything stopped removes the record and
+    /// the ends it holds.
     ///
     /// # Errors
     ///

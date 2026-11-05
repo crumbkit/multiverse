@@ -263,19 +263,24 @@ pub(crate) fn host_state(
             None => ProcessState::Starting,
         }
     } else if let Some(ended) = entry
-        .filter(|entry| entry.state == EntryState::Stopped)
+        .filter(|entry| matches!(entry.state, EntryState::Stopping | EntryState::Stopped))
         .and_then(|entry| entry.ended)
         .filter(|ended| !ended.requested)
     {
         // The keeper recorded that its app ended by itself and did not
-        // restart it.
+        // restart it, or something killed the keeper while it stopped what
+        // the app left.
         exited(ended)
-    } else if entry.is_some_and(|entry| entry.state == EntryState::Running && entry.host.is_some())
-    {
-        // The record names the process as running, and neither it nor its
-        // keeper is there: the keeper ended before it recorded the end, as
-        // when something killed it. An end that the entry holds is an
-        // earlier crash's, which the keeper restarted from.
+    } else if entry.is_some_and(|entry| {
+        entry.host.is_some()
+            && (entry.state == EntryState::Running
+                || (entry.state == EntryState::Stopping && entry.ended.is_none()))
+    }) {
+        // The record names the process as running, or as stopping with no
+        // end, and neither it nor its keeper is there: the keeper ended
+        // before it recorded the end, as when something killed it. An end
+        // that a running entry holds is an earlier crash's, which the
+        // keeper restarted from.
         ProcessState::unrecorded()
     } else {
         ProcessState::Stopped

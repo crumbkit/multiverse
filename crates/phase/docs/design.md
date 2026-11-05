@@ -639,7 +639,8 @@ restarts a process that ended.
 
 `up` keeps the record when nothing in it runs but a process's entry
 records an end that no stop request caused, so `status` can show it.
-`down` and `sweep` remove it.
+Any `down` or `sweep` that leaves everything stopped removes the record,
+and with it those ends.
 
 The record is `phase/run/v2`, which adds `ended` and `restart`. phase
 reads a `phase/run/v1` record as one with neither and writes it back as
@@ -731,7 +732,14 @@ that it ended by itself, and that its keeper did not restart, shows as
 `exited` with its code or signal. One that a stop request ended shows as
 `stopped`. A process that the record names as running, while neither it
 nor its keeper is there, shows as `exited` with the reason `unrecorded`,
-because its keeper ended before it recorded the end. A process whose
+because its keeper ended before it recorded the end. An entry that reads
+`stopping` with no end shows the same way. A stop that the keeper could
+not record also shows as `unrecorded`: a `TERM` from outside phase while
+another operation holds the lifecycle lock makes the keeper stop its app
+and drop its notes, and phase does not retry them. An entry that reads
+`stopping` with an end that no stop request caused shows as `exited` with
+that end, as after something killed the keeper while it stopped what a
+crash left. A process whose
 keeper runs and whose app has gone shows as `restarting` only when its
 recorded restart policy restarts it: before the keeper records the end,
 only a policy that restarts however the process ended counts, and

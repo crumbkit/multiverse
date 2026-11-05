@@ -696,3 +696,31 @@ fn a_running_process_whose_keeper_and_app_have_gone_is_exited_without_a_recorded
         assert_eq!(reason, Some(ExitReason::Unrecorded));
     }
 }
+
+#[test]
+fn a_stopping_process_whose_keeper_and_app_have_gone_shows_how_it_ended() {
+    let cases = [
+        // Something killed the keeper while it stopped what a crash left.
+        (
+            Some(Ended::by_itself(Some(Exit::Code(3)))),
+            ProcessState::exited(Some(3)),
+        ),
+        (Some(Ended::requested(None)), ProcessState::Stopped),
+        (None, ProcessState::unrecorded()),
+    ];
+    for (ended, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = host_record(
+            Some((EntryState::Running, host_at(100, 1))),
+            Some((EntryState::Stopping, host_at(200, 2))),
+        );
+        record.processes[0].ended = ended;
+        write_record(dir.path(), &record);
+
+        assert_eq!(
+            only_state(dir.path(), &FakeProcesses::default()),
+            expected,
+            "{ended:?}"
+        );
+    }
+}
