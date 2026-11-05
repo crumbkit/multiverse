@@ -257,14 +257,29 @@ impl SandboxSpec {
     /// Returns a 32-byte digest of the spec, with its lists sorted, so two
     /// specs that grant the same paths and ports give the same digest
     /// whatever order the host program named its protected paths in. It
-    /// holds paths and ports, never an environment value.
+    /// holds paths and ports, never an environment value. It covers every
+    /// field, which the pattern below names, so a new field fails to
+    /// compile until it is sorted here or shown to need no sorting.
     pub(crate) fn launch_digest(&self) -> [u8; 32] {
         let mut spec = self.clone();
-        for found in &mut spec.protected {
+        let Self {
+            read: _,
+            write: _,
+            path_dirs,
+            protected,
+            read_only: _,
+            links: _,
+            deny: _,
+            listen: _,
+            connect: _,
+            tmp: _,
+            launcher: _,
+        } = &mut spec;
+        for found in protected.iter_mut() {
             found.except.sort();
         }
-        spec.protected.sort();
-        spec.path_dirs.sort();
+        protected.sort();
+        path_dirs.sort();
         // The spec is plain data, so it always serializes.
         crate::plan::digest(&serde_json::to_vec(&spec).unwrap_or_default())
     }

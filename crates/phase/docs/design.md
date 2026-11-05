@@ -1630,8 +1630,9 @@ Built 5 November 2026.
   counts by its error, so `up` stops the process and its launch reports
   the error.
 - The hash leaves out the grants that come only from the inherited
-  `PATH`: the `PATH` directories and the toolchain directories that they
-  lead to. Otherwise an `up` from a shell with another `PATH` would
+  `PATH`: the `PATH` directories, the toolchain directories and links
+  that they lead to, and the Homebrew denials of a Homebrew prefix on
+  `PATH`. Otherwise an `up` from a shell with another `PATH` would
   restart every sandboxed process. A running process therefore keeps the
   read grants of the `PATH` it started with until its next start, even
   when a later `up` runs with a narrower `PATH`. `restart` builds the
