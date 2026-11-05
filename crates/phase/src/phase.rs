@@ -8,12 +8,13 @@ use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
 use crate::engine::container::{ComposeRunner, DockerCli};
+use crate::engine::exec::{ExecRequest, ExecSettings};
 use crate::engine::keeper::KeeperCommand;
 use crate::engine::run::{Engine, Settings};
 use crate::env::EnvironmentSource;
-use crate::error::{Operation, PhaseError};
+use crate::error::PhaseError;
 use crate::logs::{LineSink, LogRequest};
-use crate::name::{AppName, WorkspaceId};
+use crate::name::WorkspaceId;
 use crate::plan::Plan;
 use crate::record::Swept;
 use crate::record::process::System;
@@ -456,27 +457,75 @@ impl Phase {
         sweep::sweep(&store, workspace, dry_run, reach, waits)
     }
 
-    /// Runs `run`, as separate values that no shell reads, with the
-    /// environment and sandbox of `app` in `plan`, and returns its exit
-    /// status. It first waits for an `up` in progress to finish, until
-    /// `deadline`. When `cancel` is set, `exec` stops the command.
+    /// Runs `request.run`, as separate values that no shell reads, in the
+    /// context of `request.process` of `request.app` in `plan`, such as a
+    /// delivery script or a test run, and returns its exit status: its
+    /// code, or the signal that ended it.
+    ///
+    /// For a host process, the command runs in the process's directory
+    /// with the inherited `PATH` and `HOME` and the process's environment,
+    /// which `exec` resolves through `env` before `deadline` and checks
+    /// for the process's required variables as `up` does. An optional
+    /// variable without a value is unset. When the app is sandboxed, the
+    /// command runs under the process's own sandbox, through the launcher
+    /// that the process's keeper uses, with the sandbox's `TMPDIR`, so it
+    /// may read, write, listen and connect only where the process may. An
+    /// app that is not sandboxed runs its command unsandboxed. The process
+    /// need not be running.
+    ///
+    /// For a container process, the command runs in the process's
+    /// container through `docker exec --interactive`, with `--tty` when
+    /// `request.io` says the caller's standard input is a terminal. The
+    /// container must be running, and its labels must name the app's
+    /// workspace and app. The command receives the variables and secret
+    /// files that the container already holds, and no value reaches the
+    /// command line. `exec` never starts a container.
+    ///
+    /// `exec` writes nothing to the run record, and starts and stops no
+    /// app. It first waits for an `up`, `down`, `restart` or `sweep` in
+    /// progress to finish, until `deadline`, and then releases the
+    /// lifecycle lock before the command starts, so it never blocks those
+    /// operations while the command runs. With [`ExecIo::Inherit`](crate::ExecIo::Inherit) the
+    /// command shares the caller's streams and process group, so Ctrl-C at
+    /// the terminal reaches it directly. When `cancel` is set, `exec` stops
+    /// the command with `TERM`, and with `KILL` after the kill wait.
+    ///
+    /// A sandboxed command whose sandbox the launcher cannot apply exits
+    /// with [`SANDBOX_REFUSED`](crate::keeper::SANDBOX_REFUSED) after it
+    /// writes why to standard error.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::Environment`] when a value cannot be resolved,
-    /// and [`PhaseError::NotBuilt`] until phase carries the operation out.
-    #[expect(unused_variables, reason = "phase does not carry out `exec` yet")]
+    /// Returns [`PhaseError::UnknownTarget`] when the plan lacks the app
+    /// or the process, [`PhaseError::Busy`] when an operation holds the
+    /// lock until `deadline`, [`PhaseError::NotRunnable`] for a host app
+    /// whose program comes from a release or a build,
+    /// [`PhaseError::Environment`] when a value cannot be resolved or a
+    /// required variable is missing, [`PhaseError::NotRunning`] when the
+    /// process's container is not running, [`PhaseError::Docker`] when
+    /// Docker fails or the container belongs to another workspace or app,
+    /// and [`PhaseError::ExecUnstartable`] when the sandbox cannot be built
+    /// or the command cannot start.
     pub fn exec(
         &self,
         plan: &Plan,
-        app: &AppName,
-        run: &[String],
+        request: ExecRequest,
         env: &dyn EnvironmentSource,
         deadline: Instant,
         cancel: &Cancel,
     ) -> Result<ExitStatus, PhaseError> {
-        Err(PhaseError::NotBuilt {
-            operation: Operation::Exec,
-        })
+        let containers = self.containers();
+        let engine = self.engine(&containers);
+        crate::engine::exec::exec(
+            &ExecSettings {
+                settings: engine.settings,
+                docker_environment: self.docker_environment.as_ref(),
+            },
+            plan,
+            request,
+            env,
+            deadline,
+            cancel,
+        )
     }
 }

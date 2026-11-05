@@ -65,7 +65,9 @@
 //!
 //! The module's parts are these. `names` holds the scope and the checked
 //! names and ids. `command` runs the `docker` program, and is the only
-//! code in phase that does. `objects` inspects containers and volumes,
+//! code in phase that does, apart from the `docker exec` of `exec`, which
+//! builds that command for [`Phase::exec`](crate::Phase::exec) and which
+//! the engine's exec module runs with the caller's streams. `objects` inspects containers and volumes,
 //! mints their handles, and stops, removes and deletes them. `compose`
 //! writes the compose file, holds the values of the containers' variables
 //! in a [`ComposeValue`] each, and runs `docker compose up`. `lifecycle`
@@ -84,6 +86,7 @@ mod cli;
 mod command;
 mod compose;
 mod error;
+pub(crate) mod exec;
 mod host;
 mod lifecycle;
 mod names;

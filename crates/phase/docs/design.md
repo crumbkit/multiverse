@@ -956,6 +956,61 @@ that the plan lacks still show. Without a plan, as when the manifest is
 invalid, the rows are the record's live entries and leave the plan's
 fields empty.
 
+### Exec
+
+`Phase::exec` runs a one-off command, such as a delivery script or a test
+run, in the context of one process of an app, and returns the command's
+exit status: its code, or the signal that ended it. The command's words
+are separate values that no shell reads.
+
+For a host process, the command runs in the process's directory with the
+inherited `PATH` and `HOME` and the process's environment. phase resolves
+the environment through the `EnvironmentSource` and refuses one that lacks
+a required variable, as a start does, and leaves an optional variable
+without a value unset. When the app is sandboxed, the command runs through
+the launcher that the process's keeper uses, under the sandbox that phase
+builds for the process itself, with the always-protected paths, the
+process's ports and its `TMPDIR`. An app that is not sandboxed runs its
+command unsandboxed. A sandboxed app whose host program gave no keeper
+program has no launcher, so phase refuses its command rather than run it
+unsandboxed. The process need not be running.
+
+For a container process, the command runs in the process's container
+through `docker exec --interactive`, with `--tty` when the host program
+says its standard input is a terminal. phase first reads the container's
+id from the run record and inspects the container with the app's labels,
+as `logs` does. It refuses a container that is not running, and fails
+with Docker's foreign cause for one whose labels name another workspace or
+app. The command receives the variables and secret files that the
+container already holds, and phase passes no value on the command line.
+`exec` never starts a container, and a one-off `docker compose run` is out
+of scope.
+
+A command with `ExecIo::Inherit` shares the host program's standard
+streams and process group, so when the host program runs in the
+foreground of a terminal, the terminal sends Ctrl-C to the command
+directly. The host program catches `SIGINT` while the command runs,
+rather than ignore it, because a command inherits an ignored signal. A
+command with `ExecIo::Streams` reads and writes the streams the host
+program gives and runs in a process group of its own. When the caller
+sets the cancel flag, phase sends the command `TERM`, and `KILL` after the
+kill wait.
+
+`exec` is not a lifecycle operation. It writes nothing to the run record,
+and starts and stops no app. It takes the workspace's lifecycle lock,
+waiting up to its deadline, and releases it at once, so it runs after an
+`up`, `down`, `restart` or `sweep` in progress and sees what that
+operation left. It does not hold the lock while the command runs, because
+a held lock, exclusive or shared, would block every `up` and `down` of the
+workspace and every keeper's record of a restart for as long as a test run
+or a shell lasts.
+
+The engine builds the command in the process's context separately from
+running it, and running it knows nothing of apps or terminals. A later
+init step that `up` runs once a process's dependencies are ready can build
+the same command and run it with `ExecIo::Streams` and its output in the
+process's log.
+
 ## Environment and secrets
 
 phase resolves an app's environment through starmap. starmap's resolution
@@ -1403,6 +1458,7 @@ impl Phase {
     pub fn status(&self, workspace: &WorkspaceId, plan: Option<&Plan>) -> Result<Status, PhaseError>;
     pub fn logs(&self, workspace: &Path, request: &LogRequest, sink: &mut dyn LineSink) -> Result<(), PhaseError>;
     pub fn sweep(&self, workspace: &Path, dry_run: bool) -> Result<Swept, PhaseError>;
+    pub fn exec(&self, plan: &Plan, request: ExecRequest, env: &dyn EnvironmentSource, deadline: Instant, cancel: &Cancel) -> Result<ExitStatus, PhaseError>;
 }
 ```
 
@@ -1562,7 +1618,9 @@ still refused with `NotRunnable::Oneshot`.
   and `logs` open records read-only, take no lock, and never hold one while
   they stream, so they also work inside an agent's sandbox.
 - `exec` and the host program's tests wait for an `up` in progress to
-  finish, up to a deadline, before they run.
+  finish, up to a deadline, before they run. `exec` takes the lifecycle
+  lock and releases it at once, and holds no lock while its command runs.
+  See [Exec](#exec).
 
 ### Logs
 
