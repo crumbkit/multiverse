@@ -1113,7 +1113,7 @@ fn a_listen_permission_on_a_port_that_a_joined_unit_listens_on_fails_with_its_li
         units: vec!["api-server".to_owned()],
         listened: vec![("api-http".to_owned(), "api-server".to_owned())],
         checkouts: vec!["api".to_owned()],
-        services: Vec::new(),
+        services: BTreeMap::new(),
     };
     let error = Manifest::parse_joining(
         "[processes.proxy]\nargv = [\"true\"]\nports = { UPSTREAM = \"api-http\" }\npermissions = { listen = [\"api-http\"] }\n",

@@ -142,15 +142,21 @@ pub struct Joined {
     /// paths are then relative to the workspace's directory, and each
     /// must lie inside one of these folders.
     pub checkouts: Vec<String>,
-    /// The services of the other manifests.
-    pub services: Vec<String>,
+    /// The services of the other manifests, by name. Services keep their
+    /// names when manifests merge.
+    pub services: BTreeMap<String, Service>,
 }
 
 impl Joined {
     /// Adds the ports, units and services of `manifest`, and the ports
     /// that its units listen on or publish.
     pub fn add(&mut self, manifest: &Manifest) {
-        self.services.extend(manifest.services.keys().cloned());
+        self.services.extend(
+            manifest
+                .services
+                .iter()
+                .map(|(name, service)| (name.clone(), service.clone())),
+        );
         self.ports.extend(manifest.ports.iter().cloned());
         self.units.extend(
             manifest

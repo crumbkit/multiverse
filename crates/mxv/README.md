@@ -284,9 +284,9 @@ with `mxv::manifest::invalid`.
 
 Another tool may keep its own tables in the same file. mxv checks that the
 whole file is valid TOML, reads only its own top-level keys (`version`,
-`ports`, `disposable`, `clone_on_new`, `processes` and `containers`), and
-leaves every other top-level table alone, such as `[app]`,
-`[service.web]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
+`ports`, `disposable`, `clone_on_new`, `processes`, `containers` and
+`service`), and leaves every other top-level table alone, such as
+`[app]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
 top-level key that is not a table, such as `port = ["api"]`, fails with
 `mxv::manifest::unknown_key`. A table named like one of mxv's own, such as
 `[process.api]`, belongs to another tool and is left alone, so a
@@ -819,8 +819,8 @@ tool that owns it. A table whose name is close to one of mxv's own, such as
 would declare nothing, so mxv warns about it: `up` and `restart` print the
 warning on standard error, `status` puts it in the summary's `warnings`,
 and `show` and `new` put it in the row's `warnings`. phase's own tables,
-`[app]`, `[release]`, `[build]`, `[needs.*]` and `[service.*]`, get no
-warning. phase's `[process.*]` gets a warning that mxv runs only
+`[app]`, `[release]`, `[build]` and `[needs.*]`, get no warning. mxv reads
+`[service.*]` as its own services. phase's `[process.*]` gets a warning that mxv runs only
 `[processes.*]`. A top-level `[permissions]` table would sandbox nothing,
 because mxv sandboxes each process on its own, so it fails with
 `mxv::manifest::invalid` and a hint to move its keys to
@@ -890,8 +890,9 @@ reports `merged`, with every file it read in `manifest_paths`.
   `mxv::manifest::name_clash`, which names both files. Two services of
   different names that declare the same table, bucket, queue or key
   differently fail with `mxv::manifest::name_clash` too, because the
-  workspace has one backend of each kind. A process may need a service of
-  another file.
+  workspace has one backend of each kind. Only a process of the
+  workspace manifest may need a service that another file declares; a
+  checkout's process may need only its own file's services.
 - Two names that are the same once prefixed, such as the process `b-c` of
   the checkout `a` and the process `c` of the checkout `a-b`, or two
   volumes of the same name in two files, fail with

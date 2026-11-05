@@ -409,12 +409,12 @@ pub(super) fn check_needs(
     raw: &[Spanned<String>],
     own: &[&Spanned<String>],
     services: &BTreeMap<String, Service>,
-    joined: &[String],
+    joined: &BTreeMap<String, Service>,
 ) -> Result<Vec<String>, ManifestError> {
     let mut needs: Vec<String> = Vec::new();
     for service in raw {
         let name = service.get_ref();
-        if !services.contains_key(name) && !joined.contains(name) {
+        if !services.contains_key(name) && !joined.contains_key(name) {
             return Err(errors.invalid(
                 &service.span(),
                 format!(
@@ -435,7 +435,11 @@ pub(super) fn check_needs(
     };
     let needed: Vec<(&String, &Service)> = needs
         .iter()
-        .filter_map(|name| services.get_key_value(name))
+        .filter_map(|name| {
+            services
+                .get_key_value(name)
+                .or_else(|| joined.get_key_value(name))
+        })
         .collect();
     for variable in own {
         let name = variable.get_ref();

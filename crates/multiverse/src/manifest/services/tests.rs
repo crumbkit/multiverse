@@ -334,21 +334,57 @@ fn a_unit_or_port_named_with_the_mxv_prefix_fails_with_its_line() {
     }
 }
 
+/// Returns the joined manifests of a checkout that declares the service
+/// `store`, which binds `NAME` to `checkout`.
+fn joined_store() -> Joined {
+    let checkout =
+        parse("[service.store]\nkind = \"dynamodb\"\nenv = { NAME = \"checkout\" }\n").unwrap();
+    let mut joined = Joined::default();
+    joined.add(&checkout);
+    joined
+}
+
 #[test]
 fn a_workspace_manifest_may_need_a_service_of_a_joined_manifest() {
-    let joined = Joined {
-        ports: Vec::new(),
-        units: Vec::new(),
-        services: vec!["store".to_owned()],
-        ..Joined::default()
-    };
     let manifest = Manifest::parse_joining(
         "[processes.w]\nargv = [\"w\"]\nneeds = [\"store\"]\n",
         Path::new("/ws/mxv.toml"),
-        &joined,
+        &joined_store(),
     )
     .unwrap();
     assert_eq!(manifest.processes["w"].needs, ["store"]);
+}
+
+#[test]
+fn a_workspace_process_whose_needed_services_of_two_files_bind_one_variable_differently_fails() {
+    let error = Manifest::parse_joining(
+        "[service.mail]\nkind = \"s3\"\nenv = { NAME = \"workspace\" }\n\
+         [processes.w]\nargv = [\"w\"]\nneeds = [\"store\", \"mail\"]\n",
+        Path::new("/ws/mxv.toml"),
+        &joined_store(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error.problem, ManifestProblem::ServiceClash { name, .. } if name == "NAME"),
+        "{error}"
+    );
+    assert_eq!(error.line, Some(6));
+}
+
+#[test]
+fn a_workspace_process_that_sets_a_variable_of_a_joined_service_it_needs_fails() {
+    let error = Manifest::parse_joining(
+        "[processes.w]\nargv = [\"w\"]\nenv = { NAME = \"own\" }\nneeds = [\"store\"]\n",
+        Path::new("/ws/mxv.toml"),
+        &joined_store(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("which the service `store` that it needs also sets"),
+        "{error}"
+    );
 }
 
 #[test]
