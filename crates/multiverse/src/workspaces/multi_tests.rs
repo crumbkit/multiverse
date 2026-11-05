@@ -482,6 +482,163 @@ fn stopped_add(setup: &Setup) -> PathBuf {
     setup.root.join("triage/web")
 }
 
+/// Clones `web`'s origin into the unfinished checkout's directory at
+/// `path`, as an earlier run would have.
+fn cloned_at(setup: &Setup, path: &Path) {
+    git(
+        &setup.root,
+        &[
+            "clone",
+            "--quiet",
+            &setup.web.origin.display().to_string(),
+            "triage/web",
+        ],
+    );
+    assert!(path.join(".git").is_dir());
+}
+
+/// A workspace manifest that refers to a unit that no file declares, so
+/// the merged manifest fails.
+const BROKEN: &str = "[processes.proxy]\nargv = [\"true\"]\ndepends_on = [\"web-missing\"]\n";
+
+#[test]
+fn a_workspace_with_an_unfinished_checkout_names_it() {
+    let setup = setup();
+    stopped_add(&setup);
+    let workspace = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert_eq!(
+        workspace
+            .unfinished_checkout()
+            .map(|checkout| checkout.name.as_str()),
+        Some("web")
+    );
+    let finished = created(&setup, "other", &[Repo::new(&setup.web.clone)]);
+    assert_eq!(finished.unfinished_checkout(), None);
+}
+
+#[test]
+fn a_resumed_add_that_fails_restores_the_earlier_record_and_deletes_the_partial_clone() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    fs::create_dir_all(path.join(".git/objects")).unwrap();
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            Some(BROKEN),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ManifestRefused(_)),
+        "{outcome:?}"
+    );
+    let read = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert_eq!(read.checkouts.len(), 1);
+    assert_eq!(read.unfinished_checkout(), None);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_resumed_add_that_fails_keeps_a_finished_clone_that_holds_work_and_says_so() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    cloned_at(&setup, &path);
+    git(&path, &["switch", "--quiet", "-c", "triage"]);
+    write(path.join("notes.md"), "draft\n");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            Some(BROKEN),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ResumeBlocked { ref reason, .. } if reason.contains("merged manifest fails") && reason.contains("notes.md")),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("notes.md")).unwrap(),
+        "draft\n"
+    );
+    let read = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert!(read.unfinished_checkout().is_some());
+}
+
+#[test]
+fn a_resumed_add_that_fails_deletes_a_finished_clone_without_work_and_restores_the_record() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    cloned_at(&setup, &path);
+    git(&path, &["switch", "--quiet", "-c", "triage"]);
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            Some(BROKEN),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ManifestRefused(_)),
+        "{outcome:?}"
+    );
+    assert!(!path.exists());
+    let read = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert_eq!(read.checkouts.len(), 1);
+}
+
+#[test]
+fn the_same_add_refuses_to_delete_a_partial_clone_that_holds_an_ignored_file() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    cloned_at(&setup, &path);
+    write(path.join(".git/info/exclude"), ".env\n");
+    write(path.join(".env"), "SECRET=local\n");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ResumeBlocked { ref reason, .. } if reason.contains("ignored") && reason.contains(".env")),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(path.join(".env")).unwrap(),
+        "SECRET=local\n"
+    );
+}
+
+#[test]
+fn add_refuses_a_workspace_whose_one_checkout_has_a_folder_that_cannot_be_a_prefix() {
+    let setup = setup();
+    let infra = fixture_named("_infra");
+    created(&setup, "triage", &[Repo::new(&infra.clone)]);
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ExistingFolderInvalid { ref folder, .. } if folder == "_infra"),
+        "{outcome:?}"
+    );
+    assert!(!setup.root.join("triage/web").exists());
+}
+
 #[test]
 fn the_same_add_resumes_a_checkout_that_a_stopped_add_left_without_a_directory() {
     let setup = setup();
@@ -748,4 +905,45 @@ fn a_removal_refuses_when_the_second_checkouts_origin_is_unreachable_and_names_i
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_removal_deletes_a_partial_clone_of_an_unfinished_add_without_a_fetch() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    fs::create_dir_all(path.join(".git/objects")).unwrap();
+    let RemovalPlan::Ready(removal) = setup
+        .workspaces
+        .plan_removal(&name("triage"), Allow::default())
+        .unwrap()
+    else {
+        panic!("the removal is refused");
+    };
+    let RemovalOutcome::Done(_) = setup.workspaces.remove(removal).unwrap() else {
+        panic!("the workspace changed");
+    };
+    assert!(!setup.root.join("triage").exists());
+    assert!(!setup.state.join("triage.json").exists());
+}
+
+#[test]
+fn a_removal_refuses_a_partial_clone_of_an_unfinished_add_that_holds_files() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    fs::create_dir_all(path.join(".git/objects")).unwrap();
+    write(path.join("notes.txt"), "kept\n");
+    let plan = setup
+        .workspaces
+        .plan_removal(&name("triage"), Allow::default())
+        .unwrap();
+    let RemovalPlan::Dirty { changes, .. } = plan else {
+        panic!("the removal is not refused: {plan:?}");
+    };
+    assert!(
+        changes
+            .first()
+            .is_some_and(|change| change.starts_with("web: ")),
+        "{changes:?}"
+    );
+    assert!(path.join("notes.txt").exists());
 }

@@ -199,13 +199,31 @@ fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
     warnings
 }
 
-/// Returns the workspace's manifest, or the failure of a checkout without
-/// one.
-fn required_manifest(workspace: &Workspace) -> Result<Manifest, RunFailure> {
-    manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {
-        checkout: checkout(workspace).to_path_buf(),
-        workspace: workspace.manifest_file(),
-    })
+/// Returns the failure of a workspace whose record names a checkout that
+/// an `add` stopped before it finished, for the commands that act on the
+/// manifest. Its manifest may count the unfinished checkout, which never
+/// ran, so they refuse until the `add` resumes.
+pub(crate) fn refuse_unfinished(workspace: &Workspace) -> Result<(), MxvFailure> {
+    match workspace.unfinished_checkout() {
+        Some(checkout) => Err(MxvFailure::Incomplete {
+            name: workspace.name.to_string(),
+            folder: checkout.name.clone(),
+            repository: checkout.source.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Returns the workspace's manifest, or the failure of a workspace with an
+/// unfinished checkout or of a checkout without a manifest.
+fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumbkit::Error> {
+    refuse_unfinished(workspace)?;
+    Ok(
+        manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {
+            checkout: checkout(workspace).to_path_buf(),
+            workspace: workspace.manifest_file(),
+        })?,
+    )
 }
 
 /// Starts the processes that `args` names, and their dependencies.

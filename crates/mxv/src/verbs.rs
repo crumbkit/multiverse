@@ -492,6 +492,14 @@ pub(crate) fn add(
             }
             .into());
         }
+        AddOutcome::ExistingFolderInvalid { folder, reason, .. } => {
+            return Err(MxvFailure::ExistingFolderInvalid {
+                name: name.to_string(),
+                folder,
+                reason,
+            }
+            .into());
+        }
         AddOutcome::ResumeBlocked { path, reason, .. } => {
             return Err(MxvFailure::ResumeBlocked {
                 name: name.to_string(),

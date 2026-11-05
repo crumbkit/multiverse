@@ -621,7 +621,10 @@ reports `merged`, with every file it read in `manifest_paths`.
   `-` or `_` written as `-`. Because the prefix starts names, a folder in
   a workspace of several checkouts follows the rule of `--as` even when
   it is the repository's name, so a repository named `_infra` needs
-  `--as infra`.
+  `--as infra`. `mxv add` to a workspace of one checkout checks that
+  checkout's folder by the same rule and refuses one such as `_infra` with
+  `mxv::checkout::invalid_name`. mxv cannot rename the folder, so the hint
+  says to create the workspace again with `mxv new` and `--as`.
 - The prefixes appear only once a workspace has two checkouts. Adding a
   second repository with `mxv add` therefore renames the first
   repository's processes, containers, ports and volumes. `add` moves the
@@ -630,7 +633,8 @@ reports `merged`, with every file it read in `manifest_paths`.
   mount volumes under the new names, such as `api-data` in place of
   `data`. So that no data is left behind in the old volume, `add` refuses
   with `mxv::volume::renamed` while such an old volume exists, before it
-  clones anything. Its hint gives the commands that copy each old
+  clones anything. It checks only when the workspace reads the first
+  repository's `mxv.toml`; a workspace manifest keeps its volume names. Its hint gives the commands that copy each old
   volume's data into the new one and delete the old one; deleting the old
   volume alone drops its data.
 - The workspace manifest keeps its names as written, and its units may
@@ -662,10 +666,16 @@ file that `--manifest` names.
 a run is killed partway, running the same `mxv add` again resumes it: it
 clones again in place of a partial clone, keeps a clone that reached the
 workspace's branch, and refuses with `mxv::checkout::resume_blocked`
-when the directory holds work: a stash, a commit that origin lacks, or an
-uncommitted change or untracked path. Any other `mxv
-add` to that workspace fails with `mxv::checkout::incomplete`, whose hint
-gives the command that resumes the unfinished checkout.
+when the directory holds work: a stash, a commit that origin lacks, an
+uncommitted change or untracked path, or an ignored path outside its
+disposable set, such as `.env`. Any other `mxv add` to that workspace,
+and `up`, `restart`, `ports reset` and `clean`, fail with
+`mxv::checkout::incomplete`, whose hint gives the command that resumes
+the unfinished checkout. `status`, `show`, `down`, `logs` and `remove`
+keep working. When a resumed `add` fails, it restores the workspace's
+earlier record and deletes the new clone, unless the clone finished and
+holds work; then it keeps both and fails with
+`mxv::checkout::resume_blocked`, which names the work.
 
 `mxv new` copies no template into a workspace of several repositories,
 because a template belongs to one origin. `--manifest` still copies a

@@ -330,6 +330,16 @@ pub(crate) enum MxvFailure {
         /// The repository of the unfinished checkout.
         repository: PathBuf,
     },
+    /// `mxv add` would prefix the names of the workspace's one checkout
+    /// with its folder, which is not a folder name.
+    ExistingFolderInvalid {
+        /// The workspace's name.
+        name: String,
+        /// The folder of the workspace's one checkout.
+        folder: String,
+        /// The rule it breaks.
+        reason: String,
+    },
     /// `mxv add` resumes an unfinished checkout whose directory holds
     /// something that mxv does not delete.
     ResumeBlocked {
@@ -546,7 +556,7 @@ impl Failure for MxvFailure {
             Self::Unowned { .. } => &CHECKOUT_UNOWNED,
             Self::BranchExists { .. } => &BRANCH_EXISTS,
             Self::FolderTaken { .. } => &CHECKOUT_NAME_TAKEN,
-            Self::BadFolder { .. } => &CHECKOUT_INVALID_NAME,
+            Self::BadFolder { .. } | Self::ExistingFolderInvalid { .. } => &CHECKOUT_INVALID_NAME,
             Self::CheckoutNotFound { .. } => &CHECKOUT_NOT_FOUND,
             Self::Worktrees { .. } => &WORKSPACE_WORKTREE_KIND,
             Self::ManifestNeeded { .. } => &MANIFEST_NEEDED,
@@ -690,8 +700,11 @@ impl Failure for MxvFailure {
                 folder,
                 repository,
             } => hint(format!(
-                "finish the unfinished checkout first with `mxv add -w {name} --repo {} --as {folder}`, which resumes it, and then run this `mxv add` again",
+                "finish the unfinished checkout first with `mxv add -w {name} --repo {} --as {folder}`, which resumes it, and then run this command again",
                 shown(repository)
+            )),
+            Self::ExistingFolderInvalid { name, folder, .. } => hint(format!(
+                "mxv cannot rename the folder {folder} of the workspace {name}, so create a new workspace with every repository and a valid folder for each, such as `mxv new <NAME> --repo <PATH> --as <FOLDER> --repo <OTHER>`"
             )),
             Self::ResumeBlocked { path, .. } => hint(format!(
                 "look in {}, keep what you need somewhere else, delete the directory, and run the same `mxv add` again",
@@ -841,29 +854,10 @@ impl Failure for MxvFailure {
                 Field::new("checkouts", FieldValue::list(checkouts.iter())),
             ],
             Self::Worktrees { name } => vec![Field::new("name", name)],
-            Self::ManifestNeeded {
-                name,
-                manifest,
-                folder,
-            } => vec![
-                Field::new("name", name),
-                Field::new("manifest", shown(manifest)),
-                Field::new("folder", folder),
-            ],
-            Self::Incomplete {
-                name,
-                folder,
-                repository,
-            } => vec![
-                Field::new("name", name),
-                Field::new("folder", folder),
-                Field::new("repository", shown(repository)),
-            ],
-            Self::ResumeBlocked { name, path, reason } => vec![
-                Field::new("name", name),
-                Field::new("path", shown(path)),
-                Field::new("reason", reason),
-            ],
+            Self::ManifestNeeded { .. }
+            | Self::Incomplete { .. }
+            | Self::ExistingFolderInvalid { .. }
+            | Self::ResumeBlocked { .. } => add_fields(self),
             Self::NoHome => Vec::new(),
             Self::RelativeRoot { value } => vec![Field::new("value", shown(value))],
             Self::BadConfig { path, line, .. } => {
@@ -1097,6 +1091,47 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
     }
 }
 
+/// Returns the fields of a failure of `mxv add` that leaves the workspace
+/// as it was: a workspace manifest that it needs, an invalid folder of the
+/// existing checkout, or an unfinished checkout.
+fn add_fields(failure: &MxvFailure) -> Vec<Field<'_>> {
+    match failure {
+        MxvFailure::ManifestNeeded {
+            name,
+            manifest,
+            folder,
+        } => vec![
+            Field::new("name", name),
+            Field::new("manifest", shown(manifest)),
+            Field::new("folder", folder),
+        ],
+        MxvFailure::Incomplete {
+            name,
+            folder,
+            repository,
+        } => vec![
+            Field::new("name", name),
+            Field::new("folder", folder),
+            Field::new("repository", shown(repository)),
+        ],
+        MxvFailure::ExistingFolderInvalid {
+            name,
+            folder,
+            reason,
+        } => vec![
+            Field::new("name", name),
+            Field::new("folder", folder),
+            Field::new("reason", reason),
+        ],
+        MxvFailure::ResumeBlocked { name, path, reason } => vec![
+            Field::new("name", name),
+            Field::new("path", shown(path)),
+            Field::new("reason", reason),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 /// Returns the message of a failure of `mxv add` that leaves the workspace
 /// as it was: a workspace manifest that it needs, or an unfinished
 /// checkout.
@@ -1117,6 +1152,13 @@ fn add_message(failure: &MxvFailure) -> String {
         } => format!(
             "an earlier `mxv add` to the workspace {name} stopped before it finished the checkout {folder} of {}",
             shown(repository)
+        ),
+        MxvFailure::ExistingFolderInvalid {
+            name,
+            folder,
+            reason,
+        } => format!(
+            "the folder {folder} of the one checkout of the workspace {name} is not a folder name, so it cannot prefix that checkout's names once the workspace has two checkouts: {reason}"
         ),
         MxvFailure::ResumeBlocked { name, path, reason } => format!(
             "mxv cannot resume the unfinished checkout {} of the workspace {name}, because {reason}",
@@ -1229,9 +1271,10 @@ impl fmt::Display for MxvFailure {
                 formatter,
                 "the workspace {name} holds git worktrees, and mxv adds checkouts only to a workspace of clones"
             ),
-            Self::ManifestNeeded { .. } | Self::Incomplete { .. } | Self::ResumeBlocked { .. } => {
-                formatter.write_str(&add_message(self))
-            }
+            Self::ManifestNeeded { .. }
+            | Self::Incomplete { .. }
+            | Self::ExistingFolderInvalid { .. }
+            | Self::ResumeBlocked { .. } => formatter.write_str(&add_message(self)),
             Self::NoHome => formatter.write_str(
                 "mxv cannot find your home directory, which holds its state, config and data directories",
             ),
@@ -1286,6 +1329,7 @@ impl std::error::Error for MxvFailure {
             | Self::Worktrees { .. }
             | Self::ManifestNeeded { .. }
             | Self::Incomplete { .. }
+            | Self::ExistingFolderInvalid { .. }
             | Self::ResumeBlocked { .. }
             | Self::IgnoredFiles { .. }
             | Self::ManifestDisposable { .. }

@@ -200,6 +200,25 @@ impl Workspace {
         self.path.join(AGENTS_FILE)
     }
 
+    /// Returns the first checkout of a workspace of clones that has no
+    /// commit, which an `add` or a `new` that stopped partway left
+    /// unfinished, or `None`. While one exists, the record names a
+    /// checkout that may be missing or partial, so the commands that act
+    /// on the manifest refuse until the `add` that left it resumes.
+    #[must_use]
+    pub fn unfinished_checkout(&self) -> Option<&Checkout> {
+        self.checkouts
+            .iter()
+            .find(|checkout| self.is_unfinished(checkout))
+    }
+
+    /// Reports whether `checkout`, one of the workspace's, is unfinished,
+    /// as [`Workspace::unfinished_checkout`] describes.
+    #[must_use]
+    pub fn is_unfinished(&self, checkout: &Checkout) -> bool {
+        self.kind == WorkspaceKind::Clone && checkout.commit.is_none()
+    }
+
     /// Reports whether a checkout's directory is the workspace manifest's
     /// path, [`Workspace::manifest_file`], or holds it, as in an old record
     /// whose checkout is the workspace's directory itself. The repository

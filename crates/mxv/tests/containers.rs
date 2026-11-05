@@ -1259,3 +1259,36 @@ fn add_refuses_while_a_volume_holds_data_under_its_old_name_and_its_hint_moves_t
     let (exit, document) = setup.json(&["down", "-w", "mxvtest-renamed"]);
     assert_eq!(exit, 0, "{document}");
 }
+
+#[test]
+fn add_leaves_alone_a_volume_of_the_workspace_manifest_whose_name_it_keeps() {
+    if !docker_runs("add_leaves_alone_a_volume_of_the_workspace_manifest") {
+        return;
+    }
+    // The checkout's mxv.toml and the workspace manifest both declare the
+    // volume `srv`, and the workspace manifest is the one that runs.
+    let setup = Setup::new("mxvtest-kept-volume", &web());
+    let shared = setup.root().join("workspaces/mxvtest-kept-volume/mxv.toml");
+    write(&shared, &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-kept-volume"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-kept-volume"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.volumes(), [setup.volume_name("srv")]);
+
+    let next = setup.root().join("next.toml");
+    write(&next, &web());
+    let (exit, document) = setup.json(&[
+        "add",
+        "-w",
+        "mxvtest-kept-volume",
+        "--repo",
+        "app",
+        "--as",
+        "other",
+        "--manifest",
+        "next.toml",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.volumes(), [setup.volume_name("srv")]);
+}

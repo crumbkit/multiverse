@@ -462,14 +462,26 @@ impl Runs {
     /// without a prefix. Adding a second checkout renames such a volume to
     /// `<prefix>-<volume>`, so the container would start on an empty
     /// volume and the old one would hold its data unused. A workspace with
-    /// several checkouts, one that has never run, or one whose checkout has
-    /// no `mxv.toml` returns none.
+    /// several finished checkouts, one that has never run, and one that
+    /// reads a workspace manifest in place of its checkout's `mxv.toml`
+    /// return none.
     ///
     /// # Errors
     ///
     /// Returns the docker errors of looking up a volume.
     pub fn renamed_volumes(&self, workspace: &Workspace) -> Result<Vec<RenamedVolume>, Error> {
-        if workspace.has_several_checkouts() {
+        // An unfinished checkout never ran, so the workspace ran as the
+        // checkouts that have a commit.
+        let mut workspace = workspace.clone();
+        workspace
+            .checkouts
+            .retain(|checkout| checkout.commit.is_some());
+        // A workspace manifest's volumes keep their names after `add`, so
+        // only a workspace that reads its checkout's own file has volumes
+        // to rename.
+        if workspace.has_several_checkouts()
+            || workspace.manifest_inputs().source() != crate::lookup::ManifestSource::Repository
+        {
             return Ok(Vec::new());
         }
         let (Some(checkout), Some(id)) = (workspace.checkouts.first(), workspace.id.as_ref())

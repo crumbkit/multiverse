@@ -121,7 +121,12 @@ phase refuses a name that starts with `_`. `mxv new` with several
 `--repo` and `mxv add` refuse a repository named `_infra` with
 `mxv::checkout::invalid_name`, whose hint says to give the checkout a
 folder with `--as`. `mxv new` with one `--repo` gives its checkout no
-prefix, so it still accepts any repository's name.
+prefix, so it still accepts any repository's name. `mxv add` to such a
+workspace checks the first checkout's folder by the same rule, because
+that folder becomes a prefix too, and refuses a folder such as `_infra`
+with `mxv::checkout::invalid_name`. mxv cannot rename a checkout's
+folder, so the hint says to create the workspace again with `mxv new`,
+giving each repository a valid folder with `--as`.
 
 ### Adding a checkout to a workspace with one checkout
 
@@ -134,7 +139,10 @@ prefixed names, so a volume that holds data under its old name would be
 left unused while the container starts on an empty one. Before it clones
 anything, `mxv add` therefore refuses with `mxv::volume::renamed` while
 phase holds a volume under the old name of any volume of the first
-checkout's `mxv.toml`. The failure lists each old and new docker volume.
+checkout's `mxv.toml`. mxv checks only when the workspace reads that
+file. When the workspace has a workspace manifest, the workspace reads
+that file in place of the checkout's, its names keep no prefix, and its
+volumes keep their names after the `add`, so mxv does not check. The failure lists each old and new docker volume.
 Its hint gives, for each volume, the `docker volume create` with phase's
 labels, the `docker run` that copies the data, and the
 `docker volume rm` of the old volume, as the hint of
@@ -179,9 +187,11 @@ it. The run looks at the checkout's directory:
   keeps the clone, whatever work it holds, and records its commit.
 - When git finds no clone of its own in the directory and the directory
   holds nothing but `.git`, or it is a clone of its own that is not on the
-  workspace's branch and holds no stash, no commit that origin lacks, and
-  no uncommitted change or untracked path, it is what a clone that
-  stopped partway leaves. A clone that holds nothing but `.git` needs no
+  workspace's branch and holds no stash, no commit that origin lacks, no
+  uncommitted change or untracked path, and no ignored path outside its
+  disposable set, it is what a clone that stopped partway leaves. The
+  rule for ignored paths is the one that `mxv remove` follows, so a
+  `.env` file stops the run while a `target/` directory does not. A clone that holds nothing but `.git` needs no
   clean working tree, because it never checked out a file. The
   run deletes it and clones afresh.
 - Anything else, such as files outside a clone or a clone with a commit of
@@ -192,6 +202,25 @@ The run then writes `AGENTS.md` and the record with the checkout's commit.
 Any other `mxv add` to the workspace fails with
 `mxv::checkout::incomplete`, whose hint names the unfinished folder and
 the `mxv add -w <ws> --repo <repository> --as <folder>` that resumes it.
+
+The record already lists the unfinished checkout, so until the `add`
+resumes, the workspace counts as one of several checkouts while one of
+them has no clone. Every command that reads the manifest to act on it,
+such as `mxv up`, `mxv restart`, `mxv ports reset` and `mxv clean`,
+therefore fails with `mxv::checkout::incomplete` and the same hint.
+`mxv status`, `mxv show`, `mxv down`, `mxv logs` and `mxv remove` keep
+working, because they only read the workspace, stop it or delete it.
+`mxv remove` deletes a partial clone that holds nothing but `.git`
+without fetching its origin. It treats a partial clone that git cannot
+read and that holds other files as a change, which it deletes only with
+`--force`.
+
+When a resumed `add` fails, such as on a merged manifest that does not
+check, it restores the record that the workspace had before the `add`
+and deletes the new clone. It keeps a finished clone that holds work, by
+the rule above, and then keeps the record that names it unfinished, and
+its failure, `mxv::checkout::resume_blocked`, says what work the clone
+holds.
 
 ### Phase plans
 

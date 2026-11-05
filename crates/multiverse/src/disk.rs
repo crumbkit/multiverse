@@ -363,7 +363,12 @@ impl<B: Backend> Workspaces<B> {
         let mut kept = Vec::new();
         let mut warnings = Vec::new();
         for checkout in &workspace.checkouts {
-            if Entry::at(&checkout.path)? != Entry::Present || !checkout.path.is_dir() {
+            // An unfinished checkout's directory may be a partial clone,
+            // which git cannot read, and nothing in it is disposable yet.
+            if Entry::at(&checkout.path)? != Entry::Present
+                || !checkout.path.is_dir()
+                || workspace.is_unfinished(checkout)
+            {
                 continue;
             }
             let (set, warning) = self.disposable_set(workspace, checkout);

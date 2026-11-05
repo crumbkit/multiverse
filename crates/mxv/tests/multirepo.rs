@@ -412,6 +412,30 @@ fn an_add_that_stopped_partway_is_resumed_by_the_same_add_and_refuses_any_other(
     assert!(text.contains("--as web"), "{document}");
     assert!(!workspace.join("docs").exists());
 
+    // The commands that act on the manifest refuse until the add resumes,
+    // and the commands that only read or stop keep working.
+    for args in [
+        &["up", "-w", "triage"][..],
+        &["restart", "-w", "triage"][..],
+        &["clean", "triage", "--dry-run"][..],
+    ] {
+        let (exit, document) = setup.json(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert!(
+            document.to_string().contains("mxv::checkout::incomplete"),
+            "{args:?}: {document}"
+        );
+    }
+    for args in [
+        &["status", "-w", "triage"][..],
+        &["show", "triage"][..],
+        &["down", "-w", "triage"][..],
+        &["remove", "triage", "--dry-run"][..],
+    ] {
+        let (exit, document) = setup.json(args);
+        assert_eq!(exit, 0, "{args:?}: {document}");
+    }
+
     let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "web"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(branch(&workspace.join("web")), "triage");
@@ -419,6 +443,22 @@ fn an_add_that_stopped_partway_is_resumed_by_the_same_add_and_refuses_any_other(
     assert!(record["checkouts"][1]["commit"].is_string(), "{record}");
     let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(agents.contains("`web/`"), "{agents}");
+}
+
+#[test]
+fn add_refuses_a_workspace_whose_one_checkout_has_a_folder_that_cannot_be_a_prefix() {
+    let setup = Setup::new();
+    setup.repository("_infra");
+    setup.created("solo", &["_infra"]);
+    let (exit, document) = setup.json(&["add", "-w", "solo", "--repo", "api"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::checkout::invalid_name",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["folder"], "_infra", "{document}");
+    assert!(document.to_string().contains("mxv new"), "{document}");
+    assert!(!setup.workspace("solo").join("api").exists());
 }
 
 #[test]

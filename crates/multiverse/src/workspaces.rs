@@ -229,6 +229,18 @@ pub enum AddOutcome {
         /// Why the folder is not a folder name, in a sentence.
         reason: String,
     },
+    /// The folder of the workspace's one checkout is not a folder name, as
+    /// [`folder_name`] describes, so it cannot become the prefix of that
+    /// checkout's names. `mxv new` with one repository accepts any
+    /// repository's name, and a checkout's folder cannot be renamed.
+    ExistingFolderInvalid {
+        /// The workspace's record.
+        workspace: Workspace,
+        /// The folder of the workspace's one checkout.
+        folder: String,
+        /// Why the folder is not a folder name, in a sentence.
+        reason: String,
+    },
     /// The workspace has one checkout and a workspace manifest, and the
     /// caller gave no manifest. That manifest's paths are relative to the
     /// checkout, and once the workspace has two checkouts they would be
@@ -1325,9 +1337,7 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         let unfinished = workspace
-            .checkouts
-            .iter()
-            .find(|checkout| checkout.commit.is_none())
+            .unfinished_checkout()
             .map(|checkout| (checkout.name.clone(), checkout.source.clone()));
         let resumed = match unfinished {
             Some((unfinished, source)) => {
@@ -1369,6 +1379,18 @@ impl<B: Backend> Workspaces<B> {
                 branch: name.to_string(),
             });
         }
+        // The folder of a workspace's one checkout gains its use as a
+        // prefix only now, and `new` with one repository never checked it.
+        if !workspace.has_several_checkouts()
+            && let Some(first) = workspace.checkouts.first()
+            && let Err(reason) = folder_name(&first.name)
+        {
+            return Ok(AddOutcome::ExistingFolderInvalid {
+                folder: first.name.clone(),
+                reason,
+                workspace,
+            });
+        }
         if manifest.is_none()
             && !workspace.has_several_checkouts()
             && workspace.manifest_inputs().workspace.is_some()
@@ -1384,7 +1406,9 @@ impl<B: Backend> Workspaces<B> {
         let (checkout, url) =
             self.planned_clone(name, &workspace.path.clone(), &repository, &folder, mirrors)?;
         let leftover = if resumed {
-            self.leftover(&checkout)?
+            let mut with = workspace.clone();
+            with.checkouts.push(checkout.clone());
+            self.leftover(&with, &checkout)?
         } else {
             Leftover::Absent
         };
@@ -1406,10 +1430,23 @@ impl<B: Backend> Workspaces<B> {
         let made = self.finish_add(&mut workspace, &before, leftover, &url, manifest);
         match made {
             Ok(Ok(())) => Ok(AddOutcome::Added(workspace)),
-            Ok(Err(refused)) => {
-                self.undo_add(&workspace, before, finished);
-                Ok(AddOutcome::ManifestRefused(refused))
-            }
+            Ok(Err(refused)) => match self.undo_add(&workspace, before, finished) {
+                None => Ok(AddOutcome::ManifestRefused(refused)),
+                Some(work) => {
+                    let path = workspace
+                        .checkouts
+                        .last()
+                        .map(|checkout| checkout.path.clone())
+                        .unwrap_or_default();
+                    Ok(AddOutcome::ResumeBlocked {
+                        workspace,
+                        path,
+                        reason: format!(
+                            "the merged manifest fails ({refused}), and {work}, so mxv kept the clone and the record that names it unfinished"
+                        ),
+                    })
+                }
+            },
             Err(error) => {
                 self.undo_add(&workspace, before, finished);
                 Err(error)
@@ -1472,35 +1509,92 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Undoes an `add` that failed after it wrote the record with the new
-    /// checkout of `workspace`: it writes the workspace manifest and
-    /// `AGENTS.md` as `before` had them, deletes the new clone, and writes
-    /// the record as `before`. A clone that an earlier run finished, and
-    /// that the person may have used, is kept, and so is the record that
-    /// names it, so the same `add` resumes it again.
-    fn undo_add(&self, workspace: &Workspace, before: Workspace, finished: bool) {
+    /// checkout of `workspace`: it writes `AGENTS.md` as `before` had it,
+    /// deletes the new clone, and writes the record as `before`, so no
+    /// unfinished checkout is left behind. A clone that an earlier run
+    /// finished is kept when it holds work, as [`Workspaces::work_in`]
+    /// finds it, and so is the record that names it unfinished; the
+    /// returned sentence says what the clone holds. A clone that cannot be
+    /// deleted also keeps the record that names it.
+    fn undo_add(&self, workspace: &Workspace, before: Workspace, finished: bool) -> Option<String> {
         let _ = self.write_agents(&before);
-        if finished {
-            return;
+        let checkout = workspace.checkouts.last()?;
+        if finished && let Some(work) = self.work_in(workspace, checkout, true) {
+            return Some(work);
         }
-        let Some(checkout) = workspace.checkouts.last() else {
-            return;
-        };
         if delete_clone(&checkout.path).is_ok() {
             let mut before = before;
             let _ = self.store.update(&mut before);
         }
+        None
     }
 
-    /// Returns what the directory of `checkout`, an unfinished checkout
-    /// that `add` resumes, holds. A directory that holds nothing but
-    /// `.git` is debris, because a clone checks out no files until it
-    /// reaches the workspace's branch. A clone of its own that is not on
-    /// the workspace's branch is debris only when it holds no stash, no
-    /// commit that origin lacks, and, unless it holds nothing but `.git`,
-    /// no uncommitted change or untracked path, so resuming never deletes
-    /// work that someone did in the directory after the run stopped. A
-    /// clone on the workspace's branch is finished. Anything else is kept.
-    fn leftover(&self, checkout: &Checkout) -> Result<Leftover, Error> {
+    /// Returns what work the clone of `checkout`, a checkout of
+    /// `workspace`, holds that deleting it would lose, in a sentence, or
+    /// `None` when it holds none: a stash, a commit that origin lacks, and,
+    /// when `tree` is set, an uncommitted change, an untracked path, or an
+    /// ignored path outside the checkout's disposable set, such as `.env`,
+    /// as `mxv remove` counts them. A clone whose work mxv cannot read
+    /// counts as holding work.
+    fn work_in(&self, workspace: &Workspace, checkout: &Checkout, tree: bool) -> Option<String> {
+        let path = &checkout.path;
+        let unknown = || Some("mxv cannot tell whether the clone holds work of its own".to_owned());
+        let Ok(stashes) = self.backend.stashes(path) else {
+            return unknown();
+        };
+        if !stashes.is_empty() {
+            return Some(format!("the clone holds {} stash entries", stashes.len()));
+        }
+        let Ok(unpushed) = self.backend.unpushed_commits(path) else {
+            return unknown();
+        };
+        if !unpushed.is_empty() {
+            return Some(format!(
+                "the clone holds {} commits that origin does not",
+                unpushed.len()
+            ));
+        }
+        if !tree {
+            return None;
+        }
+        let mut sorted = Sorted::default();
+        if self.sort(workspace, checkout, &mut sorted).is_err() {
+            return unknown();
+        }
+        if !sorted.changes.is_empty() {
+            return Some(format!(
+                "the clone holds uncommitted changes or untracked paths: {}",
+                sorted.changes.join(", ")
+            ));
+        }
+        if !sorted.ignored.is_empty() {
+            return Some(format!(
+                "the clone holds ignored paths outside its disposable set: {}",
+                sorted.ignored.join(", ")
+            ));
+        }
+        None
+    }
+
+    /// Returns the head of `path` when git reads `path` as a repository of
+    /// its own, whose top level is `path` itself, and `None` otherwise.
+    fn own_head(&self, path: &Path) -> Option<crate::backend::Head> {
+        let head = self.backend.head(path).ok()?;
+        let toplevel = head.toplevel.as_deref()?.canonicalize().ok()?;
+        (toplevel == path.canonicalize().ok()?).then_some(head)
+    }
+
+    /// Returns what the directory of `checkout`, an unfinished checkout of
+    /// `workspace` that `add` resumes, holds. A directory that holds
+    /// nothing but `.git`, and in which git finds no clone of its own, is
+    /// debris. A clone on the workspace's branch is finished. A clone of
+    /// its own that is not on the workspace's branch is debris only when
+    /// it holds no work, as [`Workspaces::work_in`] finds it; a clone that
+    /// holds nothing but `.git` never checked out a file, so only its
+    /// stashes and commits count. Resuming therefore never deletes work
+    /// that someone did in the directory after the run stopped. Anything
+    /// else is kept.
+    fn leftover(&self, workspace: &Workspace, checkout: &Checkout) -> Result<Leftover, Error> {
         let path = &checkout.path;
         match Entry::at(path)? {
             Entry::Absent => return Ok(Leftover::Absent),
@@ -1518,17 +1612,10 @@ impl<B: Backend> Workspaces<B> {
             ));
         };
         let only_git = entries.flatten().all(|entry| entry.file_name() == ".git");
-        let own = |head: &crate::backend::Head| {
-            head.toplevel
-                .as_deref()
-                .and_then(|toplevel| toplevel.canonicalize().ok())
-                .zip(path.canonicalize().ok())
-                .is_some_and(|(toplevel, path)| toplevel == path)
-        };
-        let head = match self.backend.head(path) {
-            Ok(head) if own(&head) => head,
-            _ if only_git => return Ok(Leftover::Debris),
-            _ => {
+        let head = match self.own_head(path) {
+            Some(head) => head,
+            None if only_git => return Ok(Leftover::Debris),
+            None => {
                 return Ok(Leftover::Kept(
                     "the directory holds files and is not a git clone of its own".to_owned(),
                 ));
@@ -1539,52 +1626,10 @@ impl<B: Backend> Workspaces<B> {
         {
             return Ok(Leftover::Finished(commit));
         }
-        let unknown = |_| {
-            Leftover::Kept(
-                "mxv cannot tell whether the clone holds commits or stashes of its own".to_owned(),
-            )
-        };
-        let stashes = match self.backend.stashes(path) {
-            Ok(stashes) => stashes,
-            Err(error) => return Ok(unknown(error)),
-        };
-        if !stashes.is_empty() {
-            return Ok(Leftover::Kept(format!(
-                "the clone holds {} stash entries",
-                stashes.len()
-            )));
-        }
-        let unpushed = match self.backend.unpushed_commits(path) {
-            Ok(unpushed) => unpushed,
-            Err(error) => return Ok(unknown(error)),
-        };
-        if !unpushed.is_empty() {
-            return Ok(Leftover::Kept(format!(
-                "the clone holds {} commits that origin does not",
-                unpushed.len()
-            )));
-        }
-        // A clone that stopped before it checked out any file holds only
-        // `.git`, and git reports every file as deleted there, so only a
-        // clone with files of its own needs a clean working tree.
-        if only_git {
-            return Ok(Leftover::Debris);
-        }
-        let changes = match self.backend.changes(path) {
-            Ok(changes) => changes,
-            Err(_) => {
-                return Ok(Leftover::Kept(
-                    "mxv cannot tell whether the clone holds uncommitted changes".to_owned(),
-                ));
-            }
-        };
-        if !changes.changed.is_empty() {
-            return Ok(Leftover::Kept(format!(
-                "the clone holds {} uncommitted changes or untracked paths",
-                changes.changed.len()
-            )));
-        }
-        Ok(Leftover::Debris)
+        Ok(match self.work_in(workspace, checkout, !only_git) {
+            Some(work) => Leftover::Kept(work),
+            None => Leftover::Debris,
+        })
     }
 
     /// Makes the directory, the clones and the `AGENTS.md` of `workspace`,
@@ -2053,7 +2098,10 @@ impl<B: Backend> Workspaces<B> {
     /// `origin` no longer has, and then refuses a clone with commits that
     /// no remote branch holds. It refuses a clone with stashes unless
     /// `allow` permits discarding changes. A directory whose `.git` is not
-    /// a directory of its own is not the workspace's clone.
+    /// a directory of its own is not the workspace's clone. A clone that an
+    /// unfinished `add` left with nothing but `.git` is deleted without a
+    /// fetch, and one that git cannot read but that holds other files is
+    /// deleted only when `allow` permits discarding changes.
     fn plan_clone(
         &self,
         workspace: &Workspace,
@@ -2084,6 +2132,23 @@ impl<B: Backend> Workspaces<B> {
         let owned = Entry::at(&dot_git)? == Entry::Present && dot_git.is_dir();
         if !owned {
             return refused(CloneRefusal::Unowned(checkout.path.clone()));
+        }
+        if workspace.is_unfinished(checkout) {
+            // An `add` that stopped partway can leave a clone that git
+            // cannot read yet, so the plan judges it as the resumed `add`
+            // would, and fetches nothing.
+            match self.leftover(workspace, checkout)? {
+                Leftover::Debris => {
+                    planned.directory = Fate::Removed;
+                    return Ok(Ok(planned));
+                }
+                Leftover::Kept(reason) if self.own_head(&checkout.path).is_none() => {
+                    sorted.changes.push(format!("{}: {reason}", checkout.name));
+                    planned.directory = Fate::Removed;
+                    return Ok(Ok(planned));
+                }
+                Leftover::Absent | Leftover::Finished(_) | Leftover::Kept(_) => {}
+            }
         }
         if !allow.delete_unmerged {
             self.backend.refresh_origin(&checkout.path)?;
