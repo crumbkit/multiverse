@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/cd/v1",
-  "description": "The directory of the workspace, for `cd \"$(mxv cd <NAME>)\"`.",
+  "description": "The directory of the workspace or of one of its checkouts, for `cd \"$(mxv cd <NAME>)\"`.",
   "type": "object",
   "properties": {
     "data": {

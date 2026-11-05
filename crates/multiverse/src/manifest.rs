@@ -115,6 +115,30 @@ pub struct Manifest {
     pub warnings: Vec<String>,
 }
 
+/// The names of the other manifests that a manifest joins, which its units
+/// may refer to, as [`Manifest::parse_joining`] describes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Joined {
+    /// The ports of the other manifests.
+    pub ports: Vec<String>,
+    /// The processes and containers of the other manifests.
+    pub units: Vec<String>,
+}
+
+impl Joined {
+    /// Adds the ports and units of `manifest`.
+    pub fn add(&mut self, manifest: &Manifest) {
+        self.ports.extend(manifest.ports.iter().cloned());
+        self.units.extend(
+            manifest
+                .processes
+                .keys()
+                .chain(manifest.containers.keys())
+                .cloned(),
+        );
+    }
+}
+
 /// One process or container of a manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unit<'a> {
@@ -318,6 +342,31 @@ impl EnvValue {
         })
     }
 
+    /// Returns the value with each placeholder's port renamed by `rename`,
+    /// and its text written again to match, with each literal brace
+    /// doubled.
+    fn renamed(&self, rename: &dyn Fn(&str) -> String) -> Self {
+        let mut text = String::new();
+        let parts = self
+            .parts
+            .iter()
+            .map(|part| match part {
+                Part::Text(literal) => {
+                    text.push_str(&literal.replace('{', "{{").replace('}', "}}"));
+                    Part::Text(literal.clone())
+                }
+                Part::Port(port) => {
+                    let port = rename(port);
+                    text.push_str("{port.");
+                    text.push_str(&port);
+                    text.push('}');
+                    Part::Port(port)
+                }
+            })
+            .collect();
+        Self { text, parts }
+    }
+
     /// Reads `text`, or returns `None` when a brace is neither doubled nor
     /// part of a `{port.<name>}` placeholder whose name is a port name.
     fn parse(text: &str) -> Option<Self> {
@@ -429,6 +478,15 @@ pub enum ManifestProblem {
         /// What is wrong, in a sentence.
         message: String,
     },
+    /// The manifest declares a process, container or port whose name, once
+    /// a workspace with several checkouts merges its manifests, equals a
+    /// name that another of the workspace's manifests declares.
+    NameClash {
+        /// The merged name, such as `api-server`.
+        name: String,
+        /// The other manifest that declares the name.
+        other: PathBuf,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -463,6 +521,11 @@ impl fmt::Display for ManifestError {
             ManifestProblem::Unreadable { message } => {
                 write!(formatter, "cannot read {place}: {message}")
             }
+            ManifestProblem::NameClash { name, other } => write!(
+                formatter,
+                "{place}: the workspace's merged manifest has two units or two ports named `{name}`, one from this file and one from {}",
+                other.display()
+            ),
         }
     }
 }
@@ -629,6 +692,40 @@ const PHASE_TABLES: &[&str] = &[
     "service",
 ];
 
+/// Checks that `raw`'s `version` is 1 or greater and no greater than
+/// [`MANIFEST_VERSION`], and that it holds none of the reserved tables
+/// `secrets` and `actions`.
+fn check_version_and_reserved(errors: &Errors<'_>, raw: &RawManifest) -> Result<(), ManifestError> {
+    if let Some(version) = &raw.version {
+        match *version.get_ref() {
+            0 => {
+                return Err(errors.invalid(
+                    &version.span(),
+                    "the manifest version must be 1 or greater".to_owned(),
+                ));
+            }
+            found if found > MANIFEST_VERSION => {
+                return Err(errors.at(
+                    Some(&version.span()),
+                    ManifestProblem::Newer { version: found },
+                ));
+            }
+            _ => {}
+        }
+    }
+    for (section, value) in [("secrets", &raw.secrets), ("actions", &raw.actions)] {
+        if let Some(value) = value {
+            return Err(errors.at(
+                Some(&value.span()),
+                ManifestProblem::Reserved {
+                    section: section.to_owned(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks that `text` is valid TOML and that each top-level key that mxv
 /// does not read holds a table or an array of tables, such as the `[app]`,
 /// `[service.web]` or `[[release]]` of another tool that shares the file,
@@ -783,11 +880,28 @@ fn stays_inside(path: &Path) -> bool {
 /// name is an app name, and the plan that `mxv up` builds from it keeps
 /// phase's rules. It builds that plan with a placeholder host port for
 /// each port, so the check needs no workspace.
+///
+/// A manifest that joins others, as `joined` names, may depend on their
+/// units and use their ports. The check leaves out those dependencies,
+/// whose apps the other manifests' plans hold, and gives their ports a
+/// placeholder too. A merged manifest's plan checks the whole app.
 fn check_runnable(
     errors: &Errors<'_>,
     raw: &RawManifest,
     manifest: &Manifest,
+    joined: &Joined,
 ) -> Result<(), ManifestError> {
+    let own = |depends_on: &mut Vec<String>| {
+        depends_on.retain(|name| !joined.units.contains(name));
+    };
+    let mut checked = manifest.clone();
+    for process in checked.processes.values_mut() {
+        own(&mut process.depends_on);
+    }
+    for container in checked.containers.values_mut() {
+        own(&mut container.depends_on);
+    }
+    let manifest = &checked;
     let span = |name: &str| {
         raw.processes
             .keys()
@@ -806,6 +920,7 @@ fn check_runnable(
     let ports: BTreeMap<String, u16> = manifest
         .ports
         .iter()
+        .chain(&joined.ports)
         .zip(1_u16..)
         .map(|(port, number)| (port.clone(), number))
         .collect();
@@ -830,6 +945,7 @@ fn check_runnable(
         workspace: &workspace,
         id: &id,
         checkout: Path::new("/"),
+        roots: Vec::new(),
         ports: &ports,
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
@@ -867,12 +983,42 @@ impl Manifest {
     /// Returns a [`ManifestError`] when the file cannot be read, is larger
     /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
     pub fn read_file(path: &Path, checkout: &Path) -> Result<Option<Self>, ManifestError> {
-        let Some(text) = Self::read_text(path)? else {
+        Self::read_file_joining(path, checkout, &Joined::default())
+    }
+
+    /// Returns the manifest at `path` as [`Manifest::read_file`] does,
+    /// parsed as [`Manifest::parse_joining`] parses it with `joined`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Manifest::read_file`].
+    pub fn read_file_joining(
+        path: &Path,
+        checkout: &Path,
+        joined: &Joined,
+    ) -> Result<Option<Self>, ManifestError> {
+        let Some(text) = Self::read_unparsed(path)? else {
             return Ok(None);
         };
-        let manifest = Self::parse(&text, path)?;
+        Self::parse_at(&text, path, checkout, joined).map(Some)
+    }
+
+    /// Parses the manifest `text` as [`Manifest::parse_joining`] does, as
+    /// though it were read from `path`, and checks each process's `cwd`
+    /// against `checkout` as [`Manifest::read_file`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Manifest::read_file`].
+    pub fn parse_at(
+        text: &str,
+        path: &Path,
+        checkout: &Path,
+        joined: &Joined,
+    ) -> Result<Self, ManifestError> {
+        let manifest = Self::parse_joining(text, path, joined)?;
         manifest.check_cwds(checkout, path)?;
-        Ok(Some(manifest))
+        Ok(manifest)
     }
 
     /// Returns the text of the manifest at `path`, after checking that it
@@ -884,7 +1030,26 @@ impl Manifest {
     /// Returns the errors of [`Manifest::read_text`], and a
     /// [`ManifestProblem::Unreadable`] when no file is at `path`.
     pub fn read_named(path: &Path) -> Result<String, ManifestError> {
-        Self::read_text(path)?.ok_or_else(|| ManifestError {
+        let text = Self::read_named_unchecked(path)?;
+        Self::parse(&text, path)?;
+        Ok(text)
+    }
+
+    /// Returns the text of the manifest at `path`, a file that the person
+    /// named, without parsing it. It is for the workspace manifest of a
+    /// workspace with several checkouts, which refers to the names of
+    /// checkouts that exist only once they are cloned, so the caller
+    /// checks it with [`Workspace::merged_manifest_with`] after cloning.
+    ///
+    /// [`Workspace::merged_manifest_with`]: crate::Workspace::merged_manifest_with
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestError`] when the file cannot be read or is
+    /// larger than [`MOST_MANIFEST_BYTES`], and a
+    /// [`ManifestProblem::Unreadable`] when no file is at `path`.
+    pub fn read_named_unchecked(path: &Path) -> Result<String, ManifestError> {
+        Self::read_unparsed(path)?.ok_or_else(|| ManifestError {
             path: path.to_path_buf(),
             line: None,
             problem: ManifestProblem::Unreadable {
@@ -893,15 +1058,15 @@ impl Manifest {
         })
     }
 
-    /// Returns the text of the manifest at `path`, after checking that it
-    /// parses, or `None` when no file is at `path`. `mxv new` copies a
-    /// file it reads this way into a new workspace.
+    /// Returns the text of the manifest at `path`, or `None` when no file
+    /// is at `path`. `mxv new` copies a file it reads this way, through
+    /// [`Manifest::read_text`], into a new workspace.
     ///
     /// # Errors
     ///
-    /// Returns a [`ManifestError`] when the file cannot be read, is larger
-    /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
-    pub fn read_text(path: &Path) -> Result<Option<String>, ManifestError> {
+    /// Returns a [`ManifestError`] when the file cannot be read or is
+    /// larger than [`MOST_MANIFEST_BYTES`].
+    fn read_unparsed(path: &Path) -> Result<Option<String>, ManifestError> {
         let path = path.to_path_buf();
         let unreadable = |error: io::Error| ManifestError {
             path: path.clone(),
@@ -944,7 +1109,22 @@ impl Manifest {
                 },
             });
         }
-        Self::parse(&text, &path)?;
+        Ok(Some(text))
+    }
+
+    /// Returns the text of the manifest at `path`, or `None` when no file
+    /// is at `path`, after checking that it parses. `mxv new` copies a
+    /// file it reads this way into a new workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ManifestError`] when the file cannot be read, is larger
+    /// than [`MOST_MANIFEST_BYTES`], or fails as [`Manifest::parse`] does.
+    pub fn read_text(path: &Path) -> Result<Option<String>, ManifestError> {
+        let Some(text) = Self::read_unparsed(path)? else {
+            return Ok(None);
+        };
+        Self::parse(&text, path)?;
         Ok(Some(text))
     }
 
@@ -982,36 +1162,24 @@ impl Manifest {
     /// Returns a [`ManifestError`] that names the line of the first
     /// problem it finds.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ManifestError> {
+        Self::parse_joining(text, path, &Joined::default())
+    }
+
+    /// Parses the manifest `text`, read from `path`, as [`Manifest::parse`]
+    /// does, for a manifest that joins other manifests whose names are
+    /// `joined`: its units may refer to `joined`'s ports and depend on its
+    /// units, as the workspace manifest of a workspace with several
+    /// checkouts may refer to the prefixed names of its checkouts. The
+    /// returned manifest declares only its own names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Manifest::parse`].
+    pub fn parse_joining(text: &str, path: &Path, joined: &Joined) -> Result<Self, ManifestError> {
         let errors = Errors { path, text };
         let warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
-        if let Some(version) = &raw.version {
-            match *version.get_ref() {
-                0 => {
-                    return Err(errors.invalid(
-                        &version.span(),
-                        "the manifest version must be 1 or greater".to_owned(),
-                    ));
-                }
-                found if found > MANIFEST_VERSION => {
-                    return Err(errors.at(
-                        Some(&version.span()),
-                        ManifestProblem::Newer { version: found },
-                    ));
-                }
-                _ => {}
-            }
-        }
-        for (section, value) in [("secrets", &raw.secrets), ("actions", &raw.actions)] {
-            if let Some(value) = value {
-                return Err(errors.at(
-                    Some(&value.span()),
-                    ManifestProblem::Reserved {
-                        section: section.to_owned(),
-                    },
-                ));
-            }
-        }
+        check_version_and_reserved(&errors, &raw)?;
         let mut ports = Vec::new();
         for port in &raw.ports {
             if !is_unit_name(port.get_ref()) {
@@ -1036,6 +1204,12 @@ impl Manifest {
             .keys()
             .chain(raw.containers.keys())
             .map(|name| name.get_ref().as_str())
+            .chain(joined.units.iter().map(String::as_str))
+            .collect();
+        let known: Vec<String> = ports
+            .iter()
+            .chain(joined.ports.iter().filter(|port| !ports.contains(port)))
+            .cloned()
             .collect();
         if let Some(name) = raw.containers.keys().find(|name| {
             raw.processes
@@ -1053,7 +1227,7 @@ impl Manifest {
         let mut processes = BTreeMap::new();
         let mut listeners: BTreeMap<String, String> = BTreeMap::new();
         for (name, raw_process) in &raw.processes {
-            let process = check_process(&errors, name, raw_process, &ports, &names)?;
+            let process = check_process(&errors, name, raw_process, &known, &names)?;
             if let (Some(port), Some(listen)) = (&process.listen, &raw_process.listen) {
                 if let Some(other) = listeners.get(port) {
                     return Err(errors.invalid(
@@ -1070,7 +1244,7 @@ impl Manifest {
         }
         let mut containers = BTreeMap::new();
         for (name, raw_container) in &raw.containers {
-            let container = check_container(&errors, name, raw_container, &ports, &names)?;
+            let container = check_container(&errors, name, raw_container, &known, &names)?;
             for (published, key) in container.ports.iter().zip(raw_container.ports.values()) {
                 if let Some(other) = listeners.get(&published.port) {
                     return Err(errors.invalid(
@@ -1121,7 +1295,7 @@ impl Manifest {
             warnings,
         };
         check_cycle(&errors, &raw, &manifest)?;
-        check_runnable(&errors, &raw, &manifest)?;
+        check_runnable(&errors, &raw, &manifest, joined)?;
         Ok(manifest)
     }
 
@@ -1132,6 +1306,81 @@ impl Manifest {
             .get(name)
             .map(Unit::Process)
             .or_else(|| self.containers.get(name).map(Unit::Container))
+    }
+
+    /// Returns the manifest with each process, container and port renamed
+    /// by `rename`, and every reference to them rewritten to match: a
+    /// process's `ports` values, `listen`, `ready.port`, `{port.<name>}`
+    /// placeholders and `depends_on`, and a container's published ports,
+    /// `ready.port` and `depends_on`. Variable names and volume names keep
+    /// their names. A workspace with several checkouts reads each
+    /// checkout's manifest renamed this way, so two checkouts can declare
+    /// the same name.
+    #[must_use]
+    pub fn renamed(&self, rename: &dyn Fn(&str) -> String) -> Self {
+        let ready = |ready: &Option<Ready>| {
+            ready.as_ref().map(|ready| Ready {
+                check: match &ready.check {
+                    ReadyCheck::Port(port) => ReadyCheck::Port(rename(port)),
+                    ReadyCheck::Log(pattern) => ReadyCheck::Log(pattern.clone()),
+                },
+                timeout: ready.timeout,
+            })
+        };
+        let names = |names: &[String]| names.iter().map(|name| rename(name)).collect();
+        let processes = self
+            .processes
+            .iter()
+            .map(|(name, process)| {
+                let renamed = Process {
+                    argv: process.argv.clone(),
+                    cwd: process.cwd.clone(),
+                    env: process
+                        .env
+                        .iter()
+                        .map(|(variable, value)| (variable.clone(), value.renamed(rename)))
+                        .collect(),
+                    ports: process
+                        .ports
+                        .iter()
+                        .map(|(variable, port)| (variable.clone(), rename(port)))
+                        .collect(),
+                    listen: process.listen.as_deref().map(rename),
+                    ready: ready(&process.ready),
+                    depends_on: names(&process.depends_on),
+                };
+                (rename(name), renamed)
+            })
+            .collect();
+        let containers = self
+            .containers
+            .iter()
+            .map(|(name, container)| {
+                let mut renamed = container.clone();
+                for published in &mut renamed.ports {
+                    published.port = rename(&published.port);
+                }
+                renamed.ready = ready(&container.ready);
+                renamed.depends_on = names(&container.depends_on);
+                // phase names a volume `<workspace>.<volume>` for every app
+                // of the workspace, so a volume keeps its file's prefix
+                // to stay apart from another checkout's volume.
+                renamed.volumes = container
+                    .volumes
+                    .iter()
+                    .map(|(volume, mount)| (rename(volume), mount.clone()))
+                    .collect();
+                (rename(name), renamed)
+            })
+            .collect();
+        Self {
+            ports: names(&self.ports),
+            processes,
+            containers,
+            disposable: self.disposable.clone(),
+            clone_on_new: self.clone_on_new.clone(),
+            warnings: self.warnings.clone(),
+        }
     }
 
     /// Returns the names of every process and container, in name order.

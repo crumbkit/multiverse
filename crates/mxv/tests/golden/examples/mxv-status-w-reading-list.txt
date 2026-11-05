@@ -1,1 +1,2 @@
 The workspace has no manifest.
+The checkout app at /home/agent/mxv/reading-list/app cannot be read: its directory is gone.

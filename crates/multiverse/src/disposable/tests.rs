@@ -5,6 +5,25 @@ fn glob(text: &str) -> PathGlob {
 }
 
 #[test]
+fn a_workspace_glob_that_names_a_folder_applies_at_the_root_of_that_checkout_only() {
+    let data = glob("api/data/").within("api").unwrap();
+    assert_eq!(data.as_str(), "data/");
+    assert!(data.matches("data/"));
+    assert!(!data.matches("web/data/"));
+    assert_eq!(glob("api/data/").within("web"), None);
+    assert!(glob("*/data/").within("web").unwrap().matches("data/"));
+}
+
+#[test]
+fn a_workspace_glob_without_a_folder_applies_in_every_checkout() {
+    for text in ["coverage/", "**/coverage/"] {
+        let scoped = glob(text).within("api").unwrap();
+        assert!(scoped.matches("coverage/"), "{text}");
+        assert!(scoped.matches("web/coverage/"), "{text}");
+    }
+}
+
+#[test]
 fn a_glob_with_a_trailing_slash_matches_only_a_directory() {
     let results = glob("test-results/");
     assert!(results.matches("test-results/"));

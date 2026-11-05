@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::backend::{Backend, Changes, Listed, Repository};
+use crate::backend::{Backend, Changes, Head, Listed, Repository};
 use crate::error::Error;
 use crate::mirror::redacted;
 
@@ -701,6 +701,44 @@ impl Backend for Git {
         )?
         .ok("worktree unlock", repository)
         .map(drop)
+    }
+
+    fn head(&self, checkout: &Path) -> Result<Head, Error> {
+        // A checkout that lost its `.git` inside another repository reads
+        // that repository, so the caller compares the top level with the
+        // checkout.
+        let toplevel = run(
+            checkout,
+            ["rev-parse", "--show-toplevel"],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        let commit = run(
+            checkout,
+            ["rev-parse", "--verify", "--quiet", "HEAD"],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        // `symbolic-ref --quiet` exits with 1 and prints nothing for a
+        // detached `HEAD`.
+        let branch = run(
+            checkout,
+            ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            "symbolic-ref",
+            LOCAL_DEADLINE,
+        )?;
+        let named = |finished: &Finished| {
+            finished
+                .status
+                .success()
+                .then(|| trimmed(&finished.stdout))
+                .filter(|text| !text.is_empty())
+        };
+        Ok(Head {
+            toplevel: named(&toplevel).map(PathBuf::from),
+            branch: named(&branch),
+            commit: named(&commit),
+        })
     }
 
     fn changes(&self, checkout: &Path) -> Result<Changes, Error> {

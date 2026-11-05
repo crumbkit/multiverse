@@ -1,6 +1,6 @@
-Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin.
+Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin.
 
-The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG_DATA_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
+Each --repo adds one clone, in the folder <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that an --as right after that --repo gives. Two folders with the same name, compared without case, are refused. Every clone is on the branch NAME. The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG_DATA_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
 
 The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
@@ -12,10 +12,13 @@ Arguments:
 
 Options:
       --repo <PATH>
-          The git repository to check out, or any directory inside it
+          A git repository to check out, or a directory inside it; repeat it or use commas for several
+
+      --as <FOLDER>
+          The folder of the checkout of the --repo right before it, which defaults to the repository's name
 
       --no-clone
-          Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
+          Clone none of the repositories' ignored directories, such as node_modules/, into the new checkouts
 
       --manifest <FILE>
           Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template
@@ -45,6 +48,9 @@ Examples:
   mxv new triage --repo app --dry-run
           Print the workspace that a checkout of the repository app would get
 
+  mxv new triage --repo app --repo web --dry-run
+          Print the workspace that checkouts of the repositories app and web would get
+
 Columns:
   name           The workspace's name, which is also the name of its directory and of its checkouts' branch.
   branch         The branch that the workspace's checkouts were created on.
@@ -54,13 +60,13 @@ Columns:
   ports          The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
   cloned         Each ignored directory of the repository that `new` cloned into the checkout, or would clone on a dry run, with the checkout's name in front, such as `app: web/node_modules/`. A clone shares its disk with the repository's copy until a file in either changes.
   clone_warning  Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
-  manifest       Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace.
+  manifest       Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace.
   manifest_from  The file that `new` copied into the workspace manifest: the `--manifest` file, or the template whose `[template]` table lists the repository's origin, or null when it copied none.
   warnings       The sentences, joined with `; `, for each template that `new` skipped because it cannot use it, and for each table of the copied manifest that mxv ignores although its name is close to one of mxv's own, or null.
 
 Columns that --long adds:
   kind           How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
-  manifest_path  The path of the manifest that the workspace's commands read, or null when they read none.
+  manifest_path  The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
   repositories   The top-level directory of each repository that the workspace checks out.
 
 Effects: additive, not idempotent, open-world.

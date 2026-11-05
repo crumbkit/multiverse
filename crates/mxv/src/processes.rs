@@ -13,14 +13,14 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    DownOutcome, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable, UpOutcome,
-    Volumes, Workspace, WorkspaceName,
+    DownOutcome, Git, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable,
+    UpOutcome, Volumes, Workspace, WorkspaceName,
 };
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
-use crate::rows::{LogLine, PortRow, ProcessRow, StatusSummary};
+use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
 use crate::run_failures::{LogTail, NotMoved, RunFailure};
 use crate::verbs;
 
@@ -131,7 +131,10 @@ fn context(
 
 /// Returns the workspace whose directory holds the current directory, or
 /// `None`.
-fn current(store: &Store, environment: &Environment) -> Result<Option<Workspace>, MxvFailure> {
+pub(crate) fn current(
+    store: &Store,
+    environment: &Environment,
+) -> Result<Option<Workspace>, MxvFailure> {
     let Some(dir) = environment.current_dir() else {
         return Ok(None);
     };
@@ -196,13 +199,31 @@ fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
     warnings
 }
 
-/// Returns the workspace's manifest, or the failure of a checkout without
-/// one.
-fn required_manifest(workspace: &Workspace) -> Result<Manifest, RunFailure> {
-    manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {
-        checkout: checkout(workspace).to_path_buf(),
-        workspace: workspace.manifest_file(),
-    })
+/// Returns the failure of a workspace whose record names a checkout that
+/// an `add` stopped before it finished, for the commands that act on the
+/// manifest. Its manifest may count the unfinished checkout, which never
+/// ran, so they refuse until the `add` resumes.
+pub(crate) fn refuse_unfinished(workspace: &Workspace) -> Result<(), MxvFailure> {
+    match workspace.unfinished_checkout() {
+        Some(checkout) => Err(MxvFailure::Incomplete {
+            name: workspace.name.to_string(),
+            folder: checkout.name.clone(),
+            repository: checkout.source.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Returns the workspace's manifest, or the failure of a workspace with an
+/// unfinished checkout or of a checkout without a manifest.
+fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumbkit::Error> {
+    refuse_unfinished(workspace)?;
+    Ok(
+        manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {
+            checkout: checkout(workspace).to_path_buf(),
+            workspace: workspace.manifest_file(),
+        })?,
+    )
 }
 
 /// Starts the processes that `args` names, and their dependencies.
@@ -474,10 +495,17 @@ pub(crate) fn status(
         .status(&context.workspace, manifest.as_ref())
         .map_err(MxvFailure::from)?;
     let rows = statuses.iter().map(ProcessRow::from).collect();
+    let checkouts = context
+        .workspace
+        .checkouts
+        .iter()
+        .map(|checkout| CheckoutStateRow::read(&Git, checkout))
+        .collect();
     Ok(Listing::from_all(rows, None).summary(StatusSummary::new(
         &context.workspace,
         manifest.as_ref(),
         error.map(RunFailure::Manifest).as_ref(),
+        checkouts,
     )))
 }
 

@@ -41,7 +41,7 @@ mod store;
 mod template;
 mod workspaces;
 
-pub use crate::backend::{Backend, Changes, INITIALIZING, Listed, Repository};
+pub use crate::backend::{Backend, Changes, Head, INITIALIZING, Listed, Repository};
 pub use crate::clock::FOLLOW_INTERVAL;
 pub use crate::clone::{Cloned, UNSUPPORTED};
 pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};
@@ -50,32 +50,33 @@ pub use crate::disposable::{
 };
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
-pub use crate::lookup::{ManifestInputs, ManifestSource};
+pub use crate::lookup::{ManifestInputs, ManifestSource, checkout_prefix, prefixed};
 pub use crate::manifest::{
-    Container, DEFAULT_READY_TIMEOUT, EnvValue, LogPattern, MANIFEST_FILE, MANIFEST_VERSION,
-    MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError, ManifestProblem, Process,
-    Published, Ready, ReadyCheck, Unit,
+    Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
+    MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
+    ManifestProblem, Process, Published, Ready, ReadyCheck, Unit,
 };
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::record::{
-    AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, RECORD_VERSION,
-    WORKTREE_RECORD_VERSION, Workspace, WorkspaceKind, agents_text,
+    AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
+    MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, WORKTREE_RECORD_VERSION, Workspace,
+    WorkspaceKind, agents_text,
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
     DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, MOST_FOLLOW_BYTES, MOST_LOG_BYTES,
-    MOST_TAIL_BYTES, ProcessState, ProcessStatus, Runs, START_GRACE, STOP_GRACE, TAIL_LINES,
-    Unstoppable, UpOutcome, Volumes, Waited, tail,
+    MOST_TAIL_BYTES, ProcessState, ProcessStatus, RenamedVolume, Runs, START_GRACE, STOP_GRACE,
+    TAIL_LINES, Unstoppable, UpOutcome, Volumes, Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::template::{
     Found as FoundTemplate, TEMPLATE_TABLE, Template, find as find_template,
 };
 pub use crate::workspaces::{
-    Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode, NewOutcome, Removal,
-    RemovalOutcome, RemovalPlan, Workspaces,
+    AddOutcome, Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode,
+    NewOutcome, Removal, RemovalOutcome, RemovalPlan, Repo, Workspaces, folder_name,
 };
 pub use phase;
 pub use phase::container::RUN_VERSION;

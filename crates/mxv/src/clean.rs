@@ -411,6 +411,7 @@ fn measure(
     now: SystemTime,
     idle: Duration,
 ) -> Result<Candidate, MxvFailure> {
+    processes::refuse_unfinished(&workspace)?;
     let usage = workspaces.disk_usage(&workspace)?;
     let running = processes::running(environment, &workspace)?;
     Ok(Candidate {

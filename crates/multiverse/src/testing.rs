@@ -44,8 +44,13 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Returns a new fixture.
+/// Returns a new fixture whose clone is named `app`.
 pub(crate) fn fixture() -> Fixture {
+    fixture_named("app")
+}
+
+/// Returns a new fixture whose clone is named `name`.
+pub(crate) fn fixture_named(name: &str) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let seed = root.join("seed");
@@ -57,10 +62,10 @@ pub(crate) fn fixture() -> Fixture {
     );
     let origin = root.join("origin.git");
     git(&root, &["clone", "--quiet", "--bare", "seed", "origin.git"]);
-    git(&root, &["clone", "--quiet", "origin.git", "app"]);
+    git(&root, &["clone", "--quiet", "origin.git", name]);
     Fixture {
         dir,
-        clone: root.join("app"),
+        clone: root.join(name),
         origin,
     }
 }

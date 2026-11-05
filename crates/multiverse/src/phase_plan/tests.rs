@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use phase::{AppName, EnvironmentSource as _, Plan, ProcessName, RunnerKind, WorkspaceId};
+use phase::{AppName, EnvironmentSource as _, Plan, ProcessName, RunnerKind, Source, WorkspaceId};
 
 use crate::manifest::{Manifest, ManifestProblem};
 use crate::name::WorkspaceName;
-use crate::phase_plan::{Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, build};
+use crate::phase_plan::{Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, build, roots};
+use crate::record::{Checkout, Workspace};
+use crate::testing::write;
 
 const APP: &str = r#"
 ports = ["api", "db"]
@@ -50,6 +52,7 @@ fn plan_of(manifest: &Manifest, caller: &CallerEnvironment) -> Built {
         workspace: &workspace,
         id: &id,
         checkout: Path::new("/work/triage/app"),
+        roots: Vec::new(),
         ports: &ports,
         grace: Duration::from_secs(5),
         caller,
@@ -306,4 +309,182 @@ fn the_environment_returns_every_variable_that_each_process_of_the_plan_names() 
             assert_eq!(applied.names(), process.env, "{}", app.name);
         }
     }
+}
+
+/// The manifest of a checkout whose process `server` runs in `server/` and
+/// listens on its port `http`.
+const SERVER: &str = r#"ports = ["http"]
+
+[processes.server]
+argv = ["cargo", "run"]
+cwd = "server"
+ports = { PORT = "http" }
+listen = "http"
+"#;
+
+/// Returns a workspace `triage` in `dir` with the checkouts `api` and
+/// `web`, each with the manifest [`SERVER`], and a workspace manifest whose
+/// process `proxy` runs in `web/` after `api-server`.
+fn two_checkouts(dir: &Path) -> Workspace {
+    let path = dir.join("triage");
+    let checkouts = ["api", "web"]
+        .iter()
+        .map(|folder| {
+            std::fs::create_dir_all(path.join(folder).join("server")).unwrap();
+            write(path.join(folder).join("mxv.toml"), SERVER);
+            Checkout::new(
+                (*folder).to_owned(),
+                &dir.join("source").join(folder),
+                path.join(folder),
+                "triage".to_owned(),
+                "refs/remotes/origin/main".to_owned(),
+            )
+        })
+        .collect();
+    write(
+        path.join("mxv.toml"),
+        "[processes.proxy]\nargv = [\"caddy\", \"run\"]\ncwd = \"web\"\ndepends_on = [\"api-server\"]\n",
+    );
+    Workspace::new("triage".parse().unwrap(), path, checkouts)
+}
+
+#[test]
+fn a_merged_manifest_maps_onto_apps_and_ports_whose_names_do_not_clash() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = two_checkouts(&dir.path().canonicalize().unwrap());
+    let manifest = workspace.manifest().unwrap().unwrap();
+    let ports = BTreeMap::from([
+        ("api-http".to_owned(), 41_000),
+        ("web-http".to_owned(), 41_001),
+    ]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let roots = roots(&workspace);
+    let caller = CallerEnvironment::default();
+    let built = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: &workspace.path,
+        roots,
+        ports: &ports,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    })
+    .unwrap();
+    let names: BTreeSet<String> = built
+        .plan
+        .apps()
+        .iter()
+        .map(|app| app.name.to_string())
+        .collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["api-server", "web-server", "proxy"].map(str::to_owned))
+    );
+    let mut port_names = BTreeSet::new();
+    for app in built.plan.apps() {
+        for port in app.ports.keys() {
+            assert!(port_names.insert(port.to_string()), "{port} twice");
+        }
+    }
+    assert_eq!(
+        port_names,
+        BTreeSet::from(["api-http", "web-http"].map(str::to_owned))
+    );
+    // The workspace manifest's process `proxy` runs in the checkout `web`,
+    // so its source is that checkout.
+    for (app_name, source, cwd) in [
+        ("api-server", workspace.path.join("api"), Some("server")),
+        ("web-server", workspace.path.join("web"), Some("server")),
+        ("proxy", workspace.path.join("web"), None),
+    ] {
+        let plan = built.plan.app(&app(app_name)).unwrap();
+        assert_eq!(plan.source, Source::checkout(source, None), "{app_name}");
+        assert_eq!(
+            plan.processes[0].cwd.as_deref(),
+            cwd.map(Path::new),
+            "{app_name}"
+        );
+    }
+    assert_eq!(
+        built.plan.app(&app("proxy")).unwrap().depends,
+        vec![app("api-server")]
+    );
+}
+
+#[test]
+fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
+    let mut process = manifest(APP);
+    process.processes.get_mut("api").unwrap().cwd = PathBuf::from("/elsewhere");
+    let ports = BTreeMap::from([("api".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let roots = vec![PathBuf::from("/work/triage/app")];
+    let caller = CallerEnvironment::default();
+    let Err(unrunnable) = build(&Inputs {
+        manifest: &process,
+        workspace: &name,
+        id: &id,
+        checkout: Path::new("/work/triage/app"),
+        roots,
+        ports: &ports,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    }) else {
+        panic!("a directory outside every root built a plan");
+    };
+    assert_eq!(unrunnable.unit.as_deref(), Some("api"));
+    assert!(
+        unrunnable.message.contains("/elsewhere"),
+        "{}",
+        unrunnable.message
+    );
+}
+
+/// Returns the source and the `cwd` that the plan gives the process `api`
+/// of [`APP`] when its `cwd` is `cwd`, in a workspace whose checkouts are
+/// `api` and `web`.
+fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::Unrunnable> {
+    let mut manifest = manifest(APP);
+    manifest.processes.get_mut("api").unwrap().cwd = PathBuf::from(cwd);
+    let ports = BTreeMap::from([("api".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let built = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: Path::new("/work/triage"),
+        roots: vec![
+            PathBuf::from("/work/triage/api"),
+            PathBuf::from("/work/triage/web"),
+            PathBuf::from("/work/triage"),
+        ],
+        ports: &ports,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    })?;
+    let plan = built.plan.app(&app("api")).unwrap();
+    Ok((plan.source.clone(), plan.processes[0].cwd.clone()))
+}
+
+#[test]
+fn a_cwd_that_passes_through_one_checkout_into_another_runs_from_the_other() {
+    assert_eq!(
+        placed_at("/work/triage/api/../web/src").unwrap(),
+        (
+            Source::checkout(PathBuf::from("/work/triage/web"), None),
+            Some(PathBuf::from("src"))
+        )
+    );
+}
+
+#[test]
+fn a_cwd_that_leaves_the_workspace_is_unrunnable() {
+    let Err(unrunnable) = placed_at("/work/triage/../elsewhere") else {
+        panic!("a cwd outside the workspace built a plan");
+    };
+    assert_eq!(unrunnable.unit.as_deref(), Some("api"));
 }

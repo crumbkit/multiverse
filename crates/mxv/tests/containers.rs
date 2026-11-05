@@ -1183,3 +1183,112 @@ fn the_commands_of_the_volume_not_moved_hint_move_the_data_so_that_up_starts_on_
     let (_, marker) = docker(&["exec", &setup.container_name("web"), "cat", "/srv/marker"]);
     assert_eq!(marker, "kept");
 }
+
+#[test]
+fn add_refuses_while_a_volume_holds_data_under_its_old_name_and_its_hint_moves_the_data() {
+    if !docker_runs("add_refuses_while_a_volume_holds_data") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-renamed", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-renamed"]);
+    assert_eq!(exit, 0, "{document}");
+    let (wrote, _) = docker(&[
+        "exec",
+        &setup.container_name("web"),
+        "sh",
+        "-c",
+        "echo kept > /srv/marker",
+    ]);
+    assert!(wrote);
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-renamed"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let add = [
+        "add",
+        "-w",
+        "mxvtest-renamed",
+        "--repo",
+        "app",
+        "--as",
+        "other",
+    ];
+    let (exit, document) = setup.json(&add);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::volume::renamed", "{document}");
+    assert_eq!(
+        document["fields"]["old_volumes"][0],
+        setup.volume_name("srv")
+    );
+    assert_eq!(
+        document["fields"]["new_volumes"][0],
+        setup.volume_name("app-srv")
+    );
+    assert!(
+        !setup
+            .root()
+            .join("workspaces/mxvtest-renamed/other")
+            .exists()
+    );
+
+    // The hint names the copy and the deletion of the old volume as its
+    // first three commands, in backticks.
+    let hint = document["recovery"]["text"].as_str().unwrap();
+    let commands: Vec<&str> = hint.split('`').skip(1).step_by(2).take(3).collect();
+    assert!(commands[0].starts_with("docker volume create"), "{hint}");
+    assert!(commands[2].starts_with("docker volume rm"), "{hint}");
+    for command in commands {
+        let output = Command::new("sh")
+            .args(["-c", command])
+            .env("PATH", PATH)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+    }
+
+    let (exit, document) = setup.json(&add);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-renamed"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, marker) = docker(&[
+        "exec",
+        &setup.container_name("app-web"),
+        "cat",
+        "/srv/marker",
+    ]);
+    assert_eq!(marker, "kept");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-renamed"]);
+    assert_eq!(exit, 0, "{document}");
+}
+
+#[test]
+fn add_leaves_alone_a_volume_of_the_workspace_manifest_whose_name_it_keeps() {
+    if !docker_runs("add_leaves_alone_a_volume_of_the_workspace_manifest") {
+        return;
+    }
+    // The checkout's mxv.toml and the workspace manifest both declare the
+    // volume `srv`, and the workspace manifest is the one that runs.
+    let setup = Setup::new("mxvtest-kept-volume", &web());
+    let shared = setup.root().join("workspaces/mxvtest-kept-volume/mxv.toml");
+    write(&shared, &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-kept-volume"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-kept-volume"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.volumes(), [setup.volume_name("srv")]);
+
+    let next = setup.root().join("next.toml");
+    write(&next, &web());
+    let (exit, document) = setup.json(&[
+        "add",
+        "-w",
+        "mxvtest-kept-volume",
+        "--repo",
+        "app",
+        "--as",
+        "other",
+        "--manifest",
+        "next.toml",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.volumes(), [setup.volume_name("srv")]);
+}

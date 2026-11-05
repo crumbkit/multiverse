@@ -1,0 +1,19 @@
+Add a clone of a repository to a workspace, on the workspace's branch
+
+Usage: mxv add [OPTIONS] --repo <PATH>
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+      --repo <PATH>            The git repository to check out, or any directory inside it
+      --as <FOLDER>            The checkout's folder, which defaults to the repository's name
+      --no-clone               Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
+      --manifest <FILE>        Copy FILE into the workspace as its workspace manifest once it has the new checkout, with paths relative to the workspace's directory; a workspace of one checkout with a workspace manifest needs it
+      --dry-run                Report what the command would change, and change nothing
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv add -w triage --repo web --dry-run
+
+Effects: additive, not idempotent, open-world.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv add --help` describes them.
+Next: mxv add --help explains each column.

@@ -210,6 +210,36 @@ impl PathGlob {
             .filter(|name| !name.contains(['*', '?']))
     }
 
+    /// Returns the glob that this glob, written relative to the directory
+    /// of a workspace with several checkouts, applies inside the checkout
+    /// whose folder is `folder`, or `None` when it applies to none of that
+    /// checkout's paths. A glob with no `/` but a trailing one, such as
+    /// `coverage/`, and a glob that starts with `**`, such as
+    /// `**/coverage/`, apply in every checkout as written. Another glob
+    /// applies in the checkouts whose folder its first component matches,
+    /// with that component left out and still anchored at the checkout's
+    /// root, so `api/data/` is `data/` at the root of the checkout `api`.
+    #[must_use]
+    pub fn within(&self, folder: &str) -> Option<Self> {
+        if !self.anchored || self.components.first().is_some_and(|first| first == "**") {
+            return Some(self.clone());
+        }
+        let (first, rest) = self.components.split_first()?;
+        if rest.is_empty() || !component_matches(first, folder) {
+            return None;
+        }
+        let mut text = rest.join("/");
+        if self.directory {
+            text.push('/');
+        }
+        Some(Self {
+            text,
+            components: rest.to_vec(),
+            directory: self.directory,
+            anchored: true,
+        })
+    }
+
     /// Reports whether the glob matches `path`, a path relative to the
     /// repository's root as `git status` prints it, with a trailing `/` for
     /// a directory.

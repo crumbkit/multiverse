@@ -156,3 +156,193 @@ fn a_record_whose_checkout_holds_the_workspace_manifests_path_has_no_workspace_m
     assert_eq!(inputs.source(), ManifestSource::Repository);
     assert!(!workspace.manifest_trusted());
 }
+
+/// Returns a workspace with the checkouts `folders`, each a directory.
+fn several(dir: &Path, folders: &[&str]) -> Workspace {
+    let path = dir.join("triage");
+    let checkouts = folders
+        .iter()
+        .map(|folder| {
+            fs::create_dir_all(path.join(folder)).unwrap();
+            Checkout::new(
+                (*folder).to_owned(),
+                &dir.join("source").join(folder),
+                path.join(folder),
+                "triage".to_owned(),
+                "refs/remotes/origin/main".to_owned(),
+            )
+        })
+        .collect();
+    Workspace::new("triage".parse().unwrap(), path, checkouts)
+}
+
+const API: &str = r#"ports = ["http"]
+
+[processes.server]
+argv = ["cargo", "run"]
+cwd = "server"
+env = { SELF = "http://127.0.0.1:{port.http}/{{x}}" }
+ports = { PORT = "http" }
+listen = "http"
+depends_on = ["db"]
+
+[containers.db]
+image = "postgres:16.4"
+ports = { 5432 = "http" }
+"#;
+
+#[test]
+fn a_workspace_with_several_checkouts_merges_their_manifests_with_prefixed_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    fs::create_dir_all(workspace.path.join("api/server")).unwrap();
+    write(
+        workspace.path.join("api/mxv.toml"),
+        API.replace("ports = { 5432 = \"http\" }\n", ""),
+    );
+    write(
+        workspace.path.join("web/mxv.toml"),
+        "ports = [\"http\"]\n\n[processes.server]\nargv = [\"npm\", \"run\", \"dev\"]\nports = { PORT = \"http\", API = \"http\" }\n",
+    );
+    let inputs = workspace.manifest_inputs();
+    assert_eq!(inputs.source(), ManifestSource::Merged);
+    assert_eq!(inputs.files().len(), 2);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(manifest.ports, ["api-http", "web-http"]);
+    let server = &manifest.processes["api-server"];
+    assert_eq!(server.cwd, workspace.path.join("api/server"));
+    assert_eq!(server.ports["PORT"], "api-http");
+    assert_eq!(server.listen.as_deref(), Some("api-http"));
+    assert_eq!(server.depends_on, ["api-db"]);
+    assert!(server.env["SELF"] == "http://127.0.0.1:{port.api-http}/{{x}}");
+    assert!(manifest.containers.contains_key("api-db"));
+    assert_eq!(
+        manifest.processes["web-server"].cwd,
+        workspace.path.join("web")
+    );
+}
+
+#[test]
+fn the_workspace_manifest_joins_the_checkouts_with_its_names_as_written_and_paths_from_the_workspace()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), "ports = [\"http\"]\n");
+    write(
+        workspace.manifest_file(),
+        "ports = [\"proxy\"]\n\n[processes.proxy]\nargv = [\"caddy\"]\ncwd = \"web\"\nenv = { API = \"{port.api-http}\" }\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(manifest.ports, ["proxy", "api-http"]);
+    assert_eq!(manifest.processes["proxy"].cwd, workspace.path.join("web"));
+}
+
+#[test]
+fn two_equal_merged_names_fail_with_a_name_clash_that_names_both_files() {
+    let dir = tempfile::tempdir().unwrap();
+    // The checkout `a-b` with the port `c`, and the checkout `a` with the
+    // port `b-c`, both give `a-b-c`.
+    let workspace = several(dir.path(), &["a-b", "a"]);
+    write(workspace.path.join("a-b/mxv.toml"), "ports = [\"c\"]\n");
+    write(workspace.path.join("a/mxv.toml"), "ports = [\"b-c\"]\n");
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(error.path, workspace.path.join("a/mxv.toml"));
+    assert_eq!(
+        error.problem,
+        ManifestProblem::NameClash {
+            name: "a-b-c".to_owned(),
+            other: workspace.path.join("a-b/mxv.toml"),
+        }
+    );
+}
+
+/// A manifest whose container `db` mounts the volume `data`, which phase
+/// names `<workspace>.data` for every app of the workspace.
+const DB: &str = "[containers.db]\nimage = \"postgres:16.4\"\nvolumes = { data = \"/var/lib/postgresql/data\" }\n\n[containers.replica]\nimage = \"postgres:16.4\"\nvolumes = { data = \"/var/lib/postgresql/data\" }\n";
+
+#[test]
+fn each_checkouts_volumes_carry_its_prefix_so_two_checkouts_never_share_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), DB);
+    write(workspace.path.join("web/mxv.toml"), DB);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    let volumes = |name: &str| {
+        manifest.containers[name]
+            .volumes
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(volumes("api-db"), ["api-data"]);
+    assert_eq!(volumes("api-replica"), ["api-data"]);
+    assert_eq!(volumes("web-db"), ["web-data"]);
+}
+
+#[test]
+fn a_volume_that_two_files_declare_once_prefixed_fails_with_a_name_clash() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), DB);
+    write(
+        workspace.path.join("mxv.toml"),
+        "[containers.cache]\nimage = \"redis:7.4\"\nvolumes = { api-data = \"/data\" }\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(
+        error.problem,
+        ManifestProblem::NameClash {
+            name: "api-data".to_owned(),
+            other: workspace.path.join("mxv.toml"),
+        }
+    );
+}
+
+#[test]
+fn a_unit_and_a_port_may_share_a_merged_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(
+        workspace.path.join("api/mxv.toml"),
+        "ports = [\"api\"]\n\n[processes.api]\nargv = [\"true\"]\nports = { PORT = \"api\" }\n",
+    );
+    assert!(
+        workspace
+            .manifest()
+            .unwrap()
+            .unwrap()
+            .processes
+            .contains_key("api-api")
+    );
+}
+
+#[test]
+fn a_merged_name_longer_than_a_manifest_name_may_be_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let long = "a".repeat(60);
+    let workspace = several(dir.path(), &[long.as_str(), "web"]);
+    write(
+        workspace.path.join(&long).join("mxv.toml"),
+        "ports = [\"http-port\"]\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert!(
+        matches!(error.problem, ManifestProblem::Invalid { ref message } if message.contains("longer than 64")),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_checkout_prefix_is_its_folder_in_lower_case_with_other_characters_written_as_dashes() {
+    assert_eq!(crate::lookup::checkout_prefix("Web.App"), "web-app");
+    assert_eq!(crate::lookup::checkout_prefix("api_v2"), "api_v2");
+}
+
+#[test]
+fn a_workspace_with_one_checkout_keeps_its_names_without_a_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(workspace.path.join("app/mxv.toml"), "ports = [\"api\"]\n");
+    assert_eq!(workspace.manifest().unwrap().unwrap().ports, ["api"]);
+    assert_eq!(workspace.manifest_inputs().files().len(), 1);
+}

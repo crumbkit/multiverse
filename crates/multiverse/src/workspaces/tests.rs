@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use crate::backend::{Backend, Changes, Listed, Repository};
+use crate::backend::{Backend, Changes, Head, Listed, Repository};
 use crate::disposable::PathGlob;
 use crate::error::Error;
 use crate::git::Git;
@@ -733,6 +733,9 @@ impl Backend for Scripted {
     }
     fn changes(&self, checkout: &Path) -> Result<Changes, Error> {
         Git.changes(checkout)
+    }
+    fn head(&self, checkout: &Path) -> Result<Head, Error> {
+        Git.head(checkout)
     }
     fn tracks(&self, checkout: &Path, path: &str) -> Result<bool, Error> {
         Git.tracks(checkout, path)
