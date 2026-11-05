@@ -133,9 +133,10 @@ pub enum PhaseError {
     VolumeOwner {
         /// The app.
         app: AppName,
-        /// The user that the app's containers run as, from the plan's
-        /// run-as user or the image's `USER`.
-        user: String,
+        /// The plan's run-as user that the app's containers run as, or
+        /// `None` when the user came from the image's `USER`. The image's
+        /// author controls that text, so phase does not repeat it.
+        user: Option<String>,
         /// What went wrong.
         problem: VolumeOwnerProblem,
     },
@@ -361,18 +362,26 @@ impl fmt::Display for PhaseError {
                 "the secret files of {app}/{process} would belong to root; set its secret_owner to the uid:gid the app reads them as, such as 999:999 for an image that switches to user 999, or set its secret_delivery = \"env\""
             ),
             Self::VolumeOwner { app, user, problem } => {
+                let user = match user {
+                    Some(user) => {
+                        format!("the user {user:?} that the containers of {app} run as")
+                    }
+                    None => format!(
+                        "the user named by the image's USER, which the containers of {app} run as,"
+                    ),
+                };
                 match problem {
                     VolumeOwnerProblem::ResolvesToRoot => write!(
                         formatter,
-                        "the user {user} that the containers of {app} run as is uid 0 in its image, so phase does not give the app's volumes to it"
+                        "{user} is uid 0 in its image, so phase does not give the app's volumes to it"
                     )?,
                     VolumeOwnerProblem::IdFailed { status } => write!(
                         formatter,
-                        "phase could not resolve the user {user} that the containers of {app} run as to a numeric uid and gid: id in the app's image exited with status {status}"
+                        "phase could not resolve {user} to a numeric uid and gid: id in the app's image exited with status {status}"
                     )?,
                     VolumeOwnerProblem::IdUnreadable => write!(
                         formatter,
-                        "phase could not resolve the user {user} that the containers of {app} run as to a numeric uid and gid: id in the app's image did not print one number"
+                        "phase could not resolve {user} to a numeric uid and gid: id in the app's image did not print one number"
                     )?,
                 }
                 formatter.write_str(

@@ -189,6 +189,29 @@ fn an_owner_of_keep_leaves_the_volume_owned_by_root() {
 }
 
 #[test]
+fn a_plans_owner_of_root_gives_a_volume_that_another_user_owned_to_root() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    world.up(&world.plan(vec![db.clone()]));
+    assert_eq!(world.data_owner(), "1000:1000");
+    db.container.owner = Some("0:0".to_owned());
+
+    let report = world.up(&world.plan(vec![db]));
+
+    assert!(
+        !matches!(outcome(&report, "db"), AppOutcome::Errored { .. }),
+        "{report:?}"
+    );
+    assert_eq!(world.data_owner(), "0:0");
+    assert_eq!(world.recorded_owner(), Some("0:0".parse().unwrap()));
+    world.down();
+}
+
+#[test]
 fn an_images_user_that_is_a_name_resolves_to_its_numbers_in_the_image() {
     if !ready() {
         return;
@@ -232,7 +255,8 @@ fn a_user_whose_name_resolves_to_uid_0_is_refused_and_nothing_starts() {
     match outcome(&report, "db") {
         AppOutcome::Errored { code, message, .. } => {
             assert_eq!(code, "phase::container::volume_owner_root");
-            assert!(message.contains("toor"), "{message}");
+            assert!(message.contains("the image's USER"), "{message}");
+            assert!(!message.contains("toor"), "{message}");
         }
         other => panic!("{other:?}"),
     }
@@ -398,4 +422,42 @@ fn what_id_prints_in_the_image_never_reaches_the_report() {
         }
         assert!(world.helpers().is_empty(), "{:?}", world.helpers());
     }
+}
+
+#[test]
+fn an_images_user_that_holds_an_escape_sequence_never_reaches_the_report() {
+    if !ready() {
+        return;
+    }
+    // Docker resolves the user in the image's /etc/passwd before `id`
+    // runs, so the name with the escape sequence is a real user there,
+    // and the image's `id` fails as one would for a name it cannot read.
+    let Some(image) = BuiltImage::build(&format!(
+        "FROM {IMAGE}\n\
+         RUN printf 'ev\\033[31mil:x:1234:1234::/:/bin/sh\\n' >> /etc/passwd && \
+         rm /bin/id && printf '#!/bin/sh\\nexit 3\\n' > /bin/id && chmod 755 /bin/id\n\
+         USER ev\u{1b}[31mil\n"
+    )) else {
+        return;
+    };
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("[31m"), "{json}");
+    assert!(!json.contains("\\u001b"), "{json}");
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, message, .. } => {
+            assert_eq!(code, "phase::container::volume_owner_unresolved");
+            assert!(message.contains("the image's USER"), "{message}");
+            assert!(message.contains("status 3"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
 }

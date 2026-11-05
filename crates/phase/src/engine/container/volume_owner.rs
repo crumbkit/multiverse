@@ -6,12 +6,18 @@
 //! The owner comes from the same rule as the owner of the secret files,
 //! [`secrets::chosen_owner`]: the app's `owner`, or else its run-as user,
 //! or else the image's `USER`. `owner = "keep"` leaves every volume as it
-//! is, and so does an owner that is root. A user that is a name, such as
-//! `postgres`, is resolved to numbers by running `id -u` and `id -g` in
-//! the app's image as that user, because the helper that sets the owner
-//! runs busybox, whose `/etc/passwd` is not the image's. A name that
-//! resolves to uid 0 is refused: only a plan's numeric `owner` can name
-//! root.
+//! is. A plan's `owner` of `0:0` gives the volumes to root, but a run-as
+//! user or an image `USER` that is root leaves them as they are. A user
+//! that is a name, such as `postgres`, is resolved to numbers by running
+//! `id -u` and `id -g` in the app's image as that user, because the
+//! helper that sets the owner runs busybox, whose `/etc/passwd` is not
+//! the image's. A name that resolves to uid 0 is refused: only a plan's
+//! numeric `owner` can name root.
+//!
+//! The image's author controls the text of its `USER`, which may hold a
+//! newline or a terminal escape sequence, so no error repeats it. An error
+//! about a user from the image names the image's `USER` as its source, and
+//! an error about the plan's run-as user prints it quoted.
 //!
 //! Each helper is a container that phase creates, starts, waits for and
 //! removes: `docker create`, `docker start`, `docker wait` and `docker
@@ -50,7 +56,7 @@ use crate::engine::container::names::{
     WORKSPACE_ID_LABEL,
 };
 use crate::engine::container::secrets::{self, run_as};
-use crate::error::VolumeOwnerProblem;
+use crate::error::{PhaseError, VolumeOwnerProblem};
 use crate::name::{AppName, WorkspaceId};
 use crate::plan::AppPlan;
 use crate::plan::container::KEEP_OWNER;
@@ -77,13 +83,35 @@ const MOUNT: &str = "/volume";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Wanted {
     /// The step leaves the volumes as they are: the plan says `keep`, or
-    /// the owner would be root.
+    /// the app runs as root and the plan names no owner.
     Skip,
     /// The step gives each volume to this numeric owner.
     Owner(VolumeOwner),
     /// The app runs as this user, which names a user or group, so the step
     /// resolves it to numbers in the app's image first.
-    Resolve(String),
+    Resolve(RunAs),
+}
+
+/// A user that the app's containers run as and that names a user or group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunAs {
+    /// The user, in Docker's `USER[:GROUP]` form.
+    pub(crate) user: String,
+    /// Whether the user is the image's `USER`, whose text no error repeats.
+    pub(crate) from_image: bool,
+}
+
+impl RunAs {
+    /// Returns the error that says `problem` stopped phase resolving this
+    /// user for `app`. It holds the user's text only when the plan named
+    /// the user.
+    pub(crate) fn error(self, app: AppName, problem: VolumeOwnerProblem) -> PhaseError {
+        PhaseError::VolumeOwner {
+            app,
+            user: (!self.from_image).then_some(self.user),
+            problem,
+        }
+    }
 }
 
 /// Reports whether the owner of `app`'s volumes depends on its image's
@@ -103,9 +131,15 @@ pub(crate) fn wanted(app: &AppPlan, image_user: &str) -> Wanted {
         return Wanted::Skip;
     };
     match text.parse::<VolumeOwner>() {
-        Ok(owner) if owner.is_root() => Wanted::Skip,
+        // Only the plan's own owner gives a volume to root. A run-as user
+        // or an image `USER` of root means the app can write the volume
+        // as Docker made it.
+        Ok(owner) if owner.is_root() && explicit.is_none() => Wanted::Skip,
         Ok(owner) => Wanted::Owner(owner),
-        Err(_) => Wanted::Resolve(text),
+        Err(_) => Wanted::Resolve(RunAs {
+            user: text,
+            from_image: explicit.is_none() && app.container.user.is_none(),
+        }),
     }
 }
 

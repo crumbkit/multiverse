@@ -5,8 +5,9 @@
 
 use std::path::PathBuf;
 
-use super::{HELPER_IMAGE, Wanted, chown_args, helper_of, id_args, parse_id, wanted};
+use super::{HELPER_IMAGE, RunAs, Wanted, chown_args, helper_of, id_args, parse_id, wanted};
 use crate::engine::container::names::{Identity, Scope, VolumeKey};
+use crate::error::VolumeOwnerProblem;
 use crate::name::{AppName, WorkspaceId};
 use crate::plan::{AppPlan, RunnerKind};
 use crate::record::run::VolumeOwner;
@@ -53,20 +54,24 @@ fn the_volume_owner_is_the_plans_owner_then_the_run_as_user_then_the_images_user
 }
 
 #[test]
-fn keep_root_and_an_image_that_runs_as_root_leave_the_volumes_alone() {
+fn keep_and_a_run_as_user_or_image_user_of_root_leave_the_volumes_alone() {
     assert_eq!(
         wanted(&db(Some("keep"), Some("1000:1000")), "70"),
         Wanted::Skip
     );
-    assert_eq!(
-        wanted(&db(Some("0:0"), Some("1000:1000")), "70"),
-        Wanted::Skip
-    );
-    assert_eq!(wanted(&db(Some("0"), None), "70"), Wanted::Skip);
-    for user in ["", "0", "0:0", "root", "root:root"] {
+    for user in ["", "0", "0:0", "00", "root", "root:root"] {
         assert_eq!(wanted(&db(None, Some(user)), "70"), Wanted::Skip, "{user}");
         assert_eq!(wanted(&db(None, None), user), Wanted::Skip, "{user}");
     }
+}
+
+#[test]
+fn a_plans_owner_of_root_gives_the_volumes_to_root() {
+    assert_eq!(
+        wanted(&db(Some("0:0"), Some("1000:1000")), "70"),
+        owner("0:0")
+    );
+    assert_eq!(wanted(&db(Some("0"), None), "70"), owner("0"));
 }
 
 #[test]
@@ -78,12 +83,55 @@ fn a_plans_owner_of_root_with_another_group_still_sets_the_group() {
 fn a_user_that_is_a_name_is_resolved_in_the_image() {
     assert_eq!(
         wanted(&db(None, None), "postgres"),
-        Wanted::Resolve("postgres".to_owned())
+        Wanted::Resolve(RunAs {
+            user: "postgres".to_owned(),
+            from_image: true,
+        })
     );
     assert_eq!(
-        wanted(&db(None, Some("1000:staff")), ""),
-        Wanted::Resolve("1000:staff".to_owned())
+        wanted(&db(None, Some("1000:staff")), "postgres"),
+        Wanted::Resolve(RunAs {
+            user: "1000:staff".to_owned(),
+            from_image: false,
+        })
     );
+}
+
+#[test]
+fn an_error_about_the_images_user_names_its_source_and_leaves_out_its_text() {
+    let image_user = "ev\nil\u{1b}[31m";
+    let Wanted::Resolve(run_as) = wanted(&db(None, None), image_user) else {
+        panic!("the image's user should need resolving");
+    };
+    for problem in [
+        VolumeOwnerProblem::ResolvesToRoot,
+        VolumeOwnerProblem::IdFailed { status: 3 },
+        VolumeOwnerProblem::IdUnreadable,
+    ] {
+        let message = run_as
+            .clone()
+            .error("db".parse().unwrap(), problem)
+            .to_string();
+
+        assert!(message.contains("the image's USER"), "{message}");
+        assert!(!message.contains('\n'), "{message:?}");
+        assert!(!message.contains('\u{1b}'), "{message:?}");
+        assert!(!message.contains("[31m"), "{message:?}");
+    }
+}
+
+#[test]
+fn an_error_about_the_plans_run_as_user_quotes_it() {
+    let Wanted::Resolve(run_as) = wanted(&db(None, Some("ev\nil")), "") else {
+        panic!("the run-as user should need resolving");
+    };
+
+    let message = run_as
+        .error("db".parse().unwrap(), VolumeOwnerProblem::ResolvesToRoot)
+        .to_string();
+
+    assert!(message.contains(r#"the user "ev\nil" that"#), "{message}");
+    assert!(!message.contains('\n'), "{message:?}");
 }
 
 #[test]

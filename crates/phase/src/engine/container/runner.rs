@@ -658,21 +658,22 @@ impl ComposeRunner {
             }
             None => "",
         };
-        let user = match volume_owner::wanted(app, image_user) {
+        let run_as = match volume_owner::wanted(app, image_user) {
             volume_owner::Wanted::Skip => return Ok(None),
             volume_owner::Wanted::Owner(owner) => return Ok(Some(owner)),
-            volume_owner::Wanted::Resolve(user) => user,
+            volume_owner::Wanted::Resolve(run_as) => run_as,
         };
-        let resolved =
-            volume_owner::resolve(scope, image.as_str(), &user, start.deadline, start.cancel)
-                .map_err(|error| halt(&error))?;
-        resolved.map(Some).map_err(|problem| {
-            Halt::Failed(PhaseError::VolumeOwner {
-                app: app.name.clone(),
-                user,
-                problem,
-            })
-        })
+        let resolved = volume_owner::resolve(
+            scope,
+            image.as_str(),
+            &run_as.user,
+            start.deadline,
+            start.cancel,
+        )
+        .map_err(|error| halt(&error))?;
+        resolved
+            .map(Some)
+            .map_err(|problem| Halt::Failed(run_as.error(app.name.clone(), problem)))
     }
 
     /// Waits until the container `inspected` of `process` is ready, as the
