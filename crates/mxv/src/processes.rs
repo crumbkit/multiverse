@@ -75,15 +75,15 @@ pub(crate) const PORTS_RESET: Document<Vec<PortRow>> = Document::new(
 
 /// A workspace that a process verb works on, with the store that holds its
 /// record and the run files of its processes.
-struct Context {
+pub(crate) struct Context {
     /// The store of the workspace records.
-    store: Store,
+    pub(crate) store: Store,
     /// The run files of every workspace's processes.
-    runs: Runs,
+    pub(crate) runs: Runs,
     /// The workspace.
-    workspace: Workspace,
+    pub(crate) workspace: Workspace,
     /// The processes that the command line names after the workspace.
-    processes: Vec<String>,
+    pub(crate) processes: Vec<String>,
 }
 
 impl Context {
@@ -102,7 +102,7 @@ impl Context {
 
 /// Returns the context of the workspace that `-w` names, or else of the
 /// one that holds the current directory, and the processes `processes`.
-fn context(
+pub(crate) fn context(
     environment: &Environment,
     workspace: Option<&String>,
     processes: &[String],
@@ -216,7 +216,7 @@ pub(crate) fn refuse_unfinished(workspace: &Workspace) -> Result<(), MxvFailure>
 
 /// Returns the workspace's manifest, or the failure of a workspace with an
 /// unfinished checkout or of a checkout without a manifest.
-fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumbkit::Error> {
+pub(crate) fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumbkit::Error> {
     refuse_unfinished(workspace)?;
     Ok(
         manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {

@@ -66,9 +66,10 @@ pub use crate::record::{
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
-    DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, LogOutput, MOST_FOLLOW_BYTES,
-    MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus, RenamedVolume, Runs,
-    START_GRACE, STOP_GRACE, TAIL_LINES, Unstoppable, UpOutcome, Volumes, Waited, tail,
+    DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Follower, KILL_WAIT, Kind, LogOutput,
+    MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus,
+    RenamedVolume, Runs, START_GRACE, STOP_GRACE, TAIL_LINES, Unstoppable, UpOutcome, Volumes,
+    Waited, tail,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::template::{

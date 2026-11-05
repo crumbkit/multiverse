@@ -832,6 +832,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "signal-hook",
  "snapbox",
  "tempfile",
  "toml",
