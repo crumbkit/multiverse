@@ -246,6 +246,7 @@ mod tests {
         let read = status_line(&mut response, deadline, &Cancel::new());
 
         assert_eq!(read, Err(Failure::TimedOut));
+        assert!(!response.slices.is_empty());
         // The read sets each limit from the time left a moment before the
         // fake measures it, so a limit may exceed the measured time left by
         // that moment, which a busy machine stretches.

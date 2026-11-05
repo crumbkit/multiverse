@@ -21,7 +21,7 @@ use crate::clock::now;
 use crate::engine::containers::{ContainerStop, ContainerStopped};
 use crate::engine::host::{HostStop, HostStopped};
 use crate::engine::run::order::stopping_order;
-use crate::engine::run::{Engine, PortHolder, port_holder};
+use crate::engine::run::{Engine, LookupFailed, PortHolder, port_holder};
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::ProcessPlan;
@@ -131,7 +131,7 @@ fn stop_host(
             }
             if let Some(listen) = &target.listen {
                 let group = target.host.as_ref().map_or(0, |host| host.group);
-                match port_holder(engine.host, group, listen.port) {
+                match port_holder(engine.host, group, listen.port, LookupFailed::Report) {
                     PortHolder::Free => {}
                     PortHolder::Group(pid) | PortHolder::Other(pid) => {
                         notes.push(Note::detached_listener(

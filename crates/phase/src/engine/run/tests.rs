@@ -54,6 +54,9 @@ enum Listener {
     /// A process that phase may not read holds the port once something
     /// has been launched.
     UnreadableAfterLaunch,
+    /// The listener cannot be found once something has been launched, and
+    /// a bind then finds the port in use.
+    UnknownHeldAfterLaunch,
 }
 
 /// A fake host runner, which keeps its processes in memory.
@@ -247,13 +250,20 @@ impl HostRunner for FakeHost {
             Some(Listener::HeldAfterLaunch(pid)) if !state.launches.is_empty() => {
                 Ok(Some(held(Some(*pid))))
             }
+            Some(
+                Listener::HeldAfterLaunch(_)
+                | Listener::UnreadableAfterLaunch
+                | Listener::UnknownHeldAfterLaunch,
+            ) if state.launches.is_empty() => Ok(Some(held(None))),
             Some(Listener::HeldAfterLaunch(_) | Listener::UnreadableAfterLaunch) => {
                 Ok(Some(held(None)))
             }
             Some(Listener::Own) => Ok(Some(held(state.alive.last().copied()))),
-            Some(Listener::Unknown | Listener::UnknownHeld) => Err(PhaseError::ProcessTable {
-                message: "the test cannot find listeners".to_owned(),
-            }),
+            Some(Listener::Unknown | Listener::UnknownHeld | Listener::UnknownHeldAfterLaunch) => {
+                Err(PhaseError::ProcessTable {
+                    message: "the test cannot find listeners".to_owned(),
+                })
+            }
         }
     }
 
@@ -261,7 +271,9 @@ impl HostRunner for FakeHost {
         let state = self.state.borrow();
         Ok(match state.listeners.get(&port) {
             Some(Listener::Held(_) | Listener::UnknownHeld | Listener::Unreadable) => true,
-            Some(Listener::UnreadableAfterLaunch) => !state.launches.is_empty(),
+            Some(Listener::UnreadableAfterLaunch | Listener::UnknownHeldAfterLaunch) => {
+                !state.launches.is_empty()
+            }
             _ => false,
         })
     }
@@ -1454,6 +1466,26 @@ fn a_port_that_a_process_phase_may_not_read_holds_after_readiness_is_noted_and_k
         notes(&report, "api").first(),
         Some(Note::ListenerUnknown { .. })
     ));
+}
+
+#[test]
+fn a_failed_lookup_after_readiness_is_noted_with_its_cause_even_when_the_port_is_in_use() {
+    let world = World::new();
+    world.host.listen(41_000, Listener::UnknownHeldAfterLaunch);
+    let plan = plan(vec![host_app("api", Some(41_000), &[])]);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::Started);
+    assert!(
+        matches!(
+            notes(&report, "api").first(),
+            Some(Note::ListenerUnknown { reason, .. })
+                if reason.contains("the test cannot find listeners")
+        ),
+        "{:?}",
+        notes(&report, "api")
+    );
 }
 
 #[test]

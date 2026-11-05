@@ -566,7 +566,7 @@ impl Op<'_, '_> {
         )?;
         let step = self.await_ready(app, process, &target, environment.as_ref(), lines);
         if let (Step::Ready, Some(listen)) = (&step, &listen) {
-            match port_holder(host, started.group, listen.port) {
+            match port_holder(host, started.group, listen.port, LookupFailed::Report) {
                 PortHolder::Free | PortHolder::Group(_) => {}
                 PortHolder::Other(Some(pid)) => {
                     return Ok(Step::Failed(StartProblem::foreign_listener(
@@ -595,7 +595,7 @@ impl Op<'_, '_> {
         notes: &mut Vec<Note>,
     ) -> Option<StartProblem> {
         // No process group is 0, so any holder is another process.
-        match port_holder(self.engine.host, 0, listen.port) {
+        match port_holder(self.engine.host, 0, listen.port, LookupFailed::Bind) {
             PortHolder::Free => None,
             PortHolder::Group(pid) | PortHolder::Other(pid) => Some(StartProblem::port_taken(
                 listen.name.clone(),
@@ -1146,17 +1146,37 @@ pub(super) enum PortHolder {
     Unknown(PhaseError),
 }
 
+/// What [`port_holder`] does when the listener lookup fails.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum LookupFailed {
+    /// A bind and a connect stand in for the lookup, as before a launch,
+    /// where a port in use must block the start.
+    Bind,
+    /// The holder is unknown, with the lookup's error as the reason, as
+    /// after readiness and after a stop, where only a note follows.
+    Report,
+}
+
 /// Returns what holds `port`, as seen from the process group `group`. The
 /// listener lookup cannot tell a port that nothing holds from one that a
 /// process phase may not read holds, so a bind and a connect decide
-/// between them, and stand in for the lookup when it fails.
-pub(super) fn port_holder(host: &dyn HostRunner, group: u32, port: u16) -> PortHolder {
+/// between them. When the lookup fails, `failed` says whether they stand
+/// in for it.
+pub(super) fn port_holder(
+    host: &dyn HostRunner,
+    group: u32,
+    port: u16,
+    failed: LookupFailed,
+) -> PortHolder {
     let failed = match host.listener(group, port) {
         Ok(Some(Holder::Group)) => return PortHolder::Group(None),
         Ok(Some(Holder::Descendant(pid))) => return PortHolder::Group(Some(pid)),
         Ok(Some(Holder::Other(Some(pid)))) => return PortHolder::Other(Some(pid)),
         Ok(Some(Holder::Other(None)) | None) => None,
-        Err(error) => Some(error),
+        Err(error) => match failed {
+            LookupFailed::Bind => Some(error),
+            LookupFailed::Report => return PortHolder::Unknown(error),
+        },
     };
     match (host.port_in_use(port), failed) {
         (Ok(true), _) => PortHolder::Other(None),

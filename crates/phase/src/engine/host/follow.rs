@@ -140,9 +140,7 @@ impl LogFollower {
         }
         Ok(lines)
     }
-}
 
-impl LogFollower {
     /// Returns the last complete lines of the log, up to its current end,
     /// once the reader is done with it. When more than
     /// [`MOST_FOLLOW_BYTES`] bytes are unread, the follower skips to the

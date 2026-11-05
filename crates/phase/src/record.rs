@@ -331,6 +331,11 @@ pub enum SweepOutcome {
     /// phase may not read the process that has the pid, as inside a
     /// sandbox, so it cannot tell whether that is the recorded process.
     /// `sweep` left it alone, and the run record keeps it unchanged.
+    ///
+    /// `sweep` also reports this for a host entry whose recorded pid or
+    /// group is 0 or 1, which phase never signals. Such an entry stays in
+    /// the run record, and every later `sweep` reports it again, until
+    /// someone removes it from the record by hand.
     Unknown,
     /// It was still there after `KILL` and the kill wait, or after Docker
     /// removed it, so the run record keeps it and `sweep` can try again.
