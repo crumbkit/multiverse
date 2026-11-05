@@ -47,6 +47,15 @@ const SPAWNER: &str =
 /// How long a test waits for something a keeper does.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// A loop of 1200 sleeps of 0.05 seconds, which stands in for an app that
+/// runs until it is stopped. It ends by itself after a minute or more, so
+/// that an app that a test fails to stop does not run on for long.
+macro_rules! spin {
+    () => {
+        "i=0; while [ $i -lt 1200 ]; do i=$((i + 1)); sleep 0.05; done"
+    };
+}
+
 #[test]
 fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -108,7 +117,7 @@ fn the_test_binary_starts_a_keeper_when_it_is_started_as_a_spawner() {
         return;
     };
     let fixture = Fixture::at(PathBuf::from(&args[at + 1]));
-    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let spec = fixture.spec(spin!(), Restart::No, Stop::default());
     let running = fixture.start(&spec).unwrap();
     println!(
         "spawned {} {} {} {}",
@@ -326,7 +335,16 @@ impl Fixture {
             environment,
             deadline,
         })
-        .map(|kept| Running { kept })
+        .map(|kept| {
+            // The guard of `Running` ends the keeper's session, so it
+            // tests nothing unless the keeper leads one.
+            assert_eq!(
+                live_session_of(kept.keeper.pid),
+                Some(kept.keeper.pid),
+                "the keeper leads no session of its own"
+            );
+            Running { kept }
+        })
     }
 
     /// Returns the state of the app in the run record, its process and its
@@ -364,7 +382,9 @@ impl Fixture {
     }
 }
 
-/// A started keeper. Dropping it kills the keeper's and the app's groups.
+/// A started keeper. Dropping it kills the keeper and every process of
+/// the keeper's session, and then checks that none is left, so that no app
+/// that the keeper started, or restarted, outlives its test.
 struct Running {
     kept: Kept,
 }
@@ -391,10 +411,109 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        // The keeper goes first, so that it starts no further app. Each app
+        // it starts or restarts leads a new group, which a kill of the
+        // first app's group misses, but every one of them stays in the
+        // session that the keeper leads.
         let _ = System.signal(&self.kept.keeper, Signal::KILL);
         let _ = System.signal(&self.kept.app, Signal::KILL);
-        let _ = self.kept.exited();
+        let deadline = now() + PATIENCE;
+        while self.kept.exited().is_none() && now() < deadline {
+            pause(POLL_INTERVAL);
+        }
+        let left = end_session(self.kept.keeper.pid, deadline);
+        // A second panic while the test unwinds would abort the test binary
+        // and hide the first, so only a test that passed checks.
+        if !std::thread::panicking() {
+            assert!(
+                left.is_empty(),
+                "the processes {left:?} of the keeper's session outlived the test"
+            );
+        }
     }
+}
+
+/// Kills every process of the session `session` until none is left or
+/// `deadline` passes, and returns the processes that are left.
+fn end_session(session: u32, deadline: Instant) -> Vec<u32> {
+    loop {
+        let members = session_members(session);
+        if members.is_empty() || now() >= deadline {
+            return members;
+        }
+        for pid in &members {
+            if let Some(pid) = rustix::process::Pid::from_raw(i32::try_from(*pid).unwrap()) {
+                let _ = rustix::process::kill_process(pid, Signal::KILL);
+            }
+        }
+        pause(POLL_INTERVAL);
+    }
+}
+
+/// Returns the processes of the session `session` other than its leader
+/// that have not ended. A zombie that waits to be reaped runs nothing, so
+/// it is left out.
+fn session_members(session: u32) -> Vec<u32> {
+    all_processes()
+        .into_iter()
+        .filter(|pid| *pid != session)
+        .filter(|pid| live_session_of(*pid) == Some(session))
+        .collect()
+}
+
+/// Returns the session of `pid`, or `None` when it has ended, is a zombie,
+/// or its session cannot be read.
+///
+/// On Linux it reads the state and the session from `/proc/<pid>/stat`,
+/// and never asks `getsid`. A process whose session lies outside this pid
+/// namespace, such as one in a container, reports the session 0, and
+/// rustix's `getsid` debug-asserts that a pid is above 0, so `getsid` of
+/// such a process panics. A session of 0 is returned as `None`.
+#[cfg(target_os = "linux")]
+fn live_session_of(pid: u32) -> Option<u32> {
+    use crate::record::process::stat_field;
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state: char = stat_field(&text, 3)?;
+    let session: u32 = stat_field(&text, 6)?;
+    (!matches!(state, 'Z' | 'X') && session > 0).then_some(session)
+}
+
+/// Returns the session of `pid`, or `None` when it has ended, is a zombie,
+/// or its session cannot be read.
+///
+/// On macOS it reads the process's status from libproc, where `SZOMB`
+/// (5) marks a zombie, and then asks `getsid`. macOS has no pid
+/// namespaces, and every process other than `kernel_task`, pid 0, which
+/// the listing leaves out, has a session of 1 or more, so the `Pid` that
+/// rustix builds from the answer is never 0.
+#[cfg(target_os = "macos")]
+fn live_session_of(pid: u32) -> Option<u32> {
+    const SZOMB: i32 = 5;
+    let raw = i32::try_from(pid).ok().filter(|raw| *raw > 0)?;
+    let info = crate::record::process::darwin::bsd_info(raw).ok()?;
+    if crate::record::process::read_i32(&info, 4)? == SZOMB {
+        return None;
+    }
+    let sid = rustix::process::getsid(Some(rustix::process::Pid::from_raw(raw)?)).ok()?;
+    u32::try_from(sid.as_raw_nonzero().get()).ok()
+}
+
+/// Returns the ids of every process on this machine, leaving out pid 0.
+fn all_processes() -> Vec<u32> {
+    #[cfg(target_os = "macos")]
+    let ids = crate::record::process::darwin::all_processes()
+        .unwrap()
+        .into_iter()
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
+        .collect();
+    #[cfg(target_os = "linux")]
+    let ids = std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|pid: &u32| *pid > 0)
+        .collect();
+    ids
 }
 
 /// Processes that a test kills, with their groups, when it ends.
@@ -586,7 +705,9 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
 fn a_keeper_stops_its_app_with_the_stop_signal_and_records_it_stopped_while_the_lock_is_free() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
-        "trap 'echo stopping; exit 0' TERM; echo ready; while :; do sleep 0.05; done",
+        // The app ends on the stop signal long before its loop ends, so
+        // its policy never restarts it.
+        concat!("trap 'echo stopping; exit 0' TERM; echo ready; ", spin!()),
         Restart::always(RestartLimits::default()),
         Stop::default(),
     );
@@ -611,7 +732,7 @@ fn a_keeper_kills_an_app_that_ignores_its_stop_signal_once_the_grace_passes() {
     let fixture = Fixture::new();
     let wait = Duration::from_millis(200);
     let spec = fixture.spec(
-        "trap '' TERM; echo ready; while :; do sleep 0.05; done",
+        concat!("trap '' TERM; echo ready; ", spin!()),
         Restart::No,
         grace(wait),
     );
@@ -630,7 +751,10 @@ fn a_keeper_kills_an_app_that_ignores_its_stop_signal_once_the_grace_passes() {
 fn killing_the_keeper_leaves_its_app_running_and_appending_to_its_log() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
-        "while :; do echo tick; sleep 0.05; done",
+        // The loop ends after a minute, and the app's policy would then
+        // restart it, but the test kills the keeper first and the guard of
+        // `Running` ends the app.
+        "i=0; while [ $i -lt 1200 ]; do i=$((i + 1)); echo tick; sleep 0.05; done",
         Restart::always(RestartLimits::default()),
         Stop::default(),
     );
@@ -919,7 +1043,7 @@ fn a_stop_request_during_a_backoff_leaves_the_app_stopped() {
 #[test]
 fn a_keeper_leaves_a_record_entry_that_names_another_process_unchanged() {
     let fixture = Fixture::new();
-    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let spec = fixture.spec(spin!(), Restart::No, Stop::default());
     let mut running = fixture.start(&spec).unwrap();
     let app_process = running.kept.app.clone();
     eventually("the keeper's record of the app", || {
@@ -1051,7 +1175,7 @@ fn a_keeper_records_the_exit_code_of_an_app_that_ended_by_itself() {
 fn a_keeper_records_a_stop_request_as_the_cause_of_its_apps_end() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
-        "trap 'exit 7' TERM; echo ready; while :; do sleep 0.05; done",
+        concat!("trap 'exit 7' TERM; echo ready; ", spin!()),
         Restart::No,
         Stop::default(),
     );
@@ -1069,7 +1193,11 @@ fn a_keeper_keeps_the_last_crash_of_an_app_that_it_restarted() {
     let fixture = Fixture::new();
     let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
     let spec = fixture.spec(
-        "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; touch crashed; kill -9 $$",
+        concat!(
+            "if [ -e crashed ]; then ",
+            spin!(),
+            "; exit 0; fi; touch crashed; kill -9 $$"
+        ),
         restart,
         Stop::default(),
     );
@@ -1086,8 +1214,11 @@ fn a_keeper_keeps_the_last_crash_of_an_app_that_it_restarted() {
 }
 
 /// A script that crashes on its first run and runs until stopped after.
-const CRASH_ONCE: &str =
-    "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; touch crashed; kill -9 $$";
+const CRASH_ONCE: &str = concat!(
+    "if [ -e crashed ]; then ",
+    spin!(),
+    "; exit 0; fi; touch crashed; kill -9 $$"
+);
 
 #[test]
 fn a_keeper_records_a_restarted_app_without_a_readiness_probe_ready_after_its_start_grace() {
@@ -1195,7 +1326,7 @@ fn the_engine_reads_from_the_keeper_how_its_app_ended_after_the_handshake() {
 #[test]
 fn the_engine_reads_no_end_of_an_app_that_still_runs_once_its_wait_passes() {
     let fixture = Fixture::new();
-    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let spec = fixture.spec(spin!(), Restart::No, Stop::default());
     let mut running = fixture.start(&spec).unwrap();
     let end = std::mem::take(&mut running.kept.end);
 
@@ -1208,7 +1339,7 @@ fn the_engine_reads_no_end_of_an_app_that_still_runs_once_its_wait_passes() {
 #[test]
 fn the_engine_stops_waiting_for_the_end_line_once_its_operation_is_cancelled() {
     let fixture = Fixture::new();
-    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let spec = fixture.spec(spin!(), Restart::No, Stop::default());
     let mut running = fixture.start(&spec).unwrap();
     let end = std::mem::take(&mut running.kept.end);
     let cancel = Cancel::new();
@@ -1227,7 +1358,11 @@ fn a_keeper_records_and_restarts_an_app_that_crashes_after_the_engine_stopped_re
         let fixture = Fixture::of(name);
         let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
         let spec = fixture.spec(
-            "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; sleep 0.3; touch crashed; exit 3",
+            concat!(
+                "if [ -e crashed ]; then ",
+                spin!(),
+                "; exit 0; fi; sleep 0.3; touch crashed; exit 3"
+            ),
             restart,
             Stop::default(),
         );
@@ -1250,7 +1385,10 @@ fn a_keeper_records_and_restarts_an_app_that_crashes_after_the_engine_stopped_re
 fn an_app_receives_sigpipe_at_its_default_disposition() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
-        "(yes; echo \"yes ended with $?\" >&2) | head -n 1 >/dev/null; while :; do sleep 0.05; done",
+        concat!(
+            "(yes; echo \"yes ended with $?\" >&2) | head -n 1 >/dev/null; ",
+            spin!()
+        ),
         Restart::No,
         Stop::default(),
     );
