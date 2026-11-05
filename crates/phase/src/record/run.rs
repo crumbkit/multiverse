@@ -1,4 +1,4 @@
-//! The run record `phase/run/v4`: what one workspace's run planned and
+//! The run record `phase/run/v5`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -33,14 +33,20 @@ pub(crate) enum RunSchema {
     #[serde(rename = "phase/run/v3")]
     V3,
     /// `phase/run/v4`, which adds `sandbox` to host process entries. A
-    /// phase that reads only v3 refuses it as written by a newer phase.
+    /// phase that reads only v3 refuses it as written by a newer phase. It
+    /// reads as v5 with no oneshot completed.
     #[serde(rename = "phase/run/v4")]
     V4,
+    /// `phase/run/v5`, which adds `oneshot` and `completed` to host process
+    /// entries. A phase that reads only v4 refuses it as written by a newer
+    /// phase.
+    #[serde(rename = "phase/run/v5")]
+    V5,
 }
 
 impl RunSchema {
     /// The version that phase writes.
-    pub(crate) const CURRENT: Self = Self::V4;
+    pub(crate) const CURRENT: Self = Self::V5;
 }
 
 /// The newest version of the run record that this phase reads, and the one
@@ -51,7 +57,7 @@ impl RunSchema {
 /// keeper refuses it as written by a newer phase, notes each refused write
 /// in its diagnostic log, and records nothing more, until phase starts its
 /// process again with a keeper of its own.
-pub(crate) const RUN_VERSION: u32 = 4;
+pub(crate) const RUN_VERSION: u32 = 5;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +182,79 @@ pub(crate) struct HostEntry {
     /// wrote before it recorded the sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<Sandboxing>,
+    /// What phase launched a oneshot from: the hash of its part of the
+    /// plan and the runs of what it depends on. phase's launch of the
+    /// process sets it. It is `None` for a keeper, for a process that is
+    /// not a oneshot, and in a record that phase wrote before it ran
+    /// oneshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) oneshot: Option<OneshotLaunch>,
+    /// The hash of the oneshot's part of the plan, from `oneshot`, once the
+    /// oneshot has exited with status 0 since phase last launched it, or
+    /// `None` when it has not. Whoever records that end sets it: `up` when
+    /// it watched the exit, and the keeper when `up` gave up waiting first.
+    /// phase's next launch of the process and a `down` that selects it
+    /// clear it. A record that lacks it reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) completed: Option<PlanHash>,
+}
+
+/// What phase launched a oneshot from, which decides whether a later `up`
+/// runs it again. It holds no environment value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OneshotLaunch {
+    /// The hash of the oneshot's part of the plan.
+    pub(crate) plan_hash: PlanHash,
+    /// The run of each process and container that the oneshot depends on,
+    /// as phase saw them just before it launched the oneshot, or `None`
+    /// when phase could not tell, such as when Docker did not answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) depends: Option<Vec<DependencyRun>>,
+}
+
+/// One run of a process or container that a oneshot depends on. Another
+/// run of it, such as a new keeper or a container that Docker started
+/// again, compares unequal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum DependencyRun {
+    /// A host process, by its keeper and the process that the keeper
+    /// runs. phase's own start of the process starts a new keeper, and the
+    /// keeper's restart of a process that ended starts a new process.
+    Host {
+        /// The app.
+        app: AppName,
+        /// The process.
+        process: ProcessName,
+        /// The keeper.
+        keeper: HostProcess,
+        /// The process that the keeper runs.
+        host: HostProcess,
+    },
+    /// A container, by its id and when Docker last started it, exactly as
+    /// `docker container inspect` printed `State.StartedAt`.
+    Container {
+        /// The app.
+        app: AppName,
+        /// The process.
+        process: ProcessName,
+        /// The container's id.
+        id: ContainerId,
+        /// When Docker last started it.
+        started_at: String,
+    },
+}
+
+impl DependencyRun {
+    /// Returns the app and process of the run, which order the runs that
+    /// phase records.
+    pub(crate) fn key(&self) -> (&AppName, &ProcessName, bool) {
+        match self {
+            Self::Host { app, process, .. } => (app, process, false),
+            Self::Container { app, process, .. } => (app, process, true),
+        }
+    }
 }
 
 /// When phase observed a process ready: its readiness probe passed, or a
@@ -331,6 +410,9 @@ pub(crate) struct Launching {
     /// How the process runs: under which sandbox, or unsandboxed and why.
     /// It is `None` for a container.
     pub(crate) sandbox: Option<Sandboxing>,
+    /// What a oneshot is launched from, or `None` for a process that is
+    /// not a oneshot.
+    pub(crate) oneshot: Option<OneshotLaunch>,
 }
 
 /// A started host process.
@@ -599,6 +681,8 @@ impl RunRecord {
             restart: None,
             ready: None,
             sandbox: None,
+            oneshot: None,
+            completed: None,
         };
         self.keepers.push(entry(None, None));
         self.processes.push(entry(stop, listen));
@@ -899,7 +983,30 @@ impl RunRecord {
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
         entry.sandbox.clone_from(&launching.sandbox);
+        entry.oneshot.clone_from(&launching.oneshot);
+        entry.completed = None;
         Ok(())
+    }
+
+    /// Forgets the completion of the oneshot `key`, and the end that it
+    /// recorded, so `status` shows it as stopped and the next `up` runs it
+    /// again. It reports whether the entry held a completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process.
+    pub(crate) fn clear_completion(&mut self, key: &ObjectKey) -> Result<bool, Unplanned> {
+        let ObjectKey::Process(app, process) = key else {
+            return Err(Unplanned(key.clone()));
+        };
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(key.clone()))?;
+        if entry.completed.take().is_none() {
+            return Ok(false);
+        }
+        entry.ended = None;
+        Ok(true)
     }
 
     /// Writes the container entry of `process` of `app` back to planned
@@ -1068,6 +1175,14 @@ impl RunRecord {
         let entry = find_host_mut(&mut self.processes, app, process)
             .ok_or_else(|| Unplanned(key.clone()))?;
         entry.ended = Some(ended);
+        // A oneshot that exited with status 0 by itself has completed,
+        // whether `up` or its keeper records the end.
+        if !ended.requested
+            && ended.exit == Some(Exit::Code(0))
+            && let Some(launch) = &entry.oneshot
+        {
+            entry.completed = Some(launch.plan_hash.clone());
+        }
         Ok(())
     }
 

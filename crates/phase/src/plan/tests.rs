@@ -282,13 +282,40 @@ fn a_plan_refuses_a_oneshot_process_with_a_probe() {
 }
 
 #[test]
-fn a_plan_refuses_a_oneshot_process_that_restarts_always() {
-    let mut api = host_app("api");
-    api.processes[0].kind = ProcessKind::Oneshot { once: false };
-    api.processes[0].ready = None;
-    api.processes[0].restart = Restart::Always(RestartLimits::default());
+fn a_plan_refuses_a_oneshot_process_with_any_restart_policy_but_no() {
+    for restart in [
+        Restart::Always(RestartLimits::default()),
+        Restart::OnFailure(RestartLimits::default()),
+    ] {
+        let mut api = host_app("api");
+        api.processes[0].kind = ProcessKind::Oneshot { once: false };
+        api.processes[0].ready = None;
+        api.processes[0].port = None;
+        api.processes[0].restart = restart;
 
-    assert_eq!(process_problem(api), ProcessProblem::OneshotRestartsAlways);
+        assert_eq!(process_problem(api), ProcessProblem::OneshotRestarts);
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_oneshot_process_that_listens_on_a_port() {
+    let mut api = host_app("api");
+    api.processes[0].kind = ProcessKind::Oneshot { once: true };
+    api.processes[0].ready = None;
+    api.processes[0].restart = Restart::No;
+
+    assert_eq!(process_problem(api), ProcessProblem::OneshotWithPort);
+}
+
+#[test]
+fn a_plan_accepts_a_oneshot_without_a_probe_a_port_or_a_restart_policy() {
+    let mut api = host_app("api");
+    api.processes[0].kind = ProcessKind::Oneshot { once: true };
+    api.processes[0].ready = None;
+    api.processes[0].restart = Restart::No;
+    api.processes[0].port = None;
+
+    assert!(plan(vec![api]).is_ok());
 }
 
 #[test]
@@ -807,7 +834,11 @@ fn a_process_read_from_json_refuses_once_on_a_long_running_process() {
 
 #[test]
 fn a_oneshot_read_from_json_without_once_runs_on_every_up() {
-    let one = plan(vec![host_app("api")]).unwrap();
+    let mut api = host_app("api");
+    api.processes[0].ready = None;
+    api.processes[0].port = None;
+    api.processes[0].restart = Restart::No;
+    let one = plan(vec![api]).unwrap();
     let mut json = serde_json::to_value(&one).unwrap();
     json["apps"][0]["processes"][0]["kind"] = "oneshot".into();
     json["apps"][0]["processes"][0]
@@ -1265,4 +1296,25 @@ fn a_plan_accepts_an_absolute_write_path_spelled_through_the_real_path_of_a_link
     api.permissions.get_or_insert_default().write = [entry.display().to_string()].into();
 
     assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_process_digest_changes_with_its_command_and_not_with_another_process() {
+    let mut api = host_app("api");
+    let mut migrate = ProcessPlan::new("migrate".parse().unwrap(), vec!["./migrate".into()]);
+    migrate.kind = ProcessKind::oneshot(true);
+    api.processes.push(migrate);
+    let before = api.process_digest(&api.processes[1]);
+
+    let mut other = api.clone();
+    other.processes[0].run.push("--verbose".into());
+    assert_eq!(other.process_digest(&other.processes[1]), before);
+
+    let mut changed = api.clone();
+    changed.processes[1].run.push("--seed".into());
+    assert_ne!(changed.process_digest(&changed.processes[1]), before);
+
+    let mut sandboxed = api;
+    sandboxed.permissions = Some(super::Permissions::default());
+    assert_ne!(sandboxed.process_digest(&sandboxed.processes[1]), before);
 }

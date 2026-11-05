@@ -639,6 +639,24 @@ impl<'s> Journal<'s> {
         self.change(key, EntryState::Stopped, Some(ended))
     }
 
+    /// Forgets the completion of the oneshot `key`, as
+    /// [`RunRecord::clear_completion`] says, and reports whether it held
+    /// one. A record that held none is left as it is on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn clear_completion(&mut self, key: &ObjectKey) -> Result<bool, PhaseError> {
+        let mut record = self.current(key)?;
+        let cleared = record
+            .clear_completion(key)
+            .map_err(|unplanned| self.unplanned(&unplanned))?;
+        if cleared {
+            self.commit(record)?;
+        }
+        Ok(cleared)
+    }
+
     /// Deletes the record as [`Journal::finish`] does, unless a host
     /// process's entry records an end that no stop request caused, which
     /// `status` shows as exited until `down` or a later start, and reports

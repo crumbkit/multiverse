@@ -13,6 +13,8 @@ use crate::plan::Plan;
 use crate::record::store::RunStore;
 use crate::select::Selection;
 
+mod oneshot;
+
 struct Unused;
 
 impl EnvironmentSource for Unused {

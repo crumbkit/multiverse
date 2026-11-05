@@ -281,15 +281,14 @@ pub(crate) fn host_state(
             Some(entry) => after_end(entry),
             None => ProcessState::Starting,
         }
-    } else if let Some(ended) = entry
-        .filter(|entry| matches!(entry.state, EntryState::Stopping | EntryState::Stopped))
-        .and_then(|entry| entry.ended)
-        .filter(|ended| !ended.requested)
-    {
+    } else if let Some(entry) = entry.filter(|entry| {
+        matches!(entry.state, EntryState::Stopping | EntryState::Stopped)
+            && entry.ended.is_some_and(|ended| !ended.requested)
+    }) {
         // The keeper recorded that its app ended by itself and did not
         // restart it, or something killed the keeper while it stopped what
-        // the app left.
-        exited(ended)
+        // the app left, or `up` recorded a oneshot's completion.
+        ended_by_itself(entry)
     } else if entry.is_some_and(|entry| {
         entry.host.is_some()
             && (entry.state == EntryState::Running
@@ -329,7 +328,20 @@ fn after_end(entry: &HostEntry) -> ProcessState {
         (Some(restart), Some(ended)) if restarts(restart, ended.exit != Some(Exit::Code(0))) => {
             ProcessState::Restarting
         }
-        (Some(_), Some(ended)) => exited(ended),
+        (Some(_), Some(_)) => ended_by_itself(entry),
+    }
+}
+
+/// Returns the state of the host process of `entry`, which ended by itself
+/// as its entry records: completed for a oneshot whose completion the entry
+/// holds, and exited otherwise.
+fn ended_by_itself(entry: &HostEntry) -> ProcessState {
+    match entry.ended {
+        Some(ended) if entry.completed.is_some() && ended.exit == Some(Exit::Code(0)) => {
+            ProcessState::Completed
+        }
+        Some(ended) => exited(ended),
+        None => ProcessState::unrecorded(),
     }
 }
 

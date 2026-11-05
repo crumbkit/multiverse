@@ -11,8 +11,8 @@
 //! that phase cannot prove is its own, or that survives `KILL`, keeps its
 //! entry, and the report notes it. After a process's group is gone, `down`
 //! checks its port, and notes a process that still holds it without
-//! signalling that process. The record is removed once everything in it is
-//! stopped.
+//! signalling that process. It forgets the completion of each selected
+//! oneshot. The record is removed once everything in it is stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -320,6 +320,18 @@ fn down_app(
         }
         let stopped = stop_target(engine, journal, &target, deadline, &mut notes)?;
         left |= stopped == Stopped::Left;
+    }
+    // A completed oneshot runs nothing, and `down` forgets its completion,
+    // so the next `up` runs it again.
+    let completed = record
+        .processes
+        .iter()
+        .filter(|entry| &entry.app == app && chosen(&entry.process) && entry.completed.is_some());
+    for entry in completed {
+        any |= journal.clear_completion(&ObjectKey::Process(
+            entry.app.clone(),
+            entry.process.clone(),
+        ))?;
     }
     let containers: Vec<ContainerEntry> = record
         .containers

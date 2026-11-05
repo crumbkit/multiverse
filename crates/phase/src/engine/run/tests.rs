@@ -9,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 use super::{Engine, Settings};
+
+mod oneshot;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::containers::{
@@ -23,7 +25,7 @@ use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
 use crate::phase::UpDeadlines;
 use crate::plan::probe::{Probe, ProbeCheck};
-use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
+use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::DockerName;
 use crate::record::docker::DockerError;
 use crate::record::process::Identity;
@@ -529,6 +531,31 @@ impl ContainerRunner for FakeContainers {
                         .contains(&format!("{}/{}", app.name, entry.process))
             })
             .map(|entry| entry.process.clone())
+            .collect())
+    }
+
+    fn started_at(
+        &self,
+        workspace: &crate::name::WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<(ProcessName, String)>, PhaseError> {
+        assert_eq!(workspace, &self::workspace());
+        // Each start of the app's containers is a new run of them.
+        let starts = self
+            .starts
+            .borrow()
+            .iter()
+            .filter(|start| {
+                start
+                    .iter()
+                    .any(|process| process.starts_with(&format!("{app}/")))
+            })
+            .count();
+        Ok(containers
+            .iter()
+            .filter(|entry| entry.id.is_some())
+            .map(|entry| (entry.process.clone(), format!("start-{starts}")))
             .collect())
     }
 
@@ -1040,12 +1067,12 @@ fn up_records_the_readiness_that_the_container_runner_observed() {
 }
 
 #[test]
-fn a_process_that_ends_before_its_probe_passes_reports_the_last_lines_of_its_log() {
+fn a_process_that_ends_before_its_probe_passes_reports_nothing_that_it_wrote() {
     let world = World::new();
     world.host.ends("api/server");
     world.host.state.borrow_mut().logs.insert(
         "api.server.log".to_owned(),
-        vec!["missing config".to_owned()],
+        vec!["password=hunter2 rejected".to_owned()],
     );
     let mut api = host_app("api", None, &[]);
     api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
@@ -1056,11 +1083,10 @@ fn a_process_that_ends_before_its_probe_passes_reports_the_last_lines_of_its_log
 
     assert_eq!(
         outcome(&report, "api"),
-        &AppOutcome::failed(
-            name("server"),
-            StartProblem::exited(None, None, vec!["missing config".to_owned()])
-        )
+        &AppOutcome::failed(name("server"), StartProblem::exited(None, None))
     );
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("hunter2"), "{json}");
 }
 
 #[test]
@@ -1328,23 +1354,6 @@ fn an_app_from_a_release_is_reported_as_not_runnable_and_its_dependents_do_not_s
     ));
     assert_eq!(outcome(&report, "api"), &AppOutcome::NotStarted);
     assert_eq!(outcome(&report, "web"), &AppOutcome::Started);
-}
-
-#[test]
-fn an_app_with_a_oneshot_is_reported_as_not_runnable() {
-    let world = World::new();
-    let mut api = host_app("api", None, &[]);
-    api.processes[0].kind = ProcessKind::oneshot(false);
-
-    let report = world
-        .up(&plan(vec![api]), &Selection::All, &Env::default())
-        .unwrap();
-
-    assert!(matches!(
-        outcome(&report, "api"),
-        AppOutcome::Errored { .. }
-    ));
-    assert!(world.host.launches().is_empty());
 }
 
 #[test]
@@ -2587,10 +2596,7 @@ fn a_process_that_ends_during_readiness_reports_the_code_or_signal_its_keeper_re
 
         assert_eq!(
             outcome(&report, "api"),
-            &AppOutcome::failed(
-                name("server"),
-                StartProblem::exited(code, signal, Vec::new())
-            ),
+            &AppOutcome::failed(name("server"), StartProblem::exited(code, signal)),
             "{exit:?}"
         );
     }
@@ -2611,10 +2617,7 @@ fn a_process_without_a_probe_that_ends_within_its_start_grace_reports_its_exit_c
 
     assert_eq!(
         outcome(&report, "api"),
-        &AppOutcome::failed(
-            name("server"),
-            StartProblem::exited(Some(3), None, Vec::new())
-        )
+        &AppOutcome::failed(name("server"), StartProblem::exited(Some(3), None))
     );
 }
 
@@ -2687,10 +2690,7 @@ fn a_real_keeper_reports_the_code_or_signal_of_a_process_that_ends_during_readin
 
         assert_eq!(
             outcome(&report, "api"),
-            &AppOutcome::failed(
-                name("server"),
-                StartProblem::exited(code, signal, vec!["starting".to_owned()])
-            ),
+            &AppOutcome::failed(name("server"), StartProblem::exited(code, signal)),
             "{script}"
         );
     }

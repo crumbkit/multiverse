@@ -883,22 +883,13 @@ impl Runs {
                         .collect(),
                 }
             }
-            StartProblem::Exited {
-                code,
-                signal,
-                log_tail: phase_tail,
-                ..
-            } => {
+            StartProblem::Exited { code, signal, .. } => {
                 let (code, signal) = ended(log.is_some(), *code, *signal);
                 UpOutcome::Exited {
                     process: unit.to_owned(),
                     code,
                     signal,
-                    tail: if log.is_some() {
-                        log_tail()
-                    } else {
-                        phase_tail.clone()
-                    },
+                    tail: log_tail(),
                     log,
                 }
             }

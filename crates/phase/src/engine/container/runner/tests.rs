@@ -327,25 +327,25 @@ fn a_container_that_docker_restarts_outside_phase_is_running_and_no_longer_ready
 }
 
 #[test]
-fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_output_and_is_removed() {
+fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_no_output_and_is_removed()
+{
     if !docker_ready() {
         return;
     }
     let world = World::new();
-    let plan = world.plan(vec![app("db", "echo going away; exit 3")]);
+    let plan = world.plan(vec![app("db", "echo password=hunter2-going-away; exit 3")]);
 
     let report = world.up(&plan);
 
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("hunter2"), "{json}");
     match outcome(&report, "db") {
         AppOutcome::Failed {
-            problem: StartProblem::Exited { code, log_tail, .. },
+            problem: problem @ StartProblem::Exited { code, .. },
             ..
         } => {
             assert_eq!(*code, Some(3));
-            assert!(
-                log_tail.iter().any(|line| line == "going away"),
-                "{log_tail:?}"
-            );
+            assert!(!problem.to_string().contains("hunter2"), "{problem}");
         }
         other => {
             panic!("the up reported {other:?} for the container, and the report was {report:?}")
@@ -407,7 +407,7 @@ fn a_tcp_probe_waits_for_a_listener_inside_the_container_and_not_for_dockers_pro
 }
 
 #[test]
-fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
+fn a_container_that_crashes_in_a_restart_loop_fails_to_start_as_exited() {
     if !docker_ready() {
         return;
     }
@@ -422,16 +422,13 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
 
     // Without the restart check, the wait would last until the test's
     // 60-second ready deadline, and the start would be uncertain. A start
-    // that failed because the container exited, with the crash's output,
-    // shows that the restart loop ended the wait.
+    // that failed because the container exited shows that the restart
+    // loop ended the wait.
     match outcome(&report, "db") {
         AppOutcome::Failed {
-            problem: StartProblem::Exited { log_tail, .. },
+            problem: StartProblem::Exited { .. },
             ..
-        } => assert!(
-            log_tail.iter().any(|line| line == "crashing"),
-            "{log_tail:?}"
-        ),
+        } => {}
         other => panic!("{other:?}"),
     }
 }
@@ -3014,4 +3011,80 @@ fn a_wrapper_that_prints_a_lookalike_line_and_exits_with_70_leaks_nothing_into_t
     holds_no_value(&format!("{report:?}"));
     holds_no_value(&serde_json::to_string(&report).unwrap());
     assert!(!world.has_containers());
+}
+
+/// The full name of the keeper tests' test that runs a keeper when this
+/// test binary is started as one.
+const KEEPER_ENTRY: &str =
+    "engine::keeper::tests::the_test_binary_runs_a_keeper_when_it_is_started_as_one";
+
+#[test]
+fn a_host_oneshot_that_depends_on_a_container_app_runs_after_the_container_is_ready() {
+    if !docker_ready() {
+        return;
+    }
+    let mut world = World::new();
+    world.phase = Phase::new(world.state.path().to_path_buf())
+        .with_start_grace(Duration::from_millis(500))
+        .with_keeper(
+            std::env::current_exe().unwrap(),
+            ["--exact", "--nocapture", "--", KEEPER_ENTRY, "keep"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        )
+        .with_inherited(std::collections::BTreeMap::from([
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("HOME".to_owned(), world.state.path().display().to_string()),
+        ]));
+    let (port, holder) = free_port();
+    // The database listens only after three seconds, so a provisioning
+    // step that ran before its readiness would find no listener.
+    let mut db = app(
+        "db",
+        "sleep 3; mkdir -p /www; exec httpd -f -p 8080 -h /www",
+    );
+    db.ports.insert("http".parse().unwrap(), port);
+    db.processes[0]
+        .publish
+        .insert("http".parse().unwrap(), NonZeroU16::new(8080).unwrap());
+    let mut probe = Probe::new(ProbeCheck::tcp("http".parse().unwrap()));
+    probe.timeout = Duration::from_secs(60);
+    db.processes[0].ready = Some(probe);
+    let checkout = tempfile::tempdir().unwrap();
+    let mut tables = AppPlan::new(
+        "tables".parse().unwrap(),
+        RunnerKind::Host,
+        Source::checkout(checkout.path().to_path_buf(), None),
+    );
+    let mut provision = ProcessPlan::new(
+        "provision".parse().unwrap(),
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("curl -s -o /dev/null http://127.0.0.1:{port}/ && echo provisioned"),
+        ],
+    );
+    provision.kind = crate::plan::ProcessKind::oneshot(true);
+    tables.processes.push(provision);
+    tables.depends.push("db".parse().unwrap());
+    let plan = world.plan(vec![db, tables]);
+
+    drop(holder);
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(
+        outcome(&report, "tables"),
+        &AppOutcome::Started,
+        "{report:?}"
+    );
+    let status = world.phase.status(&world.id, Some(&plan)).unwrap();
+    let row = status
+        .rows
+        .iter()
+        .find(|row| row.process.as_str() == "provision")
+        .unwrap();
+    assert_eq!(row.state, ProcessState::Completed, "{status:?}");
+    world.down();
 }

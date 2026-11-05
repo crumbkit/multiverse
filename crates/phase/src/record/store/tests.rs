@@ -10,7 +10,8 @@ use crate::name::WorkspaceId;
 use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
 use crate::record::ContainerId;
 use crate::record::run::{
-    Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, PlanHash, Ready, RunRecord, Started,
+    DependencyRun, Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, OneshotLaunch,
+    PlanHash, Ready, RunRecord, Started,
 };
 use crate::record::testing::{app, empty_record, process, workspace, write_file};
 
@@ -101,7 +102,7 @@ fn the_record_holds_the_schema_and_no_environment() {
     let text = fs::read_to_string(store.path(&workspace())).unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v4");
+    assert_eq!(json["schema"], "phase/run/v5");
     assert_eq!(json["workspace"], "0b9f3c8e");
     assert_eq!(
         json["processes"][0]["host"]["started_at_us"],
@@ -187,7 +188,7 @@ fn a_record_from_a_newer_phase_asks_for_an_upgrade() {
     fs::create_dir_all(state.path().join("runs")).unwrap();
     write_file(
         &store.path(&workspace()),
-        r#"{"schema":"phase/run/v5","something":"new"}"#,
+        r#"{"schema":"phase/run/v6","something":"new"}"#,
     );
 
     let error = store.read(&workspace()).unwrap_err();
@@ -409,7 +410,54 @@ fn launching(grace_ms: u64, hash: u8) -> Launching {
         listen: None,
         restart: Restart::No,
         sandbox: Some(crate::sandbox::Sandboxing::seatbelt()),
+        oneshot: None,
     }
+}
+
+/// What phase records when it launches a oneshot from the part of the
+/// plan with the hash `[7; 32]`, after a database container and a cache
+/// process that it depends on.
+fn oneshot_launch() -> OneshotLaunch {
+    OneshotLaunch {
+        plan_hash: PlanHash::new([7; 32]),
+        depends: Some(vec![
+            DependencyRun::Host {
+                app: app("cache"),
+                process: process("server"),
+                keeper: host(),
+                host: HostProcess {
+                    pid: 4243,
+                    group: 4243,
+                    ..host()
+                },
+            },
+            DependencyRun::Container {
+                app: app("db"),
+                process: process("postgres"),
+                id: ContainerId::try_from("c0".repeat(32)).unwrap(),
+                started_at: "2026-11-05T09:00:00.123456789Z".to_owned(),
+            },
+        ]),
+    }
+}
+
+/// Opens a journal of `store` whose record holds the oneshot `api/server`,
+/// launched as [`oneshot_launch`] says and started.
+fn launched_oneshot(store: &RunStore) -> Journal<'_> {
+    let mut journal = Journal::open(store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal
+        .launching(
+            &app("api"),
+            &process("server"),
+            &Launching {
+                oneshot: Some(oneshot_launch()),
+                ..launching(300, 1)
+            },
+        )
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal
 }
 
 #[test]
@@ -595,7 +643,12 @@ fn a_stop_that_phase_begins_records_the_end_as_requested() {
 
 #[test]
 fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_version() {
-    for older in ["phase/run/v1", "phase/run/v2", "phase/run/v3"] {
+    for older in [
+        "phase/run/v1",
+        "phase/run/v2",
+        "phase/run/v3",
+        "phase/run/v4",
+    ] {
         let state = tempfile::tempdir().unwrap();
         let store = RunStore::new(state.path());
         let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
@@ -603,7 +656,7 @@ fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_versi
         drop(journal);
         let path = store.path(&workspace());
         let text = fs::read_to_string(&path).unwrap();
-        write_file(&path, &text.replace("phase/run/v4", older));
+        write_file(&path, &text.replace("phase/run/v5", older));
 
         let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
         assert_eq!(journal.record(), Some(&planned()), "{older}");
@@ -611,7 +664,7 @@ fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_versi
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["schema"], "phase/run/v4", "{older}");
+        assert_eq!(json["schema"], "phase/run/v5", "{older}");
     }
 }
 
@@ -632,7 +685,7 @@ fn a_record_that_an_older_phase_wrote_reads_as_one_that_has_observed_no_readines
     let path = store.path(&workspace());
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("ready"), "{text}");
-    write_file(&path, &text.replace("phase/run/v4", "phase/run/v2"));
+    write_file(&path, &text.replace("phase/run/v5", "phase/run/v2"));
 
     let record = on_disk(&store);
 
@@ -795,7 +848,7 @@ fn a_v3_record_reads_as_one_that_recorded_no_sandbox() {
     let path = store.path(&workspace());
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("sandbox"), "{text}");
-    write_file(&path, &text.replace("phase/run/v4", "phase/run/v3"));
+    write_file(&path, &text.replace("phase/run/v5", "phase/run/v3"));
 
     let record = on_disk(&store);
 
@@ -803,7 +856,7 @@ fn a_v3_record_reads_as_one_that_recorded_no_sandbox() {
 }
 
 #[test]
-fn a_launched_host_process_records_its_sandbox_in_a_v4_record() {
+fn a_launched_host_process_records_its_sandbox_in_the_record() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
@@ -816,9 +869,174 @@ fn a_launched_host_process_records_its_sandbox_in_a_v4_record() {
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v4");
+    assert_eq!(json["schema"], "phase/run/v5");
     assert_eq!(
         json["processes"][0]["sandbox"],
         serde_json::json!({ "kind": "seatbelt", "partial": crate::sandbox::SEATBELT_PARTIAL })
     );
+}
+
+#[test]
+fn an_exit_of_zero_of_a_launched_oneshot_records_its_completion_until_it_launches_again() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = launched_oneshot(&store);
+    assert_eq!(on_disk(&store).processes[0].oneshot, Some(oneshot_launch()));
+
+    journal
+        .ending(&server(), Ended::by_itself(Some(Exit::Code(0))))
+        .unwrap();
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, Some(PlanHash::new([7; 32])));
+    assert_eq!(entry.state, EntryState::Stopping);
+    // A stop that phase begins after the completion keeps the end.
+    journal.stopping(&server()).unwrap();
+    journal.stopped(&server()).unwrap();
+    assert_eq!(on_disk(&store).processes[0].ended, entry.ended);
+    assert_eq!(
+        on_disk(&store).processes[0].completed,
+        Some(PlanHash::new([7; 32]))
+    );
+    assert!(journal.record().unwrap().holds_an_exit());
+
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 9))
+        .unwrap();
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, None);
+    assert_eq!(entry.oneshot, None);
+}
+
+#[test]
+fn a_keeper_that_records_an_exit_of_zero_after_the_lock_is_free_completes_the_oneshot() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    drop(launched_oneshot(&store));
+    let mut keeper = Journal::open(&store, &workspace(), SHORT).unwrap();
+
+    keeper
+        .stopped_after(&server(), Ended::by_itself(Some(Exit::Code(0))))
+        .unwrap();
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, Some(PlanHash::new([7; 32])));
+    assert_eq!(entry.state, EntryState::Stopped);
+}
+
+#[test]
+fn no_end_but_an_exit_of_zero_by_itself_of_a_oneshot_records_a_completion() {
+    for (oneshot, ended) in [
+        (true, Ended::by_itself(Some(Exit::Code(1)))),
+        (true, Ended::by_itself(Some(Exit::Signal(9)))),
+        (true, Ended::by_itself(None)),
+        (true, Ended::requested(Some(Exit::Code(0)))),
+        (false, Ended::by_itself(Some(Exit::Code(0)))),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let store = RunStore::new(state.path());
+        let mut journal = if oneshot {
+            launched_oneshot(&store)
+        } else {
+            let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+            journal.plan(planned()).unwrap();
+            journal
+                .launching(&app("api"), &process("server"), &launching(300, 1))
+                .unwrap();
+            journal.started(&server(), Started::Host(host())).unwrap();
+            journal
+        };
+
+        journal.ending(&server(), ended).unwrap();
+
+        assert_eq!(
+            on_disk(&store).processes[0].completed,
+            None,
+            "{oneshot} {ended:?}"
+        );
+    }
+}
+
+#[test]
+fn clearing_a_completion_forgets_the_hash_and_the_end_and_leaves_other_entries_unwritten() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = launched_oneshot(&store);
+    assert!(!journal.clear_completion(&server()).unwrap());
+    journal
+        .ending(&server(), Ended::by_itself(Some(Exit::Code(0))))
+        .unwrap();
+
+    assert!(journal.clear_completion(&server()).unwrap());
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, None);
+    assert_eq!(entry.ended, None);
+}
+
+#[test]
+fn a_launched_oneshot_records_its_hash_and_the_runs_it_depends_on_as_named_fields() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    drop(launched_oneshot(&store));
+    let text = fs::read_to_string(store.path(&workspace())).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(
+        json["processes"][0]["oneshot"]["depends"],
+        serde_json::json!([
+            {
+                "kind": "host",
+                "app": "cache",
+                "process": "server",
+                "keeper": {
+                    "pid": 4242,
+                    "started_at_us": 1_793_000_000_000_000_u64,
+                    "group": 4242,
+                    "boot_id": null
+                },
+                "host": {
+                    "pid": 4243,
+                    "started_at_us": 1_793_000_000_000_000_u64,
+                    "group": 4243,
+                    "boot_id": null
+                }
+            },
+            {
+                "kind": "container",
+                "app": "db",
+                "process": "postgres",
+                "id": "c0".repeat(32),
+                "started_at": "2026-11-05T09:00:00.123456789Z"
+            }
+        ])
+    );
+    assert_eq!(
+        json["processes"][0]["oneshot"]["plan_hash"],
+        serde_json::json!(PlanHash::new([7; 32]))
+    );
+}
+
+#[test]
+fn a_v4_record_reads_as_one_whose_processes_were_not_launched_as_oneshots_or_completed() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 1))
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("completed"), "{text}");
+    assert!(!text.contains("oneshot"), "{text}");
+    write_file(&path, &text.replace("phase/run/v5", "phase/run/v4"));
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.oneshot, None);
+    assert_eq!(entry.completed, None);
+    assert_eq!(entry.host, Some(host()));
 }
