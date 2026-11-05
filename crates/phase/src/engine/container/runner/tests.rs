@@ -22,11 +22,12 @@ use crate::phase::{Phase, UpDeadlines};
 use crate::plan::probe::{Probe, ProbeCheck};
 use crate::plan::restart::{Restart, RestartLimits};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
-use crate::record::run::EntryState;
+use crate::record::run::{EntryState, Ready};
 use crate::record::store::RunStore;
 use crate::report::{AppOutcome, Report, StartProblem};
 use crate::select::Selection;
 use crate::source::Source;
+use crate::status::ProcessState;
 
 /// The image of the tests.
 const IMAGE: &str = "busybox:1.37.0";
@@ -180,6 +181,17 @@ impl World {
             .map(|id| id.as_str().to_owned())
     }
 
+    /// Returns when the run record says phase observed the container of
+    /// `process` of `app` ready.
+    fn ready(&self, app: &str, process: &str) -> Option<Ready> {
+        let record = RunStore::new(self.state.path()).read(&self.id).unwrap()?;
+        record
+            .containers
+            .iter()
+            .find(|entry| entry.app.as_str() == app && entry.process.as_str() == process)?
+            .ready
+    }
+
     /// Removes every container and volume that carries this workspace's
     /// id label.
     fn clean(&self) {
@@ -279,6 +291,10 @@ fn up_runs_a_container_app_that_a_command_probe_finds_ready_and_down_removes_it(
     assert!(!labels.contains(MODE), "{labels}");
     let mounts = docker(&["container", "inspect", "--format", "{{json .Mounts}}", &id]).unwrap();
     assert!(mounts.contains(".data"), "{mounts}");
+    let ready = world.ready("db", "server").unwrap();
+    assert_eq!(ready.restarts, 0);
+    let status = world.phase.status(&world.id, Some(&plan)).unwrap();
+    assert_eq!(status.rows[0].state, ProcessState::Ready, "{status:?}");
 
     let report = world.down();
 

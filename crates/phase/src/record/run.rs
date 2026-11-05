@@ -1,4 +1,4 @@
-//! The run record `phase/run/v2`: what one workspace's run planned and
+//! The run record `phase/run/v3`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -12,23 +12,35 @@ use crate::name::{AppName, PortName, ProcessName, WorkspaceId};
 use crate::plan::restart::{Restart, Stop};
 use crate::record::{BadHex, ContainerId, DockerName, hex_id};
 
-/// The version of the run record. phase reads both versions and writes
-/// only `phase/run/v2`.
+/// The version of the run record. phase reads every version and writes
+/// only the newest, [`RUN_VERSION`]. Each version adds fields that an
+/// older record lacks and that read as their defaults, so a later version
+/// adds a variant here and needs no other read path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum RunSchema {
     /// `phase/run/v1`, whose host entries hold neither how the process
-    /// ended nor its restart policy. It reads as v2 with neither.
+    /// ended nor its restart policy. It reads as v3 with neither.
     #[serde(rename = "phase/run/v1")]
     V1,
-    /// `phase/run/v2`, which adds `ended` and `restart` to host entries. A
-    /// phase that reads only v1 refuses it as written by a newer phase.
+    /// `phase/run/v2`, which adds `ended` and `restart` to host entries. It
+    /// reads as v3 with no readiness recorded.
     #[serde(rename = "phase/run/v2")]
     V2,
+    /// `phase/run/v3`, which adds `ready` to host process and container
+    /// entries. A phase that reads only v2 refuses it as written by a newer
+    /// phase.
+    #[serde(rename = "phase/run/v3")]
+    V3,
+}
+
+impl RunSchema {
+    /// The version that phase writes.
+    pub(crate) const CURRENT: Self = Self::V3;
 }
 
 /// The newest version of the run record that this phase reads, and the one
 /// it writes.
-pub(crate) const RUN_VERSION: u32 = 2;
+pub(crate) const RUN_VERSION: u32 = 3;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +150,48 @@ pub(crate) struct HostEntry {
     /// yet, and in a `phase/run/v1` record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) restart: Option<Restart>,
+    /// When phase last observed the process ready since its last start,
+    /// or `None` when it has not. phase's own start clears it. A keeper's
+    /// restart clears it too, unless the process has no readiness probe,
+    /// in which case the keeper records it ready. It is `None` for a
+    /// keeper, and a record that lacks it, such as a `phase/run/v2`
+    /// record, reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ready: Option<Ready>,
+}
+
+/// When phase observed a process ready: its readiness probe passed, or a
+/// process without a probe was running. It holds no environment value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Ready {
+    /// When phase observed it, in milliseconds since the Unix epoch.
+    pub(crate) at_ms: u64,
+    /// How many times the process had been restarted when phase observed
+    /// it: by its keeper for a host process, and by Docker for a
+    /// container. `status` counts the readiness only while the count is
+    /// the same, so a restart that the record did not hear of makes the
+    /// process count as not ready.
+    pub(crate) restarts: u32,
+}
+
+impl Ready {
+    /// Returns the readiness that phase observed at `at_ms` after
+    /// `restarts` restarts.
+    pub(crate) const fn new(at_ms: u64, restarts: u32) -> Self {
+        Self { at_ms, restarts }
+    }
+
+    /// Returns the readiness that phase observes now, after `restarts`
+    /// restarts.
+    pub(crate) fn now(restarts: u32) -> Self {
+        let at_ms = crate::clock::wall_now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        Self::new(at_ms, restarts)
+    }
 }
 
 impl HostEntry {
@@ -314,6 +368,11 @@ pub(crate) struct ContainerEntry {
     /// reads as `None`, which no plan matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) plan_hash: Option<PlanHash>,
+    /// When phase last observed the container ready since it started it,
+    /// or `None` when it has not. A record that lacks it, such as a
+    /// `phase/run/v2` record, reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ready: Option<Ready>,
 }
 
 /// A Docker network.
@@ -454,7 +513,7 @@ impl RunRecord {
     /// is `plan_hash`, with no objects.
     pub(crate) const fn new(workspace: WorkspaceId, plan_hash: PlanHash) -> Self {
         Self {
-            schema: RunSchema::V2,
+            schema: RunSchema::CURRENT,
             workspace,
             plan_hash,
             keepers: Vec::new(),
@@ -494,6 +553,7 @@ impl RunRecord {
             plan_hash: None,
             ended: None,
             restart: None,
+            ready: None,
         };
         self.keepers.push(entry(None, None));
         self.processes.push(entry(stop, listen));
@@ -525,6 +585,7 @@ impl RunRecord {
             state: EntryState::Planned,
             id: None,
             plan_hash: None,
+            ready: None,
         });
         self
     }
@@ -679,6 +740,7 @@ impl RunRecord {
                 entry.state = EntryState::Running;
                 entry.restarts = 0;
                 entry.ended = None;
+                entry.ready = None;
             }
             (ObjectKey::Container(app, process), Started::Container(id, plan_hash)) => {
                 let entry = self
@@ -689,6 +751,7 @@ impl RunRecord {
                 entry.id = Some(id);
                 entry.plan_hash = Some(plan_hash);
                 entry.state = EntryState::Running;
+                entry.ready = None;
             }
             (ObjectKey::Network(name), Started::Network(id)) => {
                 let entry = self
@@ -713,7 +776,8 @@ impl RunRecord {
     }
 
     /// Records that the keeper restarted the host process `key` as `host`,
-    /// after `restarts` restarts in all.
+    /// after `restarts` restarts in all, and that the restarted process is
+    /// `ready`, or `None` when nothing has observed it ready yet.
     ///
     /// # Errors
     ///
@@ -724,6 +788,7 @@ impl RunRecord {
         key: &ObjectKey,
         host: HostProcess,
         restarts: u32,
+        ready: Option<Ready>,
     ) -> Result<(), Unplanned> {
         let ObjectKey::Process(app, process) = key else {
             return Err(Unplanned(key.clone()));
@@ -733,6 +798,30 @@ impl RunRecord {
         entry.host = Some(host);
         entry.state = EntryState::Running;
         entry.restarts = restarts;
+        entry.ready = ready;
+        Ok(())
+    }
+
+    /// Records that phase observed the host process or container `key`
+    /// ready, as `ready` says.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process or a container.
+    pub(crate) fn mark_ready(&mut self, key: &ObjectKey, ready: Ready) -> Result<(), Unplanned> {
+        let slot = match key {
+            ObjectKey::Process(app, process) => {
+                find_host_mut(&mut self.processes, app, process).map(|entry| &mut entry.ready)
+            }
+            ObjectKey::Container(app, process) => self
+                .containers
+                .iter_mut()
+                .find(|entry| &entry.app == app && &entry.process == process)
+                .map(|entry| &mut entry.ready),
+            ObjectKey::Keeper(..) | ObjectKey::Network(_) | ObjectKey::Volume(_) => None,
+        };
+        *slot.ok_or_else(|| Unplanned(key.clone()))? = Some(ready);
         Ok(())
     }
 
@@ -760,6 +849,7 @@ impl RunRecord {
         entry.host = None;
         entry.restarts = 0;
         entry.ended = None;
+        entry.ready = None;
         entry.restart = Some(launching.restart.clone());
         entry.stop = Some(launching.stop);
         entry.listen.clone_from(&launching.listen);
@@ -788,6 +878,7 @@ impl RunRecord {
         entry.state = EntryState::Planned;
         entry.id = None;
         entry.plan_hash = None;
+        entry.ready = None;
         Ok(())
     }
 

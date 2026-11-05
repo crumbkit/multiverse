@@ -61,6 +61,13 @@ pub(crate) struct KeeperSpec {
     /// that lacks one counts as one that could not be resolved.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(crate) required: BTreeSet<String>,
+    /// Whether the app counts as ready as soon as it runs, because its
+    /// process has no readiness probe. The keeper then records each
+    /// restarted app as ready. A keeper does not run a readiness probe, so
+    /// an app that has one counts as not ready after a restart until phase
+    /// starts it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) ready_on_start: bool,
 }
 
 /// The only variables that a keeper and its app inherit from the caller.
@@ -117,7 +124,16 @@ impl KeeperSpec {
             inherited: BTreeMap::new(),
             resolved: BTreeSet::new(),
             required: BTreeSet::new(),
+            ready_on_start: false,
         }
+    }
+
+    /// Returns this specification of an app that counts as ready as soon
+    /// as it runs when `ready_on_start` is true, as one without a
+    /// readiness probe does.
+    pub(crate) const fn ready_on_start(mut self, ready_on_start: bool) -> Self {
+        self.ready_on_start = ready_on_start;
+        self
     }
 
     /// Returns this specification with the environment expiring at

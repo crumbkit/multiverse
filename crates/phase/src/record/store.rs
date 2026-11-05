@@ -29,7 +29,7 @@ use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::name::{AppName, ProcessName};
 use crate::record::run::{
-    Ended, EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, RunRecord, RunSchema,
+    Ended, EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, Ready, RunRecord, RunSchema,
     Started, Unplanned,
 };
 
@@ -135,9 +135,10 @@ impl RunStore {
         }
         let mut record: RunRecord =
             serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string()))?;
-        // A `phase/run/v1` record reads as v2 with no ends and no restart
-        // policies, and phase writes it back as v2.
-        record.schema = RunSchema::V2;
+        // An older record reads as the current version with the fields it
+        // lacks at their defaults, and phase writes it back as the current
+        // version.
+        record.schema = RunSchema::CURRENT;
         if &record.workspace != workspace {
             return Err(unreadable(format!(
                 "it names the workspace {}",
@@ -486,7 +487,8 @@ impl<'s> Journal<'s> {
     }
 
     /// Records that the keeper restarted the host process `key` as `host`,
-    /// after `restarts` restarts in all.
+    /// after `restarts` restarts in all, and that the restarted process is
+    /// `ready`, or `None` when nothing has observed it ready yet.
     ///
     /// # Errors
     ///
@@ -496,10 +498,25 @@ impl<'s> Journal<'s> {
         key: &ObjectKey,
         host: HostProcess,
         restarts: u32,
+        ready: Option<Ready>,
     ) -> Result<(), PhaseError> {
         let mut record = self.current(key)?;
         record
-            .mark_restarted(key, host, restarts)
+            .mark_restarted(key, host, restarts, ready)
+            .map_err(|unplanned| self.unplanned(&unplanned))?;
+        self.commit(record)
+    }
+
+    /// Records that phase observed the host process or container `key`
+    /// ready, as `ready` says.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::started`].
+    pub(crate) fn ready(&mut self, key: &ObjectKey, ready: Ready) -> Result<(), PhaseError> {
+        let mut record = self.current(key)?;
+        record
+            .mark_ready(key, ready)
             .map_err(|unplanned| self.unplanned(&unplanned))?;
         self.commit(record)
     }

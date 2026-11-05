@@ -24,7 +24,7 @@ use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
 use crate::engine::container::objects::{AnonymousVolumes, rm_args, stop_seconds};
 use crate::engine::container::{ContainerError, ContainerState};
-use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
+use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject, SeenContainer};
 
 #[cfg(test)]
 mod tests;
@@ -213,25 +213,27 @@ fn restarts_format() -> String {
     format!("{{{{.RestartCount}}}} {{{{index .Config.Labels {SECRETS_LABEL:?}}}}}")
 }
 
-/// Returns the state of a container that `docker container inspect`
-/// printed as `printed` with [`STATE_FORMAT`] and [`restarts_format`]. A
-/// running container whose process receives secret files and that Docker
-/// has restarted waits for files that its restart removed, so it counts as
-/// restarting, as `up` counts it as not running.
-fn status_state(printed: &str) -> ContainerState {
+/// Returns the state and the restarts of a container that `docker
+/// container inspect` printed as `printed` with [`STATE_FORMAT`] and
+/// [`restarts_format`]. A running container whose process receives secret
+/// files and that Docker has restarted waits for files that its restart
+/// removed, so it counts as restarting, as `up` counts it as not running.
+/// A count that cannot be read counts as no restarts.
+fn status_state(printed: &str) -> SeenContainer {
     let mut lines = printed.lines();
     let state = ContainerState::parse(lines.next().unwrap_or_default());
-    let mut restarts = lines.next().unwrap_or_default().split_whitespace();
-    let restarted = restarts
+    let mut fields = lines.next().unwrap_or_default().split_whitespace();
+    let restarts = fields
         .next()
         .and_then(|count| count.parse::<u32>().ok())
-        .is_some_and(|count| count > 0);
-    let files = restarts.next() == Some(SECRET_FILES);
-    if state == ContainerState::Running && restarted && files {
+        .unwrap_or_default();
+    let files = fields.next() == Some(SECRET_FILES);
+    let state = if state == ContainerState::Running && restarts > 0 && files {
         ContainerState::Restarting
     } else {
         state
-    }
+    };
+    SeenContainer::new(state, restarts)
 }
 
 /// Returns the failure of a Docker that `error` shows does not answer,
@@ -284,10 +286,10 @@ impl Docker for DockerCli {
             .map(|(id, _)| id))
     }
 
-    fn container_state(
+    fn container_seen(
         &self,
         object: &DockerObject<'_>,
-    ) -> Result<Option<ContainerState>, DockerError> {
+    ) -> Result<Option<SeenContainer>, DockerError> {
         let format = format!(
             "{}\n{STATE_FORMAT}\n{}",
             format(DockerKind::Container),

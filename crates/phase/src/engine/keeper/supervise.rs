@@ -35,7 +35,7 @@ use crate::engine::restart::{
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::plan::restart::StopSignal;
 use crate::record::process::{Processes, Start, System};
-use crate::record::run::{Ended, Exit, HostProcess};
+use crate::record::run::{Ended, Exit, HostProcess, Ready};
 
 /// What the keeper waits for.
 #[derive(Debug)]
@@ -312,8 +312,10 @@ impl Supervisor<'_> {
                 write_handshake(&mut output, &Handshake::Started(started));
                 end_output = Some(output);
             } else if let Some(previous) = previous.take() {
+                // An app without a readiness probe is ready once it runs.
+                let ready = self.spec.ready_on_start.then(|| Ready::now(runs.restarts));
                 self.recorder
-                    .restarted(app.host.clone(), previous, runs.restarts);
+                    .restarted(app.host.clone(), previous, runs.restarts, ready);
             }
             previous = Some(app.host.clone());
             let began = now();

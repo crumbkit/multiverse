@@ -191,7 +191,10 @@ fn host_row(
     process: &ProcessName,
     sources: Sources<'_>,
 ) -> Result<StatusRow, PhaseError> {
-    let state = host_state(keeper, entry, sources.processes)?;
+    let state = match host_state(keeper, entry, sources.processes)? {
+        ProcessState::Running if entry.is_some_and(observed_ready) => ProcessState::Ready,
+        state => state,
+    };
     let mut row = StatusRow::new(app.clone(), process.clone(), RunnerKind::Host, None, state);
     if let Some(entry) = entry {
         row.restarts = entry.restarts;
@@ -211,6 +214,14 @@ fn host_row(
     }
     row.log = Some(log_path(sources.state_dir, workspace, app, process));
     Ok(row)
+}
+
+/// Reports whether phase observed the host process of `entry` ready since
+/// its keeper last restarted it.
+fn observed_ready(entry: &HostEntry) -> bool {
+    entry
+        .ready
+        .is_some_and(|ready| ready.restarts == entry.restarts)
 }
 
 /// Returns what a host process is doing, from its keeper and own entries
@@ -330,31 +341,26 @@ fn container_row(
     entry: &ContainerEntry,
     sources: Sources<'_>,
 ) -> StatusRow {
-    let state = if entry.state == EntryState::Stopped {
+    let seen = if entry.state == EntryState::Stopped {
         Ok(None)
     } else {
-        sources.docker.container_state(&DockerObject {
+        sources.docker.container_seen(&DockerObject {
             workspace,
             kind: DockerKind::Container,
             name: &entry.name,
             id: entry.id.as_ref().map(crate::record::ContainerId::as_str),
         })
     };
-    // A container that the record plans and Docker has not started yet is
-    // starting, as a host process whose keeper has not started it is.
     let planned = entry.state == EntryState::Planned;
-    let state = match state {
-        Ok(Some(ContainerState::Running)) => ProcessState::Running,
-        Ok(Some(ContainerState::Paused)) => ProcessState::Paused,
-        // Docker restarts a container that exits under its restart policy,
-        // as a keeper restarts a host process.
-        Ok(Some(ContainerState::Restarting)) => ProcessState::Restarting,
-        Ok(Some(ContainerState::Exited(code))) => ProcessState::exited(Some(code)),
-        Ok(Some(ContainerState::Created) | None) if planned => ProcessState::Starting,
-        Ok(Some(ContainerState::Created) | None) => ProcessState::Stopped,
-        Ok(Some(ContainerState::Unknown)) => {
-            ProcessState::unknown(UnknownReason::UnrecognisedState)
+    // phase observed the container ready, and Docker has not restarted it
+    // since.
+    let ready = |restarts| entry.ready.is_some_and(|ready| ready.restarts == restarts);
+    let state = match seen {
+        Ok(Some(seen)) if seen.state == ContainerState::Running && ready(seen.restarts) => {
+            ProcessState::Ready
         }
+        Ok(Some(seen)) => container_state(seen.state, planned),
+        Ok(None) => container_state(ContainerState::Created, planned),
         Err(_) => ProcessState::unknown(UnknownReason::DockerUnavailable),
     };
     let mut row = StatusRow::new(
@@ -368,6 +374,26 @@ fn container_row(
         row.handle = entry.id.clone().map(Handle::container);
     }
     row
+}
+
+/// Returns what a container in Docker's `state` is doing, when phase has
+/// not observed it ready since Docker last started it. A container that
+/// Docker does not have reads as [`ContainerState::Created`]. A container
+/// that the record plans, which `planned` reports, and that Docker has not
+/// started yet is starting, as a host process whose keeper has not started
+/// it is.
+const fn container_state(state: ContainerState, planned: bool) -> ProcessState {
+    match state {
+        ContainerState::Running => ProcessState::Running,
+        ContainerState::Paused => ProcessState::Paused,
+        // Docker restarts a container that exits under its restart policy,
+        // as a keeper restarts a host process.
+        ContainerState::Restarting => ProcessState::Restarting,
+        ContainerState::Exited(code) => ProcessState::exited(Some(code)),
+        ContainerState::Created if planned => ProcessState::Starting,
+        ContainerState::Created => ProcessState::Stopped,
+        ContainerState::Unknown => ProcessState::unknown(UnknownReason::UnrecognisedState),
+    }
 }
 
 /// Returns the state of a workspace whose processes are in `rows`. A

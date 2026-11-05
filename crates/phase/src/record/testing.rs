@@ -16,7 +16,7 @@ use crate::engine::keeper::{Kept, Launch};
 use crate::engine::probe::LogLines;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
-use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
+use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject, SeenContainer};
 use crate::record::process::{self, Identity, Processes, Start, System};
 use crate::record::run::{HostProcess, PlanHash, RunRecord};
 
@@ -346,6 +346,9 @@ pub(crate) struct FakeObject {
     /// The state of a container, which is running unless a test says
     /// otherwise.
     pub(crate) state: ContainerState,
+    /// How many times Docker has restarted a container, which is 0 unless
+    /// a test says otherwise.
+    pub(crate) restarts: u32,
 }
 
 /// A fake Docker that holds objects in memory.
@@ -386,7 +389,19 @@ impl FakeDocker {
             id: id.to_owned(),
             workspace: label.map(str::to_owned),
             state: ContainerState::Running,
+            restarts: 0,
         });
+        self
+    }
+
+    /// Sets how many times Docker has restarted the container whose id is
+    /// `id`.
+    pub(crate) fn restarted(self, id: &str, restarts: u32) -> Self {
+        for object in self.objects.borrow_mut().iter_mut() {
+            if object.id == id {
+                object.restarts = restarts;
+            }
+        }
         self
     }
 
@@ -435,11 +450,13 @@ impl Docker for FakeDocker {
         Ok(self.matching(object)?.map(|found| found.id))
     }
 
-    fn container_state(
+    fn container_seen(
         &self,
         object: &DockerObject<'_>,
-    ) -> Result<Option<ContainerState>, DockerError> {
-        Ok(self.matching(object)?.map(|found| found.state))
+    ) -> Result<Option<SeenContainer>, DockerError> {
+        Ok(self
+            .matching(object)?
+            .map(|found| SeenContainer::new(found.state, found.restarts)))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, _wait: Duration) -> Result<(), DockerError> {
@@ -476,10 +493,10 @@ impl Docker for Unreachable {
         Err(Self::failure())
     }
 
-    fn container_state(
+    fn container_seen(
         &self,
         _object: &DockerObject<'_>,
-    ) -> Result<Option<ContainerState>, DockerError> {
+    ) -> Result<Option<SeenContainer>, DockerError> {
         Err(Self::failure())
     }
 

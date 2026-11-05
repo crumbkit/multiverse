@@ -384,6 +384,8 @@ struct FakeContainers {
     /// Each `app/process` whose secret files a rewrite was asked for, in
     /// order.
     rewrites: RefCell<Vec<String>>,
+    /// The readiness that each container the runner starts reports.
+    ready: RefCell<Option<crate::record::run::Ready>>,
     /// The `app/process` containers whose rewrite finds the Docker daemon
     /// unavailable.
     rewrite_unreachable: RefCell<BTreeSet<String>>,
@@ -493,6 +495,7 @@ impl ContainerRunner for FakeContainers {
                     process: process.clone(),
                     id: "c0".repeat(32).try_into().unwrap(),
                     plan_hash: fake_plan_hash(),
+                    ready: *self.ready.borrow(),
                 })
                 .collect(),
             ..ContainersStarted::default()
@@ -937,6 +940,102 @@ fn a_log_probe_makes_a_process_ready_once_its_line_arrives() {
         .unwrap();
 
     assert_eq!(outcome(&report, "api"), &AppOutcome::Started);
+}
+
+#[test]
+fn up_records_when_a_process_passed_its_readiness_probe() {
+    let world = World::new();
+    world
+        .host
+        .state
+        .borrow_mut()
+        .logs
+        .insert("api.server.log".to_owned(), vec!["listening".to_owned()]);
+    let mut api = host_app("api", None, &[]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("listening".to_owned())));
+    let before = crate::record::run::Ready::now(0).at_ms;
+
+    world
+        .up(&plan(vec![api]), &Selection::All, &Env::default())
+        .unwrap();
+
+    let ready = world.record().unwrap().processes[0].ready.unwrap();
+    assert_eq!(ready.restarts, 0);
+    assert!(ready.at_ms >= before, "{ready:?}");
+}
+
+#[test]
+fn up_records_a_process_without_a_probe_ready_once_it_outlasts_its_start_grace() {
+    let world = World::new();
+
+    world
+        .up(
+            &plan(vec![host_app("api", None, &[])]),
+            &Selection::All,
+            &Env::default(),
+        )
+        .unwrap();
+
+    assert!(world.record().unwrap().processes[0].ready.is_some());
+    let specs = world.host.state.borrow().specs.join("\n");
+    assert!(specs.contains(r#""ready_on_start":true"#), "{specs}");
+}
+
+#[test]
+fn the_keeper_of_a_process_with_a_probe_does_not_count_it_ready_on_start() {
+    let world = World::new();
+    world
+        .host
+        .state
+        .borrow_mut()
+        .logs
+        .insert("api.server.log".to_owned(), vec!["listening".to_owned()]);
+    let mut api = host_app("api", None, &[]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("listening".to_owned())));
+
+    world
+        .up(&plan(vec![api]), &Selection::All, &Env::default())
+        .unwrap();
+
+    let specs = world.host.state.borrow().specs.join("\n");
+    assert!(!specs.contains("ready_on_start"), "{specs}");
+}
+
+#[test]
+fn a_process_whose_port_another_group_answers_after_readiness_records_no_readiness() {
+    let world = World::new();
+    world.host.listen(41_000, Listener::HeldAfterLaunch(4242));
+    let plan = plan(vec![host_app("api", Some(41_000), &[])]);
+
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert!(
+        world
+            .record()
+            .is_none_or(|record| record.processes.iter().all(|entry| entry.ready.is_none()))
+    );
+}
+
+#[test]
+fn up_records_the_readiness_that_the_container_runner_observed() {
+    let world = World::new();
+    world
+        .containers
+        .ready
+        .replace(Some(crate::record::run::Ready::new(1_793_000_000_123, 2)));
+
+    world
+        .up(
+            &plan(vec![container_app("db")]),
+            &Selection::All,
+            &Env::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        world.record().unwrap().containers[0].ready,
+        Some(crate::record::run::Ready::new(1_793_000_000_123, 2))
+    );
 }
 
 #[test]

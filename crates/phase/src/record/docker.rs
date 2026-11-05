@@ -66,19 +66,20 @@ pub(crate) trait Docker {
     /// including when its context is unknown or its program is missing.
     fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError>;
 
-    /// Returns the state of the container `object`, matched as
-    /// [`Docker::find`] matches it, or `None` when the daemon answered that
-    /// it does not exist or that it exists without this workspace's labels.
-    /// `status` calls it, so a container's state comes from Docker and never
-    /// from the record alone.
+    /// Returns the state of the container `object` and how many times
+    /// Docker has restarted it, matched as [`Docker::find`] matches it, or
+    /// `None` when the daemon answered that it does not exist or that it
+    /// exists without this workspace's labels. `status` calls it, so a
+    /// container's state comes from Docker and never from the record
+    /// alone.
     ///
     /// # Errors
     ///
     /// Returns [`DockerError::Unavailable`] when Docker does not answer.
-    fn container_state(
+    fn container_seen(
         &self,
         object: &DockerObject<'_>,
-    ) -> Result<Option<ContainerState>, DockerError>;
+    ) -> Result<Option<SeenContainer>, DockerError>;
 
     /// Removes the object of `kind` whose id is `id`. A running container
     /// is stopped first, and is killed when it has not stopped after
@@ -91,6 +92,24 @@ pub(crate) trait Docker {
     /// including when its context is unknown or its program is missing,
     /// and [`DockerError::Refused`] when it answers and refuses.
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError>;
+}
+
+/// What Docker reports of a container: its state, and how many times it
+/// has restarted the container under its restart policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SeenContainer {
+    /// The container's state.
+    pub(crate) state: ContainerState,
+    /// How many times Docker has restarted the container.
+    pub(crate) restarts: u32,
+}
+
+impl SeenContainer {
+    /// Returns a container in `state` that Docker has restarted `restarts`
+    /// times.
+    pub(crate) const fn new(state: ContainerState, restarts: u32) -> Self {
+        Self { state, restarts }
+    }
 }
 
 /// A failure of a Docker call.

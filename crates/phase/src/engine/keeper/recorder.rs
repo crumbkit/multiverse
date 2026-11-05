@@ -24,7 +24,7 @@ use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::logfile::Diagnostics;
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::run::{Ended, EntryState, HostProcess, ObjectKey, Started};
+use crate::record::run::{Ended, EntryState, HostProcess, ObjectKey, Ready, Started};
 use crate::record::store::{Journal, RunStore};
 
 /// How long the writer waits for the lifecycle lock before it drops a
@@ -40,9 +40,10 @@ pub(super) enum Note {
     /// no process or this one.
     Started(HostProcess),
     /// The keeper restarted the app as the first process, after the
-    /// second, after this many restarts in all. It applies when the entry
-    /// names either process.
-    Restarted(HostProcess, HostProcess, u32),
+    /// second, after this many restarts in all, and the app is ready as
+    /// the last field says, or `None` when nothing has observed it ready.
+    /// It applies when the entry names either process.
+    Restarted(HostProcess, HostProcess, u32, Option<Ready>),
     /// A stop request came, and the keeper is about to stop the group of
     /// this process. It applies when the entry names this process.
     Stopping(HostProcess),
@@ -74,7 +75,7 @@ impl Note {
                 | Self::Stopped(host, _),
                 Some(recorded),
             ) => host == recorded,
-            (Self::Restarted(host, previous, _), Some(recorded)) => {
+            (Self::Restarted(host, previous, ..), Some(recorded)) => {
                 host == recorded || previous == recorded
             }
             (
@@ -88,7 +89,7 @@ impl Note {
     fn describe(&self) -> String {
         match self {
             Self::Started(host) => format!("the start of process {}", host.pid),
-            Self::Restarted(host, _, _) => format!("the restart as process {}", host.pid),
+            Self::Restarted(host, ..) => format!("the restart as process {}", host.pid),
             Self::Stopping(host) => format!("the stopping of process {}", host.pid),
             Self::Ending(host, _) => format!("the end of process {}", host.pid),
             Self::Stopped(host, _) => format!("the stop of process {}", host.pid),
@@ -159,9 +160,18 @@ impl Recorder {
     }
 
     /// Records that the keeper restarted the app as `host` after
-    /// `previous`, after `restarts` restarts in all.
-    pub(crate) fn restarted(&self, host: HostProcess, previous: HostProcess, restarts: u32) {
-        let _ = self.notes.send(Note::Restarted(host, previous, restarts));
+    /// `previous`, after `restarts` restarts in all, and that the app is
+    /// `ready`, or `None` when nothing has observed it ready.
+    pub(crate) fn restarted(
+        &self,
+        host: HostProcess,
+        previous: HostProcess,
+        restarts: u32,
+        ready: Option<Ready>,
+    ) {
+        let _ = self
+            .notes
+            .send(Note::Restarted(host, previous, restarts, ready));
     }
 
     /// Records that a stop request came and the keeper is about to stop
@@ -260,7 +270,9 @@ fn write(
         }
         let written = match current {
             Note::Started(host) => journal.started(key, Started::Host(host)),
-            Note::Restarted(host, _, restarts) => journal.restarted(key, host, restarts),
+            Note::Restarted(host, _, restarts, ready) => {
+                journal.restarted(key, host, restarts, ready)
+            }
             Note::Stopping(_) => journal.stopping(key),
             Note::Ending(_, ended) => journal.ending(key, ended),
             Note::Stopped(_, ended) => journal.stopped_after(key, ended),

@@ -9,7 +9,7 @@ use crate::env::EnvironmentSource;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::AppPlan;
-use crate::record::run::{ContainerEntry, NetworkId, PlanHash, VolumeLifetime};
+use crate::record::run::{ContainerEntry, NetworkId, PlanHash, Ready, VolumeLifetime};
 use crate::record::{ContainerId, DockerName};
 use crate::report::StartProblem;
 
@@ -180,6 +180,22 @@ pub(crate) struct ContainersStarted {
     pub(crate) removed: Vec<ProcessName>,
 }
 
+impl ContainersStarted {
+    /// Records that the container of `process` became ready after
+    /// `restarts` restarts by Docker. The readiness wait counts a restart
+    /// by Docker as an end, so these are the restarts that the container
+    /// had when the start inspected it.
+    pub(crate) fn ready(&mut self, process: &ProcessName, restarts: u32) {
+        if let Some(container) = self
+            .containers
+            .iter_mut()
+            .rfind(|container| &container.process == process)
+        {
+            container.ready = Some(Ready::now(restarts));
+        }
+    }
+}
+
 /// A container that [`ContainerRunner::start`] created.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StartedContainer {
@@ -190,6 +206,9 @@ pub(crate) struct StartedContainer {
     /// The hash of the process's part of the plan, which the run record
     /// keeps for [`ContainerRunner::running`].
     pub(crate) plan_hash: PlanHash,
+    /// When the start observed the container ready, with the restarts
+    /// that Docker had counted then, or `None` when it did not.
+    pub(crate) ready: Option<Ready>,
 }
 
 /// What [`ContainerRunner::rewrite`] rewrites.

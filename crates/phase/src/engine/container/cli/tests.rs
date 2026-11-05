@@ -14,7 +14,9 @@ use crate::engine::container::cli::DockerCli;
 use crate::engine::container::names::{Scope, StoreId};
 use crate::name::{WorkspaceId, WorkspaceName};
 use crate::record::DockerName;
-use crate::record::docker::{Docker, DockerCause, DockerError, DockerKind, DockerObject};
+use crate::record::docker::{
+    Docker, DockerCause, DockerError, DockerKind, DockerObject, SeenContainer,
+};
 
 /// The fake `docker` program. It appends each call's arguments to
 /// `calls`. While the file `down` exists it fails every call as docker does
@@ -871,8 +873,9 @@ fn a_running_container_with_secret_files_that_docker_restarted_is_not_running() 
     let db = name("db");
     let state = |id: &str| {
         fake.docker()
-            .container_state(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .container_seen(&object(&workspace, DockerKind::Container, &db, Some(id)))
             .unwrap()
+            .map(|seen| seen.state)
     };
 
     assert_eq!(state(&waiting), Some(ContainerState::Restarting));
@@ -882,6 +885,29 @@ fn a_running_container_with_secret_files_that_docker_restarted_is_not_running() 
         fake.calls().contains("{{.RestartCount}}"),
         "{}",
         fake.calls()
+    );
+}
+
+#[test]
+fn a_containers_restarts_come_from_its_inspection_with_its_state() {
+    let fake = Fake::new();
+    let (fresh, restarted) = (container_id('a'), container_id('b'));
+    let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
+    fake.labelled(&[&fresh], &fresh, &format!("{ours}\nrunning 0\n0 "));
+    fake.labelled(&[&restarted], &restarted, &format!("{ours}\nrunning 0\n3 "));
+    let workspace = workspace();
+    let db = name("db");
+    let seen = |id: &str| {
+        fake.docker()
+            .container_seen(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .unwrap()
+            .unwrap()
+    };
+
+    assert_eq!(seen(&fresh), SeenContainer::new(ContainerState::Running, 0));
+    assert_eq!(
+        seen(&restarted),
+        SeenContainer::new(ContainerState::Running, 3)
     );
 }
 
@@ -902,8 +928,9 @@ running 0"#,
     let db = name("db");
     let state = |id: &str| {
         fake.docker()
-            .container_state(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .container_seen(&object(&workspace, DockerKind::Container, &db, Some(id)))
             .unwrap()
+            .map(|seen| seen.state)
     };
 
     assert_eq!(state(&running), Some(ContainerState::Running));
@@ -917,7 +944,7 @@ running 0"#,
     );
     fake.mark("down");
     assert!(matches!(
-        fake.docker().container_state(&object(
+        fake.docker().container_seen(&object(
             &workspace,
             DockerKind::Container,
             &db,

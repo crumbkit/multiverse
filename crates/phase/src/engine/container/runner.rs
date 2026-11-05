@@ -501,6 +501,7 @@ impl ComposeRunner {
                     process: name.clone(),
                     id: record_id(inspected)?,
                     plan_hash,
+                    ready: None,
                 });
             }
             match up {
@@ -550,7 +551,7 @@ impl ComposeRunner {
             }
             drop(environment);
             match self.ready(app, process, &inspected, start) {
-                Readiness::Ready => {}
+                Readiness::Ready => started.ready(name, inspected.restarts),
                 Readiness::Cancelled => return Err(Halt::Cancelled),
                 Readiness::Uncertain => {
                     started.uncertain = Some(name.clone());
