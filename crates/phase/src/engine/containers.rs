@@ -101,16 +101,20 @@ pub(crate) trait ContainerRunner {
     ///   secrets was optional and absent, so it has no tmpfs and no
     ///   wrapper. `up` then replaces the container.
     /// - [`Rewritten::Kept`] when the environment cannot be resolved, a
-    ///   value cannot be read, or Docker cannot write the files while the
-    ///   container still runs. The container keeps its earlier files whole,
-    ///   apart from a lapsed optional secret's file whose removal failed,
-    ///   which the reason names.
+    ///   value cannot be read, or Docker refuses the inspection or the
+    ///   write while the container still runs. The container keeps its
+    ///   earlier files whole, apart from a lapsed optional secret's file
+    ///   whose removal failed, which the reason names.
     /// - [`Rewritten::Written`] otherwise.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::Docker`] with the cancelled cause only when
-    /// the caller cancels.
+    /// Returns [`PhaseError::Docker`] when the caller cancels, with the
+    /// cancelled cause, and when Docker itself cannot be reached or does
+    /// not answer in time: no `docker` program, a daemon that does not
+    /// answer, or a command that missed its deadline. `up` then reports
+    /// the app as errored, because phase cannot tell what the container
+    /// holds.
     fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError>;
 
     /// Stops and removes the containers of `stop.containers`, in reverse

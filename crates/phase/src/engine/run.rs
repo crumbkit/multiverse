@@ -479,7 +479,9 @@ impl Op<'_, '_> {
         // Each `up` writes the secret files of a container that still runs
         // again from a fresh environment, and replaces one that cannot
         // receive them. A rewrite that fails leaves the container running
-        // with its earlier files, which a note reports.
+        // with its earlier files, which a note reports. Docker that cannot
+        // be reached fails the app, because phase cannot tell what the
+        // container holds.
         let mut notes = Vec::new();
         for entry in &recorded {
             if !running.contains(&entry.process) {

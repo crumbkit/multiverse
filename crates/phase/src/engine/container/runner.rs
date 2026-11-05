@@ -124,7 +124,7 @@ use crate::plan::{AppPlan, ProcessPlan};
 use crate::record::docker::DockerError;
 use crate::record::run::ContainerEntry;
 use crate::record::store::RunStore;
-use crate::record::{ContainerId, DockerName};
+use crate::record::{ContainerId, DockerCause, DockerName};
 use crate::report::StartProblem;
 use crate::source::Source;
 
@@ -542,6 +542,7 @@ impl ComposeRunner {
                         removed: Vec::new(),
                         owner,
                         docker_environment: self.docker_environment.as_ref(),
+                        starting: true,
                     },
                     (start.deadline, start.cancel),
                 )
@@ -738,6 +739,13 @@ pub(crate) struct Delivery<'a> {
     /// The only environment of the `docker exec` that writes each secret,
     /// or `None` for the host program's whole environment.
     pub(crate) docker_environment: Option<&'a BTreeMap<String, String>>,
+    /// Whether the write belongs to a start, whose wrapper waits for the
+    /// files. A start's failed write explains itself with the wrapper's own
+    /// line when the container has exited. A rewrite of a running
+    /// container's files never reads that line, because the wrapper of a
+    /// running container has long since started the app, and the app's own
+    /// output could hold a line that looks like the wrapper's.
+    pub(crate) starting: bool,
 }
 
 /// Writes the secret files of `delivery` into the container `inspected`,
@@ -770,6 +778,7 @@ pub(crate) fn write_secrets(
         .map(|(name, _)| name.clone())
         .collect();
     let (deadline, cancel) = until;
+    let delivery_starting = delivery.starting;
     let mut staged = Ok(());
     for (name, bytes) in delivery.values {
         staged = write_secret(
@@ -793,14 +802,19 @@ pub(crate) fn write_secrets(
     });
     committed.map_err(|error| {
         let _ = quick(secrets::discard(id), "secret discard");
-        ended_early(inspected).unwrap_or(error)
+        if delivery_starting {
+            ended_early(inspected).unwrap_or(error)
+        } else {
+            error
+        }
     })
 }
 
 /// Returns the failure of a container `inspected` that ended before its
-/// secret files were written, which explains a write that failed: the
-/// wrapper's own line when it gave up, and [`NO_SHELL_HINT`] when Docker
-/// could not run it. It returns `None` when the container still runs.
+/// secret files were written, which explains a start's write that failed:
+/// the wrapper's own line when it gave up, and [`NO_SHELL_HINT`] when
+/// Docker could not run it. It returns `None` when the container still
+/// runs. Only a start calls it, as [`Delivery::starting`] says.
 fn ended_early(inspected: &Inspected) -> Option<ContainerError> {
     let fresh = reinspect(&inspected.container).ok()??;
     let ContainerState::Exited(code) = fresh.state else {
@@ -913,6 +927,26 @@ fn clean_up(scope: &Scope, app: &AppPlan, started: &ContainersStarted) -> Vec<Pr
     removed
 }
 
+/// Reports whether `error` says that Docker itself could not be reached
+/// or did not answer in time: no `docker` program, a daemon that does not
+/// answer, or a command that missed its deadline. A rewrite reports such a
+/// failure as a failure of `up`, because phase cannot tell what the
+/// container holds, and keeps a refusal as a note.
+fn unreachable(error: &ContainerError) -> bool {
+    matches!(
+        error.cause(),
+        DockerCause::DockerMissing | DockerCause::DaemonUnavailable | DockerCause::TimedOut
+    )
+}
+
+/// Reports whether the container `inspected` still runs as it was
+/// started: it is running, and Docker has not restarted it when it has
+/// secret files, because the restart emptied its tmpfs. `running` judges a
+/// container the same way.
+fn runs_as_planned(inspected: &Inspected) -> bool {
+    inspected.state == ContainerState::Running && !(inspected.files && inspected.restarts > 0)
+}
+
 impl ContainerRunner for ComposeRunner {
     fn objects(
         &self,
@@ -1018,16 +1052,14 @@ impl ContainerRunner for ComposeRunner {
             // A container that is gone, or no longer carries the app's
             // labels, is not the one the record names, so `up` replaces it.
             Ok(None) | Err(ContainerError::Foreign { .. }) => return Ok(Rewritten::Replace),
+            Err(error) if unreachable(&error) => return Err(docker_error(&error)),
             Err(error) => {
                 return Ok(Rewritten::Kept {
                     reason: error.to_string(),
                 });
             }
         };
-        // A container that no longer runs, or whose tmpfs a Docker restart
-        // emptied, is not running as planned, as `running` judges it.
-        if inspected.state != ContainerState::Running || (inspected.files && inspected.restarts > 0)
-        {
+        if !runs_as_planned(&inspected) {
             return Ok(Rewritten::Replace);
         }
         let environment =
@@ -1087,16 +1119,19 @@ impl ContainerRunner for ComposeRunner {
                 removed,
                 owner: &owner,
                 docker_environment: self.docker_environment.as_ref(),
+                starting: false,
             },
             (rewrite.deadline, rewrite.cancel),
         ) {
             Ok(()) => Ok(written),
             Err(error @ ContainerError::Cancelled { .. }) => Err(docker_error(&error)),
+            Err(error) if unreachable(&error) => Err(docker_error(&error)),
             // A container that ended during the write must be replaced.
             Err(error) => match reinspect(&inspected.container) {
-                Ok(Some(fresh)) if fresh.state != ContainerState::Running => Ok(Rewritten::Replace),
                 Ok(None) => Ok(Rewritten::Replace),
-                _ => Ok(Rewritten::Kept {
+                Ok(Some(fresh)) if !runs_as_planned(&fresh) => Ok(Rewritten::Replace),
+                Err(fresh) if unreachable(&fresh) => Err(docker_error(&fresh)),
+                Ok(Some(_)) | Err(_) => Ok(Rewritten::Kept {
                     reason: error.to_string(),
                 }),
             },

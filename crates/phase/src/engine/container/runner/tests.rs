@@ -1106,6 +1106,7 @@ fn a_secret_is_in_no_argument_list_or_environment_inside_the_container_while_it_
                 removed: Vec::new(),
                 owner: "1000:1000",
                 docker_environment: Some(&docker_environment),
+                starting: false,
             },
             (Instant::now() + Duration::from_secs(60), &Cancel::new()),
         )
@@ -1161,6 +1162,7 @@ fn writing_secrets_again_replaces_their_files_in_the_running_container_without_a
             removed: Vec::new(),
             owner: "1000:1000",
             docker_environment: None,
+            starting: false,
         },
         (Instant::now() + Duration::from_secs(30), &Cancel::new()),
     )
@@ -1223,6 +1225,7 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
             removed: Vec::new(),
             owner: "1000:1000",
             docker_environment: None,
+            starting: false,
         },
         (Instant::now() + Duration::from_secs(30), &Cancel::new()),
     );
@@ -2212,6 +2215,7 @@ fn a_rotation_removes_the_file_of_an_optional_secret_that_lost_its_value() {
             removed: super::lost_secrets(&db, &db.processes[0], fresh.as_ref()),
             owner: "1000:1000",
             docker_environment: None,
+            starting: false,
         },
         (Instant::now() + Duration::from_secs(30), &Cancel::new()),
     )

@@ -445,7 +445,7 @@ fn a_container_id_is_64_lowercase_hex_digits() {
 /// labels print as `labels`.
 fn printed_container(labels: &str) -> String {
     format!(
-        "{labels}\n{ID}\nexited 3\n2026-11-04T10:00:00.000000000Z\nmxv-01234567-reading-list.data 0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675 \n"
+        "{labels}\n{ID}\nexited 3\n2026-11-04T10:00:00.000000000Z\nmxv-01234567-reading-list.data 0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675 \n0\n\"\"\n"
     )
 }
 
@@ -752,17 +752,18 @@ fn a_containers_stop_timeout_is_read_alone_and_is_none_when_docker_omits_it() {
 fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
     let scope = scope("reading-list");
     let labels = container_labels(STORE, "reading-list", "db");
-    let printed = format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n\n4\n");
+    let printed =
+        format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n\n4\n\"\"\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Restarting);
     assert_eq!(inspected.restarts, 4);
 
-    let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n\"\"\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Running);
     assert_eq!(inspected.restarts, 0);
 
-    let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n\"\"\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Paused);
 }
@@ -775,8 +776,9 @@ fn an_inspection_tells_a_container_with_secret_files_by_its_secrets_label() {
         serde_json::from_str(&plain).unwrap();
     labeled.insert("mxv.secrets".to_owned(), json!("files"));
     let labeled = serde_json::Value::Object(labeled).to_string();
-    let printed =
-        |labels: &str| format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let printed = |labels: &str| {
+        format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n\"\"\n")
+    };
 
     let with_files = mint_container(&scope, &service("db"), ID, &printed(&labeled)).unwrap();
     let without = mint_container(&scope, &service("db"), ID, &printed(&plain)).unwrap();
@@ -798,6 +800,13 @@ fn an_inspection_keeps_the_user_that_the_container_was_created_with() {
 
     assert_eq!(named.user, "1000:1000");
     assert_eq!(root.user, "");
+    for unreadable in ["", "1000", "null"] {
+        let failed = mint_container(&scope, &service("db"), ID, &printed(unreadable));
+        match failed {
+            Err(error) => assert_eq!(error.cause(), DockerCause::Unexpected, "{unreadable}"),
+            Ok(inspected) => panic!("{unreadable}: {inspected:?}"),
+        }
+    }
 }
 
 #[test]

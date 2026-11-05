@@ -594,7 +594,12 @@ waits for files that its restart removed, but Docker does not count that
 start as a restart, so `up` and `status` read it as running. An `up`
 within the wrapper's 60 seconds rewrites the files, and the wrapper then
 starts the app. After that, the wrapper has exited with status 70, and
-the next `up` replaces the container because it no longer runs. The run
+the next `up` replaces the container because it no longer runs. The
+wrapper waits for every secret that had a value when the container was
+created. When one of those is an optional secret that has since lost its
+value, the rewrite writes no file for it, so the wrapper waits for a file
+that never comes, exits with status 70 after its 60 seconds, and the
+next `up` replaces the container. The run
 record keeps no start time to compare with, so `status` cannot tell such
 a container from one that runs.
 
@@ -619,8 +624,11 @@ commit runs can see the new value of one and the old value of the other.
 
 A rewrite that fails while the container still runs does not fail the
 app. When the environment cannot be resolved, a value cannot be read, or
-Docker cannot write the files, the container keeps its earlier files and
-keeps running. `up` reports the app as already running or started, with
+Docker refuses the inspection or the write, the container keeps its
+earlier files and keeps running. A failure of Docker itself, a missing
+`docker` program, a daemon that does not answer or a command that
+missed its deadline, fails the app instead, because phase cannot tell
+what the container holds. `up` reports the app as already running or started, with
 a note such as `db/server still runs with its earlier secret files:
 vault could not supply the variable TOKEN`, which names no value. `up`
 goes on to the app's other containers and processes, and the apps that

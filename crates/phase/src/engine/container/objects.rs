@@ -146,7 +146,8 @@ pub struct Inspected {
     /// The user that it runs as, in Docker's `USER[:GROUP]` form, which is
     /// empty for root: the app's run-as user, or else the user of its image
     /// when it was created. A later image under the same tag does not
-    /// change it.
+    /// change it. An inspection whose user cannot be read fails with
+    /// [`DockerCause::Unexpected`](crate::DockerCause::Unexpected).
     pub(crate) user: String,
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
@@ -214,8 +215,8 @@ fn container_format() -> String {
 /// # Errors
 ///
 /// Returns [`Error::Foreign`] when the labels do not name `scope` and
-/// `service`, and [`Error::Failed`] when docker printed no container
-/// id.
+/// `service`, and [`Error::Failed`] when docker printed no container id or
+/// a user that is not a JSON string.
 pub(super) fn mint_container(
     scope: &Scope,
     service: &ServiceName,
@@ -254,10 +255,16 @@ pub(super) fn mint_container(
         .next()
         .and_then(|line| line.trim().parse().ok())
         .unwrap_or_default();
-    let user = lines
-        .next()
-        .and_then(|line| serde_json::from_str::<String>(line.trim()).ok())
-        .unwrap_or_default();
+    // An empty user means root, so a user that cannot be read is an error
+    // and never counts as root.
+    let printed_user = lines.next().unwrap_or_default().trim();
+    let user = serde_json::from_str::<String>(printed_user).map_err(|_| {
+        Error::unexpected(
+            "container inspect",
+            Some(service.as_str()),
+            format!("docker printed {printed_user:?} as the container's user"),
+        )
+    })?;
     Ok(Inspected {
         container: OwnedContainer {
             scope: scope.clone(),

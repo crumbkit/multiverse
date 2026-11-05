@@ -384,6 +384,9 @@ struct FakeContainers {
     /// Each `app/process` whose secret files a rewrite was asked for, in
     /// order.
     rewrites: RefCell<Vec<String>>,
+    /// The `app/process` containers whose rewrite finds the Docker daemon
+    /// unavailable.
+    rewrite_unreachable: RefCell<BTreeSet<String>>,
 }
 
 /// How a fake container start ends after it creates every container.
@@ -531,6 +534,11 @@ impl ContainerRunner for FakeContainers {
         assert!(rewrite.entry.id.is_some());
         let process = format!("{}/{}", rewrite.app.name, rewrite.entry.process);
         self.rewrites.borrow_mut().push(process.clone());
+        if self.rewrite_unreachable.borrow().contains(&process) {
+            return Err(PhaseError::Docker {
+                source: DockerError::unavailable("the fake daemon does not answer".to_owned()),
+            });
+        }
         let Some(ending) = self.rewrite_ending.borrow().get(&process).cloned() else {
             return Ok(Rewritten::NoFiles);
         };
@@ -1442,6 +1450,37 @@ fn up_rewrites_the_secret_files_of_a_container_that_still_runs_and_leaves_it_run
             .state(&ObjectKey::Container(name("db"), name("server"))),
         Some(EntryState::Running)
     );
+}
+
+#[test]
+fn a_secret_rewrite_that_cannot_reach_docker_fails_the_app_without_a_note_for_it() {
+    let world = World::new();
+    let plan = plan(vec![container_app("db"), host_app("api", None, &["db"])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .insert("db/server".to_owned());
+    world
+        .containers
+        .rewrite_unreachable
+        .borrow_mut()
+        .insert("db/server".to_owned());
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, cause, .. } => {
+            assert_eq!(code, "phase::docker::unavailable");
+            assert_eq!(*cause, Some(crate::record::DockerCause::DaemonUnavailable));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(notes(&report, "db").is_empty());
+    assert_ne!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    assert!(world.containers.stopped.borrow().is_empty());
 }
 
 #[test]
