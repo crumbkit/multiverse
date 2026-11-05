@@ -6,8 +6,8 @@ use super::container::BindMount;
 use super::probe::{Probe, ProbeCheck};
 use super::restart::{Restart, RestartLimits};
 use super::{
-    AppPlan, ContainerProblem, MOST_READY_TIMEOUT, Plan, PlanError, ProcessKind, ProcessPlan,
-    ProcessProblem, RunnerKind, SecretDelivery, SourceProblem,
+    AppPlan, ContainerProblem, MOST_READY_TIMEOUT, PermissionProblem, Plan, PlanError, ProcessKind,
+    ProcessPlan, ProcessProblem, RunnerKind, SecretDelivery, SourceProblem,
 };
 use crate::source::{BuildSpec, ReleaseSpec, Source, Verification};
 
@@ -82,8 +82,14 @@ fn a_plan_survives_a_trip_through_json() {
     let mut migrate = ProcessPlan::new("migrate".parse().unwrap(), vec!["{program}".into()]);
     migrate.kind = ProcessKind::Oneshot { once: true };
     api.processes.push(migrate);
-    api.permissions.listen.insert("http".parse().unwrap());
-    api.permissions.secrets.insert("STRIPE_KEY".into());
+    api.permissions
+        .get_or_insert_default()
+        .listen
+        .insert("http".parse().unwrap());
+    api.permissions
+        .get_or_insert_default()
+        .secrets
+        .insert("STRIPE_KEY".into());
     let original = plan(vec![api, host_app("auth")]).unwrap();
 
     let json = serde_json::to_string(&original).unwrap();
@@ -190,7 +196,10 @@ fn a_plan_refuses_a_host_app_that_runs_from_an_image() {
 #[test]
 fn a_plan_refuses_permission_to_listen_on_a_port_the_app_lacks() {
     let mut api = host_app("api");
-    api.permissions.listen.insert("admin".parse().unwrap());
+    api.permissions
+        .get_or_insert_default()
+        .listen
+        .insert("admin".parse().unwrap());
 
     assert_eq!(
         plan(vec![api]),
@@ -675,7 +684,10 @@ fn a_plan_refuses_a_process_that_depends_on_itself() {
 #[test]
 fn a_plan_refuses_an_override_of_a_secret() {
     let mut api = host_app("api");
-    api.permissions.secrets.insert("STRIPE_KEY".into());
+    api.permissions
+        .get_or_insert_default()
+        .secrets
+        .insert("STRIPE_KEY".into());
     api.overrides.insert("STRIPE_KEY".into());
 
     assert_eq!(
@@ -995,4 +1007,233 @@ fn the_plan_digest_covers_the_optional_flag_and_holds_no_value() {
 
     assert_ne!(required.digest(), optional.digest());
     assert_eq!(optional.digest(), optional.clone().digest());
+}
+
+fn sandboxed(mut app: AppPlan) -> AppPlan {
+    app.permissions
+        .get_or_insert_default()
+        .listen
+        .insert("http".parse().unwrap());
+    app
+}
+
+fn permission_problem(apps: Vec<AppPlan>) -> PermissionProblem {
+    match plan(apps) {
+        Err(PlanError::BadPermissions { problem, .. }) => problem,
+        other => panic!("expected bad permissions, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_app_without_permissions_writes_them_as_null_so_the_plan_hash_records_it_unsandboxed() {
+    let unsandboxed = plan(vec![host_app("api")]).unwrap();
+    let declared = plan(vec![sandboxed(host_app("api"))]).unwrap();
+
+    let json = serde_json::to_value(&unsandboxed).unwrap();
+
+    assert!(json["apps"][0]["permissions"].is_null());
+    assert_ne!(unsandboxed.digest(), declared.digest());
+}
+
+#[test]
+fn a_plan_refuses_an_app_that_may_connect_to_an_external_host_until_the_proxy_is_built() {
+    let mut api = sandboxed(host_app("api"));
+    api.permissions
+        .get_or_insert_default()
+        .connect
+        .insert("api.stripe.com".into());
+
+    let problem = permission_problem(vec![api]);
+
+    assert_eq!(
+        problem,
+        PermissionProblem::ExternalHost("api.stripe.com".into())
+    );
+    assert!(problem.to_string().contains("proxy"), "{problem}");
+}
+
+#[test]
+fn a_plan_refuses_an_app_that_may_connect_to_an_app_it_does_not_depend_on() {
+    let mut api = sandboxed(host_app("api"));
+    api.permissions
+        .get_or_insert_default()
+        .connect
+        .insert("auth".into());
+
+    assert_eq!(
+        permission_problem(vec![api, host_app("auth")]),
+        PermissionProblem::NotADependency("auth".parse().unwrap())
+    );
+}
+
+#[test]
+fn a_plan_accepts_an_app_that_may_connect_to_an_app_it_depends_on() {
+    let mut api = sandboxed(host_app("api"));
+    api.depends.push("auth".parse().unwrap());
+    api.permissions
+        .get_or_insert_default()
+        .connect
+        .insert("auth".into());
+
+    assert!(plan(vec![api, host_app("auth")]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_sandboxed_process_that_listens_on_a_port_its_app_may_not_listen_on() {
+    let mut api = host_app("api");
+    api.permissions = Some(super::Permissions::default());
+
+    assert_eq!(
+        permission_problem(vec![api]),
+        PermissionProblem::ListenNotGranted {
+            process: "server".parse().unwrap(),
+            port: "http".parse().unwrap(),
+        }
+    );
+}
+
+#[test]
+fn a_plan_refuses_a_write_path_that_leaves_the_checkout() {
+    for path in ["../other", "", "$HOME/x", "target/../../x", "/srv/../etc"] {
+        let mut api = sandboxed(host_app("api"));
+        api.permissions
+            .get_or_insert_default()
+            .write
+            .insert(path.into());
+
+        assert_eq!(
+            permission_problem(vec![api]),
+            PermissionProblem::BadWrite(path.into()),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_accepts_the_state_directory_and_relative_and_absolute_paths_inside_the_checkout_as_writes()
+ {
+    let mut api = sandboxed(host_app("api"));
+    api.permissions.get_or_insert_default().write =
+        ["$STATE", "/workspaces/reading-list/api/cache", "target"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_an_absolute_write_path_outside_the_checkout() {
+    for path in [
+        "/srv/cache",
+        "/workspaces/reading-list/web",
+        "/workspaces/reading-list/api-other",
+    ] {
+        let mut api = sandboxed(host_app("api"));
+        api.permissions.get_or_insert_default().write = [path.to_owned()].into();
+
+        assert_eq!(
+            permission_problem(vec![api]),
+            PermissionProblem::WriteOutsideCheckout(path.to_owned()),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_leaves_the_permissions_of_a_container_app_to_docker() {
+    let mut db = container_app("db");
+    db.permissions
+        .get_or_insert_default()
+        .connect
+        .insert("api.stripe.com".into());
+
+    assert!(plan(vec![db]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_write_path_inside_another_write_path() {
+    let mut api = sandboxed(host_app("api"));
+    api.permissions.get_or_insert_default().write = ["target", "target/debug"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    assert_eq!(
+        permission_problem(vec![api]),
+        PermissionProblem::NestedWrite {
+            outer: "target".to_owned(),
+            inner: "target/debug".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_absolute_write_path_inside_the_checkouts_write_path() {
+    let mut api = sandboxed(host_app("api"));
+    let crate::source::Source::Checkout { dir, .. } = &api.source else {
+        panic!("a host app runs from its checkout");
+    };
+    let inner = dir.join("target/debug").display().to_string();
+    api.permissions.get_or_insert_default().write = ["target".to_owned(), inner.clone()].into();
+
+    assert_eq!(
+        permission_problem(vec![api]),
+        PermissionProblem::NestedWrite {
+            outer: "target".to_owned(),
+            inner,
+        }
+    );
+}
+
+#[test]
+fn a_plan_refuses_two_apps_that_may_write_overlapping_paths() {
+    // Both apps run from one checkout.
+    let mut api = sandboxed(host_app("api"));
+    api.permissions.get_or_insert_default().write = ["target".to_owned()].into();
+    let mut web = sandboxed(host_app("web"));
+    web.permissions.get_or_insert_default().write = ["target/web".to_owned()].into();
+
+    assert_eq!(
+        plan(vec![api, web]).unwrap_err(),
+        PlanError::BadPermissions {
+            app: "api".parse().unwrap(),
+            problem: PermissionProblem::SharedWrite {
+                path: "target".to_owned(),
+                other: "web".parse().unwrap(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_plan_refuses_two_apps_whose_writes_name_one_directory_through_a_symbolic_link() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("api");
+    std::fs::create_dir_all(real.join("target")).unwrap();
+    let link = root.path().join("web");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let with_checkout = |name: &str, dir: &std::path::Path| {
+        let mut app = sandboxed(host_app(name));
+        if let Source::Checkout { dir: checkout, .. } = &mut app.source {
+            *checkout = dir.to_path_buf();
+        }
+        app.permissions.get_or_insert_default().write = ["target".to_owned()].into();
+        app
+    };
+
+    assert_eq!(
+        plan(vec![
+            with_checkout("api", &real),
+            with_checkout("web", &link)
+        ])
+        .unwrap_err(),
+        PlanError::BadPermissions {
+            app: "api".parse().unwrap(),
+            problem: PermissionProblem::SharedWrite {
+                path: "target".to_owned(),
+                other: "web".parse().unwrap(),
+            },
+        }
+    );
 }

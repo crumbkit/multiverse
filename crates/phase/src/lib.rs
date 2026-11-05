@@ -28,6 +28,7 @@ mod plan;
 pub mod random;
 mod record;
 mod report;
+mod sandbox;
 mod select;
 mod source;
 mod status;
@@ -57,8 +58,8 @@ pub use crate::plan::restart::{
 };
 pub use crate::plan::{
     AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, MOST_STOP_GRACE,
-    OnceWithoutOneshot, Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem,
-    RunnerKind, SecretDelivery, SourceProblem,
+    OnceWithoutOneshot, PermissionProblem, Permissions, Plan, PlanError, ProcessKind, ProcessPlan,
+    ProcessProblem, RunnerKind, SecretDelivery, SourceProblem,
 };
 pub use crate::record::{
     BadContainerId, BadDockerName, ContainerId, DockerCause, DockerContext, DockerError,
@@ -66,6 +67,7 @@ pub use crate::record::{
     MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept, SweptItem, SweptObject,
 };
 pub use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
+pub use crate::sandbox::{LANDLOCK_UNSANDBOXED, SEATBELT_PARTIAL, Sandboxing};
 pub use crate::select::{BadTarget, Selection, Target};
 pub use crate::source::{
     BadSourceText, BuildSpec, GithubRepository, ImageReference, MOST_IMAGE_BYTES,

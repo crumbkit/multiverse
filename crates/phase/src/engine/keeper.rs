@@ -2,9 +2,9 @@
 //! the parent of exactly one app process. It holds only that process's
 //! environment, gives the process a log file descriptor, restarts it under
 //! its policy, records each start and stop in the run record, and exits
-//! when it is stopped. The sandbox is a later release's work, and the
-//! `sandbox` module's `apply_sandbox` is the hook where the keeper will
-//! apply it to the app's command.
+//! when it is stopped. When its specification names a sandbox, it starts
+//! the app through the launcher, which applies the sandbox and becomes
+//! the app, so each restart runs under the sandbox too.
 //!
 //! The program that links phase, such as mxv, calls [`run`] from its
 //! hidden `phase keep` subcommand, with the arguments that follow the
@@ -76,8 +76,15 @@
 //!   the [`KeeperEnvironment`] that `main` passed it. The specification
 //!   refuses any inherited variable other than `PATH` and `HOME`, and any
 //!   resolved name that is empty, holds `=` or NUL, or is `PATH` or
-//!   `HOME`. The sandbox will later give the app its
-//!   own `TMPDIR`.
+//!   `HOME`. A sandboxed app also receives `TMPDIR`, its own temporary
+//!   directory, which replaces any value the environment gave.
+//! - Sandbox: when the specification names one, the program is the
+//!   launcher, `<keeper program> <keeper words> --sandboxed <sandbox> --`
+//!   followed by the app's command. The sandbox holds paths and ports and
+//!   no environment value. The launcher applies it and replaces itself
+//!   with the app, so the app keeps the launcher's pid, environment and
+//!   streams. A launcher that cannot apply the sandbox or start the app
+//!   writes why to the app's log and exits with [`SANDBOX_REFUSED`].
 //! - Streams and deadline: standard input is empty. Standard output and
 //!   standard error are the app's log file, opened with `O_APPEND`, which
 //!   the app holds as its own descriptors. The keeper never reads the
@@ -160,6 +167,7 @@ mod supervise;
 #[cfg(test)]
 mod tests;
 
+pub use crate::sandbox::{SANDBOX_REFUSED, launch};
 pub use args::{BadKeeperArgs, KeeperArgs};
 pub use environment::KeeperEnvironment;
 pub(crate) use spawn::{AppEnd, KeeperCommand, Kept, Launch, spawn};

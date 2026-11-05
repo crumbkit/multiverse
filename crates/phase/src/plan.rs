@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, PortName, ProcessName, VolumeName, WorkspaceId, WorkspaceName};
+use crate::sandbox::WorkspacePaths;
 use crate::source::Source;
 
 mod check;
@@ -22,8 +23,9 @@ pub(crate) mod probe;
 mod process_file;
 pub(crate) mod restart;
 
+pub(crate) use check::STATE;
 use check::check_apps;
-pub use check::{ContainerProblem, PlanError, ProcessProblem, SourceProblem};
+pub use check::{ContainerProblem, PermissionProblem, PlanError, ProcessProblem, SourceProblem};
 use container::ContainerOptions;
 pub use process_file::OnceWithoutOneshot;
 use process_file::ProcessFile;
@@ -62,6 +64,11 @@ pub struct Plan {
     id: WorkspaceId,
     /// The apps, in the order the plan lists them.
     apps: Vec<AppPlan>,
+    /// The workspace's own directory and the paths of the workspace that
+    /// a sandboxed app may never use, which the host program gives with
+    /// [`Plan::with_workspace_dir`]. The plan's JSON form and digest leave
+    /// them out.
+    workspace_paths: WorkspacePaths,
 }
 
 impl Plan {
@@ -87,7 +94,29 @@ impl Plan {
             workspace,
             id,
             apps,
+            workspace_paths: WorkspacePaths::default(),
         })
+    }
+
+    /// Returns this plan with `dir` as the workspace's own directory, which
+    /// holds its checkouts, and `protected` as the workspace's paths that a
+    /// sandboxed app may never read or write, such as the workspace
+    /// manifest. phase refuses to sandbox an app whose checkout is `dir`,
+    /// and denies a sandboxed app the rest of `dir` outside its checkout.
+    /// Without `dir`, phase takes the parent of each app's checkout as the
+    /// workspace's directory.
+    #[must_use]
+    pub fn with_workspace_dir(mut self, dir: PathBuf, protected: Vec<PathBuf>) -> Self {
+        self.workspace_paths = WorkspacePaths {
+            dir: Some(dir),
+            protected,
+        };
+        self
+    }
+
+    /// Returns the workspace's own directory and protected paths.
+    pub(crate) const fn workspace_paths(&self) -> &WorkspacePaths {
+        &self.workspace_paths
     }
 
     /// Returns the workspace's name.
@@ -219,9 +248,15 @@ pub struct AppPlan {
     /// The apps that must be ready before this one starts.
     #[serde(default)]
     pub depends: Vec<AppName>,
-    /// What the app's processes may do inside the sandbox.
+    /// What the app's processes may do inside the sandbox, or `None` when
+    /// the app declares no `[permissions]`. Only a host app that declares
+    /// them runs under the sandbox, so `None` runs its processes
+    /// unsandboxed. In JSON an app without permissions writes
+    /// `"permissions": null`, so the plan's hash, which each process's
+    /// run record entry keeps, changes when an app turns the sandbox on or
+    /// off.
     #[serde(default)]
-    pub permissions: Permissions,
+    pub permissions: Option<Permissions>,
     /// The names of the variables that `up --env KEY=VALUE` sets for this
     /// run. Such a value is not a secret, and it reaches the app through
     /// the [`EnvironmentSource`](crate::EnvironmentSource), so the plan
@@ -246,10 +281,17 @@ impl AppPlan {
             ports: BTreeMap::new(),
             processes: Vec::new(),
             depends: Vec::new(),
-            permissions: Permissions::default(),
+            permissions: None,
             overrides: BTreeSet::new(),
             container: ContainerOptions::default(),
         }
+    }
+
+    /// Reports whether its permissions name `name` as a secret.
+    pub(crate) fn is_secret(&self, name: &str) -> bool {
+        self.permissions
+            .as_ref()
+            .is_some_and(|permissions| permissions.secrets.contains(name))
     }
 }
 
@@ -439,12 +481,19 @@ impl ProcessPlan {
 /// What an app's processes may do inside the sandbox. phase compares these
 /// with the permissions granted to the app, and asks before it runs an app
 /// whose permissions grew.
+///
+/// Until phase runs the allowlist proxy that reaches external hosts, an app
+/// may connect only to the apps it depends on, over loopback, and a plan
+/// whose `connect` names anything else is refused.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Permissions {
-    /// The paths the app may write, in which `$STATE` stands for the app's
-    /// own state directory.
+    /// The paths the app may write besides its own state and temporary
+    /// directories, which it may always write. `$STATE` stands for the
+    /// app's own state directory. Any other entry is an absolute path, or a
+    /// path relative to the app's checkout that stays inside it, such as
+    /// `target`.
     #[serde(default)]
     pub write: BTreeSet<String>,
     /// The app ports the app may listen on.

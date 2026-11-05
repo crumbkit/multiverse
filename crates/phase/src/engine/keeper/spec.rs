@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::keeper::MOST_SPEC_BYTES;
 use crate::plan::restart::{Restart, Stop};
 use crate::record::run::{Ended, HostProcess};
+use crate::sandbox::SandboxSpec;
 
 /// The version of the specification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +69,11 @@ pub(crate) struct KeeperSpec {
     /// counts as not ready after a restart until phase starts it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ready_after_ms: Option<u64>,
+    /// The sandbox that the keeper starts the app under, through the
+    /// launcher, or `None` to start the app unsandboxed. It holds paths
+    /// and ports, never an environment value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sandbox: Option<SandboxSpec>,
 }
 
 /// The only variables that a keeper and its app inherit from the caller.
@@ -125,7 +131,14 @@ impl KeeperSpec {
             resolved: BTreeSet::new(),
             required: BTreeSet::new(),
             ready_after_ms: None,
+            sandbox: None,
         }
+    }
+
+    /// Returns this specification with the app started under `sandbox`.
+    pub(crate) fn sandboxed(mut self, sandbox: SandboxSpec) -> Self {
+        self.sandbox = Some(sandbox);
+        self
     }
 
     /// Returns this specification of an app that has no readiness probe

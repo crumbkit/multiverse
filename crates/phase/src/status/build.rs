@@ -16,6 +16,7 @@ use crate::record::docker::{Docker, DockerKind, DockerObject, SeenContainer};
 use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{ContainerEntry, Ended, EntryState, Exit, HostEntry, RunRecord};
 use crate::record::store::RunStore;
+use crate::sandbox;
 use crate::status::{
     LastExit, ProcessState, SourceSummary, Status, StatusRow, UnknownReason, WorkspaceState,
 };
@@ -168,6 +169,11 @@ fn enrich(row: &mut StatusRow, app: Option<&AppPlan>, planned: Option<&ProcessPl
     };
     row.source = Some(SourceSummary::from(&app.source));
     row.runner = app.runner;
+    // A row that its record filled shows how phase launched the process,
+    // and any other row shows how phase would launch it now.
+    if row.sandbox.is_none() {
+        row.sandbox = sandbox::sandboxing(app, &sandbox::platform());
+    }
     if row.address.is_none() && app.runner == RunnerKind::Host {
         let port = planned
             .and_then(|planned| planned.port.as_ref())
@@ -203,6 +209,7 @@ fn host_row(
             LastExit::new(exit.and_then(Exit::code), exit.and_then(Exit::signal))
         });
         row.address = entry.listen.as_ref().map(|listen| loopback(listen.port));
+        row.sandbox.clone_from(&entry.sandbox);
         if let Some(host) = entry
             .host
             .as_ref()

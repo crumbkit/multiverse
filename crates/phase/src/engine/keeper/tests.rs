@@ -62,6 +62,16 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
     let Some(at) = args.iter().position(|arg| arg == "keep") else {
         return;
     };
+    // A keeper whose specification names a sandbox starts this test binary
+    // again as the launcher, which returns only when it fails.
+    if let Some(code) = crate::sandbox::launch(args.get(at + 1..).unwrap_or_default()) {
+        let _ = code;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test binary runs as the launcher, which ends with the launcher's status"
+        )]
+        std::process::exit(i32::from(crate::sandbox::SANDBOX_REFUSED));
+    }
     let keeper_args = KeeperArgs::parse(args.into_iter().skip(at + 1)).unwrap();
     #[expect(
         clippy::disallowed_methods,
@@ -699,6 +709,73 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
     eventually("the keeper's record of the stop after two restarts", || {
         matches!(fixture.recorded(), Some((EntryState::Stopped, _, 2)))
     });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specification() {
+    let fixture = Fixture::new();
+    let tmp = fixture.dir.join("tmp");
+    let outside = fixture.dir.join("outside");
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    // The launcher checks that each path is canonical before it applies the
+    // sandbox.
+    let tmp = tmp.canonicalize().unwrap();
+    let script = format!(
+        "if echo x > '{}/file' 2>/dev/null; then echo wrote; else echo denied; fi; mkdir \"$TMPDIR/run.$$\"; exit 3",
+        outside.display()
+    );
+    let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(50), Resolve::Never));
+    let sandbox = crate::sandbox::SandboxSpec {
+        read: [
+            "/usr",
+            "/bin",
+            "/System",
+            "/Library/Apple",
+            "/private/etc",
+            "/private/var/select",
+            "/dev",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect(),
+        write: BTreeSet::from([tmp.clone()]),
+        path_dirs: Vec::new(),
+        protected: Vec::new(),
+        read_only: BTreeSet::new(),
+        deny: BTreeSet::new(),
+        listen: BTreeSet::new(),
+        connect: BTreeSet::new(),
+        tmp: tmp.clone(),
+        launcher: crate::sandbox::Launcher {
+            program: std::env::current_exe().unwrap(),
+            words: ["--exact", "--nocapture", "--", ENTRY, "keep"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        },
+    };
+    let spec = fixture
+        .spec(&script, restart, Stop::default())
+        .sandboxed(sandbox);
+    let mut running = fixture.start(&spec).unwrap();
+
+    let code = running.exit_code();
+
+    assert_eq!(code, i32::from(KeeperExit::Failed.code()));
+    // The log also holds what libtest prints when this test binary starts
+    // as the launcher, and the sandbox's denials of the working directory.
+    let log = fixture.log_text();
+    assert_eq!(
+        log.lines().filter(|line| *line == "denied").count(),
+        2,
+        "{log}"
+    );
+    assert!(!log.lines().any(|line| line == "wrote"), "{log}");
+    assert!(log.contains("Operation not permitted"), "{log}");
+    assert!(!outside.join("file").exists());
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 2);
 }
 
 #[test]

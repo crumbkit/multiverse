@@ -20,7 +20,7 @@ cargo nextest run --locked --workspace --all-features
 cargo test --locked --doc --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 cargo hack clippy --locked --workspace --each-feature --all-targets
-cargo +1.89.0 check --locked --workspace --all-targets --all-features
+cargo +1.95.0 check --locked --workspace --all-targets --all-features
 ```
 
 - Write the test first, named as a sentence (BASE-36).

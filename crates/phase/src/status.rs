@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::name::{AppName, ProcessName, WorkspaceId, WorkspaceName};
 use crate::plan::RunnerKind;
 use crate::record::Handle;
+use crate::sandbox::Sandboxing;
 use crate::source::{ImageReference, Source, Version};
 pub(crate) use crate::status::build::{Sources, status};
 
@@ -129,6 +130,14 @@ pub struct StatusRow {
     /// The path of its log file, or `None` for a container, whose log comes
     /// from `docker logs`.
     pub log: Option<PathBuf>,
+    /// Whether a host process runs under the sandbox, and why not when it
+    /// does not, or `None` for a container or when `status` had no plan.
+    /// macOS shows Seatbelt as partial, because an app's listening ports
+    /// accept connections from other machines on the network. Linux shows a process under
+    /// Landlock as unsandboxed, because Landlock leaves Unix sockets open.
+    /// In JSON it is left out when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Sandboxing>,
 }
 
 /// How a process ended by itself: its exit status, or the signal that
@@ -179,6 +188,7 @@ impl StatusRow {
             restarts: 0,
             last_exit: None,
             log: None,
+            sandbox: None,
         }
     }
 }

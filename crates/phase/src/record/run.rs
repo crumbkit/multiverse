@@ -1,4 +1,4 @@
-//! The run record `phase/run/v3`: what one workspace's run planned and
+//! The run record `phase/run/v4`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::name::{AppName, PortName, ProcessName, WorkspaceId};
 use crate::plan::restart::{Restart, Stop};
 use crate::record::{BadHex, ContainerId, DockerName, hex_id};
+use crate::sandbox::Sandboxing;
 
 /// The version of the run record. phase reads every version and writes
 /// only the newest, [`RUN_VERSION`]. Each version adds fields that an
@@ -28,14 +29,18 @@ pub(crate) enum RunSchema {
     V2,
     /// `phase/run/v3`, which adds `ready` to host process and container
     /// entries. A phase that reads only v2 refuses it as written by a newer
-    /// phase.
+    /// phase. It reads as v4 with no sandbox recorded.
     #[serde(rename = "phase/run/v3")]
     V3,
+    /// `phase/run/v4`, which adds `sandbox` to host process entries. A
+    /// phase that reads only v3 refuses it as written by a newer phase.
+    #[serde(rename = "phase/run/v4")]
+    V4,
 }
 
 impl RunSchema {
     /// The version that phase writes.
-    pub(crate) const CURRENT: Self = Self::V3;
+    pub(crate) const CURRENT: Self = Self::V4;
 }
 
 /// The newest version of the run record that this phase reads, and the one
@@ -46,7 +51,7 @@ impl RunSchema {
 /// keeper refuses it as written by a newer phase, notes each refused write
 /// in its diagnostic log, and records nothing more, until phase starts its
 /// process again with a keeper of its own.
-pub(crate) const RUN_VERSION: u32 = 3;
+pub(crate) const RUN_VERSION: u32 = 4;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +169,13 @@ pub(crate) struct HostEntry {
     /// `phase/run/v2` record, reads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ready: Option<Ready>,
+    /// How phase launched the process, under which sandbox or unsandboxed
+    /// and why, which `status` shows. A keeper's restart runs under the
+    /// same sandbox, so it keeps it. It is `None` for a keeper, for a
+    /// process that phase has not started yet, and in a record that phase
+    /// wrote before it recorded the sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sandbox: Option<Sandboxing>,
 }
 
 /// When phase observed a process ready: its readiness probe passed, or a
@@ -316,6 +328,9 @@ pub(crate) struct Launching {
     pub(crate) listen: Option<Listen>,
     /// The restart policy that its keeper follows.
     pub(crate) restart: Restart,
+    /// How the process runs: under which sandbox, or unsandboxed and why.
+    /// It is `None` for a container.
+    pub(crate) sandbox: Option<Sandboxing>,
 }
 
 /// A started host process.
@@ -583,6 +598,7 @@ impl RunRecord {
             ended: None,
             restart: None,
             ready: None,
+            sandbox: None,
         };
         self.keepers.push(entry(None, None));
         self.processes.push(entry(stop, listen));
@@ -882,6 +898,7 @@ impl RunRecord {
         entry.stop = Some(launching.stop);
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
+        entry.sandbox.clone_from(&launching.sandbox);
         Ok(())
     }
 

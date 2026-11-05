@@ -947,6 +947,7 @@ fn check_runnable(
         checkout: Path::new("/"),
         roots: Vec::new(),
         ports: &ports,
+        workspace_dir: None,
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
     };

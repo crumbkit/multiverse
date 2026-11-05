@@ -249,13 +249,21 @@ impl multiverse::phase::EnvironmentSource for NoFreshEnvironment {
 /// Runs phase's keeper with the arguments after `mxv phase keep` and the
 /// environment `vars` that `main` read, and returns its exit status. The
 /// keeper reads its specification from standard input and writes its
-/// handshake to standard output.
+/// handshake to standard output. When the arguments start with
+/// `--sandboxed`, it runs phase's launcher instead, which applies a
+/// sandboxed app's sandbox and replaces this process with the app.
 #[doc(hidden)]
 #[must_use]
 pub fn keep(args: Vec<OsString>, vars: Vec<(OsString, OsString)>) -> ExitCode {
-    use multiverse::phase::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, run};
+    use multiverse::phase::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, launch, run};
+    let rest: Vec<OsString> = args.into_iter().skip(1 + KEEPER_WORDS.len()).collect();
+    // A keeper starts a sandboxed app through `mxv phase keep --sandboxed`,
+    // which applies the sandbox and becomes the app. It reads nothing else.
+    if let Some(code) = launch(&rest) {
+        return code;
+    }
     let environment = KeeperEnvironment::from_vars(vars);
-    let Ok(parsed) = KeeperArgs::parse(args.into_iter().skip(1 + KEEPER_WORDS.len())) else {
+    let Ok(parsed) = KeeperArgs::parse(rest) else {
         return KeeperExit::BadInput.into();
     };
     #[expect(

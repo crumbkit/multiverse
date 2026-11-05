@@ -5,7 +5,9 @@ members = ["crates/multiverse", "crates/mxv", "crates/phase"]
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.89"
+# nono, which applies phase's sandbox, needs Rust 1.95, so the workspace's
+# MSRV is 1.95.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/crumbkit/multiverse"
 
@@ -95,6 +97,14 @@ snapbox = { version = "1.2.2", default-features = false }
 # tempfile gives each test its own state directory and git repositories,
 # which it removes when the test ends. Only tests use it.
 tempfile = { version = "3.27.0", default-features = false }
+
+# nono applies the operating system's sandbox to a keeper's app: Seatbelt
+# on macOS and Landlock on Linux (decision P9). It is pinned to the exact
+# version that /evals/nono-library-for-phase tested, because phase relies on
+# the order in which nono's Seatbelt profile emits phase's own network rules.
+# Its default feature reads the system keyring, which phase never uses, so
+# the workspace entry turns off its default features.
+nono = { version = "=0.81.0", default-features = false }
 
 # The lint table is lints/base.toml and lints/library.toml of the Rust
 # standards (BASE-1, LIB-2, LIB-3). A build with CARGO_BUILD_WARNINGS=deny

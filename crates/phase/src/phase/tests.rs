@@ -596,3 +596,83 @@ fn a_source_that_leaves_out_a_required_variable_fails_a_host_start() {
     );
     assert_eq!(hash, None);
 }
+
+/// Starts a sandboxed app through a phase whose state lies inside a
+/// directory that the host program protects, as mxv's does: mxv protects
+/// its state directory and its mirrors, and phase's state is
+/// `<mxv state>/phase`. The app must start under the sandbox and write its
+/// own state directory.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_sandboxed_app_starts_when_the_host_program_protects_the_directory_that_holds_phases_state() {
+    use crate::plan::Permissions;
+    use crate::report::AppOutcome;
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+    // The per-user temporary directory is protected, so the test's files
+    // lie in the build's target directory.
+    let target = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("sandbox-fixtures");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("phase-")
+        .tempdir_in(target)
+        .unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let mxv_state = root.join("state/mxv");
+    let mirrors = root.join("data/mxv/mirrors");
+    let workspace = root.join("data/mxv/workspaces/reading-list");
+    let checkout = workspace.join("api");
+    for dir in [&mxv_state, &mirrors, &checkout] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let (phase, plan) = real_keeper_running(
+        &mxv_state.join("phase"),
+        &checkout,
+        "echo state > \"$TMPDIR/../state/file\" && echo \"ready $GREETING\"; exec sleep 30",
+        Some("^ready hello$"),
+        &[],
+    );
+    let phase = phase.with_protected(vec![mxv_state.clone(), mirrors]);
+    let mut apps = plan.apps().to_vec();
+    apps[0].permissions = Some(Permissions::default());
+    let plan = Plan::new(plan.workspace().clone(), id(), apps)
+        .unwrap()
+        .with_workspace_dir(workspace.clone(), vec![workspace.join("mxv.toml")]);
+    let soon = Instant::now() + Duration::from_secs(30);
+
+    let up = phase
+        .up(
+            &plan,
+            &Selection::All,
+            &Greeting,
+            UpDeadlines::new(soon, soon),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(up.apps[0].outcome, AppOutcome::Started, "{up:?}");
+    let record = RunStore::new(&mxv_state.join("phase"))
+        .read(&id())
+        .unwrap()
+        .unwrap();
+    let Platform::Available(sandboxing) = platform() else {
+        panic!("the test returned above when no sandbox is available");
+    };
+    assert_eq!(record.processes[0].sandbox, Some(sandboxing));
+    let dirs =
+        crate::sandbox::AppDirs::of(&mxv_state.join("phase"), &id(), &"api".parse().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(dirs.state.join("file")).unwrap(),
+        "state\n"
+    );
+    phase.down(&id(), &Selection::All, soon).unwrap();
+}

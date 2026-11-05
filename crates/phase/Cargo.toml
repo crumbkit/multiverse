@@ -41,12 +41,16 @@ wait-timeout = { workspace = true }
 # feature gives the number of ticks in a second.
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["param"] }
+# The keeper applies Landlock to an app that declares permissions.
+nono = { workspace = true }
 
 # macOS reads a process's start time to the microsecond, and the sockets of
 # a process's descriptors, with libproc's `proc_pidinfo`, `proc_pidfdinfo`
 # and `proc_listpids`, which libc declares.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
+# The keeper applies Seatbelt to an app that declares permissions.
+nono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

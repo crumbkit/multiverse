@@ -98,7 +98,7 @@ fn variables<'p>(app: &AppPlan, process: &'p ProcessPlan) -> impl Iterator<Item 
     process
         .env
         .iter()
-        .filter(move |name| secrets_too || !app.permissions.secrets.contains(*name))
+        .filter(move |name| secrets_too || !app.is_secret(name))
 }
 
 /// Returns the variables of `process` that phase writes as files into its
@@ -113,7 +113,7 @@ pub(crate) fn file_secrets<'p>(
     process
         .env
         .iter()
-        .filter(move |name| files && app.permissions.secrets.contains(*name))
+        .filter(move |name| files && app.is_secret(name))
 }
 
 /// Returns the name of the variable of the `docker compose up` child of
@@ -530,7 +530,29 @@ pub(crate) fn plan_hash(
     let part = file
         .get("services")
         .and_then(|services| services.get(service.as_str()))
-        .map(Value::to_string)
+        .map(|service| keys_sorted(service).to_string())
         .unwrap_or_default();
     Ok(PlanHash::new(digest(part.as_bytes())))
+}
+
+/// Returns `value` with the keys of each object in sorted order, so its
+/// text, and the plan hash of it, does not depend on whether serde_json
+/// keeps keys in insertion order. A dependency of phase turns on that
+/// order for every crate in the build, and the hash is the one of the
+/// sorted text that phase wrote before.
+pub(super) fn keys_sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), keys_sorted(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(keys_sorted).collect()),
+        other => other.clone(),
+    }
 }

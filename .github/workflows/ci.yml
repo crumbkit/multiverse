@@ -44,7 +44,7 @@ jobs:
       # (LIB-4). Both install before rust-cache, which reads the installed
       # rustc versions for its cache key.
       - run: rustup toolchain install
-      - run: rustup toolchain install 1.89.0 --profile minimal
+      - run: rustup toolchain install 1.95.0 --profile minimal
       # install-action runs before rust-cache, so the cache leaves out the
       # tool binaries that install-action downloads on every run.
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
@@ -91,7 +91,7 @@ jobs:
         run: cargo hack clippy --locked --workspace --each-feature --all-targets
       # LIB-4: every target builds on the MSRV with every feature.
       - name: msrv
-        run: cargo +1.89.0 check --locked --workspace --all-targets --all-features
+        run: cargo +1.95.0 check --locked --workspace --all-targets --all-features
 
   # The macOS lane runs the code that only builds on macOS, such as
   # process/darwin.rs, daily and on demand. Pull requests do not wait for

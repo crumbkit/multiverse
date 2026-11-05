@@ -4,25 +4,13 @@
   "description": "One page of the workspaces, in name order, and the number of workspaces.",
   "type": "object",
   "properties": {
-    "cut": {
-      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
-      "type": "object",
-      "properties": {
-        "budget": {
-          "description": "The most bytes that the run printed on standard output.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "code": {
-          "description": "The over-budget code, in the tool's spelling.",
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "code",
-        "budget"
-      ]
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/list/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
     },
     "data": {
       "description": "The rows of the page, up to the limit.",
@@ -30,14 +18,6 @@
       "items": {
         "$ref": "#/$defs/WorkspaceRow"
       }
-    },
-    "dry_run": {
-      "description": "Present, and true, when the run was a dry run that changed nothing.",
-      "const": true
-    },
-    "schema": {
-      "description": "The id of this document.",
-      "const": "mxv/list/v1"
     },
     "total": {
       "description": "The number of rows that matched, of which data holds one page. It is absent when the tool did not count the rows.",
@@ -47,6 +27,26 @@
     "truncated": {
       "description": "True when the document leaves out rows that matched, because of the limit or the output budget, and false when data holds every row.",
       "type": "boolean"
+    },
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The over-budget code, in the tool's spelling.",
+          "type": "string"
+        },
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "code",
+        "budget"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -55,58 +55,113 @@
     "truncated"
   ],
   "$defs": {
-    "CheckoutRow": {
-      "description": "One checkout of a workspace.",
+    "WorkspaceRow": {
+      "description": "One workspace, as `list` prints it.",
       "type": "object",
       "properties": {
-        "backend": {
-          "description": "The version-control system that made the checkout, which is `git`.",
-          "type": "string"
-        },
-        "base": {
-          "description": "The remote branch that the branch started from, such as\n`refs/remotes/origin/main`.",
+        "name": {
+          "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
           "type": "string"
         },
         "branch": {
-          "description": "The branch that the checkout was created on.",
-          "type": "string"
-        },
-        "commit": {
-          "description": "The commit that the branch started at, or null in a dry run, which\ndoes not fetch.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "mirror": {
-          "description": "The bare mirror whose objects a clone borrows, or null for a\nworktree.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "description": "The repository's name, which names the checkout's directory.",
+          "description": "The branch that the workspace's checkouts were created on.",
           "type": "string"
         },
         "path": {
-          "description": "The checkout's directory.",
+          "description": "The workspace's directory, which `mxv cd` prints.",
           "type": "string"
         },
-        "source": {
-          "description": "The repository's top-level directory.",
+        "repositories": {
+          "description": "The top-level directory of each repository that the workspace checks\nout.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones. Null in a row whose record\nmxv cannot read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KindRow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, `merged` for the files of a workspace\nwith several checkouts, or `none` for a bare workspace. Null in a\nrow whose record mxv cannot read.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestRow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest_path": {
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none. For a merged manifest, it is the\nworkspace manifest when it exists, or else the first checkout's\n`mxv.toml`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest_paths": {
+          "description": "Every file that the workspace's commands read: the one manifest of\na workspace with one checkout, or the workspace manifest and each\ncheckout's `mxv.toml` that exist in a workspace with several.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "checkouts": {
+          "description": "The workspace's checkouts, one for each repository.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckoutRow"
+          }
+        },
+        "problem": {
+          "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record, without `.json`, in `name`, and\nleaves the other fields empty.",
           "type": "string"
+        },
+        "ports": {
+          "description": "The host port that the workspace holds for each named port of its\nmanifest, which the first `mxv up` allocates.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          }
+        },
+        "size": {
+          "description": "The bytes that the workspace's directory takes on disk, with each\nfile that has several hard links counted once and no symbolic link\nfollowed, or null when `--sizes` was not given.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "disposable": {
+          "description": "The bytes that the workspace's disposable directories take on disk,\nsuch as `target/` and `node_modules/`, which `mxv clean` deletes, or\nnull when `--sizes` was not given.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "required": [
         "name",
-        "backend",
-        "source",
-        "path",
         "branch",
-        "base",
-        "commit",
-        "mirror"
+        "path",
+        "problem",
+        "ports",
+        "size",
+        "disposable"
       ]
     },
     "KindRow": {
@@ -149,113 +204,58 @@
         }
       ]
     },
-    "WorkspaceRow": {
-      "description": "One workspace, as `list` prints it.",
+    "CheckoutRow": {
+      "description": "One checkout of a workspace.",
       "type": "object",
       "properties": {
-        "branch": {
-          "description": "The branch that the workspace's checkouts were created on.",
+        "name": {
+          "description": "The repository's name, which names the checkout's directory.",
           "type": "string"
         },
-        "checkouts": {
-          "description": "The workspace's checkouts, one for each repository.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CheckoutRow"
-          }
+        "backend": {
+          "description": "The version-control system that made the checkout, which is `git`.",
+          "type": "string"
         },
-        "disposable": {
-          "description": "The bytes that the workspace's disposable directories take on disk,\nsuch as `target/` and `node_modules/`, which `mxv clean` deletes, or\nnull when `--sizes` was not given.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
+        "source": {
+          "description": "The repository's top-level directory.",
+          "type": "string"
         },
-        "kind": {
-          "description": "How the workspace's checkouts are made: `clone` for a clone with a\n`.git` of its own, or `worktree` for a git worktree of the\nrepository, which mxv made before clones. Null in a row whose record\nmxv cannot read.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/KindRow"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "path": {
+          "description": "The checkout's directory.",
+          "type": "string"
         },
-        "manifest": {
-          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, `merged` for the files of a workspace\nwith several checkouts, or `none` for a bare workspace. Null in a\nrow whose record mxv cannot read.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ManifestRow"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "branch": {
+          "description": "The branch that the checkout was created on.",
+          "type": "string"
         },
-        "manifest_path": {
-          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none. For a merged manifest, it is the\nworkspace manifest when it exists, or else the first checkout's\n`mxv.toml`.",
+        "base": {
+          "description": "The remote branch that the branch started from, such as\n`refs/remotes/origin/main`.",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit that the branch started at, or null in a dry run, which\ndoes not fetch.",
           "type": [
             "string",
             "null"
           ]
         },
-        "manifest_paths": {
-          "description": "Every file that the workspace's commands read: the one manifest of\na workspace with one checkout, or the workspace manifest and each\ncheckout's `mxv.toml` that exist in a workspace with several.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "name": {
-          "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",
-          "type": "string"
-        },
-        "path": {
-          "description": "The workspace's directory, which `mxv cd` prints.",
-          "type": "string"
-        },
-        "ports": {
-          "description": "The host port that the workspace holds for each named port of its\nmanifest, which the first `mxv up` allocates.",
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint16",
-            "maximum": 65535,
-            "minimum": 0
-          }
-        },
-        "problem": {
-          "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record, without `.json`, in `name`, and\nleaves the other fields empty.",
-          "type": "string"
-        },
-        "repositories": {
-          "description": "The top-level directory of each repository that the workspace checks\nout.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "size": {
-          "description": "The bytes that the workspace's directory takes on disk, with each\nfile that has several hard links counted once and no symbolic link\nfollowed, or null when `--sizes` was not given.",
+        "mirror": {
+          "description": "The bare mirror whose objects a clone borrows, or null for a\nworktree.",
           "type": [
-            "integer",
+            "string",
             "null"
-          ],
-          "format": "uint64",
-          "minimum": 0
+          ]
         }
       },
       "required": [
         "name",
-        "branch",
+        "backend",
+        "source",
         "path",
-        "problem",
-        "ports",
-        "size",
-        "disposable"
+        "branch",
+        "base",
+        "commit",
+        "mirror"
       ]
     }
   }

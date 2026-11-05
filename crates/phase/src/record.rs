@@ -1,6 +1,6 @@
 //! The run record and sweep.
 //!
-//! phase writes a run record (`phase/run/v3`) for each workspace, keyed by
+//! phase writes a run record (`phase/run/v4`) for each workspace, keyed by
 //! its stable id, before it creates anything. The record names every
 //! keeper and app process by pid, process start time and process group,
 //! every container, network and volume by id, and the hash of the plan that
