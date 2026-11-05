@@ -208,6 +208,23 @@ fn this_process_holds_its_own_listening_socket_as_a_member_of_its_group() {
     drop(listener);
 }
 
+#[test]
+fn this_process_holds_its_own_socket_that_listens_only_on_ipv6_loopback() {
+    let Ok(listener) = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)) else {
+        eprintln!("skipped: this machine has no IPv6 loopback address");
+        return;
+    };
+    let port = listener.local_addr().unwrap().port();
+    let own = u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap();
+    let held = listen_holder(own, port).unwrap();
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_eq!(held, Some(Holder::Group));
+    } else {
+        assert_eq!(held, None);
+    }
+    drop(listener);
+}
+
 fn stop<'a>(
     keeper: Option<&'a crate::record::run::HostProcess>,
     app: Option<&'a crate::record::run::HostProcess>,
@@ -442,6 +459,18 @@ fn the_system_runner_finds_a_port_in_use_on_the_wildcard_address() {
 fn the_system_runner_finds_a_port_in_use_on_the_ipv6_wildcard_address() {
     // A machine without IPv6 cannot hold the port this way.
     let Ok(held) = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)) else {
+        return;
+    };
+    let port = held.local_addr().unwrap().port();
+
+    assert!(System.port_in_use(port).unwrap());
+    drop(held);
+}
+
+#[test]
+fn the_system_runner_finds_a_port_in_use_only_on_the_ipv6_loopback_address() {
+    let Ok(held) = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)) else {
+        eprintln!("skipped: this machine has no IPv6 loopback address");
         return;
     };
     let port = held.local_addr().unwrap().port();
