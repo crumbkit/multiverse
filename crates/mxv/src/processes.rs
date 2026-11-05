@@ -543,13 +543,21 @@ pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -
             ControlFlow::Continue(())
         }
     };
+    // phase gives each note at most once for a read, and says in it why
+    // the log passed no lines.
+    let mut noted = |note: multiverse::phase::LogNote| {
+        crate::warn(&[format!("`{}`: {note}", args.process)]);
+    };
     let found = context.runs.logs(
         &context.workspace,
         manifest.as_ref(),
         &args.process,
         args.lines,
         args.follow,
-        &mut pass,
+        &mut multiverse::LogOutput {
+            pass: &mut pass,
+            noted: &mut noted,
+        },
     );
     match found {
         Ok(true) => streaming.end(Ok::<(), crumbkit::Error>(())),

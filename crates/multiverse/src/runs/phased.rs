@@ -22,7 +22,7 @@ use phase::container::{
     delete_app_volumes, volume_exists,
 };
 use phase::{
-    AppName, AppOutcome, Cancel, Handle, LineSink, LogLine, LogRequest, Note, PhaseError,
+    AppName, AppOutcome, Cancel, Handle, LineSink, LogLine, LogNote, LogRequest, Note, PhaseError,
     ProcessName, Report, RunnerKind, Selection, StartProblem, StatusRow, Target, UnknownReason,
     UpDeadlines, WorkspaceId,
 };
@@ -200,15 +200,29 @@ const fn describe_unknown(reason: UnknownReason) -> &'static str {
     }
 }
 
-/// A [`LineSink`] that passes each line's text to a closure.
-struct Lines<'a> {
-    /// The closure.
-    pass: &'a mut dyn FnMut(String) -> ControlFlow<()>,
+/// Where [`Runs::logs`] passes a log: each line's text to `pass`, which
+/// ends the read when it breaks, and each note about the log to `noted`.
+pub struct LogOutput<'a> {
+    /// The closure that receives each line.
+    pub pass: &'a mut dyn FnMut(String) -> ControlFlow<()>,
+    /// The closure that receives each note, such as that the log's
+    /// container is gone.
+    pub noted: &'a mut dyn FnMut(LogNote),
 }
 
-impl LineSink for Lines<'_> {
+impl std::fmt::Debug for LogOutput<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("LogOutput").finish_non_exhaustive()
+    }
+}
+
+impl LineSink for LogOutput<'_> {
     fn line(&mut self, line: &LogLine<'_>) -> ControlFlow<()> {
         (self.pass)(line.text.to_owned())
+    }
+
+    fn note(&mut self, note: LogNote) {
+        (self.noted)(note);
     }
 }
 
@@ -1006,10 +1020,11 @@ impl Runs {
     }
 
     /// Passes the last `lines` lines of the log of the process or container
-    /// `process` of `workspace` to `pass`, and with `follow` each later
-    /// line until `pass` breaks or nothing can write to the log any more.
-    /// It returns `false`, and passes nothing, when the workspace knows no
-    /// process or container `process`.
+    /// `process` of `workspace` to `output`, and with `follow` each later
+    /// line until `output.pass` breaks or nothing can write to the log any
+    /// more. It returns `false`, and passes nothing, when the workspace
+    /// knows no process or container `process`. A note about the log, such
+    /// as that its container is gone, goes to `output.noted`.
     ///
     /// # Errors
     ///
@@ -1022,10 +1037,10 @@ impl Runs {
         process: &str,
         lines: usize,
         follow: bool,
-        pass: &mut dyn FnMut(String) -> ControlFlow<()>,
+        output: &mut LogOutput<'_>,
     ) -> Result<bool, Error> {
         if self.has_legacy(&workspace.name)? {
-            return self.legacy_logs(workspace, manifest, process, lines, follow, pass);
+            return self.legacy_logs(workspace, manifest, process, lines, follow, output.pass);
         }
         let known = self.status(workspace, manifest)?;
         if !known.iter().any(|status| status.name == process) {
@@ -1038,7 +1053,7 @@ impl Runs {
         let mut request = LogRequest::new(app, main);
         request.follow = follow;
         request.lines = Some(lines);
-        match self.phase.logs(id, &request, &mut Lines { pass }) {
+        match self.phase.logs(id, &request, output) {
             // A unit that has never run has no log yet.
             Ok(()) | Err(PhaseError::UnknownTarget { .. }) => Ok(true),
             Err(error) => Err(self.phase_error(id, error)),

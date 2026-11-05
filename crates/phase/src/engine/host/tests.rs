@@ -726,26 +726,29 @@ fn the_system_runner_kills_a_process_that_ignores_its_stop_signal_after_the_grac
 
 #[test]
 fn the_system_runner_cuts_the_grace_short_at_the_deadline_and_returns_within_the_kill_wait() {
+    // The stop must return within the deadline, the kill wait and 3
+    // seconds of slack for a loaded machine. That is far shorter than the
+    // grace of 120 seconds, and shorter than phase's default kill wait of 5
+    // seconds, so a stop that waited for either would fail.
     let mut stubborn = Spawned::shell(IGNORES_TERM);
     let app = stubborn.host();
-    let kill_wait = Duration::from_millis(200);
+    let (to_deadline, kill_wait) = (Duration::from_millis(500), Duration::from_millis(300));
+    let slack = Duration::from_secs(3);
+    assert!(to_deadline + kill_wait + slack < crate::DEFAULT_KILL_WAIT);
     let started = now();
-    let deadline = started + Duration::from_millis(300);
+    let deadline = started + to_deadline;
 
     let stopped = System
         .stop(
-            &app_stop(&app, Duration::from_secs(30), kill_wait),
+            &app_stop(&app, Duration::from_secs(120), kill_wait),
             deadline,
         )
         .unwrap();
 
     let took = now() - started;
     assert_eq!(stopped, HostStopped::Stopped);
-    assert!(took >= Duration::from_millis(300), "{took:?}");
-    assert!(
-        took < Duration::from_millis(300) + kill_wait + Duration::from_secs(2),
-        "{took:?}"
-    );
+    assert!(took >= to_deadline, "{took:?}");
+    assert!(took < to_deadline + kill_wait + slack, "{took:?}");
     assert!(!stubborn.running());
 }
 
@@ -753,13 +756,16 @@ fn the_system_runner_cuts_the_grace_short_at_the_deadline_and_returns_within_the
 fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
     let dir = tempfile::tempdir().unwrap();
     let graceful = dir.path().join("graceful");
-    // The keeper takes a second to end on TERM, and the app takes 0.8
-    // seconds to end on its own signal. The first wait of grace and kill
-    // wait, 1.5 seconds, ends before the app would finish if it counted
-    // from the keeper's signal.
-    let mut keeper = Spawned::shell("trap 'sleep 1; exit 0' TERM; echo ready; sleep 30 & wait");
+    // The keeper takes 2 seconds to end on TERM, and the app takes 1.8
+    // seconds to end on its own signal. Counted from the keeper's signal,
+    // the grace and kill wait end at 3.2 seconds, before the app would
+    // finish at 3.8, so an app whose grace counted from the keeper's signal
+    // would be killed. Counted from the app's own signal, its grace of 3
+    // seconds leaves 1.2 seconds to spare, and the keeper's end leaves 1
+    // second of its grace to spare.
+    let mut keeper = Spawned::shell("trap 'sleep 2; exit 0' TERM; echo ready; sleep 30 & wait");
     let mut app = Spawned::shell(&format!(
-        "trap 'sleep 0.8; echo done > {}; exit 0' TERM; echo ready; sleep 30 & wait",
+        "trap 'sleep 1.8; echo done > {}; exit 0' TERM; echo ready; sleep 30 & wait",
         graceful.display()
     ));
     let (keeper_host, app_host) = (keeper.host(), app.host());
@@ -767,12 +773,12 @@ fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
         keeper: Some(&keeper_host),
         app: Some(&app_host),
         signal: StopSignal::Term,
-        grace: Duration::from_millis(1200),
-        kill_wait: Duration::from_millis(300),
+        grace: Duration::from_secs(3),
+        kill_wait: Duration::from_millis(200),
     };
 
     let stopped = System
-        .stop(&request, now() + Duration::from_secs(30))
+        .stop(&request, now() + Duration::from_secs(60))
         .unwrap();
 
     assert_eq!(stopped, HostStopped::Stopped);

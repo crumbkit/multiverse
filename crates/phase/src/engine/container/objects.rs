@@ -794,46 +794,144 @@ const ANSWER_POLL: Duration = Duration::from_millis(50);
 /// `line` breaks. `line` receives whether the container wrote the line to
 /// standard error.
 ///
+/// docker prints its own errors on standard error, among the container's
+/// lines. phase recognises only the lines that start with one of
+/// [`DOCKER_ERROR_PREFIXES`] as possibly docker's, and a container could
+/// print such a line too. A recognised line waits up to [`HOLD`]. When
+/// docker exits with code 1, as it does after it prints its own error,
+/// and the line is the last of standard error, the line is the failure's
+/// message and never reaches `line`. Otherwise the line reaches `line` as
+/// the container's own: when another line of standard error follows, when
+/// [`HOLD`] passes, or when docker exits in any other way. Every other line
+/// reaches `line` at once.
+///
 /// # Errors
 ///
 /// Returns [`Error::Missing`] when no `docker` program is on `PATH`, and
 /// [`Error::Failed`] when docker cannot start or exits with a failure,
-/// such as for a container that docker no longer has, with the last line
-/// that docker printed on standard error.
+/// such as for a container that docker no longer has. The failure's message
+/// is a recognised line, under the rule above, or else docker's exit
+/// status. A line that does not start with a recognised prefix never
+/// becomes the message, so a line that the container wrote, which may
+/// carry a secret, becomes it only when it imitates docker's own error
+/// and docker then exits with code 1.
 pub(crate) fn logs(
     id: &crate::record::ContainerId,
     lines: Option<usize>,
     follow: bool,
     line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
 ) -> Result<(), Error> {
+    logs_with(super::command::DOCKER.as_ref(), id, lines, follow, line)
+}
+
+/// The starts of the lines that docker prints for its own errors during
+/// `docker logs`, which phase keeps from the container's log when docker
+/// then fails. A line that starts with only `Error:` is not among them,
+/// because containers print such lines too.
+pub(crate) const DOCKER_ERROR_PREFIXES: [&str; 4] = [
+    "Error response from daemon:",
+    "Error: No such container:",
+    "error from daemon in stream:",
+    "Cannot connect to the Docker daemon",
+];
+
+/// The longest that [`logs`] holds back a line that may be docker's own
+/// error before it passes the line as the container's.
+pub(crate) const HOLD: Duration = Duration::from_millis(250);
+
+/// The exit code of the docker client after it prints its own error.
+const DOCKER_ERROR_EXIT: i32 = 1;
+
+/// Runs [`logs`] with `program` as the `docker` program.
+fn logs_with(
+    program: &std::ffi::OsStr,
+    id: &crate::record::ContainerId,
+    lines: Option<usize>,
+    follow: bool,
+    line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
+) -> Result<(), Error> {
+    use std::ops::ControlFlow;
     let tail = lines.map_or_else(|| "all".to_owned(), |lines| lines.to_string());
     let mut args = vec!["logs".to_owned(), "--tail".to_owned(), tail];
     if follow {
         args.push("--follow".to_owned());
     }
     args.extend(["--".to_owned(), id.as_str().to_owned()]);
-    // docker prints its own error on standard error too, as the last line
-    // before it fails, so a failure keeps that line.
-    let mut last_stderr = String::new();
-    let mut pass = |is_stderr: bool, text: &str| {
-        if is_stderr {
-            text.clone_into(&mut last_stderr);
-        }
-        line(is_stderr, text)
-    };
+    // The recognised line of standard error that may be docker's own
+    // error, with when it arrived.
+    let mut held: Option<(String, std::time::Instant)> = None;
     // A read without follow ends once docker has printed the log, so a
     // docker that prints nothing for the deadline of a docker command hangs.
     let idle = (!follow).then_some(super::command::DOCKER_DEADLINE);
-    match super::command::stream(args, "logs", idle, &mut pass)? {
-        Some(status) if !status.success() => Err(Error::failed(
-            "logs",
-            Some(id.as_str()),
-            if last_stderr.is_empty() {
-                format!("docker logs exited with {status}")
+    let status = {
+        let mut pass = |event: Option<(bool, &str)>| {
+            // A held line that has waited its whole hold is the
+            // container's, and so is one that another line of standard
+            // error follows.
+            let release = match event {
+                Some((true, _)) => true,
+                _ => held
+                    .as_ref()
+                    .is_some_and(|(_, since)| since.elapsed() >= HOLD),
+            };
+            if release
+                && let Some((earlier, _)) = held.take()
+                && line(true, &earlier).is_break()
+            {
+                return ControlFlow::Break(());
+            }
+            match event {
+                None => ControlFlow::Continue(()),
+                Some((false, text)) => line(false, text),
+                Some((true, text)) if is_docker_error(text) => {
+                    held = Some((text.to_owned(), crate::clock::now()));
+                    ControlFlow::Continue(())
+                }
+                Some((true, text)) => line(true, text),
+            }
+        };
+        super::command::stream_with_ticks(program, args, "logs", idle, Some(HOLD), &mut pass)
+    };
+    let held = held.map(|(text, _)| text);
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            if let Some(earlier) = held {
+                let _ = line(true, &earlier);
+            }
+            return Err(error);
+        }
+    };
+    match (status, held) {
+        (Some(status), Some(earlier)) if status.code() == Some(DOCKER_ERROR_EXIT) => {
+            Err(Error::failed("logs", Some(id.as_str()), earlier))
+        }
+        (Some(status), held) => {
+            if let Some(earlier) = held {
+                let _ = line(true, &earlier);
+            }
+            if status.success() {
+                Ok(())
             } else {
-                last_stderr
-            },
-        )),
-        _ => Ok(()),
+                Err(Error::failed(
+                    "logs",
+                    Some(id.as_str()),
+                    format!("docker logs exited with {status}"),
+                ))
+            }
+        }
+        // The sink broke, so it takes no more lines.
+        (None, _) => Ok(()),
     }
 }
+
+/// Reports whether `text` starts like a line that docker prints for its
+/// own error, as [`DOCKER_ERROR_PREFIXES`] lists.
+fn is_docker_error(text: &str) -> bool {
+    DOCKER_ERROR_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests;
