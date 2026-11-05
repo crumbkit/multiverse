@@ -1561,7 +1561,7 @@ fn an_image_without_bin_sh_fails_its_start_with_a_pointer_to_environment_secrets
 }
 
 #[test]
-fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
+fn an_image_without_sleep_fails_its_start_with_status_70_in_phases_own_words() {
     if !docker_ready() {
         return;
     }
@@ -1582,6 +1582,10 @@ fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
     match outcome(&report, "db") {
         AppOutcome::Errored { message, .. } => {
             assert!(message.contains("status 70"), "{message}");
+            assert!(
+                message.contains("gave up waiting for the secret files KEY, TOKEN"),
+                "{message}"
+            );
             assert!(message.contains("has no sleep program"), "{message}");
         }
         other => panic!("{other:?}"),
@@ -2957,4 +2961,57 @@ fn a_shell_that_prints_the_secret_as_dockers_error_leaks_nothing_into_the_report
         return;
     };
     assert_start_reports_no_value(&image);
+}
+
+#[test]
+fn the_message_for_status_70_is_phases_own_and_never_the_containers_log() {
+    let names = ["KEY".to_owned(), "TOKEN".to_owned()];
+    assert_eq!(
+        super::ended_message(super::secrets::WRAPPER_FAILED, &names),
+        "the container exited with status 70 before its secrets were written: its wrapper gave up waiting for the secret files KEY, TOKEN, or the image has no sleep program or no command to run"
+    );
+}
+
+#[test]
+fn a_wrapper_that_prints_a_lookalike_line_and_exits_with_70_leaks_nothing_into_the_report() {
+    if !docker_ready() {
+        return;
+    }
+    // The image's shell runs the wrapper as a line that imitates the
+    // wrapper's own and holds a value's mark, then exits with 70. It fails
+    // the stage script a second later, once the container has exited.
+    let Some(image) = BuiltImage::build(&format!(
+        "FROM {IMAGE}\n\
+         RUN [\"/bin/busybox\", \"mkdir\", \"/real\"]\n\
+         RUN [\"/bin/busybox\", \"ln\", \"-s\", \"/bin/busybox\", \"/real/sh\"]\n\
+         RUN [\"/bin/busybox\", \"rm\", \"/bin/sh\"]\n\
+         COPY --chmod=755 <<'SHIM' /bin/sh\n\
+         #!/real/sh\n\
+         if [ \"$3\" = phase-secrets ]; then echo 'phase: test-token-3f9a2c71' >&2; exit 70; fi\n\
+         if [ \"$3\" = {stage} ]; then /real/sh -c 'sleep 1'; exit 1; fi\n\
+         exec /real/sh \"$@\"\n\
+         SHIM\n",
+        stage = super::secrets::STAGE_NAME,
+    )) else {
+        return;
+    };
+    let world = World::new();
+    let plan = world.plan(vec![built_app(
+        "db",
+        &image,
+        vec!["sleep".to_owned(), "60".to_owned()],
+    )]);
+
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(message.contains("status 70"), "{message}");
+            assert!(message.contains("gave up waiting"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    holds_no_value(&format!("{report:?}"));
+    holds_no_value(&serde_json::to_string(&report).unwrap());
+    assert!(!world.has_containers());
 }

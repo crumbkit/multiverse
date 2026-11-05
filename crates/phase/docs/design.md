@@ -640,9 +640,13 @@ When a staging fails, phase removes every staged file and renames
 nothing, so the container keeps its whole old set of files. A reader of
 one file sees its old value or its new one. A write that fails during a
 start fails the start, and phase removes the container. When the
-container has already exited, the error says why: the wrapper's own line
-for status 70, and a pointer to `secret_delivery = "env"` when the image
-has no `/bin/sh`.
+container has already exited, the error says why in phase's own words.
+For status 70 it says that the wrapper gave up waiting for the secret
+files, which it names from phase's own list, or that the image has no
+`sleep` or no command. When the image has no `/bin/sh`, it points to
+`secret_delivery = "env"`. phase never copies the wrapper's line from
+the container's log into the error, because the wrapper runs under the
+image's own `/bin/sh` and some secret files may already exist by then.
 
 On the Mac, phase asks the `AppliedEnvironment` to write each value's
 bytes into memory that it overwrites with zeros afterwards, and when that

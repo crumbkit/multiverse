@@ -900,7 +900,7 @@ pub(crate) fn write_secrets(
             (DOCKER_DEADLINE, &Cancel::new()),
         );
         if delivery_starting {
-            ended_early(inspected).unwrap_or(error)
+            ended_early(inspected, &names).unwrap_or(error)
         } else {
             error
         }
@@ -969,34 +969,38 @@ fn script_ended(
 
 /// Returns the failure of a container `inspected` that ended before its
 /// secret files were written, which explains a start's write that failed:
-/// the wrapper's own line when it gave up, and [`NO_SHELL_HINT`] when
-/// Docker could not run it. It returns `None` when the container still
+/// phase's own sentence for the wrapper's status [`secrets::WRAPPER_FAILED`],
+/// which names the secrets of `names`, and [`NO_SHELL_HINT`] when Docker
+/// could not run the wrapper. It returns `None` when the container still
 /// runs. Only a start calls it, as [`Delivery::starting`] says.
-fn ended_early(inspected: &Inspected) -> Option<ContainerError> {
+///
+/// The message never holds a line of the container's log. The wrapper
+/// runs under the image's own `/bin/sh`, and some secret files may already
+/// be written when it exits, so a hostile shell could print a value in a
+/// line that looks like the wrapper's.
+fn ended_early(inspected: &Inspected, names: &[String]) -> Option<ContainerError> {
     let fresh = reinspect(&inspected.container).ok()??;
     let ContainerState::Exited(code) = fresh.state else {
         return None;
     };
-    let service = inspected.container.service().as_str();
-    let message = match code {
-        secrets::NO_SHELL => format!("the container exited with status {code}; {NO_SHELL_HINT}"),
-        secrets::WRAPPER_FAILED => {
-            let said = tail(inspected.container.id())
-                .into_iter()
-                .rev()
-                .find(|line| line.starts_with("phase:"))
-                .unwrap_or_default();
-            format!(
-                "the container exited with status {code} before its secrets were written: {said}"
-            )
-        }
-        code => format!("the container exited with status {code} before its secrets were written"),
-    };
     Some(ContainerError::failed(
         "secret write",
-        Some(service),
-        message,
+        Some(inspected.container.service().as_str()),
+        ended_message(code, names),
     ))
+}
+
+/// Returns phase's sentence for a container that exited with `code` before
+/// the secret files of `names` were written.
+fn ended_message(code: i32, names: &[String]) -> String {
+    match code {
+        secrets::NO_SHELL => format!("the container exited with status {code}; {NO_SHELL_HINT}"),
+        secrets::WRAPPER_FAILED => format!(
+            "the container exited with status {code} before its secrets were written: its wrapper gave up waiting for the secret files {}, or the image has no sleep program or no command to run",
+            names.join(", ")
+        ),
+        code => format!("the container exited with status {code} before its secrets were written"),
+    }
 }
 
 /// Turns off Docker's restart policy of `container` and returns the
