@@ -1,4 +1,4 @@
-//! The run record `phase/run/v5`: what one workspace's run planned and
+//! The run record `phase/run/v6`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -39,14 +39,18 @@ pub(crate) enum RunSchema {
     V4,
     /// `phase/run/v5`, which adds `oneshot` and `completed` to host process
     /// entries. A phase that reads only v4 refuses it as written by a newer
-    /// phase.
+    /// phase. It reads as v6 with no part of the plan recorded.
     #[serde(rename = "phase/run/v5")]
     V5,
+    /// `phase/run/v6`, which adds `part_hash` to host process entries. A
+    /// phase that reads only v5 refuses it as written by a newer phase.
+    #[serde(rename = "phase/run/v6")]
+    V6,
 }
 
 impl RunSchema {
     /// The version that phase writes.
-    pub(crate) const CURRENT: Self = Self::V5;
+    pub(crate) const CURRENT: Self = Self::V6;
 }
 
 /// The newest version of the run record that this phase reads, and the one
@@ -57,7 +61,7 @@ impl RunSchema {
 /// keeper refuses it as written by a newer phase, notes each refused write
 /// in its diagnostic log, and records nothing more, until phase starts its
 /// process again with a keeper of its own.
-pub(crate) const RUN_VERSION: u32 = 5;
+pub(crate) const RUN_VERSION: u32 = 6;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,11 +160,12 @@ pub(crate) struct HostEntry {
     pub(crate) plan_hash: Option<PlanHash>,
     /// The hash of what phase last launched the process from: its own
     /// part of the plan, which `AppPlan::process_digest` gives, and for a
-    /// sandboxed process the ports of the apps it depends on, which its
-    /// sandbox lets it connect to. A later `up` restarts a running process
-    /// whose hash changed. It holds no environment value. It is `None` for a keeper, for a process that
-    /// phase has not started yet, and in a record that phase wrote before
-    /// it recorded the part, which a later `up` reads as a change.
+    /// sandboxed process the sandbox that phase built for it, apart from
+    /// the grants that come from the inherited `PATH`. A later `up`
+    /// restarts a running process whose hash changed. It holds no
+    /// environment value. It is `None` for a keeper, for a process that
+    /// phase has not started yet, and in a record before `phase/run/v6`,
+    /// which a later `up` reads as a change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) part_hash: Option<PlanHash>,
     /// How the process last ended, or `None` when it has not ended since

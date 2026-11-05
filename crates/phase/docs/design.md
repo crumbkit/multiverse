@@ -805,7 +805,7 @@ The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 ### Run record and sweep
 
-phase writes a run record (`phase/run/v5`) for each workspace. It names every
+phase writes a run record (`phase/run/v6`) for each workspace. It names every
 keeper and app process by pid, process start time and process group, every
 container by id, and the hash of the plan that started them. It holds no
 environment values.
@@ -845,40 +845,33 @@ with it those ends, unless the `down` did not select a process that holds
 such an end. mxv's `down` of the apps that a failed `up` started is such a
 `down`, so `status` still shows the process that failed.
 
-The record is `phase/run/v5`. Version 2 added `ended` and `restart` to
+The record is `phase/run/v6`. Version 2 added `ended` and `restart` to
 host entries, version 3 added `ready` to host process and container
 entries, as the next section says, version 4 added `sandbox` to host
 process entries, which records how phase launched the process, as [The
-sandbox as built](#the-sandbox-as-built) says, and version 5 adds
-`oneshot`, `completed` and `part_hash` to host process entries. `oneshot` records what
-phase launched a oneshot from: the hash of its part of the plan and, for
-a `once = false` oneshot, the run of each process and container that it
-depends on. `completed` records the oneshot's completion. [Oneshot
+sandbox as built](#the-sandbox-as-built) says, version 5 added `oneshot`
+and `completed` to host process entries, and version 6 adds `part_hash`
+to host process entries. `oneshot` records what phase launched a oneshot
+from: the hash of its part of the plan and, for a `once = false`
+oneshot, the run of each process and container that it depends on.
+`completed` records the oneshot's completion. [Oneshot
 processes](#oneshot-processes) says how phase uses both. `part_hash`
-records the hash of the process's own part of the plan that phase last
-launched it from, as [Plan changes of a running host
-process](#plan-changes-of-a-running-host-process) says. It arrived after
-the first v5 records, so phase reads a v5 entry without it as one that
-records no part. A host entry refuses fields it does not know, so a
-phase from before `part_hash` cannot read a v5 record that holds it, and
-reports it as unreadable, not as written by a newer phase. A keeper that
-such a phase started notes each write it cannot make, and records nothing
-more until phase starts its process again, as it does with a newer
-version. The first `up` after the upgrade restarts each such process,
-which starts a new keeper. phase reads a
-`phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
-with the fields it lacks at their defaults, and writes it back as v5: a
-v1 record reads with no ends, no restart policies, no readiness, no
-sandbox and no oneshot launches or completions, a v2 record reads with
-no readiness, no sandbox and no oneshot launches or completions, a v3
-record reads with no sandbox and no oneshot launches or completions, and
-a v4 record reads with no oneshot launches or completions. Each of them
-reads with no part hashes. A
-phase that reads only an older version refuses a newer record as written
-by a newer phase and asks for an upgrade. Each version only adds fields
-that read as their defaults when they are missing, so the next version,
-v6, which records P15's watcher, adds a schema name and needs
-no other read path.
+records the hash of what phase last launched the process from, as [Plan
+changes of a running host
+process](#plan-changes-of-a-running-host-process) says. phase reads a
+`phase/run/v1` to `phase/run/v5` record with the fields it lacks at
+their defaults, and writes it back as v6: a v1 record reads with no
+ends, no restart policies, no readiness, no sandbox, no oneshot launches
+or completions and no part hashes, a v2 record reads with no readiness,
+no sandbox, no oneshot launches or completions and no part hashes, a v3
+record reads with no sandbox, no oneshot launches or completions and no
+part hashes, a v4 record reads with no oneshot launches or completions
+and no part hashes, and a v5 record reads with no part hashes. A phase
+that reads only an older version refuses a newer record as written by a
+newer phase and asks for an upgrade. Each version only adds fields that
+read as their defaults when they are missing, so the next version, v7,
+which records P15's watcher, adds a schema name and needs no other read
+path.
 
 ### Readiness in the run record
 
@@ -1623,15 +1616,29 @@ Built 5 November 2026.
   from. The hash covers the process's own part of the plan: the app's
   runner, source, ports, permissions and override names, and the
   process's own plan, such as its command, variable names, working
-  directory, port, probes and restart policy. The app's ports and its
-  permissions' `listen` give the ports the sandbox lets the process
-  listen on. For a process that runs under the sandbox, the hash also
-  covers the loopback ports of the apps that its app depends on, which
-  the sandbox lets it connect to, so a dependency that moves to another
-  port restarts its sandboxed dependents. An unsandboxed process's hash
-  is the same hash that a oneshot's `oneshot` records, and a oneshot's
-  completion keeps that hash whether or not it runs sandboxed. The hash
-  holds no environment value. `restart` records it too.
+  directory, port, probes and restart policy. An unsandboxed process's
+  hash is that part's hash alone, the same hash that a oneshot's
+  `oneshot` records.
+- For a process that runs under the sandbox, the hash also covers the
+  sandbox that phase would build for it now, with its lists sorted. That
+  sandbox covers the ports the process may listen on and connect to, so a
+  dependency that moves to another port restarts its sandboxed
+  dependents. It also covers the paths that phase and the host program
+  protect, `HOME`, the workspace's paths, phase's state directory and the
+  launcher, so a host program that protects one more path restarts every
+  sandboxed process at the next `up`. A sandbox that phase cannot build
+  counts by its error, so `up` stops the process and its launch reports
+  the error.
+- The hash leaves out the grants that come only from the inherited
+  `PATH`: the `PATH` directories and the toolchain directories that they
+  lead to. Otherwise an `up` from a shell with another `PATH` would
+  restart every sandboxed process. A running process therefore keeps the
+  read grants of the `PATH` it started with until its next start, even
+  when a later `up` runs with a narrower `PATH`. `restart` builds the
+  sandbox from the current `PATH`.
+- A oneshot's completion keeps the hash of its part alone, whether or not
+  it runs sandboxed.
+- The hash holds no environment value. `restart` records it too.
 - A later `up` that finds the process's keeper running compares the
   recorded hash with the hash of the process's part of the new plan. When
   they are equal, `up` leaves the process alone and reports it as already
@@ -1647,7 +1654,9 @@ Built 5 November 2026.
   new keeper, and waits for readiness. The first `up` after an upgrade
   therefore brings every running host process under its current plan
   once, which puts a process whose app declares permissions under the
-  sandbox, and later `up`s leave it alone.
+  sandbox, and later `up`s leave it alone. An upgrade that changes what
+  phase's sandbox protects restarts each sandboxed process once in the
+  same way.
 - The app's report reads `started`, as for a replaced container, and
   carries a `plan-changed` note, such as `restarted api/server because
   its part of the plan changed`, or `restarted api/server because the run
@@ -1839,7 +1848,7 @@ Each decision states what this draft assumes until it is decided.
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
-| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
+| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v7, since v4 records the sandbox, v5 records oneshot completions and v6 records each host process's part hash), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. |

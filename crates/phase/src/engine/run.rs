@@ -973,46 +973,42 @@ impl Op<'_, '_> {
 
     /// Returns the hash of what `process` of `app` is launched from, which
     /// its entry records as `part_hash`. It is the hash of the process's
-    /// part of the plan, which [`AppPlan::process_digest`] gives. For a
-    /// process that runs under the sandbox, it also covers the loopback
-    /// ports of the apps that its app depends on, which the sandbox lets it
-    /// connect to, so a dependency's new port restarts it. The ports it
-    /// listens on are already in its part. A oneshot's completion keeps
-    /// the part's own hash.
+    /// part of the plan, which [`AppPlan::process_digest`] gives, and for a
+    /// process that runs under the sandbox, of the sandbox that phase would
+    /// build for it now. That sandbox covers the ports it may listen on
+    /// and connect to, the paths that phase and the host program protect,
+    /// `HOME`, the workspace's paths, phase's state directory and the
+    /// launcher. It leaves out the grants that come only from the
+    /// inherited `PATH`, so an `up` from a shell with another `PATH` does
+    /// not restart every sandboxed process. A sandbox that phase cannot
+    /// build counts by its error, so the launch that follows reports it. A
+    /// oneshot's completion keeps the hash of its part alone.
     fn launch_part(&self, app: &AppPlan, process: &ProcessPlan) -> PlanHash {
         let part = app.process_digest(process);
-        let sandboxed =
-            app.permissions.is_some() && matches!(sandbox::platform(), Platform::Available(_));
-        if !sandboxed {
-            return PlanHash::new(part);
-        }
+        let built = self
+            .engine
+            .settings
+            .keeper
+            .map(|command| self.sandbox_from(app, process, command, None));
+        let sandbox = match built {
+            None | Some(Ok(None)) => return PlanHash::new(part),
+            Some(Ok(Some(spec))) => Ok(spec.launch_digest()),
+            Some(Err(error)) => Err(error.to_string()),
+        };
         /// What the hash of a sandboxed process covers.
         #[derive(serde::Serialize)]
         struct Sandboxed {
             /// The digest of the process's part of the plan.
             part: [u8; 32],
-            /// The ports that the sandbox lets the process connect to.
-            connect: BTreeSet<u16>,
+            /// The digest of its sandbox without the grants of `PATH`, or
+            /// why phase cannot build the sandbox, which names paths and
+            /// no environment value.
+            sandbox: Result<[u8; 32], String>,
         }
-        let launched = Sandboxed {
-            part,
-            connect: self.connect_ports(app),
-        };
         // The fields are plain data, so they always serialize.
         PlanHash::new(crate::plan::digest(
-            &serde_json::to_vec(&launched).unwrap_or_default(),
+            &serde_json::to_vec(&Sandboxed { part, sandbox }).unwrap_or_default(),
         ))
-    }
-
-    /// Returns the loopback ports of the apps that `app` depends on, which
-    /// its sandbox lets it connect to.
-    fn connect_ports(&self, app: &AppPlan) -> BTreeSet<u16> {
-        app.depends
-            .iter()
-            .filter_map(|depends| self.ports.get(depends))
-            .flatten()
-            .copied()
-            .collect()
     }
 
     /// Returns the sandbox of `process` of `app`, whose keeper runs as
@@ -1026,15 +1022,39 @@ impl Op<'_, '_> {
     ) -> Result<Option<SandboxSpec>, SandboxError> {
         process_sandbox(
             &self.engine.settings,
-            &SandboxScope {
-                workspace: &self.workspace,
-                workspace_paths: &self.workspace_paths,
-                ports: &self.ports,
-            },
+            &self.sandbox_scope(),
             app,
             process,
             command,
         )
+    }
+
+    /// Returns the sandbox of `process` of `app`, as [`Op::sandbox`] does,
+    /// built with `path` as the inherited `PATH`.
+    fn sandbox_from(
+        &self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        command: &KeeperCommand,
+        path: Option<&str>,
+    ) -> Result<Option<SandboxSpec>, SandboxError> {
+        sandbox_with_path(
+            &self.engine.settings,
+            &self.sandbox_scope(),
+            app,
+            process,
+            command,
+            path,
+        )
+    }
+
+    /// Returns the workspace that this operation builds sandboxes for.
+    fn sandbox_scope(&self) -> SandboxScope<'_> {
+        SandboxScope {
+            workspace: &self.workspace,
+            workspace_paths: &self.workspace_paths,
+            ports: &self.ports,
+        }
     }
 
     /// Waits until the started `target` is ready, as `process` says. When
@@ -1546,6 +1566,22 @@ pub(crate) fn process_sandbox(
     process: &ProcessPlan,
     command: &KeeperCommand,
 ) -> Result<Option<SandboxSpec>, SandboxError> {
+    let path = settings.inherited.get("PATH").map(String::as_str);
+    sandbox_with_path(settings, scope, app, process, command, path)
+}
+
+/// Returns the sandbox of `process` of `app`, as [`process_sandbox`]
+/// does, built with `path` as the inherited `PATH`. The hash of what a
+/// process is launched from builds it with no `PATH`, so it leaves out the
+/// grants that come only from `PATH`.
+fn sandbox_with_path(
+    settings: &Settings<'_>,
+    scope: &SandboxScope<'_>,
+    app: &AppPlan,
+    process: &ProcessPlan,
+    command: &KeeperCommand,
+    path: Option<&str>,
+) -> Result<Option<SandboxSpec>, SandboxError> {
     let Some(permissions) = &app.permissions else {
         return Ok(None);
     };
@@ -1556,7 +1592,7 @@ pub(crate) fn process_sandbox(
         state_dir: settings.state_dir,
         workspace: scope.workspace,
         workspace_paths: scope.workspace_paths,
-        path: settings.inherited.get("PATH").map(String::as_str),
+        path,
         home: settings.inherited.get("HOME").map(Path::new),
         protected: settings.protected,
         connect: app

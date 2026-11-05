@@ -283,3 +283,94 @@ fn up_leaves_an_unsandboxed_dependent_running_when_its_dependency_moved_to_anoth
     assert_eq!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
     assert_eq!(pid(&world, "api/server"), before);
 }
+
+/// Reports whether this machine offers a sandbox. Without one, phase
+/// builds no sandbox, so nothing that only the sandbox reads restarts a
+/// process.
+fn sandbox_available() -> bool {
+    matches!(
+        crate::sandbox::platform(),
+        crate::sandbox::Platform::Available(_)
+    )
+}
+
+#[test]
+fn up_restarts_a_sandboxed_process_once_the_host_program_protects_another_path() {
+    if !sandbox_available() {
+        return;
+    }
+    let world = World::outside_temp();
+    let plan = plan(vec![with_permissions(host_app("api", None, &[]))]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    let before = pid(&world, "api/server");
+    let guarded = world.state.path().parent().unwrap().join(format!(
+        "guarded-{}",
+        world.state.path().file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&guarded).unwrap();
+    let protected = vec![guarded.clone()];
+    let mut engine = world.engine();
+    engine.settings.protected = &protected;
+
+    let report = engine
+        .up(
+            &plan,
+            &Selection::All,
+            &Env::default(),
+            super::deadlines(),
+            &Cancel::new(),
+        )
+        .unwrap();
+    let again = engine
+        .up(
+            &plan,
+            &Selection::All,
+            &Env::default(),
+            super::deadlines(),
+            &Cancel::new(),
+        )
+        .unwrap();
+    std::fs::remove_dir(&guarded).unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(
+        notes(&report, "api"),
+        &[Note::plan_changed(&name("api"), name("server"))]
+    );
+    assert_ne!(pid(&world, "api/server"), before);
+    assert_eq!(outcome(&again, "api"), &AppOutcome::AlreadyRunning);
+}
+
+#[test]
+fn up_leaves_a_sandboxed_process_running_when_only_the_inherited_path_changed() {
+    if !sandbox_available() {
+        return;
+    }
+    let world = World::outside_temp();
+    let plan = plan(vec![with_permissions(host_app("api", None, &[]))]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    let before = pid(&world, "api/server");
+    let inherited = std::collections::BTreeMap::from([(
+        "PATH".to_owned(),
+        "/usr/bin:/bin:/usr/sbin:/sbin".to_owned(),
+    )]);
+    let mut engine = world.engine();
+    engine.settings.inherited = &inherited;
+
+    let report = engine
+        .up(
+            &plan,
+            &Selection::All,
+            &Env::default(),
+            super::deadlines(),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        outcome(&report, "api"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(pid(&world, "api/server"), before);
+}
