@@ -27,6 +27,17 @@ pub(crate) fn hex_id() -> io::Result<String> {
     Ok(text)
 }
 
+/// Returns `N` bytes from [`RANDOM_DEVICE`].
+///
+/// # Errors
+///
+/// Returns the error of opening or reading the device.
+pub(crate) fn bytes<const N: usize>() -> io::Result<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    File::open(Path::new(RANDOM_DEVICE))?.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::hex_id;

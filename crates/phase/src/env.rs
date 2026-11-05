@@ -23,8 +23,13 @@ use std::time::{Instant, SystemTime};
 
 use crate::name::{AppName, ProcessName};
 
+pub(crate) mod digest;
+pub(crate) mod zeroing;
+
 #[cfg(test)]
 mod tests;
+
+pub use digest::{DigestKey, EnvDigest};
 
 /// Resolves the environment of each process of an app, including its
 /// secrets.
@@ -106,7 +111,34 @@ pub trait AppliedEnvironment: Send {
     /// changed, and keeps only the digest in the run record. Equal names
     /// and values give equal digests under one key, and the digest never
     /// reveals a value.
+    ///
+    /// phase does not call it. It compares [`AppliedEnvironment::digest_of`]
+    /// instead, which leaves out the secrets.
     fn digest(&self, key: &[u8; 32]) -> [u8; 32];
+
+    /// Returns phase's keyed digest of the variables `names` and their
+    /// values, which phase keeps in place of the values to notice that one
+    /// changed. phase passes the names of a process's variables that its
+    /// app's permissions do not name as secrets, so a secret never reaches
+    /// the digest. A name that [`AppliedEnvironment::names`] lacks counts
+    /// as absent, which differs from an empty value.
+    ///
+    /// The digest is HMAC-SHA-256 under `key` over an encoding that phase
+    /// defines, and this provided method reads each value through
+    /// [`AppliedEnvironment::write_value`] into memory that it overwrites
+    /// with zeros afterwards. An implementation has no reason to override
+    /// it, and cannot make an [`EnvDigest`] of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of [`AppliedEnvironment::write_value`] for a
+    /// variable in `names` that the environment has, with its kind and a
+    /// message that names the variable and no value. An environment that
+    /// cannot write a value returns [`io::ErrorKind::Unsupported`], and
+    /// phase then compares no value of the process.
+    fn digest_of(&self, names: &BTreeSet<String>, key: &DigestKey) -> io::Result<EnvDigest> {
+        digest::walk(self, names, key)
+    }
 
     /// Sets each variable on `command` under the name that `reference`
     /// returns for the variable's own name. A variable for which `reference`

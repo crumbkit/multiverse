@@ -55,6 +55,12 @@ toml = { version = "1.2.0", default-features = false }
 # classes and the search optimisations, and `std` is all it needs besides.
 regex = { version = "1.13.1", default-features = false, features = ["std", "unicode", "perf"] }
 
+# sha2 and hmac compute phase's keyed digest of the values of a process's
+# variables that are not secrets, as HMAC-SHA-256. nono already builds
+# sha2 0.11 for phase, and hmac 0.13 is the release that builds on it.
+sha2 = { version = "0.11.1", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+
 # libc declares macOS's libproc calls, proc_pidinfo, proc_pidfdinfo and
 # proc_listpids, which read a process's start time to the microsecond and
 # the sockets of a process group. Only crates/phase/src/record/process/darwin.rs

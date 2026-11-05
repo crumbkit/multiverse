@@ -37,7 +37,9 @@ pub use crate::cancel::Cancel;
 pub use crate::engine::container;
 pub use crate::engine::host;
 pub use crate::engine::keeper;
-pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
+pub use crate::env::{
+    AppliedEnvironment, DigestKey, EnvDigest, EnvironmentError, EnvironmentSource,
+};
 pub use crate::error::{NotRunnable, Operation, PhaseError};
 pub use crate::logs::{LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{

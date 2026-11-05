@@ -41,6 +41,7 @@ use serde::Deserialize;
 
 use crate::engine::container::compose::literal;
 use crate::env::AppliedEnvironment;
+use crate::env::zeroing::{ZeroingBuffer, zero};
 use crate::plan::{AppPlan, ProcessPlan};
 
 #[cfg(test)]
@@ -258,12 +259,12 @@ impl SecretBytes {
     ///
     /// Returns the error of [`AppliedEnvironment::write_value`].
     pub(crate) fn of(environment: &dyn AppliedEnvironment, name: &str) -> io::Result<Self> {
-        let mut value = ZeroingBuffer(Vec::new());
+        let mut value = ZeroingBuffer::default();
         let written = environment.write_value(name, &mut value);
-        let prefix = format!("{}\n", value.0.len());
-        let mut framed = Vec::with_capacity(prefix.len() + value.0.len());
+        let prefix = format!("{}\n", value.bytes().len());
+        let mut framed = Vec::with_capacity(prefix.len() + value.bytes().len());
         framed.extend_from_slice(prefix.as_bytes());
-        framed.extend_from_slice(&value.0);
+        framed.extend_from_slice(value.bytes());
         let framed = Self(framed);
         drop(value);
         written.map(|()| framed)
@@ -285,46 +286,6 @@ impl SecretBytes {
 }
 
 impl Drop for SecretBytes {
-    fn drop(&mut self) {
-        zero(&mut self.0);
-    }
-}
-
-/// Overwrites `bytes` with zeros, which the compiler may not leave out,
-/// because the zeroed bytes are then read through [`std::hint::black_box`].
-fn zero(bytes: &mut [u8]) {
-    bytes.fill(0);
-    std::hint::black_box(&*bytes);
-}
-
-/// The buffer that an environment writes a secret's value into. When a
-/// write needs more room, it copies the bytes into a larger buffer and
-/// overwrites the old one with zeros, so no copy of the value is left in
-/// memory that the allocator freed. It overwrites its last buffer with
-/// zeros when it is dropped. The zeroing is best effort: the environment
-/// itself, the operating system's pipe buffers and the `docker` program
-/// may hold their own copies.
-struct ZeroingBuffer(Vec<u8>);
-
-impl io::Write for ZeroingBuffer {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let needed = self.0.len() + bytes.len();
-        if needed > self.0.capacity() {
-            let mut larger = Vec::with_capacity(needed.max(self.0.capacity() * 2).max(64));
-            larger.extend_from_slice(&self.0);
-            zero(&mut self.0);
-            self.0 = larger;
-        }
-        self.0.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Drop for ZeroingBuffer {
     fn drop(&mut self) {
         zero(&mut self.0);
     }

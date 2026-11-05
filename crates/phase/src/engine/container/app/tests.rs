@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::{
     compose_file, file_secrets, for_environment, keys_sorted, objects, plan_hash, reference,
-    references,
+    references, values_digest,
 };
 use crate::engine::container::names::{Identity, Scope};
 use crate::engine::container::secrets::{ImageConfig, entrypoint};
@@ -309,8 +309,8 @@ fn a_process_that_opts_into_environment_secrets_receives_them_through_private_re
 fn a_new_secret_owner_changes_the_plan_hash_of_its_process_alone() {
     let mut app = with_secrets();
     let scope = scope("db");
-    let before = plan_hash(&scope, &app, &name("server")).unwrap();
-    let worker = plan_hash(&scope, &app, &name("worker")).unwrap();
+    let before = plan_hash(&scope, &app, &name("server"), None).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker"), None).unwrap();
 
     app.processes[0].secret_owner = Some("999:999".to_owned());
 
@@ -319,8 +319,8 @@ fn a_new_secret_owner_changes_the_plan_hash_of_its_process_alone() {
         file["services"]["server"]["x-phase-secret-owner"],
         "999:999"
     );
-    assert_ne!(plan_hash(&scope, &app, &name("server")).unwrap(), before);
-    assert_eq!(plan_hash(&scope, &app, &name("worker")).unwrap(), worker);
+    assert_ne!(plan_hash(&scope, &app, &name("server"), None).unwrap(), before);
+    assert_eq!(plan_hash(&scope, &app, &name("worker"), None).unwrap(), worker);
 }
 
 #[test]
@@ -329,7 +329,7 @@ fn a_processs_plan_hash_does_not_depend_on_its_images_command() {
     let scope = scope("db");
     let file = compose_file(&scope, &app, None).unwrap();
 
-    let hash = plan_hash(&scope, &app, &name("server")).unwrap();
+    let hash = plan_hash(&scope, &app, &name("server"), None).unwrap();
 
     assert_eq!(
         hash,
@@ -409,25 +409,25 @@ fn an_apps_containers_are_planned_in_dependency_order() {
 fn a_processs_plan_hash_changes_only_with_its_own_part_of_the_app() {
     let scope = scope("db");
     let app = db();
-    let server = plan_hash(&scope, &app, &name("server")).unwrap();
-    let worker = plan_hash(&scope, &app, &name("worker")).unwrap();
+    let server = plan_hash(&scope, &app, &name("server"), None).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker"), None).unwrap();
     assert_ne!(server, worker);
-    assert_eq!(plan_hash(&scope, &db(), &name("server")).unwrap(), server);
+    assert_eq!(plan_hash(&scope, &db(), &name("server"), None).unwrap(), server);
 
     let mut changed = db();
     changed.processes[1].run.push("again".to_owned());
     assert_eq!(
-        plan_hash(&scope, &changed, &name("server")).unwrap(),
+        plan_hash(&scope, &changed, &name("server"), None).unwrap(),
         server
     );
     assert_ne!(
-        plan_hash(&scope, &changed, &name("worker")).unwrap(),
+        plan_hash(&scope, &changed, &name("worker"), None).unwrap(),
         worker
     );
 
     let mut image = db();
     image.source = Source::image(name("postgres:18"));
-    assert_ne!(plan_hash(&scope, &image, &name("server")).unwrap(), server);
+    assert_ne!(plan_hash(&scope, &image, &name("server"), None).unwrap(), server);
 }
 
 #[test]
@@ -490,8 +490,8 @@ fn an_optional_variable_is_named_in_the_service_so_the_plan_hash_covers_the_flag
             .is_none()
     );
     assert_ne!(
-        plan_hash(&scope, &optional, &name("server")).unwrap(),
-        plan_hash(&scope, &required, &name("server")).unwrap()
+        plan_hash(&scope, &optional, &name("server"), None).unwrap(),
+        plan_hash(&scope, &required, &name("server"), None).unwrap()
     );
 }
 
@@ -527,7 +527,7 @@ fn an_absent_optional_variable_is_left_out_of_the_service_and_a_required_one_sta
     );
     assert_eq!(absent["services"]["worker"], file["services"]["worker"]);
     assert_eq!(
-        plan_hash(&scope, &app, &name("server")).unwrap(),
+        plan_hash(&scope, &app, &name("server"), None).unwrap(),
         PlanHash::new(digest(
             keys_sorted(&file["services"]["server"])
                 .to_string()
@@ -559,7 +559,7 @@ fn a_process_whose_every_secret_file_is_optional_and_absent_starts_without_files
     let full = compose_file(&scope, &app, Some(&image)).unwrap();
     assert_eq!(full["services"]["server"]["restart"], "no");
     assert_eq!(
-        plan_hash(&scope, &app, &name("server")).unwrap(),
+        plan_hash(&scope, &app, &name("server"), None).unwrap(),
         PlanHash::new(digest(
             keys_sorted(&compose_file(&scope, &app, None).unwrap()["services"]["server"])
                 .to_string()
@@ -571,7 +571,7 @@ fn a_process_whose_every_secret_file_is_optional_and_absent_starts_without_files
 #[test]
 fn a_processs_plan_hash_is_the_one_of_its_service_with_sorted_keys_whatever_order_serde_json_keeps()
 {
-    let hash = plan_hash(&scope("db"), &db(), &name("server")).unwrap();
+    let hash = plan_hash(&scope("db"), &db(), &name("server"), None).unwrap();
 
     // The hash that phase recorded before a dependency turned on serde_json's
     // insertion order, so an upgrade replaces no container.
@@ -579,4 +579,170 @@ fn a_processs_plan_hash_is_the_one_of_its_service_with_sorted_keys_whatever_orde
         serde_json::to_value(&hash).unwrap(),
         json!("0693baefa96a4945e387c7b392c3d90651d1de37b9649a80a747e70aa2fdc1b0")
     );
+}
+
+/// An environment of the tests that holds its values in a list and writes
+/// each value when asked.
+struct Values(Vec<(&'static str, &'static str)>);
+
+impl crate::env::AppliedEnvironment for Values {
+    fn names(&self) -> std::collections::BTreeSet<String> {
+        self.0.iter().map(|(name, _)| (*name).to_owned()).collect()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(
+        &self,
+        _command: &mut std::process::Command,
+        _reference: &dyn Fn(&str) -> Option<String>,
+    ) {
+    }
+
+    fn write_value(&self, name: &str, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        let (_, value) = self
+            .0
+            .iter()
+            .find(|(known, _)| *known == name)
+            .ok_or(std::io::ErrorKind::NotFound)?;
+        out.write_all(value.as_bytes())
+    }
+}
+
+/// Returns the plan hash of `process` of `app` with the digest of the
+/// values of `environment` under a fixed key.
+fn hash_with(app: &AppPlan, process: &str, environment: &Values) -> PlanHash {
+    let key = crate::env::DigestKey::from_bytes([9; 32]);
+    let digest = values_digest(app, &app.processes[0], environment, &key).unwrap();
+    assert!(digest.is_some());
+    plan_hash(&scope("db"), app, &name(process), digest.as_ref()).unwrap()
+}
+
+#[test]
+fn a_changed_value_changes_the_plan_hash_and_an_unchanged_value_keeps_it() {
+    let app = db();
+    let s3 = Values(vec![("MODE", "s3"), ("PGPORT", "5432")]);
+    let again = Values(vec![("MODE", "s3"), ("PGPORT", "5432")]);
+    let sqs = Values(vec![("MODE", "s3,sqs"), ("PGPORT", "5432")]);
+
+    let before = hash_with(&app, "server", &s3);
+
+    assert_eq!(hash_with(&app, "server", &again), before);
+    assert_ne!(hash_with(&app, "server", &sqs), before);
+    assert_ne!(
+        before,
+        plan_hash(&scope("db"), &app, &name("server"), None).unwrap()
+    );
+}
+
+#[test]
+fn a_secrets_value_never_changes_the_plan_hash_whatever_its_delivery() {
+    for delivery in [SecretDelivery::File, SecretDelivery::Env] {
+        let mut app = with_secrets();
+        app.processes[0].secret_delivery = delivery;
+        let one = Values(vec![
+            ("MODE", "dev"),
+            ("PGPORT", "5432"),
+            ("PGPASSWORD", "first-password"),
+            ("TOKEN", "first-token"),
+        ]);
+        let other = Values(vec![
+            ("MODE", "dev"),
+            ("PGPORT", "5432"),
+            ("PGPASSWORD", "second-password"),
+            ("TOKEN", "second-token"),
+        ]);
+        let changed = Values(vec![
+            ("MODE", "prod"),
+            ("PGPORT", "5432"),
+            ("PGPASSWORD", "first-password"),
+            ("TOKEN", "first-token"),
+        ]);
+
+        let hash = hash_with(&app, "server", &one);
+
+        assert_eq!(hash_with(&app, "server", &other), hash, "{delivery:?}");
+        assert_ne!(hash_with(&app, "server", &changed), hash, "{delivery:?}");
+        let printed = format!("{hash:?} {}", serde_json::to_string(&hash).unwrap());
+        for value in ["first-password", "first-token", "dev"] {
+            assert!(!printed.contains(value), "{printed}");
+        }
+    }
+}
+
+#[test]
+fn the_digest_covers_the_variables_that_are_not_secrets_and_an_absent_optional_one() {
+    let app = with_optional();
+    let with_lang = Values(vec![("MODE", "dev"), ("PGPORT", "5432"), ("LANG", "C")]);
+    let without = Values(vec![("MODE", "dev"), ("PGPORT", "5432")]);
+    let empty = Values(vec![("MODE", "dev"), ("PGPORT", "5432"), ("LANG", "")]);
+
+    let hashes = [
+        hash_with(&app, "server", &with_lang),
+        hash_with(&app, "server", &without),
+        hash_with(&app, "server", &empty),
+    ];
+
+    assert_ne!(hashes[0], hashes[1]);
+    assert_ne!(hashes[1], hashes[2]);
+    assert_ne!(hashes[0], hashes[2]);
+}
+
+#[test]
+fn an_environment_that_cannot_write_a_value_gives_no_digest_and_another_failure_is_an_error() {
+    struct Unwritable;
+    impl crate::env::AppliedEnvironment for Unwritable {
+        fn names(&self) -> std::collections::BTreeSet<String> {
+            ["MODE".to_owned(), "PGPORT".to_owned()].into()
+        }
+        fn expires_at(&self) -> Option<std::time::SystemTime> {
+            None
+        }
+        fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+            *key
+        }
+        fn apply_as(
+            &self,
+            _command: &mut std::process::Command,
+            _reference: &dyn Fn(&str) -> Option<String>,
+        ) {
+        }
+    }
+    let app = db();
+    let key = crate::env::DigestKey::from_bytes([9; 32]);
+
+    assert_eq!(
+        values_digest(&app, &app.processes[0], &Unwritable, &key).unwrap(),
+        None
+    );
+    let lacking = Values(vec![("MODE", "dev")]);
+    struct Lying(Values);
+    impl crate::env::AppliedEnvironment for Lying {
+        fn names(&self) -> std::collections::BTreeSet<String> {
+            ["MODE".to_owned(), "PGPORT".to_owned()].into()
+        }
+        fn expires_at(&self) -> Option<std::time::SystemTime> {
+            None
+        }
+        fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+            *key
+        }
+        fn apply_as(
+            &self,
+            _command: &mut std::process::Command,
+            _reference: &dyn Fn(&str) -> Option<String>,
+        ) {
+        }
+        fn write_value(&self, name: &str, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+            crate::env::AppliedEnvironment::write_value(&self.0, name, out)
+        }
+    }
+    let error = values_digest(&app, &app.processes[0], &Lying(lacking), &key).unwrap_err();
+    assert!(error.contains("PGPORT"), "{error}");
 }

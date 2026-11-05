@@ -129,7 +129,7 @@ use crate::plan::probe::{LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, ProcessPlan};
 use crate::record::docker::DockerError;
-use crate::record::run::ContainerEntry;
+use crate::record::run::{ContainerEntry, PlanHash};
 use crate::record::store::RunStore;
 use crate::record::{ContainerId, DockerCause, DockerName};
 use crate::report::StartProblem;
@@ -235,6 +235,35 @@ impl ComposeRunner {
             },
             app,
         )
+    }
+
+    /// Returns the plan hash of the container of `process` of `app` in
+    /// `scope` with the values of `environment`: [`app::plan_hash`] with
+    /// the keyed digest of the values of its variables that are not
+    /// secrets, under the key in phase's state directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::StateUnwritable`] when phase cannot create or
+    /// use the key file, [`PhaseError::ProcessUnstartable`] when the
+    /// environment cannot write a value, and the errors of
+    /// [`app::plan_hash`].
+    fn planned_hash(
+        &self,
+        scope: &Scope,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        environment: &dyn AppliedEnvironment,
+    ) -> Result<PlanHash, PhaseError> {
+        let key = crate::env::digest::load_key(&self.state_dir)?;
+        let values = app::values_digest(app, process, environment, &key).map_err(|reason| {
+            PhaseError::ProcessUnstartable {
+                app: app.name.clone(),
+                process: process.name.clone(),
+                reason,
+            }
+        })?;
+        app::plan_hash(scope, app, &process.name, values.as_ref())
     }
 
     /// Returns the project directory of every compose project, which holds
@@ -462,7 +491,6 @@ impl ComposeRunner {
                 continue;
             };
             let service = app::service(app, name)?;
-            let plan_hash = app::plan_hash(&scope, app, name)?;
             // The environment is resolved before the old container is
             // removed, so a resolver that fails leaves it running.
             let environment =
@@ -471,6 +499,7 @@ impl ComposeRunner {
                         app: app.name.clone(),
                         source,
                     })?;
+            let plan_hash = self.planned_hash(&scope, app, process, environment.as_ref())?;
             // The owner and the values of the secret files are settled
             // before the old container is removed, so a refusal, or an
             // environment that cannot write a value, leaves it running.
@@ -1145,11 +1174,11 @@ impl ContainerRunner for ComposeRunner {
             ) else {
                 continue;
             };
-            // A container that phase started from another plan of its
-            // process is not the one that the plan asks for, so `start`
-            // replaces it.
-            let planned = app::plan_hash(&scope, app, &entry.process).ok();
-            if planned.is_none() || entry.plan_hash != planned {
+            // A container without a recorded plan hash is not one that
+            // phase finished starting, so `start` replaces it. `rewrite`
+            // compares the hash, because it needs the process's resolved
+            // environment.
+            if entry.plan_hash.is_none() {
                 continue;
             }
             // Docker's restart of a container empties its tmpfs, so a
@@ -1211,13 +1240,31 @@ impl ContainerRunner for ComposeRunner {
         else {
             return Ok(Rewritten::NoFiles);
         };
+        let scope = self.scope(rewrite.workspace, &app.name);
         // A start writes secret files only into a container of an image.
         if !matches!(app.source, Source::Image { .. })
             || app::file_secrets(app, process).next().is_none()
         {
-            return Ok(Rewritten::NoFiles);
+            // A process without secret files is compared with a fresh
+            // environment. One that cannot be resolved makes `up` replace
+            // the container, and the start then reports the resolver's
+            // error and leaves the old container running.
+            let Ok(environment) =
+                crate::env::resolve_required(rewrite.env, &app.name, process, rewrite.deadline)
+            else {
+                return Ok(Rewritten::Replace);
+            };
+            return Ok(
+                match self.planned_hash(&scope, app, process, environment.as_ref()) {
+                    Ok(planned) if rewrite.entry.plan_hash.as_ref() == Some(&planned) => {
+                        Rewritten::NoFiles
+                    }
+                    Ok(_) => Rewritten::Replace,
+                    Err(error @ PhaseError::StateUnwritable { .. }) => return Err(error),
+                    Err(_) => Rewritten::Replace,
+                },
+            );
         }
-        let scope = self.scope(rewrite.workspace, &app.name);
         let (Ok(service), Some(Ok(id))) = (
             names::ServiceName::new(process.name.as_str()),
             rewrite
@@ -1252,6 +1299,20 @@ impl ContainerRunner for ComposeRunner {
                     });
                 }
             };
+        // A container that phase started from another plan of its
+        // process, or with other values of its variables that are not
+        // secrets, is not the one that the plan asks for, so `up` replaces
+        // it before it writes any file.
+        match self.planned_hash(&scope, app, process, environment.as_ref()) {
+            Ok(planned) if rewrite.entry.plan_hash.as_ref() == Some(&planned) => {}
+            Ok(_) => return Ok(Rewritten::Replace),
+            Err(error @ PhaseError::StateUnwritable { .. }) => return Err(error),
+            Err(error) => {
+                return Ok(Rewritten::Kept {
+                    reason: error.to_string(),
+                });
+            }
+        }
         let present = environment.names();
         let has_values = app::present_file_secrets(app, process, Some(&present))
             .next()
