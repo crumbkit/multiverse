@@ -12,7 +12,9 @@
 //! mount them. The app's bind mounts, run-as user, stop signal, stop grace
 //! and restart policy apply to every process.
 //!
-//! The compose file holds no value of a variable. Each variable that a
+//! The compose file holds no value of a variable, and the plan hash of a
+//! process's container holds only a keyed digest of the values of its
+//! variables that are not secrets (see [`plan_hash`]). Each variable that a
 //! process receives refers to a variable of the `docker compose up` child,
 //! `MXV_ENV_<service>_<variable>`, where `<service>` is the process's
 //! position in the app and `<variable>` the variable's position in the
@@ -32,6 +34,8 @@
 //! secrets through private references like its other variables instead.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
@@ -43,6 +47,7 @@ use crate::engine::container::objects::stop_seconds;
 use crate::engine::container::secrets::{ImageConfig, SECRETS_DIR, SECRETS_MODE, entrypoint};
 use crate::engine::containers::ContainerObjects;
 use crate::engine::run::order::sorted;
+use crate::env::{AppliedEnvironment, DigestKey, EnvDigest};
 use crate::error::{NotRunnable, PhaseError};
 use crate::name::{ProcessName, VolumeName};
 use crate::plan::restart::{Restart, StopSignal};
@@ -509,13 +514,54 @@ fn compose_file_with(
     Ok(json!({"services": services, "volumes": volumes}))
 }
 
+/// Returns the names of the variables of `process` whose values phase
+/// digests: every variable of the process that the app's permissions do
+/// not name as a secret, whatever the secrets' delivery.
+fn digested(app: &AppPlan, process: &ProcessPlan) -> BTreeSet<String> {
+    process
+        .env
+        .iter()
+        .filter(|name| !app.is_secret(name))
+        .cloned()
+        .collect()
+}
+
+/// Returns the keyed digest of the values of the variables of `process`
+/// that are not secrets in `environment`, under `key`, or `None` when the
+/// environment cannot write a value, as one that predates
+/// [`AppliedEnvironment::write_value`] cannot. A secret's value never
+/// reaches the digest.
+///
+/// # Errors
+///
+/// Returns why the environment could not write a value, which names the
+/// variable and holds no value.
+pub(crate) fn values_digest(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    environment: &dyn AppliedEnvironment,
+    key: &DigestKey,
+) -> Result<Option<EnvDigest>, String> {
+    match environment.digest_of(&digested(app, process), key) {
+        Ok(digest) => Ok(Some(digest)),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// The text between a service and the digest of its values in the bytes
+/// that [`plan_hash`] hashes.
+const VALUES_SEPARATOR: &str = "\nphase/env-digest/v1:";
+
 /// Returns the hash of the part of `app` that makes the container of
 /// `process` in `scope`: its service in the compose file, which holds the
 /// image, command, user, ports, mounts, labels, restart policy and stop,
-/// and the names of its variables and secrets but no value. The hash
-/// covers the plan's command and not the image's, which the compose file
-/// of a process with secret files also holds. A container whose
-/// recorded hash differs runs another plan, and `up` replaces it.
+/// and the names of its variables and secrets but no value, followed by
+/// `values`, the keyed digest of the values of its variables that are not
+/// secrets, when there is one. The hash covers the plan's command and not
+/// the image's, which the compose file of a process with secret files also
+/// holds. A container whose recorded hash differs runs another plan or
+/// other values, and `up` replaces it.
 ///
 /// # Errors
 ///
@@ -524,14 +570,21 @@ pub(crate) fn plan_hash(
     scope: &Scope,
     app: &AppPlan,
     process: &ProcessName,
+    values: Option<&EnvDigest>,
 ) -> Result<PlanHash, PhaseError> {
     let file = compose_file(scope, app, None)?;
     let service = service(app, process)?;
-    let part = file
+    let mut part = file
         .get("services")
         .and_then(|services| services.get(service.as_str()))
         .map(|service| keys_sorted(service).to_string())
         .unwrap_or_default();
+    if let Some(values) = values {
+        part.push_str(VALUES_SEPARATOR);
+        for byte in values.bytes() {
+            let _ = write!(part, "{byte:02x}");
+        }
+    }
     Ok(PlanHash::new(digest(part.as_bytes())))
 }
 
