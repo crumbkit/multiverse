@@ -7,8 +7,7 @@ use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
-use crate::engine::container::DockerCli;
-use crate::engine::containers::Unbuilt;
+use crate::engine::container::{ComposeRunner, DockerCli};
 use crate::engine::keeper::KeeperCommand;
 use crate::engine::run::{Engine, Settings};
 use crate::env::EnvironmentSource;
@@ -191,12 +190,20 @@ impl Phase {
     /// that ends meanwhile fails to start. A process that the run record
     /// names as running is left alone.
     ///
+    /// Each container app is one Docker Compose project, and `up` starts
+    /// its processes one at a time through `docker compose up`, waits for
+    /// each to be ready, and records each container by its id. A process
+    /// receives its variables that are not secrets through private
+    /// references on its own `docker compose up` child, and no value
+    /// reaches the compose file, an argument or a label.
+    ///
     /// When a process fails to start, `up` stops what it started of that
     /// app, starts no further app, and reports which apps started. An app
-    /// whose program comes from a release or a build, or that runs in
-    /// containers, is reported as errored with
-    /// [`PhaseError::NotRunnable`]'s code, since a later release does that
-    /// work, and the apps that depend on it do not start.
+    /// whose program comes from a release or a build, and a container app
+    /// whose process receives a secret, runs once or names a working
+    /// directory, is reported as errored with [`PhaseError::NotRunnable`]'s
+    /// code, since a later release does that work, and the apps that depend
+    /// on it do not start.
     ///
     /// # Errors
     ///
@@ -215,7 +222,8 @@ impl Phase {
         deadlines: UpDeadlines,
         cancel: &Cancel,
     ) -> Result<Report, PhaseError> {
-        self.engine().up(plan, select, env, deadlines, cancel)
+        self.engine(&self.containers())
+            .up(plan, select, env, deadlines, cancel)
     }
 
     /// Resolves the environment of the selected processes of `plan` that
@@ -240,7 +248,8 @@ impl Phase {
         deadline: Instant,
         cancel: &Cancel,
     ) -> Result<Report, PhaseError> {
-        self.engine().restart(plan, select, env, deadline, cancel)
+        self.engine(&self.containers())
+            .restart(plan, select, env, deadline, cancel)
     }
 
     /// Stops the selected apps of the workspace whose stable id is
@@ -264,12 +273,18 @@ impl Phase {
         select: &Selection,
         deadline: Instant,
     ) -> Result<Report, PhaseError> {
-        self.engine().down(workspace, select, deadline)
+        self.engine(&self.containers())
+            .down(workspace, select, deadline)
+    }
+
+    /// Returns the runner of container apps on this machine.
+    fn containers(&self) -> ComposeRunner {
+        ComposeRunner::new(self.state_dir.clone(), self.start_grace)
     }
 
     /// Returns the engine that carries out `up`, `down` and `restart` on
-    /// this machine.
-    fn engine(&self) -> Engine<'_> {
+    /// this machine, with `containers` as its runner of container apps.
+    fn engine<'a>(&'a self, containers: &'a ComposeRunner) -> Engine<'a> {
         Engine {
             settings: Settings {
                 state_dir: &self.state_dir,
@@ -280,7 +295,7 @@ impl Phase {
                 inherited: &self.inherited,
             },
             host: &System,
-            containers: &Unbuilt,
+            containers,
         }
     }
 

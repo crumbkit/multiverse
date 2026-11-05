@@ -6,7 +6,7 @@ use super::{Reach, Waits, sweep};
 use crate::record::docker::{Docker, DockerKind};
 use crate::record::process::{Processes, Start, System};
 use crate::record::run::{
-    EntryState, HostProcess, NetworkId, ObjectKey, RunRecord, Started, VolumeLifetime,
+    EntryState, HostProcess, NetworkId, ObjectKey, PlanHash, RunRecord, Started, VolumeLifetime,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{
@@ -224,7 +224,10 @@ fn started_docker_objects() -> Vec<(ObjectKey, Started)> {
     vec![
         (
             ObjectKey::Container(app("db"), process("server")),
-            Started::Container(ContainerId::try_from(container_id()).unwrap()),
+            Started::Container(
+                ContainerId::try_from(container_id()).unwrap(),
+                PlanHash::new([3; 32]),
+            ),
         ),
         (
             ObjectKey::Network(name("mxv-0b9f3c8e")),

@@ -469,7 +469,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         let Some(inspected) = self.inspect_recorded(self.scope_of(prepared)?, service)? else {
             return Ok(None);
         };
-        if inspected.state == ContainerState::Running
+        if inspected.state.is_up()
             && !self.follower_alive(service)?
             && let Ok(_lock) = self.host.lock(&self.dir.lock(), Duration::ZERO)
         {
@@ -503,7 +503,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         let scope = self.scope_of(prepared)?;
         let declared = containers.get(service);
         match self.inspect_recorded(scope, service)? {
-            Some(inspected) if inspected.state == ContainerState::Running => {
+            Some(inspected) if inspected.state.is_up() => {
                 if !self.follower_alive(service)? {
                     self.follow(&inspected, true)?;
                 }
@@ -712,7 +712,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         let Some(inspected) = self.inspect_recorded(self.scope_of(prepared)?, service)? else {
             return Ok(false);
         };
-        if inspected.state != ContainerState::Running {
+        if !inspected.state.is_up() {
             return Ok(false);
         }
         if let Ok(_lock) = self.host.lock(&self.dir.lock(), Duration::ZERO) {

@@ -48,20 +48,22 @@ pub use crate::phase::{
 };
 pub use crate::plan::container::{BindMount, ContainerOptions};
 pub use crate::plan::probe::{
-    DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT, Probe, ProbeCheck,
+    DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT,
+    LEAST_PUBLISHED_PROBE_TIMEOUT, Probe, ProbeCheck,
 };
 pub use crate::plan::restart::{
     Backoff, BadBackoff, DEFAULT_FIRST_BACKOFF, DEFAULT_MOST_BACKOFF, DEFAULT_STOP_GRACE,
     LimitsWithoutRestart, Resolve, Restart, RestartLimits, Stop, StopSignal,
 };
 pub use crate::plan::{
-    AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, OnceWithoutOneshot,
-    Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem, RunnerKind,
-    SourceProblem,
+    AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, MOST_STOP_GRACE,
+    OnceWithoutOneshot, Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem,
+    RunnerKind, SourceProblem,
 };
 pub use crate::record::{
     BadContainerId, BadDockerName, ContainerId, DockerError, DockerName, Handle,
-    MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept, SweptItem, SweptObject,
+    MOST_DOCKER_MESSAGE_BYTES, MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept,
+    SweptItem, SweptObject,
 };
 pub use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
 pub use crate::select::{BadTarget, Selection, Target};

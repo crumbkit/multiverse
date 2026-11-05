@@ -64,7 +64,7 @@ use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
 use crate::select::Selection;
 use crate::source::Source;
 
-mod order;
+pub(crate) mod order;
 mod stop;
 #[cfg(test)]
 mod tests;
@@ -441,29 +441,59 @@ impl Op<'_, '_> {
     }
 
     /// Starts the processes of the container app `choice` through the
-    /// container runner. When the caller cancels or a container fails to
-    /// start, the operation stops the containers it started.
+    /// container runner. A process whose recorded container still runs, as
+    /// the runner checks it, is left alone, and an app whose processes all
+    /// still run is already running. When the caller cancels or a container
+    /// fails to start, the operation stops the containers it started.
     fn start_containers(&mut self, choice: &Chosen<'_>) -> Result<AppStep, PhaseError> {
         let app = choice.app;
         let mark = self.started.len();
+        let chosen: BTreeSet<&ProcessName> = choice
+            .processes
+            .iter()
+            .map(|process| &process.name)
+            .collect();
+        let recorded: Vec<ContainerEntry> = self
+            .recorded_containers(&app.name, Some(&chosen))
+            .into_iter()
+            .filter(|entry| entry.state == EntryState::Running && entry.id.is_some())
+            .collect();
+        let running: BTreeSet<ProcessName> = if recorded.is_empty() {
+            BTreeSet::new()
+        } else {
+            match self
+                .engine
+                .containers
+                .running(&self.workspace, app, &recorded)
+            {
+                Ok(running) => running.into_iter().collect(),
+                Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
+            }
+        };
         let processes: Vec<ProcessName> = choice
             .processes
             .iter()
             .map(|process| process.name.clone())
+            .filter(|process| !running.contains(process))
             .collect();
+        if processes.is_empty() {
+            return Ok(AppStep::Done(AppOutcome::AlreadyRunning, Vec::new()));
+        }
         let start = ContainerStart {
             workspace: &self.workspace,
             app,
             processes: &processes,
             env: self.env,
+            build: self.deadlines.build,
             deadline: self.deadlines.ready,
             cancel: self.cancel,
         };
-        let started = match self.engine.containers.start(&start) {
-            Ok(started) => started,
-            Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
+        let journal = &mut self.journal;
+        let mut launching = |process: &ProcessName| {
+            journal.containers_launching(&app.name, std::slice::from_ref(process))
         };
-        if !started.containers.is_empty() {
+        let started = self.engine.containers.start(&start, &mut launching);
+        if started.containers.len() > started.removed.len() {
             self.started.push(Begun::Containers(app.name.clone()));
         }
         for (name, id) in started.networks {
@@ -474,12 +504,23 @@ impl Op<'_, '_> {
             self.journal
                 .started(&ObjectKey::Volume(name), Started::Volume)?;
         }
-        for (process, id) in started.containers {
-            let key = ObjectKey::Container(app.name.clone(), process);
-            self.journal.started(&key, Started::Container(id))?;
+        for container in started.containers {
+            let key = ObjectKey::Container(app.name.clone(), container.process);
+            self.journal
+                .started(&key, Started::Container(container.id, container.plan_hash))?;
+        }
+        for process in started.removed {
+            self.journal
+                .stopped(&ObjectKey::Container(app.name.clone(), process))?;
+        }
+        if let Some(error) = started.failure {
+            return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new()));
         }
         if self.cancel.is_cancelled() {
             return Ok(AppStep::Cancelled(Vec::new()));
+        }
+        if started.uncertain.is_some() {
+            return Ok(AppStep::Done(AppOutcome::StartUncertain, Vec::new()));
         }
         let Some((process, problem)) = started.problem else {
             return Ok(AppStep::Done(AppOutcome::Started, Vec::new()));
@@ -1254,7 +1295,7 @@ fn check<'a>(
 
 /// Watches a process that has no readiness probe until `until`, and
 /// returns [`Outcome::Ended`] when it ends first.
-fn watch(until: Instant, ended: &mut dyn FnMut() -> bool, cancel: &Cancel) -> Outcome {
+pub(crate) fn watch(until: Instant, ended: &mut dyn FnMut() -> bool, cancel: &Cancel) -> Outcome {
     loop {
         if cancel.is_cancelled() {
             return Outcome::Cancelled;

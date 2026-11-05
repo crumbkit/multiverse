@@ -57,9 +57,7 @@ mod runner;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) use command::{CommandEnd, run_bounded};
-pub(crate) use command::{HostExec, ProbeExec};
+pub(crate) use command::{CommandEnd, HostExec, ProbeExec, run_bounded};
 pub(crate) use log::{LogLines, LogWatch};
 pub(crate) use runner::{Goal, Outcome, wait};
 #[cfg(test)]
@@ -82,6 +80,15 @@ pub(crate) enum Check<'a> {
     /// A TCP connection to 127.0.0.1 at `port` succeeds.
     Tcp {
         /// The host port that the probe's port name stands for.
+        port: u16,
+    },
+    /// Something inside a container answers on the published host port
+    /// `port`. Docker's port proxy accepts a connection to a published port
+    /// before anything in the container listens, so a TCP probe of a
+    /// container process uses this check, which
+    /// [`answers`](crate::engine::container::answers) describes.
+    Published {
+        /// The published host port that the probe's port name stands for.
         port: u16,
     },
     /// The command `run` exits with status 0.
@@ -109,6 +116,10 @@ impl fmt::Debug for Check<'_> {
                 .field("path", path)
                 .finish(),
             Self::Tcp { port } => formatter.debug_struct("Tcp").field("port", port).finish(),
+            Self::Published { port } => formatter
+                .debug_struct("Published")
+                .field("port", port)
+                .finish(),
             Self::Command { run, .. } => {
                 formatter.debug_struct("Command").field("run", run).finish()
             }
@@ -125,6 +136,13 @@ impl Check<'_> {
         match self {
             Self::Http { port, path } => http::attempt(*port, path, timeout, cancel),
             Self::Tcp { port } => http::connect(*port, timeout).map(drop).into(),
+            Self::Published { port } => {
+                if crate::engine::container::answers_within(*port, timeout, cancel) {
+                    Attempt::Passed
+                } else {
+                    Attempt::Failed(Failure::Connect(io::ErrorKind::ConnectionRefused))
+                }
+            }
             Self::Command { run, exec } => command::attempt(*exec, run, timeout, cancel),
             Self::Log { watch, lines } => watch.attempt(*lines),
         }
@@ -137,7 +155,10 @@ impl Check<'_> {
     pub(crate) fn poll(&mut self) -> bool {
         match self {
             Self::Log { watch, lines } => watch.poll(*lines),
-            Self::Http { .. } | Self::Tcp { .. } | Self::Command { .. } => false,
+            Self::Http { .. }
+            | Self::Tcp { .. }
+            | Self::Published { .. }
+            | Self::Command { .. } => false,
         }
     }
 }

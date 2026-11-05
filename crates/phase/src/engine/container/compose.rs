@@ -6,11 +6,15 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use crate::cancel::Cancel;
 use crate::engine::container::ContainerError as Error;
-use crate::engine::container::command::{PULL_DEADLINE, message, run};
+use crate::engine::container::command::{
+    ChildEnv, Finished, PULL_DEADLINE, check, message, run, run_input,
+};
 use crate::engine::container::names::{
     CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey,
 };
@@ -120,14 +124,14 @@ impl ComposeEnv {
 
 /// Writes `$` as `$$`, which Compose reads back as `$`, so it interpolates
 /// nothing in `text`.
-fn literal(text: &str) -> String {
+pub(super) fn literal(text: &str) -> String {
     text.replace('$', "$$")
 }
 
 /// Returns the variable of the `docker compose` process that holds the
 /// value of the `variable`th variable of the `service`th service, in the
 /// order of the manifest's containers and of their variables.
-fn variable_of(service: usize, variable: usize) -> String {
+pub(super) fn variable_of(service: usize, variable: usize) -> String {
     format!("MXV_ENV_{service}_{variable}")
 }
 
@@ -308,6 +312,64 @@ pub(crate) fn compose_up(
         service.as_ref(),
     ];
     let finished = run(args, env, "compose up", PULL_DEADLINE)?;
+    up_result(scope, service, &finished)
+}
+
+/// Starts the service `service` of phase's app project in `scope` with
+/// `docker compose up`, reading the compose file `file` from standard
+/// input, with the variables `env`. The project directory is `dir`, which
+/// holds no file that Compose reads, and Compose reads no `.env` file.
+/// `until` holds the time the command may take and the flag that stops
+/// it.
+///
+/// The caller has checked the compose plugin with `docker compose version`,
+/// and has pulled the image, so Compose pulls nothing.
+///
+/// # Errors
+///
+/// Returns the errors of [`compose_up`].
+pub(crate) fn app_up(
+    scope: &Scope,
+    dir: &Path,
+    file: &Value,
+    service: &ServiceName,
+    env: impl ChildEnv,
+    until: (Duration, &Cancel),
+) -> Result<Up, Error> {
+    let project = scope.project();
+    let args: [&OsStr; 16] = [
+        "compose".as_ref(),
+        "--project-name".as_ref(),
+        project.as_str().as_ref(),
+        "--project-directory".as_ref(),
+        dir.as_os_str(),
+        "--env-file".as_ref(),
+        "/dev/null".as_ref(),
+        "--file".as_ref(),
+        "-".as_ref(),
+        "up".as_ref(),
+        "--detach".as_ref(),
+        "--no-deps".as_ref(),
+        "--pull".as_ref(),
+        "never".as_ref(),
+        "--".as_ref(),
+        service.as_ref(),
+    ];
+    let (deadline, cancel) = until;
+    let finished = run_input(
+        args,
+        env,
+        file.to_string().into_bytes(),
+        "compose up",
+        deadline,
+        cancel,
+    )?;
+    up_result(scope, service, &finished)
+}
+
+/// Returns what the `docker compose up` of `service` in `scope` that
+/// ended as `finished` did.
+fn up_result(scope: &Scope, service: &ServiceName, finished: &Finished) -> Result<Up, Error> {
     if finished.status.success() {
         return Ok(Up::Started);
     }
@@ -322,8 +384,12 @@ pub(crate) fn compose_up(
             message: message(&finished.stderr),
         }),
         UpFailure::Other => {
-            finished.checked("compose up", Some(service.as_str()))?;
-            Ok(Up::Started)
+            check()?;
+            Err(Error::failed(
+                "compose up",
+                Some(service.as_str()),
+                message(&finished.stderr),
+            ))
         }
     }
 }

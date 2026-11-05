@@ -5,9 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use super::probe::{BadLogPattern, LogPattern, ProbeCheck, is_sendable_path};
+use super::probe::{
+    BadLogPattern, LEAST_PUBLISHED_PROBE_TIMEOUT, LogPattern, ProbeCheck, is_sendable_path,
+};
 use super::restart::Restart;
-use super::{AppPlan, MOST_READY_TIMEOUT, ProcessKind, ProcessPlan, RunnerKind};
+use super::{AppPlan, MOST_READY_TIMEOUT, MOST_STOP_GRACE, ProcessKind, ProcessPlan, RunnerKind};
 use crate::name::{AppName, PortName, ProcessName};
 use crate::source::Source;
 
@@ -174,6 +176,12 @@ pub enum ProcessProblem {
     /// The ready timeout is zero or longer than
     /// [`MOST_READY_TIMEOUT`].
     ReadyTimeoutOutOfRange,
+    /// The stop grace is longer than [`MOST_STOP_GRACE`].
+    StopGraceOutOfRange,
+    /// A container process's `tcp` probe has a timeout shorter than
+    /// [`LEAST_PUBLISHED_PROBE_TIMEOUT`], which leaves no time to tell the
+    /// container's listener from Docker's port proxy.
+    PublishedProbeTimeoutTooShort,
     /// The process, or its probe, names a port its app does not have.
     #[non_exhaustive]
     UnknownPort(PortName),
@@ -185,6 +193,10 @@ pub enum ProcessProblem {
     RelativeContainerPath(PathBuf),
     /// The process has an HTTP probe but no port.
     HttpProbeWithoutPort,
+    /// A container process's HTTP or TCP probe asks a port that the
+    /// process does not publish, so phase cannot reach it from the host.
+    #[non_exhaustive]
+    ProbePortUnpublished(PortName),
     /// The HTTP probe's path does not start with `/`.
     HttpPathWithoutSlash,
     /// The HTTP probe's path holds a space, a control character, a
@@ -356,6 +368,12 @@ impl fmt::Display for ProcessProblem {
                 formatter,
                 "it receives the variable {name:?}, which a process cannot receive"
             ),
+            Self::StopGraceOutOfRange => {
+                formatter.write_str("its stop grace is longer than an hour")
+            }
+            Self::PublishedProbeTimeoutTooShort => formatter.write_str(
+                "its container's tcp probe has a timeout shorter than one second",
+            ),
             Self::ReadyTimeoutOutOfRange => {
                 formatter.write_str("its ready timeout is zero or longer than an hour")
             }
@@ -371,6 +389,10 @@ impl fmt::Display for ProcessProblem {
                 )
             }
             Self::HttpProbeWithoutPort => formatter.write_str("it has an http probe but no port"),
+            Self::ProbePortUnpublished(port) => write!(
+                formatter,
+                "its probe asks the port {port}, which its container does not publish"
+            ),
             Self::HttpPathWithoutSlash => {
                 formatter.write_str("its http probe's path does not start with `/`")
             }
@@ -662,6 +684,9 @@ fn check_process(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProb
     if process.ready_timeout.is_zero() || process.ready_timeout > MOST_READY_TIMEOUT {
         return Err(ProcessProblem::ReadyTimeoutOutOfRange);
     }
+    if process.stop.grace > MOST_STOP_GRACE {
+        return Err(ProcessProblem::StopGraceOutOfRange);
+    }
     check_ports(app, process)?;
     if let ProcessKind::Oneshot { .. } = process.kind {
         if process.ready.is_some() {
@@ -699,6 +724,25 @@ fn check_ports(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
     Ok(())
 }
 
+/// Returns the port that the HTTP or TCP probe `check` of the container
+/// process `process` asks and that the process does not publish. phase
+/// reaches a container's port only through its published host port.
+fn unpublished_probe_port(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    check: &ProbeCheck,
+) -> Option<PortName> {
+    if app.runner != RunnerKind::Container {
+        return None;
+    }
+    let port = match check {
+        ProbeCheck::Http { .. } => process.port.as_ref()?,
+        ProbeCheck::Tcp { port } => port,
+        ProbeCheck::Command { .. } | ProbeCheck::Log { .. } => return None,
+    };
+    (!process.publish.contains_key(port)).then(|| port.clone())
+}
+
 /// Checks a process's readiness probe.
 fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProblem> {
     let Some(probe) = &process.ready else {
@@ -707,7 +751,26 @@ fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
     if probe.period.is_zero() || probe.timeout.is_zero() {
         return Err(ProcessProblem::ZeroProbeTime);
     }
-    match &probe.check {
+    check_probe_check(app, process, &probe.check)?;
+    if let Some(port) = unpublished_probe_port(app, process, &probe.check) {
+        return Err(ProcessProblem::ProbePortUnpublished(port));
+    }
+    if app.runner == RunnerKind::Container
+        && matches!(probe.check, ProbeCheck::Tcp { .. })
+        && probe.timeout < LEAST_PUBLISHED_PROBE_TIMEOUT
+    {
+        return Err(ProcessProblem::PublishedProbeTimeoutTooShort);
+    }
+    Ok(())
+}
+
+/// Checks what one attempt of a process's readiness probe checks.
+fn check_probe_check(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    check: &ProbeCheck,
+) -> Result<(), ProcessProblem> {
+    match check {
         ProbeCheck::Http { .. } if process.port.is_none() => {
             Err(ProcessProblem::HttpProbeWithoutPort)
         }

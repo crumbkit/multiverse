@@ -1,17 +1,15 @@
 //! The seam through which `up`, `down` and `restart` run container apps.
-//! The engine calls [`ContainerRunner`], and the container module supplies
-//! the implementation that runs Docker Compose when it lands. Until then
-//! [`Unbuilt`] refuses every container app with
-//! [`PhaseError::NotRunnable`], and the engine reports that app as errored.
+//! The engine calls [`ContainerRunner`], and the container module's
+//! `ComposeRunner` implements it with Docker Compose.
 
 use std::time::Instant;
 
 use crate::cancel::Cancel;
 use crate::env::EnvironmentSource;
-use crate::error::{NotRunnable, PhaseError};
+use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::AppPlan;
-use crate::record::run::{ContainerEntry, NetworkId, VolumeLifetime};
+use crate::record::run::{ContainerEntry, NetworkId, PlanHash, VolumeLifetime};
 use crate::record::{ContainerId, DockerName};
 use crate::report::StartProblem;
 
@@ -41,24 +39,53 @@ pub(crate) trait ContainerRunner {
     /// resolving each one's environment through `start.env`, and waits for
     /// each to be ready, until `start.deadline` or `start.cancel`.
     ///
-    /// # Errors
+    /// It reports every container that it created, even when a failure
+    /// ended the start. [`ContainersStarted::failure`] holds the failure
+    /// that kept Docker from acting, such as [`PhaseError::Docker`], and
+    /// [`ContainersStarted::removed`] the containers that the start removed
+    /// after it. A process that started and did not become ready is no
+    /// failure, and [`ContainersStarted::problem`] names it.
     ///
-    /// Returns the failure that kept Docker from acting, such as
-    /// [`PhaseError::Docker`]. A process that started and did not become
-    /// ready is no error, and [`ContainersStarted::problem`] names it.
-    fn start(&self, start: &ContainerStart<'_>) -> Result<ContainersStarted, PhaseError>;
+    /// Just before it removes or creates the container of a process, it
+    /// calls `launching` with the process, which writes the process's
+    /// entry back to planned with no id. A failure before that, such as a
+    /// pull or an environment that cannot be resolved, leaves the entries
+    /// of the running containers as they were. A failure of `launching`
+    /// ends the start as [`ContainersStarted::failure`].
+    fn start(
+        &self,
+        start: &ContainerStart<'_>,
+        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+    ) -> ContainersStarted;
 
-    /// Stops and removes the containers of `stop.containers`, until
-    /// `stop.deadline`, and returns what happened to each, by process.
+    /// Returns the processes of `containers`, containers of `app` of
+    /// `workspace` that the run record names by id, whose container still
+    /// runs as `app` plans it: Docker has the recorded id, the container's
+    /// labels name the workspace, app and process, it is running, and the
+    /// record's plan hash is the hash of its part of `app`. `up` leaves
+    /// those containers alone and reports them as already running, and
+    /// replaces the others.
     ///
     /// # Errors
     ///
-    /// Returns the failure that kept Docker from acting, such as
+    /// Returns the failure that kept Docker from answering, such as
     /// [`PhaseError::Docker`].
+    fn running(
+        &self,
+        workspace: &WorkspaceId,
+        app: &AppPlan,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<ProcessName>, PhaseError>;
+
+    /// Stops and removes the containers of `stop.containers`, in reverse
+    /// order, until `stop.deadline`, and returns what happened to each, by
+    /// process. A failure that kept Docker from acting on one container,
+    /// such as [`PhaseError::Docker`], is that container's result, and the
+    /// stop goes on to the next.
     fn stop(
         &self,
         stop: &ContainerStop<'_>,
-    ) -> Result<Vec<(ProcessName, ContainerStopped)>, PhaseError>;
+    ) -> Vec<(ProcessName, Result<ContainerStopped, PhaseError>)>;
 }
 
 /// The Docker objects that a container app creates.
@@ -73,13 +100,6 @@ pub(crate) struct ContainerObjects {
 }
 
 /// What [`ContainerRunner::start`] starts.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the container module reads this when it lands, and until then only the tests' runner does"
-    )
-)]
 pub(crate) struct ContainerStart<'a> {
     /// The workspace.
     pub(crate) workspace: &'a WorkspaceId,
@@ -89,6 +109,8 @@ pub(crate) struct ContainerStart<'a> {
     pub(crate) processes: &'a [ProcessName],
     /// The source of each process's environment.
     pub(crate) env: &'a dyn EnvironmentSource,
+    /// When pulling the app's image must have finished.
+    pub(crate) build: Instant,
     /// When every process must be ready.
     pub(crate) deadline: Instant,
     /// The flag that asks the start to stop.
@@ -96,10 +118,10 @@ pub(crate) struct ContainerStart<'a> {
 }
 
 /// What [`ContainerRunner::start`] started.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(crate) struct ContainersStarted {
-    /// Each container that started, by process.
-    pub(crate) containers: Vec<(ProcessName, ContainerId)>,
+    /// Each container that the start created.
+    pub(crate) containers: Vec<StartedContainer>,
     /// Each network that exists, by name.
     pub(crate) networks: Vec<(DockerName, NetworkId)>,
     /// Each volume that exists, by name.
@@ -107,16 +129,30 @@ pub(crate) struct ContainersStarted {
     /// The process that failed to become ready, and why, or `None` when
     /// every process is ready.
     pub(crate) problem: Option<(ProcessName, StartProblem)>,
+    /// The process whose wait a deadline cut short, so phase does not know
+    /// whether it is ready, or `None`.
+    pub(crate) uncertain: Option<ProcessName>,
+    /// The failure that kept Docker from acting, which ended the start, or
+    /// `None`.
+    pub(crate) failure: Option<PhaseError>,
+    /// The processes of [`Self::containers`] whose container the start
+    /// removed after [`Self::failure`], and which Docker no longer has.
+    pub(crate) removed: Vec<ProcessName>,
+}
+
+/// A container that [`ContainerRunner::start`] created.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartedContainer {
+    /// The process.
+    pub(crate) process: ProcessName,
+    /// The container's id.
+    pub(crate) id: ContainerId,
+    /// The hash of the process's part of the plan, which the run record
+    /// keeps for [`ContainerRunner::running`].
+    pub(crate) plan_hash: PlanHash,
 }
 
 /// What [`ContainerRunner::stop`] stops.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the container module reads this when it lands, and until then only the tests' runner does"
-    )
-)]
 pub(crate) struct ContainerStop<'a> {
     /// The workspace.
     pub(crate) workspace: &'a WorkspaceId,
@@ -129,13 +165,6 @@ pub(crate) struct ContainerStop<'a> {
 }
 
 /// How a container's stop ended.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the container module reports these when it lands, and until then only the tests' runner does"
-    )
-)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ContainerStopped {
     /// Docker removed it, and phase checked that it is gone.
@@ -144,38 +173,4 @@ pub(crate) enum ContainerStopped {
     AlreadyGone,
     /// It was still there after Docker's removal.
     Unstoppable,
-}
-
-/// The container runner until the container module lands. It refuses
-/// every container app.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Unbuilt;
-
-impl ContainerRunner for Unbuilt {
-    fn objects(
-        &self,
-        _workspace: &WorkspaceId,
-        app: &AppPlan,
-    ) -> Result<ContainerObjects, PhaseError> {
-        Err(not_runnable(&app.name))
-    }
-
-    fn start(&self, start: &ContainerStart<'_>) -> Result<ContainersStarted, PhaseError> {
-        Err(not_runnable(&start.app.name))
-    }
-
-    fn stop(
-        &self,
-        stop: &ContainerStop<'_>,
-    ) -> Result<Vec<(ProcessName, ContainerStopped)>, PhaseError> {
-        Err(not_runnable(stop.app))
-    }
-}
-
-/// Returns the failure of running the container app `app`.
-fn not_runnable(app: &AppName) -> PhaseError {
-    PhaseError::NotRunnable {
-        app: app.clone(),
-        reason: NotRunnable::Containers,
-    }
 }

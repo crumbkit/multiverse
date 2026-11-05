@@ -21,6 +21,7 @@ use crate::engine::container::command::{
 };
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
+use crate::engine::container::objects::stop_seconds;
 use crate::engine::container::{ContainerError, ContainerState};
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 
@@ -81,10 +82,12 @@ impl DockerCli {
             return workspace_id == workspace;
         }
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        self.legacy.as_ref().is_some_and(|scope| {
-            is(STORE_LABEL, scope.store().as_str())
-                && is(WORKSPACE_LABEL, scope.workspace().as_str())
-        })
+        self.legacy
+            .as_ref()
+            .and_then(Scope::legacy)
+            .is_some_and(|(store, workspace)| {
+                is(STORE_LABEL, store.as_str()) && is(WORKSPACE_LABEL, workspace.as_str())
+            })
     }
 
     /// Inspects `object` with the Go template `format`, whose first line is
@@ -132,13 +135,64 @@ impl DockerCli {
     }
 }
 
-/// Returns the whole seconds that `docker stop --time` gives a container
-/// for `wait`: `wait` rounded up, and at least one second, so a wait under
-/// a second never stops the container at once.
-fn stop_seconds(wait: Duration) -> u64 {
-    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-    seconds.max(1)
+impl DockerCli {
+    /// Removes the container `id` as `down` removes one. It turns off the
+    /// container's restart policy and reads its status again. A running or
+    /// paused container gets its stop signal and waits up to `wait`; any
+    /// other container, such as one that Docker is restarting, is removed
+    /// at once, because `docker stop` would first wait out Docker's restart
+    /// delay. Docker refuses to update a container that has stopped, so a
+    /// refused update fails the removal only when the container still runs.
+    fn remove_container(&self, id: &str, wait: Duration) -> Result<(), DockerError> {
+        let updated = quick_with(
+            self.program(),
+            ["update", "--restart", "no", "--", id],
+            "update",
+        )
+        .map_err(|error| unavailable(&error))?;
+        let inspected = quick_with(
+            self.program(),
+            ["container", "inspect", "--format", STATE_FORMAT, "--", id],
+            "inspect",
+        )
+        .map_err(|error| unavailable(&error))?;
+        if inspected.missing() {
+            return Ok(());
+        }
+        if !inspected.status.success() {
+            return Err(self.failure(&inspected));
+        }
+        let state = ContainerState::parse(&inspected.stdout);
+        if state.runs() {
+            if !updated.status.success() && !updated.missing() {
+                return Err(self.failure(&updated));
+            }
+            let seconds = stop_seconds(wait).to_string();
+            let stopped = run_program(
+                self.program(),
+                ["stop", "--time", &seconds, "--", id],
+                ComposeEnv::default(),
+                "stop",
+                wait + DOCKER_DEADLINE,
+            )
+            .map_err(|error| unavailable(&error))?;
+            if !stopped.status.success() && !stopped.missing() {
+                return Err(self.failure(&stopped));
+            }
+        }
+        let removed = quick_with(self.program(), ["rm", "--force", "--", id], "rm")
+            .map_err(|error| unavailable(&error))?;
+        if removed.status.success() || removed.missing() {
+            Ok(())
+        } else {
+            Err(self.failure(&removed))
+        }
+    }
 }
+
+/// The Go template of `docker container inspect` that prints a container's
+/// status and exit code, which [`ContainerState::parse`] reads.
+const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
 
 /// Returns the failure of a Docker that `error` shows does not answer.
 fn unavailable(error: &ContainerError) -> DockerError {
@@ -183,10 +237,7 @@ impl Docker for DockerCli {
         &self,
         object: &DockerObject<'_>,
     ) -> Result<Option<ContainerState>, DockerError> {
-        let format = format!(
-            "{}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}",
-            format(DockerKind::Container)
-        );
+        let format = format!("{}\n{STATE_FORMAT}", format(DockerKind::Container));
         let object = DockerObject {
             kind: DockerKind::Container,
             ..*object
@@ -198,21 +249,7 @@ impl Docker for DockerCli {
 
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError> {
         let removed = match kind {
-            DockerKind::Container => {
-                let seconds = stop_seconds(wait).to_string();
-                let stopped = run_program(
-                    self.program(),
-                    ["stop", "--time", &seconds, "--", id],
-                    ComposeEnv::default(),
-                    "stop",
-                    wait + DOCKER_DEADLINE,
-                )
-                .map_err(|error| unavailable(&error))?;
-                if !stopped.status.success() && !stopped.missing() {
-                    return Err(self.failure(&stopped));
-                }
-                quick_with(self.program(), ["rm", "--force", "--", id], "rm")
-            }
+            DockerKind::Container => return self.remove_container(id, wait),
             DockerKind::Network => {
                 quick_with(self.program(), ["network", "rm", "--", id], "network rm")
             }

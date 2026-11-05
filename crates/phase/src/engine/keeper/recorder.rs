@@ -179,7 +179,7 @@ struct Writer<'w> {
 }
 
 impl Writer<'_> {
-    /// Writes `first`, and every change queued behind it, as [`write`]
+    /// Writes `first`, and every change queued behind it, as [`write()`]
     /// does. When the keeper has been told to hurry and another operation
     /// holds the lock, it drops them and notes each one.
     fn write(&self, first: Note, queue: &Receiver<Note>) {

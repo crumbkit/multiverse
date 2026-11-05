@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use rustix::process::Signal;
 
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
 use crate::engine::keeper::args::{APP, PROCESS, STATE_DIR, WORKSPACE};
@@ -259,7 +259,7 @@ fn end(child: &mut std::process::Child, spec: &KeeperSpec) {
     {
         let _ = rustix::process::kill_process(keeper, Signal::TERM);
     }
-    let deadline = now() + spec.stop.grace + spec.kill_wait;
+    let deadline = deadline_in(spec.stop.grace.saturating_add(spec.kill_wait));
     while now() < deadline {
         if !matches!(child.try_wait(), Ok(None)) {
             break;

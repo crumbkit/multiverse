@@ -68,6 +68,15 @@ jobs:
         run: cargo shear
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --all-features
+      # The container tests of phase and mxv run against this runner's
+      # docker daemon and skip when their image is missing, so the lane
+      # pulls it, pinned by digest, and tags it as the tests name it. The
+      # digest is the RepoDigest of busybox:1.37.0 on Docker Hub, as
+      # `docker image inspect` printed it on 2026-11-05.
+      - name: container test image
+        run: |
+          docker pull --quiet busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          docker tag busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec busybox:1.37.0
       - name: tests
         run: cargo nextest run --locked --workspace --all-features
       - name: doctests

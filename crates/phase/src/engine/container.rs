@@ -58,6 +58,11 @@
 //! Each docker command runs with a deadline, after which mxv kills it and
 //! fails with [`ContainerError::Failed`].
 //!
+//! phase's `up`, `down` and `restart` run container apps through
+//! `ComposeRunner`, which `runner` holds. Each container app of a plan is
+//! one compose project of its own, which `app` names and describes, as the
+//! design's Containers section says.
+//!
 //! The module's parts are these. `names` holds the scope and the checked
 //! names and ids. `command` runs the `docker` program, and is the only
 //! code in phase that does. `objects` inspects containers and volumes,
@@ -72,6 +77,7 @@
 //! and the caller converts the manifest's containers into
 //! [`ContainerSpecs`], so the module reads no manifest.
 
+mod app;
 mod cli;
 mod command;
 mod compose;
@@ -81,6 +87,7 @@ mod lifecycle;
 mod names;
 mod objects;
 mod run_dir;
+mod runner;
 
 #[cfg(test)]
 mod tests;
@@ -95,7 +102,9 @@ pub use crate::engine::container::lifecycle::{
     Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, Start, WorkspaceVolumes,
 };
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
+pub(crate) use crate::engine::container::objects::answers_within;
 pub use crate::engine::container::objects::{
     ContainerState, Inspected, OwnedContainer, answers, reinspect,
 };
 pub use crate::engine::container::run_dir::RunDir;
+pub(crate) use crate::engine::container::runner::ComposeRunner;

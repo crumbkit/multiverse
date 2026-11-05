@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::json;
 
+use crate::cancel::Cancel;
+use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
-use crate::engine::container::command::{message, says_missing};
+use crate::engine::container::command::{
+    ChildEnv as _, Referenced, message, run_program_until, says_missing,
+};
 use crate::engine::container::compose::{
     ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort, UpFailure, compose_env,
     compose_file, up_failure,
@@ -13,7 +18,8 @@ use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
-    ContainerState, mint_anonymous, mint_container, mint_volume,
+    ContainerState, STOP_TIMEOUT_FORMAT, mint_anonymous, mint_container, mint_volume,
+    stop_timeout_of,
 };
 use crate::name::WorkspaceName;
 
@@ -267,15 +273,15 @@ fn a_workspace_name_with_an_underscore_or_a_dot_gives_a_project_name_that_compos
 }
 
 #[test]
-fn docker_states_parse_into_running_created_or_exited_with_dockers_code() {
+fn docker_states_parse_into_dockers_exact_status_or_exited_with_dockers_code() {
     assert_eq!(
         ContainerState::parse("running 0\n"),
         ContainerState::Running
     );
-    assert_eq!(ContainerState::parse("paused 0"), ContainerState::Running);
+    assert_eq!(ContainerState::parse("paused 0"), ContainerState::Paused);
     assert_eq!(
         ContainerState::parse("restarting 1"),
-        ContainerState::Running
+        ContainerState::Restarting
     );
     assert_eq!(ContainerState::parse("created 0"), ContainerState::Created);
     assert_eq!(
@@ -288,6 +294,22 @@ fn docker_states_parse_into_running_created_or_exited_with_dockers_code() {
     assert_eq!(ContainerState::parse("exited x"), ContainerState::Unknown);
     assert_eq!(ContainerState::parse("frozen 0"), ContainerState::Unknown);
     assert_eq!(ContainerState::parse(""), ContainerState::Unknown);
+}
+
+#[test]
+fn only_a_running_or_paused_container_takes_a_stop_signal_and_a_restarting_one_is_up() {
+    let states = [
+        ContainerState::Running,
+        ContainerState::Paused,
+        ContainerState::Restarting,
+        ContainerState::Created,
+        ContainerState::Exited(0),
+        ContainerState::Unknown,
+    ];
+    let runs: Vec<bool> = states.iter().map(|state| state.runs()).collect();
+    assert_eq!(runs, [true, true, false, false, false, false]);
+    let up: Vec<bool> = states.iter().map(|state| state.is_up()).collect();
+    assert_eq!(up, [true, true, true, false, false, false]);
 }
 
 #[test]
@@ -314,6 +336,10 @@ fn only_the_daemons_answer_that_an_object_does_not_exist_counts_as_missing() {
         "Error response from daemon: network phase-nope not found",
         "error: no such object: phase-nope",
         "Error: No such object: phase-nope",
+        // `docker image inspect` of a tag that docker 29.8.2 does not have.
+        "Error response from daemon: No such image: busybox:0.0.0-nope",
+        // Other docker CLI versions print a missing image this way.
+        "Error: No such image: busybox:0.0.0-nope",
     ] {
         assert!(says_missing(said), "{said}");
     }
@@ -593,4 +619,271 @@ fn a_volume_key_follows_the_rule_of_a_service_name() {
     for bad in ["", "-data", "a.b", "a b", "a/b", &"a".repeat(65)] {
         assert!(VolumeKey::new(bad).is_err(), "{bad:?}");
     }
+}
+
+/// The workspace id of the app scope's tests.
+const WORKSPACE_ID: &str = "fedcba9876543210fedcba9876543210";
+
+/// Returns the scope of the app `app` of the workspace [`WORKSPACE_ID`].
+fn app_scope(app: &str) -> Scope {
+    Scope::app(
+        Identity {
+            id: WORKSPACE_ID.parse().unwrap(),
+            run_record: PathBuf::from(format!("/state/runs/{WORKSPACE_ID}.json")),
+        },
+        &app.parse().unwrap(),
+    )
+}
+
+#[test]
+fn an_app_scope_names_its_project_after_the_workspace_and_the_app_and_its_volumes_after_the_workspace()
+ {
+    let scope = app_scope("api");
+    let project = scope.project();
+    assert!(project.as_str().starts_with("phase-"), "{project}");
+    assert!(project.as_str().ends_with("-api"), "{project}");
+    assert_eq!(
+        scope.container_name(&service("server")),
+        format!("{project}.server").as_str()
+    );
+    let workspace = project.as_str().strip_suffix("-api").unwrap();
+    assert_eq!(
+        scope.volume_name(&key("data")),
+        format!("{workspace}.data").as_str()
+    );
+    assert_eq!(
+        app_scope("web").volume_name(&key("data")),
+        scope.volume_name(&key("data"))
+    );
+    assert_ne!(app_scope("web").project(), project);
+    let other = Scope::app(
+        Identity {
+            id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
+            run_record: PathBuf::from("/state/runs/other.json"),
+        },
+        &"api".parse().unwrap(),
+    );
+    assert_ne!(other.project(), project);
+    assert_ne!(
+        other.volume_name(&key("data")),
+        scope.volume_name(&key("data"))
+    );
+}
+
+#[test]
+fn an_app_scope_labels_a_container_with_the_workspace_id_run_record_and_app_and_a_volume_without_the_app()
+ {
+    let scope = app_scope("api");
+    let run_record = format!("/state/runs/{WORKSPACE_ID}.json");
+    assert_eq!(
+        scope.labels("mxv.container", "server"),
+        json!({
+            "mxv.workspace-id": WORKSPACE_ID,
+            "mxv.run-record": run_record,
+            "mxv.app": "api",
+            "mxv.container": "server",
+        })
+    );
+    assert_eq!(
+        scope.labels("mxv.volume", "data"),
+        json!({
+            "mxv.workspace-id": WORKSPACE_ID,
+            "mxv.run-record": run_record,
+            "mxv.volume": "data",
+        })
+    );
+}
+
+#[test]
+fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_of_its_workspace() {
+    let scope = app_scope("api");
+    let container = |workspace: &str, app: &str, process: &str| {
+        json!({"mxv.workspace-id": workspace, "mxv.app": app, "mxv.container": process}).to_string()
+    };
+    assert!(scope.owns(
+        &container(WORKSPACE_ID, "api", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container(WORKSPACE_ID, "web", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container(WORKSPACE_ID, "api", "worker"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container("0123456789abcdef0123456789abcdef", "api", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container(&format!("{WORKSPACE_ID} "), "api", "server"),
+        "mxv.container",
+        "server"
+    ));
+    assert!(!scope.owns(
+        &container_labels(STORE, "reading-list", "server"),
+        "mxv.container",
+        "server"
+    ));
+    let volume = json!({"mxv.workspace-id": WORKSPACE_ID, "mxv.volume": "data"}).to_string();
+    assert!(scope.owns(&volume, "mxv.volume", "data"));
+    assert!(app_scope("web").owns(&volume, "mxv.volume", "data"));
+    assert!(!scope.owns(&volume, "mxv.volume", "cache"));
+}
+
+#[test]
+fn a_containers_stop_timeout_is_read_alone_and_is_none_when_docker_omits_it() {
+    assert_eq!(
+        STOP_TIMEOUT_FORMAT,
+        "{{json (index .Config \"StopTimeout\")}}"
+    );
+    assert_eq!(stop_timeout_of("3\n"), Some(3));
+    assert_eq!(stop_timeout_of("null\n"), None);
+    assert_eq!(stop_timeout_of("not json"), None);
+}
+
+#[test]
+fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
+    let scope = scope("reading-list");
+    let labels = container_labels(STORE, "reading-list", "db");
+    let printed = format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n\n4\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
+    assert_eq!(inspected.state, ContainerState::Restarting);
+    assert_eq!(inspected.restarts, 4);
+
+    let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
+    assert_eq!(inspected.state, ContainerState::Running);
+    assert_eq!(inspected.restarts, 0);
+
+    let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
+    assert_eq!(inspected.state, ContainerState::Paused);
+}
+
+#[test]
+fn a_command_whose_caller_cancels_stops_at_once_as_cancelled() {
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let began = now();
+    let ended = run_program_until(
+        "sleep".as_ref(),
+        ["30"],
+        "sleep",
+        Duration::from_secs(60),
+        &cancel,
+    );
+    assert!(
+        matches!(ended, Err(Error::Cancelled { operation: "sleep" })),
+        "{:?}",
+        ended.err()
+    );
+    assert!(now() - began < Duration::from_secs(5));
+}
+
+#[test]
+fn a_command_that_misses_its_deadline_is_stopped_as_failed() {
+    let began = now();
+    let ended = run_program_until(
+        "sleep".as_ref(),
+        ["30"],
+        "sleep",
+        Duration::from_millis(200),
+        &Cancel::new(),
+    );
+    assert!(
+        matches!(ended, Err(Error::Failed { .. })),
+        "{:?}",
+        ended.err()
+    );
+    assert!(now() - began < Duration::from_secs(5));
+}
+
+/// An environment that holds `MODE`, with a test value.
+struct ModeOnly;
+
+impl crate::env::AppliedEnvironment for ModeOnly {
+    fn names(&self) -> std::collections::BTreeSet<String> {
+        ["MODE".to_owned()].into()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(
+        &self,
+        command: &mut std::process::Command,
+        reference: &dyn Fn(&str) -> Option<String>,
+    ) {
+        if let Some(name) = reference("MODE") {
+            command.env(name, "test-mode");
+        }
+    }
+}
+
+#[test]
+fn a_compose_child_inherits_no_private_name_and_receives_only_its_own_values() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test builds a command that it never starts, to read its variables"
+    )]
+    let mut command = std::process::Command::new("docker");
+    let cleared = ["MXV_ENV_0_0".to_owned(), "MXV_ENV_1_0".to_owned()];
+    let refer = |name: &str| (name == "MODE").then(|| "MXV_ENV_0_0".to_owned());
+    Referenced {
+        environment: &ModeOnly,
+        reference: &refer,
+        cleared: &cleared,
+    }
+    .set_on(&mut command);
+    let envs: BTreeMap<String, Option<String>> = command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(envs["MXV_ENV_0_0"], Some("test-mode".to_owned()));
+    assert_eq!(envs["MXV_ENV_1_0"], None);
+}
+
+#[test]
+fn a_port_answers_only_when_its_connection_stays_open_for_the_full_hold_and_not_once_cancelled() {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let began = now();
+    assert!(!crate::engine::container::answers_within(
+        port,
+        Duration::from_millis(250),
+        &Cancel::new()
+    ));
+    assert!(now() - began < Duration::from_millis(300));
+    let began = now();
+    assert!(crate::engine::container::answers_within(
+        port,
+        crate::plan::probe::LEAST_PUBLISHED_PROBE_TIMEOUT,
+        &Cancel::new()
+    ));
+    assert!(now() - began >= Duration::from_millis(300));
+    let cancel = Cancel::new();
+    cancel.cancel();
+    assert!(!crate::engine::container::answers_within(
+        port,
+        Duration::from_secs(1),
+        &cancel
+    ));
+    drop(listener);
 }

@@ -22,8 +22,11 @@ use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 /// it fails every call as docker does for an unknown context. `inspect`
 /// prints the file `objects/<target>`, which holds what the real format
 /// prints, or fails as docker's daemon does for a missing object of that
-/// kind. A removal deletes that file, or fails as a refusal while the file
-/// `refuse` exists.
+/// kind. An inspection whose format starts with the container's status
+/// prints the file `states/<target>`, or `running 0` when there is none.
+/// `update` succeeds for an object that exists, or fails as docker does for
+/// a stopped container while the file `noupdate` exists. A removal deletes
+/// that file, or fails as a refusal while the file `refuse` exists.
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 echo "$*" >> "$dir/calls"
@@ -46,7 +49,21 @@ missing() {
 }
 case "$1 $2" in
     "version --format") echo "29.0.0"; exit 0 ;;
-    "container inspect"|"network inspect"|"volume inspect")
+    "container inspect")
+        if [ -e "$dir/objects/$last" ]; then
+            case "$4" in
+                "{{.State.Status}}"*)
+                    if [ -e "$dir/states/$last" ]; then cat "$dir/states/$last"; else echo "running 0"; fi ;;
+                *) cat "$dir/objects/$last" ;;
+            esac
+            exit 0
+        fi
+        missing "$1" ;;
+    "update --restart")
+        if [ ! -e "$dir/objects/$last" ]; then missing container; fi
+        if [ -e "$dir/noupdate" ]; then echo "Error response from daemon: Cannot update container $last: cannot update a stopped container" >&2; exit 1; fi
+        exit 0 ;;
+    "network inspect"|"network inspect"|"volume inspect")
         if [ -e "$dir/objects/$last" ]; then cat "$dir/objects/$last"; exit 0; fi
         missing "$1" ;;
 esac
@@ -125,6 +142,14 @@ impl Fake {
                 &format!("{id}\n{labels}\n"),
             );
         }
+    }
+
+    /// Sets the status and exit code that docker prints for the container
+    /// `target`, such as `restarting 1`.
+    fn state(&self, target: &str, printed: &str) {
+        let states = self.dir.path().join("states");
+        fs::create_dir_all(&states).unwrap();
+        write(&states.join(target), &format!("{printed}\n"));
     }
 
     fn has(&self, target: &str) -> bool {
@@ -395,6 +420,65 @@ fn removing_a_container_stops_it_within_the_wait_and_then_removes_it() {
     let calls = fake.calls();
     assert!(calls.contains(&format!("stop --time 7 -- {id}")), "{calls}");
     assert!(calls.contains(&format!("rm --force -- {id}")), "{calls}");
+}
+
+#[test]
+fn removing_a_container_turns_off_its_restart_policy_before_it_stops_it() {
+    let fake = Fake::new();
+    let id = container_id('2');
+    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.docker()
+        .remove(DockerKind::Container, &id, Duration::from_secs(7))
+        .unwrap();
+    let calls = fake.calls();
+    let update = calls.find(&format!("update --restart no -- {id}"));
+    let stop = calls.find(&format!("stop --time 7 -- {id}"));
+    assert!(update.is_some() && update < stop, "{calls}");
+}
+
+#[test]
+fn removing_a_container_that_docker_is_restarting_removes_it_without_a_stop() {
+    let fake = Fake::new();
+    let id = container_id('2');
+    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.state(&id, "restarting 1");
+    fake.docker()
+        .remove(DockerKind::Container, &id, Duration::from_secs(7))
+        .unwrap();
+    assert!(!fake.has(&id));
+    let calls = fake.calls();
+    assert!(!calls.contains("stop "), "{calls}");
+    assert!(calls.contains(&format!("rm --force -- {id}")), "{calls}");
+}
+
+#[test]
+fn removing_a_stopped_container_whose_update_docker_refuses_still_removes_it() {
+    let fake = Fake::new();
+    let id = container_id('2');
+    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.state(&id, "exited 1");
+    fake.mark("noupdate");
+    fake.docker()
+        .remove(DockerKind::Container, &id, Duration::from_secs(7))
+        .unwrap();
+    assert!(!fake.has(&id));
+    assert!(!fake.calls().contains("stop "), "{}", fake.calls());
+}
+
+#[test]
+fn removing_a_running_container_whose_update_docker_refuses_fails_as_refused() {
+    let fake = Fake::new();
+    let id = container_id('2');
+    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.mark("noupdate");
+    let removed = fake
+        .docker()
+        .remove(DockerKind::Container, &id, Duration::from_secs(7));
+    assert!(
+        matches!(&removed, Err(DockerError::Refused { message }) if message.contains("cannot update")),
+        "{removed:?}"
+    );
+    assert!(fake.has(&id));
 }
 
 #[test]

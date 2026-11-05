@@ -357,6 +357,51 @@ phase labels every Compose project, container, network and volume it
 creates with the workspace and app, and records each container by its
 immutable id.
 
+phase names an app's project `phase-<hash>-<app>`, where `<hash>` is 16
+hex digits of a hash of the workspace's stable id, and the container of
+each process `<project>.<process>`. The workspace's volumes are named
+`phase-<hash>.<volume>`, because every app of the workspace may mount them.
+phase creates them before `docker compose up`, the compose file declares
+them `external`, and they carry the workspace's labels and no app label.
+Every container runs on Docker's default bridge network, so phase creates
+no network. `docker compose up` reads the compose file from standard
+input, so the file never reaches the disk.
+
+The plan's restart policy maps to Docker's: `no` to `no`, `on-failure` to
+`on-failure`, or `on-failure:N` with a maximum of `N`, and `always` to
+`unless-stopped`. Docker's backoff replaces the plan's backoff, and the
+plan's maximum does not apply to `always`. While phase waits for a
+container to be ready, a container that Docker is restarting, or has
+restarted since it was created, has ended, so a container that crashes in
+a loop fails to start with the last lines of its output.
+
+The run record keeps, for each container, a hash of the process's service
+in the compose file, which holds no value of a variable. `up` leaves a
+container alone and reports it as already running when Docker still has
+the recorded id, the container's labels name the workspace, app and
+process, Docker's status is exactly `running`, and the recorded hash is
+the hash of the process's service in the new plan. `up` replaces every
+other container.
+
+`up` pulls the app's image before it removes any container, within the
+build deadline, and resolves each process's environment before it removes
+the process's old container, so a pull or a resolver that fails leaves the
+old containers running. It writes each container's entry back to planned
+just before it removes or creates that container, so the entries of the
+containers it has not reached keep their ids and plan hashes. `docker compose up` then pulls nothing. A pull,
+`docker compose up` and the removal of an old container stop when the
+caller cancels. A deadline that cuts off the wait for a container leaves
+the app's start uncertain, as it does for a host process.
+
+`down` stops an app's containers in reverse dependency order. Each
+container gets its own stop grace, cut to what is left before the
+deadline. phase first turns off the container's restart policy with
+`docker update --restart no` and reads its status again. A running or
+paused container gets its stop signal and grace, and any other
+container, such as one that Docker was restarting, is removed at once. A Docker failure on one container does not
+stop `down` from stopping the others. It records each container that is
+gone and then reports the first failure.
+
 The labels are `mxv.workspace-id`, the workspace's stable id, which is 32
 lowercase hex digits that mxv mints when it creates the workspace and keeps
 in the workspace's record; `mxv.run-record`, the absolute path of the
@@ -424,7 +469,15 @@ bare name, because Compose would then read it from the child's own
 environment, and a container variable named `PATH` or `DOCKER_HOST` would
 change which docker program or daemon the child uses. With this fallback,
 `docker inspect` and every process in the container can read the value, and
-a new value means recreating the container.
+a new value means recreating the container. Compose also hashes each
+service's interpolated values into the `com.docker.compose.config-hash`
+label of its container, so that label changes with a value. The hash is
+unsalted, so anyone who can read the container's labels can test a guess
+of a low-entropy value against it. phase passes no secret this way yet,
+and this matters once the secret fallback lands.
+
+Until P3 lands, phase refuses a container process that receives a secret,
+and reaches only its plain variables through environment references.
 
 The eval `/evals/container-secret-delivery-orbstack` in the owner's board
 measured each option on OrbStack 2.2.5 with test values. Compose secrets
@@ -500,7 +553,11 @@ nothing.
 
 `sweep` finds a container or network whose id the record does not hold yet
 by its name, and only when it carries phase's workspace label with the
-workspace's stable id. When Docker does not answer, `sweep` fails with
+workspace's stable id. It removes a container as `down` does: it turns
+off the restart policy, reads the status again, stops a running or paused
+container, and removes any container with `docker rm --force`. When
+Docker refuses to update a container that has stopped, `sweep` still
+removes it. When Docker does not answer, `sweep` fails with
 `phase::docker::unavailable`; when Docker refuses a removal, it fails with
 `phase::docker::refused`. Either way the record keeps what is left.
 
@@ -525,7 +582,9 @@ with a group of 1, which `sweep` leaves until someone removes it, shows
 as `unknown` with its reason. A container shows as `unknown` when Docker
 does not answer or reports a state that phase does not know, such as
 `removing`, and never as stopped. A container that the record plans and
-Docker has not started shows as `starting`. The workspace's state comes
+Docker has not started shows as `starting`. A container that Docker is
+restarting under its restart policy shows as `restarting`, and a paused
+container shows as `paused`, which counts as partly running. The workspace's state comes
 from the rows that are not unknown. It is `unknown` when the unknown rows
 decide it: every other row is running, or none of the others runs. With the workspace's plan, the rows
 follow the plan and carry its sources and addresses, and record entries
@@ -785,7 +844,9 @@ and redesigns are the evidence for each one.
   again. The default resolves it again when a value has expired.
 - phase recreates a container to restart it; it never uses
   `docker restart`, which keeps the environment the container was created
-  with.
+  with. A crash restart of a container is Docker's, under the restart
+  policy, so it keeps the environment the container was created with, and
+  only `phase restart` or a changed plan resolves it again.
 
 ### Concurrency
 

@@ -126,7 +126,7 @@ fn add_depends<'p>(
 /// Returns `items` in dependency order: each item after the items that it
 /// depends on, and otherwise in the order of `items`. A dependency that
 /// `items` lacks is ignored, and a cycle is broken where it closes.
-pub(super) fn sorted<T, N: PartialEq>(
+pub(crate) fn sorted<T, N: PartialEq>(
     items: &[T],
     name: impl Fn(&T) -> &N,
     depends: impl Fn(&T) -> &[N],

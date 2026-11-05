@@ -16,6 +16,12 @@ pub const DEFAULT_PROBE_PERIOD: Duration = Duration::from_secs(10);
 /// How long one attempt of a probe may take, unless the plan states another.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The shortest timeout of a container process's `tcp` probe. Docker's
+/// port proxy accepts a connection before anything in the container
+/// listens, so one attempt allows up to 300 ms to connect and then holds
+/// the connection open for 300 ms. One second leaves room for both.
+pub const LEAST_PUBLISHED_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// The consecutive failures that make a probe fail, unless the plan states
 /// another number.
 pub const DEFAULT_FAILURE_THRESHOLD: NonZeroU32 = match NonZeroU32::new(3) {

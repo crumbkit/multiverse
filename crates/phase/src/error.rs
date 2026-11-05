@@ -175,8 +175,15 @@ pub enum NotRunnable {
     /// The app's program is built from its checkout, which phase does not
     /// do yet.
     CheckoutBuild,
-    /// The app runs in containers, which phase does not run yet.
-    Containers,
+    /// A process of the container app receives a variable that the app's
+    /// permissions name as a secret. phase delivers a container's secrets
+    /// as files in a tmpfs, which it does not do yet.
+    ContainerSecrets,
+    /// A process of the container app names a working directory, which
+    /// phase does not set for a container yet.
+    ContainerWorkingDirectory,
+    /// The container app does not run from an image.
+    ContainerWithoutImage,
     /// A process of the app is a oneshot, which phase does not run yet.
     Oneshot,
 }
@@ -186,7 +193,11 @@ impl fmt::Display for NotRunnable {
         formatter.write_str(match self {
             Self::Release => "phase does not download and verify a release yet",
             Self::CheckoutBuild => "phase does not build a checkout's program yet",
-            Self::Containers => "phase does not run container apps yet",
+            Self::ContainerSecrets => "phase does not deliver secrets to a container yet",
+            Self::ContainerWorkingDirectory => {
+                "phase does not set a container's working directory yet"
+            }
+            Self::ContainerWithoutImage => "the container app does not run from an image",
             Self::Oneshot => "phase does not run oneshot processes yet",
         })
     }
@@ -271,11 +282,14 @@ impl fmt::Display for PhaseError {
                 )
             }
             Self::Docker {
-                source: DockerError::Refused { .. },
-            } => formatter.write_str("Docker refused to remove an object of the run"),
-            Self::Docker { .. } => {
-                formatter.write_str("Docker did not answer, so phase cannot tell what is running")
-            }
+                source: DockerError::Refused { message },
+            } => write!(formatter, "Docker refused a request of the run: {message}"),
+            Self::Docker {
+                source: DockerError::Unavailable { message },
+            } => write!(
+                formatter,
+                "Docker did not answer, so phase cannot tell what is running: {message}"
+            ),
             Self::KeeperUnstartable {
                 app,
                 process,
@@ -313,12 +327,12 @@ impl std::error::Error for PhaseError {
             Self::StateUnwritable { source, .. } | Self::LogUnreadable { source, .. } => {
                 Some(source)
             }
-            Self::Docker { source } => Some(source),
             Self::NotBuilt { .. }
             | Self::Busy { .. }
             | Self::RecordUnreadable { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
+            | Self::Docker { .. }
             | Self::KeeperUnstartable { .. }
             | Self::ProcessUnstartable { .. }
             | Self::NotRunnable { .. }
