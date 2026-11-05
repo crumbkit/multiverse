@@ -543,6 +543,21 @@ pub(crate) fn backends<'a>(services: impl IntoIterator<Item = &'a Service>) -> B
         .collect()
 }
 
+/// Returns LocalStack's `SERVICES`, the kinds of `services` that it
+/// serves, joined with commas in the order of [`ServiceKind::ALL`].
+pub(crate) fn localstack_services<'a>(services: impl IntoIterator<Item = &'a Service>) -> String {
+    let kinds: BTreeSet<ServiceKind> = services
+        .into_iter()
+        .map(|service| service.kind)
+        .filter(|kind| kind.backend() == Backend::Aws)
+        .collect();
+    kinds
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Two services that declare one resource differently, or bind one
 /// variable to different values for one process.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::service::{
     AttributeType, Backend, KeyAttribute, Placeholder, Queue, Service, ServiceKind, ServiceValue,
     Table, check_bindings, check_resources, is_bucket_name, is_key_name, is_queue_name,
-    is_table_name, variables,
+    is_table_name, localstack_services, variables,
 };
 
 fn table(hash: &str) -> Table {
@@ -135,6 +135,13 @@ fn dynamodb_runs_on_dynamodb_local_and_the_other_kinds_share_localstack() {
     for kind in [ServiceKind::S3, ServiceKind::Sqs, ServiceKind::Kms] {
         assert_eq!(kind.backend(), Backend::Aws);
     }
+    let services = [
+        Service::new(ServiceKind::Kms),
+        Service::new(ServiceKind::Dynamodb),
+        Service::new(ServiceKind::S3),
+        Service::new(ServiceKind::Kms),
+    ];
+    assert_eq!(localstack_services(&services), "s3,kms");
 }
 
 #[test]

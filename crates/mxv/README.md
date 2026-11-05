@@ -765,15 +765,55 @@ SET s3_url_style = 'path';
 SET s3_use_ssl = false;
 ```
 
+#### The backends
+
+mxv adds up to three apps to the workspace when its manifest declares
+services, and starts them before any process that needs them.
+
+| App | What it runs |
+| --- | --- |
+| `mxv-dynamodb` | DynamoDB Local, `amazon/dynamodb-local:3.3.1` pinned by digest, with `-sharedDb -inMemory`, for the `dynamodb` services. |
+| `mxv-aws` | LocalStack, `localstack/localstack:4.14.0` pinned by digest, for the `s3`, `sqs` and `kms` services. Its `SERVICES` lists only the kinds that the manifest declares, and its queue URLs use the path form. |
+| `mxv-provision` | A host process that runs mxv itself and creates each declared table, bucket, queue and key. It runs once and exits. |
+
+A workspace runs one DynamoDB Local and one LocalStack, which every
+service of its kind shares. Each backend's host port is a port of the
+workspace's port ledger, named after its app, so `mxv show` lists it in
+`ports` and the backend keeps it across runs. `mxv up` waits up to 180
+seconds for each backend to answer, and up to 120 seconds for
+`mxv-provision`; a backend or provisioning that takes longer fails `up`.
+
+`mxv-provision` sends plain HTTP requests to `127.0.0.1` with no
+signature. It treats a resource that exists already as provisioned, and
+gives an existing queue the declared visibility timeout. It runs again on
+the next `up` after a backend restarts or the manifest's resources
+change, and it leaves resources that the manifest no longer declares in
+place until the backend stops. Its log lists each resource it created or
+found. A backend that refuses a resource fails `up`, and the log names the
+resource and the backend's error.
+
+The backends keep their data in memory. `mxv down` stops them, and the
+next `up` starts them empty and provisions every resource again.
+
+`mxv show` lists each service's variables in `services`, with the host
+ports that the workspace holds, or `<port>` before the first `up`. No
+value is a secret, because the access keys are the literal `test`. A
+manifest that declares services and no process is valid, and `up` starts
+the backends and provisions the resources.
+
 The prefix `mxv-` belongs to mxv. A port, process or container whose name
 starts with `mxv-` fails with `mxv::manifest::invalid` and its line, and a
 checkout whose prefixed names would start with `mxv-` needs `--as`.
 
-mxv does not run services yet. `mxv up` refuses a manifest that declares
-a service with `mxv::manifest::unrunnable`, so no process starts without
-the services it needs. `mxv show` lists each service's variables in
-`services`, with `<port>` in place of each backend's host port. No value
-is a secret, because the access keys are the literal `test`.
+#### Services and the sandbox
+
+`needs` makes the process depend on each backend it uses and on
+`mxv-provision`, so a process never lists them in `depends_on`. A process
+with `permissions` runs under phase's sandbox, which lets it connect only
+to the apps in its `connect` list. mxv adds the backend of each service in
+`needs` to that list, so a sandboxed process reaches its services with no
+further grant. The manifest cannot name `mxv-dynamodb` or `mxv-aws` in
+`connect` itself, because `connect` names units of the manifest.
 
 ## The workspace manifest
 

@@ -33,6 +33,7 @@ mod name;
 mod phase_plan;
 mod ports;
 mod process;
+mod provision;
 mod record;
 mod redacted;
 mod run_files;
@@ -60,6 +61,7 @@ pub use crate::manifest::{
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
+pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
     MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, WORKTREE_RECORD_VERSION, Workspace,
