@@ -349,7 +349,9 @@ pub(crate) fn remove(
     let mut running = Vec::new();
     let mut volumes = None;
     let mut containers = Vec::new();
+    let mut id = None;
     if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
+        id.clone_from(&workspace.id);
         running = processes::running(environment, &workspace)?;
         if !running.is_empty() && !args.force {
             return Err(RunFailure::Running {
@@ -360,7 +362,7 @@ pub(crate) fn remove(
         }
         // A volume may hold the only copy of a database, so removing it
         // needs its own flag, and `--force` alone keeps the workspace.
-        let found = processes::volumes(environment, &name)?;
+        let found = processes::volumes(environment, &workspace)?;
         if !found.is_empty() && !args.delete_volumes {
             return Err(RunFailure::Volumes {
                 workspace: name.to_string(),
@@ -370,7 +372,7 @@ pub(crate) fn remove(
             .into());
         }
         volumes = Some(found);
-        containers = processes::containers(environment, &name)?;
+        containers = processes::containers(environment, &workspace)?;
     }
     let names: Vec<String> = volumes
         .as_ref()
@@ -436,7 +438,7 @@ pub(crate) fn remove(
     }
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
         RemovalOutcome::Done(removed) => {
-            processes::forget(environment, &name)?;
+            processes::forget(environment, &name, id.as_ref())?;
             if let Some(volumes) = volumes {
                 processes::delete_volumes(environment, volumes)?;
             }

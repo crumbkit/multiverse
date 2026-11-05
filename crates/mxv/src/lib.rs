@@ -54,14 +54,15 @@ pub use crate::failures::{
 #[doc(hidden)]
 pub use crate::failures::{
     DOCKER_ADDRESS_POOLS_EXHAUSTED, DOCKER_COMPOSE_MISSING, DOCKER_FAILED, DOCKER_FOREIGN_OBJECT,
-    DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, PORT_EXHAUSTED, PROCESS_TABLE_UNREADABLE,
+    DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, PHASE_FAILED, PORT_EXHAUSTED, PROCESS_TABLE_UNREADABLE,
     PROCESS_UNSTARTABLE, PROCESS_UNSUPPORTED_OS, WORKSPACE_BUSY,
 };
 #[doc(hidden)]
 pub use crate::run_failures::{
-    MANIFEST_INVALID, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNKNOWN_KEY,
-    MANIFEST_UNREADABLE, PORT_NOT_FOUND, PORT_TAKEN, PROCESS_DETACHED_LISTENER, PROCESS_EXITED,
-    PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_UNSTOPPABLE,
+    MANIFEST_INVALID, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME,
+    MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, PORT_NOT_FOUND, PORT_TAKEN,
+    PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
+    PROCESS_NOT_READY, PROCESS_UNSTOPPABLE, VOLUME_NOT_MOVED, WORKSPACE_LEGACY_RUNNING,
     WORKSPACE_NOT_CURRENT, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 #[doc(hidden)]
@@ -200,6 +201,70 @@ where
 
 /// Prints each of `warnings` on standard error as a line of its own, for
 /// a command such as `mxv up` whose result has no field for them.
+/// The words that follow the program on the command line of phase's
+/// keeper, which `run` never sees: `mxv phase keep ...`. The command is
+/// hidden from help, because only phase starts it.
+#[doc(hidden)]
+pub const KEEPER_WORDS: [&str; 2] = ["phase", "keep"];
+
+/// Reports whether `args`, the whole command line, starts phase's keeper.
+#[doc(hidden)]
+#[must_use]
+pub fn is_keeper(args: &[OsString]) -> bool {
+    args.get(1..3).is_some_and(|words| {
+        words
+            .iter()
+            .zip(KEEPER_WORDS)
+            .all(|(word, keeper)| word == keeper)
+    })
+}
+
+/// The environment source of a keeper, which mxv's plans never ask for:
+/// each process of an mxv plan is never restarted, so its keeper never
+/// resolves a fresh environment.
+struct NoFreshEnvironment;
+
+impl multiverse::phase::EnvironmentSource for NoFreshEnvironment {
+    fn resolve(
+        &self,
+        app: &multiverse::phase::AppName,
+        process: &multiverse::phase::ProcessName,
+        _deadline: std::time::Instant,
+    ) -> Result<Box<dyn multiverse::phase::AppliedEnvironment>, multiverse::phase::EnvironmentError>
+    {
+        Err(multiverse::phase::EnvironmentError::new(
+            format!("{app}/{process}"),
+            "mxv".to_owned(),
+            "mxv never restarts a process, so its keeper resolves no fresh environment".into(),
+        ))
+    }
+}
+
+/// Runs phase's keeper with the arguments after `mxv phase keep` and the
+/// environment `vars` that `main` read, and returns its exit status. The
+/// keeper reads its specification from standard input and writes its
+/// handshake to standard output.
+#[doc(hidden)]
+#[must_use]
+pub fn keep(args: Vec<OsString>, vars: Vec<(OsString, OsString)>) -> ExitCode {
+    use multiverse::phase::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, run};
+    let environment = KeeperEnvironment::from_vars(vars);
+    let Ok(parsed) = KeeperArgs::parse(args.into_iter().skip(1 + KEEPER_WORDS.len())) else {
+        return KeeperExit::BadInput.into();
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard input, and phase's keeper reads its specification there"
+    )]
+    let input = std::io::stdin().lock();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and phase's keeper writes its handshake there"
+    )]
+    let output = std::io::stdout().lock();
+    run(&parsed, environment, &NoFreshEnvironment, input, output).into()
+}
+
 pub(crate) fn warn(warnings: &[String]) {
     use std::io::Write as _;
     if warnings.is_empty() {

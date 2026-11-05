@@ -10,6 +10,7 @@ use crate::engine::container::ContainerError as Error;
 use crate::engine::container::host::{Follow, Host, Versioned};
 use crate::engine::container::lifecycle::{
     Lifecycle, Prepared, RUN_VERSION, STORE_ID_FILE, StoreIdRecord, WorkspaceVolumes,
+    app_volume_name, delete_app_volumes,
 };
 use crate::engine::container::names::{ServiceName, StoreId, VolumeName};
 use crate::engine::container::objects::{Volume, mint_anonymous};
@@ -166,6 +167,7 @@ fn a_lifecycle_refuses_to_delete_the_volumes_of_another_workspace_before_it_runs
         volumes: vec![Volume::Anonymous(
             mint_anonymous(&name, "anonymous\n").unwrap(),
         )],
+        app: false,
     };
     let refused = other.delete_volumes(&prepared(&other), volumes);
     assert!(
@@ -181,4 +183,52 @@ fn a_lifecycle_refuses_to_delete_the_volumes_of_another_workspace_before_it_runs
     other
         .delete_volumes(&prepared(&other), WorkspaceVolumes::default())
         .unwrap();
+}
+
+#[test]
+fn the_volumes_of_apps_and_of_the_older_project_are_deleted_only_by_their_own_function() {
+    let runs = tempfile::tempdir().unwrap();
+    write_store_id(runs.path());
+    let reading = lifecycle(runs.path(), "reading-list");
+    let name = VolumeName::new("0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675")
+        .unwrap();
+    let anonymous = || {
+        vec![Volume::Anonymous(
+            mint_anonymous(&name, "anonymous\n").unwrap(),
+        )]
+    };
+    let older = WorkspaceVolumes {
+        scope: Some(prepared(&reading).scope),
+        volumes: anonymous(),
+        app: false,
+    };
+    let refused = delete_app_volumes(older);
+    assert!(
+        matches!(&refused, Err(Error::Foreign { kind: "volume", .. })),
+        "{refused:?}"
+    );
+    let apps = WorkspaceVolumes {
+        scope: Some(prepared(&reading).scope),
+        volumes: anonymous(),
+        app: true,
+    };
+    let refused = reading.delete_volumes(&prepared(&reading), apps);
+    assert!(
+        matches!(&refused, Err(Error::Foreign { kind: "volume", .. })),
+        "{refused:?}"
+    );
+    delete_app_volumes(WorkspaceVolumes::default()).unwrap();
+}
+
+#[test]
+fn the_data_volumes_of_a_workspaces_apps_are_named_after_its_stable_id() {
+    let phase = Phase::new("/state/phase".into());
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let key = crate::engine::container::names::VolumeKey::new("data").unwrap();
+    let name = app_volume_name(&phase, &id, &key).unwrap();
+    assert!(
+        name.starts_with("phase-") && name.ends_with(".data"),
+        "{name}"
+    );
+    assert_eq!(name.len(), "phase-".len() + 16 + ".data".len());
 }

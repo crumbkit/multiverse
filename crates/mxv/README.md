@@ -217,7 +217,7 @@ The schema has these keys, and any other key fails with
 | `ports` | The port names, each 1 to 64 letters, digits, `-` and `_`. |
 | `processes.<name>.argv` | The program and its arguments, as separate strings. It is required and not empty. |
 | `processes.<name>.cwd` | The starting directory, relative to the repository root, which defaults to `.`. It may not leave the repository, also through a symbolic link. |
-| `processes.<name>.env` | Variables that the process receives on top of mxv's own environment. A value may name a host port as `{port.<name>}`, where the name is a port of `ports`, and writes a literal brace as `{{` or `}}`. Any other brace, or a placeholder of an undeclared port, fails with `mxv::manifest::invalid` and the value's line. `status` lists such a port as `{port.api}=<number>`. |
+| `processes.<name>.env` | Variables that the process receives beside the ones that [The environment of a host process](#the-environment-of-a-host-process) lists. A value may name a host port as `{port.<name>}`, where the name is a port of `ports`, and writes a literal brace as `{{` or `}}`. Any other brace, or a placeholder of an undeclared port, fails with `mxv::manifest::invalid` and the value's line. `status` lists such a port as `{port.api}=<number>`. |
 | `processes.<name>.ports` | Variables that receive a host port, each naming a port of `ports`. |
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
@@ -295,105 +295,131 @@ Processes and containers share one set of names, and either may depend on
 the other. A process receives a container's host port through its own
 `ports`, as `api` receives `DYNAMODB_PORT` above.
 
-mxv runs a workspace's containers as one Docker Compose project, so it
+mxv runs a workspace's app with phase, the library in `crates/phase`.
+Each process and each container of the manifest is one phase app, named
+after the unit, and each app has one process, named `main`. A unit's
+`depends_on` becomes its app's dependencies. A unit name must therefore be
+a name phase accepts: 1 to 64 lowercase letters, digits, `-` and `_`,
+starting with a letter or a digit. A manifest with any other unit name fails
+with `mxv::manifest::unit_name`, and one that breaks another of phase's plan
+rules fails with `mxv::manifest::unrunnable`, in both cases before anything
+starts.
+
+phase keys a workspace by the stable id in its record, which `mxv new`
+mints and `mxv up` adds to a record that an earlier mxv wrote. phase keeps
+its run record and the logs of host processes under
+`$XDG_STATE_HOME/mxv/phase`. A host process's log is
+`$XDG_STATE_HOME/mxv/phase/logs/<id>/<unit>.main.log`.
+
+#### Workspaces that an earlier mxv started
+
+An earlier mxv ran processes and containers itself and kept run files under
+`$XDG_STATE_HOME/mxv/runs/<workspace>`. mxv still reads those files, so
+that a workspace started before the change keeps working until it is
+stopped:
+
+- `mxv status` and `mxv logs` report the processes and containers that the
+  run files name, as the earlier mxv did.
+- `mxv down` stops them under the earlier mxv's rules, and deletes the run
+  files once nothing they name runs.
+- `mxv up` and `mxv restart` refuse with `mxv::workspace::legacy_running`
+  while anything that the run files name may still run, and the recovery
+  runs `mxv down -w <workspace>`. When everything they name has ended,
+  `up` deletes the run files and starts the workspace under phase.
+- A named volume that the earlier mxv created, `mxv-<id8>-<workspace>.<volume>`,
+  is not taken over. When it exists and phase's volume of that name does
+  not, `up` starts nothing and fails with `mxv::volume::not_moved`. Its
+  hint gives the commands that create phase's volume with the labels phase
+  gives it and copy the data into it, or that delete the old volume when
+  its data is not needed.
+
+#### The environment of a host process
+
+phase starts each host process from an empty environment. The process
+receives `PATH` and `HOME` from the environment that `mxv` itself was run
+with, its manifest `env`, its port variables, and these variables of mxv's
+environment when they are set: `LANG`, `LANGUAGE`, every `LC_*`, `TZ`,
+`TERM`, `COLORTERM`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, the `XDG_*`
+directories, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `NVM_DIR`,
+`PNPM_HOME`, `COREPACK_HOME`, `NPM_CONFIG_PREFIX`, `NODE_EXTRA_CA_CERTS`,
+`NODE_USE_SYSTEM_CA`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `MISE_DATA_DIR`,
+`MISE_CONFIG_DIR`, `MISE_CACHE_DIR`, `SSH_AUTH_SOCK`, `RUST_LOG` and
+`RUST_BACKTRACE`. No other variable of mxv's environment reaches it. A
+credential or a build override such as `RUSTFLAGS` that is exported in the
+shell does not reach the process, and a process that needs one has to set
+its value in its manifest `env`. A manifest may not set `PATH` or `HOME`,
+which fails with `mxv::manifest::unrunnable`.
+
+The plan that phase runs names each variable that a process receives, so it
+depends on which of the variables above are set when `mxv up` runs. phase
+starts a host process only when it is not running, so an `up` from a shell
+with other variables leaves running processes as they are; `mxv restart`
+starts them with the new set. A container receives only its manifest `env`.
+The decision record
+[host-process-environment.md](docs/decisions/host-process-environment.md)
+says why mxv passes these variables and what follows from it.
+
+#### Containers
+
+phase runs each container as a Docker Compose project of its own, so it
 needs docker's `compose` plugin; without it `up` fails with
-`mxv::docker::compose_missing`. Each container of the manifest is one
-service of the project. mxv writes the project's compose file to
-`$XDG_STATE_HOME/mxv/runs/<workspace>/compose.yaml`, never into the
-checkout, and starts one service at a time with `docker compose up`. The
-compose file names each of a container's variables and refers to its value
-by a variable of the `docker compose` process, so a value such as a token
-is in no file: only that process's environment and the container hold it.
+`mxv::docker::compose_missing`. The project of the container `<unit>` is
+`phase-<hash>-<unit>`, where `<hash>` is 16 hex digits of a hash of the
+workspace's stable id, and its container is `phase-<hash>-<unit>.main`. The
+named volume `<volume>` of a workspace is `phase-<hash>.<volume>`, which
+every container of the workspace that names it shares. phase labels each
+container and volume with `mxv.workspace-id=<id>` and the path of its run
+record in `mxv.run-record`, a container also with `mxv.app=<unit>`, and a
+volume with `mxv.volume=<volume>`. phase writes no compose file: a value
+such as a token is only in the environment of the `docker compose` process
+and in the container. phase publishes each port on 127.0.0.1 only, and
+every container runs on docker's default bridge network, so a container
+reaches another container, or a process on the host, through that one's
+published port on the host's 127.0.0.1.
 
-One docker daemon may serve several mxv state directories, such as two
-checkouts that run mxv's tests at once, and each may have a workspace with
-the same name. So each state directory has a store id: a random 32-digit hex
-number that mxv writes to `$XDG_STATE_HOME/mxv/runs/.store-id` when the
-directory's first container starts. The project of a workspace is
-`mxv-<id8>-<workspace>`, where `<id8>` is the first 8 digits of the store
-id. A project name allows only lowercase letters, digits, `-` and `_`, so
-the workspace's `_` is written `__` and its `.` is written `_d`. Each
-container is named `<project>.<name>` and each named volume
-`<project>.<volume>`. mxv labels each container and named volume with
-`mxv.store=<id>`, `mxv.workspace=<workspace>`, and `mxv.container=<name>`
-or `mxv.volume=<volume>`, beside the labels that Compose adds. mxv
-publishes each port on 127.0.0.1 only.
+Before it stops, removes or reuses a container or volume, phase reads the
+object's labels, and when they name another workspace it leaves the object
+alone and `up` fails with `mxv::docker::foreign_object`. `status`, `down`
+and `logs` run docker only for a workspace whose run record holds a
+container, and `remove` only for a workspace that phase has run a container
+of, so a missing docker or a daemon that does not answer never stops a
+workspace that has never run a container.
 
-Every container runs on docker's default bridge network
-(`network_mode: bridge`), and mxv creates no network. A docker daemon
-hands each network an address range from a limited set of pools, and a
-network for each workspace would use them up. Containers therefore have
-no names for each other: a container reaches another container, or a
-process on the host, through that one's published port on the host's
-127.0.0.1. When docker has no free
-address pool even for the default bridge, `up` fails with
-`mxv::docker::address_pools_exhausted`, whose hint says how to free or
-add pools.
-
-The run records say which docker objects belong to a workspace:
-`<container>.container` holds the id of the container that `up` started,
-and `.volumes` names the named volumes of its containers and the anonymous
-volumes of their images. Before it stops, removes, adopts or reuses a
-container or volume, mxv reads the object's labels. It deletes a
-recorded volume without a name of the workspace only when docker's
-`com.docker.volume.anonymous` label marks it as an anonymous volume. When they do
-not name this store, workspace and object, mxv leaves the object alone and
-fails with `mxv::docker::foreign_object`, whose fields name the object's
-kind and name. Because the records name the containers, `status` and
-`down` find a container that the manifest no longer declares. `status`,
-`down` and `logs` run docker only for a workspace with a container record,
-and `remove` only for one with a container or volume record, so a missing
-docker or a daemon that does not answer never stops a workspace that has
-never run a container.
-
-- `mxv up` checks that docker and its compose plugin answer, then that
-  each published port is free and that each named volume is missing or
-  carries the workspace's labels. It removes a stopped container of its
-  own with the same name, writes the compose file, and runs `docker
-  compose up --detach --no-deps` for the container, then records its id.
-  Docker pulls the image when it is missing. `docker compose up` has a
-  deadline of 10 minutes for the pull, and each other docker command one
-  of 30 seconds. A container with a readiness port is ready when that port
-  answers. Docker's port proxy accepts a connection before anything in the
-  container listens and then closes it, so mxv counts the port as
-  answering only when a connection stays open for 0.3 seconds or the
-  container sends data. A container without a readiness port is ready once
-  it has run for half a second. When the container stops first, `up` fails
-  with `mxv::process::exited` and its exit code; when it misses its
-  timeout, or a step after `docker compose up` fails, `up` removes it. A
-  failed `up` removes the containers it started before the failure, as it
-  stops processes. When docker reports that a published host port is
-  already allocated, such as to a container that docker created and did
-  not start, `up` removes the new container and fails with
-  `mxv::port::taken`.
-- `mxv down` stops each recorded container with `docker stop`, which sends
-  SIGTERM and then SIGKILL after 10 seconds, removes it and deletes its
-  record. Its named volumes and the anonymous volumes of its image stay,
-  with their data, and mxv adds the anonymous volumes to `.volumes`, so
-  `mxv remove --delete-volumes` deletes them with the named ones.
+- `mxv up` pulls a missing image, starts the container, and waits for its
+  readiness port. Docker's port proxy accepts a connection before anything
+  in the container listens, so phase counts the port as answering only
+  when a connection stays open for 0.3 seconds or the container sends data.
+  When the container stops first, `up` fails with `mxv::process::exited`
+  and its exit code; when it misses its timeout, `up` fails with
+  `mxv::process::not_ready`. Either way, and after any other failure, `up`
+  removes the containers and stops the processes it started. phase replaces
+  a running container whose image, command, ports or variable names
+  changed. A change to a variable's value alone waits for `mxv restart`.
+- `mxv down` stops each container, which sends SIGTERM and then SIGKILL
+  after the grace, and removes it. Its named volumes stay, with their data,
+  until `mxv remove --delete-volumes` deletes them.
 - `mxv status` reports a container's state as docker reports it, with
-  `kind` set to `container` and `pid` null: `running`, `exited`, or
-  `created` for a container that docker created and did not start. An
-  exited container's `code` is the code that docker reports, such as 137
-  for a container that SIGKILL ended, and its `signal` is null.
-- `mxv logs` reads `<container>.log`, which a detached `docker logs
-  --follow` appends to while the container runs, so the log stays after
-  `down` removes the container. `<container>.follower` records the
-  follower's process id. The follower ends when the container stops, so
-  when docker restarts a container outside mxv, the next `up` or `status`
-  starts a new follower from the container's latest start. `logs -f` ends
-  once the follower has ended and the container no longer runs; while the
-  container runs, `logs -f` starts a new follower when the old one ends. Each `up` moves the previous log to
-  `<container>.log.1`, as for a process.
+  `kind` set to `container` and `pid` and `log` null. An exited container's
+  `code` is the code that docker reports, such as 137 for a container that
+  SIGKILL ended, and its `signal` is null. When docker does not answer, the
+  state is `unknown` and `reason` says why.
+- `mxv logs` prints `docker logs` of the container, its standard output and
+  standard error together. Once `down` has removed the container, its log
+  is gone, and `logs` prints nothing for it. Without `-f`, `logs` stops
+  docker and fails with `mxv::docker::failed` when docker prints nothing
+  for 30 seconds.
 
 When a workspace needs docker and no `docker` program is on `PATH`, its
 command fails with `mxv::docker::not_found`. When docker's daemon does not
-answer, it fails with `mxv::docker::unavailable`; `down` and `remove
---force` fail too, so they never report a workspace as stopped while its
-containers may still run. A docker command that fails, such as a `docker
-compose up` whose image cannot be pulled, fails with `mxv::docker::failed`, whose
-fields name the operation, the container, and the line of docker's error
-output that starts with `docker:` or `Error`, or else its last line.
+answer, `up`, `down` and `remove --force` fail with
+`mxv::docker::unavailable`, so they never report a workspace as stopped
+while its containers may still run. A docker command that fails, such as a
+pull of an image that does not exist, fails with `mxv::docker::failed`,
+whose fields name the operation, the container, and docker's message. A
+failure of phase that mxv has no code for fails with `mxv::phase::failed`,
+whose `phase_code` field holds phase's code.
+
+#### The process verbs
 
 Each process verb works on the workspace that `-w/--workspace` names, or on
 the one that holds the current directory when it names none. Its positional
@@ -402,74 +428,46 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
 `mxv logs [-w WORKSPACE] PROCESS`.
 
 - `mxv up` starts the named processes, or every process, with their
-  dependencies first. It skips a process that already runs. Before it
-  starts a listener, it checks that the listen port is free; when it is
-  taken, `up` fails with `mxv::port::taken`, whose `holders` field names the
-  listener when its own process group still runs, such as a child that it
-  left behind, or is empty when a program outside the workspace holds the
-  port. Each process runs in its
-  own process group, with standard input empty and standard output and
-  standard error appended to its log. When a process exits before it is
-  ready, `up` fails with `mxv::process::exited` and the log's last 20 lines;
-  when it misses its timeout, `up` stops it and fails with
-  `mxv::process::not_ready`. When the readiness port is the listen port
-  and it accepts a connection, `up` also checks which process holds the
-  listening socket, through `/proc` on Linux and libproc's
-  `proc_pidfdinfo` on macOS. When a member of the process's group holds
-  it, the process is ready. When a descendant of the process's shell that
-  left the group holds it, as a daemon that calls `setsid` does, `down`
-  could not stop that descendant, so `up` sends it SIGKILL, stops the
-  process, and fails with `mxv::process::detached_listener` and the
-  descendant's process id. A descendant whose parent between it and the
-  shell has ended counts as another program, because the operating system
-  makes init its parent. When another program holds the socket, `up`
-  stops the process and fails with `mxv::process::foreign_listener` and
-  that program's process id, or a null id when the program belongs to
-  another user. A process that hands its port to a program that it did
-  not start, such as a wrapper around `docker run -p`, fails this check. A failed `up` stops the processes it started
-  before the failure. `up` also drops the ports of names that the manifest
-  no longer declares, once no running process received them, so a port
-  that the manifest renames stays with its old listener until `down`.
-- `mxv down` sends SIGTERM to the process group that a run record names,
-  waits up to 10 seconds, then sends SIGKILL. It signals the group only
-  when it is the group that `up` started: the process with the recorded id
-  has the recorded start time, or no process has that id and a member of
-  the group with that id started at least 50 milliseconds before the
-  process's shell wrote its exit file. A group keeps its id while any
-  member lives, so in the second case the group holds the children that an
-  exited process left behind. A group whose members all started later may
-  belong to another program, which took the id after the group emptied, so
-  `down` signals nothing, keeps the record, and fails that process with
-  `mxv::process::unstoppable` and a message that says it could not prove
-  the group its own. When another process has taken the recorded id,
-  `down` signals nothing and deletes the record. `running`, `remove` and
-  `logs -f` apply the same rule, and count an unproven group as still
-  running. A member of a group that has ended and waits to be reaped, a
-  zombie, does not count. A descendant that leaves its process group is
-  not reached.
+  dependencies first. It skips a process that already runs. phase starts
+  each host process under a keeper, a small `mxv` process that runs the
+  process in a process group of its own, with standard input empty and
+  standard output and standard error appended to its log, and stops what
+  is left of the group when the process ends. Before it starts a listener,
+  phase checks that the listen port is free; when it is taken, `up` fails
+  with `mxv::port::taken`. When a process exits before it is ready, `up`
+  fails with `mxv::process::exited` and the log's last lines; when it
+  misses its timeout, `up` stops it and fails with
+  `mxv::process::not_ready`. When the readiness port answers and a process
+  outside the process's group holds it, `up` stops the process and fails
+  with `mxv::process::foreign_listener` and that program's process id. A
+  failed `up` stops the processes it started before the failure. `up` also
+  drops the ports of names that the manifest no longer declares, once no
+  process of the workspace runs, so a port that the manifest renames stays
+  with its old listener until `down`.
+- `mxv down` stops each process's group with SIGTERM, waits up to 10
+  seconds, then sends SIGKILL. When phase cannot prove that a group is the
+  one it started, it signals nothing and `down` fails that process with
+  `mxv::process::unstoppable`. When `up` meets such a group while it stops
+  what it started, it fails with the same error, starts nothing more, and
+  names the units it did not start.
 - `mxv restart` stops the named processes, or every process, and starts them
   again.
-- `mxv status` reports each process as `running`, `exited` with its code,
-  or `stopped`. A process counts as running only while the process table
-  lists its process id with the start time that `up` recorded, so a reused
-  id reads as exited. The start time does not depend on the time zone: on
-  Linux it is the boot-relative start time in `/proc/<pid>/stat`, and on
-  macOS it is the start that `proc_pidinfo` reports to the microsecond.
-  Run records that an earlier mxv wrote on macOS hold the start time that
-  `ps -o lstart=` printed in UTC, so for such a record mxv runs `ps` again
-  and compares what it prints, and `status` and `down` still find the
-  process. The shell records a program that a
-  signal ended as code 128 plus the signal's number, so `status` reports a
-  code from 129 to 192 as `code` null and `signal` set; a program that
-  exits with such a code by itself reads the same way. A process that
-  exited with a code other than 0 makes `status` exit with code 1.
-  `group_alive` is true for an exited process whose group still has a
-  member, which `down` stops.
-- `mxv status` and `mxv down` read the run records when the manifest does
+- `mxv status` reports each process as `running`, `starting`, `stopping`,
+  `restarting`, `exited`, `stopped`, or `unknown` with a `reason`. An
+  exited process has its exit `code`, or the number of the `signal` that
+  ended it and a null `code`. A process that runs a shell, such as
+  `sh -c`, records a program that a signal ended as code 128 plus the
+  signal's number, so `status` reports a code from 129 to 192 as `code`
+  null and `signal` set; a program that exits with such a code by itself
+  reads the same way. When the process ended while its keeper was not
+  running, as after something killed the keeper or the machine
+  restarted, both are null and `reason` says why. An exited process
+  whose `code` is anything but 0, including null, makes `status` exit with
+  code 1. `group_alive` is null for every process that phase runs.
+- `mxv status` and `mxv down` read phase's run record when the manifest does
   not parse, so a broken manifest never keeps processes running.
 - `mxv logs` prints the last 50 lines of a log, or `--lines N`. With `-f`
-  it prints each new line, and it ends once the process has exited and no
-  member of its group remains, or the log is deleted. A line longer than
+  it prints each new line until the process has exited. A line longer than
   1 MiB comes out in parts.
 - `mxv ports reset [-w WORKSPACE] [PORT]...` gives the named ports, or
   every port, new host ports that differ from the old ones. It refuses with

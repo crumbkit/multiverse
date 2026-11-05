@@ -757,3 +757,53 @@ pub(crate) fn answers_within(port: u16, timeout: Duration, cancel: &Cancel) -> b
 /// The longest that [`answers_within`] reads before it checks its cancel
 /// flag again.
 const ANSWER_POLL: Duration = Duration::from_millis(50);
+
+/// Passes the log of the container `id` to `line`, as `docker logs`
+/// prints it: its last `lines` lines, or the whole log when `lines` is
+/// `None`, and with `follow` each later line until the container stops or
+/// `line` breaks. `line` receives whether the container wrote the line to
+/// standard error.
+///
+/// # Errors
+///
+/// Returns [`Error::Missing`] when no `docker` program is on `PATH`, and
+/// [`Error::Failed`] when docker cannot start or exits with a failure,
+/// such as for a container that docker no longer has, with the last line
+/// that docker printed on standard error.
+pub(crate) fn logs(
+    id: &crate::record::ContainerId,
+    lines: Option<usize>,
+    follow: bool,
+    line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
+) -> Result<(), Error> {
+    let tail = lines.map_or_else(|| "all".to_owned(), |lines| lines.to_string());
+    let mut args = vec!["logs".to_owned(), "--tail".to_owned(), tail];
+    if follow {
+        args.push("--follow".to_owned());
+    }
+    args.extend(["--".to_owned(), id.as_str().to_owned()]);
+    // docker prints its own error on standard error too, as the last line
+    // before it fails, so a failure keeps that line.
+    let mut last_stderr = String::new();
+    let mut pass = |is_stderr: bool, text: &str| {
+        if is_stderr {
+            text.clone_into(&mut last_stderr);
+        }
+        line(is_stderr, text)
+    };
+    // A read without follow ends once docker has printed the log, so a
+    // docker that prints nothing for the deadline of a docker command hangs.
+    let idle = (!follow).then_some(super::command::DOCKER_DEADLINE);
+    match super::command::stream(args, "logs", idle, &mut pass)? {
+        Some(status) if !status.success() => Err(Error::failed(
+            "logs",
+            Some(id.as_str()),
+            if last_stderr.is_empty() {
+                format!("docker logs exited with {status}")
+            } else {
+                last_stderr
+            },
+        )),
+        _ => Ok(()),
+    }
+}

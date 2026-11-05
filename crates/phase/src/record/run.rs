@@ -3,6 +3,7 @@
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -896,6 +897,26 @@ impl RunRecord {
         self.processes
             .iter()
             .any(|entry| entry.ended.is_some_and(|ended| !ended.requested))
+    }
+
+    /// Reports whether a host process that `wanted` does not select holds
+    /// an end that no stop request caused. `wanted` maps each selected app
+    /// to its selected processes, or to `None` for all of them. A `down` or
+    /// a sweep that leaves everything stopped removes the record, unless the
+    /// `down` did not select a process that holds such an end, so `status`
+    /// still shows that process as exited.
+    pub(crate) fn holds_an_exit_outside(
+        &self,
+        wanted: &BTreeMap<&AppName, Option<BTreeSet<&ProcessName>>>,
+    ) -> bool {
+        self.processes.iter().any(|entry| {
+            entry.ended.is_some_and(|ended| !ended.requested)
+                && match wanted.get(&entry.app) {
+                    None => true,
+                    Some(None) => false,
+                    Some(Some(only)) => !only.contains(&entry.process),
+                }
+        })
     }
 
     /// Records `ended` as how the host process `key` last ended.

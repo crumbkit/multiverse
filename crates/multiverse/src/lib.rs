@@ -30,6 +30,7 @@ mod lookup;
 mod manifest;
 mod mirror;
 mod name;
+mod phase_plan;
 mod ports;
 mod process;
 mod record;
@@ -56,6 +57,7 @@ pub use crate::manifest::{
     Published, Ready, ReadyCheck, Unit,
 };
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
+pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, RECORD_VERSION,
@@ -75,6 +77,7 @@ pub use crate::workspaces::{
     Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode, NewOutcome, Removal,
     RemovalOutcome, RemovalPlan, Workspaces,
 };
+pub use phase;
 pub use phase::container::RUN_VERSION;
 #[cfg(test)]
 mod testing;

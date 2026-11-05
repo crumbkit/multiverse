@@ -116,6 +116,10 @@ pub const DOCKER_FAILED: Code = Code::new("mxv", "docker", "failed");
 /// lacks the labels of this state directory and workspace, which mxv
 /// leaves alone.
 pub const DOCKER_FOREIGN_OBJECT: Code = Code::new("mxv", "docker", "foreign_object");
+/// The code of a failure that phase, which runs a workspace's apps,
+/// reports and mxv has no code of its own for. The `phase_code` field
+/// holds phase's code.
+pub const PHASE_FAILED: Code = Code::new("mxv", "phase", "failed");
 /// The code of an environment in which mxv finds no home directory, so it
 /// has no directory for the records, the config file or the default root.
 pub const ENVIRONMENT_NO_DIRECTORY: Code = Code::new("mxv", "environment", "no_directory");
@@ -361,6 +365,7 @@ pub(crate) const CODES: &[&Code] = &[
     &DOCKER_UNAVAILABLE,
     &DOCKER_FAILED,
     &DOCKER_FOREIGN_OBJECT,
+    &PHASE_FAILED,
 ];
 
 /// Returns `path` as text for a field or a hint.
@@ -488,6 +493,7 @@ impl Failure for MxvFailure {
                 Error::DockerUnavailable { .. } => &DOCKER_UNAVAILABLE,
                 Error::DockerFailed { .. } => &DOCKER_FAILED,
                 Error::DockerForeign { .. } => &DOCKER_FOREIGN_OBJECT,
+                Error::Phase { .. } => &PHASE_FAILED,
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
                 // mxv gives it a code of its own.
@@ -818,6 +824,9 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::DockerForeign { kind, name } => hint(format!(
             "find out who made the docker {kind} {name}, rename or remove it with docker if nobody needs it, and run the command again"
         )),
+        Error::Phase { .. } => hint(
+            "read phase's message, fix what it names, and run the command again; `mxv status` shows what runs",
+        ),
         _ => hint("run the command again"),
     }
 }
@@ -912,6 +921,10 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         Error::DockerForeign { kind, name } => {
             vec![Field::new("kind", *kind), Field::new("name", name)]
         }
+        Error::Phase { code, message } => vec![
+            Field::new("phase_code", *code),
+            Field::new("message", message),
+        ],
         _ => Vec::new(),
     }
 }

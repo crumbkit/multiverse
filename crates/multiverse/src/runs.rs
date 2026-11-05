@@ -25,6 +25,7 @@
 //! has ended and the container runs, such as after a restart outside mxv.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
@@ -44,6 +45,7 @@ use phase::host::LogFollower;
 use crate::error::Error;
 use crate::manifest::{Container, LogPattern, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
+use crate::phase_plan::CallerEnvironment;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
 use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
@@ -54,8 +56,11 @@ use crate::run_files::{
 };
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
+mod phased;
 #[cfg(test)]
 mod tests;
+
+pub use phased::Volumes;
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
@@ -92,6 +97,10 @@ pub enum ExitReason {
     /// shell before it could write the file. Members of the process group
     /// may still run.
     NoExitFile,
+    /// phase recorded no end for the process. Its keeper ended before it
+    /// recorded how the process ended, as when something killed the keeper
+    /// or the machine restarted.
+    Unrecorded,
 }
 
 impl ExitReason {
@@ -101,6 +110,9 @@ impl ExitReason {
         match self {
             Self::NoExitFile => {
                 "the shell that ran the process ended without writing its exit code, so something such as SIGKILL ended the shell"
+            }
+            Self::Unrecorded => {
+                "the process ended while phase was not watching it, so nothing recorded its exit code"
             }
         }
     }
@@ -134,6 +146,35 @@ pub enum ProcessState {
     Created,
     /// The process has not started since the last `mxv down`, or never.
     Stopped,
+    /// phase started the process and it has not passed its readiness check
+    /// yet, or its keeper runs and has not started it yet.
+    Starting {
+        /// The process id of a process, or `None` for a container or a
+        /// process that its keeper has not started.
+        pid: Option<u32>,
+    },
+    /// phase sent the stop signal and the process has not exited yet.
+    Stopping {
+        /// The process id of a process, or `None` for a container.
+        pid: Option<u32>,
+    },
+    /// docker is restarting the container under its restart policy.
+    Restarting,
+    /// phase cannot tell what the process is doing, such as when docker
+    /// does not answer, and leaves it alone.
+    Unknown {
+        /// Why phase cannot tell, in a sentence.
+        reason: &'static str,
+    },
+}
+
+impl ProcessState {
+    /// Reports whether a process in this state may run, which includes a
+    /// process whose state phase cannot tell.
+    #[must_use]
+    pub const fn may_run(self) -> bool {
+        !matches!(self, Self::Stopped | Self::Exited { .. } | Self::Created)
+    }
 }
 
 /// Whether a name of the manifest is a process or a container.
@@ -157,8 +198,9 @@ pub struct ProcessStatus {
     pub state: ProcessState,
     /// The host ports it receives, by variable name.
     pub ports: BTreeMap<String, u16>,
-    /// Its log file.
-    pub log: PathBuf,
+    /// Its log file, or `None` for a container that phase runs, whose log
+    /// comes from `docker logs`.
+    pub log: Option<PathBuf>,
     /// Whether its process group still has a member although the process
     /// itself has exited, such as a child it started in the background,
     /// which `mxv down` stops. It is `None` while the process runs, because
@@ -198,8 +240,9 @@ pub enum UpOutcome {
         code: Option<i32>,
         /// The signal that ended it, or `None`.
         signal: Option<i32>,
-        /// Its log file.
-        log: PathBuf,
+        /// Its log file, or `None` for a container that phase runs, whose
+        /// log comes from `docker logs`.
+        log: Option<PathBuf>,
         /// The last lines of its log.
         tail: Vec<String>,
     },
@@ -216,8 +259,9 @@ pub enum UpOutcome {
         /// The process that holds the port, or `None` when it is one whose
         /// descriptors mxv may not read.
         pid: Option<u32>,
-        /// The process's log file.
-        log: PathBuf,
+        /// The process's log file, or `None` for a container that phase
+        /// runs.
+        log: Option<PathBuf>,
         /// The last lines of its log.
         tail: Vec<String>,
     },
@@ -234,8 +278,9 @@ pub enum UpOutcome {
         number: u16,
         /// The descendant that holds the port, which `up` sent SIGKILL.
         pid: u32,
-        /// The process's log file.
-        log: PathBuf,
+        /// The process's log file, or `None` for a container that phase
+        /// runs.
+        log: Option<PathBuf>,
         /// The last lines of its log.
         tail: Vec<String>,
     },
@@ -248,10 +293,45 @@ pub enum UpOutcome {
         waited: Waited,
         /// The timeout it missed.
         timeout: Duration,
-        /// Its log file.
-        log: PathBuf,
+        /// Its log file, or `None` for a container that phase runs, whose
+        /// log comes from `docker logs`.
+        log: Option<PathBuf>,
         /// The last lines of its log.
         tail: Vec<String>,
+    },
+    /// A process or container that mxv started before phase ran its apps
+    /// may still run, so `up` started nothing. `mxv down` stops it.
+    LegacyRunning {
+        /// The processes and containers that may still run, in name order.
+        processes: Vec<String>,
+    },
+    /// A container mounts a volume that holds data under the name that mxv
+    /// gave it before phase ran its apps, and phase's volume of that name
+    /// does not exist, so `up` started nothing. phase does not take over
+    /// the older volume.
+    VolumeNotMoved {
+        /// The container.
+        container: String,
+        /// The volume's name in the manifest.
+        volume: String,
+        /// The older volume's docker name.
+        legacy: String,
+        /// The docker name of phase's volume.
+        phase: String,
+        /// The labels, as `name=value`, that phase's volume needs, so that
+        /// a volume created with them is the one phase mounts.
+        labels: Vec<String>,
+    },
+    /// phase cannot run the manifest.
+    Unrunnable(crate::phase_plan::Unrunnable),
+    /// phase found a process group of a unit that an earlier stop left,
+    /// which it could not stop or could not prove its own, so it started
+    /// nothing more. `up` stopped what it had started.
+    Left {
+        /// The unit and its group.
+        unstoppable: Unstoppable,
+        /// The units that `up` did not reach, in phase's order.
+        not_started: Vec<String>,
     },
 }
 
@@ -332,6 +412,9 @@ pub struct Runs {
     /// How long [`Runs::lock`] and port allocation wait for a lock that
     /// another command holds.
     lock_wait: Duration,
+    /// The environment that mxv's `main` read, which phase's keepers and
+    /// host processes receive part of.
+    caller: CallerEnvironment,
 }
 
 impl Runs {
@@ -348,14 +431,43 @@ impl Runs {
             grace: STOP_GRACE,
             port_range: DEFAULT_PORT_RANGE,
             lock_wait: LOCK_WAIT,
+            caller: CallerEnvironment::default(),
         }
+    }
+
+    /// Returns these run files with `program`, followed by the words of
+    /// `leading`, as the program that runs phase's keepers, such as mxv
+    /// itself and `phase keep`. `up` cannot start a host process until a
+    /// keeper is named.
+    #[must_use]
+    pub fn with_keeper(mut self, program: PathBuf, leading: Vec<OsString>) -> Self {
+        self.phase = self.phase.with_keeper(program, leading);
+        self
+    }
+
+    /// Returns these run files with `caller` as the environment that mxv's
+    /// `main` read. phase's keepers receive its `PATH` and `HOME`, host
+    /// processes receive its variables of [`PASSED_THROUGH`], and phase's
+    /// `docker exec`, which writes a container's secret file, receives
+    /// its `PATH`, `HOME` and `DOCKER_` variables.
+    ///
+    /// [`PASSED_THROUGH`]: crate::PASSED_THROUGH
+    #[must_use]
+    pub fn with_caller(mut self, caller: CallerEnvironment) -> Self {
+        self.phase = self
+            .phase
+            .with_inherited(caller.inherited())
+            .with_docker_environment(caller.docker_environment());
+        self.caller = caller;
+        self
     }
 
     /// Returns these run files with `wait` as how long a lock waits for
     /// another command to release it.
     #[must_use]
-    pub const fn with_lock_wait(mut self, wait: Duration) -> Self {
+    pub fn with_lock_wait(mut self, wait: Duration) -> Self {
         self.lock_wait = wait;
+        self.phase = self.phase.with_lock_wait(wait);
         self
     }
 
@@ -482,7 +594,7 @@ impl Runs {
     /// Returns [`Error::StateUnreadable`], [`Error::CorruptRecord`] or
     /// [`Error::NewerRecord`] for a run record that cannot be read, and
     /// [`Error::ProcessTable`] when `ps` fails.
-    pub fn status(
+    fn legacy_status(
         &self,
         workspace: &Workspace,
         manifest: Option<&Manifest>,
@@ -532,7 +644,7 @@ impl Runs {
     /// # Errors
     ///
     /// Returns the errors of [`Runs::status`].
-    pub fn writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+    fn legacy_writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
         if self.record(name, process)?.is_none() {
             return self.container_writing(name, process);
         }
@@ -549,7 +661,7 @@ impl Runs {
     /// # Errors
     ///
     /// Returns the errors of [`Runs::status`].
-    pub fn running(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
+    fn legacy_running(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
         let mut running = Vec::new();
         for process in self.recorded(&workspace.name)? {
             if matches!(
@@ -627,16 +739,21 @@ impl Runs {
         };
         let state = self.state(&workspace.name, process)?;
         let group_alive = match state {
-            ProcessState::Running { .. } => None,
             ProcessState::Exited { .. } => Some(self.group_lives(&workspace.name, process)?),
             ProcessState::Stopped | ProcessState::Created => Some(false),
+            // A run file gives only the three states above and running.
+            ProcessState::Running { .. }
+            | ProcessState::Starting { .. }
+            | ProcessState::Stopping { .. }
+            | ProcessState::Restarting
+            | ProcessState::Unknown { .. } => None,
         };
         Ok(ProcessStatus {
             name: process.to_owned(),
             kind: Kind::Process,
             state,
             ports,
-            log: self.log(&workspace.name, process),
+            log: Some(self.log(&workspace.name, process)),
             group_alive,
         })
     }
@@ -666,7 +783,8 @@ impl Runs {
     /// [`Runs::status`], [`Error::ProcessUnstartable`] for a process that
     /// cannot start, and [`Error::Unwritable`] when a run file cannot be
     /// written.
-    pub fn up(
+    #[doc(hidden)]
+    pub fn legacy_up(
         &self,
         _lock: &Lock,
         store: &Store,
@@ -697,7 +815,7 @@ impl Runs {
             None
         };
         let specs = container_specs(&manifest.containers);
-        self.assign_ports(store, workspace, manifest, &BTreeSet::new())?;
+        self.assign_ports(store, workspace, manifest, &BTreeSet::new(), false)?;
         let mut started = Vec::new();
         for process in &order {
             let started_one = match (manifest.unit(process), &prepared) {
@@ -878,7 +996,7 @@ impl Runs {
                     code,
                     signal,
                     tail: tail(&log, TAIL_LINES),
-                    log,
+                    log: Some(log),
                 }))
             }
             Readiness::TimedOut => {
@@ -903,7 +1021,7 @@ impl Runs {
                     waited,
                     timeout: ready.timeout,
                     tail: tail(&log, TAIL_LINES),
-                    log,
+                    log: Some(log),
                 }))
             }
         }
@@ -963,7 +1081,7 @@ impl Runs {
                 port: listen.clone(),
                 number,
                 pid,
-                log,
+                log: Some(log),
                 tail,
             },
             Holder::Group | Holder::Other(_) => UpOutcome::ForeignListener {
@@ -974,7 +1092,7 @@ impl Runs {
                     Holder::Other(pid) => pid,
                     Holder::Group | Holder::Descendant(_) => None,
                 },
-                log,
+                log: Some(log),
                 tail,
             },
         }))
@@ -1021,7 +1139,7 @@ impl Runs {
     ///
     /// Returns the errors of [`Runs::status`], and [`Error::Unwritable`]
     /// when a run file cannot be deleted.
-    pub fn down(
+    fn legacy_down(
         &self,
         _lock: &Lock,
         workspace: &Workspace,
@@ -1114,7 +1232,9 @@ impl Runs {
     /// that `workspace` does not hold, avoiding `avoid` and the ports that
     /// other workspaces in `store` hold, drops the ports of names that
     /// `manifest` no longer declares, and writes the record when it changed
-    /// one. It holds the lock `<runs>/.ports.lock` while it reads the other
+    /// one. With `held`, which says that a process phase started may still
+    /// run, it drops no port, because phase does not say which ports a
+    /// running process received. It holds the lock `<runs>/.ports.lock` while it reads the other
     /// records and writes this one, so two workspaces that allocate at once
     /// never take the same port.
     fn assign_ports(
@@ -1123,11 +1243,15 @@ impl Runs {
         workspace: &mut Workspace,
         manifest: &Manifest,
         avoid: &BTreeSet<u16>,
+        held: bool,
     ) -> Result<(), Error> {
         // A port that the manifest no longer names stays while a process
         // that received it still runs, so the old listener keeps its port
         // until `down`.
         let mut live = BTreeSet::new();
+        if held {
+            live.extend(workspace.ports.values().copied());
+        }
         for process in self.recorded(&workspace.name)? {
             if let Some(record) = self.record(&workspace.name, &process)?
                 && ownership(&record, &self.file(&workspace.name, &process, "exit"))?.may_live()
@@ -1200,7 +1324,7 @@ impl Runs {
                 old.insert(number);
             }
         }
-        self.assign_ports(store, workspace, manifest, &old)?;
+        self.assign_ports(store, workspace, manifest, &old, false)?;
         Ok(Ok(()))
     }
 
@@ -1213,7 +1337,7 @@ impl Runs {
     ///
     /// Returns the docker errors of [`Runs::down`], and
     /// [`Error::Unwritable`] when the directory cannot be deleted.
-    pub fn forget(&self, name: &WorkspaceName) -> Result<(), Error> {
+    fn legacy_forget(&self, name: &WorkspaceName) -> Result<(), Error> {
         let lifecycle = self.lifecycle(name);
         if !lifecycle.recorded()?.is_empty()
             && let Some(prepared) = lifecycle.existing()?
@@ -1280,7 +1404,7 @@ impl Runs {
     ///
     /// Returns [`Error::StateUnreadable`] when the run directory cannot be
     /// read.
-    pub fn docker_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
+    fn legacy_docker_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
         Ok(self.existing_containers(name)?.into_iter().collect())
     }
 
@@ -1352,7 +1476,7 @@ impl Runs {
             kind: Kind::Container,
             state,
             ports,
-            log: self.run_dir(&workspace.name).log(container),
+            log: Some(self.run_dir(&workspace.name).log(container)),
             group_alive: None,
         }
     }
@@ -1435,7 +1559,7 @@ impl Runs {
             code,
             signal: None,
             tail: tail(&log, TAIL_LINES),
-            log,
+            log: Some(log),
         }
     }
 
@@ -1493,7 +1617,7 @@ impl Runs {
                     },
                     timeout: ready.timeout,
                     tail: tail(&log, TAIL_LINES),
-                    log,
+                    log: Some(log),
                 }));
             }
             pause(FOLLOW_INTERVAL);
@@ -1510,63 +1634,29 @@ impl Runs {
     ///
     /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
     /// [`Error::DockerFailed`].
-    pub fn volumes(&self, name: &WorkspaceName) -> Result<Volumes, Error> {
+    fn legacy_volumes(&self, name: &WorkspaceName) -> Result<WorkspaceVolumes, Error> {
         let lifecycle = self.lifecycle(name);
-        let found = match lifecycle.existing()? {
+        Ok(match lifecycle.existing()? {
             Some(prepared) => lifecycle.volumes(&prepared)?,
             None => WorkspaceVolumes::default(),
-        };
-        Ok(Volumes {
-            workspace: name.clone(),
-            names: found.names(),
-            found,
         })
     }
 
-    /// Deletes `volumes`, which [`Runs::volumes`] returned for one
-    /// workspace, from that workspace, after it checked each one again.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::DockerForeign`], [`Error::DockerMissing`],
-    /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
-    pub fn delete_volumes(&self, volumes: Volumes) -> Result<(), Error> {
-        if volumes.is_empty() {
+    /// Deletes `volumes`, which [`Runs::legacy_volumes`] returned for the
+    /// workspace `name`, after it checked each one again.
+    fn legacy_delete_volumes(
+        &self,
+        name: &WorkspaceName,
+        volumes: WorkspaceVolumes,
+    ) -> Result<(), Error> {
+        if volumes.names().is_empty() {
             return Ok(());
         }
-        let lifecycle = self.lifecycle(&volumes.workspace);
+        let lifecycle = self.lifecycle(name);
         match lifecycle.existing()? {
-            Some(prepared) => lifecycle.delete_volumes(&prepared, volumes.found),
+            Some(prepared) => lifecycle.delete_volumes(&prepared, volumes),
             None => Ok(()),
         }
-    }
-}
-
-/// The docker volumes of a workspace that a removal deletes, which only
-/// [`Runs::volumes`] returns, after it checked that each one is the
-/// workspace's. [`Runs::delete_volumes`] deletes them from that workspace
-/// alone.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Volumes {
-    /// The workspace that the volumes belong to.
-    workspace: WorkspaceName,
-    /// The volumes' docker names, in name order.
-    names: Vec<String>,
-    /// The volumes.
-    found: WorkspaceVolumes,
-}
-
-impl Volumes {
-    /// Returns the volumes' docker names, in name order.
-    #[must_use]
-    pub fn names(&self) -> &[String] {
-        &self.names
-    }
-
-    /// Reports whether the workspace has no volume to delete.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.names.is_empty()
     }
 }
 

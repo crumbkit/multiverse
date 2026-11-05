@@ -2450,3 +2450,71 @@ fn a_restart_whose_source_leaves_out_a_required_variable_stops_nothing() {
     assert_eq!(error.code(), "phase::environment");
     assert!(world.host.stops().is_empty());
 }
+
+#[test]
+fn a_down_of_other_apps_keeps_the_exit_of_a_process_it_did_not_select() {
+    let world = World::new();
+    world.host.ends_as("api/server", Exit::Code(3));
+    let web = host_app("web", None, &[]);
+    let mut api = host_app("api", None, &["web"]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    let plan = plan(vec![web, api]);
+
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.down(&only("web"));
+
+    let sources = crate::status::Sources {
+        state_dir: world.state.path(),
+        processes: &crate::record::testing::FakeProcesses::default(),
+        docker: &crate::record::testing::Unreachable,
+    };
+    let store = RunStore::new(world.state.path());
+    let status = crate::status::status(&store, &workspace(), None, sources).unwrap();
+    let api = status
+        .rows
+        .iter()
+        .find(|row| row.app.as_str() == "api")
+        .unwrap();
+    assert_eq!(api.state, crate::status::ProcessState::exited(Some(3)));
+
+    world.down(&Selection::All);
+
+    assert_eq!(world.record(), None);
+}
+
+#[test]
+fn a_down_of_one_process_keeps_the_exit_of_another_process_of_its_app_until_a_sweep() {
+    let world = World::new();
+    world.host.ends_as("api/worker", Exit::Code(3));
+    let mut api = host_app("api", None, &[]);
+    let mut worker = ProcessPlan::new(name("worker"), vec!["./work".into()]);
+    worker.ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    api.processes.push(worker);
+    let plan = plan(vec![api]);
+
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.down(&Selection::only(vec![name::<Target>("api/server")]));
+
+    let record = world.record().expect("the down removed the worker's exit");
+    let worker = ObjectKey::Process(name("api"), name("worker"));
+    assert_eq!(record.state(&worker), Some(EntryState::Stopped));
+
+    let processes = crate::record::testing::FakeProcesses::default();
+    crate::record::sweep::sweep(
+        &RunStore::new(world.state.path()),
+        &workspace(),
+        false,
+        crate::record::sweep::Reach {
+            docker: &crate::record::testing::Unreachable,
+            processes: &processes,
+            host: &processes,
+        },
+        crate::record::sweep::Waits {
+            lock: Duration::from_millis(50),
+            kill: Duration::from_millis(20),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(world.record(), None);
+}

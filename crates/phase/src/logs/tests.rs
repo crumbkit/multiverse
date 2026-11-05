@@ -191,7 +191,7 @@ fn a_recorded_process_without_a_log_yet_has_no_lines() {
 }
 
 #[test]
-fn a_container_log_and_a_since_are_not_built_yet() {
+fn a_container_that_has_not_started_has_no_lines_and_a_since_is_not_built_yet() {
     let state = tempfile::tempdir().unwrap();
     write_record(
         state.path(),
@@ -201,29 +201,42 @@ fn a_container_log_and_a_since_are_not_built_yet() {
             "api-server".parse().unwrap(),
         ),
     );
-    let not_built = |result: Result<(), PhaseError>| {
-        matches!(
-            result,
-            Err(PhaseError::NotBuilt {
-                operation: Operation::Logs
-            })
-        )
-    };
-    let mut since = request(false);
-    since.since = Some(Duration::from_secs(300));
-
-    assert!(not_built(read(
+    let mut sink = Kept::new(1);
+    read(
         state.path(),
         &request(false),
-        &mut Kept::new(1),
-        &FakeProcesses::default()
-    )));
-    assert!(not_built(read(
-        state.path(),
-        &since,
-        &mut Kept::new(1),
-        &FakeProcesses::default()
-    )));
+        &mut sink,
+        &FakeProcesses::default(),
+    )
+    .unwrap();
+    assert!(sink.lines.is_empty());
+
+    let mut since = request(false);
+    since.since = Some(Duration::from_secs(300));
+    assert!(matches!(
+        read(
+            state.path(),
+            &since,
+            &mut Kept::new(1),
+            &FakeProcesses::default()
+        ),
+        Err(PhaseError::NotBuilt {
+            operation: Operation::Logs
+        })
+    ));
+}
+
+#[test]
+fn a_request_for_the_last_lines_passes_only_those() {
+    let state = tempfile::tempdir().unwrap();
+    write_log(state.path(), "one\ntwo\nthree\n");
+    let mut sink = Kept::new(100);
+    let mut last = request(false);
+    last.lines = Some(2);
+
+    read(state.path(), &last, &mut sink, &FakeProcesses::default()).unwrap();
+
+    assert_eq!(sink.texts(), ["two", "three"]);
 }
 
 #[test]
@@ -264,4 +277,41 @@ fn a_followed_log_of_a_process_that_the_table_shows_as_gone_ends_at_once() {
     .unwrap();
 
     assert_eq!(sink.texts(), ["only"]);
+}
+
+#[test]
+fn a_followed_tail_passes_an_unfinished_last_line_once_it_is_finished_and_never_split() {
+    let state = tempfile::tempdir().unwrap();
+    write_log(state.path(), "one\nab");
+    let log = server_log(state.path());
+    let mut writer = Spawned::shell(&format!(
+        "echo ready; sleep 0.3; printf 'cd\\n' >> {log}; exit 0",
+        log = log.display()
+    ));
+    write_record(state.path(), &running(writer.host()));
+    let mut sink = Kept::new(100);
+    let mut last = request(true);
+    last.lines = Some(5);
+
+    let reading = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| read(state.path(), &last, &mut sink, &System));
+        writer.wait_for_exit();
+        reader.join().unwrap()
+    });
+
+    reading.unwrap();
+    assert_eq!(sink.texts(), ["one", "abcd"]);
+}
+
+#[test]
+fn a_tail_without_follow_counts_an_unfinished_last_line_as_a_line() {
+    let state = tempfile::tempdir().unwrap();
+    write_log(state.path(), "one\ntwo\nab");
+    let mut sink = Kept::new(100);
+    let mut last = request(false);
+    last.lines = Some(2);
+
+    read(state.path(), &last, &mut sink, &FakeProcesses::default()).unwrap();
+
+    assert_eq!(sink.texts(), ["two", "ab"]);
 }

@@ -677,8 +677,10 @@ restarts a process that ended.
 
 `up` keeps the record when nothing in it runs but a process's entry
 records an end that no stop request caused, so `status` can show it.
-Any `down` or `sweep` that leaves everything stopped removes the record,
-and with it those ends.
+A `down` or a sweep that leaves everything stopped removes the record, and
+with it those ends, unless the `down` did not select a process that holds
+such an end. mxv's `down` of the apps that a failed `up` started is such a
+`down`, so `status` still shows the process that failed.
 
 The record is `phase/run/v2`, which adds `ended` and `restart`. phase
 reads a `phase/run/v1` record as one with neither and writes it back as

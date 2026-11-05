@@ -142,6 +142,11 @@ codes that no start provokes:
   mxv::docker::failed: Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.
   mxv::docker::foreign_object: Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.
   mxv::manifest::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::unit_name: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::unrunnable: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::workspace::legacy_running: Only processes that an earlier version of mxv started in a live checkout provoke it; tests/processes.rs starts them with that runner.
+  mxv::volume::not_moved: Only a data volume that an earlier version of mxv created for a container provokes it, with a docker daemon that answers.
+  mxv::phase::failed: Only a failure of phase that mxv has no code of its own for provokes it, such as a run record that phase cannot read.
   mxv::manifest::unknown_key: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::newer: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::port::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.

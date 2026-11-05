@@ -15,6 +15,18 @@ use crate::failures::remove_volumes_line;
 pub const WORKSPACE_NOT_CURRENT: Code = Code::new("mxv", "workspace", "not_current");
 /// The code of a removal that running processes stop.
 pub const WORKSPACE_RUNNING: Code = Code::new("mxv", "workspace", "running");
+/// The code of an `up` or `restart` that processes started before phase ran
+/// the workspace's apps stop, until `mxv down` stops them.
+pub const WORKSPACE_LEGACY_RUNNING: Code = Code::new("mxv", "workspace", "legacy_running");
+/// The code of a container whose data volume from before phase ran the
+/// workspace's apps holds data that its new volume does not.
+pub const VOLUME_NOT_MOVED: Code = Code::new("mxv", "volume", "not_moved");
+/// The code of a unit name that phase cannot run, such as one with an
+/// uppercase letter.
+pub const MANIFEST_UNIT_NAME: Code = Code::new("mxv", "manifest", "unit_name");
+/// The code of a manifest that phase cannot run, such as one whose process
+/// sets `PATH`.
+pub const MANIFEST_UNRUNNABLE: Code = Code::new("mxv", "manifest", "unrunnable");
 /// The code of a removal that the workspace's docker volumes stop.
 pub const WORKSPACE_VOLUMES: Code = Code::new("mxv", "workspace", "volumes");
 /// The code of a checkout without an `mxv.toml`.
@@ -52,6 +64,10 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_NOT_CURRENT,
     &WORKSPACE_RUNNING,
     &WORKSPACE_VOLUMES,
+    &WORKSPACE_LEGACY_RUNNING,
+    &VOLUME_NOT_MOVED,
+    &MANIFEST_UNIT_NAME,
+    &MANIFEST_UNRUNNABLE,
     &MANIFEST_NOT_FOUND,
     &MANIFEST_UNKNOWN_KEY,
     &MANIFEST_NEWER,
@@ -122,8 +138,8 @@ pub(crate) enum RunFailure {
         code: Option<i32>,
         /// The signal that ended it, or `None`.
         signal: Option<i32>,
-        /// Its log.
-        log: Box<Path>,
+        /// Its log, or `None` for a container, whose output docker keeps.
+        log: Option<Box<Path>>,
         /// The last lines of its log.
         tail: LogTail,
     },
@@ -137,8 +153,8 @@ pub(crate) enum RunFailure {
         waited: Box<Waited>,
         /// The timeout in seconds.
         seconds: u64,
-        /// Its log.
-        log: Box<Path>,
+        /// Its log, or `None` for a container, whose output docker keeps.
+        log: Option<Box<Path>>,
         /// The last lines of its log.
         tail: LogTail,
     },
@@ -155,8 +171,9 @@ pub(crate) enum RunFailure {
         /// The process that holds the port, or `None` when mxv may not
         /// read its descriptors.
         pid: Option<u32>,
-        /// The process's log.
-        log: Box<Path>,
+        /// The process's log, or `None` for a container, whose output
+        /// docker keeps.
+        log: Option<Box<Path>>,
         /// The last lines of its log.
         tail: LogTail,
     },
@@ -173,8 +190,9 @@ pub(crate) enum RunFailure {
         number: u16,
         /// The descendant.
         pid: u32,
-        /// The process's log.
-        log: Box<Path>,
+        /// The process's log, or `None` for a container, whose output
+        /// docker keeps.
+        log: Option<Box<Path>>,
         /// The last lines of its log.
         tail: LogTail,
     },
@@ -189,6 +207,9 @@ pub(crate) enum RunFailure {
         /// the process that led it has ended and nothing proves that the
         /// members left in it are the ones `up` started.
         unverified: bool,
+        /// The units that an `up` which found the group did not start, or
+        /// none for `down`.
+        not_started: Vec<String>,
     },
     /// The workspace has running processes, so `remove` refuses.
     Running {
@@ -196,6 +217,32 @@ pub(crate) enum RunFailure {
         workspace: String,
         /// The running processes.
         processes: Vec<String>,
+    },
+    /// Processes that mxv started before phase ran the workspace's apps
+    /// still run, so `up` and `restart` refuse until `mxv down` stops them.
+    LegacyRunning {
+        /// The workspace's name.
+        workspace: String,
+        /// The processes that still run.
+        processes: Vec<String>,
+    },
+    /// A container's data volume from before phase ran the workspace's
+    /// apps exists and its new volume does not, so `up` refuses rather
+    /// than start the container on an empty volume.
+    VolumeNotMoved {
+        /// The workspace's name.
+        workspace: String,
+        /// The volume and the container that mounts it.
+        moved: Box<NotMoved>,
+    },
+    /// The workspace's plan cannot be run by phase.
+    Unrunnable {
+        /// The workspace's name.
+        workspace: String,
+        /// The unit at fault, or `None` when the fault is the manifest's.
+        unit: Option<String>,
+        /// What phase refused.
+        message: String,
     },
     /// The workspace has docker volumes, which may hold data, so `remove`
     /// keeps the workspace unless `--delete-volumes` allows deleting them.
@@ -208,6 +255,77 @@ pub(crate) enum RunFailure {
         /// keeps.
         allow: Allow,
     },
+}
+
+/// A container's data volume from before phase that `up` did not move,
+/// which [`RunFailure::VolumeNotMoved`] names.
+#[derive(Debug)]
+pub(crate) struct NotMoved {
+    /// The container.
+    pub(crate) container: String,
+    /// The volume's name in the manifest.
+    pub(crate) volume: String,
+    /// The docker volume from before phase.
+    pub(crate) legacy: String,
+    /// The docker volume that phase mounts.
+    pub(crate) phase: String,
+    /// The labels, as `name=value`, that the volume phase mounts needs.
+    pub(crate) labels: Vec<String>,
+}
+
+/// The image whose `cp` copies a volume's data into another, pinned by tag.
+const COPY_IMAGE: &str = "busybox:1.37.0";
+
+/// Writes the message of [`RunFailure::Unstoppable`] for the process group
+/// `pid` of `process`. `not_started` names the units that an `up` which
+/// found the group did not start, and is empty for `down`.
+fn fmt_unstoppable(
+    formatter: &mut fmt::Formatter<'_>,
+    process: &str,
+    pid: u32,
+    unverified: bool,
+    not_started: &[String],
+) -> fmt::Result {
+    let verb = if not_started.is_empty() {
+        "`mxv down`"
+    } else {
+        "phase"
+    };
+    if unverified {
+        write!(
+            formatter,
+            "the process that led the process group {pid} of {process} has ended and the group still has members, but mxv cannot prove they are the ones it started, so {verb} did not signal them and kept the record"
+        )?;
+    } else {
+        write!(
+            formatter,
+            "the process group {pid} of {process} still runs after SIGKILL"
+        )?;
+    }
+    if not_started.is_empty() {
+        Ok(())
+    } else {
+        write!(
+            formatter,
+            "; `mxv up` stopped what it had started and did not start {}",
+            not_started.join(", ")
+        )
+    }
+}
+
+/// Returns `text` as one word of a POSIX shell command: unchanged when it
+/// holds only characters that the shell leaves alone, and in single quotes
+/// otherwise, with each single quote written as `'\''`.
+fn shell_quoted(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@,+".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
 }
 
 /// Returns `path` as text for a field or a hint.
@@ -226,12 +344,17 @@ impl Failure for RunFailure {
             Self::NotCurrent => &WORKSPACE_NOT_CURRENT,
             Self::Running { .. } => &WORKSPACE_RUNNING,
             Self::Volumes { .. } => &WORKSPACE_VOLUMES,
+            Self::LegacyRunning { .. } => &WORKSPACE_LEGACY_RUNNING,
+            Self::VolumeNotMoved { .. } => &VOLUME_NOT_MOVED,
+            Self::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
             Self::ManifestMissing { .. } => &MANIFEST_NOT_FOUND,
             Self::Manifest(error) => match error.problem {
                 ManifestProblem::UnknownKey { .. } => &MANIFEST_UNKNOWN_KEY,
                 ManifestProblem::Newer { .. } => &MANIFEST_NEWER,
                 ManifestProblem::Reserved { .. } => &MANIFEST_RESERVED,
                 ManifestProblem::Unreadable { .. } => &MANIFEST_UNREADABLE,
+                ManifestProblem::UnitName { .. } => &MANIFEST_UNIT_NAME,
+                ManifestProblem::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
@@ -251,9 +374,20 @@ impl Failure for RunFailure {
     fn recovery(&self) -> Recovery {
         match self {
             Self::NotCurrent => Recovery::Run(Call::new(&["list"])),
-            Self::Running { workspace, .. } => {
+            Self::Running { workspace, .. } | Self::LegacyRunning { workspace, .. } => {
                 Recovery::Run(Call::new(&["down"]).value("workspace", workspace))
             }
+            Self::VolumeNotMoved { moved, .. } => hint(format!(
+                "copy the data into the new volume with `docker volume create{} -- {phase}` and `docker run --rm -v {legacy}:/from -v {phase}:/to {COPY_IMAGE} cp -a /from/. /to/`, or delete the old volume with `docker volume rm {legacy}` if its data is not needed, and run `mxv up` again",
+                moved
+                    .labels
+                    .iter()
+                    .map(|label| format!(" --label {}", shell_quoted(label)))
+                    .collect::<String>(),
+                phase = moved.phase,
+                legacy = moved.legacy,
+            )),
+            Self::Unrunnable { .. } => hint("fix what the message names in the manifest"),
             Self::Volumes {
                 workspace, allow, ..
             } => hint(format!(
@@ -283,6 +417,10 @@ impl Failure for RunFailure {
                 ManifestProblem::Unreadable { .. } => {
                     hint(format!("make {} readable", shown(&error.path)))
                 }
+                ManifestProblem::UnitName { name } => hint(format!(
+                    "rename the unit `{name}` in {} to 1 to 64 lowercase letters, digits, `-` and `_`, starting with a letter or a digit",
+                    shown(&error.path)
+                )),
                 _ if error.line.is_some() => hint(format!(
                     "fix the line of {} that the message names",
                     shown(&error.path)
@@ -326,9 +464,15 @@ impl Failure for RunFailure {
             } => hint(format!(
                 "make {process} keep the program that listens in its own process group, such as by running the program in the foreground without detaching it, and run `mxv up -w {workspace} {process}` again"
             )),
-            Self::Unstoppable { pid, .. } => hint(format!(
-                "find the process group {pid} with `ps -g {pid}` and stop it by hand"
-            )),
+            Self::Unstoppable {
+                pid, not_started, ..
+            } => hint(if not_started.is_empty() {
+                format!("find the process group {pid} with `ps -g {pid}` and stop it by hand")
+            } else {
+                format!(
+                    "find the process group {pid} with `ps -g {pid}` and stop it by hand, then run `mxv up` again"
+                )
+            }),
             Self::PortTaken {
                 workspace, holders, ..
             } if !holders.is_empty() => Recovery::Run(holders.iter().fold(
@@ -364,6 +508,9 @@ impl Failure for RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
+            Self::LegacyRunning { .. } | Self::VolumeNotMoved { .. } | Self::Unrunnable { .. } => {
+                self.transition_fields()
+            }
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -388,7 +535,7 @@ impl Failure for RunFailure {
                 Field::new("process", process),
                 Field::new("code", *code),
                 Field::new("signal", *signal),
-                Field::new("log", shown(log)),
+                Field::new("log", log.as_deref().map(shown)),
                 Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::NotReady {
@@ -413,7 +560,7 @@ impl Failure for RunFailure {
                 }
                 fields.extend([
                     Field::new("timeout_seconds", *seconds),
-                    Field::new("log", shown(log)),
+                    Field::new("log", log.as_deref().map(shown)),
                     Field::new("tail", FieldValue::list(tail.lines.iter())),
                 ]);
                 fields
@@ -432,7 +579,7 @@ impl Failure for RunFailure {
                 Field::new("port", port),
                 Field::new("number", *number),
                 Field::new("pid", *pid),
-                Field::new("log", shown(log)),
+                Field::new("log", log.as_deref().map(shown)),
                 Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::DetachedListener {
@@ -449,11 +596,23 @@ impl Failure for RunFailure {
                 Field::new("port", port),
                 Field::new("number", *number),
                 Field::new("pid", *pid),
-                Field::new("log", shown(log)),
+                Field::new("log", log.as_deref().map(shown)),
                 Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
-            Self::Unstoppable { process, pid, .. } => {
-                vec![Field::new("process", process), Field::new("pid", *pid)]
+            Self::Unstoppable {
+                process,
+                pid,
+                not_started,
+                ..
+            } => {
+                let mut fields = vec![Field::new("process", process), Field::new("pid", *pid)];
+                if !not_started.is_empty() {
+                    fields.push(Field::new(
+                        "not_started",
+                        FieldValue::list(not_started.iter()),
+                    ));
+                }
+                fields
             }
             Self::PortTaken {
                 workspace,
@@ -485,7 +644,10 @@ fn manifest_fields(error: &ManifestError) -> Vec<Field<'_>> {
         ManifestProblem::UnknownKey { key } => fields.push(Field::new("key", key)),
         ManifestProblem::Reserved { section } => fields.push(Field::new("section", section)),
         ManifestProblem::Newer { version } => fields.push(Field::new("version", *version)),
-        ManifestProblem::Invalid { message } | ManifestProblem::Unreadable { message } => {
+        ManifestProblem::UnitName { name } => fields.push(Field::new("unit", name)),
+        ManifestProblem::Invalid { message }
+        | ManifestProblem::Unreadable { message }
+        | ManifestProblem::Unrunnable { message } => {
             fields.push(Field::new("message", message));
         }
         _ => {}
@@ -514,6 +676,9 @@ impl fmt::Display for RunFailure {
                 "the workspace {workspace} has docker volumes, which may hold data: {}",
                 volumes.join(", ")
             ),
+            Self::LegacyRunning { .. } | Self::VolumeNotMoved { .. } | Self::Unrunnable { .. } => {
+                self.fmt_transition(formatter)
+            }
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -599,19 +764,9 @@ impl fmt::Display for RunFailure {
             Self::Unstoppable {
                 process,
                 pid,
-                unverified: false,
-            } => write!(
-                formatter,
-                "the process group {pid} of {process} still runs after SIGKILL"
-            ),
-            Self::Unstoppable {
-                process,
-                pid,
-                unverified: true,
-            } => write!(
-                formatter,
-                "the process that led the process group {pid} of {process} has ended and the group still has members, but mxv cannot prove they are the ones it started, so `mxv down` did not signal them and kept the record"
-            ),
+                unverified,
+                not_started,
+            } => fmt_unstoppable(formatter, process, *pid, *unverified, not_started),
             Self::PortTaken {
                 workspace,
                 process,
@@ -637,6 +792,73 @@ impl fmt::Display for RunFailure {
                 formatter,
                 "the manifest of the workspace {workspace} declares no port named {port}"
             ),
+        }
+    }
+}
+
+impl RunFailure {
+    /// Returns the fields of a failure that phase's running of the
+    /// workspace's apps added.
+    fn transition_fields(&self) -> Vec<Field<'_>> {
+        match self {
+            Self::LegacyRunning {
+                workspace,
+                processes,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("processes", FieldValue::list(processes.iter())),
+            ],
+            Self::VolumeNotMoved { workspace, moved } => vec![
+                Field::new("workspace", workspace),
+                Field::new("container", &moved.container),
+                Field::new("volume", &moved.volume),
+                Field::new("legacy_volume", &moved.legacy),
+                Field::new("phase_volume", &moved.phase),
+            ],
+            Self::Unrunnable {
+                workspace,
+                unit,
+                message,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("unit", unit.as_deref()),
+                Field::new("message", message),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Writes the message of a failure that phase's running of the
+    /// workspace's apps added.
+    fn fmt_transition(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LegacyRunning {
+                workspace,
+                processes,
+            } => write!(
+                formatter,
+                "the workspace {workspace} has processes that an earlier version of mxv started, which still run: {}; `mxv down` stops them, and the next `mxv up` starts the workspace under phase",
+                processes.join(", ")
+            ),
+            Self::VolumeNotMoved { moved, .. } => write!(
+                formatter,
+                "the volume {volume} of the container {container} exists as {legacy}, which an earlier version of mxv created, and phase mounts {phase}, which does not exist yet, so mxv did not start {container} on an empty volume",
+                volume = moved.volume,
+                container = moved.container,
+                legacy = moved.legacy,
+                phase = moved.phase,
+            ),
+            Self::Unrunnable {
+                unit: Some(unit),
+                message,
+                ..
+            } => write!(formatter, "phase cannot run the unit {unit}: {message}"),
+            Self::Unrunnable {
+                unit: None,
+                message,
+                ..
+            } => write!(formatter, "phase cannot run the manifest: {message}"),
+            _ => Ok(()),
         }
     }
 }

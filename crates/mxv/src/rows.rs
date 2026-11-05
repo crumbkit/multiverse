@@ -898,7 +898,9 @@ pub(crate) struct ProcessRow {
     kind: KindName,
     /// `running`, `exited` when it ended on its own or something other
     /// than `mxv down` stopped it, `created` for a container that docker
-    /// created and did not start, or `stopped`.
+    /// created and did not start, `stopped`, `starting` while it is not
+    /// ready yet, `stopping`, `restarting` while docker restarts a
+    /// container, or `unknown` when mxv cannot tell.
     state: StateName,
     /// The process id, which is also its process group's id, while a
     /// process runs, and null for a container.
@@ -910,20 +912,24 @@ pub(crate) struct ProcessRow {
     /// The number of the signal that ended an exited process, such as 15
     /// for SIGTERM, or null.
     signal: Option<i32>,
-    /// Why mxv does not know the exit code of an exited process, or null
-    /// when it knows the code or the signal. A process group that ended
-    /// before its shell wrote the exit file, such as one that SIGKILL
-    /// ended, has a reason.
+    /// Why mxv cannot tell the state of an `unknown` process, or why it
+    /// does not know the exit code of an exited process that an earlier
+    /// version of mxv started, such as one whose group SIGKILL ended
+    /// before its shell wrote the exit file, or null when it knows.
     reason: Option<String>,
-    /// Whether the process group of an exited process still has a member,
-    /// such as a child it started in the background, which `mxv down`
-    /// stops. It is null while the process runs.
+    /// Whether the process group of an exited process that an earlier
+    /// version of mxv started still has a member, such as a child it
+    /// started in the background, which `mxv down` stops. It is null while
+    /// the process runs, and for every process that phase runs, because
+    /// phase stops what is left of a process's group when the process
+    /// ends.
     group_alive: Option<bool>,
     /// The ports that a process receives, as `VARIABLE=port`, or that a
     /// container publishes, as `port-name=port`.
     ports: Vec<String>,
-    /// The process's log file, which `mxv logs` prints.
-    log: String,
+    /// The process's log file, which `mxv logs` prints, or null for a
+    /// container, whose output docker keeps and `mxv logs` also prints.
+    log: Option<String>,
 }
 
 /// Whether a row is a process or a container.
@@ -948,6 +954,14 @@ pub(crate) enum StateName {
     Created,
     /// The process is not started.
     Stopped,
+    /// The process started and is not ready yet.
+    Starting,
+    /// The process is stopping.
+    Stopping,
+    /// docker is restarting the container.
+    Restarting,
+    /// mxv cannot tell the process's state.
+    Unknown,
 }
 
 impl Row for ProcessRow {
@@ -980,9 +994,21 @@ impl From<&ProcessStatus> for ProcessRow {
                 code,
                 signal,
                 reason,
-            } => (StateName::Exited, None, code, signal, reason),
+            } => (
+                StateName::Exited,
+                None,
+                code,
+                signal,
+                reason.map(|reason| reason.describe()),
+            ),
             ProcessState::Created => (StateName::Created, None, None, None, None),
             ProcessState::Stopped => (StateName::Stopped, None, None, None, None),
+            ProcessState::Starting { pid } => (StateName::Starting, pid, None, None, None),
+            ProcessState::Stopping { pid } => (StateName::Stopping, pid, None, None, None),
+            ProcessState::Restarting => (StateName::Restarting, None, None, None, None),
+            ProcessState::Unknown { reason } => {
+                (StateName::Unknown, None, None, None, Some(reason))
+            }
         };
         Self {
             name: status.name.clone(),
@@ -994,14 +1020,14 @@ impl From<&ProcessStatus> for ProcessRow {
             pid,
             code,
             signal,
-            reason: reason.map(|reason| reason.describe().to_owned()),
+            reason: reason.map(str::to_owned),
             group_alive: status.group_alive,
             ports: status
                 .ports
                 .iter()
                 .map(|(variable, number)| format!("{variable}={number}"))
                 .collect(),
-            log: status.log.display().to_string(),
+            log: status.log.as_ref().map(|log| log.display().to_string()),
         }
     }
 }

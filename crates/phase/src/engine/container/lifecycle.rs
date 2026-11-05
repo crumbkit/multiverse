@@ -28,13 +28,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::container::command::{check, check_compose};
+use crate::engine::container::command::{check, check_compose, quick};
 use crate::engine::container::compose::{
     ContainerSpecs, Up, compose_env, compose_file, compose_up,
 };
 use crate::engine::container::host::{Follow, Host, Versioned};
 use crate::engine::container::names::{
-    ContainerId, Identity, Scope, ServiceName, StoreId, VolumeName,
+    ContainerId, Identity, Scope, ServiceName, StoreId, VOLUME_LABEL, VolumeKey, VolumeName,
+    WORKSPACE_ID_LABEL,
 };
 use crate::engine::container::objects::{
     AnonymousVolume, AnonymousVolumes, ContainerState, Inspected, OwnedContainer, Volume,
@@ -42,7 +43,7 @@ use crate::engine::container::objects::{
     reinspect_volume, remove, stop,
 };
 use crate::engine::container::{ContainerError, RunDir};
-use crate::name::{WorkspaceId, WorkspaceName};
+use crate::name::{AppName, WorkspaceId, WorkspaceName};
 use crate::phase::Phase;
 use crate::random::RANDOM_DEVICE;
 
@@ -201,6 +202,10 @@ pub struct WorkspaceVolumes {
     scope: Option<Scope>,
     /// The volumes.
     volumes: Vec<Volume>,
+    /// Whether the volumes are those of the workspace's apps, which
+    /// [`app_volumes`] found and [`delete_app_volumes`] deletes, rather
+    /// than those of mxv's older compose project.
+    app: bool,
 }
 
 impl WorkspaceVolumes {
@@ -212,6 +217,146 @@ impl WorkspaceVolumes {
             .map(|volume| volume.name().as_str().to_owned())
             .collect()
     }
+}
+
+/// The app that the scope of a workspace's app volumes names. The volumes
+/// of a workspace's apps are shared by every app, and neither their names
+/// nor their labels name an app, so any app's scope finds them.
+const VOLUMES_APP: &str = "volumes";
+
+/// Returns the scope that finds the data volumes of the apps of the
+/// workspace whose stable id is `id`, which `phase` keeps.
+fn app_volume_scope(phase: &Phase, id: &WorkspaceId) -> Result<Scope, ContainerError> {
+    let app = AppName::try_from(VOLUMES_APP.to_owned()).map_err(|error| {
+        ContainerError::failed("volume scope", None, format!("{VOLUMES_APP}: {error}"))
+    })?;
+    let identity = Identity {
+        id: id.clone(),
+        run_record: phase.run_record(id),
+    };
+    Ok(Scope::app(identity, &app))
+}
+
+/// Returns the docker name of the data volume `volume` of the apps of the
+/// workspace whose stable id is `id`, `phase-<hash>.<volume>`, which a
+/// container app creates when it first mounts the volume.
+#[must_use]
+pub fn app_volume_name(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) -> Option<String> {
+    app_volume_scope(phase, id)
+        .ok()
+        .map(|scope| scope.volume_name(volume).as_str().to_owned())
+}
+
+/// Returns the labels, as `name=value` pairs in name order, that phase
+/// gives the data volume `volume` of the apps of the workspace whose stable
+/// id is `id`. A volume created with exactly these labels under
+/// [`app_volume_name`] is one that phase mounts as its own.
+#[must_use]
+pub fn app_volume_labels(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) -> Vec<String> {
+    let Ok(scope) = app_volume_scope(phase, id) else {
+        return Vec::new();
+    };
+    match scope.labels(VOLUME_LABEL, volume.as_str()) {
+        serde_json::Value::Object(labels) => labels
+            .into_iter()
+            .map(|(label, value)| format!("{label}={}", value.as_str().unwrap_or_default()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Returns the data volumes of the apps of the workspace whose stable id
+/// is `id`: each volume that docker labels with the id as a volume of the
+/// workspace, under a name of the workspace's apps, in name order. phase's
+/// `down` and `sweep` leave these volumes, and a removal of the workspace
+/// deletes them with [`delete_app_volumes`].
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`ContainerError::Failed`].
+pub fn app_volumes(phase: &Phase, id: &WorkspaceId) -> Result<WorkspaceVolumes, ContainerError> {
+    let scope = app_volume_scope(phase, id)?;
+    let filter = format!("label={WORKSPACE_ID_LABEL}={id}");
+    let listed = quick(
+        [
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            filter.as_str(),
+            "--filter",
+            &format!("label={VOLUME_LABEL}"),
+        ],
+        "volume ls",
+    )?
+    .checked("volume ls", None)?;
+    let mut volumes = BTreeMap::new();
+    for line in listed.lines() {
+        let Ok(name) = VolumeName::new(line.trim()) else {
+            continue;
+        };
+        match inspect_volume(&scope, &name) {
+            Ok(Some(volume)) => {
+                volumes.insert(name, Volume::Named(volume));
+            }
+            Ok(None) | Err(ContainerError::Foreign { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(WorkspaceVolumes {
+        scope: (!volumes.is_empty()).then_some(scope),
+        volumes: volumes.into_values().collect(),
+        app: true,
+    })
+}
+
+/// Deletes `volumes`, which [`app_volumes`] returned, after it checked each
+/// one again. A volume that no longer exists counts as deleted.
+///
+/// # Errors
+///
+/// Returns [`ContainerError::Foreign`] for volumes that [`Lifecycle::volumes`]
+/// returned and for an anonymous volume, and the errors of `docker version` and
+/// [`ContainerError::Failed`].
+pub fn delete_app_volumes(volumes: WorkspaceVolumes) -> Result<(), ContainerError> {
+    let Some(scope) = volumes.scope.as_ref().filter(|_| volumes.app) else {
+        return match volumes.volumes.first() {
+            Some(first) => Err(ContainerError::foreign("volume", first.name().as_str())),
+            None => Ok(()),
+        };
+    };
+    // `app_volumes` returns named volumes only. An anonymous volume belongs
+    // to its container, which removes it, so this refuses one whatever
+    // built the set.
+    if let Some(anonymous) = volumes
+        .volumes
+        .iter()
+        .find(|volume| matches!(volume, Volume::Anonymous(_)))
+    {
+        return Err(ContainerError::foreign("volume", anonymous.name().as_str()));
+    }
+    for volume in &volumes.volumes {
+        if let Some(volume) = reinspect_volume(scope, volume)? {
+            delete_volume(volume)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reports whether docker has a volume named `name`, whoever owns it.
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`ContainerError::Failed`].
+pub fn volume_exists(name: &str) -> Result<bool, ContainerError> {
+    let finished = quick(
+        ["volume", "inspect", "--format", "{{.Name}}", "--", name],
+        "volume inspect",
+    )?;
+    if finished.missing() {
+        return Ok(false);
+    }
+    finished.checked("volume inspect", None).map(|_| true)
 }
 
 /// The containers of one workspace and their run records, kept through the
@@ -353,6 +498,29 @@ impl<'h, H: Host> Lifecycle<'h, H> {
             dir: self.dir.clone(),
             scope: Scope::new(&id, &self.workspace),
         }))
+    }
+
+    /// Returns the docker name of the named volume `volume` of the
+    /// workspace's older compose project, `mxv-<id8>-<workspace>.<volume>`,
+    /// when docker has it with the project's labels, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContainerError::Failed`] for a `prepared` of another
+    /// workspace, and the errors of `docker version` and
+    /// [`ContainerError::Failed`].
+    pub fn legacy_volume(
+        &self,
+        prepared: &Prepared,
+        volume: &VolumeKey,
+    ) -> Result<Option<String>, H::Error> {
+        let scope = self.scope_of(prepared)?;
+        let name = scope.volume_name(volume);
+        match inspect_volume(scope, &name) {
+            Ok(Some(_)) => Ok(Some(name.as_str().to_owned())),
+            Ok(None) | Err(ContainerError::Foreign { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Returns the scope of `prepared`, which this lifecycle's
@@ -803,6 +971,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         Ok(WorkspaceVolumes {
             scope: Some(scope.clone()),
             volumes: volumes.into_values().collect(),
+            app: false,
         })
     }
 
@@ -822,6 +991,16 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         prepared: &Prepared,
         volumes: WorkspaceVolumes,
     ) -> Result<(), H::Error> {
+        if volumes.app {
+            return Err(ContainerError::foreign(
+                "volume",
+                volumes
+                    .volumes
+                    .first()
+                    .map_or("", |volume| volume.name().as_str()),
+            )
+            .into());
+        }
         let scope = self.scope_of(prepared)?;
         if let Some(first) = volumes.volumes.first()
             && volumes.scope.as_ref() != Some(scope)

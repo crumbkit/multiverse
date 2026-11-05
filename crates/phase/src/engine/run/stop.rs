@@ -284,7 +284,14 @@ pub(super) fn down(
         let report = down_app(engine, &mut journal, &record, app, &chosen, deadline)?;
         reports.push(report);
     }
-    journal.finish()?;
+    let keeps_an_exit = wanted.as_ref().is_some_and(|wanted| {
+        journal
+            .record()
+            .is_some_and(|record| record.holds_an_exit_outside(wanted))
+    });
+    if !keeps_an_exit {
+        journal.finish()?;
+    }
     Ok(Report::new(reports))
 }
 
