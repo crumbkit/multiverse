@@ -621,8 +621,9 @@ reports `merged`, with every file it read in `manifest_paths`.
   `-` or `_` written as `-`. Because the prefix starts names, a folder in
   a workspace of several checkouts follows the rule of `--as` even when
   it is the repository's name, so a repository named `_infra` needs
-  `--as infra`. `mxv add` to a workspace of one checkout checks that
-  checkout's folder by the same rule and refuses one such as `_infra` with
+  `--as infra`. `mxv add` to a workspace of one checkout checks only that
+  the checkout's prefix starts with a letter or a digit, so it accepts
+  `MyApp`, whose prefix is `myapp`, and refuses `_infra` with
   `mxv::checkout::invalid_name`. mxv cannot rename the folder, so the hint
   says to create the workspace again with `mxv new` and `--as`.
 - The prefixes appear only once a workspace has two checkouts. Adding a

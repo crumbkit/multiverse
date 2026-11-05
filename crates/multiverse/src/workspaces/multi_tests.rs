@@ -640,6 +640,33 @@ fn add_refuses_a_workspace_whose_one_checkout_has_a_folder_that_cannot_be_a_pref
 }
 
 #[test]
+fn add_accepts_a_workspace_whose_one_checkout_has_a_folder_in_upper_case() {
+    let setup = setup();
+    let app = fixture_named("MyApp");
+    created(&setup, "triage", &[Repo::new(&app.clone)]);
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    let AddOutcome::Added(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(workspace.checkouts.len(), 2);
+    assert_eq!(
+        workspace
+            .checkouts
+            .first()
+            .map(|checkout| checkout.name.as_str()),
+        Some("MyApp")
+    );
+}
+
+#[test]
 fn the_same_add_resumes_a_checkout_that_a_stopped_add_left_without_a_directory() {
     let setup = setup();
     let path = stopped_add(&setup);

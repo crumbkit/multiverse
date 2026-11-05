@@ -132,6 +132,30 @@ pub fn folder_name(text: &str) -> Result<String, String> {
     Ok(text.to_owned())
 }
 
+/// Checks that `folder`, the folder of a checkout that a workspace already
+/// has, gives a prefix that can start the names of phase apps and ports,
+/// which must start with an ASCII letter or digit. The prefix is
+/// [`checkout_prefix`] of the folder, so `MyApp` gives `myapp` and passes,
+/// while `_infra` and `.dotfiles` fail. Names that are too long once
+/// prefixed fail later, when `add` reads the merged manifest.
+///
+/// # Errors
+///
+/// Returns why the prefix cannot start names, in a sentence.
+fn prefix_usable(folder: &str) -> Result<(), String> {
+    let prefix = checkout_prefix(folder);
+    if prefix
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "the prefix `{prefix}` that the folder gives does not start with a letter or a digit"
+    ))
+}
+
 /// Reports whether a checkout's folder named `folder` would take the place
 /// of one of `taken`, or of a file that mxv writes in the workspace's
 /// directory, on a file system that ignores case.
@@ -229,16 +253,16 @@ pub enum AddOutcome {
         /// Why the folder is not a folder name, in a sentence.
         reason: String,
     },
-    /// The folder of the workspace's one checkout is not a folder name, as
-    /// [`folder_name`] describes, so it cannot become the prefix of that
-    /// checkout's names. `mxv new` with one repository accepts any
+    /// The folder of the workspace's one checkout gives a prefix that does
+    /// not start with an ASCII letter or digit, such as the folder
+    /// `_infra`, so it cannot become the prefix of that checkout's names. `mxv new` with one repository accepts any
     /// repository's name, and a checkout's folder cannot be renamed.
     ExistingFolderInvalid {
         /// The workspace's record.
         workspace: Workspace,
         /// The folder of the workspace's one checkout.
         folder: String,
-        /// Why the folder is not a folder name, in a sentence.
+        /// Why the folder's prefix cannot start names, in a sentence.
         reason: String,
     },
     /// The workspace has one checkout and a workspace manifest, and the
@@ -1383,7 +1407,7 @@ impl<B: Backend> Workspaces<B> {
         // prefix only now, and `new` with one repository never checked it.
         if !workspace.has_several_checkouts()
             && let Some(first) = workspace.checkouts.first()
-            && let Err(reason) = folder_name(&first.name)
+            && let Err(reason) = prefix_usable(&first.name)
         {
             return Ok(AddOutcome::ExistingFolderInvalid {
                 folder: first.name.clone(),

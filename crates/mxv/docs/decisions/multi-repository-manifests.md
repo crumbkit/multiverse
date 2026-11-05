@@ -122,9 +122,13 @@ phase refuses a name that starts with `_`. `mxv new` with several
 `mxv::checkout::invalid_name`, whose hint says to give the checkout a
 folder with `--as`. `mxv new` with one `--repo` gives its checkout no
 prefix, so it still accepts any repository's name. `mxv add` to such a
-workspace checks the first checkout's folder by the same rule, because
-that folder becomes a prefix too, and refuses a folder such as `_infra`
-with `mxv::checkout::invalid_name`. mxv cannot rename a checkout's
+workspace checks that the first checkout's folder gives a prefix that
+starts with an ASCII letter or digit, because that folder becomes a
+prefix too. It refuses a folder such as `_infra` or `.dotfiles` with
+`mxv::checkout::invalid_name`, and accepts a folder such as `MyApp`,
+whose prefix is `myapp`. A name that is longer than 64 bytes once
+prefixed fails when `add` reads the merged manifest, which rolls the
+`add` back. mxv cannot rename a checkout's
 folder, so the hint says to create the workspace again with `mxv new`,
 giving each repository a valid folder with `--as`.
 
