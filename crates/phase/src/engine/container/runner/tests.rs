@@ -35,6 +35,18 @@ const IMAGE: &str = "busybox:1.37.0";
 /// not a secret.
 const MODE: &str = "test-mode-7c1e";
 
+/// How long an `up` or a `restart` of the tests may take to start its
+/// containers. A loaded Docker host, such as one that runs other test lanes
+/// at the same time, can take over a minute to create and start a
+/// container, and an `up` whose deadline passes first reports the start as
+/// uncertain. No test waits this long when Docker answers promptly.
+const START_WAIT: Duration = Duration::from_secs(180);
+
+/// Returns the deadline of an `up` or a `restart` that begins now.
+fn start_deadline() -> Instant {
+    Instant::now() + START_WAIT
+}
+
 /// Runs the real `docker <args>` and returns its standard output when it
 /// succeeded.
 fn docker(args: &[&str]) -> Option<String> {
@@ -134,7 +146,7 @@ impl World {
     }
 
     fn up(&self, plan: &Plan) -> Report {
-        let ready = Instant::now() + Duration::from_secs(60);
+        let ready = start_deadline();
         self.phase
             .up(
                 plan,
@@ -425,7 +437,7 @@ fn restart_replaces_the_container_with_a_new_one() {
             &plan,
             &Selection::All,
             &Mode,
-            Instant::now() + Duration::from_secs(60),
+            start_deadline(),
             &Cancel::new(),
         )
         .unwrap();
@@ -875,7 +887,7 @@ impl AppliedEnvironment for SecretValues {
 
 impl World {
     fn up_with(&self, plan: &Plan, env: &dyn EnvironmentSource) -> Report {
-        let ready = Instant::now() + Duration::from_secs(60);
+        let ready = start_deadline();
         self.phase
             .up(
                 plan,
@@ -1841,7 +1853,7 @@ fn restart_removes_the_anonymous_volume_of_the_replaced_container_and_keeps_the_
             &plan,
             &Selection::All,
             &Mode,
-            Instant::now() + Duration::from_secs(60),
+            start_deadline(),
             &Cancel::new(),
         )
         .unwrap();
