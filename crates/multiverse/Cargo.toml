@@ -29,9 +29,9 @@ regex = { workspace = true }
 # the rules of workspace and unit names. phase never depends on multiverse.
 phase = { package = "mxv-phase", path = "../phase", version = "0.0.0" }
 
-# macOS reads a process's start time and a process group's sockets with
-# libproc's calls, which libc declares, and clones a new checkout's ignored
-# directories with clonefile(2) through reflink-copy.
+# macOS clones a new checkout's ignored directories with clonefile(2)
+# through reflink-copy, and tells its ENOTSUP failure by libc's errno.
+# phase reads the process table.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 reflink-copy = { workspace = true }

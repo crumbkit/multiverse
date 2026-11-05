@@ -55,8 +55,8 @@ regex = { version = "1.13.1", default-features = false, features = ["std", "unic
 
 # libc declares macOS's libproc calls, proc_pidinfo, proc_pidfdinfo and
 # proc_listpids, which read a process's start time to the microsecond and
-# the sockets of a process group. Only crates/multiverse/src/process/darwin.rs
-# and crates/phase/src/record/process/darwin.rs call them. It needs no
+# the sockets of a process group. Only crates/phase/src/record/process/darwin.rs
+# calls them, and multiverse uses libc only for an errno. It needs no
 # features beyond `std`.
 libc = { version = "0.2.191", default-features = false, features = ["std"] }
 
@@ -101,7 +101,7 @@ tempfile = { version = "3.27.0", default-features = false }
 # fails on any warning, and every package inherits the table through
 # `[lints] workspace = true`.
 [workspace.lints.rust]
-unsafe_code = "deny"                   # BASE-3; only the two darwin.rs modules expect it
+unsafe_code = "deny"                   # BASE-3; only phase's record/process/darwin.rs expects it
 unreachable_pub = "warn"               # BASE-8
 missing_debug_implementations = "warn"
 missing_docs = "deny"                  # LIB-2
