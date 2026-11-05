@@ -18,12 +18,12 @@
 
 use std::time::Duration;
 
-use crate::clock::now;
+use crate::clock::deadline_in;
 use crate::engine::host::{HostRunner, HostStop, HostStopped};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::record::docker::{Docker, DockerKind, DockerObject};
-use crate::record::process::{self, Identity, Processes};
+use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{
     EntryState, HostEntry, HostProcess, ObjectKey, RunRecord, VolumeLifetime,
 };
@@ -194,10 +194,16 @@ impl Sweeper<'_, '_, '_> {
         process: Option<&HostEntry>,
     ) -> Result<(Option<SweptItem>, Option<SweptItem>), PhaseError> {
         let keeper = keeper
-            .map(|entry| self.look(Role::Keeper, entry))
+            .map(|entry| self.look(Role::Keeper, entry, Identity::Gone))
             .transpose()?;
+        // A keeper that is phase's own vouches for the group of its app
+        // when the app's leader has gone.
+        let voucher = keeper
+            .as_ref()
+            .and_then(|look| look.identity)
+            .unwrap_or(Identity::Gone);
         let process = process
-            .map(|entry| self.look(Role::Process, entry))
+            .map(|entry| self.look(Role::Process, entry, voucher))
             .transpose()?;
         let (ours_keeper, ours_process) = (ours(keeper.as_ref()), ours(process.as_ref()));
         if (ours_keeper.is_some() || ours_process.is_some()) && self.journal.is_some() {
@@ -213,7 +219,7 @@ impl Sweeper<'_, '_, '_> {
                 grace: self.waits.kill,
                 kill_wait: self.waits.kill,
             };
-            let deadline = now() + self.waits.kill + self.waits.kill;
+            let deadline = deadline_in(self.waits.kill.saturating_add(self.waits.kill));
             // The runner reports how the pair ended, and each process is
             // then looked at again, so each gets its own outcome.
             let _: HostStopped = self.reach.host.stop(&stop, deadline)?;
@@ -224,12 +230,21 @@ impl Sweeper<'_, '_, '_> {
     }
 
     /// Looks at the keeper or host process `entry` in `role`, and records
-    /// it as stopped when nothing of it is left.
-    fn look<'e>(&mut self, role: Role, entry: &'e HostEntry) -> Result<Look<'e>, PhaseError> {
+    /// it as stopped when nothing of it is left. `keeper` is what the
+    /// process's keeper is, which vouches for the process's group when the
+    /// keeper is phase's own. A group whose leader has gone and that
+    /// nothing vouches for is unknown, and the sweep never signals it.
+    fn look<'e>(
+        &mut self,
+        role: Role,
+        entry: &'e HostEntry,
+        keeper: Identity,
+    ) -> Result<Look<'e>, PhaseError> {
         let key = match role {
             Role::Keeper => ObjectKey::Keeper(entry.app.clone(), entry.process.clone()),
             Role::Process => ObjectKey::Process(entry.app.clone(), entry.process.clone()),
         };
+        let mut identity = None;
         let outcome = match &entry.host {
             _ if entry.state == EntryState::Stopped => Some(SweepOutcome::Gone),
             // phase never signals pid or group 0 or 1, so it cannot stop
@@ -239,7 +254,7 @@ impl Sweeper<'_, '_, '_> {
                 self.stopped(&key)?;
                 Some(SweepOutcome::Gone)
             }
-            Some(host) => match self.identify(host)? {
+            Some(host) => match *identity.insert(vouched(keeper, self.identify(host)?)) {
                 Identity::Gone => {
                     self.stopped(&key)?;
                     Some(SweepOutcome::Gone)
@@ -248,7 +263,7 @@ impl Sweeper<'_, '_, '_> {
                     self.stopped(&key)?;
                     Some(SweepOutcome::PidReused)
                 }
-                Identity::Unknown => Some(SweepOutcome::Unknown),
+                Identity::Unknown | Identity::LeaderGone => Some(SweepOutcome::Unknown),
                 Identity::Ours if self.journal.is_none() => Some(SweepOutcome::WouldStop),
                 Identity::Ours => None,
             },
@@ -257,6 +272,7 @@ impl Sweeper<'_, '_, '_> {
             role,
             entry,
             key,
+            identity,
             outcome,
         })
     }
@@ -279,7 +295,10 @@ impl Sweeper<'_, '_, '_> {
                     SweepOutcome::Stopped
                 }
                 Identity::Unknown => SweepOutcome::Unknown,
-                Identity::Ours => SweepOutcome::Unstoppable,
+                // The sweep found this process to be its own and tried to
+                // stop it, so members left in its group after the leader
+                // ended are its own too.
+                Identity::Ours | Identity::LeaderGone => SweepOutcome::Unstoppable,
             },
         };
         Ok(SweptItem::new(
@@ -361,6 +380,8 @@ struct Look<'e> {
     entry: &'e HostEntry,
     /// Its key in the record.
     key: ObjectKey,
+    /// What it was found to be, when the sweep read the process table.
+    identity: Option<Identity>,
     /// Its outcome when the sweep leaves it alone, or `None` when it is
     /// running and phase stops it.
     outcome: Option<SweepOutcome>,

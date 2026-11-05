@@ -209,3 +209,80 @@ fn the_start_time_of_this_process_is_readable_and_a_free_pid_has_none() {
         super::process::Start::Absent
     );
 }
+
+#[test]
+fn the_uptime_is_the_first_field_of_proc_uptime() {
+    assert_eq!(
+        super::process::uptime("12345.67 54321.00\n"),
+        Some(std::time::Duration::from_millis(12_345_670))
+    );
+    assert_eq!(super::process::uptime(""), None);
+    assert_eq!(super::process::uptime("-1 2\n"), None);
+}
+
+#[test]
+fn a_linux_stat_gives_a_live_member_of_its_group_and_leaves_out_ended_ones() {
+    let live =
+        "4242 (my (odd) app) S 1 4200 4200 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 10";
+    assert_eq!(
+        super::process::stat_member(live, 4242, 4200),
+        Some(super::process::Member {
+            pid: 4242,
+            start: super::process::RawStart::Ticks(98_765)
+        })
+    );
+    assert_eq!(super::process::stat_member(live, 4242, 4201), None);
+    let zombie = live.replacen(") S ", ") Z ", 1);
+    assert_eq!(super::process::stat_member(&zombie, 4242, 4200), None);
+    let dead = live.replacen(") S ", ") X ", 1);
+    assert_eq!(super::process::stat_member(&dead, 4242, 4200), None);
+}
+
+#[test]
+fn a_bsd_info_gives_a_live_member_of_its_group_and_leaves_out_zombies() {
+    let mut info = [0_u8; 136];
+    info[4..8].copy_from_slice(&2_i32.to_ne_bytes());
+    info[100..104].copy_from_slice(&4200_i32.to_ne_bytes());
+    info[120..128].copy_from_slice(&1_793_809_711_u64.to_ne_bytes());
+    info[128..136].copy_from_slice(&5_u64.to_ne_bytes());
+    assert_eq!(
+        super::process::bsd_info_member(&info, 4242, 4200),
+        Some(super::process::Member {
+            pid: 4242,
+            start: super::process::RawStart::Since {
+                seconds: 1_793_809_711,
+                microseconds: 5
+            }
+        })
+    );
+    assert_eq!(super::process::bsd_info_member(&info, 4242, 4201), None);
+    info[4..8].copy_from_slice(&5_i32.to_ne_bytes());
+    assert_eq!(super::process::bsd_info_member(&info, 4242, 4200), None);
+}
+
+#[test]
+fn a_start_since_the_epoch_is_that_wall_clock_time() {
+    let start = super::process::RawStart::Since {
+        seconds: 1_793_809_711,
+        microseconds: 5,
+    };
+    assert_eq!(
+        super::process::started_at(start),
+        Some(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_793_809_711)
+                + std::time::Duration::from_micros(5)
+        )
+    );
+    assert_eq!(
+        super::process::started_at(super::process::RawStart::Absent),
+        None
+    );
+}
+
+#[test]
+fn this_process_started_before_now() {
+    let start = super::process::raw_start(std::process::id()).unwrap();
+    let started = super::process::started_at(start).unwrap();
+    assert!(started <= std::time::SystemTime::now());
+}

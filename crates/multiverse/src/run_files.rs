@@ -44,20 +44,58 @@ pub(crate) struct RunRecord {
     pub(crate) ports: BTreeMap<String, u16>,
 }
 
-/// Reports whether the process group that `record` names is the one that
-/// `up` started and still has a member. It is when the process with the
-/// recorded id has the recorded start time, and when no process has that
-/// id but a group with it still exists: a group keeps its id while any
-/// member lives, and no new process can take that id meanwhile, so the
-/// group is the one `up` started even after its leader exited. A process
-/// with the recorded id and another start time took a free id after the
-/// group ended, so the group is not ours.
-pub(crate) fn owns_group(record: &RunRecord) -> Result<bool, Error> {
+/// Whether the process group that a run record names is the one that `up`
+/// started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    /// The group is the one `up` started and still has a member.
+    Ours,
+    /// The group's leader has ended and the group still has members, but
+    /// nothing proves that they are the ones `up` started. The group may
+    /// have emptied after the leader ended and its id passed to another
+    /// program's group, so mxv never signals it.
+    Unverified,
+    /// Nothing of the group that `up` started is left.
+    Gone,
+}
+
+impl Ownership {
+    /// Reports whether the group may still be the one `up` started, so
+    /// that mxv keeps its record and its ports and starts nothing in its
+    /// place.
+    pub(crate) fn may_live(self) -> bool {
+        self != Self::Gone
+    }
+}
+
+/// Returns whether the process group that `record` names is the one that
+/// `up` started. It is when the process with the recorded id has the
+/// recorded start time. A process with the recorded id and another start
+/// time took a free id after the group ended, so the group is gone.
+///
+/// When no process has the id but a group with it has a member, the group
+/// is the one `up` started only when a member started before the shell
+/// wrote `exit_file`, less [`CLOCK_SLACK`]: such a member was in the group
+/// while the shell ran, and a group keeps its id while it has a member. A
+/// group that took the id later has a leader that started after the
+/// shell ended. Without that proof the group is unverified.
+pub(crate) fn ownership(record: &RunRecord, exit_file: &Path) -> Result<Ownership, Error> {
     Ok(match process::started_at(record.pid, &record.started)? {
-        Some(owned) => owned,
-        None => process::group_exists(record.pid),
+        Some(true) => Ownership::Ours,
+        Some(false) => Ownership::Gone,
+        None if !process::group_exists(record.pid) => Ownership::Gone,
+        None if process::member_started_before(record.pid, exit_file, CLOCK_SLACK) => {
+            Ownership::Ours
+        }
+        None => Ownership::Unverified,
     })
 }
+
+/// How much earlier than the exit file's time a member must have started
+/// for [`ownership`] to count it as the shell's. Linux gives a start time
+/// from the boot, which mxv turns into a wall-clock time to within a few
+/// hundredths of a second, and the file's time has its own rounding.
+const CLOCK_SLACK: Duration = Duration::from_millis(50);
 
 impl Versioned for RunRecord {
     fn version(&self) -> Option<u32> {
@@ -196,10 +234,14 @@ impl Host for RunHost<'_> {
         ports::is_taken(port)
     }
 
-    fn follower_alive(&self, record: &Path) -> Result<bool, Error> {
-        let record: Option<RunRecord> = read_json(record)?;
+    fn follower_alive(&self, record_path: &Path) -> Result<bool, Error> {
+        let record: Option<RunRecord> = read_json(record_path)?;
         match record {
-            Some(record) => owns_group(&record),
+            // The follower's shell writes its exit code beside its record,
+            // as `<service>.logs-exit` beside `<service>.follower`.
+            Some(record) => {
+                Ok(ownership(&record, &record_path.with_extension("logs-exit"))?.may_live())
+            }
             None => Ok(false),
         }
     }

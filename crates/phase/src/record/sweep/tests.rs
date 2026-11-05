@@ -414,6 +414,58 @@ fn sweep_stops_keepers_before_their_processes() {
 }
 
 #[test]
+fn a_keeper_that_is_phases_own_lets_sweep_stop_its_apps_group_after_the_leader_has_gone() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_both(&store, host_at(100, 1), host_at(200, 2));
+    let processes = FakeProcesses::default()
+        .with(100, Start::At(1), Some(Signal::TERM))
+        .with_leaderless(200, Some(Signal::TERM));
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(100, Signal::TERM), (200, Signal::TERM)]
+    );
+    assert_eq!(outcome_of(&swept, Role::Keeper), SweepOutcome::Stopped);
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
+}
+
+#[test]
+fn a_group_whose_leader_has_gone_without_a_keeper_is_unknown_and_never_signalled() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_host(&store, host_at(200, 2));
+    let processes = FakeProcesses::default().with_leaderless(200, Some(Signal::TERM));
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unknown);
+    assert!(processes.signals.borrow().is_empty());
+    assert_eq!(
+        store.read(&workspace()).unwrap().unwrap().state(&server()),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn a_kill_wait_too_long_for_an_instant_does_not_panic() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    record_host(&store, host_at(200, 2));
+    let processes = FakeProcesses::default().with(200, Start::At(2), Some(Signal::TERM));
+    let endless = Waits {
+        kill: Duration::MAX,
+        ..QUICK
+    };
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), endless).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
+}
+
+#[test]
 fn a_process_that_survives_kill_is_unstoppable_and_stays_recorded_as_stopping() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
@@ -487,8 +539,11 @@ fn a_process_recorded_without_a_boot_id_on_a_system_that_has_one_is_unknown() {
     );
 }
 
+// Nothing proves that the members left in a group whose leader has ended
+// are the ones phase started, because the group may have emptied and its
+// id passed to another program's group, so sweep signals none of them.
 #[test]
-fn sweep_kills_the_members_of_a_group_whose_leader_has_already_ended() {
+fn sweep_leaves_the_members_of_a_group_whose_leader_has_already_ended_as_unknown() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut leader = Spawned::shell_lines("sleep 30 & echo $!; echo ready", 2);
@@ -503,8 +558,13 @@ fn sweep_kills_the_members_of_a_group_whose_leader_has_already_ended() {
 
     let swept = run(&store, false, &Unreachable);
 
-    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
-    assert!(!alive(orphan));
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unknown);
+    assert!(alive(orphan));
+    assert_eq!(
+        store.read(&workspace()).unwrap().unwrap().state(&server()),
+        Some(EntryState::Running)
+    );
+    drop(leader);
 }
 
 #[test]

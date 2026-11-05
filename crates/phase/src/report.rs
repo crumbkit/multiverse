@@ -100,6 +100,18 @@ pub enum Note {
         /// The process.
         process: ProcessName,
     },
+    /// The process led its group and has gone, and a group with its id
+    /// still has a live member, but nothing proves that group is the one
+    /// phase started: another program may have taken the free pid and led
+    /// a new group with it. phase did not signal the group, and the run
+    /// record keeps the process.
+    #[non_exhaustive]
+    GroupUnverified {
+        /// The process.
+        process: ProcessName,
+        /// The group that phase left alone.
+        group: u32,
+    },
     /// Something of the process's group was still there after `KILL` and
     /// the kill wait. The run record keeps it, and `sweep` can try again.
     #[non_exhaustive]
@@ -142,6 +154,13 @@ impl Note {
     #[must_use]
     pub const fn not_ours(process: ProcessName) -> Self {
         Self::NotOurs { process }
+    }
+
+    /// Returns the note that phase left `group`, whose leader `process` has
+    /// gone, because nothing proves the group is its own.
+    #[must_use]
+    pub const fn group_unverified(process: ProcessName, group: u32) -> Self {
+        Self::GroupUnverified { process, group }
     }
 
     /// Returns the note that `group` of `process` survived `KILL`.

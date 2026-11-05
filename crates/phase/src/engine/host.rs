@@ -32,8 +32,8 @@ use crate::error::PhaseError;
 use crate::plan::restart::StopSignal;
 use crate::record::process::{self, Identity, System};
 pub use crate::record::process::{
-    BadProcessId, ProcessError, ProcessGroup, ProcessId, RawStart, group_exists, raw_start, reap,
-    signal_group, signal_pid,
+    BadProcessId, Member, ProcessError, ProcessGroup, ProcessId, RawStart, group_exists,
+    live_members, raw_start, reap, signal_group, signal_pid, started_at,
 };
 use crate::record::run::HostProcess;
 
@@ -52,7 +52,9 @@ pub(crate) trait HostRunner {
     fn launch(&self, launch: &Launch<'_>) -> Result<Kept, PhaseError>;
 
     /// Stops the keeper and the app that `stop` names, as [`HostStop`]
-    /// says, giving up waiting at `deadline`. It checks each process's
+    /// says. It gives up the wait for the stop signal at `deadline`, sends
+    /// `KILL`, and waits the kill wait, so it returns by `deadline` plus the
+    /// kill wait. It checks each process's
     /// identity first, and never signals a process that it cannot prove is
     /// the one phase started.
     ///
@@ -109,8 +111,9 @@ pub(crate) trait HostRunner {
 /// `stop` sends `TERM` to the keeper, which stops its app with `signal`
 /// and the app's own grace. When the keeper is gone, or goes while the app
 /// is still there, `stop` sends `signal` to the app's group itself. It
-/// waits `grace` and `kill_wait` in all, then sends `KILL` to what is left
-/// of both, and waits `kill_wait` again.
+/// waits `grace` and `kill_wait` in all, counted again from the app's
+/// signal when `stop` sends one, then sends `KILL` to what is left of both,
+/// and waits `kill_wait` again.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HostStop<'a> {
     /// The keeper, or `None` when none is recorded.
@@ -137,6 +140,13 @@ pub(crate) enum HostStopped {
     /// process is its own, and `stop` left it alone. A process that phase
     /// proved its own was stopped.
     NotOurs,
+    /// A recorded process led `group` and has gone, and the group still
+    /// has a live member, but nothing proves the group is the one phase
+    /// started, so `stop` signalled nothing of it.
+    GroupUnverified {
+        /// The group that `stop` left alone.
+        group: u32,
+    },
     /// Something of `group` was still there after `KILL` and the kill
     /// wait.
     Unstoppable {

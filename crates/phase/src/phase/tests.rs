@@ -88,20 +88,29 @@ fn a_phase_takes_other_waits_from_its_builder() {
 }
 
 #[test]
-fn status_logs_and_exec_report_that_they_are_not_built_yet() {
+fn exec_reports_that_it_is_not_built_yet() {
     let phase = Phase::new(PathBuf::from("/state/phase"));
     let soon = Instant::now() + Duration::from_secs(1);
     let cancel = Cancel::new();
     let api: AppName = "api".parse().unwrap();
 
-    assert_eq!(not_built(phase.status(&id())), Operation::Status);
-    let request = LogRequest::new(api.clone(), "server".parse().unwrap());
-    assert_eq!(
-        not_built(phase.logs(&id(), &request, &mut Unused)),
-        Operation::Logs
-    );
     let exec = phase.exec(&plan(), &api, &["true".into()], &Unused, soon, &cancel);
     assert_eq!(not_built(exec), Operation::Exec);
+}
+
+#[test]
+fn a_workspace_without_a_record_is_stopped_and_has_no_log() {
+    let state = tempfile::tempdir().unwrap();
+    let phase = Phase::new(state.path().to_path_buf());
+
+    let status = phase.status(&id(), None).unwrap();
+    assert_eq!(status.state, crate::WorkspaceState::Stopped);
+    assert!(status.rows.is_empty());
+    let request = LogRequest::new("api".parse().unwrap(), "server".parse().unwrap());
+    assert!(matches!(
+        phase.logs(&id(), &request, &mut Unused),
+        Err(PhaseError::UnknownTarget { .. })
+    ));
 }
 
 #[test]

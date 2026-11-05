@@ -285,36 +285,56 @@ impl Phase {
     }
 
     /// Returns the status of the workspace whose stable id is `workspace`.
-    /// It takes no lock.
+    /// With the workspace's `plan`, the rows follow the plan and carry the
+    /// sources, runners and addresses that only the plan gives. Without
+    /// one, as when no plan can be built, the rows are the record's live
+    /// entries. Either way `status` checks each live process with the
+    /// process table and each live container with Docker, and reports an
+    /// entry that the plan lacks. It takes no lock.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::NotBuilt`] until phase carries the operation
-    /// out.
-    #[expect(unused_variables, reason = "phase does not carry out `status` yet")]
-    pub fn status(&self, workspace: &WorkspaceId) -> Result<Status, PhaseError> {
-        Err(PhaseError::NotBuilt {
-            operation: Operation::Status,
-        })
+    /// Returns [`PhaseError::RecordUnreadable`] or
+    /// [`PhaseError::NewerRecord`] when the record cannot be used, and
+    /// [`PhaseError::ProcessTable`] when phase cannot read processes.
+    pub fn status(
+        &self,
+        workspace: &WorkspaceId,
+        plan: Option<&Plan>,
+    ) -> Result<Status, PhaseError> {
+        let sources = crate::status::Sources {
+            state_dir: &self.state_dir,
+            processes: &System,
+            docker: &DockerCli::new(),
+        };
+        crate::status::status(&RunStore::new(&self.state_dir), workspace, plan, sources)
     }
 
     /// Passes the lines of the requested log of the workspace whose stable
-    /// id is `workspace` to `sink`. It takes no lock.
+    /// id is `workspace` to `sink`, from the log's start, and with
+    /// `request.follow` each later line until the sink breaks or nothing
+    /// can write to the log any more. It takes no lock.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::NotBuilt`] until phase carries the operation
-    /// out.
-    #[expect(unused_variables, reason = "phase does not carry out `logs` yet")]
+    /// Returns [`PhaseError::UnknownTarget`] when phase knows no log of the
+    /// process, [`PhaseError::LogUnreadable`] when the log cannot be read,
+    /// and [`PhaseError::NotBuilt`] for a container's log and for
+    /// `request.since`, which phase does not carry out yet.
     pub fn logs(
         &self,
         workspace: &WorkspaceId,
         request: &LogRequest,
         sink: &mut dyn LineSink,
     ) -> Result<(), PhaseError> {
-        Err(PhaseError::NotBuilt {
-            operation: Operation::Logs,
-        })
+        crate::logs::logs(
+            &RunStore::new(&self.state_dir),
+            &self.state_dir,
+            workspace,
+            request,
+            sink,
+            &System,
+        )
     }
 
     /// Stops what the run record of the workspace whose stable id is

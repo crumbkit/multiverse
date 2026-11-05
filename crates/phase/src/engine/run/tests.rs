@@ -88,6 +88,11 @@ struct HostState {
     not_ours: BTreeSet<String>,
     /// The `app/process` whose app survives `KILL`.
     unstoppable: BTreeSet<String>,
+    /// The `app/process` whose stop finds a group whose leader has gone
+    /// and that nothing proves phase's own.
+    unverified: BTreeSet<String>,
+    /// The pids whose process has ended and left members in its group.
+    leaderless: BTreeSet<u32>,
     /// The log lines that each log file's follower hands over, by file name.
     logs: BTreeMap<String, Vec<String>>,
     /// What listens on each port.
@@ -113,6 +118,18 @@ impl FakeHost {
         let mut state = self.state.borrow_mut();
         let (_, app) = state.pids[name];
         state.alive.remove(&app);
+    }
+
+    /// Ends the app of `name` and leaves members in its group, and ends
+    /// its keeper too unless `keep_keeper`.
+    fn end_leader(&self, name: &str, keep_keeper: bool) {
+        let mut state = self.state.borrow_mut();
+        let (keeper, app) = state.pids[name];
+        state.alive.remove(&app);
+        state.leaderless.insert(app);
+        if !keep_keeper {
+            state.alive.remove(&keeper);
+        }
     }
 
     fn breaks_record_at_launch(&self, name: &str) {
@@ -208,6 +225,9 @@ impl HostRunner for FakeHost {
         if state.unstoppable.contains(&name) {
             return Ok(HostStopped::Unstoppable { group: pid });
         }
+        if state.unverified.contains(&name) {
+            return Ok(HostStopped::GroupUnverified { group: pid });
+        }
         let mut any = false;
         for host in [stop.keeper, stop.app].into_iter().flatten() {
             any |= state.alive.remove(&host.pid);
@@ -220,8 +240,11 @@ impl HostRunner for FakeHost {
     }
 
     fn identity(&self, process: &HostProcess) -> Result<Identity, PhaseError> {
-        Ok(if self.state.borrow().alive.contains(&process.pid) {
+        let state = self.state.borrow();
+        Ok(if state.alive.contains(&process.pid) {
             Identity::Ours
+        } else if state.leaderless.contains(&process.pid) {
+            Identity::LeaderGone
         } else {
             Identity::Gone
         })
@@ -922,6 +945,38 @@ fn up_leaves_a_process_that_already_runs_alone() {
 }
 
 #[test]
+fn up_starts_nothing_in_place_of_a_group_whose_leader_has_gone_and_reports_it_left() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.host.end_leader("api/server", false);
+    let (_, app) = world.host.state.borrow().pids["api/server"];
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::Left);
+    assert_eq!(
+        notes(&report, "api"),
+        &[Note::group_unverified(name("server"), app)]
+    );
+    assert_eq!(world.host.launches(), vec!["api/server"]);
+    assert!(world.host.stops().is_empty());
+}
+
+#[test]
+fn up_counts_a_group_whose_leader_has_gone_as_running_while_its_keeper_runs() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.host.end_leader("api/server", true);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.host.launches(), vec!["api/server"]);
+}
+
+#[test]
 fn up_starts_a_recorded_process_again_once_it_has_gone() {
     let world = World::new();
     let plan = plan(vec![host_app("api", None, &[])]);
@@ -1129,6 +1184,29 @@ fn down_keeps_a_process_it_cannot_prove_is_its_own_and_notes_it() {
 }
 
 #[test]
+fn down_keeps_a_group_it_cannot_prove_is_its_own_and_notes_the_group() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .host
+        .state
+        .borrow_mut()
+        .unverified
+        .insert("api/server".to_owned());
+    let (_, app) = world.host.state.borrow().pids["api/server"];
+
+    let report = world.down(&Selection::All);
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::Left);
+    assert_eq!(
+        notes(&report, "api"),
+        &[Note::group_unverified(name("server"), app)]
+    );
+    assert!(world.record().is_some());
+}
+
+#[test]
 fn down_keeps_a_process_that_survives_kill_and_notes_its_group() {
     let world = World::new();
     let plan = plan(vec![host_app("api", None, &[])]);
@@ -1208,6 +1286,39 @@ fn restart_resolves_the_environment_again_then_stops_and_starts_the_process() {
     assert_eq!(world.host.stops(), vec!["api/server"]);
     assert_eq!(world.host.launches(), vec!["api/server", "api/server"]);
     assert_eq!(world.host.running(), 2);
+}
+
+#[test]
+fn restart_leaves_a_group_it_cannot_prove_is_its_own_and_starts_nothing() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.host.end_leader("api/server", false);
+    world
+        .host
+        .state
+        .borrow_mut()
+        .unverified
+        .insert("api/server".to_owned());
+    let (_, app) = world.host.state.borrow().pids["api/server"];
+
+    let report = world
+        .engine()
+        .restart(
+            &plan,
+            &Selection::All,
+            &Env::default(),
+            soon(),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::Left);
+    assert_eq!(
+        notes(&report, "api"),
+        &[Note::group_unverified(name("server"), app)]
+    );
+    assert_eq!(world.host.launches(), vec!["api/server"]);
 }
 
 #[test]

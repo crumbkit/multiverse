@@ -68,6 +68,14 @@ pub enum PhaseError {
         /// The failure.
         source: io::Error,
     },
+    /// phase cannot read a process's log file.
+    #[non_exhaustive]
+    LogUnreadable {
+        /// The log file.
+        path: PathBuf,
+        /// The failure.
+        source: io::Error,
+    },
     /// phase cannot read the process table or signal a process.
     #[non_exhaustive]
     ProcessTable {
@@ -142,6 +150,7 @@ impl PhaseError {
             Self::RecordUnreadable { .. } => "phase::record::unreadable",
             Self::NewerRecord { .. } => "phase::record::newer",
             Self::StateUnwritable { .. } => "phase::state::unwritable",
+            Self::LogUnreadable { .. } => "phase::log::unreadable",
             Self::ProcessTable { .. } => "phase::process_table",
             Self::Docker {
                 source: DockerError::Refused { .. },
@@ -252,6 +261,9 @@ impl fmt::Display for PhaseError {
             Self::StateUnwritable { path, .. } => {
                 write!(formatter, "phase cannot write {}", path.display())
             }
+            Self::LogUnreadable { path, .. } => {
+                write!(formatter, "phase cannot read the log {}", path.display())
+            }
             Self::ProcessTable { message } => {
                 write!(
                     formatter,
@@ -298,7 +310,9 @@ impl std::error::Error for PhaseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Environment { source, .. } => Some(source),
-            Self::StateUnwritable { source, .. } => Some(source),
+            Self::StateUnwritable { source, .. } | Self::LogUnreadable { source, .. } => {
+                Some(source)
+            }
             Self::Docker { source } => Some(source),
             Self::NotBuilt { .. }
             | Self::Busy { .. }

@@ -25,8 +25,8 @@
 //! has ended and the container runs, such as after a restart outside mxv.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::fs;
+use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -49,7 +49,8 @@ use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
 use crate::redacted::Redacted;
 use crate::run_files::{
-    RUN_VERSION, RunDir, RunHost, RunRecord, owns_group, read_json, remove_if_present, write_json,
+    Ownership, RUN_VERSION, RunDir, RunHost, RunRecord, ownership, read_json, remove_if_present,
+    write_json,
 };
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
@@ -76,9 +77,7 @@ pub const MOST_LOG_BYTES: u64 = 32 * 1024 * 1024;
 /// The number of log lines that a failed start reports.
 pub const TAIL_LINES: usize = 20;
 
-/// The most bytes from the end of a log that a tail reads. A tail of a
-/// log whose last lines are longer than this returns fewer lines.
-pub const MOST_TAIL_BYTES: u64 = 64 * 1024;
+pub use phase::{MOST_TAIL_BYTES, tail};
 
 /// The most bytes that one read of a followed log takes. The rest waits
 /// for the next read.
@@ -285,7 +284,8 @@ pub enum DownOutcome {
     UnknownProcess(String),
 }
 
-/// A process whose group outlived SIGKILL and [`KILL_WAIT`].
+/// A process whose group outlived SIGKILL and [`KILL_WAIT`], or whose
+/// group `down` left alone because it could not prove the group its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Unstoppable {
@@ -293,6 +293,10 @@ pub struct Unstoppable {
     pub process: String,
     /// Its process group's id.
     pub pid: u32,
+    /// Whether `down` left the group without signalling it, because the
+    /// process that led it has ended and nothing proves that the members
+    /// left in the group are the ones `up` started.
+    pub unverified: bool,
 }
 
 /// How a wait for readiness ended.
@@ -560,14 +564,27 @@ impl Runs {
         Ok(running)
     }
 
-    /// Reports whether the process group that the run record of `process`
-    /// names is the one that `up` started and still has a member, as
-    /// [`owns_group`] decides.
-    fn group_lives(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+    /// Returns whether the process group that the run record of `process`
+    /// names is the one that `up` started, as [`ownership`] decides, or
+    /// `None` when no record names it.
+    fn group_ownership(
+        &self,
+        name: &WorkspaceName,
+        process: &str,
+    ) -> Result<Option<Ownership>, Error> {
         match self.record(name, process)? {
-            Some(record) => owns_group(&record),
-            None => Ok(false),
+            Some(record) => Ok(Some(ownership(&record, &self.file(name, process, "exit"))?)),
+            None => Ok(None),
         }
+    }
+
+    /// Reports whether the process group that the run record of `process`
+    /// names may still be the one that `up` started, so that mxv starts
+    /// nothing in its place.
+    fn group_lives(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+        Ok(self
+            .group_ownership(name, process)?
+            .is_some_and(Ownership::may_live))
     }
 
     /// Returns the manifest's processes and containers in start order,
@@ -1054,16 +1071,25 @@ impl Runs {
                 )));
                 continue;
             }
-            if let Some(record) = self.record(&workspace.name, process)?
-                && owns_group(&record)?
-                && !self.stop_group(record.pid)
-            {
-                let pid = record.pid;
-                results.push(Err(Unstoppable {
-                    process: process.clone(),
-                    pid,
-                }));
-                continue;
+            if let Some(record) = self.record(&workspace.name, process)? {
+                let exit_file = self.file(&workspace.name, process, "exit");
+                let owned = ownership(&record, &exit_file)?;
+                let stopped = match owned {
+                    Ownership::Ours => self.stop_group(record.pid),
+                    // `down` keeps the record of a group it cannot prove
+                    // its own and reports the group, which it never
+                    // signals.
+                    Ownership::Unverified => false,
+                    Ownership::Gone => true,
+                };
+                if !stopped {
+                    results.push(Err(Unstoppable {
+                        process: process.clone(),
+                        pid: record.pid,
+                        unverified: owned == Ownership::Unverified,
+                    }));
+                    continue;
+                }
             }
             remove_if_present(&self.file(&workspace.name, process, "json"))?;
             remove_if_present(&self.file(&workspace.name, process, "exit"))?;
@@ -1104,7 +1130,7 @@ impl Runs {
         let mut live = BTreeSet::new();
         for process in self.recorded(&workspace.name)? {
             if let Some(record) = self.record(&workspace.name, &process)?
-                && owns_group(&record)?
+                && ownership(&record, &self.file(&workspace.name, &process, "exit"))?.may_live()
             {
                 live.extend(record.ports.values().copied());
             }
@@ -1593,6 +1619,13 @@ const fn container_state(state: ContainerState) -> ProcessState {
             signal: None,
             reason: None,
         },
+        // A status that docker printed and phase does not know, such as
+        // `removing`, gives no exit code.
+        ContainerState::Unknown => ProcessState::Exited {
+            code: None,
+            signal: None,
+            reason: None,
+        },
     }
 }
 
@@ -1684,32 +1717,6 @@ fn code_and_signal(code: Option<i32>) -> (Option<i32>, Option<i32>) {
         Some(code) if (129..=192).contains(&code) => (None, Some(code - 128)),
         code => (code, None),
     }
-}
-
-/// Returns the last `lines` lines of the file at `path`, read from its
-/// last [`MOST_TAIL_BYTES`] bytes, or no lines when it cannot be read.
-#[must_use]
-pub fn tail(path: &Path, lines: usize) -> Vec<String> {
-    let Ok(mut file) = File::open(path) else {
-        return Vec::new();
-    };
-    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    let start = length.saturating_sub(MOST_TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
-    let mut bytes = Vec::new();
-    if file.take(MOST_TAIL_BYTES).read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut all: Vec<&str> = text.lines().collect();
-    if start > 0 && !all.is_empty() {
-        // The read started inside a line, so its first line is partial.
-        all.remove(0);
-    }
-    let skip = all.len().saturating_sub(lines);
-    all.into_iter().skip(skip).map(str::to_owned).collect()
 }
 
 /// A log file that `mxv logs -f` reads as it grows, through phase's

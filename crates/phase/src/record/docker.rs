@@ -4,6 +4,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use crate::engine::container::ContainerState;
 use crate::name::WorkspaceId;
 use crate::record::DockerName;
 
@@ -60,6 +61,20 @@ pub(crate) trait Docker {
     /// Returns [`DockerError::Unavailable`] when Docker does not answer,
     /// including when its context is unknown or its program is missing.
     fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError>;
+
+    /// Returns the state of the container `object`, matched as
+    /// [`Docker::find`] matches it, or `None` when the daemon answered that
+    /// it does not exist or that it exists without this workspace's labels.
+    /// `status` calls it, so a container's state comes from Docker and never
+    /// from the record alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DockerError::Unavailable`] when Docker does not answer.
+    fn container_state(
+        &self,
+        object: &DockerObject<'_>,
+    ) -> Result<Option<ContainerState>, DockerError>;
 
     /// Removes the object of `kind` whose id is `id`. A running container
     /// is stopped first, and is killed when it has not stopped after

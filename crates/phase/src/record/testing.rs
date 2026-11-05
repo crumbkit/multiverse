@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use rustix::process::Signal;
 
+use crate::engine::container::ContainerState;
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
 use crate::engine::keeper::{Kept, Launch};
 use crate::engine::probe::LogLines;
@@ -73,6 +74,12 @@ impl Spawned {
     /// Starts `sh -c script` in a new process group, and waits until it
     /// prints `lines` lines, the last of which it prints once it is ready.
     pub(crate) fn shell_lines(script: &str, lines: usize) -> Self {
+        Self::shell_in_group(script, lines, 0)
+    }
+
+    /// Starts `sh -c script` in the process group `group`, or in a new one
+    /// when `group` is 0, and waits until it prints `lines` lines.
+    pub(crate) fn shell_in_group(script: &str, lines: usize, group: u32) -> Self {
         #[expect(
             clippy::disallowed_methods,
             reason = "the test starts a real process for sweep to stop"
@@ -80,7 +87,7 @@ impl Spawned {
         let mut command = Command::new("/bin/sh");
         command
             .args(["-c", script])
-            .process_group(0)
+            .process_group(i32::try_from(group).unwrap())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -128,6 +135,26 @@ impl Spawned {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Waits up to five seconds for the process, a member of `group`, to
+    /// end, and leaves it unreaped, so that it stays in the group as a
+    /// zombie.
+    pub(crate) fn wait_for_end_unreaped(&self, group: u32) {
+        let group = super::process::ProcessGroup::new(group).unwrap();
+        let deadline = crate::clock::deadline_in(std::time::Duration::from_secs(5));
+        while super::process::live_members(group)
+            .unwrap()
+            .iter()
+            .any(|member| member.pid == self.pid())
+        {
+            assert!(
+                crate::clock::now() < deadline,
+                "the process {} did not end",
+                self.pid()
+            );
+            crate::clock::pause(crate::clock::POLL_INTERVAL);
+        }
+    }
+
     /// Waits for the process to end and reaps it.
     pub(crate) fn wait_for_exit(&mut self) {
         self.child.wait().unwrap();
@@ -164,6 +191,10 @@ pub(crate) struct FakeProcess {
     /// The signal that ends it, or `None` for a process that no signal
     /// ends. `KILL` ends a process that `TERM` ends.
     pub(crate) ends_on: Option<Signal>,
+    /// For a group leader, whether it leaves members in its group when it
+    /// ends, and the signal to the group that ends them, as in
+    /// [`FakeProcesses::leaderless`].
+    pub(crate) leaves: Option<Option<Signal>>,
 }
 
 /// A fake process table.
@@ -175,15 +206,46 @@ pub(crate) struct FakeProcesses {
     pub(crate) boot_id: Option<String>,
     /// Each pid that was signalled, with the signal, in order.
     pub(crate) signals: RefCell<Vec<(u32, Signal)>>,
+    /// The groups whose leader has ended and that still have members, by
+    /// id, with the signal that ends the members, or `None` when no signal
+    /// does.
+    pub(crate) leaderless: RefCell<BTreeMap<u32, Option<Signal>>>,
 }
 
 impl FakeProcesses {
     /// Adds the process `pid`, whose table entry is `start`, which `ends_on`
     /// ends.
     pub(crate) fn with(self, pid: u32, start: Start, ends_on: Option<Signal>) -> Self {
-        self.processes
-            .borrow_mut()
-            .insert(pid, FakeProcess { start, ends_on });
+        self.processes.borrow_mut().insert(
+            pid,
+            FakeProcess {
+                start,
+                ends_on,
+                leaves: None,
+            },
+        );
+        self
+    }
+
+    /// Adds the group leader `pid`, as [`FakeProcesses::with`] does, which
+    /// leaves members in its group when it ends, and `KILL` to the group
+    /// ends them.
+    pub(crate) fn with_leaving(self, pid: u32, start: Start, ends_on: Signal) -> Self {
+        self.processes.borrow_mut().insert(
+            pid,
+            FakeProcess {
+                start,
+                ends_on: Some(ends_on),
+                leaves: Some(Some(Signal::KILL)),
+            },
+        );
+        self
+    }
+
+    /// Adds the group `group`, whose leader has ended and whose members
+    /// `ends_on` ends.
+    pub(crate) fn with_leaderless(self, group: u32, ends_on: Option<Signal>) -> Self {
+        self.leaderless.borrow_mut().insert(group, ends_on);
         self
     }
 }
@@ -203,6 +265,7 @@ impl Processes for FakeProcesses {
 
     fn group_exists(&self, group: u32) -> bool {
         self.processes.borrow().contains_key(&group)
+            || self.leaderless.borrow().contains_key(&group)
     }
 
     fn reap(&self, _pid: u32) {}
@@ -213,8 +276,18 @@ impl Processes for FakeProcesses {
         let ends = processes.get(&host.pid).is_some_and(|found| {
             found.ends_on == Some(signal) || (signal == Signal::KILL && found.ends_on.is_some())
         });
-        if ends {
-            processes.remove(&host.pid);
+        if ends && let Some(ended) = processes.remove(&host.pid) {
+            if let Some(members) = ended.leaves {
+                self.leaderless.borrow_mut().insert(host.pid, members);
+            }
+            return Ok(());
+        }
+        let mut leaderless = self.leaderless.borrow_mut();
+        let members_end = leaderless
+            .get(&host.group)
+            .is_some_and(|ends_on| *ends_on == Some(signal));
+        if host.group == host.pid && members_end {
+            leaderless.remove(&host.group);
         }
         Ok(())
     }
@@ -270,6 +343,9 @@ pub(crate) struct FakeObject {
     /// The value of phase's workspace label, or `None` for an object
     /// without it.
     pub(crate) workspace: Option<String>,
+    /// The state of a container, which is running unless a test says
+    /// otherwise.
+    pub(crate) state: ContainerState,
 }
 
 /// A fake Docker that holds objects in memory.
@@ -309,7 +385,18 @@ impl FakeDocker {
             name: name.to_owned(),
             id: id.to_owned(),
             workspace: label.map(str::to_owned),
+            state: ContainerState::Running,
         });
+        self
+    }
+
+    /// Sets the state of the container whose id is `id`.
+    pub(crate) fn in_state(self, id: &str, state: ContainerState) -> Self {
+        for object in self.objects.borrow_mut().iter_mut() {
+            if object.id == id {
+                object.state = state;
+            }
+        }
         self
     }
 
@@ -319,8 +406,10 @@ impl FakeDocker {
     }
 }
 
-impl Docker for FakeDocker {
-    fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+impl FakeDocker {
+    /// Returns the object that `object` names, as [`Docker::find`] matches
+    /// it.
+    fn matching(&self, object: &DockerObject<'_>) -> Result<Option<FakeObject>, DockerError> {
         if self.down {
             return Err(Self::failure());
         }
@@ -337,7 +426,20 @@ impl Docker for FakeDocker {
                         |id| found.id == id,
                     )
             })
-            .map(|found| found.id.clone()))
+            .cloned())
+    }
+}
+
+impl Docker for FakeDocker {
+    fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+        Ok(self.matching(object)?.map(|found| found.id))
+    }
+
+    fn container_state(
+        &self,
+        object: &DockerObject<'_>,
+    ) -> Result<Option<ContainerState>, DockerError> {
+        Ok(self.matching(object)?.map(|found| found.state))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, _wait: Duration) -> Result<(), DockerError> {
@@ -371,6 +473,13 @@ impl Unreachable {
 
 impl Docker for Unreachable {
     fn find(&self, _object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+        Err(Self::failure())
+    }
+
+    fn container_state(
+        &self,
+        _object: &DockerObject<'_>,
+    ) -> Result<Option<ContainerState>, DockerError> {
         Err(Self::failure())
     }
 

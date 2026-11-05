@@ -452,6 +452,28 @@ pub(crate) fn group_exists(pid: u32) -> bool {
     phase::host::group_exists(group)
 }
 
+/// Reports whether the process group `group` has a member that has not
+/// ended and that started more than `slack` before `exit_file` was last
+/// written. It is false when the file has no time, the members cannot be
+/// listed, or a member's start cannot be turned into a wall-clock time.
+pub(crate) fn member_started_before(group: u32, exit_file: &Path, slack: Duration) -> bool {
+    let Some(bound) = std::fs::metadata(exit_file)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|written| written.checked_sub(slack))
+    else {
+        return false;
+    };
+    let Ok(group) = ProcessGroup::new(group) else {
+        return false;
+    };
+    phase::host::live_members(group).is_some_and(|members| {
+        members.iter().any(|member| {
+            phase::host::started_at(member.start).is_some_and(|started| started < bound)
+        })
+    })
+}
+
 /// Returns the exit code that the script wrote to `exit_file`, or `None`
 /// when the file does not exist or the script has not finished writing it.
 /// The script's redirection creates the file empty before `printf` writes
