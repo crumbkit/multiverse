@@ -60,6 +60,10 @@ pub struct Phase {
     /// The variables that keepers and their apps inherit from the program
     /// that links phase: only ever `PATH` and `HOME`.
     inherited: BTreeMap<String, String>,
+    /// The only variables that the `docker exec` which writes a container's
+    /// secret receives, or `None` for the host program's whole
+    /// environment.
+    docker_environment: Option<BTreeMap<String, String>>,
 }
 
 /// The deadlines of one `up`. A deadline that cuts off a start makes that
@@ -95,6 +99,7 @@ impl Phase {
             kill_wait: DEFAULT_KILL_WAIT,
             keeper: None,
             inherited: BTreeMap::new(),
+            docker_environment: None,
         }
     }
 
@@ -116,6 +121,25 @@ impl Phase {
     #[must_use]
     pub fn with_inherited(mut self, inherited: BTreeMap<String, String>) -> Self {
         self.inherited = inherited;
+        self
+    }
+
+    /// Returns this `Phase` with `vars`, which the program that links phase
+    /// reads in `main`, as the only environment of the `docker exec` that
+    /// writes a container's secret file. phase keeps `PATH`, `HOME` and the
+    /// variables whose names start with `DOCKER_`, which choose the docker
+    /// program, its configuration and its daemon, and drops the rest.
+    /// Without it, that `docker exec` inherits the host program's
+    /// environment, as phase's other `docker` commands do. The secret's
+    /// value reaches neither environment, because phase writes it to the
+    /// command's standard input.
+    #[must_use]
+    pub fn with_docker_environment(mut self, vars: BTreeMap<String, String>) -> Self {
+        self.docker_environment = Some(
+            vars.into_iter()
+                .filter(|(name, _)| name == "PATH" || name == "HOME" || name.starts_with("DOCKER_"))
+                .collect(),
+        );
         self
     }
 
@@ -199,7 +223,8 @@ impl Phase {
     /// container starts, `up` writes each of its secrets to a file in the
     /// container's `/run/secrets` tmpfs through `docker exec`, with the
     /// value on standard input, before it waits for the process to be
-    /// ready. A process whose plan sets
+    /// ready. It refuses a process whose secret files would belong to root
+    /// with [`PhaseError::SecretOwnerUnknown`]. A process whose plan sets
     /// [`SecretDelivery::Env`](crate::SecretDelivery::Env) receives its
     /// secrets through private references instead.
     ///
@@ -285,6 +310,7 @@ impl Phase {
     /// Returns the runner of container apps on this machine.
     fn containers(&self) -> ComposeRunner {
         ComposeRunner::new(self.state_dir.clone(), self.start_grace)
+            .with_docker_environment(self.docker_environment.clone())
     }
 
     /// Returns the engine that carries out `up`, `down` and `restart` on

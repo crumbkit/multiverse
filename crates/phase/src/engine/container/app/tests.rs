@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::{compose_file, file_secrets, objects, plan_hash, reference, references};
 use crate::engine::container::names::{Identity, Scope};
-use crate::engine::container::secrets::{ImageCommand, entrypoint};
+use crate::engine::container::secrets::{ImageConfig, entrypoint};
 use crate::error::{NotRunnable, PhaseError};
 use crate::plan::container::BindMount;
 use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
@@ -236,7 +236,11 @@ fn a_process_that_receives_secrets_mounts_a_tmpfs_and_waits_for_their_files_thro
     let names: Vec<String> = ["PGPASSWORD".to_owned(), "TOKEN".to_owned()].into();
     assert_eq!(server["entrypoint"], json!(entrypoint(names.iter())));
     assert!(server.get("command").is_none());
+    assert_eq!(server["restart"], "no");
+    assert_eq!(server["labels"]["mxv.secrets"], "files");
+    assert!(server.get("x-phase-secret-owner").is_none());
     let worker = &file["services"]["worker"];
+    assert!(worker["labels"].get("mxv.secrets").is_none());
     assert!(worker.get("entrypoint").is_none());
     assert!(!worker["volumes"].to_string().contains("tmpfs"));
     assert_eq!(reference(&app, &name("server"), "TOKEN"), None);
@@ -250,7 +254,7 @@ fn a_process_that_receives_secrets_mounts_a_tmpfs_and_waits_for_their_files_thro
 #[test]
 fn the_wrapper_runs_the_images_entrypoint_and_the_plans_command_or_else_the_images_command() {
     let mut app = with_secrets();
-    let image = ImageCommand::new(&["docker-entrypoint.sh"], &["postgres"]);
+    let image = ImageConfig::new(&["docker-entrypoint.sh"], &["postgres"], "");
     let scope = scope("db");
 
     let file = compose_file(&scope, &app, Some(&image)).unwrap();
@@ -295,6 +299,24 @@ fn a_process_that_opts_into_environment_secrets_receives_them_through_private_re
         Some("MXV_ENV_0_3")
     );
     assert_eq!(file_secrets(&app, &app.processes[0]).count(), 0);
+}
+
+#[test]
+fn a_new_secret_owner_changes_the_plan_hash_of_its_process_alone() {
+    let mut app = with_secrets();
+    let scope = scope("db");
+    let before = plan_hash(&scope, &app, &name("server")).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker")).unwrap();
+
+    app.processes[0].secret_owner = Some("999:999".to_owned());
+
+    let file = compose_file(&scope, &app, None).unwrap();
+    assert_eq!(
+        file["services"]["server"]["x-phase-secret-owner"],
+        "999:999"
+    );
+    assert_ne!(plan_hash(&scope, &app, &name("server")).unwrap(), before);
+    assert_eq!(plan_hash(&scope, &app, &name("worker")).unwrap(), worker);
 }
 
 #[test]

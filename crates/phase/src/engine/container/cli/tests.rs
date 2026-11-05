@@ -748,6 +748,36 @@ fn a_container_removal_waits_at_least_a_second_and_rounds_a_part_second_up() {
 }
 
 #[test]
+fn a_running_container_with_secret_files_that_docker_restarted_is_not_running() {
+    let fake = Fake::new();
+    let (waiting, restarted, fresh) = (container_id('a'), container_id('b'), container_id('c'));
+    let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
+    fake.labelled(
+        &[&waiting],
+        &waiting,
+        &format!("{ours}\nrunning 0\n2 files"),
+    );
+    fake.labelled(&[&restarted], &restarted, &format!("{ours}\nrunning 0\n2 "));
+    fake.labelled(&[&fresh], &fresh, &format!("{ours}\nrunning 0\n0 files"));
+    let workspace = workspace();
+    let db = name("db");
+    let state = |id: &str| {
+        fake.docker()
+            .container_state(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .unwrap()
+    };
+
+    assert_eq!(state(&waiting), Some(ContainerState::Restarting));
+    assert_eq!(state(&restarted), Some(ContainerState::Running));
+    assert_eq!(state(&fresh), Some(ContainerState::Running));
+    assert!(
+        fake.calls().contains("{{.RestartCount}}"),
+        "{}",
+        fake.calls()
+    );
+}
+
+#[test]
 fn a_containers_state_comes_from_its_inspection_when_it_carries_this_workspaces_id() {
     let fake = Fake::new();
     let (running, exited, foreign) = (container_id('a'), container_id('b'), container_id('c'));

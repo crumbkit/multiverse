@@ -3,18 +3,21 @@
 
 use std::ffi::OsStr;
 use std::io::{self, Read as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use rustix::process::{Pid, Signal};
 use wait_timeout::ChildExt as _;
 
 use crate::cancel::Cancel;
-use crate::clock::now;
+use crate::clock::{now, pause};
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::ContainerId;
-use crate::engine::probe::{CommandEnd, ProbeExec, run_bounded};
+use crate::engine::container::secrets::SecretBytes;
+use crate::engine::probe::{CommandEnd, ProbeExec, exited, run_bounded};
 use crate::env::AppliedEnvironment;
 
 /// The variables that a docker command receives on top of the host
@@ -56,71 +59,134 @@ impl ChildEnv for Referenced<'_> {
     }
 }
 
-/// The variable of the shell that writes a secret into a container which
-/// holds the secret's value. The shell hands the value to `docker exec` on
-/// standard input, and the `docker` program does not inherit it.
-const SECRET_VARIABLE: &str = "MXV_SECRET";
+/// How long the feeder of a secret pauses between two bytes, which a test
+/// sets to catch the processes of a write while they run. It is zero
+/// outside tests.
+#[cfg(test)]
+pub(crate) static FEED_PAUSE_MILLIS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-/// The value of one secret of a process's resolved environment, which
-/// reaches the shell of [`write_secret`] as [`SECRET_VARIABLE`] and no
-/// other variable of the environment.
-struct SecretValue<'a> {
-    /// The process's resolved environment.
-    environment: &'a dyn AppliedEnvironment,
-    /// The name of the secret.
-    name: &'a str,
-}
-
-impl ChildEnv for SecretValue<'_> {
-    fn set_on(self, command: &mut Command) {
-        command.env_remove(SECRET_VARIABLE);
-        let name = self.name;
-        self.environment.apply_as(command, &|variable| {
-            (variable == name).then(|| SECRET_VARIABLE.to_owned())
-        });
+/// Writes `input` to `stdin` and closes it. In a test that sets
+/// `FEED_PAUSE_MILLIS`, it writes one byte at a time with that pause.
+fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
+    #[cfg(test)]
+    {
+        let millis = FEED_PAUSE_MILLIS.load(std::sync::atomic::Ordering::Relaxed);
+        if millis > 0 {
+            for byte in input.framed() {
+                if stdin.write_all(&[*byte]).is_err() {
+                    return;
+                }
+                let _ = stdin.flush();
+                crate::clock::pause(Duration::from_millis(millis));
+            }
+            return;
+        }
     }
+    let _ = stdin.write_all(input.framed());
 }
 
-/// The script of the host's shell that runs `docker` with its arguments
-/// and the value of [`SECRET_VARIABLE`] on standard input. `printf` is a
-/// built-in command of the shell, so the value is in no argument list,
-/// and `docker` starts without the variable. A shell that did not receive
-/// the variable fails with status 64 and says so.
-const SECRET_FEED: &str = r#"if [ -z "${MXV_SECRET+set}" ]; then
-  echo 'the environment source supplied no value for the secret' >&2
-  exit 64
-fi
-printf '%s' "$MXV_SECRET" | { unset MXV_SECRET; exec "$0" "$@"; }
-"#;
-
-/// Writes the secret `name` of `environment` into the container `id`
-/// with `docker <args>`, where `args` are [`super::secrets::write_args`],
-/// within `deadline` or until `cancel` is set. The host's `/bin/sh`
-/// feeds the value to `docker exec` on standard input, so it never
-/// appears in an argument list, and its error holds what `docker` printed
-/// on standard error, which the writer never fills with the value.
+/// Runs `docker <args>`, where `args` are a `docker exec --interactive`
+/// that stages a secret, with `input`, the secret's framed bytes, on its
+/// standard input, which it then closes, within the deadline of `until` or
+/// until its cancel flag is set.
+///
+/// `docker` starts in a process group of its own. With `environment`, it
+/// receives those variables alone, which the host program chose, and
+/// otherwise the host program's environment, as phase's other `docker`
+/// commands do. No secret's value is in either. When the deadline passes
+/// or the caller cancels, phase kills the group, reaps `docker`, and joins
+/// the threads that fed and read it, whose pipes the kill closed.
 pub(super) fn write_secret(
     args: &[String],
-    environment: &dyn AppliedEnvironment,
-    name: &str,
-    deadline: Duration,
-    cancel: &Cancel,
+    input: SecretBytes,
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+    until: (Duration, &Cancel),
 ) -> Result<Finished, Error> {
-    let shell = ["-c", SECRET_FEED, DOCKER]
-        .into_iter()
-        .map(str::to_owned)
-        .chain(args.iter().cloned());
-    run_full(
-        "/bin/sh".as_ref(),
-        shell,
-        SecretValue { environment, name },
-        None,
-        "secret write",
-        Until {
-            deadline,
-            cancel: Some(cancel),
-        },
-    )
+    let (deadline, cancel) = until;
+    let operation = "secret write";
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
+    )]
+    let mut command = Command::new(DOCKER);
+    if let Some(environment) = environment {
+        command.env_clear().envs(environment);
+    }
+    command
+        .args(args)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
+    )]
+    let spawned = command.spawn();
+    #[expect(
+        clippy::disallowed_types,
+        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its deadline and cleanup (PROC-1)"
+    )]
+    let mut child: std::process::Child = match spawned {
+        Ok(child) => child,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Missing { source });
+        }
+        Err(source) => return Err(Error::failed(operation, None, source.to_string())),
+    };
+    let pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
+    let feeder = child
+        .stdin
+        .take()
+        .map(|stdin| thread::spawn(move || feed(stdin, &input)));
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
+    let ends = now() + deadline;
+    let stopped = loop {
+        match exited(pid) {
+            Ok(true) => break None,
+            Ok(false) => {}
+            Err(_) => break Some(false),
+        }
+        if cancel.is_cancelled() {
+            break Some(true);
+        }
+        if now() >= ends {
+            break Some(false);
+        }
+        pause(CANCEL_POLL.min(ends.saturating_duration_since(now())));
+    };
+    // The group is killed however the write ended, so nothing that docker
+    // started outlives it. docker stays unreaped until then, so its pid,
+    // which is the group's id, is not reused in between.
+    if let Some(group) = pid {
+        let _ = rustix::process::kill_process_group(group, Signal::KILL);
+    }
+    let reaped = child.wait();
+    if let Some(feeder) = feeder {
+        let _ = feeder.join();
+    }
+    let stdout = joined(stdout);
+    let stderr = joined(stderr);
+    match (stopped, reaped) {
+        (Some(true), _) => Err(Error::Cancelled { operation }),
+        (Some(false), _) => Err(Error::failed(
+            operation,
+            None,
+            format!(
+                "docker did not finish within {} seconds, so phase stopped it",
+                deadline.as_secs()
+            ),
+        )),
+        (None, Ok(status)) => Ok(Finished {
+            status,
+            stdout,
+            stderr,
+        }),
+        (None, Err(source)) => Err(Error::failed(operation, None, source.to_string())),
+    }
 }
 
 /// The program that this backend runs.

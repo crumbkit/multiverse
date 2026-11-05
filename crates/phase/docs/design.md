@@ -467,52 +467,83 @@ The compose file passes the wrapper as the service's `entrypoint`:
 `/bin/sh -c <script> phase-secrets <NAME>... --`, followed by the service's
 `command`. Replacing an image's entrypoint makes Docker drop the image's
 command too, so after the image is pulled phase reads the image's
-entrypoint and command with `docker image inspect`, and the service's
-command is the image's entrypoint followed by the plan's command, or by
-the image's command when the plan has none. The container therefore runs
-what it would have run without the wrapper. The run record's plan hash
-covers the plan's command and not the image's.
+entrypoint, command and user with `docker image inspect`, and the
+service's command is the image's entrypoint followed by the plan's
+command, or by the image's command when the plan has none. This holds for
+an entrypoint in exec form and in shell form. The container therefore
+runs what it would have run without the wrapper. The run record's plan
+hash covers the plan's command and `secret_owner`, and not the image's
+command.
 
-The wrapper's script needs only `/bin/sh`. It waits until
-`/run/secrets/<NAME>` exists for each name, then replaces itself with the
-command, so the app is the container's first process and receives its
-stop signal. While it waits, a stop signal ends it. It pauses a tenth of a
-second between checks with `sleep` when the image has that program, and
-gives up after 60 seconds of pauses with status 1 and a line that names
-the missing file. An image without `sleep` makes it check without pausing
-and without a time limit.
+The wrapper waits until `/run/secrets/<NAME>` exists for each name, then
+replaces itself with the command, so the app is the container's first
+process and receives its stop signal. While it waits, a stop signal ends
+it. It pauses a tenth of a second between checks with `sleep`. It exits
+with status 70 and one line on standard error that names the missing file
+when the file has not appeared after 60 seconds, when the image has no
+`sleep`, so that it never waits by spinning, and when it has no command to
+run.
 
-phase writes each secret with `docker exec --interactive --user 0`,
-running a script of `/bin/sh` that reads the value from standard input
-into a temporary file in the same tmpfs, gives the directory and the file
-to the user and group of the container's first process, makes the file
-readable by its owner alone (mode 0400), and renames it over
-`/run/secrets/<NAME>`. A reader sees the old value or the new one. On the
-Mac, the host's `/bin/sh` hands the value to `docker exec` with its
-built-in `printf`, so the value is in the environment of that shell alone
-and in no argument list. Every write happens before the readiness wait. A
-write that fails, including one for a secret that the environment source
-did not supply, fails the start, and phase removes the container.
+The files belong to one owner, in this order:
+
+1. the process's `secret_owner`, a numeric `uid:gid` such as `999:999`;
+2. otherwise the app's run-as user;
+3. otherwise the image's own `User`.
+
+phase refuses to start a process whose files would belong to root by the
+second or third rule, with `phase::container::secret_owner_unknown`. Many
+images start as root and switch to another user before they read their
+secrets, and that user could not read files that belong to root. The
+error says to set `secret_owner` to the user the app reads as, such as
+`999:999`, or to use `secret_delivery = "env"`. An app that runs as root
+and reads its files as root sets `secret_owner = "0:0"`.
+
+phase writes the files in two steps, each a `docker exec --interactive
+--user 0` that runs a script of the container's `/bin/sh`:
+
+1. For each secret, phase writes the value's length in bytes on one line
+   to the script's standard input, then the value, and closes it. The
+   script writes the value to `/run/secrets/.<NAME>.new`, compares its
+   bytes with the length using `wc -c`, gives the directory and the file
+   to the owner, and makes the file readable by the owner alone (mode
+   0400). A feed that was cut short, or a script that fails, removes its
+   file.
+2. Once every secret is staged, one script renames each staged file over
+   `/run/secrets/<NAME>`.
+
+When a staging fails, phase removes every staged file and renames
+nothing, so the container keeps its whole old set of files. A reader of
+one file sees its old value or its new one. A write that fails during a
+start fails the start, and phase removes the container. When the
+container has already exited, the error says why: the wrapper's own line
+for status 70, and a pointer to `secret_delivery = "env"` when the image
+has no `/bin/sh`.
+
+On the Mac, phase asks the `AppliedEnvironment` to write the value's
+bytes into memory that it overwrites with zeros afterwards, and starts
+`docker exec` itself, in a process group of its own and with only `PATH`,
+`HOME` and the `DOCKER_*` variables in its environment. The value
+therefore reaches no shell, no environment and no argument list. When the
+deadline passes or the caller cancels, phase kills the group.
 
 An image that runs with secret files must therefore provide `/bin/sh`,
-`cat`, `chown`, `chmod`, `mv` and `rm`, which busybox and the base images
-of the common distributions do, and `sleep` to pause between checks. The
-app reads its secrets as the user it starts as. An image whose entrypoint
-starts as root and then switches to another user, which many official
-images do, reads the files while it is still root, because the files
-belong to the user of the first process when phase writes them.
+`sleep`, `cat`, `wc`, `chown`, `chmod`, `mv` and `rm`, which busybox and
+the base images of the common distributions do. An image that lacks one
+of them needs `secret_delivery = "env"`.
 
-A Docker restart under the container's restart policy empties the tmpfs,
-and phase is not there to write the files again, so the restarted
-container waits in the wrapper and then exits with status 1. Each `up`
-treats a container with secret files that Docker has restarted as not
-running, and replaces it.
+A Docker restart empties the tmpfs, and phase is not running to write
+the files again. phase therefore gives a process with secret files
+Docker's `no` restart policy, whatever its plan's restart policy says, and
+a crash leaves its container exited until the next `up` or `restart`.
+Restarting such a process after a crash needs phase. The follow-up is a
+watcher per app that rewrites the files after a restart and before
+`AppliedEnvironment::expires_at`. Until then, `up` treats a container with
+secret files that Docker has restarted as not running and replaces it,
+and `status` shows it as restarting.
 
 Rotation is `write_secrets` in the container runner, which writes the
 files of a running container again from a fresh environment. Nothing calls
-it on a timer yet. phase runs only while `up`, `restart` or `down` runs, so
-the follow-up is a long-running caller that resolves the environment again
-before `AppliedEnvironment::expires_at` and rewrites the files.
+it on a timer yet, which the same watcher would do.
 
 An image that can read a secret only from an environment variable falls
 back to environment references when its process sets
@@ -647,9 +678,13 @@ fields empty.
 ## Environment and secrets
 
 phase resolves an app's environment through starmap. starmap's resolution
-produces an `AppliedEnvironment`, a type that can list variable names and
-apply values to a `Command` but cannot return a value. It has no `Debug`,
-`Display` or `Serialize` implementation.
+produces an `AppliedEnvironment`, a type that can list variable names,
+apply values to a `Command`, and write one named value's bytes to a
+writer for a container's secret file, but cannot return a value. It has
+no `Debug`, `Display` or `Serialize` implementation. Its `write_value`
+returns an `Unsupported` error by default, so an implementation that
+predates it compiles, and phase reports a container secret file that it
+then cannot write.
 
 The plan names each process's variables and holds no value, literal or
 secret. The host program's `EnvironmentSource` supplies every value, and
@@ -665,11 +700,14 @@ A secret value takes only these paths:
 - for a host process's `command` readiness probe, from starmap's
   resolvers into the environment of the probe command that phase runs
   during `up`'s readiness wait;
-- for a container, from starmap's resolvers into phase, and from phase
-  through `docker exec -i` standard input into a file in the container's
-  tmpfs at `/run/secrets` (see [Container secrets](#container-secrets));
-  only an image that can read nothing but environment variables receives
-  it through the `docker compose up` child instead.
+- for a container, from starmap's resolvers through
+  `AppliedEnvironment::write_value` into phase's memory, which phase
+  overwrites with zeros afterwards, and from there through the standard
+  input of a `docker exec` that phase starts with no inherited value into
+  a file in the container's tmpfs at `/run/secrets` (see
+  [Container secrets](#container-secrets)); only a process that sets
+  `secret_delivery = "env"` receives it through the `docker compose up`
+  child instead.
 
 No value is written to a file, an argument list, a log, the run record or a
 status document. When a resolver cannot supply a value, for example because

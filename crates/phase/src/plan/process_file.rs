@@ -78,6 +78,9 @@ pub(super) struct ProcessFile {
     /// How a container process receives its secrets.
     #[serde(default, skip_serializing_if = "SecretDelivery::is_file")]
     secret_delivery: SecretDelivery,
+    /// The owner of the secret files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_owner: Option<String>,
 }
 
 /// A process that is not a oneshot states `once`.
@@ -118,6 +121,7 @@ impl TryFrom<ProcessFile> for ProcessPlan {
             restart: file.restart,
             stop: file.stop,
             secret_delivery: file.secret_delivery,
+            secret_owner: file.secret_owner,
         })
     }
 }
@@ -144,6 +148,7 @@ impl From<ProcessPlan> for ProcessFile {
             restart: process.restart,
             stop: process.stop,
             secret_delivery: process.secret_delivery,
+            secret_owner: process.secret_owner,
         }
     }
 }

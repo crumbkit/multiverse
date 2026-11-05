@@ -162,7 +162,7 @@ pub(crate) fn run_bounded(
 
 /// Reports whether the child `pid` has exited, and leaves it unreaped. A
 /// wait that a signal interrupts is tried again.
-fn exited(pid: Option<Pid>) -> io::Result<bool> {
+pub(crate) fn exited(pid: Option<Pid>) -> io::Result<bool> {
     let Some(pid) = pid else {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     };

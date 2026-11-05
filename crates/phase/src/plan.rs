@@ -339,6 +339,14 @@ pub struct ProcessPlan {
     /// [`SecretDelivery::File`], and receives its secrets in its keeper's
     /// environment.
     pub secret_delivery: SecretDelivery,
+    /// For a container process that receives its secrets as files, the
+    /// owner of the files as a numeric `uid:gid`, such as `999:999`. It is
+    /// the user that the app reads its secrets as, which an image that
+    /// starts as root and then switches to another user needs. `None` makes
+    /// the files belong to the app's run-as user, or else to the image's
+    /// own user, and phase refuses a process whose files would then belong
+    /// to root. A host process leaves it `None`.
+    pub secret_owner: Option<String>,
 }
 
 /// How a container process receives its secrets.
@@ -398,6 +406,7 @@ impl ProcessPlan {
             restart: Restart::No,
             stop: Stop::default(),
             secret_delivery: SecretDelivery::File,
+            secret_owner: None,
         }
     }
 }

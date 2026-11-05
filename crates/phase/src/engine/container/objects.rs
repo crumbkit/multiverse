@@ -28,7 +28,7 @@ use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
     CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeKey, VolumeName,
 };
-use crate::engine::container::secrets::{IMAGE_COMMAND_FORMAT, ImageCommand};
+use crate::engine::container::secrets::{IMAGE_CONFIG_FORMAT, ImageConfig};
 
 /// The label that docker gives the anonymous volumes of an image's
 /// `VOLUME` paths.
@@ -418,30 +418,30 @@ pub(crate) fn ensure_image(image: &str, deadline: Duration, cancel: &Cancel) -> 
     Ok(())
 }
 
-/// Returns the entrypoint and command of `image`, which docker has.
+/// Returns the entrypoint, command and user of `image`, which docker has.
 ///
 /// # Errors
 ///
 /// Returns the errors of `docker version` and [`Error::Failed`] when
 /// docker cannot inspect the image or prints something else.
-pub(crate) fn image_command(image: &str) -> Result<ImageCommand, Error> {
+pub(crate) fn image_config(image: &str) -> Result<ImageConfig, Error> {
     let printed = quick(
         [
             "image",
             "inspect",
             "--format",
-            IMAGE_COMMAND_FORMAT,
+            IMAGE_CONFIG_FORMAT,
             "--",
             image,
         ],
         "image inspect",
     )?
     .checked("image inspect", None)?;
-    ImageCommand::parse(&printed).ok_or_else(|| {
+    ImageConfig::parse(&printed).ok_or_else(|| {
         Error::failed(
             "image inspect",
             None,
-            "docker printed an entrypoint and command that phase cannot read",
+            "docker printed an entrypoint, command and user that phase cannot read",
         )
     })
 }

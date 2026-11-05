@@ -25,7 +25,9 @@
 //! process that receives such a file mounts the tmpfs and starts through
 //! phase's wrapper, which waits for the files, as [`super::secrets`] says.
 //! [`file_secrets`] returns the names that `up` writes after the container
-//! starts. A process whose plan sets
+//! starts. The service carries the label `mxv.secrets=files`, which
+//! `status` reads, and Docker's `no` restart policy, because a Docker
+//! restart empties the tmpfs. A process whose plan sets
 //! [`SecretDelivery::Env`] receives its
 //! secrets through private references like its other variables instead.
 
@@ -37,7 +39,7 @@ use serde_json::{Map, Value, json};
 use crate::engine::container::compose::{literal, variable_of};
 use crate::engine::container::names::{CONTAINER_LABEL, Scope, ServiceName, VolumeKey};
 use crate::engine::container::objects::stop_seconds;
-use crate::engine::container::secrets::{ImageCommand, SECRETS_DIR, SECRETS_MODE, entrypoint};
+use crate::engine::container::secrets::{ImageConfig, SECRETS_DIR, SECRETS_MODE, entrypoint};
 use crate::engine::containers::ContainerObjects;
 use crate::engine::run::order::sorted;
 use crate::error::{NotRunnable, PhaseError};
@@ -50,6 +52,19 @@ use crate::source::Source;
 
 #[cfg(test)]
 mod tests;
+
+/// The extension field of a service that holds its process's
+/// `secret_owner`, which Compose ignores, so that a new owner changes the
+/// service's plan hash and `up` replaces its container.
+const SECRET_OWNER_FIELD: &str = "x-phase-secret-owner";
+
+/// The label of a container whose process receives secret files, which
+/// `status` reads to tell a container that waits for its files after a
+/// restart from one that runs.
+pub(crate) const SECRETS_LABEL: &str = "mxv.secrets";
+
+/// The value of [`SECRETS_LABEL`].
+pub(crate) const SECRET_FILES: &str = "files";
 
 /// Returns the service of `process`, whose name follows the same rule.
 pub(crate) fn service(app: &AppPlan, process: &ProcessName) -> Result<ServiceName, PhaseError> {
@@ -277,7 +292,7 @@ fn path(path: &Path) -> String {
 ///
 /// A process that receives secrets as files starts through the wrapper,
 /// which replaces the image's entrypoint, and Docker then drops the
-/// image's command too. With `image_command`, the image's entrypoint and command
+/// image's command too. With `image_config`, the image's entrypoint and command
 /// as Docker reports them, the service's command is what the container
 /// would run without the wrapper. Without it, the service's command is the
 /// plan's, which is the form that [`plan_hash`] hashes.
@@ -289,7 +304,7 @@ fn path(path: &Path) -> String {
 pub(crate) fn compose_file(
     scope: &Scope,
     app: &AppPlan,
-    image_command: Option<&ImageCommand>,
+    image_config: Option<&ImageConfig>,
 ) -> Result<Value, PhaseError> {
     let Source::Image { image } = &app.source else {
         return Err(PhaseError::NotRunnable {
@@ -353,18 +368,25 @@ pub(crate) fn compose_file(
             "network_mode".to_owned(),
             Value::String("bridge".to_owned()),
         );
-        definition.insert(
-            "labels".to_owned(),
-            escaped(scope.labels(CONTAINER_LABEL, service.as_str())),
-        );
-        let command = match image_command {
+        let mut labels = scope.labels(CONTAINER_LABEL, service.as_str());
+        if let (false, Value::Object(labels)) = (secrets.is_empty(), &mut labels) {
+            labels.insert(
+                SECRETS_LABEL.to_owned(),
+                Value::String(SECRET_FILES.to_owned()),
+            );
+        }
+        definition.insert("labels".to_owned(), escaped(labels));
+        let command = match image_config {
             Some(image) if !secrets.is_empty() => image.argv(&process.run),
             _ => process.run.clone(),
         };
         if !secrets.is_empty() {
+            if let Some(owner) = &process.secret_owner {
+                definition.insert(SECRET_OWNER_FIELD.to_owned(), Value::String(literal(owner)));
+            }
             definition.insert(
                 "entrypoint".to_owned(),
-                entrypoint(secrets.into_iter()).into_iter().collect(),
+                entrypoint(secrets.iter().copied()).into_iter().collect(),
             );
         }
         if !command.is_empty() {
@@ -379,10 +401,15 @@ pub(crate) fn compose_file(
         definition.insert("environment".to_owned(), Value::Object(environment));
         definition.insert("ports".to_owned(), Value::Array(ports));
         definition.insert("volumes".to_owned(), Value::Array(mounts));
-        definition.insert(
-            "restart".to_owned(),
-            Value::String(restart_policy(&process.restart)),
-        );
+        // Docker's restart empties the tmpfs, and phase is not there to
+        // write the files again, so Docker never restarts a process that
+        // receives secret files.
+        let restart = if secrets.is_empty() {
+            restart_policy(&process.restart)
+        } else {
+            "no".to_owned()
+        };
+        definition.insert("restart".to_owned(), Value::String(restart));
         definition.insert(
             "stop_signal".to_owned(),
             Value::String(signal_name(process.stop.signal).to_owned()),
