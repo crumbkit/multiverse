@@ -1,8 +1,9 @@
 //! Tests of the container runner through `Phase::up`, `restart` and
 //! `down` against a real Docker daemon. Each test skips when no daemon
-//! answers or when `busybox:1.37.0` is not pulled, which the tests do not
-//! pull. Each test uses a workspace id of its own and removes what it
-//! created.
+//! answers, when the compose plugin is missing, or when `busybox:1.37.0`
+//! is not pulled, which the tests do not pull. CI pulls no image, so these
+//! tests skip there. Each test uses a workspace id of its own and removes
+//! what it created.
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -18,6 +19,7 @@ use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::phase::{Phase, UpDeadlines};
 use crate::plan::probe::{Probe, ProbeCheck};
+use crate::plan::restart::{Restart, RestartLimits};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::run::EntryState;
 use crate::record::store::RunStore;
@@ -50,6 +52,10 @@ fn docker(args: &[&str]) -> Option<String> {
 fn docker_ready() -> bool {
     if docker(&["version", "--format", "{{.Server.Version}}"]).is_none() {
         println!("skipping: no docker daemon answers");
+        return false;
+    }
+    if docker(&["compose", "version"]).is_none() {
+        println!("skipping: docker's compose plugin is not installed");
         return false;
     }
     if docker(&["image", "inspect", IMAGE]).is_none() {
@@ -178,10 +184,13 @@ impl Drop for World {
     }
 }
 
-/// Returns a TCP port on 127.0.0.1 that nothing held a moment ago.
-fn free_port() -> NonZeroU16 {
+/// Returns a TCP port on 127.0.0.1 and the listener that holds it, which
+/// the test drops just before phase publishes the port, so no other test
+/// takes the port meanwhile.
+fn free_port() -> (NonZeroU16, TcpListener) {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
-    NonZeroU16::new(listener.local_addr().unwrap().port()).unwrap()
+    let port = NonZeroU16::new(listener.local_addr().unwrap().port()).unwrap();
+    (port, listener)
 }
 
 /// Returns the container app `app` with one process, `server`, which runs
@@ -286,32 +295,79 @@ fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_output
 }
 
 #[test]
-fn a_log_probe_reads_the_containers_output_and_a_tcp_probe_waits_for_a_listener_inside() {
+fn a_log_probe_reads_the_containers_output() {
     if !docker_ready() {
         return;
     }
     let world = World::new();
-    let port = free_port();
-    let mut db = app(
-        "db",
-        "sleep 1; echo \"ready $MODE\"; exec nc -lk -p 8080 -e cat",
-    );
+    let mut db = app("db", "sleep 1; echo \"ready $MODE\"; exec sleep 60");
     db.processes[0].ready = Some(Probe::new(ProbeCheck::log(format!("^ready {MODE}$"))));
-    let mut web = app("web", "sleep 1; exec nc -lk -p 8080 -e cat");
-    web.ports.insert("http".parse().unwrap(), port);
-    web.processes[0]
-        .publish
-        .insert("http".parse().unwrap(), NonZeroU16::new(8080).unwrap());
-    web.processes[0].ready = Some(Probe::new(ProbeCheck::tcp("http".parse().unwrap())));
-    let plan = world.plan(vec![db, web]);
+    let plan = world.plan(vec![db]);
 
     let began = Instant::now();
     let report = world.up(&plan);
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
-    assert_eq!(outcome(&report, "web"), &AppOutcome::Started, "{report:?}");
-    assert!(began.elapsed() >= Duration::from_secs(2));
+    assert!(began.elapsed() >= Duration::from_secs(1));
     world.down();
+}
+
+#[test]
+fn a_tcp_probe_waits_for_a_listener_inside_the_container_and_not_for_dockers_proxy() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let (port, holder) = free_port();
+    let mut web = app("web", "sleep 4; exec nc -lk -p 8080 -e cat");
+    web.ports.insert("http".parse().unwrap(), port);
+    web.processes[0]
+        .publish
+        .insert("http".parse().unwrap(), NonZeroU16::new(8080).unwrap());
+    web.processes[0].ready = Some(Probe::new(ProbeCheck::tcp("http".parse().unwrap())));
+    let plan = world.plan(vec![web]);
+
+    drop(holder);
+    let began = Instant::now();
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "web"), &AppOutcome::Started, "{report:?}");
+    assert!(
+        began.elapsed() >= Duration::from_secs(3),
+        "{:?}",
+        began.elapsed()
+    );
+    world.down();
+}
+
+#[test]
+fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = app("db", "echo crashing; exit 3");
+    db.processes[0].restart = Restart::on_failure(RestartLimits::default());
+    db.processes[0].ready = Some(Probe::new(ProbeCheck::command(vec!["false".to_owned()])));
+    db.processes[0].ready_timeout = Duration::from_secs(300);
+    let plan = world.plan(vec![db]);
+
+    let began = Instant::now();
+    let report = world.up(&plan);
+
+    match outcome(&report, "db") {
+        AppOutcome::Failed {
+            problem: StartProblem::Exited { log_tail, .. },
+            ..
+        } => assert!(
+            log_tail.iter().any(|line| line == "crashing"),
+            "{log_tail:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // Without the restart check, the wait would last the 300-second
+    // ready timeout, or the 60-second deadline of the test.
+    assert!(began.elapsed() < Duration::from_secs(55));
 }
 
 #[test]
@@ -342,7 +398,7 @@ fn a_published_port_that_something_holds_fails_the_start_before_docker_runs() {
 }
 
 #[test]
-fn restart_recreates_the_container_and_up_leaves_a_running_one_alone() {
+fn restart_replaces_the_container_with_a_new_one() {
     if !docker_ready() {
         return;
     }
@@ -366,6 +422,18 @@ fn restart_recreates_the_container_and_up_leaves_a_running_one_alone() {
     let second = world.container("db", "server").unwrap();
     assert_ne!(first, second);
     assert!(docker(&["container", "inspect", &first]).is_none());
+    world.down();
+}
+
+#[test]
+fn up_leaves_a_running_container_of_the_same_plan_alone_and_replaces_a_stopped_or_changed_one() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![app("db", "exec sleep 60")]);
+    world.up(&plan);
+    let first = world.container("db", "server").unwrap();
 
     let report = world.up(&plan);
 
@@ -374,10 +442,18 @@ fn restart_recreates_the_container_and_up_leaves_a_running_one_alone() {
         &AppOutcome::AlreadyRunning,
         "{report:?}"
     );
-    assert_eq!(world.container("db", "server").unwrap(), second);
+    assert_eq!(world.container("db", "server").unwrap(), first);
 
-    docker(&["stop", "--time", "0", "--", &second]).unwrap();
+    docker(&["stop", "--time", "0", "--", &first]).unwrap();
     let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let second = world.container("db", "server").unwrap();
+    assert_ne!(first, second);
+    assert!(docker(&["container", "inspect", &first]).is_none());
+
+    let changed = world.plan(vec![app("db", "exec sleep 61")]);
+    let report = world.up(&changed);
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     let third = world.container("db", "server").unwrap();

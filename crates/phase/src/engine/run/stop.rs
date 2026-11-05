@@ -343,12 +343,13 @@ fn down_app(
 }
 
 /// Stops the recorded `containers` of `app` through the engine's container
-/// runner, records each one that is gone, and reports whether all are.
+/// runner, in reverse of their order in the record, which is dependency
+/// order, records each one that is gone, and reports whether all are.
 ///
 /// # Errors
 ///
-/// Returns the container runner's failure, and the errors of writing the
-/// record.
+/// Returns the container runner's first failure, after it records each
+/// container that is gone, and the errors of writing the record.
 pub(super) fn stop_containers(
     engine: &Engine<'_>,
     journal: &mut Journal<'_>,
@@ -370,15 +371,23 @@ pub(super) fn stop_containers(
         app,
         containers,
         deadline,
-    })?;
+    });
     let mut all = true;
+    let mut failure = None;
     for (process, how) in stopped {
         match how {
-            ContainerStopped::Stopped | ContainerStopped::AlreadyGone => {
+            Ok(ContainerStopped::Stopped | ContainerStopped::AlreadyGone) => {
                 journal.stopped(&ObjectKey::Container(app.clone(), process))?;
             }
-            ContainerStopped::Unstoppable => all = false,
+            Ok(ContainerStopped::Unstoppable) => all = false,
+            Err(error) => {
+                all = false;
+                failure.get_or_insert(error);
+            }
         }
     }
-    Ok(all)
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(all),
+    }
 }

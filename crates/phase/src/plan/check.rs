@@ -185,6 +185,10 @@ pub enum ProcessProblem {
     RelativeContainerPath(PathBuf),
     /// The process has an HTTP probe but no port.
     HttpProbeWithoutPort,
+    /// A container process's HTTP or TCP probe asks a port that the
+    /// process does not publish, so phase cannot reach it from the host.
+    #[non_exhaustive]
+    ProbePortUnpublished(PortName),
     /// The HTTP probe's path does not start with `/`.
     HttpPathWithoutSlash,
     /// The HTTP probe's path holds a space, a control character, a
@@ -371,6 +375,10 @@ impl fmt::Display for ProcessProblem {
                 )
             }
             Self::HttpProbeWithoutPort => formatter.write_str("it has an http probe but no port"),
+            Self::ProbePortUnpublished(port) => write!(
+                formatter,
+                "its probe asks the port {port}, which its container does not publish"
+            ),
             Self::HttpPathWithoutSlash => {
                 formatter.write_str("its http probe's path does not start with `/`")
             }
@@ -699,6 +707,25 @@ fn check_ports(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
     Ok(())
 }
 
+/// Returns the port that the HTTP or TCP probe `check` of the container
+/// process `process` asks and that the process does not publish. phase
+/// reaches a container's port only through its published host port.
+fn unpublished_probe_port(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    check: &ProbeCheck,
+) -> Option<PortName> {
+    if app.runner != RunnerKind::Container {
+        return None;
+    }
+    let port = match check {
+        ProbeCheck::Http { .. } => process.port.as_ref()?,
+        ProbeCheck::Tcp { port } => port,
+        ProbeCheck::Command { .. } | ProbeCheck::Log { .. } => return None,
+    };
+    (!process.publish.contains_key(port)).then(|| port.clone())
+}
+
 /// Checks a process's readiness probe.
 fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProblem> {
     let Some(probe) = &process.ready else {
@@ -707,7 +734,20 @@ fn check_probe(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
     if probe.period.is_zero() || probe.timeout.is_zero() {
         return Err(ProcessProblem::ZeroProbeTime);
     }
-    match &probe.check {
+    check_probe_check(app, process, &probe.check)?;
+    if let Some(port) = unpublished_probe_port(app, process, &probe.check) {
+        return Err(ProcessProblem::ProbePortUnpublished(port));
+    }
+    Ok(())
+}
+
+/// Checks what one attempt of a process's readiness probe checks.
+fn check_probe_check(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    check: &ProbeCheck,
+) -> Result<(), ProcessProblem> {
+    match check {
         ProbeCheck::Http { .. } if process.port.is_none() => {
             Err(ProcessProblem::HttpProbeWithoutPort)
         }

@@ -64,7 +64,7 @@ use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
 use crate::select::Selection;
 use crate::source::Source;
 
-mod order;
+pub(crate) mod order;
 mod stop;
 #[cfg(test)]
 mod tests;
@@ -464,7 +464,7 @@ impl Op<'_, '_> {
             match self
                 .engine
                 .containers
-                .running(&self.workspace, &app.name, &recorded)
+                .running(&self.workspace, app, &recorded)
             {
                 Ok(running) => running.into_iter().collect(),
                 Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
@@ -485,14 +485,12 @@ impl Op<'_, '_> {
             app,
             processes: &processes,
             env: self.env,
+            build: self.deadlines.build,
             deadline: self.deadlines.ready,
             cancel: self.cancel,
         };
-        let started = match self.engine.containers.start(&start) {
-            Ok(started) => started,
-            Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
-        };
-        if !started.containers.is_empty() {
+        let started = self.engine.containers.start(&start);
+        if started.containers.len() > started.removed.len() {
             self.started.push(Begun::Containers(app.name.clone()));
         }
         for (name, id) in started.networks {
@@ -503,12 +501,23 @@ impl Op<'_, '_> {
             self.journal
                 .started(&ObjectKey::Volume(name), Started::Volume)?;
         }
-        for (process, id) in started.containers {
-            let key = ObjectKey::Container(app.name.clone(), process);
-            self.journal.started(&key, Started::Container(id))?;
+        for container in started.containers {
+            let key = ObjectKey::Container(app.name.clone(), container.process);
+            self.journal
+                .started(&key, Started::Container(container.id, container.plan_hash))?;
+        }
+        for process in started.removed {
+            self.journal
+                .stopped(&ObjectKey::Container(app.name.clone(), process))?;
+        }
+        if let Some(error) = started.failure {
+            return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new()));
         }
         if self.cancel.is_cancelled() {
             return Ok(AppStep::Cancelled(Vec::new()));
+        }
+        if started.uncertain.is_some() {
+            return Ok(AppStep::Done(AppOutcome::StartUncertain, Vec::new()));
         }
         let Some((process, problem)) = started.problem else {
             return Ok(AppStep::Done(AppOutcome::Started, Vec::new()));

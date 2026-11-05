@@ -102,6 +102,7 @@ pub use crate::engine::container::lifecycle::{
     Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, Start, WorkspaceVolumes,
 };
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
+pub(crate) use crate::engine::container::objects::answers_within;
 pub use crate::engine::container::objects::{
     ContainerState, Inspected, OwnedContainer, answers, reinspect,
 };

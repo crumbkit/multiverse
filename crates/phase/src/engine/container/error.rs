@@ -51,6 +51,13 @@ pub enum ContainerError {
         /// The line of docker's standard error that says what failed.
         message: String,
     },
+    /// The caller cancelled the operation while a docker command ran, so
+    /// the engine stopped the command.
+    #[non_exhaustive]
+    Cancelled {
+        /// The docker command, such as `pull`.
+        operation: &'static str,
+    },
     /// A docker container or volume has a name of the scope, or is one that
     /// the run directory records, and its labels do not name the scope and
     /// the object, so the engine leaves it alone.
@@ -123,6 +130,9 @@ impl fmt::Display for ContainerError {
                 }
                 write!(formatter, ": {message}")
             }
+            Self::Cancelled { operation } => {
+                write!(formatter, "docker {operation} was cancelled")
+            }
             Self::Foreign { kind, name } => write!(
                 formatter,
                 "the labels of the docker {kind} {name} do not name its scope"
@@ -142,6 +152,7 @@ impl std::error::Error for ContainerError {
             | Self::NoAddressPool { .. }
             | Self::Unavailable { .. }
             | Self::Failed { .. }
+            | Self::Cancelled { .. }
             | Self::Foreign { .. } => None,
         }
     }

@@ -1,10 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::json;
 
+use crate::cancel::Cancel;
+use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
-use crate::engine::container::command::{message, says_missing};
+use crate::engine::container::command::{
+    ChildEnv as _, Referenced, message, run_program_until, says_missing,
+};
 use crate::engine::container::compose::{
     ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort, UpFailure, compose_env,
     compose_file, up_failure,
@@ -13,7 +18,7 @@ use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
-    ContainerState, mint_anonymous, mint_container, mint_volume, stop_timeout_of,
+    ContainerState, Status, mint_anonymous, mint_container, mint_volume, stop_timeout_of,
 };
 use crate::name::WorkspaceName;
 
@@ -719,4 +724,140 @@ fn a_containers_stop_timeout_is_read_from_its_config_and_is_none_when_docker_omi
     assert_eq!(stop_timeout_of(r#"{"Image":"busybox"}"#), None);
     assert_eq!(stop_timeout_of(r#"{"StopTimeout":null}"#), None);
     assert_eq!(stop_timeout_of("not json"), None);
+}
+
+#[test]
+fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
+    let scope = scope("reading-list");
+    let labels = container_labels(STORE, "reading-list", "db");
+    let printed = format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n\n4\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
+    assert_eq!(inspected.state, ContainerState::Running);
+    assert_eq!(inspected.status, Status::Restarting);
+    assert_eq!(inspected.restarts, 4);
+
+    let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
+    assert_eq!(inspected.status, Status::Running);
+    assert_eq!(inspected.restarts, 0);
+
+    let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
+    assert_eq!(inspected.state, ContainerState::Running);
+    assert_eq!(inspected.status, Status::Other);
+}
+
+#[test]
+fn a_command_whose_caller_cancels_stops_at_once_as_cancelled() {
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let began = now();
+    let ended = run_program_until(
+        "sleep".as_ref(),
+        ["30"],
+        "sleep",
+        Duration::from_secs(60),
+        &cancel,
+    );
+    assert!(
+        matches!(ended, Err(Error::Cancelled { operation: "sleep" })),
+        "{:?}",
+        ended.err()
+    );
+    assert!(now() - began < Duration::from_secs(5));
+}
+
+#[test]
+fn a_command_that_misses_its_deadline_is_stopped_as_failed() {
+    let began = now();
+    let ended = run_program_until(
+        "sleep".as_ref(),
+        ["30"],
+        "sleep",
+        Duration::from_millis(200),
+        &Cancel::new(),
+    );
+    assert!(
+        matches!(ended, Err(Error::Failed { .. })),
+        "{:?}",
+        ended.err()
+    );
+    assert!(now() - began < Duration::from_secs(5));
+}
+
+/// An environment that holds `MODE`, with a test value.
+struct ModeOnly;
+
+impl crate::env::AppliedEnvironment for ModeOnly {
+    fn names(&self) -> std::collections::BTreeSet<String> {
+        ["MODE".to_owned()].into()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(
+        &self,
+        command: &mut std::process::Command,
+        reference: &dyn Fn(&str) -> Option<String>,
+    ) {
+        if let Some(name) = reference("MODE") {
+            command.env(name, "test-mode");
+        }
+    }
+}
+
+#[test]
+fn a_compose_child_inherits_no_private_name_and_receives_only_its_own_values() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test builds a command that it never starts, to read its variables"
+    )]
+    let mut command = std::process::Command::new("docker");
+    let cleared = ["MXV_ENV_0_0".to_owned(), "MXV_ENV_1_0".to_owned()];
+    let refer = |name: &str| (name == "MODE").then(|| "MXV_ENV_0_0".to_owned());
+    Referenced {
+        environment: &ModeOnly,
+        reference: &refer,
+        cleared: &cleared,
+    }
+    .set_on(&mut command);
+    let envs: BTreeMap<String, Option<String>> = command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(envs["MXV_ENV_0_0"], Some("test-mode".to_owned()));
+    assert_eq!(envs["MXV_ENV_1_0"], None);
+}
+
+#[test]
+fn a_port_whose_connection_stays_open_answers_within_a_short_timeout_and_not_once_cancelled() {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let began = now();
+    assert!(crate::engine::container::answers_within(
+        port,
+        Duration::from_millis(100),
+        &Cancel::new()
+    ));
+    assert!(now() - began < Duration::from_millis(300));
+    let cancel = Cancel::new();
+    cancel.cancel();
+    assert!(!crate::engine::container::answers_within(
+        port,
+        Duration::from_secs(1),
+        &cancel
+    ));
+    drop(listener);
 }

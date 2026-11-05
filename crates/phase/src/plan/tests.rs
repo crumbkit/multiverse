@@ -810,3 +810,30 @@ fn a_oneshot_read_from_json_without_once_runs_on_every_up() {
         ProcessKind::Oneshot { once: false }
     );
 }
+
+#[test]
+fn a_plan_refuses_a_container_probe_on_a_port_the_process_does_not_publish() {
+    let mut db = container_app("db");
+    db.ports
+        .insert("admin".parse().unwrap(), NonZeroU16::new(41_002).unwrap());
+    db.processes[0].ready = Some(Probe::new(ProbeCheck::Tcp {
+        port: "admin".parse().unwrap(),
+    }));
+    assert_eq!(
+        process_problem(db.clone()),
+        ProcessProblem::ProbePortUnpublished("admin".parse().unwrap())
+    );
+
+    db.processes[0].port = Some("admin".parse().unwrap());
+    db.processes[0].ready = Some(Probe::new(ProbeCheck::http("/health".to_owned())));
+    assert_eq!(
+        process_problem(db.clone()),
+        ProcessProblem::ProbePortUnpublished("admin".parse().unwrap())
+    );
+
+    db.processes[0].ready = Some(Probe::new(ProbeCheck::Tcp {
+        port: "pg".parse().unwrap(),
+    }));
+    db.processes[0].port = None;
+    assert!(plan(vec![db]).is_ok());
+}

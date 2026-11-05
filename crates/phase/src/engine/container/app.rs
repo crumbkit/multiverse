@@ -32,12 +32,14 @@ use serde_json::{Map, Value, json};
 
 use crate::engine::container::compose::{literal, variable_of};
 use crate::engine::container::names::{CONTAINER_LABEL, Scope, ServiceName, VolumeKey};
+use crate::engine::container::objects::stop_seconds;
 use crate::engine::containers::ContainerObjects;
+use crate::engine::run::order::sorted;
 use crate::error::{NotRunnable, PhaseError};
 use crate::name::{ProcessName, VolumeName};
 use crate::plan::restart::{Restart, StopSignal};
-use crate::plan::{AppPlan, ProcessKind, ProcessPlan};
-use crate::record::run::VolumeLifetime;
+use crate::plan::{AppPlan, ProcessKind, ProcessPlan, digest};
+use crate::record::run::{PlanHash, VolumeLifetime};
 use crate::record::{DockerName, MOST_DOCKER_NAME_BYTES};
 use crate::source::Source;
 
@@ -80,6 +82,22 @@ pub(crate) fn reference(app: &AppPlan, process: &ProcessName, name: &str) -> Opt
         .find(|(_, plan)| &plan.name == process)?;
     let variable = variables(app, plan).position(|known| known == name)?;
     Some(variable_of(service, variable))
+}
+
+/// Returns the name of every variable of a `docker compose up` child that
+/// the compose file of `app` refers to, for every process. A child removes
+/// each of them from what it inherits, and then sets the ones of its own
+/// process, so Compose reads no inherited value under one of these names.
+pub(crate) fn references(app: &AppPlan) -> Vec<String> {
+    app.processes
+        .iter()
+        .enumerate()
+        .flat_map(|(service, process)| {
+            variables(app, process)
+                .enumerate()
+                .map(move |(variable, _)| variable_of(service, variable))
+        })
+        .collect()
 }
 
 /// Returns the workspace's volumes that `process` of `app` mounts: its
@@ -151,7 +169,14 @@ fn docker_name(app: &AppPlan, process: &ProcessName, text: &str) -> Result<Docke
 /// whose container name is too long.
 pub(crate) fn objects(scope: &Scope, app: &AppPlan) -> Result<ContainerObjects, PhaseError> {
     let mut objects = ContainerObjects::default();
-    for process in &app.processes {
+    // The containers are in dependency order, which the run record keeps,
+    // so `down` stops them in reverse.
+    let ordered = sorted(
+        &app.processes,
+        |process| &process.name,
+        |process| &process.depends,
+    );
+    for process in ordered {
         runnable(app, process)?;
         let name = scope.container_name(&service(app, &process.name)?);
         objects.containers.push((
@@ -203,9 +228,27 @@ fn restart_policy(restart: &Restart) -> String {
     }
 }
 
-/// Returns a duration as Compose reads it, in milliseconds.
-fn duration(duration: Duration) -> String {
-    format!("{}ms", duration.as_millis())
+/// Returns a stop grace as Compose reads it, in the whole seconds that
+/// `docker stop` takes: rounded up, and at least one second.
+fn grace(grace: Duration) -> String {
+    format!("{}s", stop_seconds(grace))
+}
+
+/// Returns `labels` with each value as compose file text, in which Compose
+/// interpolates nothing, so a label holds its value as written.
+fn escaped(labels: Value) -> Value {
+    match labels {
+        Value::Object(labels) => Value::Object(
+            labels
+                .into_iter()
+                .map(|(key, value)| match value {
+                    Value::String(text) => (key, Value::String(literal(&text))),
+                    other => (key, other),
+                })
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// Returns a path inside a container or on the host as compose file text,
@@ -278,7 +321,7 @@ pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseE
         );
         definition.insert(
             "labels".to_owned(),
-            scope.labels(CONTAINER_LABEL, service.as_str()),
+            escaped(scope.labels(CONTAINER_LABEL, service.as_str())),
         );
         if !process.run.is_empty() {
             definition.insert(
@@ -306,7 +349,7 @@ pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseE
         );
         definition.insert(
             "stop_grace_period".to_owned(),
-            Value::String(duration(process.stop.grace)),
+            Value::String(grace(process.stop.grace)),
         );
         services.insert(service.as_str().to_owned(), Value::Object(definition));
     }
@@ -318,4 +361,28 @@ pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseE
         );
     }
     Ok(json!({"services": services, "volumes": volumes}))
+}
+
+/// Returns the hash of the part of `app` that makes the container of
+/// `process` in `scope`: its service in the compose file, which holds the
+/// image, command, user, ports, mounts, labels, restart policy and stop,
+/// and the names of its variables but no value. A container whose
+/// recorded hash differs runs another plan, and `up` replaces it.
+///
+/// # Errors
+///
+/// Returns the errors of [`compose_file`].
+pub(crate) fn plan_hash(
+    scope: &Scope,
+    app: &AppPlan,
+    process: &ProcessName,
+) -> Result<PlanHash, PhaseError> {
+    let file = compose_file(scope, app)?;
+    let service = service(app, process)?;
+    let part = file
+        .get("services")
+        .and_then(|services| services.get(service.as_str()))
+        .map(Value::to_string)
+        .unwrap_or_default();
+    Ok(PlanHash::new(digest(part.as_bytes())))
 }

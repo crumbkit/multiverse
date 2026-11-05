@@ -212,6 +212,12 @@ pub(crate) struct ContainerEntry {
     pub(crate) state: EntryState,
     /// The container's id, once it has started.
     pub(crate) id: Option<ContainerId>,
+    /// The hash of the container's part of the plan that phase started it
+    /// from, so a later `up` replaces a container whose part changed. It
+    /// is `None` before the container starts, and a record that lacks it
+    /// reads as `None`, which no plan matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_hash: Option<PlanHash>,
 }
 
 /// A Docker network.
@@ -334,8 +340,8 @@ impl fmt::Display for ObjectKey {
 pub(crate) enum Started {
     /// A keeper or host process.
     Host(HostProcess),
-    /// A container, by its id.
-    Container(ContainerId),
+    /// A container, by its id, with the hash of its part of the plan.
+    Container(ContainerId, PlanHash),
     /// A network, by its id.
     Network(NetworkId),
     /// A volume, which its name identifies.
@@ -420,6 +426,7 @@ impl RunRecord {
             name,
             state: EntryState::Planned,
             id: None,
+            plan_hash: None,
         });
         self
     }
@@ -574,13 +581,14 @@ impl RunRecord {
                 entry.state = EntryState::Running;
                 entry.restarts = 0;
             }
-            (ObjectKey::Container(app, process), Started::Container(id)) => {
+            (ObjectKey::Container(app, process), Started::Container(id, plan_hash)) => {
                 let entry = self
                     .containers
                     .iter_mut()
                     .find(|entry| &entry.app == app && &entry.process == process)
                     .ok_or_else(unplanned)?;
                 entry.id = Some(id);
+                entry.plan_hash = Some(plan_hash);
                 entry.state = EntryState::Running;
             }
             (ObjectKey::Network(name), Started::Network(id)) => {
@@ -678,6 +686,7 @@ impl RunRecord {
             .ok_or_else(|| Unplanned(ObjectKey::Container(app.clone(), process.clone())))?;
         entry.state = EntryState::Planned;
         entry.id = None;
+        entry.plan_hash = None;
         Ok(())
     }
 

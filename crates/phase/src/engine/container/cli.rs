@@ -21,6 +21,7 @@ use crate::engine::container::command::{
 };
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
+use crate::engine::container::objects::stop_seconds;
 use crate::engine::container::{ContainerError, ContainerState};
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 
@@ -132,14 +133,6 @@ impl DockerCli {
             Err(error) => unavailable(&error),
         }
     }
-}
-
-/// Returns the whole seconds that `docker stop --time` gives a container
-/// for `wait`: `wait` rounded up, and at least one second, so a wait under
-/// a second never stops the container at once.
-fn stop_seconds(wait: Duration) -> u64 {
-    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-    seconds.max(1)
 }
 
 /// Returns the failure of a Docker that `error` shows does not answer.

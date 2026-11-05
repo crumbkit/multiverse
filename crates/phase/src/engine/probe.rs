@@ -137,7 +137,7 @@ impl Check<'_> {
             Self::Http { port, path } => http::attempt(*port, path, timeout, cancel),
             Self::Tcp { port } => http::connect(*port, timeout).map(drop).into(),
             Self::Published { port } => {
-                if crate::engine::container::answers(*port) {
+                if crate::engine::container::answers_within(*port, timeout, cancel) {
                     Attempt::Passed
                 } else {
                     Attempt::Failed(Failure::Connect(io::ErrorKind::ConnectionRefused))

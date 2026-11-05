@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{compose_file, objects, reference};
+use super::{compose_file, objects, plan_hash, reference, references};
 use crate::engine::container::names::{Identity, Scope};
 use crate::error::{NotRunnable, PhaseError};
 use crate::plan::container::BindMount;
@@ -115,7 +115,7 @@ fn an_apps_compose_file_runs_each_process_as_a_labelled_service_and_holds_no_val
                     "volumes": mounts(vec![json!({"type": "volume", "source": "data", "target": "/var/lib/postgresql/data"})]),
                     "restart": "on-failure",
                     "stop_signal": "SIGINT",
-                    "stop_grace_period": "2500ms",
+                    "stop_grace_period": "3s",
                 },
                 "worker": {
                     "image": "postgres:17",
@@ -129,7 +129,7 @@ fn an_apps_compose_file_runs_each_process_as_a_labelled_service_and_holds_no_val
                     "volumes": mounts(Vec::new()),
                     "restart": "no",
                     "stop_signal": "SIGTERM",
-                    "stop_grace_period": "10000ms",
+                    "stop_grace_period": "10s",
                 },
             },
             "volumes": {
@@ -250,4 +250,82 @@ fn each_restart_policy_maps_to_dockers_own_policy() {
     app.processes[1].restart = Restart::No;
     let file = compose_file(&scope("db"), &app).unwrap();
     assert_eq!(file["services"]["worker"]["restart"], "no");
+}
+
+#[test]
+fn a_stop_grace_is_written_in_whole_seconds_rounded_up_and_at_least_one() {
+    let mut app = db();
+    app.processes[0].stop.grace = Duration::from_millis(1);
+    app.processes[1].stop.grace = Duration::ZERO;
+    let file = compose_file(&scope("db"), &app).unwrap();
+    assert_eq!(file["services"]["server"]["stop_grace_period"], "1s");
+    assert_eq!(file["services"]["worker"]["stop_grace_period"], "1s");
+    app.processes[0].stop.grace = Duration::from_millis(4001);
+    let file = compose_file(&scope("db"), &app).unwrap();
+    assert_eq!(file["services"]["server"]["stop_grace_period"], "5s");
+}
+
+#[test]
+fn an_apps_containers_are_planned_in_dependency_order() {
+    let mut app = db();
+    app.processes[0].depends.push(name("worker"));
+    let found = objects(&scope("db"), &app).unwrap();
+    let order: Vec<&str> = found
+        .containers
+        .iter()
+        .map(|(process, _)| process.as_str())
+        .collect();
+    assert_eq!(order, ["worker", "server"]);
+}
+
+#[test]
+fn a_processs_plan_hash_changes_only_with_its_own_part_of_the_app() {
+    let scope = scope("db");
+    let app = db();
+    let server = plan_hash(&scope, &app, &name("server")).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker")).unwrap();
+    assert_ne!(server, worker);
+    assert_eq!(plan_hash(&scope, &db(), &name("server")).unwrap(), server);
+
+    let mut changed = db();
+    changed.processes[1].run.push("again".to_owned());
+    assert_eq!(
+        plan_hash(&scope, &changed, &name("server")).unwrap(),
+        server
+    );
+    assert_ne!(
+        plan_hash(&scope, &changed, &name("worker")).unwrap(),
+        worker
+    );
+
+    let mut image = db();
+    image.source = Source::image(name("postgres:18"));
+    assert_ne!(plan_hash(&scope, &image, &name("server")).unwrap(), server);
+}
+
+#[test]
+fn a_label_value_with_a_dollar_sign_reaches_the_compose_file_escaped() {
+    let scope = Scope::app(
+        Identity {
+            id: name(WORKSPACE_ID),
+            run_record: PathBuf::from("/state/$HOME/runs.json"),
+        },
+        &name("db"),
+    );
+    let file = compose_file(&scope, &db()).unwrap();
+    assert_eq!(
+        file["services"]["server"]["labels"]["mxv.run-record"],
+        "/state/$$HOME/runs.json"
+    );
+}
+
+#[test]
+fn the_references_of_an_app_are_every_private_variable_its_compose_file_names() {
+    let app = db();
+    let file = compose_file(&scope("db"), &app).unwrap().to_string();
+    let all = references(&app);
+    assert_eq!(all, ["MXV_ENV_0_0", "MXV_ENV_0_1", "MXV_ENV_1_0"]);
+    for name in &all {
+        assert!(file.contains(&format!("${{{name}:-}}")), "{name}");
+    }
 }

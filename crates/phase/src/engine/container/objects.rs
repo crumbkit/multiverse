@@ -20,8 +20,10 @@ use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
+use crate::cancel::Cancel;
+use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
-use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run};
+use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run, run_until};
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
     CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeKey, VolumeName,
@@ -76,6 +78,29 @@ impl ContainerState {
     }
 }
 
+/// Docker's exact status of a container, where phase's container runner
+/// needs more than [`ContainerState`] says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Status {
+    /// The container runs.
+    Running,
+    /// Docker is restarting the container after it exited.
+    Restarting,
+    /// Any other status, such as `paused`, `created` or `exited`.
+    Other,
+}
+
+impl Status {
+    /// Returns the status that docker prints as `<status> <exit code>`.
+    fn parse(printed: &str) -> Self {
+        match printed.split_whitespace().next() {
+            Some("running") => Self::Running,
+            Some("restarting") => Self::Restarting,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// A container whose labels name its scope and service, as an inspection
 /// found them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +134,10 @@ pub struct Inspected {
     pub(crate) container: OwnedContainer,
     /// Its state.
     pub state: ContainerState,
+    /// Its exact status.
+    pub(crate) status: Status,
+    /// How many times Docker has restarted it under its restart policy.
+    pub(crate) restarts: u32,
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
     pub(crate) started: String,
@@ -163,7 +192,7 @@ impl Volume {
 /// [`mint_container`] reads.
 fn container_format() -> String {
     format!(
-        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}",
+        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.RestartCount}}}}",
         labels_format(".Config.Labels")
     )
 }
@@ -200,7 +229,9 @@ pub(super) fn mint_container(
         container: Some(service.as_str().to_owned()),
         message: format!("docker printed {printed_id:?} as the container's id"),
     })?;
-    let state = ContainerState::parse(lines.next().unwrap_or_default());
+    let printed_state = lines.next().unwrap_or_default();
+    let state = ContainerState::parse(printed_state);
+    let status = Status::parse(printed_state);
     let started = lines.next().unwrap_or_default().trim().to_owned();
     let prefix = scope.volume_prefix();
     let anonymous = lines
@@ -211,6 +242,10 @@ pub(super) fn mint_container(
         .filter_map(|volume| VolumeName::new(volume).ok())
         .map(|name| AnonymousVolume { name })
         .collect();
+    let restarts = lines
+        .next()
+        .and_then(|line| line.trim().parse().ok())
+        .unwrap_or_default();
     Ok(Inspected {
         container: OwnedContainer {
             scope: scope.clone(),
@@ -218,6 +253,8 @@ pub(super) fn mint_container(
             id,
         },
         state,
+        status,
+        restarts,
         started,
         anonymous,
     })
@@ -323,17 +360,81 @@ pub fn reinspect(container: &OwnedContainer) -> Result<Option<Inspected>, Error>
 ///
 /// Returns the errors of `docker version` and [`Error::Failed`].
 pub(crate) fn stop(container: &OwnedContainer, grace: Duration) -> Result<(), Error> {
-    let seconds = grace.as_secs().to_string();
+    let seconds = stop_seconds(grace);
     let stopped = run(
-        ["stop", "--time", &seconds, "--", container.id.as_str()],
+        stop_args(seconds, container),
         ComposeEnv::default(),
         "stop",
-        grace + DOCKER_DEADLINE,
+        Duration::from_secs(seconds) + DOCKER_DEADLINE,
     )?;
     if !stopped.missing() {
         stopped.checked("stop", Some(container.service.as_str()))?;
     }
     Ok(())
+}
+
+/// Stops `container` as [`stop`] does, and stops waiting for docker with
+/// [`Error::Cancelled`] once `cancel` is set.
+///
+/// # Errors
+///
+/// Returns the errors of [`stop`] and [`Error::Cancelled`].
+pub(crate) fn stop_until(
+    container: &OwnedContainer,
+    grace: Duration,
+    cancel: &Cancel,
+) -> Result<(), Error> {
+    let seconds = stop_seconds(grace);
+    let stopped = run_until(
+        stop_args(seconds, container),
+        "stop",
+        Duration::from_secs(seconds) + DOCKER_DEADLINE,
+        cancel,
+    )?;
+    if !stopped.missing() {
+        stopped.checked("stop", Some(container.service.as_str()))?;
+    }
+    Ok(())
+}
+
+/// Pulls `image` unless docker already has it, within `deadline`, and
+/// stops the pull with [`Error::Cancelled`] once `cancel` is set.
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`Error::Failed`] when the
+/// pull fails or misses its deadline.
+pub(crate) fn ensure_image(image: &str, deadline: Duration, cancel: &Cancel) -> Result<(), Error> {
+    let found = quick(
+        ["image", "inspect", "--format", "{{.Id}}", "--", image],
+        "image inspect",
+    )?;
+    if !found.missing() {
+        found.checked("image inspect", None)?;
+        return Ok(());
+    }
+    run_until(["pull", "--quiet", "--", image], "pull", deadline, cancel)?.checked("pull", None)?;
+    Ok(())
+}
+
+/// Returns the whole seconds that `docker stop --time` gives a container
+/// for `wait`: `wait` rounded up, and at least one second, so a wait under
+/// a second never stops the container at once.
+pub(crate) fn stop_seconds(wait: Duration) -> u64 {
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    seconds.max(1)
+}
+
+/// Returns the arguments of `docker stop` of `container` that waits
+/// `seconds` after the stop signal.
+fn stop_args(seconds: u64, container: &OwnedContainer) -> [String; 5] {
+    [
+        "stop".to_owned(),
+        "--time".to_owned(),
+        seconds.to_string(),
+        "--".to_owned(),
+        container.id.as_str().to_owned(),
+    ]
 }
 
 /// Removes `container`. Its named and anonymous volumes stay. A container
@@ -526,19 +627,48 @@ pub(crate) fn follow_args(container: &OwnedContainer, since: Option<&str>) -> Ve
 /// open for 300 ms or the container sends data.
 #[must_use]
 pub fn answers(port: u16) -> bool {
+    answers_within(port, PROBE_WAIT + PROBE_WAIT, &Cancel::new())
+}
+
+/// Reports whether something inside a container answers on the host port
+/// `port`, as [`answers`] describes, within `timeout`. A connection that
+/// stays open until `timeout` ends, when that comes before 300 ms, counts
+/// as answering. It reports no answer once `cancel` is set.
+pub(crate) fn answers_within(port: u16, timeout: Duration, cancel: &Cancel) -> bool {
+    let began = now();
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, PROBE_WAIT) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, PROBE_WAIT.min(timeout)) else {
         return false;
     };
-    if stream.set_read_timeout(Some(PROBE_WAIT)).is_err() {
-        return false;
-    }
+    let hold = PROBE_WAIT.min(timeout.saturating_sub(began.elapsed()));
+    let held = now();
     let mut byte = [0_u8; 1];
-    match stream.read(&mut byte) {
-        Ok(read) => read > 0,
-        Err(error) => matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        ),
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let left = hold.saturating_sub(held.elapsed());
+        if left.is_zero() {
+            return true;
+        }
+        if stream
+            .set_read_timeout(Some(left.min(ANSWER_POLL)))
+            .is_err()
+        {
+            return false;
+        }
+        match stream.read(&mut byte) {
+            Ok(read) => return read > 0,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return false,
+        }
     }
 }
+
+/// The longest that [`answers_within`] reads before it checks its cancel
+/// flag again.
+const ANSWER_POLL: Duration = Duration::from_millis(50);

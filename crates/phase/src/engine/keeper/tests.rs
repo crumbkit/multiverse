@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
-use super::spawn::{command_line, read_handshake};
+use super::spawn::{command_line, deadline_after, read_handshake};
 use super::spec::{Handshake, NotInherited, read_spec, write_handshake};
 use super::supervise::keep;
 use super::{
@@ -989,4 +989,14 @@ fn a_keeper_environment_shows_its_names_and_no_value() {
 
     assert!(shown.contains("GREETING"));
     assert!(!shown.contains("hello"));
+}
+
+#[test]
+fn a_stop_deadline_from_a_wait_too_long_for_the_clock_is_a_century_ahead() {
+    let before = Instant::now();
+    let deadline = deadline_after(Duration::MAX);
+    assert!(deadline > before + Duration::from_secs(99 * 365 * 24 * 60 * 60));
+    let soon = deadline_after(Duration::from_secs(2));
+    assert!(soon >= before + Duration::from_secs(2));
+    assert!(soon < Instant::now() + Duration::from_secs(3));
 }

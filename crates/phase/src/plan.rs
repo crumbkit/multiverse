@@ -116,26 +116,30 @@ impl Plan {
     /// different starting values, which detect a change and are not meant
     /// to resist a forged plan.
     pub(crate) fn digest(&self) -> [u8; 32] {
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        const OFFSETS: [u64; 4] = [
-            0xcbf2_9ce4_8422_2325,
-            0x8422_2325_cbf2_9ce4,
-            0x9ce4_8422_2325_cbf2,
-            0x2325_cbf2_9ce4_8422,
-        ];
         // A plan always serializes, since its fields are plain data.
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
-        let mut digest = [0; 32];
-        for (lane, offset) in OFFSETS.into_iter().enumerate() {
-            let hash = bytes.iter().fold(offset, |hash, byte| {
-                (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
-            });
-            if let Some(slot) = digest.get_mut(lane * 8..lane * 8 + 8) {
-                slot.copy_from_slice(&hash.to_be_bytes());
-            }
-        }
-        digest
+        digest(&serde_json::to_vec(self).unwrap_or_default())
     }
+}
+
+/// Returns the 32-byte digest of `bytes` that [`Plan::digest`] describes.
+pub(crate) fn digest(bytes: &[u8]) -> [u8; 32] {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    const OFFSETS: [u64; 4] = [
+        0xcbf2_9ce4_8422_2325,
+        0x8422_2325_cbf2_9ce4,
+        0x9ce4_8422_2325_cbf2,
+        0x2325_cbf2_9ce4_8422,
+    ];
+    let mut digest = [0; 32];
+    for (lane, offset) in OFFSETS.into_iter().enumerate() {
+        let hash = bytes.iter().fold(offset, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+        });
+        if let Some(slot) = digest.get_mut(lane * 8..lane * 8 + 8) {
+            slot.copy_from_slice(&hash.to_be_bytes());
+        }
+    }
+    digest
 }
 
 /// The version of the plan's JSON form.

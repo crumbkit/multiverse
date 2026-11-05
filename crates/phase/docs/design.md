@@ -370,9 +370,33 @@ input, so the file never reaches the disk.
 The plan's restart policy maps to Docker's: `no` to `no`, `on-failure` to
 `on-failure`, or `on-failure:N` with a maximum of `N`, and `always` to
 `unless-stopped`. Docker's backoff replaces the plan's backoff, and the
-plan's maximum does not apply to `always`. `up` leaves a container alone
-and reports it as already running when Docker still has the recorded id,
-the container's labels name the workspace, app and process, and it runs.
+plan's maximum does not apply to `always`. While phase waits for a
+container to be ready, a container that Docker is restarting, or has
+restarted since it was created, has ended, so a container that crashes in
+a loop fails to start with the last lines of its output.
+
+The run record keeps, for each container, a hash of the process's service
+in the compose file, which holds no value of a variable. `up` leaves a
+container alone and reports it as already running when Docker still has
+the recorded id, the container's labels name the workspace, app and
+process, Docker's status is exactly `running`, and the recorded hash is
+the hash of the process's service in the new plan. `up` replaces every
+other container.
+
+`up` pulls the app's image before it removes any container, within the
+build deadline, and resolves each process's environment before it removes
+the process's old container, so a pull or a resolver that fails leaves the
+old containers running. `docker compose up` then pulls nothing. A pull,
+`docker compose up` and the removal of an old container stop when the
+caller cancels. A deadline that cuts off the wait for a container leaves
+the app's start uncertain, as it does for a host process.
+
+`down` stops an app's containers in reverse dependency order. Each
+container gets its own stop grace, cut to what is left before the
+deadline. A container that Docker does not run, such as one that it is
+restarting, is removed at once. A Docker failure on one container does not
+stop `down` from stopping the others. It records each container that is
+gone and then reports the first failure.
 
 The labels are `mxv.workspace-id`, the workspace's stable id, which is 32
 lowercase hex digits that mxv mints when it creates the workspace and keeps
@@ -441,7 +465,13 @@ bare name, because Compose would then read it from the child's own
 environment, and a container variable named `PATH` or `DOCKER_HOST` would
 change which docker program or daemon the child uses. With this fallback,
 `docker inspect` and every process in the container can read the value, and
-a new value means recreating the container.
+a new value means recreating the container. Compose also hashes each
+service's interpolated values into the `com.docker.compose.config-hash`
+label of its container, so that label changes with a value. The hash
+does not reveal a value, but it does show that a value changed.
+
+Until P3 lands, phase refuses a container process that receives a secret,
+and reaches only its plain variables through environment references.
 
 The eval `/evals/container-secret-delivery-orbstack` in the owner's board
 measured each option on OrbStack 2.2.5 with test values. Compose secrets
@@ -802,7 +832,9 @@ and redesigns are the evidence for each one.
   again. The default resolves it again when a value has expired.
 - phase recreates a container to restart it; it never uses
   `docker restart`, which keeps the environment the container was created
-  with.
+  with. A crash restart of a container is Docker's, under the restart
+  policy, so it keeps the environment the container was created with, and
+  only `phase restart` or a changed plan resolves it again.
 
 ### Concurrency
 

@@ -9,7 +9,7 @@ use crate::env::EnvironmentSource;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::AppPlan;
-use crate::record::run::{ContainerEntry, NetworkId, VolumeLifetime};
+use crate::record::run::{ContainerEntry, NetworkId, PlanHash, VolumeLifetime};
 use crate::record::{ContainerId, DockerName};
 use crate::report::StartProblem;
 
@@ -39,18 +39,21 @@ pub(crate) trait ContainerRunner {
     /// resolving each one's environment through `start.env`, and waits for
     /// each to be ready, until `start.deadline` or `start.cancel`.
     ///
-    /// # Errors
-    ///
-    /// Returns the failure that kept Docker from acting, such as
-    /// [`PhaseError::Docker`]. A process that started and did not become
-    /// ready is no error, and [`ContainersStarted::problem`] names it.
-    fn start(&self, start: &ContainerStart<'_>) -> Result<ContainersStarted, PhaseError>;
+    /// It reports every container that it created, even when a failure
+    /// ended the start. [`ContainersStarted::failure`] holds the failure
+    /// that kept Docker from acting, such as [`PhaseError::Docker`], and
+    /// [`ContainersStarted::removed`] the containers that the start removed
+    /// after it. A process that started and did not become ready is no
+    /// failure, and [`ContainersStarted::problem`] names it.
+    fn start(&self, start: &ContainerStart<'_>) -> ContainersStarted;
 
     /// Returns the processes of `containers`, containers of `app` of
     /// `workspace` that the run record names by id, whose container still
-    /// runs: Docker has the recorded id, the container's labels name the
-    /// workspace, app and process, and it is running. `up` leaves those
-    /// containers alone and reports them as already running.
+    /// runs as `app` plans it: Docker has the recorded id, the container's
+    /// labels name the workspace, app and process, it is running, and the
+    /// record's plan hash is the hash of its part of `app`. `up` leaves
+    /// those containers alone and reports them as already running, and
+    /// replaces the others.
     ///
     /// # Errors
     ///
@@ -59,21 +62,19 @@ pub(crate) trait ContainerRunner {
     fn running(
         &self,
         workspace: &WorkspaceId,
-        app: &AppName,
+        app: &AppPlan,
         containers: &[ContainerEntry],
     ) -> Result<Vec<ProcessName>, PhaseError>;
 
-    /// Stops and removes the containers of `stop.containers`, until
-    /// `stop.deadline`, and returns what happened to each, by process.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure that kept Docker from acting, such as
-    /// [`PhaseError::Docker`].
+    /// Stops and removes the containers of `stop.containers`, in reverse
+    /// order, until `stop.deadline`, and returns what happened to each, by
+    /// process. A failure that kept Docker from acting on one container,
+    /// such as [`PhaseError::Docker`], is that container's result, and the
+    /// stop goes on to the next.
     fn stop(
         &self,
         stop: &ContainerStop<'_>,
-    ) -> Result<Vec<(ProcessName, ContainerStopped)>, PhaseError>;
+    ) -> Vec<(ProcessName, Result<ContainerStopped, PhaseError>)>;
 }
 
 /// The Docker objects that a container app creates.
@@ -97,6 +98,8 @@ pub(crate) struct ContainerStart<'a> {
     pub(crate) processes: &'a [ProcessName],
     /// The source of each process's environment.
     pub(crate) env: &'a dyn EnvironmentSource,
+    /// When pulling the app's image must have finished.
+    pub(crate) build: Instant,
     /// When every process must be ready.
     pub(crate) deadline: Instant,
     /// The flag that asks the start to stop.
@@ -104,10 +107,10 @@ pub(crate) struct ContainerStart<'a> {
 }
 
 /// What [`ContainerRunner::start`] started.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(crate) struct ContainersStarted {
-    /// Each container that started, by process.
-    pub(crate) containers: Vec<(ProcessName, ContainerId)>,
+    /// Each container that the start created.
+    pub(crate) containers: Vec<StartedContainer>,
     /// Each network that exists, by name.
     pub(crate) networks: Vec<(DockerName, NetworkId)>,
     /// Each volume that exists, by name.
@@ -115,6 +118,27 @@ pub(crate) struct ContainersStarted {
     /// The process that failed to become ready, and why, or `None` when
     /// every process is ready.
     pub(crate) problem: Option<(ProcessName, StartProblem)>,
+    /// The process whose wait a deadline cut short, so phase does not know
+    /// whether it is ready, or `None`.
+    pub(crate) uncertain: Option<ProcessName>,
+    /// The failure that kept Docker from acting, which ended the start, or
+    /// `None`.
+    pub(crate) failure: Option<PhaseError>,
+    /// The processes of [`Self::containers`] whose container the start
+    /// removed after [`Self::failure`], and which Docker no longer has.
+    pub(crate) removed: Vec<ProcessName>,
+}
+
+/// A container that [`ContainerRunner::start`] created.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartedContainer {
+    /// The process.
+    pub(crate) process: ProcessName,
+    /// The container's id.
+    pub(crate) id: ContainerId,
+    /// The hash of the process's part of the plan, which the run record
+    /// keeps for [`ContainerRunner::running`].
+    pub(crate) plan_hash: PlanHash,
 }
 
 /// What [`ContainerRunner::stop`] stops.

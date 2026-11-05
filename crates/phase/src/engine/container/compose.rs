@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use crate::cancel::Cancel;
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::command::{
     ChildEnv, Finished, PULL_DEADLINE, check, message, run, run_input,
@@ -317,8 +319,11 @@ pub(crate) fn compose_up(
 /// `docker compose up`, reading the compose file `file` from standard
 /// input, with the variables `env`. The project directory is `dir`, which
 /// holds no file that Compose reads, and Compose reads no `.env` file.
+/// `until` holds the time the command may take and the flag that stops
+/// it.
 ///
-/// The caller has checked the compose plugin with `docker compose version`.
+/// The caller has checked the compose plugin with `docker compose version`,
+/// and has pulled the image, so Compose pulls nothing.
 ///
 /// # Errors
 ///
@@ -329,9 +334,10 @@ pub(crate) fn app_up(
     file: &Value,
     service: &ServiceName,
     env: impl ChildEnv,
+    until: (Duration, &Cancel),
 ) -> Result<Up, Error> {
     let project = scope.project();
-    let args: [&OsStr; 15] = [
+    let args: [&OsStr; 16] = [
         "compose".as_ref(),
         "--project-name".as_ref(),
         project.as_str().as_ref(),
@@ -344,16 +350,19 @@ pub(crate) fn app_up(
         "up".as_ref(),
         "--detach".as_ref(),
         "--no-deps".as_ref(),
-        "--quiet-pull".as_ref(),
+        "--pull".as_ref(),
+        "never".as_ref(),
         "--".as_ref(),
         service.as_ref(),
     ];
+    let (deadline, cancel) = until;
     let finished = run_input(
         args,
         env,
         file.to_string().into_bytes(),
         "compose up",
-        PULL_DEADLINE,
+        deadline,
+        cancel,
     )?;
     up_result(scope, service, &finished)
 }
