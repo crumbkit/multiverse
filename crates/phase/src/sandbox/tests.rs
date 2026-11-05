@@ -1475,6 +1475,10 @@ mod seatbelt {
         let free = TcpListener::bind("127.0.0.1:0").unwrap();
         let own = free.local_addr().unwrap().port();
         drop(free);
+        // The dependency also listens on ::1 at its port when this machine
+        // has an IPv6 loopback address, as a dev server such as Vite does.
+        let dependency_ipv6 =
+            TcpListener::bind(("::1", dependency.local_addr().unwrap().port())).ok();
         let agent_dir = tempfile::Builder::new()
             .prefix("phase-agent-")
             .tempdir_in(user_temp_dir())
@@ -1497,10 +1501,12 @@ mod seatbelt {
             case=perl-runs check /usr/bin/perl -e 1
             case=connect-dependency check nc -z -w 2 127.0.0.1 {dependency}
             case=connect-dependency-by-name check nc -z -w 2 localhost {dependency}
+            case=connect-dependency-ipv6 check nc -z -w 2 ::1 {dependency}
             case=connect-other check nc -z -w 2 127.0.0.1 {other}
             case=listen-other check nc -l 127.0.0.1 {other_port}
             listens() {{ nc -l "$1" {own} 2>/dev/null & listener=$!; sleep 1; if kill -0 $listener 2>/dev/null; then echo "$case=allowed"; kill $listener; wait $listener 2>/dev/null; else echo "$case=denied"; fi; }}
             case=listen-own listens 127.0.0.1
+            case=listen-own-ipv6 listens ::1
             case=listen-own-every-address listens 0.0.0.0
             if /usr/bin/perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr => shift, Timeout => 2) or print "$!"' 192.0.2.1:{dependency} | grep -q 'not permitted'; then echo connect-dependency-port-elsewhere=denied; else echo connect-dependency-port-elsewhere=allowed; fi
             limited() {{ /usr/bin/perl -e 'alarm 5; exec @ARGV' "$@"; }}
@@ -1563,6 +1569,14 @@ mod seatbelt {
             ("keeper-environment", "denied"),
         ] {
             assert_eq!(outcome(&output, case), expected, "{case} in {output}");
+        }
+        // Seatbelt's `localhost` in a port rule covers ::1 as well as
+        // 127.0.0.1, so an app may listen on its own port on ::1 and reach
+        // a dependency that listens only there.
+        if dependency_ipv6.is_some() {
+            for case in ["connect-dependency-ipv6", "listen-own-ipv6"] {
+                assert_eq!(outcome(&output, case), "allowed", "{case} in {output}");
+            }
         }
         assert!(!fixture.outside().join("file").exists());
         // DNS is blocked, so whether `localhost` resolves depends on the

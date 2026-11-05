@@ -364,6 +364,17 @@ that writes its ready line and then exits counts as ready.
 A liveness wait in a keeper attempts the probe once each period, and ends
 when the failures in a row reach the failure threshold.
 
+An `http` or `tcp` probe of a host process connects to 127.0.0.1, and to
+::1 when 127.0.0.1 refuses or fails, as mxv's port probe did. A dev server
+such as Vite may listen only on ::1, and a probe of 127.0.0.1 alone never
+saw it ready. The connection to ::1 gets the part of the probe's timeout
+that is left, so one attempt still ends within the timeout. An `http`
+probe sends its request to the address that accepted, with the `Host`
+header `localhost:<port>`. The port checks before a launch and after
+readiness find a listener on ::1 too: the check whether a port is in use
+connects to both loopback addresses, and the lookup of the process that
+holds a port reads IPv6 sockets as well as IPv4 ones.
+
 A command probe of a host process runs in its own process group, and phase
 kills that group however the command ends. A command probe of a container
 process runs inside its container through `docker exec`. When it times
@@ -1423,6 +1434,11 @@ is checked with no remote address. A process that may listen on a port can
 therefore listen on it on every address, and a macOS test shows that a
 peer on the machine's `en0` address reaches it. A peer on another machine
 was not tested. A connection out to another host stays refused.
+Seatbelt's `localhost` covers ::1 as well as 127.0.0.1, so an app may
+listen on its own port on ::1 and connect to a dependency that listens
+only on ::1. The macOS test checks both on a machine with an IPv6
+loopback address. On Linux, Landlock restricts TCP ports with no address,
+so the same holds there.
 
 On Linux `status` shows a process under Landlock as `unsandboxed
 (Landlock cannot restrict Unix sockets (nono does not yet enforce

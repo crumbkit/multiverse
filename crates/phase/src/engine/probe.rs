@@ -19,14 +19,21 @@
 //!
 //! # The checks
 //!
-//! - `http` sends `GET <path>` as HTTP/1.1 to 127.0.0.1 on the process's
-//!   host port, and passes on a 2xx status. It follows no redirect, so a
-//!   3xx status fails. It reads at most [`MOST_RESPONSE_BYTES`] bytes of
-//!   the response and only needs the status line.
-//! - `tcp` passes when a connection to 127.0.0.1 on the port succeeds.
-//!   The connection blocks in `connect_timeout`, so a TCP check, and the
-//!   connect step of an HTTP check, see a cancel only once the connection
-//!   succeeds or fails, at most the probe's timeout later.
+//! - `http` sends `GET <path>` as HTTP/1.1 to the process's host port on
+//!   the loopback address, and passes on a 2xx status. It connects to
+//!   127.0.0.1, and to ::1 when 127.0.0.1 refuses or fails, because a dev
+//!   server such as Vite may listen only on ::1. The request goes to the
+//!   address that accepted, with the `Host` header `localhost:<port>`. It
+//!   follows no redirect, so a 3xx status fails. It reads at most
+//!   [`MOST_RESPONSE_BYTES`] bytes of the response and only needs the
+//!   status line.
+//! - `tcp` passes when a connection to the port on 127.0.0.1, or on ::1
+//!   when 127.0.0.1 refuses or fails, succeeds. The connection to ::1 gets
+//!   only the part of the probe's timeout that is left, so an attempt still
+//!   ends within the timeout. Each connection blocks in `connect_timeout`,
+//!   so a TCP check, and the connect step of an HTTP check, see a cancel
+//!   only once the connections succeed or fail, at most the probe's
+//!   timeout later.
 //! - `command` passes when the command exits with status 0 within the
 //!   timeout. A [`ProbeExec`] runs it with the process's environment:
 //!   [`HostExec`] for a host process, and `docker exec` in the container
@@ -70,14 +77,16 @@ pub(crate) const MOST_RESPONSE_BYTES: usize = 4096;
 
 /// One probe's check of one process, ready to attempt.
 pub(crate) enum Check<'a> {
-    /// `GET path` on 127.0.0.1 at `port` returns a 2xx status.
+    /// `GET path` at `port` on 127.0.0.1, or on ::1 when 127.0.0.1 does not
+    /// accept, returns a 2xx status.
     Http {
         /// The process's host port.
         port: u16,
         /// The request path, which starts with `/`.
         path: &'a str,
     },
-    /// A TCP connection to 127.0.0.1 at `port` succeeds.
+    /// A TCP connection to `port` on 127.0.0.1, or on ::1 when 127.0.0.1
+    /// does not accept, succeeds.
     Tcp {
         /// The host port that the probe's port name stands for.
         port: u16,
