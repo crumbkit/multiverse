@@ -20,8 +20,16 @@ pub const DEFAULT_MOST_BACKOFF: Duration = Duration::from_secs(30);
 /// states another. phase sends `KILL` to the process group when it passes.
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 
-/// When phase restarts a process that exits. phase restarts a container
-/// process by recreating its container.
+/// When phase restarts a process that exits.
+///
+/// A host process's keeper carries out the policy with its limits. For a
+/// container process, Docker's restart policy restarts the container, as
+/// the design's Containers section says: `no` maps to Docker's `no`,
+/// `on-failure` to `on-failure`, or `on-failure:N` when the limits state a
+/// maximum of `N` restarts, and `always` to `unless-stopped`. Docker's own
+/// backoff replaces the plan's backoff, the plan's maximum does not apply
+/// to `always`, and Docker restarts a container with the environment it
+/// was created with, so the plan's `resolve` does not apply either.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "policy", rename_all = "kebab-case", try_from = "RestartFile")]
 pub enum Restart {
@@ -123,9 +131,11 @@ impl std::error::Error for LimitsWithoutRestart {}
 #[non_exhaustive]
 pub struct RestartLimits {
     /// The most restarts after which phase leaves the process stopped, or
-    /// `None` when phase restarts it without limit.
+    /// `None` when phase restarts it without limit. A container process
+    /// whose policy is `always` restarts without limit.
     pub max: Option<NonZeroU32>,
-    /// The waits before each restart.
+    /// The waits before each restart. A container process waits Docker's
+    /// own backoff instead.
     pub backoff: Backoff,
     /// Whether a restart after a crash resolves the app's environment again.
     pub resolve: Resolve,

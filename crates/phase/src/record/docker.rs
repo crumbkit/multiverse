@@ -108,19 +108,52 @@ pub enum DockerError {
     },
 }
 
+/// The most bytes of Docker's message that a [`DockerError`] keeps. A
+/// longer message keeps its first bytes up to a character boundary and
+/// ends with `...`, so a report or an error stays short.
+pub const MOST_DOCKER_MESSAGE_BYTES: usize = 2048;
+
+/// The marker at the end of a message that was cut short.
+const CUT: &str = "...";
+
+/// Returns `message`, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes.
+///
+/// Docker's messages may echo the arguments of the command that failed,
+/// such as a container's name or id, a volume's name or a path. phase
+/// never puts a value of a variable in an argument, a compose file or a
+/// label: a value reaches only the environment of a `docker compose up`
+/// child, under a private reference that the compose file names. So a
+/// message that echoes what phase sent holds no value.
+fn bounded(mut message: String) -> String {
+    if message.len() <= MOST_DOCKER_MESSAGE_BYTES {
+        return message;
+    }
+    let mut end = MOST_DOCKER_MESSAGE_BYTES - CUT.len();
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message.push_str(CUT);
+    message
+}
+
 impl DockerError {
     /// Returns the failure of a Docker that did not answer, which `message`
-    /// describes.
+    /// describes, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes.
     #[must_use]
-    pub const fn unavailable(message: String) -> Self {
-        Self::Unavailable { message }
+    pub fn unavailable(message: String) -> Self {
+        Self::Unavailable {
+            message: bounded(message),
+        }
     }
 
     /// Returns the failure of a Docker that answered and refused, with its
-    /// answer `message`.
+    /// answer `message`, kept to [`MOST_DOCKER_MESSAGE_BYTES`] bytes.
     #[must_use]
-    pub const fn refused(message: String) -> Self {
-        Self::Refused { message }
+    pub fn refused(message: String) -> Self {
+        Self::Refused {
+            message: bounded(message),
+        }
     }
 }
 

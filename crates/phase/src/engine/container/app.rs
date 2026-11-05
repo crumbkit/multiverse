@@ -187,8 +187,11 @@ const fn signal_name(signal: StopSignal) -> &'static str {
     }
 }
 
-/// Returns Docker's restart policy for `restart`. Docker restarts with
-/// its own backoff, and keeps no count for `always`.
+/// Returns Docker's restart policy for `restart`, which the docs of
+/// [`Restart`] state: `no` is `no`, `on-failure` is `on-failure`, or
+/// `on-failure:N` with a maximum of `N`, and `always` is `unless-stopped`.
+/// Docker's backoff replaces the plan's backoff, and the plan's maximum
+/// does not apply to `always`.
 fn restart_policy(restart: &Restart) -> String {
     match restart {
         Restart::No => "no".to_owned(),
@@ -196,7 +199,7 @@ fn restart_policy(restart: &Restart) -> String {
             Some(max) => format!("on-failure:{max}"),
             None => "on-failure".to_owned(),
         },
-        Restart::Always(_) => "always".to_owned(),
+        Restart::Always(_) => "unless-stopped".to_owned(),
     }
 }
 

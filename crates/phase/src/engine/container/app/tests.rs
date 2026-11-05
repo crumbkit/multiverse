@@ -237,7 +237,7 @@ fn a_container_name_longer_than_a_docker_name_may_be_refuses_its_process() {
 }
 
 #[test]
-fn an_always_restarting_process_and_a_limited_on_failure_process_get_dockers_policies() {
+fn each_restart_policy_maps_to_dockers_own_policy() {
     let mut app = db();
     app.processes[0].restart = Restart::always(RestartLimits::default());
     app.processes[1].restart = Restart::on_failure(RestartLimits {
@@ -245,6 +245,9 @@ fn an_always_restarting_process_and_a_limited_on_failure_process_get_dockers_pol
         ..RestartLimits::default()
     });
     let file = compose_file(&scope("db"), &app).unwrap();
-    assert_eq!(file["services"]["server"]["restart"], "always");
+    assert_eq!(file["services"]["server"]["restart"], "unless-stopped");
     assert_eq!(file["services"]["worker"]["restart"], "on-failure:3");
+    app.processes[1].restart = Restart::No;
+    let file = compose_file(&scope("db"), &app).unwrap();
+    assert_eq!(file["services"]["worker"]["restart"], "no");
 }

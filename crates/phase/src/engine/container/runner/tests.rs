@@ -342,7 +342,7 @@ fn a_published_port_that_something_holds_fails_the_start_before_docker_runs() {
 }
 
 #[test]
-fn restart_recreates_the_container_and_up_replaces_a_running_one() {
+fn restart_recreates_the_container_and_up_leaves_a_running_one_alone() {
     if !docker_ready() {
         return;
     }
@@ -367,7 +367,19 @@ fn restart_recreates_the_container_and_up_replaces_a_running_one() {
     assert_ne!(first, second);
     assert!(docker(&["container", "inspect", &first]).is_none());
 
-    world.up(&plan);
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), second);
+
+    docker(&["stop", "--time", "0", "--", &second]).unwrap();
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     let third = world.container("db", "server").unwrap();
     assert_ne!(second, third);
     assert!(docker(&["container", "inspect", &second]).is_none());

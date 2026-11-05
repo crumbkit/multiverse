@@ -31,6 +31,11 @@
 //! exited has ended. A process that does not become ready within its ready
 //! timeout or the caller's deadline fails as not ready.
 //!
+//! `running` tells `up` which recorded containers still run: Docker has
+//! the recorded id, the container's labels name the workspace, app and
+//! process, and its state is running. `up` leaves those alone and asks
+//! `start` only for the others.
+//!
 //! When a docker command fails after some containers started, `start`
 //! stops and removes those containers before it returns the failure, so
 //! no container that the caller does not learn of keeps running.
@@ -71,6 +76,7 @@ use crate::plan::probe::{LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, ProcessPlan};
 use crate::record::docker::DockerError;
+use crate::record::run::ContainerEntry;
 use crate::record::store::RunStore;
 use crate::record::{ContainerId, DockerName};
 use crate::report::StartProblem;
@@ -420,6 +426,38 @@ impl ContainerRunner for ComposeRunner {
         }
     }
 
+    fn running(
+        &self,
+        workspace: &WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<ProcessName>, PhaseError> {
+        let scope = self.scope(workspace, app);
+        let mut running = Vec::new();
+        for entry in containers {
+            let (Ok(service), Some(Ok(id))) = (
+                names::ServiceName::new(entry.process.as_str()),
+                entry
+                    .id
+                    .as_ref()
+                    .map(|id| names::ContainerId::new(id.as_str())),
+            ) else {
+                continue;
+            };
+            match inspect_id(&scope, &service, &id) {
+                Ok(Some(inspected)) if inspected.state == ContainerState::Running => {
+                    running.push(entry.process.clone());
+                }
+                // A container that is gone, has stopped, or no longer
+                // carries the app's labels is not running as the record
+                // says, so `start` replaces it.
+                Ok(_) | Err(ContainerError::Foreign { .. }) => {}
+                Err(error) => return Err(docker_error(&error)),
+            }
+        }
+        Ok(running)
+    }
+
     fn stop(
         &self,
         stop: &ContainerStop<'_>,
@@ -438,7 +476,7 @@ impl ContainerRunner for ComposeRunner {
 /// docs say, within `deadline`.
 fn stop_one(
     scope: &Scope,
-    entry: &crate::record::run::ContainerEntry,
+    entry: &ContainerEntry,
     deadline: Instant,
 ) -> Result<ContainerStopped, PhaseError> {
     let Ok(service) = names::ServiceName::new(entry.process.as_str()) else {

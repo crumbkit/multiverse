@@ -46,6 +46,23 @@ pub(crate) trait ContainerRunner {
     /// ready is no error, and [`ContainersStarted::problem`] names it.
     fn start(&self, start: &ContainerStart<'_>) -> Result<ContainersStarted, PhaseError>;
 
+    /// Returns the processes of `containers`, containers of `app` of
+    /// `workspace` that the run record names by id, whose container still
+    /// runs: Docker has the recorded id, the container's labels name the
+    /// workspace, app and process, and it is running. `up` leaves those
+    /// containers alone and reports them as already running.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure that kept Docker from answering, such as
+    /// [`PhaseError::Docker`].
+    fn running(
+        &self,
+        workspace: &WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<ProcessName>, PhaseError>;
+
     /// Stops and removes the containers of `stop.containers`, until
     /// `stop.deadline`, and returns what happened to each, by process.
     ///

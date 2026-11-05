@@ -25,6 +25,7 @@ use crate::phase::UpDeadlines;
 use crate::plan::probe::{Probe, ProbeCheck};
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
 use crate::record::process::Identity;
+use crate::record::run::ContainerEntry;
 use crate::record::run::{EntryState, HostProcess, ObjectKey, RunRecord};
 use crate::record::store::RunStore;
 use crate::record::testing::workspace;
@@ -331,6 +332,11 @@ struct FakeContainers {
     /// The state and id of each process's container entry, as the run
     /// record held them when the runner was asked to start it.
     entries_at_start: RefCell<Vec<(EntryState, bool)>>,
+    /// The `app/process` containers that the runner reports as still
+    /// running.
+    running: RefCell<BTreeSet<String>>,
+    /// The processes of each start, as `app/process`, in order.
+    starts: RefCell<Vec<Vec<String>>>,
 }
 
 impl ContainerRunner for FakeContainers {
@@ -386,6 +392,13 @@ impl ContainerRunner for FakeContainers {
                 })?;
         }
         self.started.borrow_mut().push(start.app.name.to_string());
+        self.starts.borrow_mut().push(
+            start
+                .processes
+                .iter()
+                .map(|process| format!("{}/{process}", start.app.name))
+                .collect(),
+        );
         Ok(ContainersStarted {
             containers: start
                 .processes
@@ -397,6 +410,25 @@ impl ContainerRunner for FakeContainers {
                 .collect(),
             ..ContainersStarted::default()
         })
+    }
+
+    fn running(
+        &self,
+        workspace: &crate::name::WorkspaceId,
+        app: &AppName,
+        containers: &[ContainerEntry],
+    ) -> Result<Vec<ProcessName>, PhaseError> {
+        assert_eq!(workspace, &self::workspace());
+        assert!(containers.iter().all(|entry| entry.id.is_some()));
+        Ok(containers
+            .iter()
+            .filter(|entry| {
+                self.running
+                    .borrow()
+                    .contains(&format!("{app}/{}", entry.process))
+            })
+            .map(|entry| entry.process.clone())
+            .collect())
     }
 
     fn stop(
@@ -1167,6 +1199,48 @@ fn a_container_start_writes_its_entry_back_to_planned_without_an_id_before_the_r
     let record = world.record().unwrap();
     assert_eq!(
         record.state(&ObjectKey::Container(name("db"), name("server"))),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn up_leaves_a_container_that_still_runs_alone_and_starts_only_the_others() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    let key = ObjectKey::Container(name("db"), name("server"));
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    let record = world.record().unwrap();
+    assert_eq!(record.state(&key), Some(EntryState::Running));
+    assert!(
+        record
+            .containers
+            .iter()
+            .all(|entry| entry.id.is_some() && entry.state == EntryState::Running)
+    );
+
+    world.containers.running.borrow_mut().remove("db/worker");
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
+    assert_eq!(
+        world.containers.starts.borrow().last().unwrap(),
+        &vec!["db/worker".to_owned()]
+    );
+    assert_eq!(
+        world.record().unwrap().state(&key),
         Some(EntryState::Running)
     );
 }

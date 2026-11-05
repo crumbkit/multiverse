@@ -286,3 +286,53 @@ fn this_process_started_before_now() {
     let started = super::process::started_at(start).unwrap();
     assert!(started <= std::time::SystemTime::now());
 }
+
+#[test]
+fn a_docker_message_is_kept_to_its_first_2_kib_on_a_character_boundary() {
+    use crate::record::docker::{DockerError, MOST_DOCKER_MESSAGE_BYTES};
+
+    let long = "é".repeat(4096);
+    for error in [
+        DockerError::refused(long.clone()),
+        DockerError::unavailable(long.clone()),
+    ] {
+        let (DockerError::Refused { message } | DockerError::Unavailable { message }) = &error;
+        assert!(
+            message.len() <= MOST_DOCKER_MESSAGE_BYTES,
+            "{}",
+            message.len()
+        );
+        assert!(message.ends_with("..."), "{message}");
+        assert!(message.starts_with("éé"));
+    }
+    assert!(matches!(
+        DockerError::refused("short".to_owned()),
+        DockerError::Refused { message } if message == "short"
+    ));
+}
+
+#[test]
+fn a_docker_failure_reads_as_one_sentence_that_names_dockers_own_message() {
+    use crate::error::PhaseError;
+    use crate::record::docker::DockerError;
+
+    let unavailable = PhaseError::Docker {
+        source: DockerError::unavailable(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.".to_owned(),
+        ),
+    };
+    assert_eq!(
+        unavailable.to_string(),
+        "Docker did not answer, so phase cannot tell what is running: Cannot connect to the Docker daemon at unix:///var/run/docker.sock."
+    );
+    let refused = PhaseError::Docker {
+        source: DockerError::refused(
+            "Error response from daemon: conflict: phase-db is in use".to_owned(),
+        ),
+    };
+    assert_eq!(
+        refused.to_string(),
+        "Docker refused a request of the run: Error response from daemon: conflict: phase-db is in use"
+    );
+    assert!(std::error::Error::source(&refused).is_none());
+}

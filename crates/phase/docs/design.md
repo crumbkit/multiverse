@@ -367,6 +367,13 @@ Every container runs on Docker's default bridge network, so phase creates
 no network. `docker compose up` reads the compose file from standard
 input, so the file never reaches the disk.
 
+The plan's restart policy maps to Docker's: `no` to `no`, `on-failure` to
+`on-failure`, or `on-failure:N` with a maximum of `N`, and `always` to
+`unless-stopped`. Docker's backoff replaces the plan's backoff, and the
+plan's maximum does not apply to `always`. `up` leaves a container alone
+and reports it as already running when Docker still has the recorded id,
+the container's labels name the workspace, app and process, and it runs.
+
 The labels are `mxv.workspace-id`, the workspace's stable id, which is 32
 lowercase hex digits that mxv mints when it creates the workspace and keeps
 in the workspace's record; `mxv.run-record`, the absolute path of the

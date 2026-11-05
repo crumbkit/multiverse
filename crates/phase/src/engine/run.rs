@@ -441,16 +441,44 @@ impl Op<'_, '_> {
     }
 
     /// Starts the processes of the container app `choice` through the
-    /// container runner. When the caller cancels or a container fails to
-    /// start, the operation stops the containers it started.
+    /// container runner. A process whose recorded container still runs, as
+    /// the runner checks it, is left alone, and an app whose processes all
+    /// still run is already running. When the caller cancels or a container
+    /// fails to start, the operation stops the containers it started.
     fn start_containers(&mut self, choice: &Chosen<'_>) -> Result<AppStep, PhaseError> {
         let app = choice.app;
         let mark = self.started.len();
+        let chosen: BTreeSet<&ProcessName> = choice
+            .processes
+            .iter()
+            .map(|process| &process.name)
+            .collect();
+        let recorded: Vec<ContainerEntry> = self
+            .recorded_containers(&app.name, Some(&chosen))
+            .into_iter()
+            .filter(|entry| entry.state == EntryState::Running && entry.id.is_some())
+            .collect();
+        let running: BTreeSet<ProcessName> = if recorded.is_empty() {
+            BTreeSet::new()
+        } else {
+            match self
+                .engine
+                .containers
+                .running(&self.workspace, &app.name, &recorded)
+            {
+                Ok(running) => running.into_iter().collect(),
+                Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
+            }
+        };
         let processes: Vec<ProcessName> = choice
             .processes
             .iter()
             .map(|process| process.name.clone())
+            .filter(|process| !running.contains(process))
             .collect();
+        if processes.is_empty() {
+            return Ok(AppStep::Done(AppOutcome::AlreadyRunning, Vec::new()));
+        }
         self.journal.containers_launching(&app.name, &processes)?;
         let start = ContainerStart {
             workspace: &self.workspace,
