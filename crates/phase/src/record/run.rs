@@ -1,4 +1,4 @@
-//! The run record `phase/run/v4`: what one workspace's run planned and
+//! The run record `phase/run/v5`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -33,14 +33,19 @@ pub(crate) enum RunSchema {
     #[serde(rename = "phase/run/v3")]
     V3,
     /// `phase/run/v4`, which adds `sandbox` to host process entries. A
-    /// phase that reads only v3 refuses it as written by a newer phase.
+    /// phase that reads only v3 refuses it as written by a newer phase. It
+    /// reads as v5 with no oneshot completed.
     #[serde(rename = "phase/run/v4")]
     V4,
+    /// `phase/run/v5`, which adds `completed` to host process entries. A
+    /// phase that reads only v4 refuses it as written by a newer phase.
+    #[serde(rename = "phase/run/v5")]
+    V5,
 }
 
 impl RunSchema {
     /// The version that phase writes.
-    pub(crate) const CURRENT: Self = Self::V4;
+    pub(crate) const CURRENT: Self = Self::V5;
 }
 
 /// The newest version of the run record that this phase reads, and the one
@@ -51,7 +56,7 @@ impl RunSchema {
 /// keeper refuses it as written by a newer phase, notes each refused write
 /// in its diagnostic log, and records nothing more, until phase starts its
 /// process again with a keeper of its own.
-pub(crate) const RUN_VERSION: u32 = 4;
+pub(crate) const RUN_VERSION: u32 = 5;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +181,16 @@ pub(crate) struct HostEntry {
     /// wrote before it recorded the sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<Sandboxing>,
+    /// The hash of the oneshot's own part of the plan when it last exited
+    /// with status 0 under `up` or `restart`, or `None` when it has not
+    /// completed since phase last launched it. A later `up` leaves a
+    /// oneshot that declares `once` alone while this hash matches its
+    /// part of the new plan. phase's next launch of the process and a
+    /// `down` that selects it clear it. It is `None` for a keeper, for a
+    /// process that is not a oneshot, and in a record that phase wrote
+    /// before it ran oneshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) completed: Option<PlanHash>,
 }
 
 /// When phase observed a process ready: its readiness probe passed, or a
@@ -599,6 +614,7 @@ impl RunRecord {
             restart: None,
             ready: None,
             sandbox: None,
+            completed: None,
         };
         self.keepers.push(entry(None, None));
         self.processes.push(entry(stop, listen));
@@ -899,7 +915,54 @@ impl RunRecord {
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
         entry.sandbox.clone_from(&launching.sandbox);
+        entry.completed = None;
         Ok(())
+    }
+
+    /// Records that the oneshot `key` exited with status 0 from the part
+    /// of the plan whose hash is `hash`, and that its keeper is about to be
+    /// stopped: the entry reads `stopping`, with an end that no stop
+    /// request caused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process.
+    pub(crate) fn mark_completed(
+        &mut self,
+        key: &ObjectKey,
+        hash: PlanHash,
+    ) -> Result<(), Unplanned> {
+        let ObjectKey::Process(app, process) = key else {
+            return Err(Unplanned(key.clone()));
+        };
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(key.clone()))?;
+        entry.state = EntryState::Stopping;
+        entry.ended = Some(Ended::by_itself(Some(Exit::Code(0))));
+        entry.completed = Some(hash);
+        Ok(())
+    }
+
+    /// Forgets the completion of the oneshot `key`, and the end that it
+    /// recorded, so `status` shows it as stopped and the next `up` runs it
+    /// again. It reports whether the entry held a completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record does not name `key` as a host
+    /// process.
+    pub(crate) fn clear_completion(&mut self, key: &ObjectKey) -> Result<bool, Unplanned> {
+        let ObjectKey::Process(app, process) = key else {
+            return Err(Unplanned(key.clone()));
+        };
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(key.clone()))?;
+        if entry.completed.take().is_none() {
+            return Ok(false);
+        }
+        entry.ended = None;
+        Ok(true)
     }
 
     /// Writes the container entry of `process` of `app` back to planned

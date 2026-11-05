@@ -9,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 use super::{Engine, Settings};
+
+mod oneshot;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::containers::{
@@ -23,7 +25,7 @@ use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
 use crate::phase::UpDeadlines;
 use crate::plan::probe::{Probe, ProbeCheck};
-use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
+use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::DockerName;
 use crate::record::docker::DockerError;
 use crate::record::process::Identity;
@@ -1328,23 +1330,6 @@ fn an_app_from_a_release_is_reported_as_not_runnable_and_its_dependents_do_not_s
     ));
     assert_eq!(outcome(&report, "api"), &AppOutcome::NotStarted);
     assert_eq!(outcome(&report, "web"), &AppOutcome::Started);
-}
-
-#[test]
-fn an_app_with_a_oneshot_is_reported_as_not_runnable() {
-    let world = World::new();
-    let mut api = host_app("api", None, &[]);
-    api.processes[0].kind = ProcessKind::oneshot(false);
-
-    let report = world
-        .up(&plan(vec![api]), &Selection::All, &Env::default())
-        .unwrap();
-
-    assert!(matches!(
-        outcome(&report, "api"),
-        AppOutcome::Errored { .. }
-    ));
-    assert!(world.host.launches().is_empty());
 }
 
 #[test]

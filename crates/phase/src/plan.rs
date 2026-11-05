@@ -287,6 +287,41 @@ impl AppPlan {
         }
     }
 
+    /// Returns the 32-byte digest of what a run of this app's process
+    /// `process` depends on in the plan: the app's runner, source, ports,
+    /// permissions and override names, and the process's own plan. The
+    /// other processes and apps of the plan leave it unchanged, and so do
+    /// environment values, which the plan does not hold. A oneshot that
+    /// declares `once` runs again when its digest changes.
+    pub(crate) fn process_digest(&self, process: &ProcessPlan) -> [u8; 32] {
+        /// The parts of the plan that the digest covers.
+        #[derive(Serialize)]
+        struct ProcessPart<'a> {
+            /// The app's runner.
+            runner: RunnerKind,
+            /// The app's source.
+            source: &'a Source,
+            /// The app's ports.
+            ports: &'a BTreeMap<PortName, NonZeroU16>,
+            /// The app's permissions.
+            permissions: Option<&'a Permissions>,
+            /// The names that `up --env` overrides.
+            overrides: &'a BTreeSet<String>,
+            /// The process.
+            process: &'a ProcessPlan,
+        }
+        let part = ProcessPart {
+            runner: self.runner,
+            source: &self.source,
+            ports: &self.ports,
+            permissions: self.permissions.as_ref(),
+            overrides: &self.overrides,
+            process,
+        };
+        // The parts are plain data, so they always serialize.
+        digest(&serde_json::to_vec(&part).unwrap_or_default())
+    }
+
     /// Reports whether its permissions name `name` as a secret.
     pub(crate) fn is_secret(&self, name: &str) -> bool {
         self.permissions
@@ -310,8 +345,14 @@ pub enum ProcessKind {
     /// that.
     #[non_exhaustive]
     Oneshot {
-        /// Whether the process runs only on the first `up` of the
-        /// workspace. When it is false, the process runs on every `up`.
+        /// Whether the process runs only until it has completed once.
+        /// With `once`, a later `up` leaves alone a oneshot whose run
+        /// record holds its completion from the same part of the plan.
+        /// Without it, an `up` runs the oneshot again unless the oneshot's
+        /// completion is from the same part of the plan, every other
+        /// process of its app is already running, and every app that its
+        /// app depends on was already running. `down` forgets the
+        /// completion, and `restart` runs the oneshot again either way.
         once: bool,
     },
 }

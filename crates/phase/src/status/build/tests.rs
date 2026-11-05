@@ -580,6 +580,27 @@ fn a_process_that_ended_by_itself_is_exited_with_its_code_or_signal() {
 }
 
 #[test]
+fn a_oneshot_whose_entry_holds_its_completion_is_completed_and_one_that_failed_is_exited() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut record = ended_record(Ended::by_itself(Some(Exit::Code(0))));
+    record.processes[0].completed = Some(crate::record::run::PlanHash::new([7; 32]));
+    write_record(dir.path(), &record);
+
+    let status = read(dir.path(), None, &FakeProcesses::default(), &Unreachable);
+
+    assert_eq!(status.rows[0].state, ProcessState::Completed);
+    assert_eq!(status.rows[0].handle, None);
+
+    let failed = tempfile::tempdir().unwrap();
+    write_record(
+        failed.path(),
+        &ended_record(Ended::by_itself(Some(Exit::Code(2)))),
+    );
+    let status = read(failed.path(), None, &FakeProcesses::default(), &Unreachable);
+    assert_eq!(status.rows[0].state, ProcessState::exited(Some(2)));
+}
+
+#[test]
 fn a_process_that_a_stop_request_ended_is_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let ended = Ended::requested(Some(Exit::Signal(15)));

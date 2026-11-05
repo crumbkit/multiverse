@@ -193,7 +193,8 @@ pub enum NotRunnable {
     ContainerWorkingDirectory,
     /// The container app does not run from an image.
     ContainerWithoutImage,
-    /// A process of the app is a oneshot, which phase does not run yet.
+    /// A process of the container app is a oneshot, which phase runs only
+    /// on the host yet.
     Oneshot,
 }
 
@@ -206,7 +207,7 @@ impl fmt::Display for NotRunnable {
                 "phase does not set a container's working directory yet"
             }
             Self::ContainerWithoutImage => "the container app does not run from an image",
-            Self::Oneshot => "phase does not run oneshot processes yet",
+            Self::Oneshot => "phase does not run a oneshot process in a container yet",
         })
     }
 }

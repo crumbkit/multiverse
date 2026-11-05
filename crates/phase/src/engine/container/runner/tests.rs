@@ -3015,3 +3015,79 @@ fn a_wrapper_that_prints_a_lookalike_line_and_exits_with_70_leaks_nothing_into_t
     holds_no_value(&serde_json::to_string(&report).unwrap());
     assert!(!world.has_containers());
 }
+
+/// The full name of the keeper tests' test that runs a keeper when this
+/// test binary is started as one.
+const KEEPER_ENTRY: &str =
+    "engine::keeper::tests::the_test_binary_runs_a_keeper_when_it_is_started_as_one";
+
+#[test]
+fn a_host_oneshot_that_depends_on_a_container_app_runs_after_the_container_is_ready() {
+    if !docker_ready() {
+        return;
+    }
+    let mut world = World::new();
+    world.phase = Phase::new(world.state.path().to_path_buf())
+        .with_start_grace(Duration::from_millis(500))
+        .with_keeper(
+            std::env::current_exe().unwrap(),
+            ["--exact", "--nocapture", "--", KEEPER_ENTRY, "keep"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        )
+        .with_inherited(std::collections::BTreeMap::from([
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("HOME".to_owned(), world.state.path().display().to_string()),
+        ]));
+    let (port, holder) = free_port();
+    // The database listens only after three seconds, so a provisioning
+    // step that ran before its readiness would find no listener.
+    let mut db = app(
+        "db",
+        "sleep 3; mkdir -p /www; exec httpd -f -p 8080 -h /www",
+    );
+    db.ports.insert("http".parse().unwrap(), port);
+    db.processes[0]
+        .publish
+        .insert("http".parse().unwrap(), NonZeroU16::new(8080).unwrap());
+    let mut probe = Probe::new(ProbeCheck::tcp("http".parse().unwrap()));
+    probe.timeout = Duration::from_secs(60);
+    db.processes[0].ready = Some(probe);
+    let checkout = tempfile::tempdir().unwrap();
+    let mut tables = AppPlan::new(
+        "tables".parse().unwrap(),
+        RunnerKind::Host,
+        Source::checkout(checkout.path().to_path_buf(), None),
+    );
+    let mut provision = ProcessPlan::new(
+        "provision".parse().unwrap(),
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("curl -s -o /dev/null http://127.0.0.1:{port}/ && echo provisioned"),
+        ],
+    );
+    provision.kind = crate::plan::ProcessKind::oneshot(true);
+    tables.processes.push(provision);
+    tables.depends.push("db".parse().unwrap());
+    let plan = world.plan(vec![db, tables]);
+
+    drop(holder);
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(
+        outcome(&report, "tables"),
+        &AppOutcome::Started,
+        "{report:?}"
+    );
+    let status = world.phase.status(&world.id, Some(&plan)).unwrap();
+    let row = status
+        .rows
+        .iter()
+        .find(|row| row.process.as_str() == "provision")
+        .unwrap();
+    assert_eq!(row.state, ProcessState::Completed, "{status:?}");
+    world.down();
+}

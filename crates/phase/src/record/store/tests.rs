@@ -101,7 +101,7 @@ fn the_record_holds_the_schema_and_no_environment() {
     let text = fs::read_to_string(store.path(&workspace())).unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v4");
+    assert_eq!(json["schema"], "phase/run/v5");
     assert_eq!(json["workspace"], "0b9f3c8e");
     assert_eq!(
         json["processes"][0]["host"]["started_at_us"],
@@ -187,7 +187,7 @@ fn a_record_from_a_newer_phase_asks_for_an_upgrade() {
     fs::create_dir_all(state.path().join("runs")).unwrap();
     write_file(
         &store.path(&workspace()),
-        r#"{"schema":"phase/run/v5","something":"new"}"#,
+        r#"{"schema":"phase/run/v6","something":"new"}"#,
     );
 
     let error = store.read(&workspace()).unwrap_err();
@@ -595,7 +595,12 @@ fn a_stop_that_phase_begins_records_the_end_as_requested() {
 
 #[test]
 fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_version() {
-    for older in ["phase/run/v1", "phase/run/v2", "phase/run/v3"] {
+    for older in [
+        "phase/run/v1",
+        "phase/run/v2",
+        "phase/run/v3",
+        "phase/run/v4",
+    ] {
         let state = tempfile::tempdir().unwrap();
         let store = RunStore::new(state.path());
         let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
@@ -603,7 +608,7 @@ fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_versi
         drop(journal);
         let path = store.path(&workspace());
         let text = fs::read_to_string(&path).unwrap();
-        write_file(&path, &text.replace("phase/run/v4", older));
+        write_file(&path, &text.replace("phase/run/v5", older));
 
         let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
         assert_eq!(journal.record(), Some(&planned()), "{older}");
@@ -611,7 +616,7 @@ fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_versi
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["schema"], "phase/run/v4", "{older}");
+        assert_eq!(json["schema"], "phase/run/v5", "{older}");
     }
 }
 
@@ -632,7 +637,7 @@ fn a_record_that_an_older_phase_wrote_reads_as_one_that_has_observed_no_readines
     let path = store.path(&workspace());
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("ready"), "{text}");
-    write_file(&path, &text.replace("phase/run/v4", "phase/run/v2"));
+    write_file(&path, &text.replace("phase/run/v5", "phase/run/v2"));
 
     let record = on_disk(&store);
 
@@ -795,7 +800,7 @@ fn a_v3_record_reads_as_one_that_recorded_no_sandbox() {
     let path = store.path(&workspace());
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("sandbox"), "{text}");
-    write_file(&path, &text.replace("phase/run/v4", "phase/run/v3"));
+    write_file(&path, &text.replace("phase/run/v5", "phase/run/v3"));
 
     let record = on_disk(&store);
 
@@ -803,7 +808,7 @@ fn a_v3_record_reads_as_one_that_recorded_no_sandbox() {
 }
 
 #[test]
-fn a_launched_host_process_records_its_sandbox_in_a_v4_record() {
+fn a_launched_host_process_records_its_sandbox_in_the_record() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
     let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
@@ -816,9 +821,72 @@ fn a_launched_host_process_records_its_sandbox_in_a_v4_record() {
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v4");
+    assert_eq!(json["schema"], "phase/run/v5");
     assert_eq!(
         json["processes"][0]["sandbox"],
         serde_json::json!({ "kind": "seatbelt", "partial": crate::sandbox::SEATBELT_PARTIAL })
     );
+}
+
+#[test]
+fn a_completed_oneshot_records_its_hash_and_an_exit_of_zero_until_it_launches_again() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+
+    journal
+        .completed(&server(), PlanHash::new([7; 32]))
+        .unwrap();
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, Some(PlanHash::new([7; 32])));
+    assert_eq!(entry.state, EntryState::Stopping);
+    assert_eq!(entry.ended, Some(Ended::by_itself(Some(Exit::Code(0)))));
+    // A stop that phase begins after the completion keeps the end.
+    journal.stopping(&server()).unwrap();
+    journal.stopped(&server()).unwrap();
+    assert_eq!(on_disk(&store).processes[0].ended, entry.ended);
+    assert!(journal.record().unwrap().holds_an_exit());
+
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 9))
+        .unwrap();
+
+    assert_eq!(on_disk(&store).processes[0].completed, None);
+}
+
+#[test]
+fn clearing_a_completion_forgets_the_hash_and_the_end_and_leaves_other_entries_unwritten() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    assert!(!journal.clear_completion(&server()).unwrap());
+    journal
+        .completed(&server(), PlanHash::new([7; 32]))
+        .unwrap();
+
+    assert!(journal.clear_completion(&server()).unwrap());
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.completed, None);
+    assert_eq!(entry.ended, None);
+}
+
+#[test]
+fn a_v4_record_reads_as_one_whose_oneshots_have_not_completed() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("completed"), "{text}");
+    write_file(&path, &text.replace("phase/run/v5", "phase/run/v4"));
+
+    assert_eq!(on_disk(&store).processes[0].completed, None);
 }

@@ -8,8 +8,10 @@
 //! keeper through the [`HostRunner`], records the keeper and the process
 //! from the handshake, and waits for the process to be ready. A process
 //! without a readiness probe is watched for the start grace instead, and a
-//! process that ends meanwhile fails to start. Container apps go through
-//! the [`ContainerRunner`].
+//! process that ends meanwhile fails to start. `up` waits for a oneshot to
+//! exit instead, and may leave one that has completed alone, as the
+//! `oneshot` module says. Container apps go through the
+//! [`ContainerRunner`].
 //!
 //! Before each launch, `up` writes the process's keeper and entry back to
 //! planned with no process, so a record that names a stopped or stale
@@ -65,11 +67,13 @@ use crate::sandbox::{self, Context, Platform, SandboxError, SandboxSpec, Workspa
 use crate::select::Selection;
 use crate::source::Source;
 
+mod oneshot;
 pub(crate) mod order;
 mod stop;
 #[cfg(test)]
 mod tests;
 
+use oneshot::{Rerun, completed_targets};
 use order::{Chosen, choose};
 use stop::{Stopped, Target};
 
@@ -264,6 +268,8 @@ enum AppStep {
 enum Step {
     /// The process is ready.
     Ready,
+    /// The oneshot exited with status 0, and its keeper is stopped.
+    Completed,
     /// The process was already running and is left alone.
     AlreadyRunning,
     /// A process that phase started survived an earlier stop, so phase
@@ -338,6 +344,7 @@ impl Op<'_, '_> {
         self.journal.plan(planned)?;
         let mut reports: Vec<AppReport> = Vec::new();
         let mut unready: BTreeSet<AppName> = BTreeSet::new();
+        let mut left_alone: BTreeSet<AppName> = BTreeSet::new();
         let mut halted = false;
         for (at, choice) in chosen.iter().enumerate() {
             let name = &choice.app.name;
@@ -362,7 +369,14 @@ impl Op<'_, '_> {
                 return self.cancelled(reports, Vec::new(), rest);
             }
             attempted.insert(name.clone());
-            let step = match self.start_app(choice, None) {
+            let rerun = Rerun::Up {
+                depends_left: choice
+                    .app
+                    .depends
+                    .iter()
+                    .all(|depend| left_alone.contains(depend)),
+            };
+            let step = match self.start_app(choice, None, rerun) {
                 Ok(step) => step,
                 Err(error) => return Err(self.abort(error)),
             };
@@ -371,6 +385,9 @@ impl Op<'_, '_> {
                     if !matches!(outcome, AppOutcome::Started | AppOutcome::AlreadyRunning) {
                         unready.insert(name.clone());
                         halted = true;
+                    }
+                    if outcome == AppOutcome::AlreadyRunning {
+                        left_alone.insert(name.clone());
                     }
                     reports.push(AppReport::new(name.clone(), outcome).with_notes(notes));
                 }
@@ -387,7 +404,7 @@ impl Op<'_, '_> {
         let mut planned = planned.app(&app.name, &app.depends);
         match app.runner {
             RunnerKind::Host => {
-                runnable(app, &choice.processes)?;
+                runnable(app)?;
                 for process in &choice.processes {
                     planned = planned.planned_host_process(
                         &app.name,
@@ -414,7 +431,9 @@ impl Op<'_, '_> {
     }
 
     /// Starts the processes of `choice`, each with the environment that
-    /// `fresh` holds for it, or resolving it when `fresh` holds none.
+    /// `fresh` holds for it, or resolving it when `fresh` holds none. A
+    /// completed oneshot is left alone when `rerun` allows it, as the
+    /// `oneshot` module says.
     ///
     /// # Errors
     ///
@@ -424,6 +443,7 @@ impl Op<'_, '_> {
         &mut self,
         choice: &Chosen<'_>,
         mut fresh: Option<&mut BTreeMap<ProcessName, Box<dyn AppliedEnvironment>>>,
+        rerun: Rerun,
     ) -> Result<AppStep, PhaseError> {
         let app = choice.app;
         if app.runner == RunnerKind::Container {
@@ -433,12 +453,20 @@ impl Op<'_, '_> {
         let mut notes = Vec::new();
         let mut any = false;
         for process in &choice.processes {
+            match self.leaves_oneshot(app, process, &choice.processes, rerun) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    self.stop_since(mark, &mut StopsByApp::new(), &mut notes)?;
+                    return Ok(AppStep::Done(AppOutcome::errored(&error), notes));
+                }
+            }
             let environment = fresh
                 .as_deref_mut()
                 .and_then(|fresh| fresh.remove(&process.name));
             let step = self.start_process(app, process, environment, &mut notes)?;
             let outcome = match step {
-                Step::Ready => {
+                Step::Ready | Step::Completed => {
                     any = true;
                     continue;
                 }
@@ -610,6 +638,12 @@ impl Op<'_, '_> {
         let host = self.engine.host;
         match self.recorded(app, process) {
             Ok(Recorded::Nothing) => {}
+            // A oneshot that still runs was started by an operation that
+            // ended before it saw the exit, so nothing tells whether it
+            // will complete, and phase leaves it.
+            Ok(Recorded::Ours) if matches!(process.kind, ProcessKind::Oneshot { .. }) => {
+                return Ok(Step::Left);
+            }
             Ok(Recorded::Ours) => return Ok(Step::AlreadyRunning),
             Ok(Recorded::Left) => return Ok(Step::Left),
             Ok(Recorded::Unverified(group)) => {
@@ -675,7 +709,15 @@ impl Op<'_, '_> {
             &ObjectKey::Process(app.name.clone(), process.name.clone()),
             Started::Host(started.clone()),
         )?;
-        let step = self.await_ready(app, process, &target, environment.as_ref(), end, lines);
+        let step = match process.kind {
+            ProcessKind::Oneshot { .. } => self.await_completion(process, &target, end, lines),
+            ProcessKind::LongRunning => {
+                self.await_ready(app, process, &target, environment.as_ref(), end, lines)
+            }
+        };
+        if matches!(step, Step::Completed) {
+            return self.complete(app, process, &target, notes);
+        }
         if let Step::Failed(StartProblem::Exited { code, .. }) = &step
             && let Some(message) = denial_hint(app, *code)
         {
@@ -832,9 +874,7 @@ impl Op<'_, '_> {
             engine.settings.kill_wait,
         )
         .ready_after(
-            process
-                .ready
-                .is_none()
+            (process.ready.is_none() && process.kind == ProcessKind::LongRunning)
                 .then_some(engine.settings.start_grace),
         )
         .expiring(environment.expires_at())
@@ -1137,12 +1177,25 @@ impl Op<'_, '_> {
         let mut running: Vec<(&Chosen<'_>, Vec<Target>)> = Vec::new();
         let mut reports = Vec::new();
         for choice in chosen {
-            let targets = stop::running_targets(
+            let mut targets = stop::running_targets(
                 self.engine,
                 self.journal.record(),
                 &choice.app.name,
                 &choice.processes,
             )?;
+            // A completed oneshot runs again in its place among the
+            // processes that `restart` starts again.
+            targets.extend(completed_targets(
+                self.journal.record(),
+                &choice.app.name,
+                &choice.processes,
+            ));
+            targets.sort_by_key(|target| {
+                choice
+                    .processes
+                    .iter()
+                    .position(|process| process.name == target.process)
+            });
             if targets.is_empty() && choice.app.runner == RunnerKind::Host {
                 reports.push(AppReport::new(
                     choice.app.name.clone(),
@@ -1225,6 +1278,9 @@ impl Op<'_, '_> {
         }
         let deadline = self.deadlines.ready;
         for target in targets.iter().rev() {
+            if target.keeper.is_none() && target.host.is_none() {
+                continue;
+            }
             let stopped =
                 stop::stop_target(self.engine, &mut self.journal, target, deadline, &mut notes)?;
             if stopped != Stopped::Stopped {
@@ -1243,7 +1299,7 @@ impl Op<'_, '_> {
         };
         let mut fresh = fresh.unwrap_or_default();
         let mark = self.started.len();
-        let step = self.start_app(&again, Some(&mut fresh))?;
+        let step = self.start_app(&again, Some(&mut fresh), Rerun::Always)?;
         Ok(match step {
             AppStep::Done(AppOutcome::Started | AppOutcome::AlreadyRunning, more) => {
                 notes.extend(more);
@@ -1307,11 +1363,10 @@ impl Op<'_, '_> {
     }
 }
 
-/// Returns why phase cannot run the host processes `processes` of `app`
-/// yet, if it cannot. A release and a checkout with a build need their
-/// program settled first, which a later release does, and a oneshot needs
-/// its exit status.
-fn runnable(app: &AppPlan, processes: &[&ProcessPlan]) -> Result<(), PhaseError> {
+/// Returns why phase cannot run the host processes of `app` yet, if it
+/// cannot. A release and a checkout with a build need their program
+/// settled first, which a later release does.
+fn runnable(app: &AppPlan) -> Result<(), PhaseError> {
     let refuse = |reason| {
         Err(PhaseError::NotRunnable {
             app: app.name.clone(),
@@ -1319,17 +1374,10 @@ fn runnable(app: &AppPlan, processes: &[&ProcessPlan]) -> Result<(), PhaseError>
         })
     };
     match &app.source {
-        Source::Release { .. } => return refuse(NotRunnable::Release),
-        Source::Checkout { build: Some(_), .. } => return refuse(NotRunnable::CheckoutBuild),
-        Source::Checkout { build: None, .. } | Source::Image { .. } => {}
+        Source::Release { .. } => refuse(NotRunnable::Release),
+        Source::Checkout { build: Some(_), .. } => refuse(NotRunnable::CheckoutBuild),
+        Source::Checkout { build: None, .. } | Source::Image { .. } => Ok(()),
     }
-    if processes
-        .iter()
-        .any(|process| matches!(process.kind, ProcessKind::Oneshot { .. }))
-    {
-        return refuse(NotRunnable::Oneshot);
-    }
-    Ok(())
 }
 
 /// Returns the port that `process` of `app` listens on, or `None`.

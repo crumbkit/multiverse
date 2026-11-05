@@ -319,8 +319,13 @@ pub enum ProcessProblem {
     /// A oneshot process has a readiness probe, but it is ready when it
     /// exits with status 0.
     OneshotWithProbe,
-    /// A oneshot process restarts always, so it would never complete.
-    OneshotRestartsAlways,
+    /// A oneshot process has a restart policy other than `no`. phase never
+    /// restarts a oneshot: a failed oneshot fails its app, and the next
+    /// `up` or `restart` runs it again.
+    OneshotRestarts,
+    /// A oneshot process listens on a port. It runs to completion, so
+    /// nothing could connect to it.
+    OneshotWithPort,
 }
 
 impl fmt::Display for PlanError {
@@ -523,9 +528,10 @@ impl fmt::Display for ProcessProblem {
             Self::EmptyProbeCommand => formatter.write_str("its probe's command is empty"),
             Self::ZeroProbeTime => formatter.write_str("its probe's period or timeout is zero"),
             Self::OneshotWithProbe => formatter.write_str("it is a oneshot with a probe"),
-            Self::OneshotRestartsAlways => {
-                formatter.write_str("it is a oneshot that restarts always")
+            Self::OneshotRestarts => {
+                formatter.write_str("it is a oneshot with a restart policy other than `no`")
             }
+            Self::OneshotWithPort => formatter.write_str("it is a oneshot that listens on a port"),
         }
     }
 }
@@ -986,8 +992,11 @@ fn check_process(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProb
         if process.ready.is_some() {
             return Err(ProcessProblem::OneshotWithProbe);
         }
-        if let Restart::Always(_) = process.restart {
-            return Err(ProcessProblem::OneshotRestartsAlways);
+        if process.restart != Restart::No {
+            return Err(ProcessProblem::OneshotRestarts);
+        }
+        if process.port.is_some() {
+            return Err(ProcessProblem::OneshotWithPort);
         }
     }
     check_probe(app, process)

@@ -787,7 +787,7 @@ The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 ### Run record and sweep
 
-phase writes a run record (`phase/run/v4`) for each workspace. It names every
+phase writes a run record (`phase/run/v5`) for each workspace. It names every
 keeper and app process by pid, process start time and process group, every
 container by id, and the hash of the plan that started them. It holds no
 environment values.
@@ -827,20 +827,23 @@ with it those ends, unless the `down` did not select a process that holds
 such an end. mxv's `down` of the apps that a failed `up` started is such a
 `down`, so `status` still shows the process that failed.
 
-The record is `phase/run/v4`. Version 2 added `ended` and `restart` to
+The record is `phase/run/v5`. Version 2 added `ended` and `restart` to
 host entries, version 3 added `ready` to host process and container
-entries, as the next section says, and version 4 adds `sandbox` to host
+entries, as the next section says, version 4 added `sandbox` to host
 process entries, which records how phase launched the process, as [The
-sandbox as built](#the-sandbox-as-built) says. phase reads a
-`phase/run/v1`, `phase/run/v2` or `phase/run/v3` record with the fields
-it lacks at their defaults, and writes it back as v4: a v1 record reads
-with no ends, no restart policies, no readiness and no sandbox, a v2
-record reads with no readiness and no sandbox, and a v3 record reads with
-no sandbox. A
+sandbox as built](#the-sandbox-as-built) says, and version 5 adds
+`completed` to host process entries, which records a oneshot's
+completion, as [Oneshot processes](#oneshot-processes) says. phase reads a
+`phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
+with the fields it lacks at their defaults, and writes it back as v5: a
+v1 record reads with no ends, no restart policies, no readiness, no
+sandbox and no completions, a v2 record reads with no readiness, no
+sandbox and no completions, a v3 record reads with no sandbox and no
+completions, and a v4 record reads with no completions. A
 phase that reads only an older version refuses a newer record as written
 by a newer phase and asks for an upgrade. Each version only adds fields
 that read as their defaults when they are missing, so the next version,
-such as v5, which records P15's watcher, adds a schema name and needs
+v6, which records P15's watcher, adds a schema name and needs
 no other read path.
 
 ### Readiness in the run record
@@ -906,7 +909,8 @@ does not answer or reports a state that phase does not know, such as
 `removing`, and never as stopped. A host process whose entry records
 that it ended by itself, and that its keeper did not restart, shows as
 `exited` with its code or signal. One that a stop request ended shows as
-`stopped`. A process that the record names as running, while neither it
+`stopped`. A oneshot whose entry records its completion shows as
+`completed`. A process that the record names as running, while neither it
 nor its keeper is there, shows as `exited` with the reason `unrecorded`,
 because its keeper ended before it recorded the end. An entry that reads
 `stopping` with no end shows the same way. A stop that the keeper could
@@ -1398,12 +1402,66 @@ and redesigns are the evidence for each one.
   probe timeout.
 - Before it starts a process, phase checks that its port is free, and when
   it is not, names the process that holds it.
-- A process can be a `oneshot`, such as a migration. It is ready when it
-  exits 0, and the processes that depend on it wait for that. It runs on
-  every `up` unless it declares `once = true`.
+- A process can be a `oneshot`, such as a migration, or a provisioning
+  step that creates tables after a local database is ready. It is ready
+  when it exits 0, and the processes that depend on it wait for that. See
+  [Oneshot processes](#oneshot-processes).
 - Ctrl-C during a foreground `up` stops what that `up` started. Status
   shows each workspace as starting, running, partly running, stopped, or
   unknown when processes phase cannot read decide which of those it is.
+
+### Oneshot processes
+
+Built 5 November 2026 for host apps. A container app with a oneshot is
+still refused with `NotRunnable::Oneshot`.
+
+- A oneshot runs under a keeper like any other host process. Its app's
+  `[permissions]` sandbox it, it receives the variables that its `env`
+  names, required and optional alike, and its output goes to its log
+  file.
+- The plan refuses a oneshot with a readiness probe, with a port, or with
+  a restart policy other than `no`. phase never restarts a oneshot: a
+  oneshot that fails fails its app, and the next `up` or `restart` runs it
+  again.
+- `up` starts a oneshot in the dependency order that it uses for every
+  process, and waits until the oneshot exits, within the oneshot's
+  `ready_timeout` and the readiness deadline of `up`. A cancel stops it
+  as it stops any process that `up` started. A oneshot that does not exit
+  within its `ready_timeout` fails as not ready, and one that the deadline
+  of `up` cuts off is uncertain.
+- An exit with status 0 completes the oneshot. `up` records the
+  completion in the oneshot's run record entry as `completed`, the hash of
+  the oneshot's own part of the plan, stops the keeper, and then starts
+  the processes and apps that depend on it. The hash covers the app's
+  runner, source, ports, permissions and override names, and the
+  oneshot's own plan, such as its command, variable names and working
+  directory. It holds no environment value, so a changed value alone does
+  not count as a change.
+- Any other end fails the oneshot's app with the exit code or signal and
+  the last lines of its log, as for a process that ends before it is
+  ready. `up` starts no app that depends on it.
+- A later `up` leaves a completed oneshot alone when its recorded hash
+  matches its part of the new plan and either of these holds:
+  - the oneshot declares `once = true`;
+  - every other selected process of its app is already running, and
+    every app that its app depends on was already running in this `up`.
+
+  Otherwise `up` runs it again. A `once = false` oneshot therefore runs
+  again whenever `up` starts or restarts its app or an app it depends on,
+  such as a database container that `up` started again, and an `up` that
+  finds everything running and unchanged leaves it alone.
+- `restart` runs each selected oneshot that has completed again, before
+  the processes of its app that depend on it, whatever `once` says. It
+  does not run a oneshot that failed, which the next `up` runs again.
+- `down` forgets the completion of each oneshot that it selects, so the
+  next `up` runs it again. A `down` or sweep that leaves everything
+  stopped removes the run record, and with it every completion.
+- A oneshot that the run record names as still running, which an
+  operation that ended before it saw the exit left, is reported as left,
+  and `up` starts nothing that depends on it.
+- `status` shows a oneshot that completed as `completed`, which counts as
+  running for the workspace's state, and one that failed as `exited`
+  with its code or signal.
 
 ### Restarts and expiring credentials
 
@@ -1490,7 +1548,7 @@ Each decision states what this draft assumes until it is decided.
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
-| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v4, since v3 records readiness), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
+| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the refusal of an app that runs at the workspace's top, and the launcher's second check. |
