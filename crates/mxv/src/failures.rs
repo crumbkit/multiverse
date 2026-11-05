@@ -1074,7 +1074,7 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             message,
             ..
         } => {
-            let mut fields = vec![Field::new("operation", *operation)];
+            let mut fields = vec![Field::new("operation", operation.as_str())];
             if let Some(container) = container {
                 fields.push(Field::new("container", container));
             }

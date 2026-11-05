@@ -208,34 +208,34 @@ pub enum Error {
     DockerComposeMissing {
         /// The line of docker's standard error that says what failed.
         message: String,
-        /// Whether `message` is phase's whole sentence, which says what
-        /// failed in phase's words, so the error prints it alone. It is
-        /// `false` when `message` is only docker's line.
-        from_phase: bool,
+        /// The line that docker printed for its own error, which
+        /// `message` then also holds, or `None`. Without it, `message` is
+        /// phase's whole sentence, which the error prints alone.
+        docker_line: Option<String>,
     },
     /// docker has no free address pool for a network, so it cannot
     /// connect a container.
     DockerNoAddressPool {
         /// The line of docker's standard error that says what failed.
         message: String,
-        /// Whether `message` is phase's whole sentence, which says what
-        /// failed in phase's words, so the error prints it alone. It is
-        /// `false` when `message` is only docker's line.
-        from_phase: bool,
+        /// The line that docker printed for its own error, which
+        /// `message` then also holds, or `None`. Without it, `message` is
+        /// phase's whole sentence, which the error prints alone.
+        docker_line: Option<String>,
     },
     /// The `docker` program runs, and its daemon does not answer.
     DockerUnavailable {
         /// The line of docker's standard error that says what failed.
         message: String,
-        /// Whether `message` is phase's whole sentence, which says what
-        /// failed in phase's words, so the error prints it alone. It is
-        /// `false` when `message` is only docker's line.
-        from_phase: bool,
+        /// The line that docker printed for its own error, which
+        /// `message` then also holds, or `None`. Without it, `message` is
+        /// phase's whole sentence, which the error prints alone.
+        docker_line: Option<String>,
     },
     /// A docker command failed or missed its deadline.
     DockerFailed {
         /// The docker command, such as `run`.
-        operation: &'static str,
+        operation: String,
         /// The compose service of the container that the command worked
         /// on, which is the name of its process in the manifest, such as
         /// `server`, when it worked on one. It is never a container's id
@@ -243,10 +243,10 @@ pub enum Error {
         container: Option<String>,
         /// The line of docker's standard error that says what failed.
         message: String,
-        /// Whether `message` is phase's whole sentence, which says what
-        /// failed in phase's words, so the error prints it alone. It is
-        /// `false` when `message` is only docker's line.
-        from_phase: bool,
+        /// The line that docker printed for its own error, which
+        /// `message` then also holds, or `None`. Without it, `message` is
+        /// phase's whole sentence, which the error prints alone.
+        docker_line: Option<String>,
     },
     /// A docker container or volume has a name of mxv's, or is one that
     /// mxv recorded, and its labels do not name this store, workspace and
@@ -309,6 +309,22 @@ impl Error {
     }
 }
 
+/// Writes mxv's sentence `lead` followed by docker's own line, when
+/// docker printed one, and otherwise phase's `message` alone, so no words
+/// repeat. A failure with neither writes `lead` alone.
+fn lead_in(
+    formatter: &mut fmt::Formatter<'_>,
+    lead: &dyn fmt::Display,
+    docker_line: Option<&str>,
+    message: &str,
+) -> fmt::Result {
+    match docker_line {
+        Some(line) => write!(formatter, "{lead}: {line}"),
+        None if message.is_empty() => write!(formatter, "{lead}"),
+        None => formatter.write_str(message),
+    }
+}
+
 impl Error {
     /// Writes the text of a docker failure. A failure whose message is
     /// phase's whole sentence prints that sentence alone.
@@ -319,56 +335,44 @@ impl Error {
             }
             Self::DockerComposeMissing {
                 message,
-                from_phase: true,
-            }
-            | Self::DockerNoAddressPool {
+                docker_line,
+            } => lead_in(
+                formatter,
+                &"docker runs, and its compose plugin is not installed",
+                docker_line.as_deref(),
                 message,
-                from_phase: true,
-            }
-            | Self::DockerUnavailable {
+            ),
+            Self::DockerNoAddressPool {
                 message,
-                from_phase: true,
-            }
-            | Self::DockerFailed {
+                docker_line,
+            } => lead_in(
+                formatter,
+                &"docker has no free address pool for a container's network",
+                docker_line.as_deref(),
                 message,
-                from_phase: true,
-                ..
-            } if !message.is_empty() => formatter.write_str(message),
-            Self::DockerComposeMissing { message, .. } => {
-                formatter.write_str("docker runs, and its compose plugin is not installed")?;
-                if !message.is_empty() {
-                    write!(formatter, ": {message}")?;
-                }
-                Ok(())
-            }
-            Self::DockerNoAddressPool { message, .. } => {
-                formatter.write_str("docker has no free address pool for a container's network")?;
-                if !message.is_empty() {
-                    write!(formatter, ": {message}")?;
-                }
-                Ok(())
-            }
-            Self::DockerUnavailable { message, .. } => {
-                formatter.write_str("the docker daemon does not answer")?;
-                if !message.is_empty() {
-                    write!(formatter, ": {message}")?;
-                }
-                Ok(())
-            }
+            ),
+            Self::DockerUnavailable {
+                message,
+                docker_line,
+            } => lead_in(
+                formatter,
+                &"the docker daemon does not answer",
+                docker_line.as_deref(),
+                message,
+            ),
             Self::DockerFailed {
                 operation,
                 container,
                 message,
-                ..
+                docker_line,
             } => {
-                write!(formatter, "docker {operation} failed")?;
-                if let Some(container) = container {
-                    write!(formatter, " for the container {container}")?;
-                }
-                if !message.is_empty() {
-                    write!(formatter, ": {message}")?;
-                }
-                Ok(())
+                let lead = match container {
+                    Some(container) => {
+                        format!("docker {operation} failed for the container {container}")
+                    }
+                    None => format!("docker {operation} failed"),
+                };
+                lead_in(formatter, &lead, docker_line.as_deref(), message)
             }
             Self::DockerForeign { kind, name } => write!(
                 formatter,
@@ -528,16 +532,16 @@ impl From<phase::container::ContainerError> for Error {
         match error {
             Container::Missing { source, .. } => Self::DockerMissing { source },
             Container::ComposeMissing { message, .. } => Self::DockerComposeMissing {
+                docker_line: docker_line(&message),
                 message,
-                from_phase: false,
             },
             Container::NoAddressPool { message, .. } => Self::DockerNoAddressPool {
+                docker_line: docker_line(&message),
                 message,
-                from_phase: false,
             },
             Container::Unavailable { message, .. } => Self::DockerUnavailable {
+                docker_line: docker_line(&message),
                 message,
-                from_phase: false,
             },
             Container::Failed {
                 operation,
@@ -545,18 +549,18 @@ impl From<phase::container::ContainerError> for Error {
                 message,
                 ..
             } => Self::DockerFailed {
-                operation,
+                operation: operation.to_string(),
                 container: service,
+                docker_line: docker_line(&message),
                 message,
-                from_phase: false,
             },
             Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },
             Container::Unreadable { path, source, .. } => Self::StateUnreadable { path, source },
             other => Self::DockerFailed {
-                operation: "container engine",
+                operation: "container engine".to_owned(),
                 container: None,
                 message: other.to_string(),
-                from_phase: false,
+                docker_line: None,
             },
         }
     }
@@ -604,12 +608,12 @@ impl Error {
                 operation,
                 container: None,
                 message,
-                from_phase,
+                docker_line,
             } => Self::DockerFailed {
                 operation,
                 container: Some(container.to_owned()),
                 message,
-                from_phase,
+                docker_line,
             },
             other => other,
         }
@@ -618,37 +622,52 @@ impl Error {
     /// Returns the docker failure `source`, which phase reported with the
     /// code `code`, as the docker failure that mxv reported before phase
     /// ran its apps.
-    ///
-    /// The cause of `source` chooses the failure, and phase's typed facts
-    /// fill it: the operation and the compose service of a failed command,
-    /// and the kind and the name of a foreign object. mxv reads none of
-    /// them from the message, which it keeps whole. A cancelled command, a
-    /// foreign object that phase did not name, and a cause that mxv does
-    /// not know, are [`Error::Phase`] with phase's code.
     pub(crate) fn of_docker_error(source: &phase::DockerError, code: &'static str) -> Self {
-        use phase::DockerCause as C;
         let message = match source {
             phase::DockerError::Unavailable { message, .. }
-            | phase::DockerError::Refused { message, .. } => message.clone(),
-            _ => String::new(),
+            | phase::DockerError::Refused { message, .. } => message.as_str(),
+            _ => "",
         };
-        match source.cause() {
+        Self::of_docker(code, source.cause(), source.context(), message)
+    }
+
+    /// Returns the docker failure that phase reported with the code
+    /// `code`, the cause `cause`, the context `context` and the message
+    /// `message`, either for a whole run or for one app's outcome.
+    ///
+    /// The cause chooses the failure, and the context fills it: the docker
+    /// command and the compose service of a failed command, the kind and
+    /// the name of a foreign object, and docker's own line, which is the
+    /// failure's message when docker printed one. Otherwise the message is
+    /// phase's. mxv never reads the message. A cancelled command, a
+    /// foreign object that phase did not name, and a cause that mxv does
+    /// not know, are [`Error::Phase`] with phase's code.
+    pub(crate) fn of_docker(
+        code: &'static str,
+        cause: phase::DockerCause,
+        context: &phase::DockerContext,
+        message: &str,
+    ) -> Self {
+        use phase::DockerCause as C;
+        let docker_line = context.docker_line.clone();
+        let message = docker_line.clone().unwrap_or_else(|| message.to_owned());
+        match cause {
             C::DockerMissing => Self::DockerMissing {
                 source: io::Error::new(io::ErrorKind::NotFound, message),
             },
             C::ComposeMissing => Self::DockerComposeMissing {
                 message,
-                from_phase: true,
+                docker_line,
             },
             C::DaemonUnavailable => Self::DockerUnavailable {
                 message,
-                from_phase: true,
+                docker_line,
             },
             C::NoAddressPool => Self::DockerNoAddressPool {
                 message,
-                from_phase: true,
+                docker_line,
             },
-            C::Foreign => match source.foreign() {
+            C::Foreign => match &context.foreign {
                 Some(object) => Self::DockerForeign {
                     kind: docker_kind(object.kind()),
                     name: object.name().to_owned(),
@@ -656,64 +675,20 @@ impl Error {
                 None => Self::Phase { code, message },
             },
             C::PullFailed | C::Refused | C::TimedOut | C::Unexpected => Self::DockerFailed {
-                operation: source.operation().unwrap_or("request"),
-                container: source.service().map(str::to_owned),
+                operation: context.operation.as_deref().unwrap_or("request").to_owned(),
+                container: context.service.clone(),
                 message,
-                from_phase: true,
+                docker_line,
             },
             _ => Self::Phase { code, message },
         }
     }
+}
 
-    /// Returns the docker failure that phase reported for an app with
-    /// `message`, which did not answer when `unavailable` and refused
-    /// otherwise.
-    ///
-    /// phase reports a failed app as its code and its message, without the
-    /// cause of a docker failure, so mxv reads the message back into the
-    /// docker failures that it reported before phase ran its apps. The
-    /// message ends with the text of phase's container engine error. A
-    /// message that none of them fits is a failed request.
-    pub(crate) fn of_docker(unavailable: bool, message: &str) -> Self {
-        let after = |marker: &str| {
-            message
-                .find(marker)
-                .map(|start| message[start + marker.len()..].to_owned())
-        };
-        if message.contains(DOCKER_MISSING) {
-            return Self::DockerMissing {
-                source: io::Error::new(io::ErrorKind::NotFound, message.to_owned()),
-            };
-        }
-        if let Some(foreign) = docker_foreign(message) {
-            return foreign;
-        }
-        if let Some(message) = after(DOCKER_COMPOSE_MISSING) {
-            return Self::DockerComposeMissing {
-                message,
-                from_phase: false,
-            };
-        }
-        if let Some(message) = after(DOCKER_NO_ADDRESS_POOL) {
-            return Self::DockerNoAddressPool {
-                message,
-                from_phase: false,
-            };
-        }
-        if let Some(message) = after(DOCKER_UNAVAILABLE) {
-            return Self::DockerUnavailable {
-                message,
-                from_phase: false,
-            };
-        }
-        if unavailable {
-            return Self::DockerUnavailable {
-                message: message.to_owned(),
-                from_phase: false,
-            };
-        }
-        docker_failed(message)
-    }
+/// Returns `message`, docker's line in an error of phase's container
+/// engine, as docker's own line, or `None` when it is empty.
+fn docker_line(message: &str) -> Option<String> {
+    (!message.is_empty()).then(|| message.to_owned())
 }
 
 /// Returns the name of the docker object kind `kind`, such as `volume`.
@@ -725,93 +700,6 @@ fn docker_kind(kind: phase::DockerKind) -> &'static str {
         _ => "object",
     }
 }
-
-/// Returns the foreign object that phase's `message` names, when it is the
-/// message of a docker object whose labels name another scope.
-fn docker_foreign(message: &str) -> Option<Error> {
-    let start = message.find(DOCKER_FOREIGN)?;
-    let mut words = message[start + DOCKER_FOREIGN.len()..].splitn(2, ' ');
-    let kind = match words.next() {
-        Some("volume") => "volume",
-        Some("container") => "container",
-        _ => return None,
-    };
-    let name = words.next()?.strip_suffix(DOCKER_FOREIGN_END)?;
-    Some(Error::DockerForeign {
-        kind,
-        name: name.to_owned(),
-    })
-}
-
-/// Returns the failed docker command that phase's `message` names, with
-/// its container and docker's message, or a failed request when the
-/// message names no command.
-fn docker_failed(message: &str) -> Error {
-    let failed = DOCKER_OPERATIONS.iter().find_map(|operation| {
-        let marker = format!("docker {operation} failed");
-        let start = message.find(&marker)?;
-        let rest = &message[start + marker.len()..];
-        let (container, text) = match rest.strip_prefix(" for the container ") {
-            Some(named) => {
-                let (container, text) = named.split_once(": ").unwrap_or((named, ""));
-                (Some(container.to_owned()), text)
-            }
-            None => (None, rest.strip_prefix(": ").unwrap_or(rest)),
-        };
-        Some(Error::DockerFailed {
-            operation,
-            container,
-            message: text.to_owned(),
-            from_phase: false,
-        })
-    });
-    failed.unwrap_or_else(|| Error::DockerFailed {
-        operation: "request",
-        container: None,
-        message: message.to_owned(),
-        from_phase: false,
-    })
-}
-
-/// The text of phase's error for a `docker` that is not on `PATH`.
-const DOCKER_MISSING: &str = "docker is not installed";
-/// The text before the kind and name in phase's error for a docker object
-/// whose labels name another scope.
-const DOCKER_FOREIGN: &str = "the labels of the docker ";
-/// The text after the name in phase's error for a docker object whose
-/// labels name another scope.
-const DOCKER_FOREIGN_END: &str = " do not name its scope";
-/// The text before docker's message in phase's error for a missing
-/// compose plugin.
-const DOCKER_COMPOSE_MISSING: &str = "docker's compose plugin is not installed: ";
-/// The text before docker's message in phase's error for a docker without
-/// a free address pool.
-const DOCKER_NO_ADDRESS_POOL: &str = "docker has no free address pool: ";
-/// The text before docker's message in phase's error for a daemon that
-/// does not answer.
-const DOCKER_UNAVAILABLE: &str = "the docker daemon does not answer: ";
-/// The docker commands whose failure phase names, longest first so that
-/// `compose up` is found before a shorter command it contains.
-const DOCKER_OPERATIONS: &[&str] = &[
-    "container inspect",
-    "compose version",
-    "network inspect",
-    "volume inspect",
-    "image inspect",
-    "volume create",
-    "volume scope",
-    "compose up",
-    "network rm",
-    "volume ls",
-    "volume rm",
-    "inspect",
-    "update",
-    "pull",
-    "logs",
-    "stop",
-    "exec",
-    "rm",
-];
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {

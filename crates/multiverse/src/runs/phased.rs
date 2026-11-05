@@ -804,14 +804,20 @@ impl Runs {
                         self.start_problem(workspace, manifest, id, unit, problem)?,
                     ));
                 }
-                AppOutcome::Errored { code, message, .. } => {
+                AppOutcome::Errored {
+                    code,
+                    message,
+                    cause,
+                    context,
+                    ..
+                } => {
                     return Err(if code == "phase::process::unstartable" {
                         Error::ProcessUnstartable {
                             process: unit.to_owned(),
                             source: io::Error::other(message.clone()),
                         }
                     } else {
-                        errored(code, message).naming(unit)
+                        errored(code, message, *cause, context.as_ref()).naming(unit)
                     });
                 }
                 AppOutcome::StartUncertain => {
@@ -1059,7 +1065,13 @@ impl Runs {
                     "the deadline of down passed while phase was stopping {name}, so phase does not know whether it has stopped"
                 ),
             }),
-            AppOutcome::Errored { code, message, .. } => Err(errored(code, message).naming(name)),
+            AppOutcome::Errored {
+                code,
+                message,
+                cause,
+                context,
+                ..
+            } => Err(errored(code, message, *cause, context.as_ref()).naming(name)),
             _ => {
                 let mut status = Self::phase_unit_status(workspace, manifest, name, None);
                 status.log = row.and_then(|row| row.log.clone());
@@ -1250,12 +1262,16 @@ impl Runs {
 }
 
 /// Returns the error of an app that phase reported as errored with
-/// `code` and `message`: a docker failure for phase's docker codes, and
-/// [`Error::Phase`] otherwise.
-fn errored(code: &str, message: &str) -> Error {
-    match code {
-        "phase::docker::unavailable" => Error::of_docker(true, message),
-        "phase::docker::refused" => Error::of_docker(false, message),
+/// `code`, `message`, and for a Docker failure its `cause` and `context`:
+/// the docker failure that they describe, and [`Error::Phase`] otherwise.
+fn errored(
+    code: &str,
+    message: &str,
+    cause: Option<phase::DockerCause>,
+    context: Option<&phase::DockerContext>,
+) -> Error {
+    match (cause, context) {
+        (Some(cause), Some(context)) => Error::of_docker(phase_code(code), cause, context, message),
         _ => Error::Phase {
             code: phase_code(code),
             message: message.to_owned(),
