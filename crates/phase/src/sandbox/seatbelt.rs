@@ -31,9 +31,12 @@ pub(crate) const DENIED_SERVICES: &[&str] = &[
 /// kernel resolves it, so a process that reads
 /// `/var/select/developer_dir`, as `xcode-select` and `xcrun` do, needs the
 /// `/var` link itself as well as the `/private/var/select` that it leads
-/// to. nono grants a link's metadata only when a granted path or a `PATH`
-/// entry is spelt through it.
-const ROOT_LINKS: &[&str] = &["/var"];
+/// to. A process that stats `/etc/gitconfig`, as git does, needs the
+/// `/etc` link in the same way: without it the stat fails with "Operation
+/// not permitted" in place of "No such file", and git stops. nono grants a
+/// link's metadata only when a granted path or a `PATH` entry is spelt
+/// through it.
+const ROOT_LINKS: &[&str] = &["/var", "/etc"];
 
 /// The terminal devices of macOS that no sandboxed process may open or
 /// use: each pseudo-terminal's slave, `/dev/ttysNNN`, and the old BSD

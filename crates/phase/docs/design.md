@@ -1294,7 +1294,12 @@ The sandbox allows (decision P18):
   checks the metadata of every name of a path as the kernel resolves it, so
   reading
   the link through `/var` also needs the metadata of the `/var` link
-  itself, and the profile allows that one literal path. nono allows a
+  itself, and the profile allows that one literal path. It allows the
+  `/etc` link's metadata for the same reason: git stats `/etc/gitconfig`,
+  and when the stat of a missing file through `/etc` fails with "Operation
+  not permitted" in place of "No such file", git stops with "unable to
+  access". An exec test of a sandboxed `git status` with `PATH` set to
+  `/usr/bin:/bin` found this. nono allows a
   link's metadata only when a granted path or a `PATH` entry is spelt
   through it. Without the rule, `xcode-select` failed with "unable to read
   data link" on a machine whose `PATH` names no directory under `/var`,

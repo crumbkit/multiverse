@@ -1416,19 +1416,17 @@ mod rules {
     }
 
     #[test]
-    fn the_profile_lets_a_path_through_the_var_link_resolve() {
+    fn the_profile_lets_a_path_through_the_var_or_etc_link_resolve() {
         let fixture = Fixture::new();
         let api = fixture.app(sh("true"), 41_000);
         let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
 
         let rules = rules(&spec);
 
-        assert!(
-            rules
-                .iter()
-                .any(|rule| rule == "(allow file-read-metadata (literal \"/var\"))"),
-            "{rules:?}"
-        );
+        for link in ["/var", "/etc"] {
+            let wanted = format!("(allow file-read-metadata (literal \"{link}\"))");
+            assert!(rules.contains(&wanted), "{rules:?}");
+        }
     }
 
     #[test]
