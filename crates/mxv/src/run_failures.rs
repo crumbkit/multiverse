@@ -351,6 +351,22 @@ fn shown(path: &Path) -> String {
 }
 
 /// Returns the hint `text` as a recovery.
+/// Returns the recovery of the process `process` of `workspace`, which
+/// exited or was not ready. mxv starts its own apps, such as
+/// mxv-provision, with the workspace, and `up` takes no name of one, so
+/// their hint runs `up` for the whole workspace.
+fn start_failed(workspace: &str, process: &str) -> Recovery {
+    if process.starts_with(multiverse::RESERVED_PREFIX) {
+        hint(format!(
+            "run `mxv logs -w {workspace} {process}` to read what failed, fix it, and run `mxv up -w {workspace}` again"
+        ))
+    } else {
+        hint(format!(
+            "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
+        ))
+    }
+}
+
 fn hint(text: impl Into<String>) -> Recovery {
     Recovery::Hint(text.into())
 }
@@ -485,9 +501,7 @@ impl Failure for RunFailure {
             }
             | Self::NotReady {
                 workspace, process, ..
-            } => hint(format!(
-                "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
-            )),
+            } => start_failed(workspace, process),
             Self::ForeignListener {
                 workspace,
                 process,

@@ -33,8 +33,27 @@ mod tests;
 /// A longer response fails as unreadable.
 const MOST_RESPONSE_BYTES: u64 = 1024 * 1024;
 
-/// How long one request may take to connect, and then to send or read.
+/// How long one attempt of a request may wait to connect, and then for
+/// each send or read. An attempt never waits past the provisioning's
+/// deadline, so it may wait less.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Returns how long an attempt may wait now: [`REQUEST_TIMEOUT`] or the
+/// time left before `deadline`, whichever is shorter.
+///
+/// # Errors
+///
+/// Returns a timed-out error once `deadline` has passed.
+fn wait_until(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the deadline passed before the backend answered",
+        ));
+    }
+    Ok(left.min(REQUEST_TIMEOUT))
+}
 
 /// The pause between two attempts of a request that found its backend
 /// still starting.
@@ -140,6 +159,17 @@ pub enum ProvisionError {
         /// its message.
         error: String,
     },
+    /// A table exists with a shape other than the manifest declares,
+    /// which DynamoDB Local cannot change in place.
+    Changed {
+        /// The resource, such as `table inbox`.
+        resource: String,
+        /// What differs, such as `expiry on `gone``.
+        what: String,
+        /// Whether `what` names one thing, which the message calls `it`,
+        /// or several, which it calls `them`.
+        one: bool,
+    },
 }
 
 impl fmt::Display for ProvisionError {
@@ -168,6 +198,15 @@ impl fmt::Display for ProvisionError {
             } => write!(
                 formatter,
                 "the backend refused to create the {resource} with HTTP status {status}: {error}"
+            ),
+            Self::Changed {
+                resource,
+                what,
+                one,
+            } => write!(
+                formatter,
+                "the {resource} exists with {what} other than the manifest declares, and DynamoDB Local cannot change {}; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`",
+                if *one { "it" } else { "them" }
             ),
         }
     }
@@ -255,11 +294,10 @@ impl Request<'_> {
     /// Sends the request once and reads the whole response. The request
     /// is HTTP/1.0, so the response ends when the backend closes the
     /// connection, and its body is never chunked.
-    fn send_once(&self) -> io::Result<Response> {
+    fn send_once(&self, deadline: Instant) -> io::Result<Response> {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
-        let mut stream = TcpStream::connect_timeout(&address, REQUEST_TIMEOUT)?;
-        stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-        stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+        let mut stream = TcpStream::connect_timeout(&address, wait_until(deadline)?)?;
+        stream.set_write_timeout(Some(wait_until(deadline)?))?;
         let mut head = format!(
             "{} {} HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\n",
             self.method,
@@ -274,9 +312,20 @@ impl Request<'_> {
         stream.write_all(head.as_bytes())?;
         stream.write_all(self.body.as_bytes())?;
         let mut bytes = Vec::new();
-        stream
-            .take(MOST_RESPONSE_BYTES + 1)
-            .read_to_end(&mut bytes)?;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            // Each read waits at most until the deadline, so a backend that
+            // answers slowly cannot hold the attempt past it.
+            stream.set_read_timeout(Some(wait_until(deadline)?))?;
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(buffer.get(..read).unwrap_or_default());
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MOST_RESPONSE_BYTES {
+                break;
+            }
+        }
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MOST_RESPONSE_BYTES {
             return Err(io::Error::other(format!(
                 "the response is longer than {MOST_RESPONSE_BYTES} bytes"
@@ -299,7 +348,7 @@ impl Request<'_> {
     /// 500, pausing between attempts, and returns the answer.
     fn send(&self, resource: &str, deadline: Instant) -> Result<Response, ProvisionError> {
         loop {
-            let last = match self.send_once() {
+            let last = match self.send_once(deadline) {
                 Ok(response) if response.status < 500 => return Ok(response),
                 Ok(response) => format!("HTTP status {}: {}", response.status, response.code()),
                 Err(error) => error.to_string(),
@@ -432,6 +481,31 @@ pub(crate) fn create_table_body(name: &str, table: &Table) -> Value {
     body
 }
 
+/// Returns the parts of a table that the manifest declares, from either
+/// a `CreateTable` body or DynamoDB's `Table` description: its key schema,
+/// its attribute definitions by name, and the key schema of each global
+/// secondary index by name. Other fields, such as its status, are left
+/// out, and the order of the definitions and indexes does not matter.
+fn table_shape(table: &Value) -> Value {
+    let by_name = |list: &str, key: &str, value: &str| -> BTreeMap<String, Value> {
+        table
+            .get(list)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let name = item.get(key)?.as_str()?.to_owned();
+                Some((name, item.get(value).cloned().unwrap_or(Value::Null)))
+            })
+            .collect()
+    };
+    json!({
+        "KeySchema": table.get("KeySchema").cloned().unwrap_or(Value::Null),
+        "AttributeDefinitions": by_name("AttributeDefinitions", "AttributeName", "AttributeType"),
+        "Indexes": by_name("GlobalSecondaryIndexes", "IndexName", "KeySchema"),
+    })
+}
+
 /// Creates the table `name`, and turns on its expiry when it declares a
 /// `ttl` attribute, and returns the line that says what it did.
 fn create_table(
@@ -451,6 +525,23 @@ fn create_table(
     let mut line = if created.ok() {
         format!("created the {resource}")
     } else if created.code() == "ResourceInUseException" {
+        let described = json_request(
+            port,
+            "DynamoDB_20120810.DescribeTable",
+            JSON_1_0,
+            &json!({ "TableName": name }),
+        )
+        .send(resource, deadline)?;
+        if !described.ok() {
+            return Err(described.refusal(resource));
+        }
+        if table_shape(&described.field("Table")) != table_shape(&create_table_body(name, table)) {
+            return Err(ProvisionError::Changed {
+                resource: resource.to_owned(),
+                what: "keys, attribute types or indexes".to_owned(),
+                one: false,
+            });
+        }
         format!("the {resource} exists already")
     } else {
         return Err(created.refusal(resource));
@@ -467,8 +558,19 @@ fn create_table(
             return Err(described.refusal(resource));
         }
         let status = described.field("TimeToLiveDescription");
-        let enabled = status.get("TimeToLiveStatus").and_then(Value::as_str) == Some("ENABLED")
-            && status.get("AttributeName").and_then(Value::as_str) == Some(attribute);
+        let state = status.get("TimeToLiveStatus").and_then(Value::as_str);
+        let current = status.get("AttributeName").and_then(Value::as_str);
+        if matches!(state, Some("ENABLED" | "ENABLING"))
+            && let Some(current) = current
+            && current != attribute
+        {
+            return Err(ProvisionError::Changed {
+                resource: resource.to_owned(),
+                what: format!("expiry on `{current}`"),
+                one: true,
+            });
+        }
+        let enabled = state == Some("ENABLED") && current == Some(attribute);
         if !enabled {
             let updated = json_request(
                 port,

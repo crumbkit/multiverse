@@ -124,11 +124,9 @@ fn backend_app(inputs: &Inputs<'_>, backend: Backend) -> Result<Planned, Unrunna
         }
         Backend::Aws => {
             let host_port = inputs.ports.get(name).copied().unwrap_or_default();
+            let kinds = localstack_services(inputs.manifest.services.values());
             vars = vec![
-                (
-                    "SERVICES".to_owned(),
-                    Redacted::new(localstack_services(inputs.manifest.services.values())),
-                ),
+                ("SERVICES".to_owned(), Redacted::new(kinds.clone())),
                 (
                     "SQS_ENDPOINT_STRATEGY".to_owned(),
                     Redacted::new("path".to_owned()),
@@ -140,7 +138,11 @@ fn backend_app(inputs: &Inputs<'_>, backend: Backend) -> Result<Planned, Unrunna
                     Redacted::new(format!("{HOST}:{host_port}")),
                 ),
             ];
-            let mut main = ProcessPlan::new(main_process()?, Vec::new());
+            // phase's plan hash of a container covers its command and the
+            // names of its variables, not their values, so the kinds go in
+            // the command too: a change of kinds then replaces the
+            // container. LocalStack's entrypoint ignores its arguments.
+            let mut main = ProcessPlan::new(main_process()?, vec![format!("mxv-services={kinds}")]);
             main.port = Some(port.clone());
             main.ready = Some(Probe::new(ProbeCheck::http(LOCALSTACK_HEALTH.to_owned())));
             main

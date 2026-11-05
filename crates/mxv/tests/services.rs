@@ -437,7 +437,80 @@ fn up_starts_a_manifest_of_services_alone_without_a_warning() {
     assert_eq!(names, ["mxv-aws", "mxv-provision"]);
     let (exit, document) = setup.json(&["down", "-w", name]);
     assert_eq!(exit, 0, "{document}");
+    assert_eq!(row(&document, "mxv-aws")["kind"], "container");
     assert!(setup.containers().is_empty());
+}
+
+#[test]
+fn a_kind_added_to_a_running_workspace_replaces_localstack_and_up_provisions_it() {
+    if !docker_runs("a_kind_added_to_a_running_workspace") {
+        return;
+    }
+    let name = "mxvtest-services-added";
+    let files = "[service.files]\nkind = \"s3\"\nbuckets = [\"mxv-test-added\"]\n";
+    let setup = Setup::new(name, files);
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+
+    setup.write_manifest(&format!(
+        "{files}\n[service.jobs]\nkind = \"sqs\"\nqueues.mxv-test-added = {{}}\n"
+    ));
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let provisioned = log_of(&setup, "mxv-provision");
+    assert!(
+        provisioned.contains("created the queue mxv-test-added"),
+        "{provisioned}"
+    );
+
+    let (exit, document) = setup.json(&["down", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+}
+
+#[test]
+fn a_table_whose_keys_change_fails_up_with_the_provisioning_log_until_down_resets_it() {
+    if !docker_runs("a_table_whose_keys_change") {
+        return;
+    }
+    let name = "mxvtest-services-changed";
+    let table = |hash: &str| {
+        format!(
+            "[service.store]\nkind = \"dynamodb\"\ntables.mxv-test-changed = {{ hash = \"{hash}\" }}\n"
+        )
+    };
+    let setup = Setup::new(name, &table("pk:S"));
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+
+    setup.write_manifest(&table("pk:N"));
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::process::exited", "{document}");
+    assert_eq!(document["fields"]["process"], "mxv-provision", "{document}");
+    let log = document["fields"]["log"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{document}"));
+    assert!(log.ends_with("mxv-provision.main.log"), "{log}");
+    assert_eq!(document["fields"]["tail"], serde_json::json!([]));
+    let hint = document["recovery"]["text"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains(&format!("mxv logs -w {name} mxv-provision"))
+            && hint.contains(&format!("mxv up -w {name}`")),
+        "{document}"
+    );
+    let provisioned = fs::read_to_string(log).unwrap();
+    assert!(
+        provisioned.contains("the table mxv-test-changed exists with keys, attribute types or indexes other than the manifest declares")
+            && provisioned.contains("run `mxv down`"),
+        "{provisioned}"
+    );
+
+    let (exit, document) = setup.json(&["down", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["down", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
 }
 
 #[cfg(target_os = "macos")]

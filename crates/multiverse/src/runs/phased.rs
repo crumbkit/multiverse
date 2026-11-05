@@ -38,6 +38,7 @@ use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Inputs, MAIN};
 use crate::record::Workspace;
 use crate::run_files::RunHost;
+use crate::service::PROVISION_APP;
 use crate::store::{self, Lock, Store};
 
 /// How long `up` gives phase to build each selected checkout. mxv's apps
@@ -492,6 +493,18 @@ impl Runs {
             (Some(Unit::Container(_)), _) => Kind::Container,
             (Some(Unit::Process(_)), _) => Kind::Process,
             (None, Some(row)) if row.runner == RunnerKind::Container => Kind::Container,
+            // A backend of the services runs in a container whether or not
+            // phase still has its row, as after `down`.
+            (None, _)
+                if manifest.is_some_and(|manifest| {
+                    manifest
+                        .backends()
+                        .iter()
+                        .any(|backend| backend.app() == name)
+                }) =>
+            {
+                Kind::Container
+            }
             (None, _) => Kind::Process,
         };
         ProcessStatus {
@@ -934,8 +947,11 @@ impl Runs {
         problem: &StartProblem,
     ) -> Result<UpOutcome, Error> {
         let log = self.phase_log(id, manifest, unit);
+        // The provisioning's failure points to its log and quotes none of
+        // it.
         let log_tail = || {
             log.as_deref()
+                .filter(|_| unit != PROVISION_APP)
                 .map(|log| tail(log, TAIL_LINES))
                 .unwrap_or_default()
         };
@@ -1005,10 +1021,14 @@ impl Runs {
     }
 
     /// Returns the log file that phase's keeper gives the host process
-    /// `unit`, or `None` for a container, whose log comes from `docker
-    /// logs`.
+    /// `unit`, which is a process of `manifest` or [`PROVISION_APP`] when
+    /// the manifest declares services, or `None` for a container, whose
+    /// log comes from `docker logs`.
     fn phase_log(&self, id: &WorkspaceId, manifest: &Manifest, unit: &str) -> Option<PathBuf> {
-        manifest.processes.get(unit)?;
+        let provisions = unit == PROVISION_APP && !manifest.services.is_empty();
+        if !provisions && !manifest.processes.contains_key(unit) {
+            return None;
+        }
         Some(
             self.phase
                 .state_dir()

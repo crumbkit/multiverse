@@ -773,7 +773,7 @@ services, and starts them before any process that needs them.
 | App | What it runs |
 | --- | --- |
 | `mxv-dynamodb` | DynamoDB Local, `amazon/dynamodb-local:3.3.1` pinned by digest, with `-sharedDb -inMemory`, for the `dynamodb` services. |
-| `mxv-aws` | LocalStack, `localstack/localstack:4.14.0` pinned by digest, for the `s3`, `sqs` and `kms` services. Its `SERVICES` lists only the kinds that the manifest declares, and its queue URLs use the path form. |
+| `mxv-aws` | LocalStack, `localstack/localstack:4.14.0` pinned by digest, for the `s3`, `sqs` and `kms` services. Its `SERVICES` lists only the kinds that the manifest declares, and its queue URLs use the path form. A kind added to the manifest replaces the container on the next `up`, which loses LocalStack's in-memory data, and `mxv-provision` then creates every resource again. |
 | `mxv-provision` | A host process that runs mxv itself and creates each declared table, bucket, queue and key. It runs once and exits. |
 
 A workspace runs one DynamoDB Local and one LocalStack, which every
@@ -789,8 +789,20 @@ gives an existing queue the declared visibility timeout. It runs again on
 the next `up` after a backend restarts or the manifest's resources
 change, and it leaves resources that the manifest no longer declares in
 place until the backend stops. Its log lists each resource it created or
-found. A backend that refuses a resource fails `up`, and the log names the
-resource and the backend's error.
+found. Each request waits at most until the provisioning's deadline of
+110 seconds, after which the provisioning fails.
+
+DynamoDB Local cannot change a table's keys, attribute types, indexes or
+expiry attribute in place. When a table exists with any of them other than
+the manifest declares, `mxv-provision` fails, and its log says to run
+`mxv down`, which drops the backends' in-memory data, and then `mxv up`,
+which creates the table as declared.
+
+When the provisioning fails, `up` fails with `mxv::process::exited`, whose
+`log` field names the provisioning's log. The hint says to read it with
+`mxv logs -w <workspace> mxv-provision`, fix what it names, and run
+`mxv up -w <workspace>` again. A backend that refuses a resource fails the
+provisioning, and the log names the resource and the backend's error.
 
 The backends keep their data in memory. `mxv down` stops them, and the
 next `up` starts them empty and provisions every resource again.
@@ -865,7 +877,7 @@ and `show` and `new` put it in the row's `warnings`. phase's own tables,
 because mxv sandboxes each process on its own, so it fails with
 `mxv::manifest::invalid` and a hint to move its keys to
 `[processes.<name>.permissions]`. `up` also warns when the manifest declares
-no processes and no containers, and starts nothing.
+no processes, no containers and no services, and starts nothing.
 
 A workspace manifest that is a symbolic link leading nowhere cannot be
 read. `up` fails with `mxv::manifest::unreadable`, which names the link and

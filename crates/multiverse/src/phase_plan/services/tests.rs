@@ -162,7 +162,9 @@ fn localstack_serves_the_declared_kinds_with_path_queue_urls_on_its_published_ad
         LOCALSTACK_IMAGE
     );
     let main = &aws.processes[0];
-    assert!(main.run.is_empty());
+    // LocalStack's entrypoint ignores its arguments, and phase's plan hash
+    // covers them, so a change of kinds replaces the container.
+    assert_eq!(main.run, ["mxv-services=s3,kms"]);
     assert_eq!(main.port.as_ref().unwrap().as_str(), "mxv-aws");
     assert!(matches!(
         &main.ready.as_ref().unwrap().check,

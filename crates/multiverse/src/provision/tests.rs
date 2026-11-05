@@ -83,6 +83,37 @@ impl FakeBackend {
     }
 }
 
+/// Returns DynamoDB's description of the table `inbox` as the manifest
+/// declares it, with the sort key `sk` of the type `range` and fields that
+/// the comparison ignores, in an order other than the declaration's.
+fn described_inbox(range: &str) -> String {
+    json!({"Table": {
+        "TableName": "inbox",
+        "TableStatus": "ACTIVE",
+        "AttributeDefinitions": [
+            {"AttributeName": "sk", "AttributeType": range},
+            {"AttributeName": "pk", "AttributeType": "S"},
+            {"AttributeName": "owner", "AttributeType": "S"},
+            {"AttributeName": "at", "AttributeType": "N"},
+        ],
+        "KeySchema": [
+            {"AttributeName": "pk", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        "GlobalSecondaryIndexes": [{
+            "IndexName": "by-owner",
+            "IndexStatus": "ACTIVE",
+            "KeySchema": [
+                {"AttributeName": "owner", "KeyType": "HASH"},
+                {"AttributeName": "at", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        "ItemCount": 0,
+    }})
+    .to_string()
+}
+
 /// Answers as a backend in which every resource exists already.
 fn everything_exists(request: &Received) -> (u16, String) {
     match request.target.as_str() {
@@ -90,6 +121,7 @@ fn everything_exists(request: &Received) -> (u16, String) {
             400,
             json!({"__type": "com.amazonaws.dynamodb.v20120810#ResourceInUseException", "Message": "Cannot create preexisting table"}).to_string(),
         ),
+        "DynamoDB_20120810.DescribeTable" => (200, described_inbox("S")),
         "DynamoDB_20120810.DescribeTimeToLive" => (
             200,
             json!({"TimeToLiveDescription": {"TimeToLiveStatus": "ENABLED", "AttributeName": "expires"}}).to_string(),
@@ -300,6 +332,41 @@ fn provisioning_a_backend_that_holds_every_resource_succeeds_and_creates_nothing
 }
 
 #[test]
+fn a_table_that_exists_with_another_key_schema_fails_and_says_to_run_down_then_up() {
+    let backend = FakeBackend::start(|request| match request.target.as_str() {
+        "DynamoDB_20120810.DescribeTable" => (200, described_inbox("N")),
+        _ => everything_exists(request),
+    });
+    let error = provision(&spec(backend.port, backend.port), deadline(), &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(&error, ProvisionError::Changed { resource, .. } if resource == "table inbox"),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "the table inbox exists with keys, attribute types or indexes other than the manifest declares, and DynamoDB Local cannot change them; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`"
+    );
+}
+
+#[test]
+fn a_table_whose_expiry_is_on_another_attribute_fails_and_says_to_run_down_then_up() {
+    let backend = FakeBackend::start(|request| {
+        match request.target.as_str() {
+        "DynamoDB_20120810.DescribeTimeToLive" => (
+            200,
+            json!({"TimeToLiveDescription": {"TimeToLiveStatus": "ENABLED", "AttributeName": "gone"}}).to_string(),
+        ),
+        _ => everything_exists(request),
+    }
+    });
+    let error = provision(&spec(backend.port, backend.port), deadline(), &mut |_| {}).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the table inbox exists with expiry on `gone` other than the manifest declares, and DynamoDB Local cannot change it; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`"
+    );
+}
+
+#[test]
 fn a_backend_that_refuses_a_resource_fails_with_the_resource_and_the_backends_error() {
     let backend = FakeBackend::start(|_| {
         (
@@ -334,6 +401,30 @@ fn a_backend_that_never_answers_fails_as_unreachable_at_the_deadline() {
         matches!(&error, ProvisionError::Unreachable { resource, .. } if resource == "table inbox"),
         "{error}"
     );
+}
+
+#[test]
+fn a_backend_that_accepts_and_never_answers_fails_soon_after_the_deadline() {
+    // The listener accepts connections into its backlog and never reads
+    // or writes, so each request waits for an answer that never comes.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut spec = spec(port, port);
+    spec.buckets.clear();
+    spec.queues.clear();
+    spec.keys.clear();
+    let started = Instant::now();
+    let error = provision(&spec, started + Duration::from_secs(1), &mut |_| {}).unwrap_err();
+    assert!(
+        matches!(&error, ProvisionError::Unreachable { resource, .. } if resource == "table inbox"),
+        "{error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(listener);
 }
 
 #[test]
