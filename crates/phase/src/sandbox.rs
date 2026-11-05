@@ -76,8 +76,13 @@ pub use launch::{SANDBOX_REFUSED, launch};
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum Sandboxing {
-    /// The process runs under macOS's Seatbelt.
-    Seatbelt,
+    /// The process runs under macOS's Seatbelt, which confines it only in
+    /// part: [`SEATBELT_PARTIAL`] says what Seatbelt leaves open.
+    #[non_exhaustive]
+    Seatbelt {
+        /// What Seatbelt leaves unrestricted.
+        partial: String,
+    },
     /// The process runs under Linux's Landlock, which confines it only in
     /// part: [`LANDLOCK_PARTIAL`] says what Landlock leaves open.
     #[non_exhaustive]
@@ -94,6 +99,14 @@ pub enum Sandboxing {
 }
 
 impl Sandboxing {
+    /// Returns the sandbox of macOS, which [`SEATBELT_PARTIAL`] describes.
+    #[must_use]
+    pub fn seatbelt() -> Self {
+        Self::Seatbelt {
+            partial: SEATBELT_PARTIAL.to_owned(),
+        }
+    }
+
     /// Returns the partial sandbox of Linux, which [`LANDLOCK_PARTIAL`]
     /// describes.
     #[must_use]
@@ -107,12 +120,18 @@ impl Sandboxing {
 impl fmt::Display for Sandboxing {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Seatbelt => formatter.write_str("seatbelt"),
+            Self::Seatbelt { partial } => write!(formatter, "seatbelt (partial: {partial})"),
             Self::Landlock { partial } => write!(formatter, "landlock (partial: {partial})"),
             Self::Unsandboxed { reason } => write!(formatter, "unsandboxed ({reason})"),
         }
     }
 }
+
+/// What Seatbelt leaves open on macOS. Seatbelt restricts a bind by port
+/// and never by address, and its `localhost` matches every address of the
+/// machine, so a process that may listen on a port can listen on it on
+/// every address and accept a peer on any of them.
+pub const SEATBELT_PARTIAL: &str = "a listening port accepts connections on every address";
 
 /// What Landlock leaves open on Linux. Before its ABI 9 Landlock cannot
 /// restrict `connect` to a Unix socket, and nono 0.81 does not enforce
@@ -138,7 +157,7 @@ pub(crate) enum Platform {
 #[cfg(target_os = "macos")]
 pub(crate) fn platform() -> Platform {
     if nono::Sandbox::is_supported() {
-        Platform::Available(Sandboxing::Seatbelt)
+        Platform::Available(Sandboxing::seatbelt())
     } else {
         Platform::Unavailable(nono::Sandbox::support_info().details)
     }
@@ -146,6 +165,11 @@ pub(crate) fn platform() -> Platform {
 
 /// Returns the sandbox that this machine offers. Landlock counts only when
 /// it can restrict TCP ports, which needs its ABI 4.
+///
+/// This is the one place that decides how Linux is reported. Returning
+/// [`Platform::Unavailable`] for every kernel would run each app
+/// unsandboxed and report it so, instead of applying Landlock and
+/// reporting it as partial.
 #[cfg(target_os = "linux")]
 pub(crate) fn platform() -> Platform {
     match nono::Sandbox::detect_abi() {
@@ -262,6 +286,15 @@ pub(crate) enum SandboxError {
         /// Where it resolves now.
         now: PathBuf,
     },
+    /// A writable path lies inside a sticky, group-writable or
+    /// world-writable directory, such as `/tmp`, where another process
+    /// could replace a name in it with a symbolic link.
+    SharedDirectory {
+        /// The writable path.
+        path: PathBuf,
+        /// The shared directory.
+        dir: PathBuf,
+    },
     /// A path that the sandbox needs cannot be read or created.
     Unusable {
         /// The path.
@@ -304,6 +337,12 @@ impl fmt::Display for SandboxError {
                 "the sandbox allows {}, which now resolves to {}",
                 path.display(),
                 now.display()
+            ),
+            Self::SharedDirectory { path, dir } => write!(
+                formatter,
+                "the sandbox would let the app write {}, which lies inside {}, a directory that other users or processes may write",
+                path.display(),
+                dir.display()
             ),
             Self::Unusable { path, reason } => write!(
                 formatter,
@@ -512,8 +551,9 @@ const SYSTEM_DENY: &[&str] = &["/usr/local/var", "/usr/local/etc"];
 const SYSTEM_DENY: &[&str] = &[];
 
 /// The paths in the home directory that every sandbox protects: the
-/// credentials of ssh, AWS, GitHub's CLI, Docker, netrc, git and gpg and
-/// Cargo, the shells' startup files, the agents' own directories, mise's
+/// credentials and configuration of ssh, AWS, GitHub's CLI, Docker, netrc,
+/// git, gpg, Cargo, npm, PyPI, Kubernetes, Google Cloud and Azure, the
+/// shells' startup files, the agents' own directories, mise's
 /// configuration, and on macOS the Keychains and the user's launch agents.
 const HOME_PROTECTED: &[&str] = &[
     ".ssh",
@@ -525,6 +565,15 @@ const HOME_PROTECTED: &[&str] = &[
     ".gnupg",
     ".cargo/credentials.toml",
     ".cargo/credentials",
+    ".cargo/config.toml",
+    ".cargo/config",
+    ".gitconfig",
+    ".config/git",
+    ".npmrc",
+    ".pypirc",
+    ".kube",
+    ".config/gcloud",
+    ".azure",
     ".config/mise",
     ".claude",
     ".codex",
@@ -647,13 +696,15 @@ pub(crate) fn spec(
     // The app's own directories lie inside phase's state directory, which
     // is protected apart from them.
     protected.push(Protected::except(context.state_dir, &dirs.base));
-    protected.extend(context.protected.iter().map(|path| Protected::path(path)));
+    // The host program may protect a directory that holds phase's state,
+    // as mxv protects its state directory, so its protection also leaves
+    // out the app's own directories.
     protected.extend(
         context
-            .workspace_paths
             .protected
             .iter()
-            .map(|path| Protected::path(path)),
+            .chain(&context.workspace_paths.protected)
+            .map(|path| Protected::except(path, &dirs.base)),
     );
     if let Some(workspace) = &workspace_dir {
         protected.push(Protected::except(workspace, &checkout));
@@ -667,11 +718,10 @@ pub(crate) fn spec(
             canonical(&checkout.join(entry))
         });
     }
-    let mut read: BTreeSet<PathBuf> = SYSTEM_READ
+    let mut read: BTreeSet<PathBuf> = system_read()
         .iter()
-        .map(Path::new)
         .filter(|path| path.exists())
-        .map(canonical)
+        .map(|path| canonical(path))
         .collect();
     read.insert(checkout.clone());
     if let Some(program) = process.run.first().map(Path::new)
@@ -680,10 +730,7 @@ pub(crate) fn spec(
         read.insert(canonical(program));
     }
     let mut read_only: BTreeSet<PathBuf> = BTreeSet::new();
-    for program in [
-        context.launcher.program.clone(),
-        canonical(&context.launcher.program),
-    ] {
+    for program in link_chain(&context.launcher.program) {
         if let Some(parent) = program.parent() {
             read_only.insert(canonical(parent));
         }
@@ -696,8 +743,12 @@ pub(crate) fn spec(
         if !entry.is_absolute() {
             continue;
         }
-        path_dirs.push(entry.to_path_buf());
         read_only.insert(canonical(entry));
+        // A `PATH` entry that reaches a protected path, such as the home
+        // directory, lets the app look nothing up in it.
+        if !reaches(&canonical(entry)) {
+            path_dirs.push(entry.to_path_buf());
+        }
         for dir in toolchain(entry, context.home) {
             let dir = canonical(&dir);
             read_only.insert(dir.clone());
@@ -729,6 +780,14 @@ pub(crate) fn spec(
         launcher: context.launcher.clone(),
     };
     check(&spec)?;
+    for path in &spec.write {
+        if let Some(dir) = shared_ancestor(path) {
+            return Err(SandboxError::SharedDirectory {
+                path: path.clone(),
+                dir,
+            });
+        }
+    }
     for path in spec
         .read
         .iter()
@@ -789,6 +848,20 @@ pub(crate) fn check(spec: &SandboxSpec) -> Result<(), SandboxError> {
 /// errors of [`check`], and [`SandboxError::Unusable`] for a directory that
 /// cannot be created.
 pub(crate) fn verify(spec: &SandboxSpec) -> Result<(), SandboxError> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    // The directories are created first, so a symbolic link that the app
+    // planted where one was missing shows as a moved path below, and no
+    // directory appears after the check.
+    for path in &spec.write {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .map_err(|error| SandboxError::Unusable {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
+    }
     for path in spec.read.iter().chain(&spec.write) {
         let now = canonical(path);
         if &now != path {
@@ -800,12 +873,102 @@ pub(crate) fn verify(spec: &SandboxSpec) -> Result<(), SandboxError> {
     }
     check(spec)?;
     for path in &spec.write {
-        std::fs::create_dir_all(path).map_err(|error| SandboxError::Unusable {
-            path: path.clone(),
-            reason: error.to_string(),
-        })?;
+        if let Some(dir) = shared_ancestor(path) {
+            return Err(SandboxError::SharedDirectory {
+                path: path.clone(),
+                dir,
+            });
+        }
     }
     Ok(())
+}
+
+/// Returns the first directory from the root down to `path` that is
+/// sticky, group-writable or world-writable, such as `/tmp`, where another
+/// user or process could replace a name with a symbolic link, or `None`.
+fn shared_ancestor(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    path.ancestors()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter_map(|dir| Some((dir, std::fs::symlink_metadata(dir).ok()?)))
+        .find(|(_, metadata)| metadata.is_dir() && metadata.permissions().mode() & 0o1022 != 0)
+        .map(|(dir, _)| dir.to_path_buf())
+}
+
+/// Returns `program` and each path that its chain of symbolic links passes
+/// through, ending at the file it resolves to. A chain longer than 40
+/// links stops there, as the kernel's does.
+fn link_chain(program: &Path) -> Vec<PathBuf> {
+    let mut chain = vec![program.to_path_buf()];
+    let mut current = program.to_path_buf();
+    for _ in 0..40 {
+        let Ok(target) = std::fs::read_link(&current) else {
+            break;
+        };
+        current = match current.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+        chain.push(current.clone());
+    }
+    chain.push(canonical(program));
+    chain
+}
+
+/// Returns the system directories that every sandboxed process may read.
+/// On Linux `/usr` is listed by its entries, and `/usr/local` by its
+/// entries apart from `etc` and `var`, because Landlock cannot deny a path
+/// inside a granted one.
+fn system_read() -> Vec<PathBuf> {
+    let paths = SYSTEM_READ.iter().map(PathBuf::from);
+    if cfg!(target_os = "linux") {
+        paths
+            .flat_map(|path| {
+                if path == Path::new("/usr") {
+                    usr_without_local_data(&path)
+                } else {
+                    vec![path]
+                }
+            })
+            .collect()
+    } else {
+        paths.collect()
+    }
+}
+
+/// Returns the entries of `usr`, with `local` replaced by its entries
+/// apart from `etc` and `var`.
+fn usr_without_local_data(usr: &Path) -> Vec<PathBuf> {
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    entries(usr)
+        .into_iter()
+        .flat_map(|entry| {
+            if entry.file_name() == Some(std::ffi::OsStr::new("local")) {
+                entries(&entry)
+                    .into_iter()
+                    .filter(|inner| {
+                        !matches!(
+                            inner.file_name().and_then(std::ffi::OsStr::to_str),
+                            Some("etc" | "var")
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![entry]
+            }
+        })
+        .collect()
 }
 
 /// Reports whether `path` is UTF-8 and holds no quote, backslash or control

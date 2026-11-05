@@ -101,7 +101,7 @@ fn the_record_holds_the_schema_and_no_environment() {
     let text = fs::read_to_string(store.path(&workspace())).unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v3");
+    assert_eq!(json["schema"], "phase/run/v4");
     assert_eq!(json["workspace"], "0b9f3c8e");
     assert_eq!(
         json["processes"][0]["host"]["started_at_us"],
@@ -187,7 +187,7 @@ fn a_record_from_a_newer_phase_asks_for_an_upgrade() {
     fs::create_dir_all(state.path().join("runs")).unwrap();
     write_file(
         &store.path(&workspace()),
-        r#"{"schema":"phase/run/v4","something":"new"}"#,
+        r#"{"schema":"phase/run/v5","something":"new"}"#,
     );
 
     let error = store.read(&workspace()).unwrap_err();
@@ -408,7 +408,7 @@ fn launching(grace_ms: u64, hash: u8) -> Launching {
         },
         listen: None,
         restart: Restart::No,
-        sandbox: Some(crate::sandbox::Sandboxing::Seatbelt),
+        sandbox: Some(crate::sandbox::Sandboxing::seatbelt()),
     }
 }
 
@@ -595,7 +595,7 @@ fn a_stop_that_phase_begins_records_the_end_as_requested() {
 
 #[test]
 fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_version() {
-    for older in ["phase/run/v1", "phase/run/v2"] {
+    for older in ["phase/run/v1", "phase/run/v2", "phase/run/v3"] {
         let state = tempfile::tempdir().unwrap();
         let store = RunStore::new(state.path());
         let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
@@ -603,7 +603,7 @@ fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_versi
         drop(journal);
         let path = store.path(&workspace());
         let text = fs::read_to_string(&path).unwrap();
-        write_file(&path, &text.replace("phase/run/v3", older));
+        write_file(&path, &text.replace("phase/run/v4", older));
 
         let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
         assert_eq!(journal.record(), Some(&planned()), "{older}");
@@ -611,7 +611,7 @@ fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_versi
 
         let json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["schema"], "phase/run/v3", "{older}");
+        assert_eq!(json["schema"], "phase/run/v4", "{older}");
     }
 }
 
@@ -632,7 +632,7 @@ fn a_record_that_an_older_phase_wrote_reads_as_one_that_has_observed_no_readines
     let path = store.path(&workspace());
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("ready"), "{text}");
-    write_file(&path, &text.replace("phase/run/v3", "phase/run/v2"));
+    write_file(&path, &text.replace("phase/run/v4", "phase/run/v2"));
 
     let record = on_disk(&store);
 
@@ -782,5 +782,43 @@ fn launching_a_process_records_its_restart_policy() {
     assert_eq!(
         on_disk(&store).processes[0].restart,
         Some(Restart::always(RestartLimits::default()))
+    );
+}
+
+#[test]
+fn a_v3_record_reads_as_one_that_recorded_no_sandbox() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("sandbox"), "{text}");
+    write_file(&path, &text.replace("phase/run/v4", "phase/run/v3"));
+
+    let record = on_disk(&store);
+
+    assert_eq!(record.processes[0].sandbox, None);
+}
+
+#[test]
+fn a_launched_host_process_records_its_sandbox_in_a_v4_record() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal
+        .launching(&app("api"), &process("server"), &launching(500, 1))
+        .unwrap();
+    drop(journal);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
+
+    assert_eq!(json["schema"], "phase/run/v4");
+    assert_eq!(
+        json["processes"][0]["sandbox"],
+        serde_json::json!({ "kind": "seatbelt", "partial": crate::sandbox::SEATBELT_PARTIAL })
     );
 }

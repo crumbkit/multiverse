@@ -74,10 +74,13 @@ pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
         rules.push(format!(
             "{NETWORK_RULE}-bind (local tcp \"localhost:{port}\"))"
         ));
-        // Seatbelt restricts a bind by port and never by address, so the
-        // inbound rule also names the peer, which must be on this machine.
+        // Seatbelt's `localhost` matches every address of this machine,
+        // and an inbound rule that names the remote side also refuses the
+        // listen, so the rule names only the local port. A process that
+        // listens on every address therefore accepts any peer, which
+        // `SEATBELT_PARTIAL` says.
         rules.push(format!(
-            "{NETWORK_RULE}-inbound (local tcp \"localhost:{port}\") (remote tcp \"localhost:*\"))"
+            "{NETWORK_RULE}-inbound (local tcp \"localhost:{port}\"))"
         ));
     }
     for port in &spec.connect {

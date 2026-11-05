@@ -14,7 +14,8 @@ use tempfile::TempDir;
 
 use super::{
     AppDirs, Context, LANDLOCK_PARTIAL, Launcher, Platform, SandboxError, SandboxSpec, Sandboxing,
-    UNDECLARED, WorkspacePaths, launch, launcher_command, sandboxing, spec, toolchain, verify,
+    UNDECLARED, WorkspacePaths, launch, launcher_command, sandboxing, spec, toolchain,
+    usr_without_local_data, verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
 use crate::record::testing::{app, workspace};
@@ -149,6 +150,20 @@ impl Fixture {
         path: &str,
         connect: BTreeSet<u16>,
     ) -> Result<SandboxSpec, SandboxError> {
+        self.spec_with(api, path, connect, test_launcher(), &[])
+    }
+
+    /// Returns the spec of the first process of `api` as [`Fixture::spec_of`]
+    /// does, with `launcher` as the launcher and `protected` as the host
+    /// program's protected paths.
+    fn spec_with(
+        &self,
+        api: &AppPlan,
+        path: &str,
+        connect: BTreeSet<u16>,
+        launcher: Launcher,
+        protected: &[PathBuf],
+    ) -> Result<SandboxSpec, SandboxError> {
         let home = self.home();
         let id = workspace();
         let state = self.state();
@@ -159,9 +174,9 @@ impl Fixture {
             workspace_paths: &paths,
             path: Some(path),
             home: Some(&home),
-            protected: &[],
+            protected,
             connect,
-            launcher: test_launcher(),
+            launcher,
         };
         spec(
             api,
@@ -196,7 +211,7 @@ fn an_app_without_permissions_runs_unsandboxed_and_says_why() {
     api.permissions = None;
 
     assert_eq!(
-        sandboxing(&api, &Platform::Available(Sandboxing::Seatbelt)),
+        sandboxing(&api, &Platform::Available(Sandboxing::seatbelt())),
         Some(Sandboxing::Unsandboxed {
             reason: UNDECLARED.to_owned()
         })
@@ -233,7 +248,10 @@ fn landlock_status_says_that_it_sandboxes_only_in_part_and_what_it_leaves_open()
         serde_json::to_value(&landlock).unwrap(),
         serde_json::json!({ "kind": "landlock", "partial": LANDLOCK_PARTIAL })
     );
-    assert_eq!(Sandboxing::Seatbelt.to_string(), "seatbelt");
+    assert_eq!(
+        Sandboxing::seatbelt().to_string(),
+        "seatbelt (partial: a listening port accepts connections on every address)"
+    );
 }
 
 #[test]
@@ -247,7 +265,7 @@ fn a_container_app_has_no_sandbox_of_phase() {
     );
 
     assert_eq!(
-        sandboxing(&db, &Platform::Available(Sandboxing::Seatbelt)),
+        sandboxing(&db, &Platform::Available(Sandboxing::seatbelt())),
         None
     );
 }
@@ -565,6 +583,14 @@ fn a_spec_denies_the_home_directorys_credentials_and_startup_files() {
         ".zshrc",
         ".bashrc",
         ".profile",
+        ".gitconfig",
+        ".config/git",
+        ".cargo/config.toml",
+        ".npmrc",
+        ".pypirc",
+        ".kube",
+        ".config/gcloud",
+        ".azure",
     ] {
         assert!(spec.deny.contains(&fixture.home().join(name)), "{name}");
     }
@@ -691,6 +717,123 @@ fn a_spec_reads_only_the_toolchain_directories_of_library_and_denies_the_keychai
     );
 }
 
+#[test]
+fn a_spec_lets_an_app_use_its_own_directories_inside_a_directory_that_the_host_program_protects() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    // mxv protects its state directory, which holds phase's state. The
+    // fixture's parent directory also holds the checkout, so the test
+    // protects phase's state directory itself.
+    let host_state = fixture.state();
+
+    let spec = fixture
+        .spec_with(
+            &api,
+            "/usr/bin",
+            BTreeSet::new(),
+            test_launcher(),
+            std::slice::from_ref(&host_state),
+        )
+        .unwrap();
+
+    let dirs = AppDirs::of(&fixture.state(), &workspace(), &app("api"));
+    assert!(spec.write.contains(&dirs.state));
+    assert!(spec.deny.contains(&host_state));
+}
+
+#[test]
+fn a_spec_refuses_a_write_inside_a_directory_that_others_may_write() {
+    let fixture = Fixture::new();
+    let tmp = PathBuf::from("/tmp").canonicalize().unwrap();
+
+    let result = writing(
+        &fixture,
+        &["/tmp/phase-sandbox-shared".to_owned()],
+        "/usr/bin",
+    );
+
+    assert!(
+        matches!(&result, Err(SandboxError::SharedDirectory { dir, .. }) if *dir == tmp),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn the_launchers_check_creates_a_missing_write_directory_readable_only_by_the_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    let spec = writing(&fixture, &["target".to_owned()], "/usr/bin").unwrap();
+
+    verify(&spec).unwrap();
+
+    let mode = std::fs::metadata(fixture.checkout().join("target"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+#[test]
+fn a_spec_keeps_every_link_of_the_launchers_chain_and_its_directory_read_only() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let real = fixture.outside().join("real");
+    let hop = fixture.outside().join("hop");
+    let bin = fixture.outside().join("bin");
+    for dir in [&real, &hop, &bin] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), real.join("program")).unwrap();
+    std::os::unix::fs::symlink(real.join("program"), hop.join("program")).unwrap();
+    std::os::unix::fs::symlink(hop.join("program"), bin.join("program")).unwrap();
+    let launcher = Launcher {
+        program: bin.join("program"),
+        words: Vec::new(),
+    };
+
+    let spec = fixture
+        .spec_with(&api, "/usr/bin", BTreeSet::new(), launcher, &[])
+        .unwrap();
+
+    for dir in [&bin, &hop, &real] {
+        assert!(spec.read_only.contains(dir), "{}", dir.display());
+    }
+}
+
+#[test]
+fn a_spec_looks_nothing_up_in_a_path_entry_that_reaches_a_protected_path() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let path = format!("{}:/usr/bin", fixture.home().display());
+
+    let spec = fixture.spec_of(&api, &path, BTreeSet::new()).unwrap();
+
+    assert_eq!(spec.path_dirs, [PathBuf::from("/usr/bin")]);
+}
+
+#[test]
+fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_local() {
+    let usr = tempfile::tempdir().unwrap();
+    for dir in [
+        "bin",
+        "lib",
+        "local/bin",
+        "local/etc",
+        "local/var",
+        "local/share",
+    ] {
+        std::fs::create_dir_all(usr.path().join(dir)).unwrap();
+    }
+
+    let mut read: Vec<String> = usr_without_local_data(usr.path())
+        .iter()
+        .map(|path| path.strip_prefix(usr.path()).unwrap().display().to_string())
+        .collect();
+    read.sort();
+
+    assert_eq!(read, ["bin", "lib", "local/bin", "local/share"]);
+}
+
 /// The tests of phase's Seatbelt rules, which are plain text, so they run
 /// on the Linux pull-request lane too.
 mod rules {
@@ -717,7 +860,7 @@ mod rules {
             network,
             [
                 "(allow network-bind (local tcp \"localhost:41000\"))",
-                "(allow network-inbound (local tcp \"localhost:41000\") (remote tcp \"localhost:*\"))",
+                "(allow network-inbound (local tcp \"localhost:41000\"))",
                 "(allow network-outbound (remote tcp \"localhost:41005\"))",
             ]
         );
@@ -975,6 +1118,187 @@ mod seatbelt {
             "connect-dependency-by-name={}",
             outcome(&output, "connect-dependency-by-name")
         );
+    }
+
+    /// Returns this machine's address on `en0`, or `None` when it has none.
+    fn en0_address() -> Option<String> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test asks ipconfig for the machine's address on en0"
+        )]
+        let output = Command::new("/usr/sbin/ipconfig")
+            .args(["getifaddr", "en0"])
+            .output()
+            .ok()?;
+        let address = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+        (!address.is_empty()).then_some(address)
+    }
+
+    /// Records what [`crate::sandbox::SEATBELT_PARTIAL`] says: Seatbelt's
+    /// `localhost` matches every address of this machine, so a sandboxed
+    /// process that listens on its port on every address accepts a peer
+    /// that connects to the machine's address on `en0`. When Seatbelt
+    /// refuses that peer, this test fails, and `status` can stop calling
+    /// Seatbelt partial.
+    #[test]
+    fn a_sandboxed_listener_on_every_address_accepts_a_peer_on_this_machines_en0_address() {
+        let Some(address) = en0_address() else {
+            return;
+        };
+        let fixture = Fixture::new();
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        let own = free.local_addr().unwrap().port();
+        drop(free);
+        let script = format!(
+            r#"/usr/bin/perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(LocalAddr => "0.0.0.0", LocalPort => {own}, Listen => 5, ReuseAddr => 1) or die "bind: $!"; $SIG{{ALRM}} = sub {{ exit 0 }}; alarm 6; while ($c = $s->accept) {{ print "accepted ", $c->peerhost, "\n"; }}'"#
+        );
+        let peer = std::thread::spawn(move || {
+            crate::clock::pause(std::time::Duration::from_millis(1500));
+            let reached = std::net::TcpStream::connect_timeout(
+                &format!("{address}:{own}").parse().unwrap(),
+                std::time::Duration::from_secs(2),
+            )
+            .is_ok();
+            (address, reached)
+        });
+
+        let (output, _) = sandboxed(&fixture, &script, own, 1);
+
+        let (address, reached) = peer.join().unwrap();
+        assert!(reached, "{output}");
+        assert!(output.contains(&format!("accepted {address}")), "{output}");
+    }
+
+    /// Runs `script` under a sandbox built from this machine's own `HOME`
+    /// and `PATH`, with the checkout's `target` writable, and returns its
+    /// output and exit status.
+    fn with_real_toolchains(fixture: &Fixture, script: &str) -> (String, i32) {
+        let mut api = fixture.app(sh(script), 41_000);
+        api.permissions.as_mut().unwrap().write = ["target".to_owned()].into();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the smoke test runs this machine's real toolchains"
+        )]
+        let (home, path) = (
+            PathBuf::from(std::env::var("HOME").unwrap()),
+            std::env::var("PATH").unwrap(),
+        );
+        let id = crate::record::testing::workspace();
+        let state = fixture.state();
+        let paths = fixture.workspace_paths();
+        let context = crate::sandbox::Context {
+            state_dir: &state,
+            workspace: &id,
+            workspace_paths: &paths,
+            path: Some(&path),
+            home: Some(&home),
+            protected: &[],
+            connect: BTreeSet::new(),
+            launcher: super::test_launcher(),
+        };
+        let spec = crate::sandbox::spec(
+            &api,
+            &api.processes[0],
+            api.permissions.as_ref().unwrap(),
+            &context,
+        )
+        .unwrap();
+        let mut command = launcher_command(&spec, &sh(script)).unwrap();
+        command
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("TMPDIR", &spec.tmp)
+            .env("CARGO_HOME", spec.tmp.join("cargo"))
+            .env("CARGO_TARGET_DIR", fixture.checkout().join("target"))
+            .env("RUSTUP_TOOLCHAIN", "1.99.1")
+            .current_dir(fixture.checkout())
+            .stdin(Stdio::null());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let output = command.output().unwrap();
+        (
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            output.status.code().unwrap_or(-1),
+        )
+    }
+
+    /// Reports whether `program` is on this machine's `PATH`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the smoke test looks for this machine's real toolchains"
+    )]
+    fn on_path(program: &str) -> bool {
+        std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .any(|dir| std::path::Path::new(dir).join(program).is_file())
+    }
+
+    #[test]
+    fn xcrun_python_and_node_run_under_the_sandbox_where_they_exist() {
+        let fixture = Fixture::new();
+        for (program, script) in [
+            ("xcrun", "xcrun --show-sdk-path"),
+            ("python3", "python3 -c 'print(1 + 1)'"),
+            ("node", "node -e 'console.log(1 + 1)'"),
+        ] {
+            if !on_path(program) {
+                println!("{program}=absent");
+                continue;
+            }
+            let (output, code) = with_real_toolchains(&fixture, script);
+            println!("{program}={code}: {output}");
+            assert_eq!(code, 0, "{program}: {output}");
+        }
+    }
+
+    #[test]
+    fn cargo_builds_a_crate_whose_build_script_compiles_c_under_the_sandbox() {
+        if !on_path("cargo") {
+            return;
+        }
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.checkout().join("src")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the crate that the sandboxed cargo builds"
+        )]
+        {
+            std::fs::write(
+                fixture.checkout().join("Cargo.toml"),
+                "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                fixture.checkout().join("build.rs"),
+                "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    let status = std::process::Command::new(\"cc\").args([\"-c\", \"src/hello.c\", \"-o\"]).arg(format!(\"{out}/hello.o\")).status().unwrap();\n    assert!(status.success());\n}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                fixture.checkout().join("src/hello.c"),
+                "int hello(void) { return 2; }\n",
+            )
+            .unwrap();
+            std::fs::write(fixture.checkout().join("src/main.rs"), "fn main() {}\n").unwrap();
+            // The checkout is read-only, so the lock file that cargo would
+            // write already exists.
+            std::fs::write(
+                fixture.checkout().join("Cargo.lock"),
+                "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"smoke\"\nversion = \"0.0.0\"\n",
+            )
+            .unwrap();
+        }
+
+        let (output, code) = with_real_toolchains(&fixture, "cargo build --offline");
+
+        assert_eq!(code, 0, "{output}");
     }
 
     #[test]

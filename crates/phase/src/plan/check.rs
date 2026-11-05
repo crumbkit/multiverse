@@ -154,6 +154,15 @@ pub enum PermissionProblem {
     /// backslash or a control character, which the sandbox's profile cannot
     /// hold.
     BadWrite(String),
+    /// An entry of `write` overlaps a path that another app of the plan may
+    /// write, so one app could replace a name in the other's directory.
+    #[non_exhaustive]
+    SharedWrite {
+        /// The entry.
+        path: String,
+        /// The other app.
+        other: AppName,
+    },
     /// One entry of `write` lies inside another, so the inner one grants
     /// nothing and hides what the outer one covers.
     #[non_exhaustive]
@@ -183,6 +192,10 @@ impl fmt::Display for PermissionProblem {
             Self::BadWrite(path) => write!(
                 formatter,
                 "it may write {path:?}, which is neither $STATE, an absolute path without `..`, nor a path inside its checkout that a sandbox profile can hold"
+            ),
+            Self::SharedWrite { path, other } => write!(
+                formatter,
+                "it may write {path:?}, which overlaps a path that {other} may write"
             ),
             Self::NestedWrite { outer, inner } => write!(
                 formatter,
@@ -564,7 +577,51 @@ pub(super) fn check_apps(apps: &[AppPlan]) -> Result<(), PlanError> {
             }
         })?;
     }
+    check_shared_writes(apps)
+}
+
+/// Checks that no two host apps may write paths that overlap, so one
+/// sandboxed app cannot replace a name in the other's directory with a
+/// symbolic link.
+fn check_shared_writes(apps: &[AppPlan]) -> Result<(), PlanError> {
+    let writes: Vec<(&AppPlan, Vec<(&String, PathBuf)>)> = apps
+        .iter()
+        .filter(|app| app.runner == RunnerKind::Host)
+        .map(|app| (app, write_paths(app)))
+        .collect();
+    for (index, (app, paths)) in writes.iter().enumerate() {
+        for (other, other_paths) in writes.iter().skip(index + 1) {
+            for (entry, path) in paths {
+                if other_paths.iter().any(|(_, other_path)| {
+                    path.starts_with(other_path) || other_path.starts_with(path)
+                }) {
+                    return Err(PlanError::BadPermissions {
+                        app: app.name.clone(),
+                        problem: PermissionProblem::SharedWrite {
+                            path: (*entry).clone(),
+                            other: other.name.clone(),
+                        },
+                    });
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+/// Returns each entry of the `write` of `app` apart from `$STATE`, with
+/// the path it names: a relative entry joined to the app's checkout.
+fn write_paths(app: &AppPlan) -> Vec<(&String, PathBuf)> {
+    let checkout = match &app.source {
+        Source::Checkout { dir, .. } => dir.clone(),
+        _ => PathBuf::new(),
+    };
+    app.permissions
+        .iter()
+        .flat_map(|permissions| &permissions.write)
+        .filter(|entry| entry.as_str() != STATE)
+        .map(|entry| (entry, checkout.join(entry).components().collect()))
+        .collect()
 }
 
 /// Checks the permissions of the host `app`, whose plan holds the apps for
@@ -610,16 +667,7 @@ fn check_permissions(
     // A relative entry is inside the checkout, so it is compared as the
     // checkout's path joined with it. `$STATE` lies outside every other
     // entry, under phase's state directory.
-    let checkout = match &app.source {
-        Source::Checkout { dir, .. } => dir.clone(),
-        _ => PathBuf::new(),
-    };
-    let resolved: Vec<(&String, PathBuf)> = permissions
-        .write
-        .iter()
-        .filter(|entry| entry.as_str() != STATE)
-        .map(|entry| (entry, checkout.join(entry).components().collect()))
-        .collect();
+    let resolved = write_paths(app);
     for (outer, outer_path) in &resolved {
         for (inner, inner_path) in &resolved {
             if outer != inner && inner_path.starts_with(outer_path) {

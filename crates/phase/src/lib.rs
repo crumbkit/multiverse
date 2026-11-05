@@ -67,7 +67,7 @@ pub use crate::record::{
     MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept, SweptItem, SweptObject,
 };
 pub use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
-pub use crate::sandbox::{LANDLOCK_PARTIAL, Sandboxing};
+pub use crate::sandbox::{LANDLOCK_PARTIAL, SEATBELT_PARTIAL, Sandboxing};
 pub use crate::select::{BadTarget, Selection, Target};
 pub use crate::source::{
     BadSourceText, BuildSpec, GithubRepository, ImageReference, MOST_IMAGE_BYTES,

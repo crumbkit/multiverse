@@ -1165,3 +1165,22 @@ fn a_plan_refuses_an_absolute_write_path_inside_the_checkouts_write_path() {
         }
     );
 }
+
+#[test]
+fn a_plan_refuses_two_apps_that_may_write_overlapping_paths() {
+    let mut api = sandboxed(host_app("api"));
+    api.permissions.get_or_insert_default().write = ["/srv/cache".to_owned()].into();
+    let mut web = sandboxed(host_app("web"));
+    web.permissions.get_or_insert_default().write = ["/srv/cache/web".to_owned()].into();
+
+    assert_eq!(
+        plan(vec![api, web]).unwrap_err(),
+        PlanError::BadPermissions {
+            app: "api".parse().unwrap(),
+            problem: PermissionProblem::SharedWrite {
+                path: "/srv/cache".to_owned(),
+                other: "web".parse().unwrap(),
+            },
+        }
+    );
+}

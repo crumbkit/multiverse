@@ -1,4 +1,4 @@
-//! The run record `phase/run/v3`: what one workspace's run planned and
+//! The run record `phase/run/v4`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -29,14 +29,18 @@ pub(crate) enum RunSchema {
     V2,
     /// `phase/run/v3`, which adds `ready` to host process and container
     /// entries. A phase that reads only v2 refuses it as written by a newer
-    /// phase.
+    /// phase. It reads as v4 with no sandbox recorded.
     #[serde(rename = "phase/run/v3")]
     V3,
+    /// `phase/run/v4`, which adds `sandbox` to host process entries. A
+    /// phase that reads only v3 refuses it as written by a newer phase.
+    #[serde(rename = "phase/run/v4")]
+    V4,
 }
 
 impl RunSchema {
     /// The version that phase writes.
-    pub(crate) const CURRENT: Self = Self::V3;
+    pub(crate) const CURRENT: Self = Self::V4;
 }
 
 /// The newest version of the run record that this phase reads, and the one
@@ -47,7 +51,7 @@ impl RunSchema {
 /// keeper refuses it as written by a newer phase, notes each refused write
 /// in its diagnostic log, and records nothing more, until phase starts its
 /// process again with a keeper of its own.
-pub(crate) const RUN_VERSION: u32 = 3;
+pub(crate) const RUN_VERSION: u32 = 4;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

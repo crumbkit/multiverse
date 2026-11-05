@@ -701,7 +701,7 @@ The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 ### Run record and sweep
 
-phase writes a run record (`phase/run/v3`) for each workspace. It names every
+phase writes a run record (`phase/run/v4`) for each workspace. It names every
 keeper and app process by pid, process start time and process group, every
 container by id, and the hash of the plan that started them. It holds no
 environment values.
@@ -741,16 +741,20 @@ with it those ends, unless the `down` did not select a process that holds
 such an end. mxv's `down` of the apps that a failed `up` started is such a
 `down`, so `status` still shows the process that failed.
 
-The record is `phase/run/v3`. Version 2 added `ended` and `restart` to
-host entries, and version 3 adds `ready` to host process and container
-entries, as the next section says. phase reads a `phase/run/v1` or
-`phase/run/v2` record with the fields it lacks at their defaults, and
-writes it back as v3: a v1 record reads with no ends, no restart
-policies and no readiness, and a v2 record reads with no readiness. A
+The record is `phase/run/v4`. Version 2 added `ended` and `restart` to
+host entries, version 3 added `ready` to host process and container
+entries, as the next section says, and version 4 adds `sandbox` to host
+process entries, which records how phase launched the process, as [The
+sandbox as built](#the-sandbox-as-built) says. phase reads a
+`phase/run/v1`, `phase/run/v2` or `phase/run/v3` record with the fields
+it lacks at their defaults, and writes it back as v4: a v1 record reads
+with no ends, no restart policies, no readiness and no sandbox, a v2
+record reads with no readiness and no sandbox, and a v3 record reads with
+no sandbox. A
 phase that reads only an older version refuses a newer record as written
 by a newer phase and asks for an upgrade. Each version only adds fields
 that read as their defaults when they are missing, so the next version,
-such as the one that records P15's watcher, adds a schema name and needs
+such as v5, which records P15's watcher, adds a schema name and needs
 no other read path.
 
 ### Readiness in the run record
@@ -1012,7 +1016,7 @@ or whose Landlock ABI is older than 4, which is the first that restricts
 TCP ports.
 
 The run record entry of each host process records how phase launched it:
-`seatbelt`, `landlock` with what Landlock leaves open, or `unsandboxed`
+`seatbelt` or `landlock`, each with what it leaves open, or `unsandboxed`
 with the reason. `status` shows that recorded value, and for a process
 that phase has not launched it shows how phase would launch it now.
 
@@ -1040,10 +1044,15 @@ The sandbox allows (decision P18):
   id>/<app>/state`, which `$STATE` names, its temporary directory `.../tmp`,
   which becomes the app's `TMPDIR`, and the paths of `write`. phase sets
   both directories to mode 0700 at each launch. Each entry of `write` is an
-  absolute path without `..` or a path inside the checkout, and no entry
-  may lie inside another. The launcher creates a write directory that does
-  not exist yet. The directories carry the workspace's id because app names
-  are unique only within a workspace;
+  absolute path without `..` or a path inside the checkout. No entry may
+  lie inside another, and no two apps of a plan may write overlapping
+  paths, so one app cannot plant a symbolic link in another's directory.
+  That also refuses two apps of one checkout that both write `target`.
+  phase refuses a write path inside a sticky, group-writable or
+  world-writable directory, such as `/tmp`. The launcher creates a missing
+  write directory with mode 0700 before it checks the spec. The
+  directories carry the workspace's id because app names are unique only
+  within a workspace;
 - listening on the loopback ports that `listen` names, and connecting over
   loopback to the ports of the apps it depends on (decision P16).
 
@@ -1051,24 +1060,28 @@ The sandbox always denies these paths, which a sandboxed app may neither
 read nor write:
 
 - in the home directory: `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.docker`,
-  `~/.netrc`, `~/.git-credentials`, `~/.gnupg`, Cargo's credentials,
-  `~/.config/mise`, `~/.claude`, `~/.codex`, the shells' startup files and
-  `~/.config/fish`, and on macOS `~/Library/Keychains` and
-  `~/Library/LaunchAgents`;
+  `~/.netrc`, `~/.git-credentials`, `~/.gitconfig`, `~/.config/git`,
+  `~/.gnupg`, Cargo's credentials and `~/.cargo/config.toml`, `~/.npmrc`,
+  `~/.pypirc`, `~/.kube`, `~/.config/gcloud`, `~/.azure`, `~/.config/mise`,
+  `~/.claude`, `~/.codex`, the shells' startup files and `~/.config/fish`,
+  and on macOS `~/Library/Keychains` and `~/Library/LaunchAgents`;
 - `/Library/Keychains` on macOS;
 - the per-user temporary directory that holds the agent's socket: all of
   `/private/var/folders` on macOS, and `/run/user/<uid>` on Linux;
 - phase's state directory, apart from the app's own directories;
-- the paths that the host program protects. mxv protects its state
-  directory, which holds the workspace records, and its mirrors;
+- the paths that the host program protects, apart from the app's own
+  directories when they lie inside one. mxv protects its state directory,
+  which holds the workspace records and phase's state, and its mirrors;
 - the workspace's own directory outside the app's checkout, which holds
   every other checkout, and the workspace's manifest and `AGENTS.md`, which
   mxv names. phase refuses to sandbox an app whose checkout is the
   workspace's own directory, because its checkout would hold all of them.
 
-The sandbox lets an app read, but never write, the launcher program and
-its directory, the directories of `PATH`, the toolchain directories above
-and the checkout's `.git`. A sandboxed app therefore cannot replace a
+The sandbox lets an app read, but never write, the launcher program, each
+link of its chain of symbolic links and each one's directory, the
+directories of `PATH`, the toolchain directories above and the checkout's
+`.git`. A `PATH` directory that reaches a protected path, such as the
+home directory, lets the app look nothing up in it. A sandboxed app therefore cannot replace a
 program that a later process runs, and git cannot commit or fetch in a
 sandboxed checkout. git also cannot read objects that a clone borrows from
 mxv's mirrors, which are protected.
@@ -1079,9 +1092,11 @@ read-only path. That check is the only control that Landlock can express.
 The launcher repeats it on the paths as they resolve just before it
 applies the sandbox, and refuses to start the app when a path resolves
 somewhere else than when phase built the sandbox, such as a write
-directory that the app replaced with a symbolic link. On macOS the profile
-also denies the protected paths and Homebrew's `/usr/local/var` and
-`/usr/local/etc` explicitly, denies writes to the read-only paths, and
+directory that the app replaced with a symbolic link. On Linux the
+sandbox reads `/usr` by its entries and `/usr/local` by its entries apart
+from `etc` and `var`, because Landlock cannot deny a path inside a granted
+one. On macOS the profile also denies the protected paths and Homebrew's
+`/usr/local/var` and `/usr/local/etc` explicitly, denies writes to the read-only paths, and
 then allows again the checkout and the app's directories that lie inside a
 denied path.
 
@@ -1089,7 +1104,11 @@ On macOS the profile also denies the Mach services of the pasteboard and
 LaunchServices, sending Apple events and asking LaunchServices to open an
 app. A macOS test checks that a sandboxed process cannot open an app, send
 an Apple event, submit a launchd job, read the pasteboard or read its
-keeper's environment with `ps -E`.
+keeper's environment with `ps -E`. Other macOS tests check that `cargo
+build` of a crate whose build script runs `cc` through xcrun, `xcrun
+--show-sdk-path`, `python3` and `node` still run under the sandbox where
+they exist. xcrun warns that it cannot write its cache in the per-user
+temporary directory, and succeeds.
 
 The plan refuses a `connect` that names an external host, with an error
 that says the proxy is not built yet, a `connect` that names an app the
@@ -1112,6 +1131,16 @@ dependency's port on another host. A nono release that changed the order
 would fail the macOS test, and the exact pin means only a pull request
 that moves the pin can bring one in.
 
+On macOS the sandbox is partial too, and `status` shows it as `seatbelt
+(partial: a listening port accepts connections on every address)`.
+Seatbelt restricts a bind by port and never by address, and its
+`localhost` matches every address of the machine. An inbound rule that
+also names the remote side refuses the `listen` itself, because `listen`
+is checked with no remote address. A process that may listen on a port can
+therefore listen on it on every address, and a macOS test shows that a
+peer on the machine's `en0` address reaches it. A peer on another machine
+was not tested. A connection out to another host stays refused.
+
 On Linux the sandbox is partial, and `status` shows it as `landlock
 (partial: Unix sockets and UDP unrestricted, TCP ports on every
 address)`. Landlock before its ABI 9 cannot restrict `connect` to a Unix
@@ -1123,7 +1152,9 @@ it restricts a TCP port on every address, so an app that may connect to a
 dependency's port may also connect to that port on another host. phase
 still applies Landlock, because it confines the app's files and TCP
 ports. A full Linux sandbox waits for nono to enforce Unix-socket
-restrictions, or for a seccomp filter in a later pull request.
+restrictions, or for a seccomp filter in a later pull request. One
+function, `platform`, decides how Linux is reported, so reporting Linux
+as unsandboxed and running apps without Landlock is a change to it alone.
 
 When a sandboxed process ends before it is ready, `up` adds a note that
 says the sandbox may have denied an access the process needed, and where

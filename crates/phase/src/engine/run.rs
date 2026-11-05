@@ -1348,7 +1348,7 @@ fn listen(app: &AppPlan, process: &ProcessPlan) -> Option<Listen> {
 /// note says only that a denial may be why.
 fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
     let kind = match sandbox::sandboxing(app, &sandbox::platform())? {
-        sandbox::Sandboxing::Seatbelt => "Seatbelt",
+        sandbox::Sandboxing::Seatbelt { .. } => "Seatbelt",
         sandbox::Sandboxing::Landlock { .. } => "Landlock",
         sandbox::Sandboxing::Unsandboxed { .. } => return None,
     };
