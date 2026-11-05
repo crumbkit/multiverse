@@ -585,7 +585,8 @@ Docker's `no` restart policy, whatever its plan's restart policy says, and
 a crash leaves its container exited until the next `up` or `restart`.
 Restarting such a process after a crash needs phase. The follow-up is a
 watcher per app that rewrites the files after a restart and before
-`AppliedEnvironment::expires_at`. Until then, `up` treats a container with
+`AppliedEnvironment::expires_at`, which would let such a process keep its
+plan's restart policy. Until then, `up` treats a container with
 secret files that Docker has restarted as not running and replaces it,
 and `status` shows it as restarting. A container with secret files that
 someone stopped and started again by hand, with `docker start`, also
@@ -594,9 +595,19 @@ start as a restart, so `up` and `status` read it as running. The run
 record keeps no start time to compare with, so the next `restart`
 recreates it.
 
-Rotation is `write_secrets` in the container runner, which writes the
-files of a running container again from a fresh environment. Nothing calls
-it on a timer yet, which the same watcher would do.
+Each `up` rewrites the secret files of every container that it leaves
+running. For each such process that receives secret files, `up`
+resolves the process's environment again and writes the files the same
+way, in the two steps above, so the container keeps running and a reader
+sees each file's old value or its new one. A rewrite that cannot resolve
+the environment or write a value leaves the old files whole and the
+container running, and `up` reports the app as errored with that
+failure, which names no value. `up` resolves no environment for a
+process without secret files. A short-lived value that a resolver
+renews therefore reaches a running container at the next `up`, and
+nothing rewrites the files between two runs of `up` yet. The watcher
+that rewrites them before `AppliedEnvironment::expires_at` and after a
+Docker restart is a follow-up, and needs the decision recorded as P15.
 
 An optional secret, one that the process names in `optional_env`, gets
 no file when the environment has no value for it, and the wrapper's names
@@ -607,15 +618,19 @@ mark useless for a secret. When every secret file of a process is
 optional and none has a value, the process starts as one without secret
 files: its service has no tmpfs, no wrapper and no secrets label, it
 keeps its plan's restart policy, and phase does not ask who owns the
-files. Such a container cannot receive a file later without being
-recreated. The plan hash comes from the service as the plan describes
-it, so it does not depend on which values are there. A later rewrite of
-the files, such as a rotation, writes the optional secrets that then
-have a value, and removes the file of one that has lost its value in
-the same script that renames the staged files, so the container never
-keeps an old value of a secret that the source no longer supplies. Only
-a rewrite removes a file, because a start makes a new container, and
-the watcher that rewrites files is a follow-up.
+files. The plan hash comes from the service as the plan describes it, so
+it does not depend on which values are there.
+
+A rewrite writes the optional secrets that then have a value, and
+removes the file of one that has lost its value in the same script that
+renames the staged files, so the container never keeps an old value of a
+secret that the source no longer supplies. Only a rewrite removes a
+file, because a start makes a new container. A container without the
+secrets label cannot receive a file, because it has no tmpfs and no
+wrapper. When a rewrite finds that such a container's fresh environment
+has a value for one of its secrets, `up` replaces the container, and the
+new container starts with the tmpfs, the wrapper and the files. While
+none of its secrets has a value, `up` leaves it running.
 
 An image that can read a secret only from an environment variable falls
 back to environment references when its process sets
@@ -1080,7 +1095,9 @@ and redesigns are the evidence for each one.
   `docker restart`, which keeps the environment the container was created
   with. A crash restart of a container is Docker's, under the restart
   policy, so it keeps the environment the container was created with, and
-  only `phase restart` or a changed plan resolves it again.
+  only `phase restart` or a changed plan resolves it again. The secret
+  files of a running container are the exception: each `up` resolves the
+  process's environment again and rewrites them in place.
 
 ### Concurrency
 
@@ -1151,3 +1168,4 @@ Each decision states what this draft assumes until it is decided.
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
+| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values. It can run as a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, which mxv cannot yet supply to a process that outlives `up`, or it can receive the values from `up`, which adds a long-lived process that holds an app's secret values. | Open; to be decided by the owner. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |

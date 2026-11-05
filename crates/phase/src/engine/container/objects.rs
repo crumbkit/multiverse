@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
+use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
 use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run, run_until};
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
@@ -137,6 +138,11 @@ pub struct Inspected {
     pub state: ContainerState,
     /// How many times Docker has restarted it under its restart policy.
     pub(crate) restarts: u32,
+    /// Whether it receives secret files: its labels carry the secrets
+    /// label, so it mounts the tmpfs at `/run/secrets` and starts through
+    /// phase's wrapper. A container without it has no tmpfs, so it cannot
+    /// receive a secret file without being recreated.
+    pub(crate) files: bool,
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
     pub(crate) started: String,
@@ -212,11 +218,8 @@ pub(super) fn mint_container(
     printed: &str,
 ) -> Result<Inspected, Error> {
     let mut lines = printed.lines();
-    if !scope.owns(
-        lines.next().unwrap_or_default(),
-        CONTAINER_LABEL,
-        service.as_str(),
-    ) {
+    let labels = lines.next().unwrap_or_default();
+    if !scope.owns(labels, CONTAINER_LABEL, service.as_str()) {
         return Err(Error::Foreign {
             kind: "container",
             name: target.to_owned(),
@@ -254,9 +257,19 @@ pub(super) fn mint_container(
         },
         state,
         restarts,
+        files: has_secret_files(labels),
         started,
         anonymous,
     })
+}
+
+/// Reports whether `labels`, a container's labels printed as JSON, carry
+/// the label of a container that receives secret files.
+fn has_secret_files(labels: &str) -> bool {
+    serde_json::from_str::<Option<std::collections::BTreeMap<String, String>>>(labels)
+        .ok()
+        .flatten()
+        .is_some_and(|labels| labels.get(SECRETS_LABEL).map(String::as_str) == Some(SECRET_FILES))
 }
 
 /// Inspects the container that `target`, its id or its name, names, and

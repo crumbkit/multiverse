@@ -26,7 +26,7 @@
 //! phase's wrapper, which waits for the files, as [`super::secrets`] says.
 //! [`file_secrets`] returns the names that `up` writes after the container
 //! starts. The service carries the label `mxv.secrets=files`, which
-//! `status` reads, and Docker's `no` restart policy, because a Docker
+//! `status` and the rewrite of a running container's files read, and Docker's `no` restart policy, because a Docker
 //! restart empties the tmpfs. A process whose plan sets
 //! [`SecretDelivery::Env`] receives its
 //! secrets through private references like its other variables instead.
@@ -67,7 +67,8 @@ const OPTIONAL_ENV_FIELD: &str = "x-phase-optional-env";
 
 /// The label of a container whose process receives secret files, which
 /// `status` reads to tell a container that waits for its files after a
-/// restart from one that runs.
+/// restart from one that runs, and which a rewrite of the files reads to
+/// tell a container that has the tmpfs from one that must be replaced.
 pub(crate) const SECRETS_LABEL: &str = "mxv.secrets";
 
 /// The value of [`SECRETS_LABEL`].

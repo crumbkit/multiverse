@@ -557,9 +557,7 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
         let mut expected = plain.with_cause(cause);
         match &error {
             ContainerError::Failed {
-                operation,
-                service,
-                ..
+                operation, service, ..
             } => expected = expected.during(operation, service.as_deref()),
             ContainerError::Cancelled { operation } => expected = expected.during(operation, None),
             ContainerError::Foreign { name, .. } => {
@@ -2248,4 +2246,146 @@ fn a_process_whose_every_secret_file_is_optional_and_absent_needs_no_owner() {
         present,
         Err(crate::error::PhaseError::SecretOwnerUnknown { .. })
     ));
+}
+
+/// Returns the time at which the container `id` last started, as Docker
+/// prints it.
+fn started_at(id: &str) -> Option<String> {
+    docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.State.StartedAt}}",
+        id,
+    ])
+}
+
+#[test]
+fn up_rewrites_the_secret_files_of_a_running_container_from_a_fresh_environment_without_a_restart()
+{
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![secret_app("db")]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let started = started_at(&id);
+    env.set(SecretValues {
+        token: Some(ROTATED),
+        key: Some(KEY),
+    });
+
+    let report = world.up_with(&plan, &env);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert!(!format!("{report:?}").contains(ROTATED));
+    assert_eq!(
+        world.container("db", "server").as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(started_at(&id), started);
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, ROTATED);
+    let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
+    assert_eq!(
+        listed.split_whitespace().collect::<Vec<_>>(),
+        [".", "..", "KEY", "TOKEN"]
+    );
+    assert!(!world.state_text().contains(ROTATED));
+    world.down();
+}
+
+#[test]
+fn up_removes_the_file_of_an_optional_secret_that_lost_its_value_from_a_running_container() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_secret_app("db")]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    env.set(SecretValues {
+        token: Some(TOKEN),
+        key: None,
+    });
+
+    let report = world.up_with(&plan, &env);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(
+        world.container("db", "server").as_deref(),
+        Some(id.as_str())
+    );
+    let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
+    assert_eq!(
+        listed.split_whitespace().collect::<Vec<_>>(),
+        [".", "..", "TOKEN"]
+    );
+    world.down();
+}
+
+/// Returns the app of [`secret_app_running`] whose `server` runs as user
+/// 1000, is ready at once, and treats both of its secrets as optional.
+fn all_optional_secret_app(name: &str) -> AppPlan {
+    let mut app = secret_app_running(name, "touch /tmp/ready; exec sleep 60");
+    app.container.user = Some("1000:1000".to_owned());
+    app.processes[0].optional_env = ["TOKEN".to_owned(), "KEY".to_owned()].into();
+    app
+}
+
+#[test]
+fn up_replaces_a_container_that_started_without_secret_files_once_a_secret_has_a_value() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![all_optional_secret_app("db")]);
+    let env = Secrets::new(None);
+    env.set(SecretValues {
+        token: None,
+        key: None,
+    });
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    assert!(docker(&["exec", "--", &first, "test", "-d", "/run/secrets"]).is_none());
+
+    // While no secret has a value, the container stays as it is.
+    let report = world.up_with(&plan, &env);
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(
+        world.container("db", "server").as_deref(),
+        Some(first.as_str())
+    );
+
+    env.set(SecretValues {
+        token: Some(TOKEN),
+        key: None,
+    });
+    let report = world.up_with(&plan, &env);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let second = world.container("db", "server").unwrap();
+    assert_ne!(first, second);
+    assert!(docker(&["container", "inspect", &first]).is_none());
+    let read = docker(&["exec", "--", &second, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, TOKEN);
+    world.down();
 }

@@ -12,8 +12,8 @@ use super::{Engine, Settings};
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::containers::{
-    ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
-    ContainersStarted, StartedContainer,
+    ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
+    ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
 use crate::engine::keeper::{AppEnd, KeeperCommand, Kept, Launch};
@@ -377,6 +377,13 @@ struct FakeContainers {
     start_ending: RefCell<Option<StartEnding>>,
     /// The processes whose containers each stop was asked for, in order.
     stop_order: RefCell<Vec<String>>,
+    /// How the rewrite of the secret files of each `app/process` container
+    /// ends, after it resolves the process's environment. A container that
+    /// it does not name has no secret files.
+    rewrite_ending: RefCell<BTreeMap<String, Rewritten>>,
+    /// Each `app/process` whose secret files a rewrite was asked for, in
+    /// order.
+    rewrites: RefCell<Vec<String>>,
 }
 
 /// How a fake container start ends after it creates every container.
@@ -517,6 +524,24 @@ impl ContainerRunner for FakeContainers {
             })
             .map(|entry| entry.process.clone())
             .collect())
+    }
+
+    fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError> {
+        assert_eq!(rewrite.workspace, &workspace());
+        assert!(rewrite.entry.id.is_some());
+        let process = format!("{}/{}", rewrite.app.name, rewrite.entry.process);
+        self.rewrites.borrow_mut().push(process.clone());
+        let Some(ending) = self.rewrite_ending.borrow().get(&process).copied() else {
+            return Ok(Rewritten::NoFiles);
+        };
+        rewrite
+            .env
+            .resolve(&rewrite.app.name, &rewrite.entry.process, rewrite.deadline)
+            .map_err(|source| PhaseError::Environment {
+                app: rewrite.app.name.clone(),
+                source,
+            })?;
+        Ok(ending)
     }
 
     fn stop(
@@ -1359,6 +1384,113 @@ fn up_leaves_a_container_that_still_runs_alone_and_starts_only_the_others() {
     );
     assert_eq!(
         world.record().unwrap().state(&key),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn up_rewrites_the_secret_files_of_a_container_that_still_runs_and_leaves_it_running() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+    world
+        .containers
+        .rewrite_ending
+        .borrow_mut()
+        .insert("db/server".to_owned(), Rewritten::Written);
+    let env = Env::default();
+
+    let report = world.up(&plan, &Selection::All, &env).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    assert_eq!(
+        *world.containers.rewrites.borrow(),
+        vec!["db/server".to_owned(), "db/worker".to_owned()]
+    );
+    assert_eq!(*env.resolved.borrow(), vec!["db/server".to_owned()]);
+    assert!(world.containers.stopped.borrow().is_empty());
+    assert_eq!(
+        world
+            .record()
+            .unwrap()
+            .state(&ObjectKey::Container(name("db"), name("server"))),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn up_replaces_a_running_container_that_cannot_receive_its_secret_files() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+    world
+        .containers
+        .rewrite_ending
+        .borrow_mut()
+        .insert("db/server".to_owned(), Rewritten::Replace);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
+    assert_eq!(
+        world.containers.starts.borrow().last().unwrap(),
+        &vec!["db/server".to_owned()]
+    );
+}
+
+#[test]
+fn a_secret_rewrite_whose_environment_fails_leaves_the_container_running_and_errs_the_app() {
+    let world = World::new();
+    let plan = plan(vec![container_app("db")]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .insert("db/server".to_owned());
+    world
+        .containers
+        .rewrite_ending
+        .borrow_mut()
+        .insert("db/server".to_owned(), Rewritten::Written);
+    let locked = Env {
+        failing: BTreeSet::from(["db".to_owned()]),
+        ..Env::default()
+    };
+
+    let report = world.up(&plan, &Selection::All, &locked).unwrap();
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, message, .. } => {
+            assert_eq!(code, "phase::environment");
+            assert!(!message.contains(SECRET), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    assert!(world.containers.stopped.borrow().is_empty());
+    assert_eq!(
+        world
+            .record()
+            .unwrap()
+            .state(&ObjectKey::Container(name("db"), name("server"))),
         Some(EntryState::Running)
     );
 }

@@ -50,6 +50,16 @@
 //! count, because the restart emptied its tmpfs. `up` leaves those alone
 //! and asks `start` only for the others.
 //!
+//! `rewrite` writes the secret files of a container that `running`
+//! reported, from a fresh environment of its process, as [`write_secrets`]
+//! does, and removes the file of each optional secret that lost its value,
+//! as [`lost_secrets`] names them. It resolves nothing for a process
+//! without secret files. A container whose labels lack the secrets label
+//! started while every one of its secrets was optional and absent, so it
+//! has no tmpfs and no wrapper. When its fresh environment has a value for
+//! a secret, `rewrite` reports that the container must be replaced, and
+//! `up` asks `start` to replace it.
+//!
 //! When a docker command fails after some containers started, `start`
 //! removes those containers, and reports each container that it created
 //! and each that Docker no longer has, so the run record names every
@@ -95,8 +105,8 @@ use crate::engine::container::objects::{
 };
 use crate::engine::container::secrets::{self, ImageConfig, SecretBytes};
 use crate::engine::containers::{
-    ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
-    ContainersStarted, StartedContainer,
+    ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
+    ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::probe::{self, Check, Goal, LogLines, LogWatch, Outcome};
 use crate::engine::run::watch;
@@ -691,18 +701,9 @@ pub(crate) fn secret_values(
 
 /// Returns the optional secrets of `process` of `app` that it receives as
 /// files and that `environment` has no value for, in name order. A rewrite
-/// of a running container's files, such as a rotation, removes their
+/// of a running container's files, which each `up` makes, removes their
 /// files, so a secret that lost its value keeps no old one. Only a rewrite
-/// uses it: a start makes a new container, which has no old file. Nothing
-/// calls a rewrite outside the tests yet; the watcher that rotates secrets
-/// is a follow-up.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only a rewrite of a running container's files removes a file, and the watcher that rewrites them is a follow-up"
-    )
-)]
+/// uses it: a start makes a new container, which has no old file.
 pub(crate) fn lost_secrets(
     app: &AppPlan,
     process: &ProcessPlan,
@@ -722,11 +723,12 @@ pub(crate) struct Delivery<'a> {
     /// Each secret's name and value.
     pub(crate) values: Vec<(String, SecretBytes)>,
     /// The secrets whose files the commit removes, from [`lost_secrets`].
-    /// Only a rewrite of a running container's files, such as a rotation,
-    /// removes any; a start passes none, because a new container has no
-    /// old file. The rewrite path that would pass them is a follow-up.
+    /// Only a rewrite of a running container's files removes any; a start
+    /// passes none, because a new container has no old file.
     pub(crate) removed: Vec<String>,
-    /// The owner of the files, in the form that `chown` reads.
+    /// The owner of the files, in the form that `chown` reads. Only the
+    /// staging of a value uses it, so a delivery without values may leave
+    /// it empty.
     pub(crate) owner: &'a str,
     /// The only environment of the `docker exec` that writes each secret,
     /// or `None` for the host program's whole environment.
@@ -978,6 +980,86 @@ impl ContainerRunner for ComposeRunner {
             }
         }
         Ok(running)
+    }
+
+    fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError> {
+        let app = rewrite.app;
+        let Some(process) = app
+            .processes
+            .iter()
+            .find(|process| process.name == rewrite.entry.process)
+        else {
+            return Ok(Rewritten::NoFiles);
+        };
+        // A start writes secret files only into a container of an image,
+        // whose config names the files' owner.
+        let Source::Image { image } = &app.source else {
+            return Ok(Rewritten::NoFiles);
+        };
+        if app::file_secrets(app, process).next().is_none() {
+            return Ok(Rewritten::NoFiles);
+        }
+        let scope = self.scope(rewrite.workspace, &app.name);
+        let service = app::service(app, &process.name)?;
+        let Some(Ok(id)) = rewrite
+            .entry
+            .id
+            .as_ref()
+            .map(|id| names::ContainerId::new(id.as_str()))
+        else {
+            return Ok(Rewritten::Replace);
+        };
+        let environment =
+            crate::env::resolve_required(rewrite.env, &app.name, process, rewrite.deadline)
+                .map_err(|source| PhaseError::Environment {
+                    app: app.name.clone(),
+                    source,
+                })?;
+        let inspected = match inspect_id(&scope, &service, &id) {
+            Ok(Some(inspected)) => inspected,
+            // A container that is gone, or no longer carries the app's
+            // labels, is not the one the record names, so `up` replaces it.
+            Ok(None) | Err(ContainerError::Foreign { .. }) => return Ok(Rewritten::Replace),
+            Err(error) => return Err(docker_error(&error)),
+        };
+        let present = environment.names();
+        let has_values = app::present_file_secrets(app, process, Some(&present))
+            .next()
+            .is_some();
+        // A container that started while every secret was optional and
+        // absent has no tmpfs and no wrapper, so it can receive a file
+        // only as a new container.
+        if !inspected.files {
+            return Ok(if has_values {
+                Rewritten::Replace
+            } else {
+                Rewritten::NoFiles
+            });
+        }
+        let image_config = if has_values {
+            Some(objects::image_config(image.as_str()).map_err(|error| docker_error(&error))?)
+        } else {
+            None
+        };
+        let (owner, values) = delivered(app, process, image_config.as_ref(), environment.as_ref())?
+            .unwrap_or_default();
+        let removed = lost_secrets(app, process, environment.as_ref());
+        drop(environment);
+        if values.is_empty() && removed.is_empty() {
+            return Ok(Rewritten::Written);
+        }
+        write_secrets(
+            &inspected,
+            Delivery {
+                values,
+                removed,
+                owner: &owner,
+                docker_environment: self.docker_environment.as_ref(),
+            },
+            (rewrite.deadline, rewrite.cancel),
+        )
+        .map_err(|error| docker_error(&error))?;
+        Ok(Rewritten::Written)
     }
 
     fn stop(

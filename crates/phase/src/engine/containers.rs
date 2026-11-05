@@ -77,6 +77,32 @@ pub(crate) trait ContainerRunner {
         containers: &[ContainerEntry],
     ) -> Result<Vec<ProcessName>, PhaseError>;
 
+    /// Writes the secret files of the running container of
+    /// `rewrite.entry` again from a fresh environment of its process, which
+    /// it resolves through `rewrite.env`, until `rewrite.deadline` or
+    /// `rewrite.cancel`. It writes the file of each secret that has a
+    /// value and removes the file of each optional secret that has lost
+    /// its value, and the container keeps running. `up` calls it for each
+    /// container that [`ContainerRunner::running`] reports, so each `up`
+    /// keeps the files of a running container current.
+    ///
+    /// It resolves no environment for a process that receives no secret
+    /// files, and returns [`Rewritten::NoFiles`] for it, and for a
+    /// container without secret files whose fresh environment has no value
+    /// for any of its optional secrets. It returns
+    /// [`Rewritten::Replace`] when the container cannot receive a file that
+    /// the fresh environment has a value for, because it started while
+    /// every one of its secrets was optional and absent, and so has no
+    /// tmpfs and no wrapper. `up` then replaces the container.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::Environment`] when the environment cannot be
+    /// resolved, the errors of reading its values, and
+    /// [`PhaseError::Docker`] when a write fails. A failed write leaves
+    /// the container's old files whole, and the container keeps running.
+    fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError>;
+
     /// Stops and removes the containers of `stop.containers`, in reverse
     /// order, until `stop.deadline`, and returns what happened to each, by
     /// process. A failure that kept Docker from acting on one container,
@@ -150,6 +176,37 @@ pub(crate) struct StartedContainer {
     /// The hash of the process's part of the plan, which the run record
     /// keeps for [`ContainerRunner::running`].
     pub(crate) plan_hash: PlanHash,
+}
+
+/// What [`ContainerRunner::rewrite`] rewrites.
+pub(crate) struct ContainerRewrite<'a> {
+    /// The workspace.
+    pub(crate) workspace: &'a WorkspaceId,
+    /// The app.
+    pub(crate) app: &'a AppPlan,
+    /// The run record's entry of the running container, which names it
+    /// by id.
+    pub(crate) entry: &'a ContainerEntry,
+    /// The source of the process's environment.
+    pub(crate) env: &'a dyn EnvironmentSource,
+    /// When the rewrite gives up.
+    pub(crate) deadline: Instant,
+    /// The flag that asks the rewrite to stop.
+    pub(crate) cancel: &'a Cancel,
+}
+
+/// How [`ContainerRunner::rewrite`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rewritten {
+    /// The container has no secret files and needs none, so nothing was
+    /// written. phase resolves no environment for a process that receives
+    /// no secret files.
+    NoFiles,
+    /// The container's secret files hold the fresh environment's values.
+    Written,
+    /// The container cannot receive the files that the fresh environment
+    /// has values for, so `up` must replace it.
+    Replace,
 }
 
 /// What [`ContainerRunner::stop`] stops.

@@ -768,6 +768,24 @@ fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
 }
 
 #[test]
+fn an_inspection_tells_a_container_with_secret_files_by_its_secrets_label() {
+    let scope = scope("reading-list");
+    let plain = container_labels(STORE, "reading-list", "db");
+    let mut labeled: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&plain).unwrap();
+    labeled.insert("mxv.secrets".to_owned(), json!("files"));
+    let labeled = serde_json::Value::Object(labeled).to_string();
+    let printed =
+        |labels: &str| format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+
+    let with_files = mint_container(&scope, &service("db"), ID, &printed(&labeled)).unwrap();
+    let without = mint_container(&scope, &service("db"), ID, &printed(&plain)).unwrap();
+
+    assert!(with_files.files);
+    assert!(!without.files);
+}
+
+#[test]
 fn a_command_whose_caller_cancels_stops_at_once_as_cancelled() {
     let cancel = Cancel::new();
     cancel.cancel();
