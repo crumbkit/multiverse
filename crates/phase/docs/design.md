@@ -956,6 +956,114 @@ that the plan lacks still show. Without a plan, as when the manifest is
 invalid, the rows are the record's live entries and leave the plan's
 fields empty.
 
+### Exec
+
+`Phase::exec` runs a one-off command, such as a delivery script or a test
+run, in the context of one process of an app, and returns the command's
+exit status: its code, or the signal that ended it. The command's words
+are separate values that no shell reads.
+
+For a host process, the command runs in the process's directory with the
+inherited `PATH` and `HOME` and the process's environment. phase resolves
+the environment through the `EnvironmentSource` and refuses one that lacks
+a required variable, as a start does, and leaves an optional variable
+without a value unset. When the app is sandboxed, the command runs through
+the launcher that the process's keeper uses, under the sandbox that phase
+builds for the process itself, with the always-protected paths, the
+process's ports and its `TMPDIR`. An app that is not sandboxed runs its
+command unsandboxed. A sandboxed app whose host program gave no keeper
+program has no launcher, so phase refuses its command rather than run it
+unsandboxed. The process need not be running.
+
+For a container process, the command runs in the process's container
+through `docker exec --interactive`, with `--tty` when the host program
+says its standard input is a terminal. phase first reads the container's
+id from the run record and inspects the container with the app's labels,
+as `logs` does. It refuses a container that is not running, and fails
+with Docker's foreign cause for one whose labels name another workspace or
+app. The command receives the variables and secret files that the
+container already holds, and phase passes no value on the command line.
+`exec` never starts a container, and a one-off `docker compose run` is out
+of scope.
+
+A sandboxed command runs in a session of its own. The launcher calls
+`setsid` before it applies the sandbox, so the command has no controlling
+terminal. A command whose controlling terminal is the user's could push
+input into the user's shell with `TIOCSTI`, which the shell would run
+outside the sandbox once the command ends, and Seatbelt allows `ioctl` on
+terminal devices. Without a controlling terminal, `TIOCSTI` fails even
+when the command's standard input is the terminal. A keeper's app already
+leads its own process group and cannot start a session, so the launcher
+goes on only when opening `/dev/tty` fails with `ENXIO`, which says that
+the keeper's own session has no controlling terminal, and refuses on any
+other answer. The sandbox also denies the terminal devices of other
+sessions, so a sandboxed command cannot open the user's terminal by its
+`/dev/ttys*` path and read what the user types, as [The sandbox as
+built](#the-sandbox-as-built) says.
+
+A command with `ExecIo::Inherit` shares the host program's standard
+streams. An unsandboxed command, and the `docker exec` of a container
+command, also share the host program's process group, so when the host
+program runs in the foreground of a terminal, the terminal sends Ctrl-C to
+the command directly. The host program then catches `SIGINT` rather than
+ignore it, because a command inherits an ignored signal, and leaves the
+cancel flag alone. A cancel reaches only that command's own process, so
+processes it started may survive it. A sandboxed command does not receive
+the terminal's Ctrl-C, so the host program sets the cancel flag on
+`SIGINT`, and phase ends the command's whole process group.
+`Phase::exec_sandboxed` tells the host program which case applies. phase
+refuses a sandboxed command with `phase::exec::sandboxed_terminal` when
+the host program says its standard input is a terminal, or when any of
+the host program's standard input, output and error is a terminal, which
+phase checks itself rather than trust the flag. A command that inherited
+the terminal could read what the user types, and one that runs without it
+would not get the terminal it expects.
+
+A command with `ExecIo::Streams` reads and writes the streams the host
+program gives and runs in a process group of its own. When the caller
+sets the cancel flag, phase sends the command's group `TERM`, and `KILL`
+after the kill wait. A command that the cancel kills may leave the
+terminal in raw mode.
+
+`docker exec` exits 125 when it fails itself, 126 when the command cannot
+be run, and 127 when the command is not found. After one of those, phase
+inspects the container again and reports `phase::exec::not_running` when
+the container stopped or went in the meantime, and the status otherwise.
+
+`exec` is not a lifecycle operation. It writes nothing to the run record,
+and starts and stops no app. It takes the workspace's lifecycle lock,
+waiting up to its deadline, and releases it at once, so it runs after an
+`up`, `down`, `restart` or `sweep` in progress and sees what that
+operation left. It does not hold the lock while the command runs, because
+a held lock, exclusive or shared, would block every `up` and `down` of the
+workspace and every keeper's record of a restart for as long as a test run
+or a shell lasts. The run record does not name the command, so a host
+command outlives a `down` of its app.
+
+The engine builds the command in the process's context separately from
+running it, and running it knows nothing of apps or terminals. A later
+init step that `up` runs once a process's dependencies are ready can build
+the same command and run it with `ExecIo::Streams` and its output in the
+process's log.
+
+These follow-ups remain:
+
+- A pty relay owned by phase, which gives a sandboxed command a terminal of
+  its own and relays bytes and window size between it and the user's
+  terminal, as `docker exec --tty` does. Until it exists, a sandboxed
+  command cannot have the terminal.
+- A record of the host commands that `exec` started, so that `down` can
+  end them.
+- A refusal of an exec whose plan differs from the plan that the running
+  process started from, so that the command cannot run under a different
+  sandbox than the process. The run record holds the hash of the whole
+  plan, so this needs a hash of the process's own part first.
+- A Seatbelt rule that denies `TIOCSTI` as a second defence, such as
+  `(deny file-ioctl (ioctl-command 2147578994))`. The profile language
+  accepts the filter, and nono writes phase's own rules after its
+  `file-ioctl` allowances, but phase's rules are written for the network
+  only today.
+
 ## Environment and secrets
 
 phase resolves an app's environment through starmap. starmap's resolution
@@ -1136,9 +1244,18 @@ The sandbox allows (decision P18):
 - reading the system's directories, the toolchain directories that `PATH`
   names and the app's checkout. On macOS the system directories include
   only `/Library/Developer`, `/Library/Frameworks` and `/Library/Apple` of
-  `/Library`. For Cargo the toolchain directories are its `bin`,
-  `registry` and `git` directories and rustup's home, never Cargo's
-  credentials. For mise they are its data directory. For Homebrew they are
+  `/Library`. Of `/dev` they include only `null`, `zero`, `random` and
+  `urandom`, and on macOS also `fd` and `dtracehelper`, which dyld and
+  some runtimes open at startup. On Linux `/dev/fd` links into `/proc`,
+  which is readable. `/dev/null`, `/dev/zero` and `/dev/tty` are also
+  writable. No terminal device of another session is readable, so a
+  sandboxed process cannot read what the user types into a terminal. On
+  macOS the profile also denies reading, writing and `ioctl` on every
+  `/dev/ttys*` and BSD pseudo-terminal device, because nono's base profile
+  allows `ioctl` on them. `/dev/tty` opens only the process's own
+  controlling terminal, and the launcher leaves the caller's first. For
+  Cargo the toolchain directories are its `bin`, `registry` and `git`
+  directories and rustup's home, never Cargo's credentials. For mise they are its data directory. For Homebrew they are
   the prefix's `bin`, `sbin`, `Cellar`, `opt`, `lib`, `libexec`, `share`,
   `include` and `Frameworks`, never its `var` or `etc`, with one exception
   inside `etc`. A sandboxed process may read the prefix's `etc/openssl`
@@ -1403,6 +1520,7 @@ impl Phase {
     pub fn status(&self, workspace: &WorkspaceId, plan: Option<&Plan>) -> Result<Status, PhaseError>;
     pub fn logs(&self, workspace: &Path, request: &LogRequest, sink: &mut dyn LineSink) -> Result<(), PhaseError>;
     pub fn sweep(&self, workspace: &Path, dry_run: bool) -> Result<Swept, PhaseError>;
+    pub fn exec(&self, plan: &Plan, request: ExecRequest, env: &dyn EnvironmentSource, deadline: Instant, cancel: &Cancel) -> Result<ExitStatus, PhaseError>;
 }
 ```
 
@@ -1562,7 +1680,9 @@ still refused with `NotRunnable::Oneshot`.
   and `logs` open records read-only, take no lock, and never hold one while
   they stream, so they also work inside an agent's sandbox.
 - `exec` and the host program's tests wait for an `up` in progress to
-  finish, up to a deadline, before they run.
+  finish, up to a deadline, before they run. `exec` takes the lifecycle
+  lock and releases it at once, and holds no lock while its command runs.
+  See [Exec](#exec).
 
 ### Logs
 
@@ -1629,5 +1749,5 @@ Each decision states what this draft assumes until it is decided.
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
-| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the refusal of an app that runs at the workspace's top, and the launcher's second check. |
+| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |

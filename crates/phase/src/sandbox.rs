@@ -532,7 +532,13 @@ impl AppDirs {
 /// Xcode license was accepted, which `xcodebuild` reads before `xcrun`
 /// runs a tool. `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
 /// profile allows the resolved paths and the metadata of the `/var` link. Of `/Library` it allows only what
-/// toolchains read.
+/// toolchains read. Of `/dev` it allows only the nodes that toolchains
+/// use, and no terminal device, so a sandboxed process cannot open a
+/// user's terminal and read what is typed into it. `/dev/null`, `/dev/zero`
+/// and `/dev/tty` are also writable, which the capabilities add. `/dev/tty`
+/// opens only the process's controlling terminal, and the launcher leaves
+/// the caller's before it applies the sandbox. `dtracehelper` is the node
+/// that dyld and the runtimes of Swift and Node.js open at startup.
 #[cfg(target_os = "macos")]
 const SYSTEM_READ: &[&str] = &[
     "/usr",
@@ -546,13 +552,32 @@ const SYSTEM_READ: &[&str] = &[
     "/private/var/db/timezone",
     "/private/var/select",
     "/Library/Preferences/com.apple.dt.Xcode.plist",
-    "/dev",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/fd",
+    "/dev/dtracehelper",
 ];
 
 /// The system directories that every sandboxed process may read on Linux.
+/// Of `/dev` it allows only the nodes that toolchains use, and no terminal
+/// device such as `/dev/pts/*`. `/dev/fd` is a symbolic link into `/proc`,
+/// which is allowed, so it needs no entry.
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_READ: &[&str] = &[
-    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/dev", "/proc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/etc",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/proc",
 ];
 
 /// The link that `xcode-select --switch` sets to the active developer

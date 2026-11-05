@@ -171,7 +171,7 @@ pub use crate::sandbox::{SANDBOX_REFUSED, launch};
 pub use args::{BadKeeperArgs, KeeperArgs};
 pub use environment::KeeperEnvironment;
 pub(crate) use spawn::{AppEnd, KeeperCommand, Kept, Launch, spawn};
-pub(crate) use spec::KeeperSpec;
+pub(crate) use spec::{KeeperSpec, check_inherited, check_resolved};
 
 /// The most bytes of the specification that a keeper reads from its
 /// standard input. A longer specification is refused.

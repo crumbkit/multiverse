@@ -35,6 +35,13 @@ pub(crate) const DENIED_SERVICES: &[&str] = &[
 /// entry is spelt through it.
 const ROOT_LINKS: &[&str] = &["/var"];
 
+/// The terminal devices of macOS that no sandboxed process may open or
+/// use: each pseudo-terminal's slave, `/dev/ttysNNN`, and the old BSD
+/// pseudo-terminals. `/dev/tty`, which names only the process's own
+/// controlling terminal, and `/dev/ptmx`, which opens a new pseudo-terminal
+/// of the process's own, stay allowed.
+pub(crate) const TERMINAL_DEVICES: &str = "^/dev/(ttys[0-9]+|pty[a-z][0-9a-f]+|tty[p-w][0-9a-f])$";
+
 /// Returns phase's own Seatbelt rules for `spec`, in the order they apply.
 ///
 /// The filesystem rules deny the spec's protected paths, deny writes to
@@ -44,7 +51,8 @@ const ROOT_LINKS: &[&str] = &["/var"];
 /// that lies inside a grant that the rules allow again, such as the
 /// `private` directory of an OpenSSL directory inside `/usr/local/etc`, is
 /// denied after that allow, because Seatbelt applies the last rule that
-/// matches. The Mach rules deny [`DENIED_SERVICES`] and sending Apple
+/// matches. The terminal devices of [`TERMINAL_DEVICES`] are denied
+/// after every filesystem allow. The Mach rules deny [`DENIED_SERVICES`] and sending Apple
 /// events. The network rules allow the loopback ports, and each starts
 /// with [`NETWORK_RULE`].
 pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
@@ -93,6 +101,13 @@ pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
     for service in DENIED_SERVICES {
         rules.push(format!("(deny mach-lookup (global-name \"{service}\"))"));
     }
+    // nono's base profile allows `ioctl` on every terminal device, and a
+    // later grant could reach `/dev`, so the profile denies the terminals
+    // of other sessions outright: a process that opened one could read
+    // what the user types there, or push input into it.
+    rules.push(format!(
+        "(deny file-read* file-write* file-ioctl (regex #\"{TERMINAL_DEVICES}\"))"
+    ));
     rules.push("(deny appleevent-send)".to_owned());
     rules.push("(deny lsopen)".to_owned());
     if !spec.listen.is_empty() || !spec.connect.is_empty() {
