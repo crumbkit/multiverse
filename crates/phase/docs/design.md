@@ -519,10 +519,17 @@ container has already exited, the error says why: the wrapper's own line
 for status 70, and a pointer to `secret_delivery = "env"` when the image
 has no `/bin/sh`.
 
-On the Mac, phase asks the `AppliedEnvironment` to write the value's
-bytes into memory that it overwrites with zeros afterwards, and starts
-`docker exec` itself, in a process group of its own and with only `PATH`,
-`HOME` and the `DOCKER_*` variables in its environment. The value
+On the Mac, phase asks the `AppliedEnvironment` to write each value's
+bytes into memory that it overwrites with zeros afterwards, and when that
+memory grows. It reads every value of a process before it removes the
+process's old container, so an environment that cannot write a value
+leaves the old container running. The zeroing is best effort: the
+environment, the operating system's pipe buffers and the `docker` program
+may keep copies of their own. phase starts `docker exec` itself, in a
+process group of its own. When the host program set
+`Phase::with_docker_environment`, `docker exec` receives only the `PATH`,
+`HOME` and `DOCKER_*` variables that it passed, and otherwise the host
+program's environment, as phase's other `docker` commands do. The value
 therefore reaches no shell, no environment and no argument list. When the
 deadline passes or the caller cancels, phase kills the group.
 
@@ -539,7 +546,12 @@ Restarting such a process after a crash needs phase. The follow-up is a
 watcher per app that rewrites the files after a restart and before
 `AppliedEnvironment::expires_at`. Until then, `up` treats a container with
 secret files that Docker has restarted as not running and replaces it,
-and `status` shows it as restarting.
+and `status` shows it as restarting. A container with secret files that
+someone stopped and started again by hand, with `docker start`, also
+waits for files that its restart removed, but Docker does not count that
+start as a restart, so `up` and `status` read it as running. The run
+record keeps no start time to compare with, so the next `restart`
+recreates it.
 
 Rotation is `write_secrets` in the container runner, which writes the
 files of a running container again from a fresh environment. Nothing calls
@@ -702,9 +714,9 @@ A secret value takes only these paths:
   during `up`'s readiness wait;
 - for a container, from starmap's resolvers through
   `AppliedEnvironment::write_value` into phase's memory, which phase
-  overwrites with zeros afterwards, and from there through the standard
-  input of a `docker exec` that phase starts with no inherited value into
-  a file in the container's tmpfs at `/run/secrets` (see
+  overwrites with zeros afterwards as best it can, and from there through
+  the standard input of a `docker exec` that phase starts into a file in
+  the container's tmpfs at `/run/secrets` (see
   [Container secrets](#container-secrets)); only a process that sets
   `secret_delivery = "env"` receives it through the `docker compose up`
   child instead.

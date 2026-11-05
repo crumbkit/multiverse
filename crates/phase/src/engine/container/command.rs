@@ -60,14 +60,35 @@ impl ChildEnv for Referenced<'_> {
 }
 
 /// How long the feeder of a secret pauses between two bytes, which a test
-/// sets to catch the processes of a write while they run. It is zero
-/// outside tests.
+/// sets through [`FeedPause`] to catch the processes of a write while they
+/// run. It is zero outside tests.
 #[cfg(test)]
-pub(crate) static FEED_PAUSE_MILLIS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static FEED_PAUSE_MILLIS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Writes `input` to `stdin` and closes it. In a test that sets
-/// `FEED_PAUSE_MILLIS`, it writes one byte at a time with that pause.
+/// The pause between two bytes of every secret's feed while a test holds
+/// it, which ends when it is dropped, so no other write is slowed.
+#[cfg(test)]
+pub(crate) struct FeedPause;
+
+#[cfg(test)]
+impl FeedPause {
+    /// Pauses `millis` milliseconds between two bytes of a feed until the
+    /// returned value is dropped.
+    pub(crate) fn set(millis: u64) -> Self {
+        FEED_PAUSE_MILLIS.store(millis, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for FeedPause {
+    fn drop(&mut self) {
+        FEED_PAUSE_MILLIS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Writes `input` to `stdin` and closes it. In a test that holds a
+/// `FeedPause`, it writes one byte at a time with that pause.
 fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
     #[cfg(test)]
     {
@@ -86,6 +107,16 @@ fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
     let _ = stdin.write_all(input.framed());
 }
 
+/// Why [`write_secret`] stopped `docker` before it exited.
+enum Stop {
+    /// The caller cancelled the write.
+    Cancelled,
+    /// The deadline passed.
+    Late,
+    /// phase could not wait for `docker`.
+    WaitFailed(io::Error),
+}
+
 /// Runs `docker <args>`, where `args` are a `docker exec --interactive`
 /// that stages a secret, with `input`, the secret's framed bytes, on its
 /// standard input, which it then closes, within the deadline of `until` or
@@ -96,7 +127,10 @@ fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
 /// otherwise the host program's environment, as phase's other `docker`
 /// commands do. No secret's value is in either. When the deadline passes
 /// or the caller cancels, phase kills the group, reaps `docker`, and joins
-/// the threads that fed and read it, whose pipes the kill closed.
+/// the threads that fed and read it, whose pipes the kill closed. The
+/// feeder's next write to the closed pipe then fails with `EPIPE` and the
+/// feeder ends, because Rust's runtime ignores `SIGPIPE` in every program
+/// it starts, so the write does not kill the host program.
 pub(super) fn write_secret(
     args: &[String],
     input: SecretBytes,
@@ -148,13 +182,13 @@ pub(super) fn write_secret(
         match exited(pid) {
             Ok(true) => break None,
             Ok(false) => {}
-            Err(_) => break Some(false),
+            Err(error) => break Some(Stop::WaitFailed(error)),
         }
         if cancel.is_cancelled() {
-            break Some(true);
+            break Some(Stop::Cancelled);
         }
         if now() >= ends {
-            break Some(false);
+            break Some(Stop::Late);
         }
         pause(CANCEL_POLL.min(ends.saturating_duration_since(now())));
     };
@@ -171,8 +205,13 @@ pub(super) fn write_secret(
     let stdout = joined(stdout);
     let stderr = joined(stderr);
     match (stopped, reaped) {
-        (Some(true), _) => Err(Error::Cancelled { operation }),
-        (Some(false), _) => Err(Error::failed(
+        (Some(Stop::Cancelled), _) => Err(Error::Cancelled { operation }),
+        (Some(Stop::WaitFailed(error)), _) => Err(Error::failed(
+            operation,
+            None,
+            format!("phase could not wait for docker: {error}"),
+        )),
+        (Some(Stop::Late), _) => Err(Error::failed(
             operation,
             None,
             format!(

@@ -374,3 +374,42 @@ fn an_image_config_reads_dockers_nulls_as_empty_and_the_plans_command_replaces_t
     assert_eq!(bare, ImageConfig::new(&[], &["sh"], "1000"));
     assert_eq!(ImageConfig::parse("no json"), None);
 }
+
+/// Writes a long value one byte at a time, so the buffer that holds it
+/// grows many times.
+struct Trickle;
+
+impl AppliedEnvironment for Trickle {
+    fn names(&self) -> BTreeSet<String> {
+        BTreeSet::from(["TOKEN".to_owned()])
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(&self, _command: &mut Command, _reference: &dyn Fn(&str) -> Option<String>) {}
+
+    fn write_value(&self, _name: &str, out: &mut dyn std::io::Write) -> std::io::Result<()> {
+        for index in 0..5000_u32 {
+            out.write_all(&[b'a' + u8::try_from(index % 26).unwrap()])?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_value_written_in_many_small_pieces_is_framed_whole() {
+    let bytes = SecretBytes::of(&Trickle, "TOKEN").unwrap();
+
+    let expected: Vec<u8> = (0..5000_u32)
+        .map(|index| b'a' + u8::try_from(index % 26).unwrap())
+        .collect();
+    let mut framed = b"5000\n".to_vec();
+    framed.extend_from_slice(&expected);
+    assert_eq!(bytes.framed(), framed.as_slice());
+}

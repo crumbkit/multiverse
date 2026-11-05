@@ -29,7 +29,11 @@ pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 /// maximum of `N` restarts, and `always` to `unless-stopped`. Docker's own
 /// backoff replaces the plan's backoff, the plan's maximum does not apply
 /// to `always`, and Docker restarts a container with the environment it
-/// was created with, so the plan's `resolve` does not apply either.
+/// was created with, so the plan's `resolve` does not apply either. A
+/// container process that receives secrets as files gets Docker's `no`
+/// policy whatever its plan states, because a Docker restart empties the
+/// directory that holds the files and phase is not running to write them
+/// again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "policy", rename_all = "kebab-case", try_from = "RestartFile")]
 pub enum Restart {

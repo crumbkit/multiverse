@@ -953,7 +953,7 @@ fn a_secret_is_in_no_argument_list_or_environment_inside_the_container_while_it_
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     let id = world.container("db", "server").unwrap();
     let inspected = world.inspected(&db);
-    super::super::command::FEED_PAUSE_MILLIS.store(100, std::sync::atomic::Ordering::Relaxed);
+    let _pause = super::super::command::FeedPause::set(100);
     // The write's docker receives only these variables, as a host program
     // that sets `Phase::with_docker_environment` gives them.
     #[expect(
@@ -964,15 +964,14 @@ fn a_secret_is_in_no_argument_list_or_environment_inside_the_container_while_it_
         .filter(|(name, _)| name == "PATH" || name == "HOME" || name.starts_with("DOCKER_"))
         .collect();
     let writer = std::thread::spawn(move || {
+        let values = SecretValues {
+            token: Some(ROTATED),
+            key: Some(KEY),
+        };
         super::write_secrets(
-            &db,
-            &db.processes[0],
             &inspected,
             super::Delivery {
-                environment: &SecretValues {
-                    token: Some(ROTATED),
-                    key: Some(KEY),
-                },
+                values: super::secret_values(&db, &db.processes[0], &values).unwrap(),
                 owner: "1000:1000",
                 docker_environment: Some(&docker_environment),
             },
@@ -1024,11 +1023,9 @@ fn writing_secrets_again_replaces_their_files_in_the_running_container_without_a
         .unwrap();
 
     super::write_secrets(
-        &db,
-        &db.processes[0],
         &world.inspected(&db),
         super::Delivery {
-            environment: fresh.as_ref(),
+            values: super::secret_values(&db, &db.processes[0], fresh.as_ref()).unwrap(),
             owner: "1000:1000",
             docker_environment: None,
         },
@@ -1072,16 +1069,24 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     let id = world.container("db", "server").unwrap();
 
-    // `KEY` comes before `TOKEN`, so `KEY` is staged and `TOKEN` fails.
+    // `KEY` is staged first, and the feed of `TOKEN` is cut short.
+    let values = SecretValues {
+        token: Some(ROTATED),
+        key: Some("test-key-rotated"),
+    };
     let failed = super::write_secrets(
-        &db,
-        &db.processes[0],
         &world.inspected(&db),
         super::Delivery {
-            environment: &SecretValues {
-                token: None,
-                key: Some("test-key-rotated"),
-            },
+            values: vec![
+                (
+                    "KEY".to_owned(),
+                    super::SecretBytes::of(&values, "KEY").unwrap(),
+                ),
+                (
+                    "TOKEN".to_owned(),
+                    super::SecretBytes::of(&values, "TOKEN").unwrap().cut(4),
+                ),
+            ],
             owner: "1000:1000",
             docker_environment: None,
         },
@@ -1089,10 +1094,8 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
     );
 
     let error = failed.unwrap_err().to_string();
-    assert!(
-        error.contains("supplied no value for the secret TOKEN"),
-        "{error}"
-    );
+    assert!(error.contains("the secret TOKEN arrived with"), "{error}");
+    assert!(!error.contains(ROTATED), "{error}");
     assert!(!error.contains("test-key-rotated"), "{error}");
     let key = docker(&["exec", "--", &id, "cat", "/run/secrets/KEY"]).unwrap();
     assert_eq!(key, KEY);
@@ -1397,4 +1400,166 @@ fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
         other => panic!("{other:?}"),
     }
     assert!(!world.has_containers());
+}
+
+#[test]
+fn an_environment_that_cannot_write_a_secret_leaves_the_running_container_in_place() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = secret_app("db");
+    let report = world.up_with(&world.plan(vec![db.clone()]), &Secrets::new(Some(TOKEN)));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    let mut changed = db;
+    changed.processes[0].run[2] = format!("{COPY_SECRETS} # changed");
+
+    // `Mode`'s environment keeps the default `write_value`, which cannot
+    // write a value.
+    let report = world.up_with(&world.plan(vec![changed]), &Mode);
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(message.contains("cannot write the value"), "{message}");
+            assert!(message.contains("secret_delivery"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let state = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.State.Status}}",
+        &first,
+    ]);
+    assert_eq!(state.as_deref().map(str::trim), Some("running"));
+    assert_eq!(
+        world.container("db", "server").as_deref(),
+        Some(first.as_str())
+    );
+    world.down();
+}
+
+/// Reports whether a `phase-secret-stage` exec of the container `id` is
+/// left, on the host or inside the container.
+fn stage_left(id: &str) -> (bool, bool) {
+    let host = docker_free_ps()
+        .lines()
+        .any(|line| line.contains("phase-secret-stage") && line.contains(id));
+    let inside = docker(&["exec", "--user", "0", "--", id, "ps", "-o", "args"])
+        .unwrap_or_default()
+        .contains("phase-secret-stage");
+    (host, inside)
+}
+
+/// Returns the command line of every process on the host.
+fn docker_free_ps() -> String {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test lists the host's processes to find a docker exec that phase left"
+    )]
+    let output = Command::new("ps")
+        .args(["-A", "-ww", "-o", "command="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Waits up to ten seconds until no `phase-secret-stage` exec of the
+/// container `id` is left, and returns what is still left.
+fn stage_gone(id: &str) -> (bool, bool) {
+    let began = Instant::now();
+    loop {
+        let left = stage_left(id);
+        if left == (false, false) || began.elapsed() > Duration::from_secs(10) {
+            return left;
+        }
+        crate::clock::pause(Duration::from_millis(200));
+    }
+}
+
+/// Starts the secret app of `world` and returns its container's id and a
+/// slow write of its `TOKEN`'s arguments and bytes.
+fn slow_write(world: &World) -> (String, Vec<String>, super::SecretBytes) {
+    let db = secret_app("db");
+    let report = world.up_with(&world.plan(vec![db]), &Secrets::new(Some(TOKEN)));
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let values = SecretValues {
+        token: Some(ROTATED),
+        key: Some(KEY),
+    };
+    let bytes = super::SecretBytes::of(&values, "TOKEN").unwrap();
+    let args = super::secrets::stage(&id, "TOKEN", "1000:1000");
+    (id, args, bytes)
+}
+
+#[test]
+fn a_secret_write_that_misses_its_deadline_fails_and_leaves_no_exec() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let (id, args, bytes) = slow_write(&world);
+    let _pause = super::super::command::FeedPause::set(1000);
+    let began = Instant::now();
+
+    let written = super::super::command::write_secret(
+        &args,
+        bytes,
+        None,
+        (Duration::from_secs(1), &Cancel::new()),
+    );
+
+    assert!(
+        matches!(&written, Err(super::ContainerError::Failed { message, .. }) if message.contains("did not finish within 1 seconds")),
+        "{:?}",
+        written.as_ref().err()
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(stage_gone(&id), (false, false));
+    let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(token, TOKEN);
+    world.down();
+}
+
+#[test]
+fn a_cancelled_secret_write_stops_and_leaves_no_exec() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let (id, args, bytes) = slow_write(&world);
+    let _pause = super::super::command::FeedPause::set(1000);
+    let cancel = std::sync::Arc::new(Cancel::new());
+    let flag = std::sync::Arc::clone(&cancel);
+    let canceller = std::thread::spawn(move || {
+        crate::clock::pause(Duration::from_millis(1500));
+        flag.cancel();
+    });
+    let began = Instant::now();
+
+    let written =
+        super::super::command::write_secret(&args, bytes, None, (Duration::from_secs(60), &cancel));
+
+    canceller.join().unwrap();
+    assert!(
+        matches!(&written, Err(super::ContainerError::Cancelled { .. })),
+        "{:?}",
+        written.as_ref().err()
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(stage_gone(&id), (false, false));
+    let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(token, TOKEN);
+    world.down();
 }

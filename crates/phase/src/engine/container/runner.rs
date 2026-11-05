@@ -87,7 +87,7 @@ use crate::engine::container::objects::{
     self, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id, inspect_named,
     no_restart, reinspect, remove, stop, stop_until,
 };
-use crate::engine::container::secrets::{self, SecretBytes};
+use crate::engine::container::secrets::{self, ImageConfig, SecretBytes};
 use crate::engine::containers::{
     ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
     ContainersStarted, StartedContainer,
@@ -133,6 +133,44 @@ pub(crate) struct ComposeRunner {
     /// The only environment of the `docker exec` that writes a secret, or
     /// `None` for the host program's whole environment.
     docker_environment: Option<BTreeMap<String, String>>,
+}
+
+/// The values of the file secrets of a process, by secret name.
+type NamedSecrets = Vec<(String, SecretBytes)>;
+
+/// Returns the owner of the file secrets of `process` and their values,
+/// or `None` when the process has no file secrets.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::SecretOwnerUnknown`] when the owner would be
+/// root, and [`PhaseError::ProcessUnstartable`] when `environment` cannot
+/// write a value.
+fn delivered(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    image_config: Option<&ImageConfig>,
+    environment: &dyn AppliedEnvironment,
+) -> Result<Option<(String, NamedSecrets)>, PhaseError> {
+    let Some(image) = image_config else {
+        return Ok(None);
+    };
+    if app::file_secrets(app, process).next().is_none() {
+        return Ok(None);
+    }
+    let owner =
+        secrets::owner(app, process, image).ok_or_else(|| PhaseError::SecretOwnerUnknown {
+            app: app.name.clone(),
+            process: process.name.clone(),
+        })?;
+    let values = secret_values(app, process, environment).map_err(|reason| {
+        PhaseError::ProcessUnstartable {
+            app: app.name.clone(),
+            process: process.name.clone(),
+            reason,
+        }
+    })?;
+    Ok(Some((owner, values)))
 }
 
 impl ComposeRunner {
@@ -340,19 +378,14 @@ impl ComposeRunner {
                         app: app.name.clone(),
                         source,
                     })?;
-            // The owner of the secret files is settled before the old
-            // container is removed, so a refusal leaves it running.
-            let owner = match &image_config {
-                Some(image) if app::file_secrets(app, process).next().is_some() => {
-                    Some(secrets::owner(app, process, image).ok_or_else(|| {
-                        PhaseError::SecretOwnerUnknown {
-                            app: app.name.clone(),
-                            process: name.clone(),
-                        }
-                    })?)
-                }
-                _ => None,
-            };
+            // The owner and the values of the secret files are settled
+            // before the old container is removed, so a refusal, or an
+            // environment that cannot write a value, leaves it running.
+            let (owner, values) =
+                match delivered(app, process, image_config.as_ref(), environment.as_ref())? {
+                    Some((owner, values)) => (Some(owner), values),
+                    None => (None, Vec::new()),
+                };
             launching(name)?;
             if let Some(existing) = inspect_named(&scope, &service).map_err(|error| halt(&error))? {
                 let grace = own_grace(&existing.container).min(left(start.deadline));
@@ -422,11 +455,9 @@ impl ComposeRunner {
             // write that fails ends the start, which removes the container.
             if let Some(owner) = &owner {
                 write_secrets(
-                    app,
-                    process,
                     &inspected,
                     Delivery {
-                        environment: environment.as_ref(),
+                        values,
                         owner,
                         docker_environment: self.docker_environment.as_ref(),
                     },
@@ -552,11 +583,44 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
     }
 }
 
-/// What [`write_secrets`] writes: the values of a process's resolved
-/// environment, and the owner its files get.
+/// Returns the value of each secret of `process` of `app` that it
+/// receives as a file, read from `environment` in name order. `up` reads
+/// them before it removes the process's old container, so an environment
+/// that cannot write a value leaves that container running.
+///
+/// # Errors
+///
+/// Returns why the environment could not write a value, which names the
+/// secret and holds no value.
+pub(crate) fn secret_values(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    environment: &dyn AppliedEnvironment,
+) -> Result<Vec<(String, SecretBytes)>, String> {
+    app::file_secrets(app, process)
+        .map(|name| {
+            SecretBytes::of(environment, name)
+                .map(|bytes| (name.clone(), bytes))
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::NotFound => {
+                        format!("the environment source supplied no value for the secret {name}")
+                    }
+                    io::ErrorKind::Unsupported => format!(
+                        "the environment source cannot write the value of the secret {name} to a file, so set secret_delivery = \"env\" for this process"
+                    ),
+                    kind => format!(
+                        "the environment source failed to write the value of the secret {name}: {kind}"
+                    ),
+                })
+        })
+        .collect()
+}
+
+/// What [`write_secrets`] writes: the values of a process's secrets, from
+/// [`secret_values`], and the owner its files get.
 pub(crate) struct Delivery<'a> {
-    /// The process's resolved environment.
-    pub(crate) environment: &'a dyn AppliedEnvironment,
+    /// Each secret's name and value.
+    pub(crate) values: Vec<(String, SecretBytes)>,
     /// The owner of the files, in the form that `chown` reads.
     pub(crate) owner: &'a str,
     /// The only environment of the `docker exec` that writes each secret,
@@ -564,81 +628,58 @@ pub(crate) struct Delivery<'a> {
     pub(crate) docker_environment: Option<&'a BTreeMap<String, String>>,
 }
 
-/// Writes each secret of `process` of `app` that it receives as a file
-/// into its container `inspected`, from `delivery`, until the deadline or
-/// the cancel flag of `until`.
+/// Writes the secret files of `delivery` into the container `inspected`,
+/// until the deadline or the cancel flag of `until`.
 ///
 /// It stages every secret first and renames the staged files over the
 /// old ones only once all of them are staged, as the secrets module says.
-/// A staging that fails removes the staged files, so the container keeps
-/// its old set of files whole. Writing again with a fresh environment
+/// A staging or a rename that fails removes the staged files, so the
+/// container keeps its old set of files whole, apart from the files that
+/// a failed rename already replaced. Writing again with fresh values
 /// therefore rotates the secrets of a running container without
 /// restarting it.
 ///
 /// # Errors
 ///
-/// Returns [`ContainerError::Failed`] when the environment cannot write a
-/// secret's value, a staging or the renames fail, or the container ended
-/// before its files were written, [`ContainerError::Cancelled`], and the
-/// errors of checking that docker answers. No error holds a value.
+/// Returns [`ContainerError::Failed`] when a staging or the renames fail,
+/// or the container ended before its files were written,
+/// [`ContainerError::Cancelled`], and the errors of checking that docker
+/// answers. No error holds a value.
 pub(crate) fn write_secrets(
-    app: &AppPlan,
-    process: &ProcessPlan,
     inspected: &Inspected,
     delivery: Delivery<'_>,
     until: (Instant, &Cancel),
 ) -> Result<(), ContainerError> {
     let id = inspected.container.id().as_str();
-    let staged = stage_secrets(app, process, inspected, &delivery, until);
-    if let Err(error) = staged {
-        let _ = quick(secrets::discard(id), "secret discard");
-        return Err(ended_early(inspected).unwrap_or(error));
-    }
     let service = inspected.container.service().as_str();
-    quick(
-        secrets::commit(id, app::file_secrets(app, process)),
-        "secret commit",
-    )?
-    .checked("secret commit", Some(service))?;
-    Ok(())
-}
-
-/// Stages each secret file of `process` of `app` in its container
-/// `inspected`, as [`write_secrets`] says.
-fn stage_secrets(
-    app: &AppPlan,
-    process: &ProcessPlan,
-    inspected: &Inspected,
-    delivery: &Delivery<'_>,
-    until: (Instant, &Cancel),
-) -> Result<(), ContainerError> {
+    let names: Vec<String> = delivery
+        .values
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
     let (deadline, cancel) = until;
-    let service = inspected.container.service().as_str();
-    let id = inspected.container.id().as_str();
-    for name in app::file_secrets(app, process) {
-        let bytes = SecretBytes::of(delivery.environment, name).map_err(|error| {
-            let reason = match error.kind() {
-                io::ErrorKind::NotFound => {
-                    format!("the environment source supplied no value for the secret {name}")
-                }
-                io::ErrorKind::Unsupported => format!(
-                    "the environment source cannot write the value of the secret {name} to a file, so set secret_delivery = \"env\" for this process"
-                ),
-                kind => format!(
-                    "the environment source failed to write the value of the secret {name}: {kind}"
-                ),
-            };
-            ContainerError::failed("secret write", Some(service), reason)
-        })?;
-        write_secret(
-            &secrets::stage(id, name, delivery.owner),
+    let mut staged = Ok(());
+    for (name, bytes) in delivery.values {
+        staged = write_secret(
+            &secrets::stage(id, &name, delivery.owner),
             bytes,
             delivery.docker_environment,
             (left(deadline), cancel),
-        )?
-        .checked("secret write", Some(service))?;
+        )
+        .and_then(|finished| finished.checked("secret write", Some(service)).map(drop));
+        if staged.is_err() {
+            break;
+        }
     }
-    Ok(())
+    let committed = staged.and_then(|()| {
+        quick(secrets::commit(id, names.iter()), "secret commit")?
+            .checked("secret commit", Some(service))
+            .map(drop)
+    });
+    committed.map_err(|error| {
+        let _ = quick(secrets::discard(id), "secret discard");
+        ended_early(inspected).unwrap_or(error)
+    })
 }
 
 /// Returns the failure of a container `inspected` that ended before its

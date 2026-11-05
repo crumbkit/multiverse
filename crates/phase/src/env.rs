@@ -107,9 +107,11 @@ pub trait AppliedEnvironment: Send {
     /// Writes the bytes of the value of the variable `name` to `out`, and
     /// nothing else. phase calls it only to deliver a container's secret
     /// as a file: it buffers the bytes in memory that it overwrites with
-    /// zeros afterwards, writes them to the standard input of `docker
-    /// exec`, and never logs, formats or stores them. An implementation
-    /// must not log the value either.
+    /// zeros afterwards, also when the buffer grows, writes them to the
+    /// standard input of `docker exec`, and never logs, formats or stores
+    /// them. The zeroing is best effort: the implementation, the operating
+    /// system's pipe buffers and the `docker` program may keep copies of
+    /// their own. An implementation must not log the value either.
     ///
     /// # Errors
     ///
