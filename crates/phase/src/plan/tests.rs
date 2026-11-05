@@ -837,3 +837,40 @@ fn a_plan_refuses_a_container_probe_on_a_port_the_process_does_not_publish() {
     db.processes[0].port = None;
     assert!(plan(vec![db]).is_ok());
 }
+
+#[test]
+fn a_plan_refuses_a_container_tcp_probe_whose_timeout_is_under_a_second() {
+    let mut db = container_app("db");
+    let mut probe = Probe::new(ProbeCheck::Tcp {
+        port: "pg".parse().unwrap(),
+    });
+    probe.timeout = Duration::from_millis(999);
+    db.processes[0].ready = Some(probe.clone());
+    assert_eq!(
+        process_problem(db.clone()),
+        ProcessProblem::PublishedProbeTimeoutTooShort
+    );
+    probe.timeout = Duration::from_secs(60);
+    db.processes[0].ready = Some(probe);
+    assert!(plan(vec![db]).is_ok());
+
+    let mut api = host_app("api");
+    let mut probe = Probe::new(ProbeCheck::Tcp {
+        port: "http".parse().unwrap(),
+    });
+    probe.timeout = Duration::from_millis(100);
+    api.processes[0].ready = Some(probe);
+    assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_plan_refuses_a_stop_grace_longer_than_an_hour() {
+    let mut api = host_app("api");
+    api.processes[0].stop.grace = Duration::from_secs(3601);
+    assert_eq!(
+        process_problem(api.clone()),
+        ProcessProblem::StopGraceOutOfRange
+    );
+    api.processes[0].stop.grace = Duration::from_secs(3600);
+    assert!(plan(vec![api]).is_ok());
+}

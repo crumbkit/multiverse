@@ -386,15 +386,19 @@ other container.
 `up` pulls the app's image before it removes any container, within the
 build deadline, and resolves each process's environment before it removes
 the process's old container, so a pull or a resolver that fails leaves the
-old containers running. `docker compose up` then pulls nothing. A pull,
+old containers running. It writes each container's entry back to planned
+just before it removes or creates that container, so the entries of the
+containers it has not reached keep their ids and plan hashes. `docker compose up` then pulls nothing. A pull,
 `docker compose up` and the removal of an old container stop when the
 caller cancels. A deadline that cuts off the wait for a container leaves
 the app's start uncertain, as it does for a host process.
 
 `down` stops an app's containers in reverse dependency order. Each
 container gets its own stop grace, cut to what is left before the
-deadline. A container that Docker does not run, such as one that it is
-restarting, is removed at once. A Docker failure on one container does not
+deadline. phase first turns off the container's restart policy with
+`docker update --restart no` and reads its status again. A running or
+paused container gets its stop signal and grace, and any other
+container, such as one that Docker was restarting, is removed at once. A Docker failure on one container does not
 stop `down` from stopping the others. It records each container that is
 gone and then reports the first failure.
 
@@ -467,8 +471,10 @@ change which docker program or daemon the child uses. With this fallback,
 `docker inspect` and every process in the container can read the value, and
 a new value means recreating the container. Compose also hashes each
 service's interpolated values into the `com.docker.compose.config-hash`
-label of its container, so that label changes with a value. The hash
-does not reveal a value, but it does show that a value changed.
+label of its container, so that label changes with a value. The hash is
+unsalted, so anyone who can read the container's labels can test a guess
+of a low-entropy value against it. phase passes no secret this way yet,
+and this matters once the secret fallback lands.
 
 Until P3 lands, phase refuses a container process that receives a secret,
 and reaches only its plain variables through environment references.

@@ -8,8 +8,9 @@
 //! plugin answer, pulls the app's image unless docker has it, within the
 //! build deadline, creates the workspace's volumes that the app mounts,
 //! and then starts the selected processes one at a time, in dependency
-//! order. For each process it resolves the process's environment, removes
-//! a container that holds the process's name and carries the app's labels,
+//! order. For each process it resolves the process's environment, has the
+//! caller write the process's entry back to planned, removes a container
+//! that holds the process's name and carries the app's labels,
 //! checks that the process's published host ports are free, and runs
 //! `docker compose up` with the values of the process's variables on that
 //! child alone, each under its private reference. The pull and the
@@ -20,9 +21,9 @@
 //!
 //! - An `http` probe asks the published port on 127.0.0.1.
 //! - A `tcp` probe counts the published port as answering only when a
-//!   connection stays open or the container sends data, because Docker's
-//!   port proxy accepts a connection before anything in the container
-//!   listens.
+//!   connection stays open for 300 ms or the container sends data, because
+//!   Docker's port proxy accepts a connection before anything in the
+//!   container listens.
 //! - A `command` probe runs inside the container through `docker exec`.
 //! - A `log` probe reads the container's output through `docker logs
 //!   --timestamps`, at most once each [`LOG_INTERVAL`], and each read asks
@@ -52,11 +53,12 @@
 //! `stop` takes the containers in reverse of the record's order, which is
 //! dependency order. It finds each container by its recorded id, or by its
 //! name when the record holds no id yet, and acts on it only when its
-//! labels name the workspace, app and process. It stops a running
-//! container with the stop signal that the compose file set, waits the
-//! container's stop grace or until the deadline, whichever comes first,
-//! removes it, and checks that docker no longer has it. It removes a
-//! container that does not run at once. A failure on one container is that
+//! labels name the workspace, app and process. It turns off the
+//! container's restart policy and reads its status again. It stops a
+//! running or paused container with the stop signal that the compose file
+//! set, waits the container's stop grace or until the deadline, whichever
+//! comes first, removes it, and checks that docker no longer has it. It
+//! removes any other container at once. A failure on one container is that
 //! container's result, and `stop` goes on to the next. Volumes stay.
 
 use std::cell::Cell;
@@ -76,7 +78,7 @@ use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
 use crate::engine::container::objects::{
     self, ContainerState, Inspected, Status, ensure_image, ensure_volume, inspect_id,
-    inspect_named, reinspect, remove, stop, stop_until,
+    inspect_named, no_restart, reinspect, remove, stop, stop_until,
 };
 use crate::engine::containers::{
     ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
@@ -259,6 +261,7 @@ impl ComposeRunner {
     fn start_into(
         &self,
         start: &ContainerStart<'_>,
+        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
         started: &mut ContainersStarted,
     ) -> Result<(), Halt> {
         let app = start.app;
@@ -304,6 +307,7 @@ impl ComposeRunner {
                         app: app.name.clone(),
                         source,
                     })?;
+            launching(name)?;
             if let Some(existing) = inspect_named(&scope, &service).map_err(|error| halt(&error))? {
                 let grace = own_grace(&existing.container).min(left(start.deadline));
                 discard_until(&existing, grace, start.cancel)?;
@@ -464,24 +468,43 @@ impl ComposeRunner {
     }
 }
 
+/// Turns off Docker's restart policy of `container` and returns the
+/// container as docker then has it, or `None` when docker no longer has it.
+/// Docker restarts no container after this, so a container that crashes in
+/// a loop holds still for its stop, and its status is current.
+fn settle(
+    container: &crate::engine::container::OwnedContainer,
+) -> Result<Option<Inspected>, ContainerError> {
+    no_restart(container)?;
+    reinspect(container)
+}
+
 /// Stops and removes the container `inspected`, which waits `grace` after
-/// its stop signal. A container that does not run, such as one that Docker
-/// is restarting, is removed at once, because `docker stop` waits for
-/// Docker's restart delay first.
+/// its stop signal. phase first turns off its restart policy and reads its
+/// status again. A running or paused container gets its stop signal and
+/// its grace. Any other container, such as one that Docker was restarting,
+/// is removed at once, because `docker stop` would first wait out Docker's
+/// restart delay.
 fn discard(inspected: &Inspected, grace: Duration) -> Result<(), ContainerError> {
-    if inspected.status == Status::Running {
-        stop(&inspected.container, grace)?;
+    let Some(fresh) = settle(&inspected.container)? else {
+        return Ok(());
+    };
+    if fresh.status.runs() {
+        stop(&fresh.container, grace)?;
     }
-    remove(inspected.container.clone())
+    remove(fresh.container)
 }
 
 /// Stops and removes the container `inspected` as [`discard`] does, and
 /// stops waiting for docker once `cancel` is set.
 fn discard_until(inspected: &Inspected, grace: Duration, cancel: &Cancel) -> Result<(), Halt> {
-    if inspected.status == Status::Running {
-        stop_until(&inspected.container, grace, cancel).map_err(|error| halt(&error))?;
+    let Some(fresh) = settle(&inspected.container).map_err(|error| halt(&error))? else {
+        return Ok(());
+    };
+    if fresh.status.runs() {
+        stop_until(&fresh.container, grace, cancel).map_err(|error| halt(&error))?;
     }
-    remove(inspected.container.clone()).map_err(|error| halt(&error))
+    remove(fresh.container).map_err(|error| halt(&error))
 }
 
 /// Stops and removes each container of `started`, after a failure ended
@@ -521,9 +544,13 @@ impl ContainerRunner for ComposeRunner {
         app::objects(&self.scope(workspace, &app.name), app)
     }
 
-    fn start(&self, start: &ContainerStart<'_>) -> ContainersStarted {
+    fn start(
+        &self,
+        start: &ContainerStart<'_>,
+        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+    ) -> ContainersStarted {
         let mut started = ContainersStarted::default();
-        match self.start_into(start, &mut started) {
+        match self.start_into(start, launching, &mut started) {
             Ok(()) | Err(Halt::Cancelled) => {}
             Err(Halt::Failed(error)) => {
                 let scope = self.scope(start.workspace, &start.app.name);
@@ -711,35 +738,77 @@ fn tail(id: &names::ContainerId) -> Vec<String> {
     .filter(|finished| finished.status.success()) else {
         return Vec::new();
     };
-    let lines = stamped(&finished.stdout, &finished.stderr);
+    let lines = stamped(&finished.stdout, &finished.stderr, MOST_OUTPUT_BYTES);
     let skip = lines.len().saturating_sub(TAIL_LINES);
-    lines
-        .into_iter()
-        .skip(skip)
-        .map(|(_, text)| text.to_owned())
-        .collect()
+    lines.into_iter().skip(skip).map(|(_, text)| text).collect()
 }
+
+/// The text that ends a line longer than a docker command keeps, which
+/// phase hands over cut short.
+const CUT_LINE: &str = " [cut by phase]";
 
 /// Returns the lines that `docker logs --timestamps` printed on `stdout`
 /// and `stderr`, each as its timestamp and its text, in the order of their
 /// timestamps. Docker prints each timestamp in a fixed width, so text
-/// order is time order. A stream that filled the bytes that a docker
-/// command keeps loses its last line, which the cut may have split.
-fn stamped<'a>(stdout: &'a str, stderr: &'a str) -> Vec<(&'a str, &'a str)> {
-    let whole = |stream: &'a str| {
-        let mut lines: Vec<&str> = stream.lines().collect();
-        if u64::try_from(stream.len()).unwrap_or(u64::MAX) >= MOST_OUTPUT_BYTES {
-            lines.pop();
+/// order is time order.
+///
+/// A stream that filled the `cap` bytes that a docker command keeps lost
+/// its later lines, and its last kept line may be cut. That line is left
+/// out, and so is every line of either stream stamped after the last whole
+/// line of a full stream, so a later read that starts from the last line
+/// handed over misses nothing. A full stream that holds no whole line
+/// holds one line longer than `cap`, which is handed over cut short and
+/// ended with [`CUT_LINE`], so the reads move past it.
+fn stamped<'a>(stdout: &'a str, stderr: &'a str, cap: u64) -> Vec<(&'a str, String)> {
+    let split = |line: &'a str| line.split_once(' ').unwrap_or((line, ""));
+    let mut lines: Vec<(&str, String)> = Vec::new();
+    let mut until: Option<&str> = None;
+    for stream in [stdout, stderr] {
+        let mut kept: Vec<&str> = stream.lines().collect();
+        if u64::try_from(stream.len()).unwrap_or(u64::MAX) >= cap {
+            let cut = kept.pop();
+            let last = match (kept.last(), cut) {
+                (Some(last), _) => split(last).0,
+                (None, Some(cut)) => {
+                    let (stamp, text) = split(cut);
+                    lines.push((stamp, format!("{text}{CUT_LINE}")));
+                    stamp
+                }
+                (None, None) => continue,
+            };
+            until = Some(until.map_or(last, |until| until.min(last)));
         }
-        lines
-    };
-    let mut lines: Vec<(&str, &str)> = whole(stdout)
-        .into_iter()
-        .chain(whole(stderr))
-        .map(|line| line.split_once(' ').unwrap_or((line, "")))
-        .collect();
+        lines.extend(kept.into_iter().map(|line| {
+            let (stamp, text) = split(line);
+            (stamp, text.to_owned())
+        }));
+    }
+    if let Some(until) = until {
+        lines.retain(|(stamp, _)| *stamp <= until);
+    }
     lines.sort_by(|left, right| left.0.cmp(right.0));
     lines
+}
+
+/// Returns the timestamp one nanosecond after `stamp`, which docker
+/// printed as `2026-11-05T10:00:00.123456789Z`, or `stamp` itself when its
+/// fraction is all nines or it has none.
+fn just_after(stamp: &str) -> String {
+    let Some((head, tail)) = stamp.split_once('.') else {
+        return stamp.to_owned();
+    };
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    let (fraction, zone) = tail.split_at(digits);
+    let mut bytes = fraction.as_bytes().to_vec();
+    for byte in bytes.iter_mut().rev() {
+        if *byte == b'9' {
+            *byte = b'0';
+        } else {
+            *byte += 1;
+            return format!("{head}.{}{zone}", String::from_utf8_lossy(&bytes));
+        }
+    }
+    stamp.to_owned()
 }
 
 /// The output of a container, read with `docker logs --timestamps` at most
@@ -755,6 +824,8 @@ struct DockerLogs {
     since: Option<(String, usize)>,
     /// When the output was last read.
     last: Option<Instant>,
+    /// The bytes of each stream that a read keeps.
+    cap: u64,
 }
 
 impl DockerLogs {
@@ -764,6 +835,7 @@ impl DockerLogs {
             id,
             since: None,
             last: None,
+            cap: MOST_OUTPUT_BYTES,
         }
     }
 
@@ -773,7 +845,7 @@ impl DockerLogs {
     fn after(&mut self, stdout: &str, stderr: &str) -> Vec<String> {
         let (since, mut repeated) = self.since.clone().unwrap_or_default();
         let mut handed = Vec::new();
-        for (stamp, text) in stamped(stdout, stderr) {
+        for (stamp, text) in stamped(stdout, stderr, self.cap) {
             if !since.is_empty() && stamp < since.as_str() {
                 continue;
             }
@@ -781,11 +853,17 @@ impl DockerLogs {
                 repeated -= 1;
                 continue;
             }
-            match &mut self.since {
-                Some((last, count)) if last == stamp => *count += 1,
-                _ => self.since = Some((stamp.to_owned(), 1)),
+            if text.ends_with(CUT_LINE) {
+                // `--since` includes its own time, so the next read starts
+                // just after the cut line, which would fill it again.
+                self.since = Some((just_after(stamp), 0));
+            } else {
+                match &mut self.since {
+                    Some((last, count)) if last == stamp => *count += 1,
+                    _ => self.since = Some((stamp.to_owned(), 1)),
+                }
             }
-            handed.push(text.to_owned());
+            handed.push(text);
         }
         handed
     }

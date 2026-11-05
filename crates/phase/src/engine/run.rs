@@ -479,7 +479,6 @@ impl Op<'_, '_> {
         if processes.is_empty() {
             return Ok(AppStep::Done(AppOutcome::AlreadyRunning, Vec::new()));
         }
-        self.journal.containers_launching(&app.name, &processes)?;
         let start = ContainerStart {
             workspace: &self.workspace,
             app,
@@ -489,7 +488,11 @@ impl Op<'_, '_> {
             deadline: self.deadlines.ready,
             cancel: self.cancel,
         };
-        let started = self.engine.containers.start(&start);
+        let journal = &mut self.journal;
+        let mut launching = |process: &ProcessName| {
+            journal.containers_launching(&app.name, std::slice::from_ref(process))
+        };
+        let started = self.engine.containers.start(&start, &mut launching);
         if started.containers.len() > started.removed.len() {
             self.started.push(Begun::Containers(app.name.clone()));
         }

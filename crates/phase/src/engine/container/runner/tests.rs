@@ -3,7 +3,8 @@
 //! answers, when the compose plugin is missing, or when `busybox:1.37.0`
 //! is not pulled, which the tests do not pull. CI's lane pulls the image,
 //! pinned by digest, so the tests run there. Each test uses a workspace id
-//! of its own and removes what it created.
+//! of its own and removes what it created. The tests of the log reader at
+//! the end need no daemon.
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -65,7 +66,11 @@ fn docker_ready() -> bool {
     true
 }
 
-/// An environment source that gives every process `MODE`.
+/// The value of `SERVICES` that the tests' environment source gives, a
+/// literal that is not a secret.
+const SERVICES: &str = "s3,sqs,kms";
+
+/// An environment source that gives every process `MODE` and `SERVICES`.
 struct Mode;
 
 impl EnvironmentSource for Mode {
@@ -84,7 +89,7 @@ struct ModeValue;
 
 impl AppliedEnvironment for ModeValue {
     fn names(&self) -> BTreeSet<String> {
-        BTreeSet::from(["MODE".to_owned()])
+        BTreeSet::from(["MODE".to_owned(), "SERVICES".to_owned()])
     }
 
     fn expires_at(&self) -> Option<std::time::SystemTime> {
@@ -98,6 +103,9 @@ impl AppliedEnvironment for ModeValue {
     fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>) {
         if let Some(name) = reference("MODE") {
             command.env(name, MODE);
+        }
+        if let Some(name) = reference("SERVICES") {
+            command.env(name, SERVICES);
         }
     }
 }
@@ -324,7 +332,11 @@ fn a_tcp_probe_waits_for_a_listener_inside_the_container_and_not_for_dockers_pro
     web.processes[0]
         .publish
         .insert("http".parse().unwrap(), NonZeroU16::new(8080).unwrap());
-    web.processes[0].ready = Some(Probe::new(ProbeCheck::tcp("http".parse().unwrap())));
+    // A fixed container port, published to the workspace's host port, with
+    // the 60-second attempt timeout that mxv's manifests use.
+    let mut probe = Probe::new(ProbeCheck::tcp("http".parse().unwrap()));
+    probe.timeout = Duration::from_secs(60);
+    web.processes[0].ready = Some(probe);
     let plan = world.plan(vec![web]);
 
     drop(holder);
@@ -367,7 +379,7 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_with_its_output() {
     }
     // Without the restart check, the wait would last the 300-second
     // ready timeout, or the 60-second deadline of the test.
-    assert!(began.elapsed() < Duration::from_secs(55));
+    assert!(began.elapsed() < Duration::from_secs(20));
 }
 
 #[test]
@@ -459,5 +471,106 @@ fn up_leaves_a_running_container_of_the_same_plan_alone_and_replaces_a_stopped_o
     let third = world.container("db", "server").unwrap();
     assert_ne!(second, third);
     assert!(docker(&["container", "inspect", &second]).is_none());
+    world.down();
+}
+
+/// Returns what `docker logs --timestamps` prints for `text` at the
+/// nanosecond `at` of a fixed second.
+fn logged(at: u32, text: &str) -> String {
+    format!("2026-11-05T10:00:00.{at:09}Z {text}\n")
+}
+
+/// Returns a log reader of a made-up container whose streams keep `cap`
+/// bytes.
+fn logs(cap: u64) -> super::DockerLogs {
+    let mut logs = super::DockerLogs::new(
+        crate::engine::container::names::ContainerId::new(&"a".repeat(64)).unwrap(),
+    );
+    logs.cap = cap;
+    logs
+}
+
+#[test]
+fn a_log_read_hands_each_line_over_once_in_time_order() {
+    let mut reader = logs(1 << 20);
+    let out = logged(1, "one") + &logged(3, "three");
+    let err = logged(2, "two");
+    assert_eq!(reader.after(&out, &err), ["one", "two", "three"]);
+    // The next read, from the last line's time, gets that line again.
+    let out = logged(3, "three") + &logged(4, "four");
+    assert_eq!(reader.after(&out, ""), ["four"]);
+}
+
+#[test]
+fn a_full_stream_holds_back_every_line_after_its_last_whole_line() {
+    let out = logged(1, "one") + &logged(4, "four") + &logged(5, "fi");
+    let cap = u64::try_from(out.len()).unwrap();
+    let mut reader = logs(cap);
+    let err = logged(2, "two") + &logged(6, "six");
+    // stdout filled its cap, so `fi` may be cut and stdout lines after
+    // `four` were not read; `six` waits for the next read.
+    assert_eq!(reader.after(&out, &err), ["one", "two", "four"]);
+    let mut reader2 = logs(1 << 20);
+    reader2.since = reader.since.clone();
+    let out = logged(4, "four") + &logged(5, "five");
+    let err = logged(6, "six");
+    assert_eq!(reader2.after(&out, &err), ["five", "six"]);
+}
+
+#[test]
+fn a_line_longer_than_a_read_keeps_is_handed_over_cut_and_the_reads_move_past_it() {
+    let long = logged(1, &"x".repeat(100));
+    let cut = &long[..60];
+    let mut reader = logs(60);
+    let handed = reader.after(cut, "");
+    assert_eq!(handed.len(), 1);
+    assert!(handed[0].ends_with(super::CUT_LINE), "{handed:?}");
+    assert_eq!(
+        reader.since.as_ref().map(|(since, _)| since.as_str()),
+        Some("2026-11-05T10:00:00.000000002Z")
+    );
+    assert_eq!(
+        super::just_after("2026-11-05T10:00:00.000000999Z"),
+        "2026-11-05T10:00:00.000001000Z"
+    );
+}
+
+#[test]
+fn a_container_runs_its_own_command_and_receives_its_literal_variables() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = app("db", "echo overridden; exec sleep 60");
+    db.processes[0].env.insert("SERVICES".to_owned());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let printed = docker(&["exec", "--", &id, "printenv", "SERVICES"]).unwrap();
+    assert_eq!(printed.trim(), SERVICES);
+    let command = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Config.Cmd}}",
+        &id,
+    ])
+    .unwrap();
+    assert_eq!(
+        command.trim(),
+        r#"["sh","-c","echo overridden; exec sleep 60"]"#
+    );
+    let config = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Config.Labels}}",
+        &id,
+    ])
+    .unwrap();
+    assert!(!config.contains(SERVICES), "{config}");
     world.down();
 }

@@ -42,6 +42,10 @@ pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// time is refused with [`ProcessProblem::ReadyTimeoutOutOfRange`].
 pub const MOST_READY_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// The longest stop grace a plan may give a process. A longer grace is
+/// refused with [`ProcessProblem::StopGraceOutOfRange`].
+pub const MOST_STOP_GRACE: Duration = Duration::from_secs(3600);
+
 /// Returns [`DEFAULT_READY_TIMEOUT`], for a plan read from JSON that omits
 /// it.
 const fn default_ready_timeout() -> Duration {

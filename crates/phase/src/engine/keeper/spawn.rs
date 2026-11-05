@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustix::process::Signal;
 
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
 use crate::engine::keeper::args::{APP, PROCESS, STATE_DIR, WORKSPACE};
@@ -259,7 +259,7 @@ fn end(child: &mut std::process::Child, spec: &KeeperSpec) {
     {
         let _ = rustix::process::kill_process(keeper, Signal::TERM);
     }
-    let deadline = deadline_after(spec.stop.grace.saturating_add(spec.kill_wait));
+    let deadline = deadline_in(spec.stop.grace.saturating_add(spec.kill_wait));
     while now() < deadline {
         if !matches!(child.try_wait(), Ok(None)) {
             break;
@@ -326,14 +326,4 @@ pub(crate) fn read_handshake(input: impl Read) -> io::Result<Option<Handshake>> 
                 .map_err(io::Error::other);
         }
     }
-}
-
-/// The furthest ahead that [`deadline_after`] puts a deadline: a century.
-const FURTHEST_DEADLINE: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
-
-/// Returns the time `wait` from now, or a century from now when `wait` is
-/// longer, so a plan's long stop grace never overflows the clock.
-pub(super) fn deadline_after(wait: Duration) -> Instant {
-    let at = now();
-    at.checked_add(wait.min(FURTHEST_DEADLINE)).unwrap_or(at)
 }

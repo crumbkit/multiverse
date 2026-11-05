@@ -154,8 +154,8 @@ pub(super) fn says_missing(line: &str) -> bool {
         .any(|said| answer.contains(said))
             || (answer.starts_with("network ") && answer.ends_with(" not found"));
     }
-    line.to_ascii_lowercase()
-        .starts_with("error: no such object:")
+    let line = line.to_ascii_lowercase();
+    line.starts_with("error: no such object:") || line.starts_with("error: no such image:")
 }
 
 /// Returns the line of docker's standard error that says what failed: the

@@ -45,7 +45,18 @@ pub(crate) trait ContainerRunner {
     /// [`ContainersStarted::removed`] the containers that the start removed
     /// after it. A process that started and did not become ready is no
     /// failure, and [`ContainersStarted::problem`] names it.
-    fn start(&self, start: &ContainerStart<'_>) -> ContainersStarted;
+    ///
+    /// Just before it removes or creates the container of a process, it
+    /// calls `launching` with the process, which writes the process's
+    /// entry back to planned with no id. A failure before that, such as a
+    /// pull or an environment that cannot be resolved, leaves the entries
+    /// of the running containers as they were. A failure of `launching`
+    /// ends the start as [`ContainersStarted::failure`].
+    fn start(
+        &self,
+        start: &ContainerStart<'_>,
+        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+    ) -> ContainersStarted;
 
     /// Returns the processes of `containers`, containers of `app` of
     /// `workspace` that the run record names by id, whose container still

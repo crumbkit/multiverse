@@ -18,7 +18,8 @@ use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
-    ContainerState, Status, mint_anonymous, mint_container, mint_volume, stop_timeout_of,
+    ContainerState, STOP_TIMEOUT_FORMAT, Status, mint_anonymous, mint_container, mint_volume,
+    stop_timeout_of,
 };
 use crate::name::WorkspaceName;
 
@@ -319,6 +320,10 @@ fn only_the_daemons_answer_that_an_object_does_not_exist_counts_as_missing() {
         "Error response from daemon: network phase-nope not found",
         "error: no such object: phase-nope",
         "Error: No such object: phase-nope",
+        // `docker image inspect` of a tag that docker 29.8.2 does not have.
+        "Error response from daemon: No such image: busybox:0.0.0-nope",
+        // Other docker CLI versions print a missing image this way.
+        "Error: No such image: busybox:0.0.0-nope",
     ] {
         assert!(says_missing(said), "{said}");
     }
@@ -716,13 +721,13 @@ fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_o
 }
 
 #[test]
-fn a_containers_stop_timeout_is_read_from_its_config_and_is_none_when_docker_omits_it() {
+fn a_containers_stop_timeout_is_read_alone_and_is_none_when_docker_omits_it() {
     assert_eq!(
-        stop_timeout_of(r#"{"Image":"busybox","StopTimeout":3}"#),
-        Some(3)
+        STOP_TIMEOUT_FORMAT,
+        "{{json (index .Config \"StopTimeout\")}}"
     );
-    assert_eq!(stop_timeout_of(r#"{"Image":"busybox"}"#), None);
-    assert_eq!(stop_timeout_of(r#"{"StopTimeout":null}"#), None);
+    assert_eq!(stop_timeout_of("3\n"), Some(3));
+    assert_eq!(stop_timeout_of("null\n"), None);
     assert_eq!(stop_timeout_of("not json"), None);
 }
 
@@ -744,6 +749,10 @@ fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
     let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Running);
+    assert_eq!(inspected.status, Status::Paused);
+
+    let printed = format!("{labels}\n{ID}\nexited 0\n2026-11-04T10:00:00.000000000Z\n\n0\n");
+    let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.status, Status::Other);
 }
 
@@ -841,17 +850,24 @@ fn a_compose_child_inherits_no_private_name_and_receives_only_its_own_values() {
 }
 
 #[test]
-fn a_port_whose_connection_stays_open_answers_within_a_short_timeout_and_not_once_cancelled() {
+fn a_port_answers_only_when_its_connection_stays_open_for_the_full_hold_and_not_once_cancelled() {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
     let port = listener.local_addr().unwrap().port();
     let began = now();
-    assert!(crate::engine::container::answers_within(
+    assert!(!crate::engine::container::answers_within(
         port,
-        Duration::from_millis(100),
+        Duration::from_millis(250),
         &Cancel::new()
     ));
     assert!(now() - began < Duration::from_millis(300));
+    let began = now();
+    assert!(crate::engine::container::answers_within(
+        port,
+        crate::plan::probe::LEAST_PUBLISHED_PROBE_TIMEOUT,
+        &Cancel::new()
+    ));
+    assert!(now() - began >= Duration::from_millis(300));
     let cancel = Cancel::new();
     cancel.cancel();
     assert!(!crate::engine::container::answers_within(

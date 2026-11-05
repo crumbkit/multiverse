@@ -182,6 +182,7 @@ impl HostRunner for FakeHost {
             cancel.cancel();
         }
         state.launches.push(name.clone());
+        event(format!("host start {name}"));
         state
             .specs
             .push(serde_json::to_string(launch.spec).unwrap());
@@ -222,6 +223,7 @@ impl HostRunner for FakeHost {
         let pid = stop.app.or(stop.keeper).map_or(0, |host| host.pid);
         let name = state.names.get(&pid).cloned().unwrap_or_default();
         state.stops.push(name.clone());
+        event(format!("host stop {name}"));
         if state.not_ours.contains(&name) {
             return Ok(HostStopped::NotOurs);
         }
@@ -320,6 +322,22 @@ impl LogLines for FakeLines {
     }
 }
 
+std::thread_local! {
+    /// What the fake runners did, in order, across host and container
+    /// apps.
+    static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Notes that a fake runner did `what`.
+fn event(what: String) {
+    EVENTS.with(|events| events.borrow_mut().push(what));
+}
+
+/// Returns what the fake runners did, in order, and forgets it.
+fn events() -> Vec<String> {
+    EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
 /// A fake container runner.
 #[derive(Default)]
 struct FakeContainers {
@@ -390,27 +408,15 @@ impl ContainerRunner for FakeContainers {
         })
     }
 
-    fn start(&self, start: &ContainerStart<'_>) -> ContainersStarted {
+    fn start(
+        &self,
+        start: &ContainerStart<'_>,
+        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+    ) -> ContainersStarted {
         assert_eq!(start.workspace, &workspace());
         assert!(start.deadline > now());
         if start.cancel.is_cancelled() {
             return ContainersStarted::default();
-        }
-        if let Some(state_dir) = self.state_dir.borrow().as_ref() {
-            let record = RunStore::new(state_dir)
-                .read(start.workspace)
-                .unwrap()
-                .unwrap();
-            for process in start.processes {
-                let entry = record
-                    .containers
-                    .iter()
-                    .find(|entry| entry.app == start.app.name && &entry.process == process)
-                    .unwrap();
-                self.entries_at_start
-                    .borrow_mut()
-                    .push((entry.state, entry.id.is_some()));
-            }
         }
         for process in start.processes {
             if let Err(source) = start.env.resolve(&start.app.name, process, start.deadline) {
@@ -423,7 +429,32 @@ impl ContainerRunner for FakeContainers {
                 };
             }
         }
+        for process in start.processes {
+            if let Err(error) = launching(process) {
+                return ContainersStarted {
+                    failure: Some(error),
+                    ..ContainersStarted::default()
+                };
+            }
+            if let Some(state_dir) = self.state_dir.borrow().as_ref() {
+                let record = RunStore::new(state_dir)
+                    .read(start.workspace)
+                    .unwrap()
+                    .unwrap();
+                let entry = record
+                    .containers
+                    .iter()
+                    .find(|entry| entry.app == start.app.name && &entry.process == process)
+                    .unwrap();
+                self.entries_at_start
+                    .borrow_mut()
+                    .push((entry.state, entry.id.is_some()));
+            }
+        }
         self.started.borrow_mut().push(start.app.name.to_string());
+        for process in start.processes {
+            event(format!("container start {}/{process}", start.app.name));
+        }
         self.starts.borrow_mut().push(
             start
                 .processes
@@ -489,6 +520,7 @@ impl ContainerRunner for FakeContainers {
                 self.stop_order
                     .borrow_mut()
                     .push(format!("{}/{}", stop.app, entry.process));
+                event(format!("container stop {}/{}", stop.app, entry.process));
                 let how = match (&entry.id, self.stubborn) {
                     _ if self.stop_failing == Some(entry.process.as_str()) => Err(docker_refused()),
                     (None, _) => Ok(ContainerStopped::AlreadyGone),
@@ -2088,4 +2120,84 @@ fn up_replaces_a_running_container_that_phase_started_from_another_plan_of_its_p
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
     assert_eq!(world.containers.starts.borrow().len(), 2);
+}
+
+#[test]
+fn a_container_start_that_fails_before_it_removes_anything_keeps_the_recorded_ids() {
+    let world = World::new();
+    let plan = plan(vec![container_app("db")]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    let failing = Env {
+        failing: BTreeSet::from(["db".to_owned()]),
+        ..Env::default()
+    };
+
+    let report = world.up(&plan, &Selection::All, &failing).unwrap();
+
+    assert!(
+        matches!(outcome(&report, "db"), AppOutcome::Errored { .. }),
+        "{report:?}"
+    );
+    let record = world.record().unwrap();
+    let entry = &record.containers[0];
+    assert_eq!(entry.state, EntryState::Running);
+    assert!(entry.id.is_some());
+    assert_eq!(entry.plan_hash, Some(fake_plan_hash()));
+}
+
+#[test]
+fn a_host_app_that_depends_on_two_container_apps_starts_after_both_and_stops_before_them() {
+    let world = World::new();
+    let plan = plan(vec![
+        host_app("api", None, &["db", "cache"]),
+        container_app("db"),
+        container_app("cache"),
+    ]);
+    events();
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    for app in ["api", "db", "cache"] {
+        assert_eq!(outcome(&report, app), &AppOutcome::Started, "{report:?}");
+    }
+    let started = events();
+    let at = |what: &str| started.iter().position(|event| event == what).unwrap();
+    assert!(
+        at("host start api/server") > at("container start db/server"),
+        "{started:?}"
+    );
+    assert!(
+        at("host start api/server") > at("container start cache/server"),
+        "{started:?}"
+    );
+
+    let report = world.down(&Selection::All);
+
+    for app in ["api", "db", "cache"] {
+        assert_eq!(outcome(&report, app), &AppOutcome::Stopped, "{report:?}");
+    }
+    let stopped = events();
+    let at = |what: &str| stopped.iter().position(|event| event == what).unwrap();
+    assert!(
+        at("host stop api/server") < at("container stop db/server"),
+        "{stopped:?}"
+    );
+    assert!(
+        at("host stop api/server") < at("container stop cache/server"),
+        "{stopped:?}"
+    );
+}
+
+#[test]
+fn a_container_process_with_literal_variables_is_runnable_and_reaches_its_runner() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes[0].env.insert("SERVICES".to_owned());
+    let plan = plan(vec![db]);
+    let env = Env::default();
+
+    let report = world.up(&plan, &Selection::All, &env).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(*env.resolved.borrow(), ["db/server"]);
 }

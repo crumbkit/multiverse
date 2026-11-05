@@ -84,17 +84,26 @@ impl ContainerState {
 pub(crate) enum Status {
     /// The container runs.
     Running,
+    /// The container is paused.
+    Paused,
     /// Docker is restarting the container after it exited.
     Restarting,
-    /// Any other status, such as `paused`, `created` or `exited`.
+    /// Any other status, such as `created` or `exited`.
     Other,
 }
 
 impl Status {
+    /// Reports whether the container runs or is paused, so it takes a stop
+    /// signal.
+    pub(crate) const fn runs(self) -> bool {
+        matches!(self, Self::Running | Self::Paused)
+    }
+
     /// Returns the status that docker prints as `<status> <exit code>`.
     fn parse(printed: &str) -> Self {
         match printed.split_whitespace().next() {
             Some("running") => Self::Running,
+            Some("paused") => Self::Paused,
             Some("restarting") => Self::Restarting,
             _ => Self::Other,
         }
@@ -281,15 +290,18 @@ fn inspect(scope: &Scope, service: &ServiceName, target: &str) -> Result<Option<
 /// default or docker does not say.
 ///
 /// Docker omits `StopTimeout` from a container's config when it was
-/// created without one, and a template that names the missing key fails.
-/// The config is therefore read as JSON, apart from [`container_format`].
+/// created without one, and a template that names the missing key as a
+/// field fails, so the shared [`container_format`] leaves it out. This
+/// reads the one key through `index`, which prints `null` for a missing
+/// key, and never the rest of the config, which holds the container's
+/// environment values.
 pub(crate) fn stop_timeout(container: &OwnedContainer) -> Option<u64> {
     let finished = quick(
         [
             "container",
             "inspect",
             "--format",
-            "{{json .Config}}",
+            STOP_TIMEOUT_FORMAT,
             "--",
             container.id.as_str(),
         ],
@@ -302,13 +314,14 @@ pub(crate) fn stop_timeout(container: &OwnedContainer) -> Option<u64> {
     stop_timeout_of(&finished.stdout)
 }
 
-/// Returns the `StopTimeout` of a container's config, which docker printed
-/// as JSON in `printed`.
+/// The Go template of `docker container inspect` that prints a
+/// container's `StopTimeout` as JSON, or `null` when it has none.
+pub(super) const STOP_TIMEOUT_FORMAT: &str = "{{json (index .Config \"StopTimeout\")}}";
+
+/// Returns the `StopTimeout` that docker printed with
+/// [`STOP_TIMEOUT_FORMAT`] in `printed`.
 pub(super) fn stop_timeout_of(printed: &str) -> Option<u64> {
-    serde_json::from_str::<serde_json::Value>(printed)
-        .ok()?
-        .get("StopTimeout")?
-        .as_u64()
+    serde_json::from_str::<Option<u64>>(printed.trim()).ok()?
 }
 
 /// Inspects the container with the id `id`, which mxv recorded as the
@@ -423,6 +436,24 @@ pub(crate) fn ensure_image(image: &str, deadline: Duration, cancel: &Cancel) -> 
 pub(crate) fn stop_seconds(wait: Duration) -> u64 {
     let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
     seconds.max(1)
+}
+
+/// Turns off Docker's restart policy of `container`, so Docker does not
+/// restart it while phase stops and removes it. A container that docker
+/// no longer has needs nothing.
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`Error::Failed`].
+pub(crate) fn no_restart(container: &OwnedContainer) -> Result<(), Error> {
+    let updated = quick(
+        ["update", "--restart", "no", "--", container.id.as_str()],
+        "update",
+    )?;
+    if !updated.missing() {
+        updated.checked("update", Some(container.service.as_str()))?;
+    }
+    Ok(())
 }
 
 /// Returns the arguments of `docker stop` of `container` that waits
@@ -631,16 +662,26 @@ pub fn answers(port: u16) -> bool {
 }
 
 /// Reports whether something inside a container answers on the host port
-/// `port`, as [`answers`] describes, within `timeout`. A connection that
-/// stays open until `timeout` ends, when that comes before 300 ms, counts
-/// as answering. It reports no answer once `cancel` is set.
+/// `port`, as [`answers`] describes, within `timeout`. The connection gets
+/// at most 300 ms, and must then stay open for the full 300 ms or bring
+/// data, so a `timeout` too short to leave 300 ms after the connection
+/// gives no answer. [`crate::plan::probe::LEAST_PUBLISHED_PROBE_TIMEOUT`]
+/// is the shortest timeout that the plan allows for this check. It reports
+/// no answer once `cancel` is set.
 pub(crate) fn answers_within(port: u16, timeout: Duration, cancel: &Cancel) -> bool {
     let began = now();
+    let connect = PROBE_WAIT.min(timeout.saturating_sub(PROBE_WAIT));
+    if connect.is_zero() {
+        return false;
+    }
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, PROBE_WAIT.min(timeout)) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, connect) else {
         return false;
     };
-    let hold = PROBE_WAIT.min(timeout.saturating_sub(began.elapsed()));
+    if timeout.saturating_sub(began.elapsed()) < PROBE_WAIT {
+        return false;
+    }
+    let hold = PROBE_WAIT;
     let held = now();
     let mut byte = [0_u8; 1];
     loop {
