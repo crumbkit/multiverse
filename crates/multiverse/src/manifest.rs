@@ -59,7 +59,7 @@ use serde::de::IgnoredAny;
 use toml::Spanned;
 
 use crate::disposable::{BadGlob, PathGlob};
-use crate::name::is_unit_name;
+use crate::name::{WorkspaceName, is_unit_name};
 use crate::redacted::Redacted;
 
 #[cfg(test)]
@@ -415,6 +415,20 @@ pub enum ManifestProblem {
         /// Why it cannot be read.
         message: String,
     },
+    /// A process or container has a name that phase cannot run an app
+    /// under: phase names a container's compose project after the unit,
+    /// and a project name holds only lowercase letters, digits, `-` and
+    /// `_`.
+    UnitName {
+        /// The unit's name.
+        name: String,
+    },
+    /// The manifest parses, and phase cannot run it, such as a process
+    /// that sets `PATH`, which phase gives every process itself.
+    Unrunnable {
+        /// What is wrong, in a sentence.
+        message: String,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -439,7 +453,13 @@ impl fmt::Display for ManifestError {
                 formatter,
                 "{place}: the section `{section}` is reserved for a later version of mxv"
             ),
-            ManifestProblem::Invalid { message } => write!(formatter, "{place}: {message}"),
+            ManifestProblem::Invalid { message } | ManifestProblem::Unrunnable { message } => {
+                write!(formatter, "{place}: {message}")
+            }
+            ManifestProblem::UnitName { name } => write!(
+                formatter,
+                "{place}: `{name}` is not a name mxv can run, which holds 1 to 64 lowercase letters, digits, '-' and '_' and starts with a letter or a digit"
+            ),
             ManifestProblem::Unreadable { message } => {
                 write!(formatter, "cannot read {place}: {message}")
             }
@@ -718,6 +738,29 @@ fn is_variable(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+/// Checks that no unit of `manifest` depends on itself through a cycle.
+fn check_cycle(
+    errors: &Errors<'_>,
+    raw: &RawManifest,
+    manifest: &Manifest,
+) -> Result<(), ManifestError> {
+    let Some(name) = manifest.cycle() else {
+        return Ok(());
+    };
+    let span = raw
+        .processes
+        .keys()
+        .chain(raw.containers.keys())
+        .find(|key| key.get_ref() == &name)
+        .map(Spanned::span);
+    Err(errors.at(
+        span.as_ref(),
+        ManifestProblem::Invalid {
+            message: format!("`{name}` depends on itself through a dependency cycle"),
+        },
+    ))
+}
+
 /// Reports whether `path` is relative and never leaves the directory it
 /// starts in.
 fn stays_inside(path: &Path) -> bool {
@@ -734,6 +777,72 @@ fn stays_inside(path: &Path) -> bool {
         }
     }
     true
+}
+
+/// Checks that phase can run `manifest`, whose TOML is `raw`: each unit's
+/// name is an app name, and the plan that `mxv up` builds from it keeps
+/// phase's rules. It builds that plan with a placeholder host port for
+/// each port, so the check needs no workspace.
+fn check_runnable(
+    errors: &Errors<'_>,
+    raw: &RawManifest,
+    manifest: &Manifest,
+) -> Result<(), ManifestError> {
+    let span = |name: &str| {
+        raw.processes
+            .keys()
+            .chain(raw.containers.keys())
+            .find(|key| key.get_ref() == name)
+            .map(Spanned::span)
+    };
+    for name in manifest.names() {
+        if crate::phase_plan::app_name(name).is_err() {
+            return Err(errors.at(
+                span(name).as_ref(),
+                ManifestProblem::UnitName { name: name.clone() },
+            ));
+        }
+    }
+    let ports: BTreeMap<String, u16> = manifest
+        .ports
+        .iter()
+        .zip(1_u16..)
+        .map(|(port, number)| (port.clone(), number))
+        .collect();
+    let id = phase::WorkspaceId::try_from("manifest-check".to_owned()).map_err(|error| {
+        errors.at(
+            None,
+            ManifestProblem::Unrunnable {
+                message: error.to_string(),
+            },
+        )
+    })?;
+    let workspace = WorkspaceName::try_from("manifest-check".to_owned()).map_err(|error| {
+        errors.at(
+            None,
+            ManifestProblem::Unrunnable {
+                message: error.to_string(),
+            },
+        )
+    })?;
+    let inputs = crate::phase_plan::Inputs {
+        manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: Path::new("/"),
+        ports: &ports,
+        grace: crate::runs::STOP_GRACE,
+        caller: &crate::phase_plan::CallerEnvironment::default(),
+    };
+    match crate::phase_plan::build(&inputs) {
+        Ok(_) => Ok(()),
+        Err(unrunnable) => Err(errors.at(
+            unrunnable.unit.as_deref().and_then(span).as_ref(),
+            ManifestProblem::Unrunnable {
+                message: unrunnable.message,
+            },
+        )),
+    }
 }
 
 impl Manifest {
@@ -1011,20 +1120,8 @@ impl Manifest {
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
             warnings,
         };
-        if let Some(name) = manifest.cycle() {
-            let span = raw
-                .processes
-                .keys()
-                .chain(raw.containers.keys())
-                .find(|key| key.get_ref() == &name)
-                .map(Spanned::span);
-            return Err(errors.at(
-                span.as_ref(),
-                ManifestProblem::Invalid {
-                    message: format!("`{name}` depends on itself through a dependency cycle"),
-                },
-            ));
-        }
+        check_cycle(&errors, &raw, &manifest)?;
+        check_runnable(&errors, &raw, &manifest)?;
         Ok(manifest)
     }
 

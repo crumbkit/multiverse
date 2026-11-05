@@ -248,6 +248,45 @@ pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
     }
 }
 
+/// Passes the log of the container `id` that the run record of
+/// `workspace` names for the process that `request` names to `line`, as
+/// [`objects::logs`] does with the request's lines and follow, after it
+/// inspects the container with the app's scope. A container that docker no longer has passes no lines, and one
+/// whose labels do not name the app's scope fails with the foreign cause,
+/// so docker's own errors never reach `line` as lines of the app.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::Docker`] when the inspection or `docker logs`
+/// fails.
+pub(crate) fn recorded_logs(
+    state_dir: &std::path::Path,
+    workspace: &WorkspaceId,
+    id: &ContainerId,
+    request: &crate::logs::LogRequest,
+    line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
+) -> Result<(), PhaseError> {
+    let scope = Scope::app(
+        Identity {
+            id: workspace.clone(),
+            run_record: RunStore::new(state_dir).path(workspace),
+        },
+        &request.app,
+    );
+    let (Ok(service), Ok(docker_id)) = (
+        names::ServiceName::new(request.process.as_str()),
+        names::ContainerId::new(id.as_str()),
+    ) else {
+        return Ok(());
+    };
+    match inspect_id(&scope, &service, &docker_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Ok(()),
+        Err(error) => return Err(docker_error(&error)),
+    }
+    objects::logs(id, request.lines, request.follow, line).map_err(|error| docker_error(&error))
+}
+
 /// Returns the record's id of the container that `inspected` names.
 fn record_id(inspected: &Inspected) -> Result<ContainerId, PhaseError> {
     ContainerId::try_from(inspected.container.id().as_str().to_owned()).map_err(|_| {

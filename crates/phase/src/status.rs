@@ -120,9 +120,10 @@ pub struct StatusRow {
     /// process that its keeper restarted keeps the end of its last crash
     /// here. A stop that phase begins, such as a `down` while the keeper
     /// waits out a backoff, replaces the crash with a requested end, so
-    /// this is then `None`. A `down` or `sweep` that leaves everything
-    /// stopped removes the run record, and with it every recorded end. In
-    /// JSON it is left out when it is `None`.
+    /// this is then `None`. A `down` or a sweep that leaves everything
+    /// stopped removes the run record, and with it every recorded end,
+    /// unless the `down` did not select a process that holds such an end.
+    /// In JSON it is left out when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<LastExit>,
     /// The path of its log file, or `None` for a container, whose log comes

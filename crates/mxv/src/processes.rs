@@ -6,20 +6,22 @@
 //! the one that holds the current directory. Its positional words name
 //! processes.
 
-use std::path::Path;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crumbkit::{Batch, Document, Listing, Output, Stream};
+use multiverse::phase::WorkspaceId;
 use multiverse::{
-    DownOutcome, Follower, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable,
-    UpOutcome, Volumes, Workspace, WorkspaceName, tail,
+    DownOutcome, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable, UpOutcome,
+    Volumes, Workspace, WorkspaceName,
 };
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::rows::{LogLine, PortRow, ProcessRow, StatusSummary};
-use crate::run_failures::{LogTail, RunFailure};
+use crate::run_failures::{LogTail, NotMoved, RunFailure};
 use crate::verbs;
 
 /// The document that `mxv up` prints.
@@ -106,7 +108,9 @@ fn context(
     processes: &[String],
 ) -> Result<Context, crumbkit::Error> {
     let store = Store::new(environment.records()?);
-    let runs = Runs::new(&environment.state()?).with_port_range(environment.port_range()?);
+    let runs = environment
+        .runs()?
+        .with_port_range(environment.port_range()?);
     let workspace = match workspace {
         Some(text) => {
             let name = verbs::parse_name(text)?;
@@ -216,7 +220,6 @@ pub(crate) fn up(
 fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let manifest = required_manifest(&context.workspace)?;
     crate::warn(&start_warnings(&context.workspace, &manifest));
-    let checkout = checkout(&context.workspace).to_path_buf();
     let workspace = context.workspace.name.to_string();
     let outcome = context
         .runs
@@ -224,13 +227,50 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             lock,
             &context.store,
             &mut context.workspace,
-            &checkout,
             &manifest,
             &context.processes,
         )
         .map_err(MxvFailure::from)?;
     match outcome {
         UpOutcome::Up(statuses) => Ok(statuses.iter().map(ProcessRow::from).collect()),
+        UpOutcome::Left {
+            unstoppable,
+            not_started,
+        } => Err(RunFailure::Unstoppable {
+            process: unstoppable.process,
+            pid: unstoppable.pid,
+            unverified: unstoppable.unverified,
+            not_started,
+        }
+        .into()),
+        UpOutcome::LegacyRunning { processes } => Err(RunFailure::LegacyRunning {
+            workspace,
+            processes,
+        }
+        .into()),
+        UpOutcome::VolumeNotMoved {
+            container,
+            volume,
+            legacy,
+            phase,
+            labels,
+        } => Err(RunFailure::VolumeNotMoved {
+            workspace,
+            moved: Box::new(NotMoved {
+                container,
+                volume,
+                legacy,
+                phase,
+                labels,
+            }),
+        }
+        .into()),
+        UpOutcome::Unrunnable(unrunnable) => Err(RunFailure::Unrunnable {
+            workspace,
+            unit: unrunnable.unit,
+            message: unrunnable.message,
+        }
+        .into()),
         UpOutcome::UnknownProcess(process) => {
             Err(RunFailure::UnknownProcess { workspace, process }.into())
         }
@@ -258,7 +298,7 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             process,
             code,
             signal,
-            log: log.into_boxed_path(),
+            log: log.map(PathBuf::into_boxed_path),
             tail: LogTail::new(tail),
         }
         .into()),
@@ -275,7 +315,7 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             port,
             number,
             pid,
-            log: log.into_boxed_path(),
+            log: log.map(PathBuf::into_boxed_path),
             tail: LogTail::new(tail),
         }
         .into()),
@@ -292,7 +332,7 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             port,
             number,
             pid,
-            log: log.into_boxed_path(),
+            log: log.map(PathBuf::into_boxed_path),
             tail: LogTail::new(tail),
         }
         .into()),
@@ -307,7 +347,7 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             process,
             waited: Box::new(waited),
             seconds: timeout.as_secs(),
-            log: log.into_boxed_path(),
+            log: log.map(PathBuf::into_boxed_path),
             tail: LogTail::new(tail),
         }
         .into()),
@@ -348,6 +388,7 @@ fn stop_every(
                 process: unstoppable.process,
                 pid: unstoppable.pid,
                 unverified: unstoppable.unverified,
+                not_started: Vec::new(),
             }
             .into());
         }
@@ -380,6 +421,7 @@ pub(crate) fn down(
                 process: unstoppable.process.clone(),
                 pid: unstoppable.pid,
                 unverified: unstoppable.unverified,
+                not_started: Vec::new(),
             }),
         });
     }
@@ -402,6 +444,20 @@ pub(crate) fn restart(
         .into());
     }
     let lock = context.lock()?;
+    // A process that mxv started before phase ran the workspace's apps
+    // keeps running until `mxv down` stops it, so `restart` stops nothing
+    // and starts nothing meanwhile.
+    let legacy = context
+        .runs
+        .legacy_live(&context.workspace)
+        .map_err(MxvFailure::from)?;
+    if !legacy.is_empty() {
+        return Err(RunFailure::LegacyRunning {
+            workspace: context.workspace.name.to_string(),
+            processes: legacy,
+        }
+        .into());
+    }
     stop_every(&context, &lock, Some(&manifest))?;
     start(&mut context, &lock)
 }
@@ -432,70 +488,49 @@ pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -
         Ok(streaming) => streaming,
         Err(code) => return code,
     };
-    let (context, log) = match log_path(environment, args) {
-        Ok(found) => found,
+    let context = match context(environment, args.workspace.as_ref(), &[]) {
+        Ok(context) => context,
         Err(error) => return streaming.end(Err(error)),
     };
-    let mut follower = match Follower::at_end(&log) {
-        Ok(follower) => follower,
+    // A workspace that an earlier mxv started reads its logs from its run
+    // files, so a manifest that this mxv refuses, and that the earlier one
+    // accepted, does not keep them from being read, as for `down` and
+    // `status`.
+    let legacy = match context.runs.has_legacy(&context.workspace.name) {
+        Ok(legacy) => legacy,
         Err(error) => return streaming.end(Err(MxvFailure::from(error))),
     };
-    for line in tail(&log, args.lines) {
+    let manifest = if legacy {
+        lenient_manifest(&context.workspace)
+    } else {
+        match manifest(&context.workspace) {
+            Ok(manifest) => manifest,
+            Err(error) => return streaming.end(Err(crumbkit::Error::from(error))),
+        }
+    };
+    let mut pass = |line: String| {
         if streaming.item(&LogLine::new(line)).is_break() {
-            return streaming.end(Ok::<(), crumbkit::Error>(()));
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
-    }
-    if args.follow {
-        while let Some(reader) = follower.as_mut() {
-            let lines = match reader.lines() {
-                Ok(lines) => lines,
-                Err(error) => return streaming.end(Err(MxvFailure::from(error))),
-            };
-            let quiet = lines.is_empty();
-            for line in lines {
-                if streaming.item(&LogLine::new(line)).is_break() {
-                    return streaming.end(Ok::<(), crumbkit::Error>(()));
-                }
-            }
-            if quiet {
-                // The follow ends once the log is gone or nothing can write
-                // to it any more. A read that returned lines is followed by
-                // another, so the last lines before the end are printed.
-                let writing = context.runs.writing(&context.workspace.name, &args.process);
-                match writing {
-                    Ok(true) if log.exists() => {}
-                    Ok(_) => break,
-                    Err(error) => return streaming.end(Err(MxvFailure::from(error))),
-                }
-                reader.wait();
-            }
-        }
-    }
-    streaming.end(Ok::<(), crumbkit::Error>(()))
-}
-
-/// Returns the log of the process that `args` names, after it checks that
-/// the workspace knows the process.
-fn log_path(
-    environment: &Environment,
-    args: &LogsArgs,
-) -> Result<(Context, std::path::PathBuf), crumbkit::Error> {
-    let context = context(environment, args.workspace.as_ref(), &[])?;
-    let process = &args.process;
-    let manifest = manifest(&context.workspace)?;
-    let known = context
-        .runs
-        .status(&context.workspace, manifest.as_ref())
-        .map_err(MxvFailure::from)?;
-    if !known.iter().any(|status| &status.name == process) {
-        return Err(RunFailure::UnknownProcess {
+    };
+    let found = context.runs.logs(
+        &context.workspace,
+        manifest.as_ref(),
+        &args.process,
+        args.lines,
+        args.follow,
+        &mut pass,
+    );
+    match found {
+        Ok(true) => streaming.end(Ok::<(), crumbkit::Error>(())),
+        Ok(false) => streaming.end(Err(crumbkit::Error::from(RunFailure::UnknownProcess {
             workspace: context.workspace.name.to_string(),
-            process: process.clone(),
-        }
-        .into());
+            process: args.process.clone(),
+        }))),
+        Err(error) => streaming.end(Err(MxvFailure::from(error))),
     }
-    let log = context.runs.log(&context.workspace.name, process);
-    Ok((context, log))
 }
 
 /// Gives the workspace that `args` names new host ports for the ports that
@@ -554,13 +589,13 @@ pub(crate) fn running(
     environment: &Environment,
     workspace: &Workspace,
 ) -> Result<Vec<String>, MxvFailure> {
-    Ok(Runs::new(&environment.state()?).running(workspace)?)
+    Ok(environment.runs()?.running(workspace)?)
 }
 
 /// Takes the lock of the workspace `name`, which `up` and `down` also
 /// take, so `mxv clean` deletes nothing while they start or stop it.
 pub(crate) fn lock(environment: &Environment, name: &WorkspaceName) -> Result<Lock, MxvFailure> {
-    Ok(Runs::new(&environment.state()?).lock(name)?)
+    Ok(environment.runs()?.lock(name)?)
 }
 
 /// Stops every process of `workspace` and deletes its run files and logs,
@@ -571,7 +606,7 @@ pub(crate) fn stop_all(
 ) -> Result<(), crumbkit::Error> {
     let mut context = Context {
         store: Store::new(environment.records()?),
-        runs: Runs::new(&environment.state()?),
+        runs: environment.runs()?,
         workspace: workspace.clone(),
         processes: Vec::new(),
     };
@@ -579,28 +614,32 @@ pub(crate) fn stop_all(
     stop_every(&context, &lock, None)
 }
 
-/// Removes the stopped containers of the workspace `name` and deletes its
-/// run files and logs.
-pub(crate) fn forget(environment: &Environment, name: &WorkspaceName) -> Result<(), MxvFailure> {
-    Ok(Runs::new(&environment.state()?).forget(name)?)
+/// Removes the stopped containers of the workspace `name`, whose stable id
+/// is `id`, and deletes its run files and logs.
+pub(crate) fn forget(
+    environment: &Environment,
+    name: &WorkspaceName,
+    id: Option<&WorkspaceId>,
+) -> Result<(), MxvFailure> {
+    Ok(environment.runs()?.forget(name, id)?)
 }
 
-/// Returns the docker volumes of the workspace `name`, for the refusal of
-/// `mxv remove`.
+/// Returns the docker volumes of `workspace`, for the refusal of `mxv
+/// remove`.
 pub(crate) fn volumes(
     environment: &Environment,
-    name: &WorkspaceName,
+    workspace: &Workspace,
 ) -> Result<Volumes, MxvFailure> {
-    Ok(Runs::new(&environment.state()?).volumes(name)?)
+    Ok(environment.runs()?.volumes(workspace)?)
 }
 
-/// Returns the docker containers of the workspace `name`, running or
-/// stopped, which `mxv remove` removes.
+/// Returns the docker containers of `workspace`, running or stopped, which
+/// `mxv remove` removes.
 pub(crate) fn containers(
     environment: &Environment,
-    name: &WorkspaceName,
+    workspace: &Workspace,
 ) -> Result<Vec<String>, MxvFailure> {
-    Ok(Runs::new(&environment.state()?).docker_containers(name)?)
+    Ok(environment.runs()?.docker_containers(workspace)?)
 }
 
 /// Deletes the docker volumes `volumes`, which [`volumes`] returned for a
@@ -609,5 +648,5 @@ pub(crate) fn delete_volumes(
     environment: &Environment,
     volumes: Volumes,
 ) -> Result<(), MxvFailure> {
-    Ok(Runs::new(&environment.state()?).delete_volumes(volumes)?)
+    Ok(environment.runs()?.delete_volumes(volumes)?)
 }

@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use etcetera::BaseStrategy as _;
-use multiverse::DEFAULT_PORT_RANGE;
+use multiverse::{CallerEnvironment, DEFAULT_PORT_RANGE, Runs};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -117,6 +117,12 @@ pub struct Environment {
     /// The directory that mxv started in, which names the current
     /// workspace.
     current_dir: Option<PathBuf>,
+    /// The variables of mxv's environment that phase's keepers and host
+    /// processes receive.
+    caller: CallerEnvironment,
+    /// The mxv program, which phase starts each keeper with, or `None`
+    /// when `main` could not find it.
+    program: Option<PathBuf>,
 }
 
 impl Environment {
@@ -126,6 +132,8 @@ impl Environment {
             root: read("MXV_ROOT"),
             bases,
             current_dir: None,
+            caller: CallerEnvironment::default(),
+            program: None,
         }
     }
 
@@ -140,6 +148,30 @@ impl Environment {
     pub fn with_current_dir(mut self, dir: Option<PathBuf>) -> Self {
         self.current_dir = dir;
         self
+    }
+
+    /// Returns the snapshot with `caller` as the variables that phase's
+    /// keepers and host processes receive, and `program` as the mxv
+    /// program that phase starts each keeper with.
+    #[must_use]
+    pub fn with_caller(mut self, caller: CallerEnvironment, program: Option<PathBuf>) -> Self {
+        self.caller = caller;
+        self.program = program;
+        self
+    }
+
+    /// Returns the run files under mxv's state directory, whose phase
+    /// starts each keeper as `mxv phase keep` and passes the caller's
+    /// variables to host processes.
+    pub(crate) fn runs(&self) -> Result<Runs, MxvFailure> {
+        let mut runs = Runs::new(&self.state()?).with_caller(self.caller.clone());
+        if let Some(program) = &self.program {
+            runs = runs.with_keeper(
+                program.clone(),
+                crate::KEEPER_WORDS.iter().map(OsString::from).collect(),
+            );
+        }
+        Ok(runs)
     }
 
     /// Returns the directory that mxv started in, when `main` could read

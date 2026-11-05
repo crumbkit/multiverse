@@ -80,7 +80,7 @@ fn up_allocates_each_port_once_and_writes_it_to_the_record() {
     let checkout = workspace.checkouts[0].path.clone();
     let runs = setup.runs();
     assert!(matches!(
-        runs.up(
+        runs.legacy_up(
             &runs.lock(&workspace.name).unwrap(),
             &setup.store(),
             &mut workspace,
@@ -120,7 +120,7 @@ fn a_process_that_only_receives_its_readiness_port_is_ready_when_that_port_accep
     let checkout = workspace.checkouts[0].path.clone();
     let runs = setup.runs();
     let outcome = runs
-        .up(
+        .legacy_up(
             &runs.lock(&workspace.name).unwrap(),
             &setup.store(),
             &mut workspace,
@@ -151,7 +151,7 @@ fn down_kills_a_process_that_ignores_sigterm_after_the_grace() {
     );
     let checkout = workspace.checkouts[0].path.clone();
     let runs = setup.runs();
-    runs.up(
+    runs.legacy_up(
         &runs.lock(&workspace.name).unwrap(),
         &setup.store(),
         &mut workspace,
@@ -317,7 +317,7 @@ fn a_record_with_the_start_time_that_ps_prints_still_owns_its_running_process_on
     let checkout = workspace.checkouts[0].path.clone();
     let runs = setup.runs();
     let outcome = runs
-        .up(
+        .legacy_up(
             &runs.lock(&workspace.name).unwrap(),
             &setup.store(),
             &mut workspace,

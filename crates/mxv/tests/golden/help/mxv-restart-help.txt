@@ -35,16 +35,16 @@ Examples:
 Columns:
   name         The process's or container's name in the manifest.
   kind         `process` or `container`.
-  state        `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, or `stopped`.
+  state        `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
   pid          The process id, which is also its process group's id, while a process runs, and null for a container.
   code         The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
   signal       The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-  reason       Why mxv does not know the exit code of an exited process, or null when it knows the code or the signal. A process group that ended before its shell wrote the exit file, such as one that SIGKILL ended, has a reason.
-  group_alive  Whether the process group of an exited process still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs.
+  reason       Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
+  group_alive  Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
   ports        The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 
 Columns that --long adds:
-  log  The process's log file, which `mxv logs` prints.
+  log  The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
 
 Effects: destructive, not idempotent, open-world.
 Writes: applies all items or none.

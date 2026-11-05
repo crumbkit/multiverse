@@ -107,7 +107,7 @@
           "format": "int32"
         },
         "group_alive": {
-          "description": "Whether the process group of an exited process still has a member,\nsuch as a child it started in the background, which `mxv down`\nstops. It is null while the process runs.",
+          "description": "Whether the process group of an exited process that an earlier\nversion of mxv started still has a member, such as a child it\nstarted in the background, which `mxv down` stops. It is null while\nthe process runs, and for every process that phase runs, because\nphase stops what is left of a process's group when the process\nends.",
           "type": [
             "boolean",
             "null"
@@ -118,8 +118,11 @@
           "$ref": "#/$defs/KindName"
         },
         "log": {
-          "description": "The process's log file, which `mxv logs` prints.",
-          "type": "string"
+          "description": "The process's log file, which `mxv logs` prints, or null for a\ncontainer, whose output docker keeps and `mxv logs` also prints.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "description": "The process's or container's name in the manifest.",
@@ -142,7 +145,7 @@
           }
         },
         "reason": {
-          "description": "Why mxv does not know the exit code of an exited process, or null\nwhen it knows the code or the signal. A process group that ended\nbefore its shell wrote the exit file, such as one that SIGKILL\nended, has a reason.",
+          "description": "Why mxv cannot tell the state of an `unknown` process, or why it\ndoes not know the exit code of an exited process that an earlier\nversion of mxv started, such as one whose group SIGKILL ended\nbefore its shell wrote the exit file, or null when it knows.",
           "type": [
             "string",
             "null"
@@ -157,7 +160,7 @@
           "format": "int32"
         },
         "state": {
-          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, or `stopped`.",
+          "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, `stopped`, `starting` while it is not\nready yet, `stopping`, `restarting` while docker restarts a\ncontainer, or `unknown` when mxv cannot tell.",
           "$ref": "#/$defs/StateName"
         }
       },
@@ -195,6 +198,26 @@
           "description": "The process is not started.",
           "type": "string",
           "const": "stopped"
+        },
+        {
+          "description": "The process started and is not ready yet.",
+          "type": "string",
+          "const": "starting"
+        },
+        {
+          "description": "The process is stopping.",
+          "type": "string",
+          "const": "stopping"
+        },
+        {
+          "description": "docker is restarting the container.",
+          "type": "string",
+          "const": "restarting"
+        },
+        {
+          "description": "mxv cannot tell the process's state.",
+          "type": "string",
+          "const": "unknown"
         }
       ]
     },

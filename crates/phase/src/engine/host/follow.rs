@@ -81,6 +81,32 @@ impl LogFollower {
         &self.path
     }
 
+    /// Returns the offset in the log up to which the follower has read, or
+    /// 0 while the log does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of reading the open file's position.
+    pub fn position(&mut self) -> io::Result<u64> {
+        self.file
+            .as_mut()
+            .map_or(Ok(0), |file| file.stream_position())
+    }
+
+    /// Holds `bytes` as the start of the line that the next read
+    /// completes, as when they are the unfinished last line before the
+    /// follower's position.
+    pub fn hold(&mut self, bytes: Vec<u8>) {
+        self.partial = bytes;
+    }
+
+    /// Returns the unfinished last line that the follower holds, or `None`
+    /// when it holds none, and holds nothing afterwards.
+    pub fn take_partial(&mut self) -> Option<String> {
+        (!self.partial.is_empty())
+            .then(|| String::from_utf8_lossy(&std::mem::take(&mut self.partial)).into_owned())
+    }
+
     /// Returns the complete lines written since the last read, without
     /// their line endings, up to [`MOST_FOLLOW_BYTES`] bytes of them; the
     /// rest waits for the next read. A line longer than

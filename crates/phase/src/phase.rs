@@ -357,16 +357,24 @@ impl Phase {
     }
 
     /// Passes the lines of the requested log of the workspace whose stable
-    /// id is `workspace` to `sink`, from the log's start, and with
-    /// `request.follow` each later line until the sink breaks or nothing
-    /// can write to the log any more. It takes no lock.
+    /// id is `workspace` to `sink`, from the log's start or only its last
+    /// `request.lines` lines, and with `request.follow` each later line
+    /// until the sink breaks or nothing can write to the log any more. A
+    /// host process's last lines come from at most the log's last
+    /// [`crate::logs::MOST_TAIL_BYTES`] bytes, so a request for more lines
+    /// than those bytes hold passes fewer. A container's log comes from
+    /// `docker logs`, after phase inspects the container with its app's
+    /// labels. A container that has not started, that phase stopped, or
+    /// that docker no longer has passes no lines, even with
+    /// `request.follow`. It takes no lock.
     ///
     /// # Errors
     ///
     /// Returns [`PhaseError::UnknownTarget`] when phase knows no log of the
     /// process, [`PhaseError::LogUnreadable`] when the log cannot be read,
-    /// and [`PhaseError::NotBuilt`] for a container's log and for
-    /// `request.since`, which phase does not carry out yet.
+    /// [`PhaseError::Docker`] when `docker logs` fails, and
+    /// [`PhaseError::NotBuilt`] for `request.since`, which phase does not
+    /// carry out yet.
     pub fn logs(
         &self,
         workspace: &WorkspaceId,

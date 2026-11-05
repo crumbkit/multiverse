@@ -700,3 +700,235 @@ impl ProbeExec for DockerExec {
         run_bounded(command, timeout, cancel)
     }
 }
+
+/// One line that a streamed docker command printed: standard output's when
+/// the flag is false, standard error's when it is true.
+type StreamedLine = (bool, String);
+
+/// Runs `docker <args>` with no input, and passes each line it prints to
+/// `line`, with whether it printed it on standard error, until it exits or
+/// `line` breaks, which kills it. It returns how docker exited, or `None`
+/// when `line` broke. A line is read as UTF-8, with each byte that is not
+/// replaced, and without its line ending. With `idle`, docker is killed
+/// when it prints nothing for that long, as a daemon that hangs does. A
+/// follow of a container's log passes no `idle`, because it lasts as long
+/// as the container runs or the reader reads.
+///
+/// # Errors
+///
+/// Returns [`Error::Missing`] when no `docker` program is on `PATH`,
+/// [`Error::Failed`] with the timed-out cause when docker was idle for
+/// `idle`, and [`Error::Failed`] when docker cannot start or cannot be
+/// waited for.
+pub(super) fn stream<I, S>(
+    args: I,
+    operation: &'static str,
+    idle: Option<Duration>,
+    line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
+) -> Result<Option<ExitStatus>, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    stream_program(DOCKER.as_ref(), args, operation, idle, line)
+}
+
+/// How many lines the readers of [`stream_program`] may hold for the
+/// calling thread. A reader whose line does not fit waits, so a slow `line`
+/// slows docker down instead of growing phase's memory.
+const STREAMED_LINES: usize = 256;
+
+/// The most bytes of one line that [`stream_program`] passes at once. A
+/// longer line comes out in parts of at most this many bytes, as the host
+/// log follower splits one.
+pub(crate) const MOST_LINE_BYTES: usize = 1024 * 1024;
+
+/// Runs `<program> <args>`, where `program` is the `docker` program, as
+/// [`stream`] does. `line` runs on the calling thread only, so it is never
+/// called while a read of either stream blocks: each stream is read on a
+/// thread of its own, which hands the calling thread complete lines.
+///
+/// The program stays in the caller's process group, so a signal that the
+/// terminal sends to the foreground group, such as SIGINT from Ctrl-C,
+/// reaches it too and it ends with the caller. When `line` breaks, the
+/// idle deadline passes or `line` panics, phase kills the program by its
+/// process id, reaps it and joins both readers. `docker logs` starts no
+/// program of its own, so killing it ends everything the stream started.
+/// A `docker` wrapper that does not exec could leave a child that holds
+/// the pipes, and the readers would then wait until that child ends.
+fn stream_program<I, S>(
+    program: &OsStr,
+    args: I,
+    operation: &'static str,
+    idle: Option<Duration>,
+    line: &mut dyn FnMut(bool, &str) -> std::ops::ControlFlow<()>,
+) -> Result<Option<ExitStatus>, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
+    )]
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
+    )]
+    let spawned = command.spawn();
+    #[expect(
+        clippy::disallowed_types,
+        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its cleanup (PROC-1)"
+    )]
+    let mut child: std::process::Child = match spawned {
+        Ok(child) => child,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Missing { source });
+        }
+        Err(source) => return Err(Error::failed(operation, None, source.to_string())),
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<StreamedLine>(STREAMED_LINES);
+    let readers: Vec<thread::JoinHandle<()>> = [
+        child
+            .stdout
+            .take()
+            .map(|out| read_lines(out, false, sender.clone())),
+        child
+            .stderr
+            .take()
+            .map(|err| read_lines(err, true, sender.clone())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    // Only the readers hold senders now, so the receiver ends once both
+    // streams have closed.
+    drop(sender);
+    let mut streaming = Streaming {
+        child,
+        receiver: Some(receiver),
+        readers,
+        finished: false,
+    };
+    let mut broke = false;
+    let mut idled = false;
+    if let Some(receiver) = &streaming.receiver {
+        loop {
+            let received = match idle {
+                Some(idle) => receiver.recv_timeout(idle).map_err(|error| {
+                    idled = error == std::sync::mpsc::RecvTimeoutError::Timeout;
+                }),
+                None => receiver.recv().map_err(|_| ()),
+            };
+            let Ok((is_stderr, text)) = received else {
+                break;
+            };
+            if line(is_stderr, &text).is_break() {
+                broke = true;
+                break;
+            }
+        }
+    }
+    match streaming.finish(broke || idled) {
+        _ if idled => Err(Error::timed_out(
+            operation,
+            format!(
+                "docker printed nothing for {} seconds, so phase stopped it",
+                idle.unwrap_or_default().as_secs()
+            ),
+        )),
+        Ok(_) if broke => Ok(None),
+        Ok(status) => Ok(Some(status)),
+        Err(source) => Err(Error::failed(operation, None, source.to_string())),
+    }
+}
+
+/// The program that [`stream_program`] runs, with the readers of its
+/// streams, which [`Streaming::finish`] ends, or dropping it ends when the
+/// caller unwinds.
+struct Streaming {
+    /// The program, which shares the caller's process group.
+    #[expect(
+        clippy::disallowed_types,
+        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its cleanup (PROC-1)"
+    )]
+    child: std::process::Child,
+    /// The lines that the readers pass, until `finish` drops it.
+    receiver: Option<std::sync::mpsc::Receiver<StreamedLine>>,
+    /// The readers of standard output and standard error.
+    readers: Vec<thread::JoinHandle<()>>,
+    /// Whether `finish` has run.
+    finished: bool,
+}
+
+impl Streaming {
+    /// Kills the program with SIGKILL when `kill`, reaps the program,
+    /// drops the receiver so that a reader that waits to send gives up, and
+    /// joins the readers. The program stays unreaped until it is killed, so
+    /// its process id is not reused in between. A program whose streams
+    /// both closed is reaped without a kill, so its exit status is its own.
+    fn finish(&mut self, kill: bool) -> io::Result<ExitStatus> {
+        self.finished = true;
+        if kill {
+            let _ = self.child.kill();
+        }
+        let waited = self.child.wait();
+        drop(self.receiver.take());
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        waited
+    }
+}
+
+impl Drop for Streaming {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finish(true);
+        }
+    }
+}
+
+/// Reads `stream` on a thread of its own and sends each line, without its
+/// line ending, to `sender`, marked with `is_stderr`. A line longer than
+/// [`MOST_LINE_BYTES`] goes in parts. The thread ends when the stream
+/// closes or the receiver is gone.
+fn read_lines<R: io::Read + Send + 'static>(
+    stream: R,
+    is_stderr: bool,
+    sender: std::sync::mpsc::SyncSender<StreamedLine>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        use std::io::BufRead as _;
+        let mut reader = io::BufReader::new(stream);
+        let mut bytes = Vec::new();
+        let most = u64::try_from(MOST_LINE_BYTES).unwrap_or(u64::MAX);
+        loop {
+            bytes.clear();
+            match (&mut reader).take(most).read_until(b'\n', &mut bytes) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            if bytes.last() == Some(&b'\n') {
+                bytes.pop();
+                if bytes.last() == Some(&b'\r') {
+                    bytes.pop();
+                }
+            }
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            if sender.send((is_stderr, text)).is_err() {
+                return;
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests;
