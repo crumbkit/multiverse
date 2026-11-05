@@ -403,6 +403,7 @@ fn a_record_without_restart_counts_reads_as_no_restarts() {
 fn launching(grace_ms: u64, hash: u8) -> Launching {
     Launching {
         plan_hash: PlanHash::new([hash; 32]),
+        part_hash: PlanHash::new([hash.wrapping_add(100); 32]),
         stop: Stop {
             signal: StopSignal::Int,
             grace: Duration::from_millis(grace_ms),
@@ -484,6 +485,11 @@ fn launching_a_process_again_writes_its_entries_back_to_planned_with_no_host() {
     }
     assert_eq!(record.processes[0].stop, Some(launching(300, 9).stop));
     assert_eq!(record.processes[0].plan_hash, Some(PlanHash::new([9; 32])));
+    assert_eq!(
+        record.processes[0].part_hash,
+        Some(PlanHash::new([109; 32]))
+    );
+    assert_eq!(record.keepers[0].part_hash, None);
 }
 
 #[test]
@@ -1038,5 +1044,33 @@ fn a_v4_record_reads_as_one_whose_processes_were_not_launched_as_oneshots_or_com
     let entry = on_disk(&store).processes[0].clone();
     assert_eq!(entry.oneshot, None);
     assert_eq!(entry.completed, None);
+    assert_eq!(entry.host, Some(host()));
+}
+
+#[test]
+fn a_v5_record_without_part_hashes_reads_as_one_whose_processes_record_no_part() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 1))
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(json["schema"], "phase/run/v5");
+    assert!(json["processes"][0]["part_hash"].is_string(), "{json}");
+    json["processes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("part_hash");
+    write_file(&path, &json.to_string());
+
+    let entry = on_disk(&store).processes[0].clone();
+    assert_eq!(entry.part_hash, None);
+    assert_eq!(entry.plan_hash, Some(PlanHash::new([1; 32])));
     assert_eq!(entry.host, Some(host()));
 }

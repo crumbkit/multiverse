@@ -850,18 +850,24 @@ host entries, version 3 added `ready` to host process and container
 entries, as the next section says, version 4 added `sandbox` to host
 process entries, which records how phase launched the process, as [The
 sandbox as built](#the-sandbox-as-built) says, and version 5 adds
-`oneshot` and `completed` to host process entries. `oneshot` records what
+`oneshot`, `completed` and `part_hash` to host process entries. `oneshot` records what
 phase launched a oneshot from: the hash of its part of the plan and, for
 a `once = false` oneshot, the run of each process and container that it
 depends on. `completed` records the oneshot's completion. [Oneshot
-processes](#oneshot-processes) says how phase uses both. phase reads a
+processes](#oneshot-processes) says how phase uses both. `part_hash`
+records the hash of the process's own part of the plan that phase last
+launched it from, as [Plan changes of a running host
+process](#plan-changes-of-a-running-host-process) says. It arrived after
+the first v5 records, so phase reads a v5 entry without it as one that
+records no part. phase reads a
 `phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
 with the fields it lacks at their defaults, and writes it back as v5: a
 v1 record reads with no ends, no restart policies, no readiness, no
 sandbox and no oneshot launches or completions, a v2 record reads with
 no readiness, no sandbox and no oneshot launches or completions, a v3
 record reads with no sandbox and no oneshot launches or completions, and
-a v4 record reads with no oneshot launches or completions. A
+a v4 record reads with no oneshot launches or completions. Each of them
+reads with no part hashes. A
 phase that reads only an older version refuses a newer record as written
 by a newer phase and asks for an upgrade. Each version only adds fields
 that read as their defaults when they are missing, so the next version,
@@ -1568,7 +1574,9 @@ and redesigns are the evidence for each one.
 - A run record that phase cannot read blocks only its own workspace. A
   record written by a newer phase asks you to upgrade. `sweep --unreadable
   [--dry-run]` removes the rest. A phase upgrade leaves running workspaces
-  running, and the next `up` adopts them.
+  running, and the next `up` adopts them. It restarts once each host
+  process whose entry records no part of the plan, as [Plan changes of a
+  running host process](#plan-changes-of-a-running-host-process) says.
 
 ### Starting and stopping
 
@@ -1578,6 +1586,11 @@ and redesigns are the evidence for each one.
   plan hash, the program's digest, and a keyed hash of its environment
   values, never the values) with the new ones. It restarts a process whose
   inputs changed and leaves the rest alone without probing them again.
+  Built so far: a container's plan hash, as [Containers](#containers)
+  says, and a host process's part of the plan, as [Plan changes of a
+  running host process](#plan-changes-of-a-running-host-process) says.
+  No program digest is recorded yet, because phase runs no release or
+  build yet, and no keyed hash of environment values is recorded yet.
 - `up` has separate deadlines for building and for readiness. When a
   deadline cuts off a start or stop, phase reports the outcome as
   uncertain and does not retry it.
@@ -1594,6 +1607,56 @@ and redesigns are the evidence for each one.
 - Ctrl-C during a foreground `up` stops what that `up` started. Status
   shows each workspace as starting, running, partly running, stopped, or
   unknown when processes phase cannot read decide which of those it is.
+
+### Plan changes of a running host process
+
+Built 5 November 2026.
+
+- When phase launches a host process, it records in the process's run
+  record entry, as `part_hash`, the hash of the process's own part of the
+  plan, the same hash that a oneshot's `oneshot` records. It covers the
+  app's runner, source, ports, permissions and override names, and the
+  process's own plan, such as its command, variable names, working
+  directory, port, probes and restart policy. It holds no environment
+  value. `restart` records it too.
+- A later `up` that finds the process's keeper running compares the
+  recorded hash with the hash of the process's part of the new plan. When
+  they are equal, `up` leaves the process alone and reports it as already
+  running, as before.
+- When they differ, or the entry records no hash, as an entry that an
+  earlier phase wrote does not, `up` restarts the process. It resolves
+  the process's environment first, so a resolver that fails leaves the
+  running process alone, as it leaves a container that `up` would
+  replace. It then stops the keeper and the process through the stop
+  that `down` and `restart` use, within the readiness deadline of `up`,
+  and launches the process again from the new plan, as a first start
+  does: it checks the port, writes the entry back to planned, starts a
+  new keeper, and waits for readiness. The first `up` after an upgrade
+  therefore brings every running host process under its current plan
+  once, which puts a process whose app declares permissions under the
+  sandbox, and later `up`s leave it alone.
+- The app's report reads `started`, as for a replaced container, and
+  carries a `plan-changed` note, such as `restarted api/server because
+  its part of the plan changed`, or `restarted api/server because the run
+  record does not say which part of the plan it started from`. A stop
+  that leaves something behind reports the app as `left`, or as
+  uncertain once the deadline has passed, and starts nothing in its
+  place.
+- `up` restarts no other process because of the change. The processes
+  and apps that depend on the restarted process keep running when their
+  own parts are unchanged, as the apps that depend on a replaced container
+  do. A `once = false` oneshot that depends on it runs again, because its
+  dependency's run changed.
+- A oneshot that still runs is left, as before, and a completed oneshot
+  is compared by its completion, as [Oneshot
+  processes](#oneshot-processes) says.
+- The hash covers no environment value, so a changed value alone does
+  not restart a host process. `AppliedEnvironment::digest` gives a keyed
+  hash of the values, but phase has no key of its own to give it yet, and
+  would have to resolve every running process's environment on each `up`
+  to compare it. The hash also does not cover the ports of the apps that
+  the app depends on, which a sandboxed app's profile allows it to
+  connect to, so a dependency's new port alone does not restart it.
 
 ### Oneshot processes
 

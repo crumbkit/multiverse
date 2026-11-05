@@ -13,6 +13,14 @@
 //! `oneshot` module says. Container apps go through the
 //! [`ContainerRunner`].
 //!
+//! Each launch records the hash of the process's own part of the plan. A
+//! later `up` that finds the process's keeper running leaves it alone when
+//! the recorded hash is the current one. Otherwise, and when the entry
+//! records no hash, `up` resolves the process's environment, stops it as
+//! `down` does, and launches it again, with a note that says why. The
+//! processes that depend on it keep running, as the apps that depend on a
+//! replaced container do.
+//!
 //! Before each launch, `up` writes the process's keeper and entry back to
 //! planned with no process, so a record that names a stopped or stale
 //! process never stands for the new one. It pushes each process it
@@ -72,7 +80,7 @@ mod stop;
 #[cfg(test)]
 mod tests;
 
-use oneshot::{Rerun, completed_targets};
+use oneshot::{Rerun, completed_targets, part_hash};
 use order::{Chosen, choose};
 use stop::{Stopped, Target};
 
@@ -615,6 +623,7 @@ impl Op<'_, '_> {
         notes: &mut Vec<Note>,
     ) -> Result<Step, PhaseError> {
         let host = self.engine.host;
+        let mut environment = environment;
         match self.recorded(app, process) {
             Ok(Recorded::Nothing) => {}
             // A oneshot that still runs was started by an operation that
@@ -623,7 +632,32 @@ impl Op<'_, '_> {
             Ok(Recorded::Ours) if matches!(process.kind, ProcessKind::Oneshot { .. }) => {
                 return Ok(Step::Left);
             }
-            Ok(Recorded::Ours) => return Ok(Step::AlreadyRunning),
+            Ok(Recorded::Ours) => {
+                let Some(note) = self.drift(app, process) else {
+                    return Ok(Step::AlreadyRunning);
+                };
+                // The environment is resolved before the stop, so a
+                // resolver that fails leaves the running process alone, as
+                // it leaves a container that `up` would replace.
+                if environment.is_none() {
+                    environment = Some(
+                        crate::env::resolve_required(
+                            self.env,
+                            &app.name,
+                            process,
+                            self.deadlines.ready,
+                        )
+                        .map_err(|source| PhaseError::Environment {
+                            app: app.name.clone(),
+                            source,
+                        })?,
+                    );
+                }
+                if let Some(step) = self.stop_drifted(app, process, notes)? {
+                    return Ok(step);
+                }
+                notes.push(note);
+            }
             Ok(Recorded::Left) => return Ok(Step::Left),
             Ok(Recorded::Unverified(group)) => {
                 notes.push(Note::group_unverified(process.name.clone(), group));
@@ -661,6 +695,7 @@ impl Op<'_, '_> {
             &process.name,
             &Launching {
                 plan_hash: self.plan_hash.clone(),
+                part_hash: part_hash(app, process),
                 stop: process.stop,
                 listen: listen.clone(),
                 restart: process.restart.clone(),
@@ -765,6 +800,51 @@ impl Op<'_, '_> {
                 None
             }
         }
+    }
+
+    /// Returns the note that `up` restarts the running `process` of `app`,
+    /// or `None` when its entry records the hash of its current part of
+    /// the plan, so `up` leaves it alone. An entry that records another
+    /// hash, or none, as an entry that an older phase wrote, restarts it.
+    fn drift(&self, app: &AppPlan, process: &ProcessPlan) -> Option<Note> {
+        let record = self.journal.record()?;
+        let (_, entry) = record.host_pair(&app.name, &process.name);
+        match entry.and_then(|entry| entry.part_hash.as_ref()) {
+            Some(recorded) if *recorded == part_hash(app, process) => None,
+            Some(_) => Some(Note::plan_changed(&app.name, process.name.clone())),
+            None => Some(Note::plan_unrecorded(&app.name, process.name.clone())),
+        }
+    }
+
+    /// Stops the running `process` of `app`, whose part of the plan
+    /// changed, through the stop that `down` and `restart` use, before
+    /// `up` starts it again. It returns `None` once nothing of it is left,
+    /// and otherwise the step that ends its start: left, or uncertain when
+    /// the readiness deadline has passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of the stop.
+    fn stop_drifted(
+        &mut self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        notes: &mut Vec<Note>,
+    ) -> Result<Option<Step>, PhaseError> {
+        let target = self.journal.record().and_then(|record| {
+            let (keeper, entry) = record.host_pair(&app.name, &process.name);
+            stop::target_of(keeper, entry)
+        });
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        let deadline = self.deadlines.ready;
+        let stopped = stop::stop_target(self.engine, &mut self.journal, &target, deadline, notes)?;
+        Ok(match stopped {
+            Stopped::Stopped => None,
+            Stopped::Left if now() >= deadline => Some(Step::Uncertain),
+            Stopped::Left => Some(Step::Left),
+        })
     }
 
     /// Returns what the run record says of `process` of `app`: whether

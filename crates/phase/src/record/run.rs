@@ -154,6 +154,14 @@ pub(crate) struct HostEntry {
     /// yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) plan_hash: Option<PlanHash>,
+    /// The hash of the process's own part of the plan that phase last
+    /// launched it from, which `AppPlan::process_digest` gives, so a later
+    /// `up` restarts a running process whose part changed. It holds no
+    /// environment value. It is `None` for a keeper, for a process that
+    /// phase has not started yet, and in a record that phase wrote before
+    /// it recorded the part, which a later `up` reads as a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) part_hash: Option<PlanHash>,
     /// How the process last ended, or `None` when it has not ended since
     /// phase last started it. A keeper's restart keeps it, so `status`
     /// shows the last crash of a process that restarts, and phase's own
@@ -401,6 +409,8 @@ impl Exit {
 pub(crate) struct Launching {
     /// The hash of the plan.
     pub(crate) plan_hash: PlanHash,
+    /// The hash of the process's own part of the plan.
+    pub(crate) part_hash: PlanHash,
     /// How the process stops.
     pub(crate) stop: Stop,
     /// The port that the process listens on, or `None`.
@@ -677,6 +687,7 @@ impl RunRecord {
             stop,
             listen,
             plan_hash: None,
+            part_hash: None,
             ended: None,
             restart: None,
             ready: None,
@@ -982,6 +993,7 @@ impl RunRecord {
         entry.stop = Some(launching.stop);
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
+        entry.part_hash = Some(launching.part_hash.clone());
         entry.sandbox.clone_from(&launching.sandbox);
         entry.oneshot.clone_from(&launching.oneshot);
         entry.completed = None;

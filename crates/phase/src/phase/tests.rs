@@ -660,3 +660,94 @@ fn a_sandboxed_app_starts_when_the_host_program_protects_the_directory_that_hold
     );
     phase.down(&id(), &Selection::All, soon).unwrap();
 }
+
+/// Starts an unsandboxed app under a real keeper, adds `[permissions]` to
+/// its plan, and runs `up` again. `up` must restart the running process
+/// under Seatbelt, so `status` shows it sandboxed with a new pid.
+#[cfg(target_os = "macos")]
+#[test]
+fn up_restarts_a_running_unsandboxed_process_under_seatbelt_once_its_app_declares_permissions() {
+    use crate::plan::Permissions;
+    use crate::record::Handle;
+    use crate::report::{AppOutcome, Note};
+    use crate::sandbox::{Platform, Sandboxing, platform};
+
+    let Platform::Available(seatbelt) = platform() else {
+        return;
+    };
+    // The per-user temporary directory is protected, so the test's files
+    // lie in the build's target directory.
+    let target = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("sandbox-fixtures");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = tempfile::Builder::new()
+        .prefix("phase-")
+        .tempdir_in(target)
+        .unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let state = root.join("state");
+    let workspace = root.join("workspaces/reading-list");
+    let checkout = workspace.join("api");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let (phase, plan) = real_keeper(&state, &checkout);
+    let plan = Plan::new(plan.workspace().clone(), id(), plan.apps().to_vec())
+        .unwrap()
+        .with_workspace_dir(workspace.clone(), vec![workspace.join("mxv.toml")]);
+    let mut apps = plan.apps().to_vec();
+    apps[0].permissions = Some(Permissions::default());
+    let sandboxed = Plan::new(plan.workspace().clone(), id(), apps)
+        .unwrap()
+        .with_workspace_dir(workspace.clone(), vec![workspace.join("mxv.toml")]);
+    let soon = Instant::now() + Duration::from_secs(30);
+    let up = |plan: &Plan| {
+        phase
+            .up(
+                plan,
+                &Selection::All,
+                &Greeting,
+                UpDeadlines::new(soon, soon),
+                &Cancel::new(),
+            )
+            .unwrap()
+    };
+    let row = |plan: &Plan| phase.status(&id(), Some(plan)).unwrap().rows[0].clone();
+
+    let first = up(&plan);
+    let before = row(&plan);
+    let second = up(&sandboxed);
+    let after = row(&sandboxed);
+    let third = up(&sandboxed);
+    let last = row(&sandboxed);
+    phase.down(&id(), &Selection::All, soon).unwrap();
+
+    assert_eq!(first.apps[0].outcome, AppOutcome::Started, "{first:?}");
+    assert!(
+        matches!(before.sandbox, Some(Sandboxing::Unsandboxed { .. })),
+        "{before:?}"
+    );
+    assert_eq!(second.apps[0].outcome, AppOutcome::Started, "{second:?}");
+    assert_eq!(
+        second.apps[0].notes,
+        vec![Note::plan_changed(
+            &"api".parse().unwrap(),
+            "server".parse().unwrap()
+        )]
+    );
+    assert_eq!(after.sandbox, Some(seatbelt), "{after:?}");
+    let pid = |row: &crate::status::StatusRow| match row.handle {
+        Some(Handle::Pid { pid, .. }) => pid,
+        ref other => panic!("the row names no pid: {other:?}"),
+    };
+    assert_ne!(pid(&after), pid(&before));
+    assert_eq!(
+        third.apps[0].outcome,
+        AppOutcome::AlreadyRunning,
+        "{third:?}"
+    );
+    assert_eq!(pid(&last), pid(&after));
+}
