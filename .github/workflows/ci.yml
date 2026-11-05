@@ -93,12 +93,43 @@ jobs:
       - name: msrv
         run: cargo +1.95.0 check --locked --workspace --all-targets --all-features
 
+  # Reports whether a pull request changes phase's sandbox, whose Seatbelt
+  # tests run only on macOS.
+  sandbox-changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read # gh pr diff lists the pull request's files.
+    outputs:
+      sandbox: ${{ steps.files.outputs.sandbox }}
+    steps:
+      - id: files
+        run: |
+          if gh pr diff "$PR" --repo "$REPO" --name-only | grep -q '^crates/phase/src/sandbox'; then
+            echo sandbox=true >> "$GITHUB_OUTPUT"
+          else
+            echo sandbox=false >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+
   # The macOS lane runs the code that only builds on macOS, such as
-  # process/darwin.rs, daily and on demand. Pull requests do not wait for
-  # it, because macOS runners queue longer than Linux ones. The container
+  # process/darwin.rs and the sandbox's Seatbelt tests, daily, on demand,
+  # and on a pull request that changes crates/phase/src/sandbox.rs or
+  # crates/phase/src/sandbox/. Other pull requests do not wait for it,
+  # because macOS runners queue longer than Linux ones. The container
   # tests skip on this runner, which has no docker daemon.
   macos:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: sandbox-changes
+    # !cancelled() lets the lane run when sandbox-changes was skipped, as it
+    # is on every event other than a pull request.
+    if: >-
+      !cancelled() && (github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || needs.sandbox-changes.outputs.sandbox == 'true')
     runs-on: macos-latest
     timeout-minutes: 30
     permissions:

@@ -1052,10 +1052,16 @@ The sandbox allows (decision P18):
   workspaces, which would need it to read every workspace's run record, so
   the first stage refuses an absolute write path outside the checkout.
   That limit is lifted once phase can compare writes across run records.
-  No entry may lie inside another, and no two apps of a plan may write
-  overlapping paths once their symbolic links are resolved, so one app
-  cannot plant a symbolic link in another's directory. That also refuses
-  two apps of one checkout that both write `target`. phase refuses a write
+  No entry may lie inside another, and no app of a plan may write a path
+  strictly inside a path that another app may write once their symbolic
+  links are resolved, so one app cannot plant a symbolic link in another's
+  directory. Two apps may write the same path, such as two apps of one
+  checkout that both write `target`: neither may write the directory that
+  holds it, so neither can replace it with a link, and a link planted
+  inside it resolves outside the other app's grant. The checkout and an
+  absolute entry are compared with their symbolic links resolved, so an
+  entry spelled through the checkout's real path passes when the checkout
+  is named through a link. phase refuses a write
   path inside a sticky, group-writable or world-writable directory, such
   as `/tmp`. The launcher creates a missing write directory with mode 0700
   before it checks the spec, one name at a time without following a
