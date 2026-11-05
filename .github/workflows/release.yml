@@ -1,0 +1,175 @@
+# The binary release. It runs the advisory check, builds `mxv` for macOS and
+# Linux, checks that each binary prints the release's version, and attaches
+# the archives to a GitHub release with SHA256SUMS.
+#
+# A push of the tag `v<version>` releases that tag, where <version> is the
+# workspace version in Cargo.toml. A manual run with a tag releases that
+# existing tag. A manual run without a tag, and a pull request that changes
+# this file, build the archives and release nothing.
+#
+# mxv has no Windows build, because phase supervises an app's processes with
+# Unix process groups and signals, and reads the process table only on macOS
+# and Linux.
+#
+# No job uses rust-cache, because a poisoned cache would reach the released
+# binaries, and zizmor fails a release workflow that restores a cache.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [.github/workflows/release.yml]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to release, such as v0.1.0. Leave it empty to build without releasing.
+        type: string
+        default: ""
+
+# Each job grants only the permissions it needs.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag to release, if any, and the version that Cargo.toml holds at it.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag=$GITHUB_REF_NAME
+          else
+            tag=$INPUT_TAG
+          fi
+          case "$tag" in
+            "") ref= ;;
+            v[0-9]*) ref=refs/tags/$tag ;;
+            *) echo "the tag is $tag, and a release tag starts with v and a digit" >&2; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.tag.outputs.ref }}
+          persist-credentials: false
+      - id: version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          version=$(cargo pkgid --package mxv | sed 's/.*[#@]//')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -n "$TAG" ] && [ "$TAG" != "v$version" ]; then
+            echo "the tag is $TAG and Cargo.toml says $version" >&2
+            exit 1
+          fi
+
+  # BASE-29: a release waits for the advisory check, so it ships no
+  # dependency with a known security advisory.
+  advisories:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+      - name: advisories
+        run: cargo deny --locked check advisories
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+          persist-credentials: false
+      # rustup installs the toolchain that rust-toolchain.toml pins.
+      - run: rustup target add "$TARGET"
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-auditable@0.7.7
+          fallback: none
+      # BASE-30: the binary records the dependency versions it contains.
+      - run: cargo auditable build --release --locked --package mxv --target "$TARGET"
+      - name: version
+        run: |
+          printed=$("target/$TARGET/release/mxv" --version)
+          if [ "$printed" != "mxv $VERSION" ]; then
+            echo "the binary printed '$printed', and the release is $VERSION" >&2
+            exit 1
+          fi
+      - run: |
+          mkdir dist
+          tar -C "target/$TARGET/release" -czf "dist/mxv-$VERSION-$TARGET.tar.gz" mxv
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mxv-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The release gets the archives and SHA256SUMS. A run again after a failure
+  # replaces the files of a release that the failed run created.
+  release:
+    if: needs.version.outputs.tag != ''
+    needs: [version, advisories, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # gh creates the release and uploads its files.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mxv-*
+          path: dist
+          merge-multiple: true
+      - run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes dist/*
+          fi
