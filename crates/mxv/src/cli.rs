@@ -369,6 +369,10 @@ pub(crate) struct AddArgs {
     #[arg(long)]
     pub(crate) no_clone: bool,
 
+    /// Copy FILE into the workspace as its workspace manifest once it has the new checkout, with paths relative to the workspace's directory; a workspace of one checkout with a workspace manifest needs it
+    #[arg(long, value_name = "FILE")]
+    pub(crate) manifest: Option<PathBuf>,
+
     /// Print the workspace that the command would make, and change nothing.
     #[command(flatten)]
     pub(crate) dry_run: DryRun,

@@ -18,7 +18,7 @@
 //! `crates/mxv/docs/decisions/multi-repository-manifests.md` describes:
 //! the workspace manifest with its names as written and its paths relative
 //! to the workspace's directory, and each checkout's own `mxv.toml` with
-//! each process, container and port renamed `<prefix>-<name>`, where the
+//! each process, container, port and volume renamed `<prefix>-<name>`, where the
 //! prefix is [`checkout_prefix`] of the checkout's folder. Two equal names
 //! fail with [`ManifestProblem::NameClash`]. Each process of the merged
 //! manifest has an absolute `cwd`, so it runs in its own checkout.
@@ -35,7 +35,7 @@
 //! [`ManifestInputs`] names the files, for a tool that reads them as
 //! separate inputs even when the workspace manifest wins.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -170,16 +170,25 @@ struct Declared {
     units: BTreeMap<String, PathBuf>,
     /// The ports.
     ports: BTreeMap<String, PathBuf>,
+    /// The volumes, which phase names after the workspace alone, so two
+    /// files that mount one name would share the volume's data.
+    volumes: BTreeMap<String, PathBuf>,
 }
 
 impl Declared {
     /// Adds the names of `manifest`, read from `path`, or fails on the
     /// first name that another file declares or that is longer than a
-    /// manifest name may be.
+    /// manifest name may be. Containers of one file may share a volume.
     fn add(&mut self, manifest: &Manifest, path: &Path) -> Result<(), ManifestError> {
         let units = manifest.processes.keys().chain(manifest.containers.keys());
         declare(&mut self.units, units, path)?;
-        declare(&mut self.ports, manifest.ports.iter(), path)
+        declare(&mut self.ports, manifest.ports.iter(), path)?;
+        let volumes: BTreeSet<&String> = manifest
+            .containers
+            .values()
+            .flat_map(|container| container.volumes.keys())
+            .collect();
+        declare(&mut self.volumes, volumes.into_iter(), path)
     }
 }
 
@@ -407,6 +416,31 @@ impl Workspace {
     /// Returns the merged manifest of a workspace with several checkouts,
     /// or `None` when no file exists.
     fn merged_manifest(&self) -> Result<Option<Manifest>, ManifestError> {
+        self.merged_from(None)
+    }
+
+    /// Returns the merged manifest that the workspace, which has several
+    /// checkouts, would read with `text` as its workspace manifest, read
+    /// from the checkouts as they are on disk. It checks a workspace
+    /// manifest before it is written, so a manifest that clashes or that
+    /// refers to a name no file declares is never installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Workspace::manifest`].
+    pub fn merged_manifest_with(&self, text: &str) -> Result<Manifest, ManifestError> {
+        self.merged_from(Some(text))?.ok_or_else(|| ManifestError {
+            path: self.manifest_file(),
+            line: None,
+            problem: ManifestProblem::Invalid {
+                message: "the merged manifest is empty".to_owned(),
+            },
+        })
+    }
+
+    /// Returns the merged manifest with `text`, when it is given, in place
+    /// of the workspace manifest's file.
+    fn merged_from(&self, text: Option<&str>) -> Result<Option<Manifest>, ManifestError> {
         let mut checkouts = Vec::new();
         let mut joined = Joined::default();
         for read in self.renamed_checkout_manifests() {
@@ -414,10 +448,15 @@ impl Workspace {
             joined.add(&renamed);
             checkouts.push((checkout.path.join(MANIFEST_FILE), checkout, renamed));
         }
-        let shared = match self.workspace_manifest_input() {
-            Some(path) => Manifest::read_file_joining(&path, &self.path, &joined)?
+        let shared = match (text, self.workspace_manifest_input()) {
+            (Some(text), _) => {
+                let path = self.manifest_file();
+                let manifest = Manifest::parse_at(text, &path, &self.path, &joined)?;
+                Some((path, manifest))
+            }
+            (None, Some(path)) => Manifest::read_file_joining(&path, &self.path, &joined)?
                 .map(|manifest| (path, manifest)),
-            None => None,
+            (None, None) => None,
         };
         let mut declared = Declared::default();
         let mut merged: Option<Manifest> = None;

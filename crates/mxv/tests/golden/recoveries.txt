@@ -163,6 +163,7 @@ codes that no start provokes:
   mxv::manifest::unrunnable: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::workspace::legacy_running: Only processes that an earlier version of mxv started in a live checkout provoke it; tests/processes.rs starts them with that runner.
   mxv::volume::not_moved: Only a data volume that an earlier version of mxv created for a container provokes it, with a docker daemon that answers.
+  mxv::volume::renamed: Only `mxv add` to a workspace of one clone whose container has run and left a docker volume provokes it, with a docker daemon that answers.
   mxv::phase::failed: Only a failure of phase that mxv has no code of its own for provokes it, such as a run record that phase cannot read.
   mxv::manifest::unknown_key: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::newer: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
@@ -170,7 +171,9 @@ codes that no start provokes:
   mxv::manifest::reserved: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::invalid: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::name_clash: Only two checkouts whose mxv.toml files declare names that clash once prefixed provoke it, and the fixture's workspace has one checkout; tests/workspaces.rs provokes it.
-  mxv::manifest::checkout_relative: Only `mxv add` to a live workspace of one checkout whose workspace manifest names paths inside that checkout provokes it, and the fixture's workspace holds a git worktree; tests/workspaces.rs provokes it.
+  mxv::manifest::needed: Only `mxv add` to a live workspace of one clone with a workspace manifest provokes it, and the fixture's workspace holds a git worktree; tests/multirepo.rs provokes it.
+  mxv::checkout::incomplete: Only `mxv add` to a live workspace of clones whose record names an unfinished checkout provokes it, and the fixture's workspace holds a git worktree; tests/multirepo.rs provokes it.
+  mxv::checkout::resume_blocked: Only `mxv add` that resumes an unfinished clone whose directory holds work provokes it, and the fixture's workspace holds a git worktree; the library's tests provoke it.
   mxv::manifest::unreadable: Only an mxv.toml without read permission provokes it, in a live checkout that the fixture cannot hold.
   mxv::process::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::process::exited: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.

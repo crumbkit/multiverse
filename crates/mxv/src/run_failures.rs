@@ -21,6 +21,9 @@ pub const WORKSPACE_LEGACY_RUNNING: Code = Code::new("mxv", "workspace", "legacy
 /// The code of a container whose data volume from before phase ran the
 /// workspace's apps holds data that its new volume does not.
 pub const VOLUME_NOT_MOVED: Code = Code::new("mxv", "volume", "not_moved");
+/// The code of `mxv add` to a workspace of one checkout whose containers'
+/// volumes hold data under the names that adding a checkout prefixes.
+pub const VOLUME_RENAMED: Code = Code::new("mxv", "volume", "renamed");
 /// The code of a unit name that phase cannot run, such as one with an
 /// uppercase letter.
 pub const MANIFEST_UNIT_NAME: Code = Code::new("mxv", "manifest", "unit_name");
@@ -69,6 +72,7 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_VOLUMES,
     &WORKSPACE_LEGACY_RUNNING,
     &VOLUME_NOT_MOVED,
+    &VOLUME_RENAMED,
     &MANIFEST_UNIT_NAME,
     &MANIFEST_UNRUNNABLE,
     &MANIFEST_NOT_FOUND,
@@ -239,6 +243,15 @@ pub(crate) enum RunFailure {
         /// The volume and the container that mounts it.
         moved: Box<NotMoved>,
     },
+    /// `mxv add` would prefix the names of volumes that hold the data of
+    /// the workspace's one checkout, so its containers would start on
+    /// empty volumes and the old ones would sit unused.
+    VolumeRenamed {
+        /// The workspace's name.
+        workspace: String,
+        /// The volumes, each with its old and new docker name.
+        volumes: Vec<multiverse::RenamedVolume>,
+    },
     /// The workspace's plan cannot be run by phase.
     Unrunnable {
         /// The workspace's name.
@@ -350,6 +363,7 @@ impl Failure for RunFailure {
             Self::Volumes { .. } => &WORKSPACE_VOLUMES,
             Self::LegacyRunning { .. } => &WORKSPACE_LEGACY_RUNNING,
             Self::VolumeNotMoved { .. } => &VOLUME_NOT_MOVED,
+            Self::VolumeRenamed { .. } => &VOLUME_RENAMED,
             Self::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
             Self::ManifestMissing { .. } => &MANIFEST_NOT_FOUND,
             Self::Manifest(error) => match error.problem {
@@ -391,6 +405,23 @@ impl Failure for RunFailure {
                     .collect::<String>(),
                 phase = moved.phase,
                 legacy = moved.legacy,
+            )),
+            Self::VolumeRenamed { volumes, .. } => hint(format!(
+                "copy each volume's data into the volume that the container mounts after the add, {}, then delete each old volume, and run `mxv add` again; to drop the data instead, only delete the old volumes",
+                volumes
+                    .iter()
+                    .map(|volume| format!(
+                        "with `docker volume create{} -- {new}` and `docker run --rm -v {old}:/from -v {new}:/to {COPY_IMAGE} cp -a /from/. /to/` and `docker volume rm {old}`",
+                        volume
+                            .labels
+                            .iter()
+                            .map(|label| format!(" --label {}", shell_quoted(label)))
+                            .collect::<String>(),
+                        new = volume.new,
+                        old = volume.old,
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             )),
             Self::Unrunnable { .. } => hint("fix what the message names in the manifest"),
             Self::Volumes {
@@ -518,9 +549,10 @@ impl Failure for RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
-            Self::LegacyRunning { .. } | Self::VolumeNotMoved { .. } | Self::Unrunnable { .. } => {
-                self.transition_fields()
-            }
+            Self::LegacyRunning { .. }
+            | Self::VolumeNotMoved { .. }
+            | Self::VolumeRenamed { .. }
+            | Self::Unrunnable { .. } => self.transition_fields(),
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -690,9 +722,10 @@ impl fmt::Display for RunFailure {
                 "the workspace {workspace} has docker volumes, which may hold data: {}",
                 volumes.join(", ")
             ),
-            Self::LegacyRunning { .. } | Self::VolumeNotMoved { .. } | Self::Unrunnable { .. } => {
-                self.fmt_transition(formatter)
-            }
+            Self::LegacyRunning { .. }
+            | Self::VolumeNotMoved { .. }
+            | Self::VolumeRenamed { .. }
+            | Self::Unrunnable { .. } => self.fmt_transition(formatter),
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -822,6 +855,21 @@ impl RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("processes", FieldValue::list(processes.iter())),
             ],
+            Self::VolumeRenamed { workspace, volumes } => vec![
+                Field::new("workspace", workspace),
+                Field::new(
+                    "volumes",
+                    FieldValue::list(volumes.iter().map(|volume| &volume.volume)),
+                ),
+                Field::new(
+                    "old_volumes",
+                    FieldValue::list(volumes.iter().map(|volume| &volume.old)),
+                ),
+                Field::new(
+                    "new_volumes",
+                    FieldValue::list(volumes.iter().map(|volume| &volume.new)),
+                ),
+            ],
             Self::VolumeNotMoved { workspace, moved } => vec![
                 Field::new("workspace", workspace),
                 Field::new("container", &moved.container),
@@ -853,6 +901,18 @@ impl RunFailure {
                 formatter,
                 "the workspace {workspace} has processes that an earlier version of mxv started, which still run: {}; `mxv down` stops them, and the next `mxv up` starts the workspace under phase",
                 processes.join(", ")
+            ),
+            Self::VolumeRenamed { workspace, volumes } => write!(
+                formatter,
+                "adding a checkout to the workspace {workspace} prefixes the names of its containers' volumes, and these hold data under the old names: {}; the containers would start on empty volumes",
+                volumes
+                    .iter()
+                    .map(|volume| format!(
+                        "{} in {}, which becomes {}",
+                        volume.volume, volume.old, volume.new
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Self::VolumeNotMoved { moved, .. } => write!(
                 formatter,

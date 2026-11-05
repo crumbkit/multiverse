@@ -28,8 +28,8 @@ use phase::{
 };
 
 use super::{
-    DownOutcome, ExitReason, Follower, Kind, ProcessState, ProcessStatus, Runs, TAIL_LINES,
-    Unstoppable, UpOutcome, Waited, code_and_signal, received, tail,
+    DownOutcome, ExitReason, Follower, Kind, ProcessState, ProcessStatus, RenamedVolume, Runs,
+    TAIL_LINES, Unstoppable, UpOutcome, Waited, code_and_signal, received, tail,
 };
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
@@ -455,6 +455,58 @@ impl Runs {
             .iter()
             .map(|name| Self::phase_unit_status(workspace, manifest, name, rows.get(name)))
             .collect())
+    }
+
+    /// Returns each volume of a container in the `mxv.toml` of `workspace`'s
+    /// one checkout for which phase holds a docker volume under the name
+    /// without a prefix. Adding a second checkout renames such a volume to
+    /// `<prefix>-<volume>`, so the container would start on an empty
+    /// volume and the old one would hold its data unused. A workspace with
+    /// several checkouts, one that has never run, or one whose checkout has
+    /// no `mxv.toml` returns none.
+    ///
+    /// # Errors
+    ///
+    /// Returns the docker errors of looking up a volume.
+    pub fn renamed_volumes(&self, workspace: &Workspace) -> Result<Vec<RenamedVolume>, Error> {
+        if workspace.has_several_checkouts() {
+            return Ok(Vec::new());
+        }
+        let (Some(checkout), Some(id)) = (workspace.checkouts.first(), workspace.id.as_ref())
+        else {
+            return Ok(Vec::new());
+        };
+        let Ok(Some(own)) = Manifest::read(&checkout.path) else {
+            return Ok(Vec::new());
+        };
+        let volumes: BTreeSet<&String> = own
+            .containers
+            .values()
+            .flat_map(|container| container.volumes.keys())
+            .collect();
+        let prefix = crate::lookup::checkout_prefix(&checkout.name);
+        let mut renamed = Vec::new();
+        for volume in volumes {
+            let moved = crate::lookup::prefixed(&prefix, volume);
+            let (Ok(key), Ok(moved_key)) = (VolumeKey::new(volume), VolumeKey::new(&moved)) else {
+                continue;
+            };
+            let (Some(old), Some(new)) = (
+                app_volume_name(&self.phase, id, &key),
+                app_volume_name(&self.phase, id, &moved_key),
+            ) else {
+                continue;
+            };
+            if volume_exists(&old)? {
+                renamed.push(RenamedVolume {
+                    volume: volume.clone(),
+                    old,
+                    new,
+                    labels: app_volume_labels(&self.phase, id, &moved_key),
+                });
+            }
+        }
+        Ok(renamed)
     }
 
     /// Returns the names of the processes and containers of `workspace`

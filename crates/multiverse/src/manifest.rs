@@ -1000,9 +1000,25 @@ impl Manifest {
         let Some(text) = Self::read_unparsed(path)? else {
             return Ok(None);
         };
-        let manifest = Self::parse_joining(&text, path, joined)?;
+        Self::parse_at(&text, path, checkout, joined).map(Some)
+    }
+
+    /// Parses the manifest `text` as [`Manifest::parse_joining`] does, as
+    /// though it were read from `path`, and checks each process's `cwd`
+    /// against `checkout` as [`Manifest::read_file`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Manifest::read_file`].
+    pub fn parse_at(
+        text: &str,
+        path: &Path,
+        checkout: &Path,
+        joined: &Joined,
+    ) -> Result<Self, ManifestError> {
+        let manifest = Self::parse_joining(text, path, joined)?;
         manifest.check_cwds(checkout, path)?;
-        Ok(Some(manifest))
+        Ok(manifest)
     }
 
     /// Returns the text of the manifest at `path`, after checking that it
@@ -1014,27 +1030,32 @@ impl Manifest {
     /// Returns the errors of [`Manifest::read_text`], and a
     /// [`ManifestProblem::Unreadable`] when no file is at `path`.
     pub fn read_named(path: &Path) -> Result<String, ManifestError> {
-        Self::read_named_joining(path, &Joined::default())
+        let text = Self::read_named_unchecked(path)?;
+        Self::parse(&text, path)?;
+        Ok(text)
     }
 
-    /// Returns the text of the manifest at `path` as
-    /// [`Manifest::read_named`] does, after checking that it parses as
-    /// [`Manifest::parse_joining`] parses it with `joined`, for the
-    /// workspace manifest of a workspace with several checkouts.
+    /// Returns the text of the manifest at `path`, a file that the person
+    /// named, without parsing it. It is for the workspace manifest of a
+    /// workspace with several checkouts, which refers to the names of
+    /// checkouts that exist only once they are cloned, so the caller
+    /// checks it with [`Workspace::merged_manifest_with`] after cloning.
+    ///
+    /// [`Workspace::merged_manifest_with`]: crate::Workspace::merged_manifest_with
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Manifest::read_named`].
-    pub fn read_named_joining(path: &Path, joined: &Joined) -> Result<String, ManifestError> {
-        let text = Self::read_unparsed(path)?.ok_or_else(|| ManifestError {
+    /// Returns a [`ManifestError`] when the file cannot be read or is
+    /// larger than [`MOST_MANIFEST_BYTES`], and a
+    /// [`ManifestProblem::Unreadable`] when no file is at `path`.
+    pub fn read_named_unchecked(path: &Path) -> Result<String, ManifestError> {
+        Self::read_unparsed(path)?.ok_or_else(|| ManifestError {
             path: path.to_path_buf(),
             line: None,
             problem: ManifestProblem::Unreadable {
                 message: "no file is at this path".to_owned(),
             },
-        })?;
-        Self::parse_joining(&text, path, joined)?;
-        Ok(text)
+        })
     }
 
     /// Returns the text of the manifest at `path`, or `None` when no file
@@ -1341,6 +1362,14 @@ impl Manifest {
                 }
                 renamed.ready = ready(&container.ready);
                 renamed.depends_on = names(&container.depends_on);
+                // phase names a volume `<workspace>.<volume>` for every app
+                // of the workspace, so a volume keeps its file's prefix
+                // to stay apart from another checkout's volume.
+                renamed.volumes = container
+                    .volumes
+                    .iter()
+                    .map(|(volume, mount)| (rename(volume), mount.clone()))
+                    .collect();
                 (rename(name), renamed)
             })
             .collect();

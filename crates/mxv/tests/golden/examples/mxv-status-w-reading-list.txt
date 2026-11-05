@@ -1,2 +1,2 @@
 The workspace has no manifest.
-The checkout app at /home/agent/mxv/reading-list/app cannot be read: git status failed in /home/agent/mxv/reading-list/app with exit code 128: fatal: cannot change to '/home/agent/mxv/reading-list/app': No such file or directory.
+The checkout app at /home/agent/mxv/reading-list/app cannot be read: its directory is gone.

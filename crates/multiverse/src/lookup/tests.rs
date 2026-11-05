@@ -256,6 +256,48 @@ fn two_equal_merged_names_fail_with_a_name_clash_that_names_both_files() {
     );
 }
 
+/// A manifest whose container `db` mounts the volume `data`, which phase
+/// names `<workspace>.data` for every app of the workspace.
+const DB: &str = "[containers.db]\nimage = \"postgres:16.4\"\nvolumes = { data = \"/var/lib/postgresql/data\" }\n\n[containers.replica]\nimage = \"postgres:16.4\"\nvolumes = { data = \"/var/lib/postgresql/data\" }\n";
+
+#[test]
+fn each_checkouts_volumes_carry_its_prefix_so_two_checkouts_never_share_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), DB);
+    write(workspace.path.join("web/mxv.toml"), DB);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    let volumes = |name: &str| {
+        manifest.containers[name]
+            .volumes
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(volumes("api-db"), ["api-data"]);
+    assert_eq!(volumes("api-replica"), ["api-data"]);
+    assert_eq!(volumes("web-db"), ["web-data"]);
+}
+
+#[test]
+fn a_volume_that_two_files_declare_once_prefixed_fails_with_a_name_clash() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), DB);
+    write(
+        workspace.path.join("mxv.toml"),
+        "[containers.cache]\nimage = \"redis:7.4\"\nvolumes = { api-data = \"/data\" }\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(
+        error.problem,
+        ManifestProblem::NameClash {
+            name: "api-data".to_owned(),
+            other: workspace.path.join("mxv.toml"),
+        }
+    );
+}
+
 #[test]
 fn a_unit_and_a_port_may_share_a_merged_name() {
     let dir = tempfile::tempdir().unwrap();

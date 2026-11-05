@@ -37,6 +37,11 @@ pub struct Changes {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Head {
+    /// The top-level directory of the repository that git reads in the
+    /// checkout, or `None` when git finds no repository there. It differs
+    /// from the checkout when the checkout lost its `.git` inside another
+    /// repository.
+    pub toplevel: Option<PathBuf>,
     /// The branch that `HEAD` names, such as `triage`, or `None` for a
     /// detached `HEAD`.
     pub branch: Option<String>,

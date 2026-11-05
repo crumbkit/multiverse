@@ -704,6 +704,15 @@ impl Backend for Git {
     }
 
     fn head(&self, checkout: &Path) -> Result<Head, Error> {
+        // A checkout that lost its `.git` inside another repository reads
+        // that repository, so the caller compares the top level with the
+        // checkout.
+        let toplevel = run(
+            checkout,
+            ["rev-parse", "--show-toplevel"],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
         let commit = run(
             checkout,
             ["rev-parse", "--verify", "--quiet", "HEAD"],
@@ -726,6 +735,7 @@ impl Backend for Git {
                 .filter(|text| !text.is_empty())
         };
         Ok(Head {
+            toplevel: named(&toplevel).map(PathBuf::from),
             branch: named(&branch),
             commit: named(&commit),
         })

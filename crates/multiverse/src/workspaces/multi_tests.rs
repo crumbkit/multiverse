@@ -169,7 +169,12 @@ fn add_clones_the_repository_on_the_workspace_branch_and_rewrites_the_agents_fil
     created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::Change)
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
         .unwrap();
     let AddOutcome::Added(workspace) = outcome else {
         panic!("{outcome:?}");
@@ -191,7 +196,12 @@ fn a_dry_run_of_add_changes_nothing() {
     let before = created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::DryRun)
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::DryRun,
+            None,
+        )
         .unwrap();
     assert!(matches!(outcome, AddOutcome::Planned(ref planned) if planned.checkouts.len() == 2));
     assert!(!setup.root.join("triage/web").exists());
@@ -208,7 +218,12 @@ fn add_refuses_a_folder_that_a_checkout_holds() {
     let other = fixture_named("api");
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&other.clone), Mode::Change)
+        .add(
+            &name("triage"),
+            &Repo::new(&other.clone),
+            Mode::Change,
+            None,
+        )
         .unwrap();
     assert!(
         matches!(outcome, AddOutcome::FolderTaken { ref folder, .. } if folder == "api"),
@@ -223,7 +238,12 @@ fn add_refuses_a_repository_with_a_branch_named_after_the_workspace() {
     git(&setup.web.clone, &["branch", "triage"]);
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::Change)
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
         .unwrap();
     assert!(
         matches!(outcome, AddOutcome::BranchTaken { ref branch, .. } if branch == "triage"),
@@ -240,7 +260,12 @@ fn a_failed_add_deletes_the_new_clone_and_restores_the_record() {
     assert!(
         setup
             .workspaces
-            .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::Change)
+            .add(
+                &name("triage"),
+                &Repo::new(&setup.web.clone),
+                Mode::Change,
+                None
+            )
             .is_err()
     );
     assert!(!setup.root.join("triage/web").exists());
@@ -264,7 +289,12 @@ fn add_moves_the_ports_of_the_first_checkouts_manifest_to_their_prefixed_names_a
     setup.workspaces.store.update(&mut workspace).unwrap();
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::Change)
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
         .unwrap();
     let AddOutcome::Added(workspace) = outcome else {
         panic!("{outcome:?}");
@@ -277,54 +307,372 @@ fn add_moves_the_ports_of_the_first_checkouts_manifest_to_their_prefixed_names_a
 }
 
 #[test]
-fn add_refuses_a_workspace_manifest_whose_paths_are_relative_to_the_checkout() {
+fn add_refuses_a_workspace_of_one_checkout_with_a_workspace_manifest_unless_given_the_next_one() {
     let setup = setup();
     let workspace = created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
-    write(
-        workspace.manifest_file(),
-        "disposable = [\"data/cache/\"]\n\n[processes.server]\nargv = [\"true\"]\n",
-    );
+    let text = "disposable = [\"web/coverage/\"]\n\n[processes.server]\nargv = [\"true\"]\n";
+    write(workspace.manifest_file(), text);
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::Change)
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
         .unwrap();
     match outcome {
-        AddOutcome::ManifestCheckoutRelative { folder, paths, .. } => {
+        AddOutcome::ManifestNeeded {
+            folder, manifest, ..
+        } => {
             assert_eq!(folder, "api");
-            assert_eq!(
-                paths,
-                ["processes.server.cwd = \".\"", "disposable \"data/cache/\""]
-            );
+            assert_eq!(manifest, workspace.manifest_file());
         }
         other => panic!("{other:?}"),
     }
     assert!(!setup.root.join("triage/web").exists());
+    assert_eq!(fs::read_to_string(workspace.manifest_file()).unwrap(), text);
 }
 
 #[test]
-fn add_accepts_a_workspace_manifest_whose_paths_lie_below_the_checkouts_folder_and_keeps_its_ports()
-{
+fn add_installs_the_given_workspace_manifest_with_paths_relative_to_the_workspace() {
     let setup = setup();
     let mut workspace = created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
     write(
         workspace.manifest_file(),
-        "ports = [\"http\"]\ndisposable = [\"api/data/\", \"coverage/\"]\n\n[processes.server]\nargv = [\"true\"]\ncwd = \"api\"\n",
+        "ports = [\"http\"]\n\n[processes.server]\nargv = [\"true\"]\n",
     );
     workspace.ports.insert("http".to_owned(), 21000);
     setup.workspaces.store.update(&mut workspace).unwrap();
+    let next = "ports = [\"http\"]\ndisposable = [\"web/coverage/\"]\n\n[processes.server]\nargv = [\"true\"]\ncwd = \"api\"\n";
     let outcome = setup
         .workspaces
-        .add(&name("triage"), &Repo::new(&setup.web.clone), Mode::Change)
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            Some(next),
+        )
         .unwrap();
     let AddOutcome::Added(workspace) = outcome else {
         panic!("{outcome:?}");
     };
+    assert_eq!(fs::read_to_string(workspace.manifest_file()).unwrap(), next);
     assert_eq!(workspace.ports.get("http"), Some(&21000));
     let manifest = workspace.manifest().unwrap().unwrap();
     assert_eq!(
         manifest.processes["server"].cwd,
         setup.root.join("triage/api")
     );
+    assert_eq!(
+        manifest
+            .disposable
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["web/coverage/"]
+    );
+}
+
+#[test]
+fn add_refuses_a_given_workspace_manifest_that_the_merged_manifest_rejects_and_changes_nothing() {
+    let setup = setup();
+    let before = created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
+    let next = "[processes.server]\nargv = [\"true\"]\ndepends_on = [\"web-missing\"]\n";
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            Some(next),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ManifestRefused(_)),
+        "{outcome:?}"
+    );
+    assert!(!setup.root.join("triage/web").exists());
+    assert!(!before.manifest_file().exists());
+    let read = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert_eq!(read.checkouts, before.checkouts);
+}
+
+#[test]
+fn add_refuses_a_default_folder_that_is_not_a_folder_name() {
+    let setup = setup();
+    created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
+    let infra = fixture_named("_infra");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&infra.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::BadFolder { ref folder, .. } if folder == "_infra"),
+        "{outcome:?}"
+    );
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::named(&infra.clone, "infra").unwrap(),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(matches!(outcome, AddOutcome::Added(_)), "{outcome:?}");
+}
+
+#[test]
+fn new_refuses_a_default_folder_that_is_not_a_folder_name_only_for_several_repositories() {
+    let setup = setup();
+    let infra = fixture_named("_infra");
+    let repos = [Repo::new(&setup.api.clone), Repo::new(&infra.clone)];
+    let outcome = setup
+        .workspaces
+        .create_repos(&setup.root, &name("triage"), &repos, Mode::Change, None)
+        .unwrap();
+    assert!(
+        matches!(outcome, NewOutcome::BadFolder { ref folder, .. } if folder == "_infra"),
+        "{outcome:?}"
+    );
+    created(&setup, "solo", &[Repo::new(&infra.clone)]);
+}
+
+#[test]
+fn new_checks_a_workspace_manifest_against_the_clones_and_deletes_the_workspace_when_it_fails() {
+    let setup = setup();
+    let text = "[processes.proxy]\nargv = [\"true\"]\ndepends_on = [\"web-missing\"]\n";
+    let outcome = setup
+        .workspaces
+        .create_repos(
+            &setup.root,
+            &name("triage"),
+            &both(&setup),
+            Mode::Change,
+            Some(text),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, NewOutcome::ManifestRefused(_)),
+        "{outcome:?}"
+    );
+    assert!(!setup.root.join("triage").exists());
+    assert!(!setup.state.join("triage.json").exists());
+}
+
+/// Writes the record of `triage` as an `add` of `web` that stopped after
+/// it wrote the record with the unfinished checkout, and returns the
+/// checkout's directory.
+fn stopped_add(setup: &Setup) -> PathBuf {
+    let mut workspace = created(setup, "triage", &[Repo::new(&setup.api.clone)]);
+    let mut planned = workspace.checkouts[0].clone();
+    planned.name = "web".to_owned();
+    planned.source.clone_from(&setup.web.clone);
+    planned.path = setup.root.join("triage/web");
+    planned.commit = None;
+    planned.mirror = None;
+    workspace.checkouts.push(planned);
+    setup.workspaces.store.update(&mut workspace).unwrap();
+    setup.root.join("triage/web")
+}
+
+#[test]
+fn the_same_add_resumes_a_checkout_that_a_stopped_add_left_without_a_directory() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    let AddOutcome::Added(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(workspace.checkouts.len(), 2);
+    assert!(workspace.checkouts[1].commit.is_some());
+    assert_eq!(branch(&path), "triage");
+    let agents = fs::read_to_string(workspace.agents_file()).unwrap();
+    assert!(agents.contains("`web/`"), "{agents}");
+}
+
+#[test]
+fn the_same_add_deletes_a_partial_clone_and_clones_again() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    fs::create_dir_all(path.join(".git/objects")).unwrap();
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(matches!(outcome, AddOutcome::Added(_)), "{outcome:?}");
+    assert_eq!(branch(&path), "triage");
+}
+
+#[test]
+fn the_same_add_keeps_a_clone_that_reached_the_workspace_branch_and_records_its_commit() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    git(
+        &setup.root,
+        &[
+            "clone",
+            "--quiet",
+            &setup.web.origin.display().to_string(),
+            "triage/web",
+        ],
+    );
+    git(&path, &["switch", "--quiet", "-c", "triage"]);
+    write(path.join("notes.md"), "draft\n");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    let AddOutcome::Added(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let head = git(&path, &["rev-parse", "HEAD"]);
+    assert_eq!(workspace.checkouts[1].commit.as_deref(), Some(head.trim()));
+    assert_eq!(
+        fs::read_to_string(path.join("notes.md")).unwrap(),
+        "draft\n"
+    );
+}
+
+#[test]
+fn the_same_add_refuses_to_delete_a_directory_that_holds_files_outside_a_clone() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    fs::create_dir_all(&path).unwrap();
+    write(path.join("notes.md"), "draft\n");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ResumeBlocked { path: ref blocked, .. } if *blocked == path),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("notes.md")).unwrap(),
+        "draft\n"
+    );
+}
+
+#[test]
+fn the_same_add_refuses_to_delete_a_partial_clone_that_holds_a_commit_of_its_own() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    git(
+        &setup.root,
+        &[
+            "clone",
+            "--quiet",
+            &setup.web.origin.display().to_string(),
+            "triage/web",
+        ],
+    );
+    git(
+        &path,
+        &["commit", "--quiet", "--allow-empty", "-m", "Local"],
+    );
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ResumeBlocked { ref reason, .. } if reason.contains("1 commits")),
+        "{outcome:?}"
+    );
+    assert!(path.join(".git").is_dir());
+}
+
+#[test]
+fn the_same_add_refuses_to_delete_a_partial_clone_that_holds_an_untracked_file() {
+    let setup = setup();
+    let path = stopped_add(&setup);
+    git(
+        &setup.root,
+        &[
+            "clone",
+            "--quiet",
+            &setup.web.origin.display().to_string(),
+            "triage/web",
+        ],
+    );
+    write(path.join("notes.md"), "draft\n");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::ResumeBlocked { ref reason, .. } if reason.contains("untracked")),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(path.join("notes.md")).unwrap(),
+        "draft\n"
+    );
+}
+
+#[test]
+fn another_add_refuses_while_a_checkout_is_unfinished_and_names_it() {
+    let setup = setup();
+    stopped_add(&setup);
+    let other = fixture_named("docs");
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&other.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    match outcome {
+        AddOutcome::Incomplete {
+            folder, repository, ..
+        } => {
+            assert_eq!(folder, "web");
+            assert_eq!(repository, setup.web.clone);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!setup.root.join("triage/docs").exists());
 }
 
 #[test]

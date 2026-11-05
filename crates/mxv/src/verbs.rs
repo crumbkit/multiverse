@@ -167,7 +167,15 @@ fn copied(
         } else {
             Joined::default()
         };
-        let text = Manifest::read_named_joining(&from, &joined).map_err(RunFailure::Manifest)?;
+        // The workspace manifest of several repositories refers to names
+        // that their clones declare, so the library checks it against the
+        // clones once it has made them.
+        let text = if repos.len() > 1 {
+            Manifest::read_named_unchecked(&from)
+        } else {
+            Manifest::read_named(&from)
+        }
+        .map_err(RunFailure::Manifest)?;
         workspaces
             .check_manifest_source(&from, root)
             .map_err(MxvFailure::from)?;
@@ -328,6 +336,10 @@ pub(crate) fn new(
         NewOutcome::FolderTaken { folder, repository } => {
             Err(MxvFailure::FolderTaken { repository, folder }.into())
         }
+        NewOutcome::BadFolder { folder, reason, .. } => {
+            Err(MxvFailure::BadFolder { folder, reason }.into())
+        }
+        NewOutcome::ManifestRefused(error) => Err(RunFailure::Manifest(error).into()),
     }
 }
 
@@ -396,6 +408,20 @@ pub(crate) fn add(
     };
     let name = workspace.name.clone();
     let repo = repo_of(&args.repo, args.folder.as_deref())?;
+    let manifest = match &args.manifest {
+        Some(file) => {
+            let from = match environment.current_dir() {
+                Some(dir) if file.is_relative() => dir.join(file),
+                _ => file.clone(),
+            };
+            let text = Manifest::read_named_unchecked(&from).map_err(RunFailure::Manifest)?;
+            workspaces
+                .check_manifest_source(&from, &root.path)
+                .map_err(MxvFailure::from)?;
+            Some(text)
+        }
+        None => None,
+    };
     let _lock = processes::lock(environment, &name)?;
     let running = processes::running(environment, &workspace)?;
     if !running.is_empty() {
@@ -405,8 +431,22 @@ pub(crate) fn add(
         }
         .into());
     }
+    // Adding a checkout prefixes the names of the first checkout's
+    // volumes, so a volume that holds data under its old name would be
+    // left behind. `add` refuses before it clones anything.
+    let volumes = environment
+        .runs()?
+        .renamed_volumes(&workspace)
+        .map_err(MxvFailure::from)?;
+    if !volumes.is_empty() {
+        return Err(RunFailure::VolumeRenamed {
+            workspace: name.to_string(),
+            volumes,
+        }
+        .into());
+    }
     let outcome = workspaces
-        .add(&name, &repo, mode)
+        .add(&name, &repo, mode, manifest.as_deref())
         .map_err(MxvFailure::from)?;
     let workspace = match outcome {
         AddOutcome::Added(workspace) | AddOutcome::Planned(workspace) => workspace,
@@ -428,17 +468,35 @@ pub(crate) fn add(
         AddOutcome::BranchTaken { repository, branch } => {
             return Err(MxvFailure::BranchExists { repository, branch }.into());
         }
-        AddOutcome::ManifestCheckoutRelative {
-            manifest,
-            folder,
-            paths,
-            ..
+        AddOutcome::BadFolder { folder, reason, .. } => {
+            return Err(MxvFailure::BadFolder { folder, reason }.into());
+        }
+        AddOutcome::ManifestNeeded {
+            manifest, folder, ..
         } => {
-            return Err(MxvFailure::CheckoutRelative {
+            return Err(MxvFailure::ManifestNeeded {
                 name: name.to_string(),
                 manifest,
                 folder,
-                paths,
+            }
+            .into());
+        }
+        AddOutcome::ManifestRefused(error) => return Err(RunFailure::Manifest(error).into()),
+        AddOutcome::Incomplete {
+            folder, repository, ..
+        } => {
+            return Err(MxvFailure::Incomplete {
+                name: name.to_string(),
+                folder,
+                repository,
+            }
+            .into());
+        }
+        AddOutcome::ResumeBlocked { path, reason, .. } => {
+            return Err(MxvFailure::ResumeBlocked {
+                name: name.to_string(),
+                path,
+                reason,
             }
             .into());
         }

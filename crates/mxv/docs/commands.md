@@ -100,6 +100,7 @@ The clone lives in \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the reposit
 - `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
 - `--as <FOLDER>`: The checkout's folder, which defaults to the repository's name
 - `--no-clone`: Clone none of the repository's ignored directories, such as node\_modules/, into the new checkout
+- `--manifest <FILE>`: Copy FILE into the workspace as its workspace manifest once it has the new checkout, with paths relative to the workspace's directory; a workspace of one checkout with a workspace manifest needs it
 - `--dry-run`: Report what the command would change, and change nothing
 
 ### Examples

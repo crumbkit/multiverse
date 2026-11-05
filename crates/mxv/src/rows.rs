@@ -1203,11 +1203,32 @@ impl CheckoutStateRow {
             changes: None,
             problem: None,
         };
-        match backend
-            .head(&checkout.path)
-            .and_then(|head| Ok((head, backend.changes(&checkout.path)?)))
-        {
-            Ok((head, changes)) => {
+        if !checkout.path.is_dir() {
+            row.problem = Some("its directory is gone".to_owned());
+            return row;
+        }
+        let head = match backend.head(&checkout.path) {
+            Ok(head) => head,
+            Err(error) => {
+                row.problem = Some(error.to_string());
+                return row;
+            }
+        };
+        let own = head.toplevel.as_deref().is_some_and(|toplevel| {
+            toplevel.canonicalize().ok() == checkout.path.canonicalize().ok()
+        });
+        if !own {
+            row.problem = Some(match &head.toplevel {
+                Some(toplevel) => format!(
+                    "it has no .git of its own, so git reads the repository at {}",
+                    toplevel.display()
+                ),
+                None => "it is not a git checkout".to_owned(),
+            });
+            return row;
+        }
+        match backend.changes(&checkout.path) {
+            Ok(changes) => {
                 row.branch = head.branch;
                 row.commit = head.commit;
                 row.changes = Some(changes.changed.len());

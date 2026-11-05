@@ -208,6 +208,25 @@ pub struct ProcessStatus {
     pub group_alive: Option<bool>,
 }
 
+/// A volume of a container of a workspace's one checkout that holds data
+/// under its name without a prefix, which adding a second checkout would
+/// leave behind, because the container then mounts the volume under its
+/// prefixed name. [`Runs::renamed_volumes`] returns them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RenamedVolume {
+    /// The volume's name in the checkout's `mxv.toml`, such as `data`.
+    pub volume: String,
+    /// The docker volume that holds the data now.
+    pub old: String,
+    /// The docker volume that phase mounts once the workspace has several
+    /// checkouts.
+    pub new: String,
+    /// The labels, as `name=value`, that the new volume needs, so that a
+    /// volume created with them is the one phase mounts.
+    pub labels: Vec<String>,
+}
+
 /// The outcome of [`Runs::up`].
 #[derive(Debug)]
 pub enum UpOutcome {

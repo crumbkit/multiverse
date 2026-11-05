@@ -41,15 +41,18 @@ character other than an ASCII letter, a digit, `-` or `_` written as `-`.
 The folder `Web.App` has the prefix `web-app`.
 
 Every name that a checkout's manifest declares becomes
-`<prefix>-<name>`: each process, each container, and each port. mxv
-rewrites every reference inside that file to the prefixed name: the values
-of a unit's `ports`, its `listen`, its `ready.port`, each `{port.<name>}`
-placeholder in its `env`, and each name in its `depends_on`. In the
-checkout `api`, the process `server` becomes `api-server`, the port `http`
-becomes `api-http`, and `{port.http}` becomes `{port.api-http}`. Variable
-names, such as `PORT`, and volume names keep their names, because a
-variable belongs to its process and phase scopes a volume to the app that
-mounts it.
+`<prefix>-<name>`: each process, each container, each port and each
+volume. mxv rewrites every reference inside that file to the prefixed
+name: the values of a unit's `ports`, its `listen`, its `ready.port`, each
+`{port.<name>}` placeholder in its `env`, each name in its `depends_on`,
+and the volume of each of a container's `volumes`. In the checkout `api`,
+the process `server` becomes `api-server`, the port `http` becomes
+`api-http`, `{port.http}` becomes `{port.api-http}`, and the volume `data`
+becomes `api-data`. phase names a volume `<workspace>.<volume>`, after the
+workspace alone, so without the prefix the containers of two checkouts
+that each mount `data` would share one volume and its data. Containers of
+one checkout that mount one volume still share it. Variable names, such
+as `PORT`, keep their names, because a variable belongs to its process.
 
 A checkout's manifest can refer only to its own names. The workspace
 manifest's names carry no prefix, and its units can refer to any merged
@@ -59,7 +62,7 @@ name, such as `depends_on = ["api-server"]` or
 ### Clashes and limits
 
 The merge fails with `mxv::manifest::name_clash` when two of its names are
-equal: two units, or two ports, from any two of its files. A prefix can
+equal: two units, two ports or two volumes, from any two of its files. A prefix can
 make a clash, such as the checkout `a-b` with the port `c` and the
 checkout `a` with the port `b-c`, which both give `a-b-c`. The failure
 names the merged name and the two files that declare it. Renaming one
@@ -104,18 +107,91 @@ today.
 
 `mxv new` with one `--repo` copies a template as it does today. `mxv new`
 with several `--repo` copies no template, because a template names one
-origin. `--manifest` copies a file with either form.
+origin. `--manifest` copies a file with either form. With several
+`--repo`, `mxv new` checks the file against the merged manifest of the new
+clones, which come from origin, after it clones them. When the check
+fails, it deletes the workspace and fails with the manifest's error, such
+as `mxv::manifest::invalid` for a reference to a name that no file
+declares.
+
+A checkout's folder in a workspace with several checkouts must follow the
+folder rule of `--as`, whether `--as` gives it or the repository's name
+does, because its prefix starts the names of phase apps and ports, and
+phase refuses a name that starts with `_`. `mxv new` with several
+`--repo` and `mxv add` refuse a repository named `_infra` with
+`mxv::checkout::invalid_name`, whose hint says to give the checkout a
+folder with `--as`. `mxv new` with one `--repo` gives its checkout no
+prefix, so it still accepts any repository's name.
 
 ### Adding a checkout to a workspace with one checkout
 
 `mxv add` turns a workspace with one checkout into one with several. Its
-units and ports then gain their prefix, so `mxv add` refuses with
-`mxv::workspace::running` while the workspace runs, and the next `mxv up`
-allocates host ports for the new names and drops the old ones. When such a
-workspace has a workspace manifest, its paths would change from relative
-to the checkout to relative to the workspace's directory, so `mxv add`
-refuses with `mxv::manifest::checkout_relative`, whose hint names the file
-to edit, and changes nothing.
+units, ports and volumes then gain their prefix, so `mxv add` refuses with
+`mxv::workspace::running` while the workspace runs.
+
+The first checkout's containers then mount their volumes under the
+prefixed names, so a volume that holds data under its old name would be
+left unused while the container starts on an empty one. Before it clones
+anything, `mxv add` therefore refuses with `mxv::volume::renamed` while
+phase holds a volume under the old name of any volume of the first
+checkout's `mxv.toml`. The failure lists each old and new docker volume.
+Its hint gives, for each volume, the `docker volume create` with phase's
+labels, the `docker run` that copies the data, and the
+`docker volume rm` of the old volume, as the hint of
+`mxv::volume::not_moved` does, and says that deleting the old volumes
+alone drops their data. Once no old volume exists, `mxv add` goes ahead.
+
+`mxv add` keeps the number of each host port whose name the merged
+manifest declares. A port of the first checkout's `mxv.toml`, such as
+`http`, moves with its number to its prefixed name, `api-http`. `mxv add`
+releases every port that the merged manifest does not declare. The next
+`mxv up` allocates a number only for a declared name that holds none.
+
+When such a workspace has a workspace manifest, that file's paths are
+relative to the checkout, and after the `add` they are relative to the
+workspace's directory. mxv cannot tell which paths the person means: the
+glob `coverage/` matches the checkout's `coverage/` before and every
+checkout's `coverage/` after, and `web/coverage/` may name a directory
+inside the first checkout or the new checkout's `coverage/`. So `mxv add`
+without `--manifest` refuses with `mxv::manifest::needed` and changes
+nothing. `mxv add --manifest <FILE>` takes the workspace manifest that the
+workspace reads afterwards, with its paths relative to the workspace's
+directory. `mxv add` clones the new checkout, checks the merged manifest
+with that file, and only then copies the file to `<root>/<ws>/mxv.toml`
+and writes the record. When the check fails, it deletes the new clone,
+leaves the workspace as it was, and fails with the manifest's error. mxv
+never rewrites the person's file. `--manifest` also replaces the workspace
+manifest of a workspace that already has several checkouts.
+
+### An `add` that stops partway
+
+`mxv add` writes the record with the new checkout before it clones, with
+no commit for that checkout. A checkout without a commit in a workspace of
+clones is unfinished. A run that is killed before it writes the commit
+leaves such a checkout, and its directory may be missing or partial.
+
+The same `mxv add`, with the same repository and the same folder, resumes
+it. The run looks at the checkout's directory:
+
+- When nothing is there, it clones afresh.
+- When the directory is a git clone of its own on the workspace's branch,
+  the clone finished and only the record and `AGENTS.md` were left, so it
+  keeps the clone, whatever work it holds, and records its commit.
+- When git finds no clone of its own in the directory and the directory
+  holds nothing but `.git`, or it is a clone of its own that is not on the
+  workspace's branch and holds no stash, no commit that origin lacks, and
+  no uncommitted change or untracked path, it is what a clone that
+  stopped partway leaves. A clone that holds nothing but `.git` needs no
+  clean working tree, because it never checked out a file. The
+  run deletes it and clones afresh.
+- Anything else, such as files outside a clone or a clone with a commit of
+  its own, fails with `mxv::checkout::resume_blocked`, which names the
+  directory and what it holds, and the run changes nothing.
+
+The run then writes `AGENTS.md` and the record with the checkout's commit.
+Any other `mxv add` to the workspace fails with
+`mxv::checkout::incomplete`, whose hint names the unfinished folder and
+the `mxv add -w <ws> --repo <repository> --as <folder>` that resumes it.
 
 ### Phase plans
 

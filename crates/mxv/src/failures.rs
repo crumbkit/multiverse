@@ -71,10 +71,17 @@ pub const CHECKOUT_NOT_FOUND: Code = Code::new("mxv", "checkout", "not_found");
 /// The code of `mxv add` on a workspace of git worktrees, which mxv made
 /// before clones.
 pub const WORKSPACE_WORKTREE_KIND: Code = Code::new("mxv", "workspace", "worktree_kind");
-/// The code of `mxv add` on a workspace with one checkout whose workspace
-/// manifest names paths relative to that checkout, which would name other
-/// places once the workspace has two checkouts.
-pub const MANIFEST_CHECKOUT_RELATIVE: Code = Code::new("mxv", "manifest", "checkout_relative");
+/// The code of `mxv add` without `--manifest` on a workspace with one
+/// checkout and a workspace manifest, whose paths are relative to that
+/// checkout and would name other places once the workspace has two
+/// checkouts.
+pub const MANIFEST_NEEDED: Code = Code::new("mxv", "manifest", "needed");
+/// The code of `mxv add` while an earlier `mxv add` to the workspace left
+/// another checkout unfinished.
+pub const CHECKOUT_INCOMPLETE: Code = Code::new("mxv", "checkout", "incomplete");
+/// The code of `mxv add` that resumes an unfinished checkout whose
+/// directory holds something that mxv does not delete.
+pub const CHECKOUT_RESUME_BLOCKED: Code = Code::new("mxv", "checkout", "resume_blocked");
 /// The code of a `--repo` that is not a git repository.
 pub const REPOSITORY_NOT_FOUND: Code = Code::new("mxv", "repository", "not_found");
 /// The code of a repository without a remote named `origin`.
@@ -303,17 +310,35 @@ pub(crate) enum MxvFailure {
         /// The workspace's name.
         name: String,
     },
-    /// `mxv add` named a workspace with one checkout whose workspace
-    /// manifest names paths relative to that checkout.
-    CheckoutRelative {
+    /// `mxv add` without `--manifest` named a workspace with one checkout
+    /// and a workspace manifest.
+    ManifestNeeded {
         /// The workspace's name.
         name: String,
         /// The workspace manifest.
         manifest: PathBuf,
-        /// The checkout's folder.
+        /// The folder of the workspace's one checkout.
         folder: String,
-        /// The paths that do not lie below the folder.
-        paths: Vec<String>,
+    },
+    /// An earlier `mxv add` left a checkout of the workspace unfinished,
+    /// and this `mxv add` names another checkout.
+    Incomplete {
+        /// The workspace's name.
+        name: String,
+        /// The folder of the unfinished checkout.
+        folder: String,
+        /// The repository of the unfinished checkout.
+        repository: PathBuf,
+    },
+    /// `mxv add` resumes an unfinished checkout whose directory holds
+    /// something that mxv does not delete.
+    ResumeBlocked {
+        /// The workspace's name.
+        name: String,
+        /// The directory of the unfinished checkout.
+        path: PathBuf,
+        /// What the directory holds.
+        reason: String,
     },
     /// mxv finds no home directory.
     NoHome,
@@ -391,7 +416,9 @@ pub(crate) const CODES: &[&Code] = &[
     &CHECKOUT_INVALID_NAME,
     &CHECKOUT_NOT_FOUND,
     &WORKSPACE_WORKTREE_KIND,
-    &MANIFEST_CHECKOUT_RELATIVE,
+    &MANIFEST_NEEDED,
+    &CHECKOUT_INCOMPLETE,
+    &CHECKOUT_RESUME_BLOCKED,
     &REPOSITORY_NOT_FOUND,
     &REPOSITORY_NO_ORIGIN,
     &REPOSITORY_EMPTY_ORIGIN,
@@ -522,7 +549,9 @@ impl Failure for MxvFailure {
             Self::BadFolder { .. } => &CHECKOUT_INVALID_NAME,
             Self::CheckoutNotFound { .. } => &CHECKOUT_NOT_FOUND,
             Self::Worktrees { .. } => &WORKSPACE_WORKTREE_KIND,
-            Self::CheckoutRelative { .. } => &MANIFEST_CHECKOUT_RELATIVE,
+            Self::ManifestNeeded { .. } => &MANIFEST_NEEDED,
+            Self::Incomplete { .. } => &CHECKOUT_INCOMPLETE,
+            Self::ResumeBlocked { .. } => &CHECKOUT_RESUME_BLOCKED,
             Self::NoHome => &ENVIRONMENT_NO_DIRECTORY,
             Self::RelativeRoot { .. } => &ENVIRONMENT_RELATIVE_ROOT,
             Self::BadConfig { .. } => &CONFIG_INVALID,
@@ -640,7 +669,7 @@ impl Failure for MxvFailure {
                 shown(repository)
             )),
             Self::BadFolder { .. } => hint(
-                "use 1 to 64 lowercase letters, digits, '-', '_' and '.', starting with a letter or a digit, other than mxv.toml",
+                "give the checkout a folder with `--as <FOLDER>` right after its `--repo`, of 1 to 64 lowercase letters, digits, '-', '_' and '.', starting with a letter or a digit, other than mxv.toml",
             ),
             Self::CheckoutNotFound { name, .. } => {
                 Recovery::Run(Call::new(&["show"]).value("names", name))
@@ -648,14 +677,25 @@ impl Failure for MxvFailure {
             Self::Worktrees { name } => hint(format!(
                 "create a new workspace with every repository, such as `mxv new <NAME> --repo <A> --repo <B>`, because the workspace {name} holds git worktrees, which mxv made before clones, and mxv adds no checkout to it"
             )),
-            Self::CheckoutRelative {
+            Self::ManifestNeeded {
                 name,
                 manifest,
                 folder,
-                ..
             } => hint(format!(
-                "a workspace with two checkouts reads its workspace manifest's paths from the workspace's directory, so move each listed path of {} under `{folder}/`, such as `cwd = \"{folder}\"` for a process that ran at the checkout's root, and then run `mxv add -w {name}` again",
+                "write the workspace manifest that the workspace reads once it has two checkouts, in a file outside the workspace, with each path relative to the workspace's directory, such as `cwd = \"{folder}\"` for a process that ran at the root of {folder}, and pass it to `mxv add -w {name} --manifest <FILE>`, which replaces {} with a copy of it and leaves your file as it is",
                 shown(manifest)
+            )),
+            Self::Incomplete {
+                name,
+                folder,
+                repository,
+            } => hint(format!(
+                "finish the unfinished checkout first with `mxv add -w {name} --repo {} --as {folder}`, which resumes it, and then run this `mxv add` again",
+                shown(repository)
+            )),
+            Self::ResumeBlocked { path, .. } => hint(format!(
+                "look in {}, keep what you need somewhere else, delete the directory, and run the same `mxv add` again",
+                shown(path)
             )),
             Self::NoHome => hint("set HOME to your home directory"),
             Self::RelativeRoot { .. } => hint(
@@ -801,16 +841,28 @@ impl Failure for MxvFailure {
                 Field::new("checkouts", FieldValue::list(checkouts.iter())),
             ],
             Self::Worktrees { name } => vec![Field::new("name", name)],
-            Self::CheckoutRelative {
+            Self::ManifestNeeded {
                 name,
                 manifest,
                 folder,
-                paths,
             } => vec![
                 Field::new("name", name),
                 Field::new("manifest", shown(manifest)),
                 Field::new("folder", folder),
-                Field::new("paths", FieldValue::list(paths.iter())),
+            ],
+            Self::Incomplete {
+                name,
+                folder,
+                repository,
+            } => vec![
+                Field::new("name", name),
+                Field::new("folder", folder),
+                Field::new("repository", shown(repository)),
+            ],
+            Self::ResumeBlocked { name, path, reason } => vec![
+                Field::new("name", name),
+                Field::new("path", shown(path)),
+                Field::new("reason", reason),
             ],
             Self::NoHome => Vec::new(),
             Self::RelativeRoot { value } => vec![Field::new("value", shown(value))],
@@ -1045,6 +1097,35 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
     }
 }
 
+/// Returns the message of a failure of `mxv add` that leaves the workspace
+/// as it was: a workspace manifest that it needs, or an unfinished
+/// checkout.
+fn add_message(failure: &MxvFailure) -> String {
+    match failure {
+        MxvFailure::ManifestNeeded {
+            name,
+            manifest,
+            folder,
+        } => format!(
+            "the workspace {name} has one checkout, {folder}, and a workspace manifest {} whose paths are relative to that checkout, so mxv cannot tell which paths the workspace manifest of two checkouts names",
+            shown(manifest)
+        ),
+        MxvFailure::Incomplete {
+            name,
+            folder,
+            repository,
+        } => format!(
+            "an earlier `mxv add` to the workspace {name} stopped before it finished the checkout {folder} of {}",
+            shown(repository)
+        ),
+        MxvFailure::ResumeBlocked { name, path, reason } => format!(
+            "mxv cannot resume the unfinished checkout {} of the workspace {name}, because {reason}",
+            shown(path)
+        ),
+        _ => String::new(),
+    }
+}
+
 impl fmt::Display for MxvFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1148,18 +1229,9 @@ impl fmt::Display for MxvFailure {
                 formatter,
                 "the workspace {name} holds git worktrees, and mxv adds checkouts only to a workspace of clones"
             ),
-            Self::CheckoutRelative {
-                name,
-                manifest,
-                folder,
-                paths,
-            } => write!(
-                formatter,
-                "the workspace manifest {} of the workspace {name} names {} relative to the checkout {folder}, which would name other places once the workspace has two checkouts: {}",
-                shown(manifest),
-                if paths.len() == 1 { "a path" } else { "paths" },
-                paths.join(", ")
-            ),
+            Self::ManifestNeeded { .. } | Self::Incomplete { .. } | Self::ResumeBlocked { .. } => {
+                formatter.write_str(&add_message(self))
+            }
             Self::NoHome => formatter.write_str(
                 "mxv cannot find your home directory, which holds its state, config and data directories",
             ),
@@ -1212,7 +1284,9 @@ impl std::error::Error for MxvFailure {
             | Self::BadFolder { .. }
             | Self::CheckoutNotFound { .. }
             | Self::Worktrees { .. }
-            | Self::CheckoutRelative { .. }
+            | Self::ManifestNeeded { .. }
+            | Self::Incomplete { .. }
+            | Self::ResumeBlocked { .. }
             | Self::IgnoredFiles { .. }
             | Self::ManifestDisposable { .. }
             | Self::Changed { .. }

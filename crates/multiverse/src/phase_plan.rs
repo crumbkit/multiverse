@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::num::NonZeroU16;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -237,13 +237,14 @@ fn placed(
     if !process.cwd.is_absolute() {
         return Ok((inputs.checkout.to_path_buf(), relative(&process.cwd)));
     }
+    // `api/../web` in the workspace manifest runs in the checkout `web`, so
+    // the path is resolved before its root is chosen.
+    let cwd = lexical(&process.cwd);
     inputs
         .roots
         .iter()
         .find_map(|root| {
-            process
-                .cwd
-                .strip_prefix(root)
+            cwd.strip_prefix(lexical(root))
                 .ok()
                 .map(|rest| (root.clone(), relative(rest)))
         })
@@ -254,6 +255,23 @@ fn placed(
                 process.cwd.display()
             ),
         })
+}
+
+/// Returns `path` with each `.` dropped and each `..` removing the name
+/// before it, without reading the file system. A `..` at the root stays at
+/// the root.
+fn lexical(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved
 }
 
 /// Returns the plan of every process and container of `inputs.manifest`,

@@ -441,3 +441,50 @@ fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
         unrunnable.message
     );
 }
+
+/// Returns the source and the `cwd` that the plan gives the process `api`
+/// of [`APP`] when its `cwd` is `cwd`, in a workspace whose checkouts are
+/// `api` and `web`.
+fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::Unrunnable> {
+    let mut manifest = manifest(APP);
+    manifest.processes.get_mut("api").unwrap().cwd = PathBuf::from(cwd);
+    let ports = BTreeMap::from([("api".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let built = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: Path::new("/work/triage"),
+        roots: vec![
+            PathBuf::from("/work/triage/api"),
+            PathBuf::from("/work/triage/web"),
+            PathBuf::from("/work/triage"),
+        ],
+        ports: &ports,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    })?;
+    let plan = built.plan.app(&app("api")).unwrap();
+    Ok((plan.source.clone(), plan.processes[0].cwd.clone()))
+}
+
+#[test]
+fn a_cwd_that_passes_through_one_checkout_into_another_runs_from_the_other() {
+    assert_eq!(
+        placed_at("/work/triage/api/../web/src").unwrap(),
+        (
+            Source::checkout(PathBuf::from("/work/triage/web"), None),
+            Some(PathBuf::from("src"))
+        )
+    );
+}
+
+#[test]
+fn a_cwd_that_leaves_the_workspace_is_unrunnable() {
+    let Err(unrunnable) = placed_at("/work/triage/../elsewhere") else {
+        panic!("a cwd outside the workspace built a plan");
+    };
+    assert_eq!(unrunnable.unit.as_deref(), Some("api"));
+}

@@ -322,7 +322,7 @@ fn add_of_a_folder_the_workspace_has_fails_with_name_taken() {
 }
 
 #[test]
-fn add_refuses_a_workspace_manifest_with_paths_inside_its_one_checkout_and_says_how_to_move_them() {
+fn add_to_a_workspace_with_a_workspace_manifest_needs_the_next_manifest_and_installs_it() {
     let setup = Setup::new();
     let file = setup.root().join("triage.toml");
     write_text(
@@ -340,14 +340,99 @@ fn add_refuses_a_workspace_manifest_with_paths_inside_its_one_checkout_and_says_
     assert_eq!(exit, 0, "{document}");
     let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "web"]);
     assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::needed", "{document}");
+    assert!(document.to_string().contains("--manifest"), "{document}");
+    assert!(!setup.workspace("triage").join("web").exists());
+    let next = setup.root().join("next.toml");
+    let text = "disposable = [\"api/data/cache/\", \"web/coverage/\"]\n\n[processes.server]\nargv = [\"true\"]\ncwd = \"api\"\n";
+    write_text(&next, text);
+    let (exit, document) = setup.json(&[
+        "add",
+        "-w",
+        "triage",
+        "--repo",
+        "web",
+        "--manifest",
+        "next.toml",
+    ]);
+    assert_eq!(exit, 0, "{document}");
     assert_eq!(
-        document["code"], "mxv::manifest::checkout_relative",
+        fs::read_to_string(setup.workspace("triage").join("mxv.toml")).unwrap(),
+        text
+    );
+    assert_eq!(fs::read_to_string(&next).unwrap(), text);
+}
+
+#[test]
+fn add_refuses_a_manifest_that_refers_to_a_name_no_checkout_declares_and_keeps_the_workspace() {
+    let setup = Setup::new();
+    setup.created("triage", &["api"]);
+    write_text(
+        &setup.root().join("next.toml"),
+        "[processes.proxy]\nargv = [\"true\"]\ndepends_on = [\"web-missing\"]\n",
+    );
+    let (exit, document) = setup.json(&[
+        "add",
+        "-w",
+        "triage",
+        "--repo",
+        "web",
+        "--manifest",
+        "next.toml",
+    ]);
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document["code"]
+            .as_str()
+            .is_some_and(|code| code.starts_with("mxv::manifest::")),
         "{document}"
     );
-    let text = document.to_string();
-    assert!(text.contains("processes.server.cwd"), "{document}");
-    assert!(text.contains("api/"), "{document}");
     assert!(!setup.workspace("triage").join("web").exists());
+    assert!(!setup.workspace("triage").join("mxv.toml").exists());
+}
+
+#[test]
+fn an_add_that_stopped_partway_is_resumed_by_the_same_add_and_refuses_any_other() {
+    let setup = Setup::new();
+    setup.repository("docs");
+    let workspace = setup.created("triage", &["api", "web"]);
+    // A run killed after it wrote the record and before it finished the
+    // clone leaves the checkout without a commit and its directory partial.
+    let path = setup.root().join("state/mxv/workspaces/triage.json");
+    let mut record: Value = serde_json::from_str(&setup.record("triage")).unwrap();
+    record["checkouts"][1]["commit"] = Value::Null;
+    write_text(&path, &serde_json::to_string_pretty(&record).unwrap());
+    fs::remove_dir_all(workspace.join("web")).unwrap();
+    fs::create_dir_all(workspace.join("web/.git/objects")).unwrap();
+
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "docs"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::incomplete", "{document}");
+    let text = document.to_string();
+    assert!(text.contains("--as web"), "{document}");
+    assert!(!workspace.join("docs").exists());
+
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "web"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(branch(&workspace.join("web")), "triage");
+    let record: Value = serde_json::from_str(&setup.record("triage")).unwrap();
+    assert!(record["checkouts"][1]["commit"].is_string(), "{record}");
+    let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("`web/`"), "{agents}");
+}
+
+#[test]
+fn add_refuses_a_repository_whose_name_is_not_a_folder_name() {
+    let setup = Setup::new();
+    setup.repository("_infra");
+    setup.created("triage", &["api"]);
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "_infra"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::checkout::invalid_name",
+        "{document}"
+    );
+    assert!(document.to_string().contains("--as"), "{document}");
 }
 
 #[test]
@@ -482,6 +567,32 @@ fn up_runs_each_checkouts_process_in_its_own_checkout_and_down_stops_them() {
     }
     let (exit, document) = setup.json(&["down", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
+}
+
+#[test]
+fn status_reports_a_checkout_without_its_own_git_directory_as_a_problem() {
+    let setup = Setup::new();
+    // The workspace root sits inside a repository, so a checkout that
+    // loses its `.git` would read that repository's branch.
+    git(
+        &setup.root(),
+        &["init", "--quiet", "--initial-branch=outer"],
+    );
+    let workspace = setup.created("triage", &["api", "web"]);
+    fs::remove_dir_all(workspace.join("web").join(".git")).unwrap();
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    let web = &status["summary"]["checkouts"][1];
+    assert_eq!(web["name"], "web", "{status}");
+    assert!(web["branch"].is_null(), "{status}");
+    assert!(
+        web["problem"]
+            .as_str()
+            .unwrap()
+            .contains("no .git of its own"),
+        "{status}"
+    );
+    assert_eq!(status["summary"]["checkouts"][0]["branch"], "triage");
 }
 
 #[test]
