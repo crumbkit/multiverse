@@ -225,7 +225,8 @@ fn declare<'a>(
 }
 
 /// Moves the units, ports and warnings of `from` into `into`, with each
-/// process's `cwd` made absolute below `root`.
+/// process's `cwd` and each write path of its permissions other than
+/// `$STATE` made absolute below `root`.
 fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
     for (name, mut process) in from.processes {
         process.cwd = if process.cwd == Path::new(".") {
@@ -233,6 +234,19 @@ fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
         } else {
             root.join(&process.cwd)
         };
+        if let Some(permissions) = &mut process.permissions {
+            permissions.write = permissions
+                .write
+                .iter()
+                .map(|path| {
+                    if path == crate::manifest::STATE {
+                        path.clone()
+                    } else {
+                        root.join(path).display().to_string()
+                    }
+                })
+                .collect();
+        }
         into.processes.insert(name, process);
     }
     into.containers.extend(from.containers);
@@ -392,6 +406,7 @@ impl Workspace {
             for (_, renamed) in self.renamed_checkout_manifests().into_iter().flatten() {
                 joined.add(&renamed);
             }
+            self.join_checkouts(&mut joined);
         }
         Manifest::read_file_joining(&path, self.manifest_root(), &joined)
     }
@@ -438,6 +453,15 @@ impl Workspace {
         })
     }
 
+    /// Adds the folder of each of the workspace's checkouts to `joined`.
+    fn join_checkouts(&self, joined: &mut Joined) {
+        for checkout in &self.checkouts {
+            if let Some(folder) = checkout.path.file_name() {
+                joined.add_checkout(&folder.to_string_lossy());
+            }
+        }
+    }
+
     /// Returns the merged manifest with `text`, when it is given, in place
     /// of the workspace manifest's file.
     fn merged_from(&self, text: Option<&str>) -> Result<Option<Manifest>, ManifestError> {
@@ -448,6 +472,7 @@ impl Workspace {
             joined.add(&renamed);
             checkouts.push((checkout.path.join(MANIFEST_FILE), checkout, renamed));
         }
+        self.join_checkouts(&mut joined);
         let shared = match (text, self.workspace_manifest_input()) {
             (Some(text), _) => {
                 let path = self.manifest_file();

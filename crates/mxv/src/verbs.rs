@@ -132,6 +132,7 @@ fn joined_names(workspaces: &Workspaces<Git>, repos: &[Repo]) -> Result<Joined, 
     let mut joined = Joined::default();
     for repo in repos {
         let (source, folder) = workspaces.resolve(repo)?;
+        joined.add_checkout(&folder);
         if let Ok(Some(own)) = Manifest::read(&source) {
             let prefix = checkout_prefix(&folder);
             joined.add(&own.renamed(&|name| prefixed(&prefix, name)));

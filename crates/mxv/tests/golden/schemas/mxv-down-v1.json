@@ -477,14 +477,14 @@
           ]
         },
         "sandbox": {
-          "description": "Whether phase runs a host process under its sandbox, as phase\ndescribes it, such as `unsandboxed (its app declares no\npermissions)`, or null for a container and for a process that\nphase does not run.",
+          "description": "Whether phase runs a host process under its sandbox, as phase\ndescribes it: `seatbelt (partial: <what it leaves open>)` on macOS,\nor `unsandboxed (<reason>)`, such as `unsandboxed (its app declares\nno permissions)` for a process whose manifest has no `permissions`\ntable. It is null for a container and for a process that phase\ndoes not run.",
           "type": [
             "string",
             "null"
           ]
         },
         "notes": {
-          "description": "What `up` and `restart` found about the process beside its state:\na warning when the process's running container still has its\nearlier secret files, because `up` could not rewrite them, and an\ninfo line when `up` rewrote them. Every other command prints none.",
+          "description": "What `up` and `restart` found about the process beside its state:\na warning when the process's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and a warning when `up` left a host\nprocess running that started before its manifest gained or lost\nits `permissions` table, which names the `mxv restart` that applies\nthe change. Every other command prints none.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/NoteRow"
@@ -502,6 +502,7 @@
         "reason",
         "group_alive",
         "ports",
+        "sandbox",
         "notes"
       ]
     },

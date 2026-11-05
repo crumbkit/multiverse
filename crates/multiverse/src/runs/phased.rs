@@ -23,8 +23,8 @@ use phase::container::{
 };
 use phase::{
     AppName, AppOutcome, Cancel, Handle, LineSink, LogLine, LogNote, LogRequest, Note, PhaseError,
-    ProcessName, Report, RunnerKind, Selection, StartProblem, StatusRow, Target, UnknownReason,
-    UpDeadlines, WorkspaceId,
+    ProcessName, Report, RunnerKind, Sandboxing, Selection, StartProblem, StatusRow, Target,
+    UnknownReason, UpDeadlines, WorkspaceId,
 };
 
 use super::{
@@ -180,6 +180,39 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
         }
     }
     notes
+}
+
+/// The reason that phase gives for a host process whose app declares no
+/// permissions. The end-to-end tests of `status` hold the same sentence,
+/// so they fail if phase changes it.
+const UNDECLARED: &str = "its app declares no permissions";
+
+/// Returns the warning for the host process `unit` of the workspace
+/// `workspace`, which `up` found already running, when phase recorded it
+/// as started with or without permissions and its manifest now asks for
+/// the other: `wants` is true when the manifest gives it a `permissions`
+/// table. It returns `None` when the two agree, or when `row` records no
+/// sandbox state. A process recorded as unsandboxed for another reason,
+/// such as a platform without a sandbox, declared its permissions.
+fn stale_sandbox(workspace: &str, unit: &str, wants: bool, row: &StatusRow) -> Option<ProcessNote> {
+    let declared = !matches!(
+        row.sandbox.as_ref()?,
+        Sandboxing::Unsandboxed { reason, .. } if reason == UNDECLARED
+    );
+    let restart = format!("mxv restart -w {workspace} {unit}");
+    match (wants, declared) {
+        (true, false) => Some(ProcessNote::SandboxStale {
+            message: format!(
+                "{unit} still runs unsandboxed, because it was running before its manifest gave it permissions; run `{restart}` to run it under the sandbox"
+            ),
+        }),
+        (false, true) => Some(ProcessNote::SandboxStale {
+            message: format!(
+                "{unit} still runs as its earlier permissions allowed, because it was running before its manifest dropped them; run `{restart}` to run it unsandboxed"
+            ),
+        }),
+        _ => None,
+    }
 }
 
 /// Returns the exit code and the signal that mxv reports for a process
@@ -701,6 +734,23 @@ impl Runs {
         }
         let rows = self.phase_rows(workspace, Some(manifest))?;
         let mut notes = notes_of(&report);
+        for app in &report.apps {
+            let unit = app.app.as_str();
+            if app.outcome != AppOutcome::AlreadyRunning {
+                continue;
+            }
+            let (Some(process), Some(row)) = (manifest.processes.get(unit), rows.get(unit)) else {
+                continue;
+            };
+            if let Some(note) = stale_sandbox(
+                workspace.name.as_str(),
+                unit,
+                process.permissions.is_some(),
+                row,
+            ) {
+                notes.entry(unit.to_owned()).or_default().push(note);
+            }
+        }
         Ok(UpOutcome::Up(
             order
                 .iter()

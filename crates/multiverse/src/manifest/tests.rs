@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::manifest::{
-    DEFAULT_READY_TIMEOUT, Manifest, ManifestError, ManifestProblem, Published, ReadyCheck, Unit,
+    DEFAULT_READY_TIMEOUT, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
+    Published, ReadyCheck, Unit,
 };
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
@@ -137,7 +138,7 @@ fn a_misspelt_name_of_one_of_mxvs_tables_parses_with_a_warning_that_names_it() {
 #[test]
 fn the_tables_of_phase_and_of_other_tools_parse_without_a_warning() {
     let manifest = parse(
-        "[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[permissions]\na = 1\n[needs.db]\na = 1\n[service.web]\na = 1\n[deploy]\na = 1\n",
+        "[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[needs.db]\na = 1\n[service.web]\na = 1\n[deploy]\na = 1\n",
     )
     .unwrap();
     assert_eq!(manifest.warnings, Vec::<String>::new());
@@ -821,4 +822,384 @@ fn a_clone_glob_that_could_match_any_ignored_directory_fails_as_invalid() {
         panic!("{problem:?}");
     };
     assert!(!message.contains("config file"), "{message}");
+}
+
+/// The manifest of an application whose four processes each run under the
+/// sandbox, with the containers that two of them use.
+const SANDBOXED: &str = r#"
+ports = ["auth", "api", "web", "dynamodb", "localstack"]
+
+[containers.dynamodb]
+image = "amazon/dynamodb-local:2.5.4"
+ports = { 8000 = "dynamodb" }
+
+[containers.localstack]
+image = "localstack/localstack:4.0.3"
+ports = { 4566 = "localstack" }
+
+[processes.auth]
+argv = ["cargo", "run", "--bin", "auth"]
+ports = { PORT = "auth" }
+listen = "auth"
+permissions = { write = ["target"], listen = ["auth"] }
+
+[processes.server]
+argv = ["cargo", "run", "--bin", "server"]
+ports = { PORT = "api", AUTH_PORT = "auth", DYNAMODB_PORT = "dynamodb", LOCALSTACK_PORT = "localstack" }
+listen = "api"
+depends_on = ["auth", "dynamodb", "localstack"]
+
+[processes.server.permissions]
+write = ["target"]
+listen = ["api"]
+connect = ["auth", "dynamodb", "localstack"]
+
+[processes.worker]
+argv = ["cargo", "run", "--bin", "worker"]
+ports = { DYNAMODB_PORT = "dynamodb", LOCALSTACK_PORT = "localstack" }
+ready = { log = "^worker ready" }
+depends_on = ["dynamodb", "localstack"]
+permissions = { write = ["target"], connect = ["dynamodb", "localstack"] }
+
+[processes.web]
+argv = ["pnpm", "run", "dev"]
+cwd = "web"
+ports = { PORT = "web", API_PORT = "api", AUTH_PORT = "auth" }
+listen = "web"
+depends_on = ["server", "auth"]
+permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"], connect = ["server", "auth"] }
+"#;
+
+/// Returns a manifest whose process `app` listens on `api`, receives
+/// `other` and depends on the container `db`, with the permissions table
+/// `permissions`, which starts on line 12.
+fn with_permissions(permissions: &str) -> String {
+    format!(
+        "ports = [\"api\", \"other\", \"db\", \"spare\"]\n\n[containers.db]\nimage = \"postgres:17.2\"\nports = {{ 5432 = \"db\" }}\n\n[processes.app]\nargv = [\"true\"]\nports = {{ PORT = \"api\", OTHER_PORT = \"other\" }}\nlisten = \"api\"\ndepends_on = [\"db\"]\n{permissions}"
+    )
+}
+
+/// Returns the problem of the manifest of [`with_permissions`].
+fn permissions_problem(permissions: &str) -> (Option<usize>, ManifestProblem) {
+    problem(&with_permissions(permissions))
+}
+
+/// Returns the message of the invalid manifest of [`permissions_problem`].
+fn permissions_message(permissions: &str) -> (Option<usize>, String) {
+    match permissions_problem(permissions) {
+        (line, ManifestProblem::Invalid { message }) => (line, message),
+        other => panic!("expected an invalid manifest, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_process_with_permissions_parses_its_writes_listen_ports_and_connections() {
+    let manifest = parse(SANDBOXED).unwrap();
+    let server = manifest.processes["server"].permissions.as_ref().unwrap();
+    assert_eq!(server.write, BTreeSet::from(["target".to_owned()]));
+    assert_eq!(server.listen, BTreeSet::from(["api".to_owned()]));
+    assert_eq!(
+        server.connect,
+        BTreeSet::from(["auth", "dynamodb", "localstack"].map(str::to_owned))
+    );
+    let web = manifest.processes["web"].permissions.as_ref().unwrap();
+    assert_eq!(
+        web.write,
+        BTreeSet::from(["web/node_modules/.vite", "web/dist"].map(str::to_owned))
+    );
+    assert_eq!(
+        web.connect,
+        BTreeSet::from(["server", "auth"].map(str::to_owned))
+    );
+    let worker = manifest.processes["worker"].permissions.as_ref().unwrap();
+    assert!(worker.listen.is_empty());
+}
+
+#[test]
+fn an_empty_permissions_table_grants_nothing_and_an_absent_one_leaves_the_process_unsandboxed() {
+    let manifest = parse(
+        "[processes.a]\nargv = [\"true\"]\n\n[processes.a.permissions]\n\n[processes.b]\nargv = [\"true\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.processes["a"].permissions,
+        Some(Permissions::default())
+    );
+    assert_eq!(manifest.processes["b"].permissions, None);
+}
+
+#[test]
+fn a_write_path_may_be_state() {
+    let manifest = parse(
+        "[processes.a]\nargv = [\"true\"]\npermissions = { write = [\"$STATE\", \"./out\"] }\n",
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.processes["a"].permissions.as_ref().unwrap().write,
+        BTreeSet::from(["$STATE", "./out"].map(str::to_owned))
+    );
+}
+
+#[test]
+fn a_write_path_that_is_absolute_leaves_the_checkout_or_names_all_of_it_fails_with_its_line() {
+    for (path, says) in [
+        ("/tmp/out", "absolute"),
+        ("../other", "`..`"),
+        ("web/../target", "`..`"),
+        ("", "empty"),
+        (".", "whole checkout"),
+        ("$HOME/out", "$STATE"),
+        ("out\\\\dir", "backslash"),
+    ] {
+        let (line, message) = permissions_message(&format!(
+            "\n[processes.app.permissions]\nwrite = [{path:?}]\n"
+        ));
+        assert_eq!(line, Some(14), "{path}");
+        assert!(message.contains("`app`"), "{path}: {message}");
+        assert!(message.contains(says), "{path}: {message}");
+    }
+}
+
+#[test]
+fn a_listen_port_that_the_process_neither_listens_on_nor_receives_fails_with_its_line() {
+    let (line, message) = permissions_message("permissions = { listen = [\"api\", \"spare\"] }\n");
+    assert_eq!(line, Some(12));
+    assert!(message.contains("`spare`"), "{message}");
+    assert!(message.contains("receive"), "{message}");
+}
+
+#[test]
+fn a_listen_port_that_the_manifest_does_not_declare_fails_with_its_line() {
+    let (line, message) = permissions_message("permissions = { listen = [\"api\", \"nope\"] }\n");
+    assert_eq!(line, Some(12));
+    assert!(message.contains("`nope`"), "{message}");
+    assert!(message.contains("does not declare"), "{message}");
+}
+
+#[test]
+fn a_port_that_the_process_receives_may_be_a_listen_port_of_its_permissions() {
+    let manifest = parse(&with_permissions(
+        "permissions = { listen = [\"api\", \"other\"] }\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        manifest.processes["app"]
+            .permissions
+            .as_ref()
+            .unwrap()
+            .listen,
+        BTreeSet::from(["api", "other"].map(str::to_owned))
+    );
+}
+
+#[test]
+fn a_sandboxed_process_whose_permissions_do_not_name_its_listen_port_fails_with_its_line() {
+    let (line, message) = permissions_message("permissions = { listen = [\"other\"] }\n");
+    assert_eq!(line, Some(12));
+    assert!(message.contains("listens on `api`"), "{message}");
+    assert!(message.contains("listen = [\"api\"]"), "{message}");
+}
+
+#[test]
+fn a_connection_to_a_unit_that_the_manifest_does_not_declare_fails_with_its_line() {
+    let (line, message) = permissions_message(
+        "permissions = { listen = [\"api\"], connect = [\"db\", \"example.com\"] }\n",
+    );
+    assert_eq!(line, Some(12));
+    assert!(message.contains("`example.com`"), "{message}");
+    assert!(message.contains("external host"), "{message}");
+}
+
+#[test]
+fn a_connection_to_a_unit_that_the_process_does_not_depend_on_fails_and_says_to_depend_on_it() {
+    let text = "ports = [\"api\"]\n\n[processes.api]\nargv = [\"true\"]\nports = { PORT = \"api\" }\nlisten = \"api\"\n\n[processes.web]\nargv = [\"true\"]\npermissions = { connect = [\"api\"] }\n";
+    let (line, problem) = problem(text);
+    assert_eq!(line, Some(10));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(message.contains("depends_on"), "{message}");
+    assert!(message.contains("`api`"), "{message}");
+}
+
+#[test]
+fn secrets_in_a_processs_permissions_fails_as_an_unknown_key() {
+    let (line, problem) =
+        permissions_problem("\n[processes.app.permissions]\nsecrets = [\"TOKEN\"]\n");
+    assert_eq!(line, Some(14));
+    assert_eq!(
+        problem,
+        ManifestProblem::UnknownKey {
+            key: "secrets".to_owned()
+        }
+    );
+}
+
+#[test]
+fn permissions_of_a_container_fail_with_its_line_and_say_that_only_processes_take_them() {
+    let (line, message) = match container_problem(
+        "image = \"postgres:17.2\"\npermissions = { write = [\"data\"] }\n",
+    ) {
+        (line, ManifestProblem::Invalid { message }) => (line, message),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(line, Some(5));
+    assert!(message.contains("`db`"), "{message}");
+    assert!(message.contains("host process"), "{message}");
+}
+
+#[test]
+fn a_top_level_permissions_table_fails_with_its_line_and_names_the_processs_table() {
+    let (line, problem) = problem("ports = []\n\n[permissions]\nwrite = [\"target\"]\n");
+    assert_eq!(line, Some(3));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(
+        message.contains("[processes.<name>.permissions]"),
+        "{message}"
+    );
+}
+
+#[test]
+fn renaming_a_manifest_renames_the_listen_ports_and_connections_of_its_permissions() {
+    let renamed = parse(SANDBOXED)
+        .unwrap()
+        .renamed(&|name| format!("inbox-{name}"));
+    let server = renamed.processes["inbox-server"]
+        .permissions
+        .as_ref()
+        .unwrap();
+    assert_eq!(server.write, BTreeSet::from(["target".to_owned()]));
+    assert_eq!(server.listen, BTreeSet::from(["inbox-api".to_owned()]));
+    assert_eq!(
+        server.connect,
+        BTreeSet::from(["inbox-auth", "inbox-dynamodb", "inbox-localstack"].map(str::to_owned))
+    );
+}
+
+#[test]
+fn a_listen_permission_on_another_processs_listen_port_fails_with_its_line() {
+    let text = "ports = [\"api\", \"web\"]\n\n[processes.api]\nargv = [\"true\"]\nports = { PORT = \"api\" }\nlisten = \"api\"\n\n[processes.web]\nargv = [\"true\"]\nports = { PORT = \"web\", API_PORT = \"api\" }\nlisten = \"web\"\ndepends_on = [\"api\"]\npermissions = { listen = [\"web\", \"api\"] }\n";
+    let (line, problem) = problem(text);
+    assert_eq!(line, Some(13));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(
+        message.contains("`api` listens on or publishes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_listen_permission_on_a_containers_published_port_fails_with_its_line() {
+    let text = "ports = [\"db\"]\n\n[containers.db]\nimage = \"postgres:17.2\"\nports = { 5432 = \"db\" }\n\n[processes.app]\nargv = [\"true\"]\nports = { DB_PORT = \"db\" }\ndepends_on = [\"db\"]\npermissions = { listen = [\"db\"] }\n";
+    let (line, problem) = problem(text);
+    assert_eq!(line, Some(11));
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
+    };
+    assert!(
+        message.contains("`db` listens on or publishes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_listen_permission_on_a_port_that_a_joined_unit_listens_on_fails_with_its_line() {
+    let joined = Joined {
+        ports: vec!["api-http".to_owned()],
+        units: vec!["api-server".to_owned()],
+        listened: vec![("api-http".to_owned(), "api-server".to_owned())],
+        checkouts: vec!["api".to_owned()],
+    };
+    let error = Manifest::parse_joining(
+        "[processes.proxy]\nargv = [\"true\"]\nports = { UPSTREAM = \"api-http\" }\npermissions = { listen = [\"api-http\"] }\n",
+        Path::new("/ws/mxv.toml"),
+        &joined,
+    )
+    .unwrap_err();
+    assert_eq!(error.line, Some(4));
+    let ManifestProblem::Invalid { message } = error.problem else {
+        panic!("{:?}", error.problem);
+    };
+    assert!(
+        message.contains("`api-server` listens on or publishes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_write_path_inside_the_checkouts_git_fails_with_its_line_in_any_case() {
+    for path in [".git", ".git/hooks", "./.GIT/x", ".Git"] {
+        let (line, message) = permissions_message(&format!(
+            "\n[processes.app.permissions]\nwrite = [{path:?}]\nlisten = [\"api\"]\n"
+        ));
+        assert_eq!(line, Some(14), "{path}");
+        assert!(message.contains("`.git`"), "{path}: {message}");
+    }
+}
+
+/// Returns the problem of a workspace manifest of the checkouts `api` and
+/// `web` whose process `proxy` runs in `api` and may write `write`.
+fn workspace_write_message(write: &str) -> String {
+    let joined = Joined {
+        checkouts: vec!["api".to_owned(), "web".to_owned()],
+        ..Joined::default()
+    };
+    let error = Manifest::parse_joining(
+        &format!("[processes.proxy]\nargv = [\"true\"]\ncwd = \"api\"\npermissions = {{ write = [{write:?}] }}\n"),
+        Path::new("/ws/mxv.toml"),
+        &joined,
+    )
+    .unwrap_err();
+    assert_eq!(error.line, Some(4), "{write}");
+    match error.problem {
+        ManifestProblem::Invalid { message } => message,
+        other => panic!("{write}: {other:?}"),
+    }
+}
+
+#[test]
+fn a_workspace_manifests_write_path_that_names_a_whole_checkout_fails_with_its_line() {
+    let message = workspace_write_message("api");
+    assert!(message.contains("whole checkout `api`"), "{message}");
+    assert!(
+        message.contains("relative to the workspace's directory"),
+        "{message}"
+    );
+    assert!(!message.contains("relative to the checkout"), "{message}");
+}
+
+#[test]
+fn a_workspace_manifests_write_path_outside_every_checkout_fails_with_its_line() {
+    let message = workspace_write_message("notes/out");
+    assert!(
+        message.contains("none of the workspace's checkouts"),
+        "{message}"
+    );
+    assert!(message.contains("`api`, `web`"), "{message}");
+}
+
+#[test]
+fn a_workspace_manifests_write_path_inside_a_checkout_parses() {
+    let joined = Joined {
+        checkouts: vec!["api".to_owned(), "web".to_owned()],
+        ..Joined::default()
+    };
+    let manifest = Manifest::parse_joining(
+        "[processes.proxy]\nargv = [\"true\"]\ncwd = \"api\"\npermissions = { write = [\"api/target\"] }\n",
+        Path::new("/ws/mxv.toml"),
+        &joined,
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.processes["proxy"]
+            .permissions
+            .as_ref()
+            .unwrap()
+            .write,
+        BTreeSet::from(["api/target".to_owned()])
+    );
 }
