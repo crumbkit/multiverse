@@ -253,7 +253,7 @@ fn linux_reports_a_process_under_landlock_as_unsandboxed_and_says_why() {
     );
     assert_eq!(
         Sandboxing::seatbelt().to_string(),
-        "seatbelt (partial: its listening ports accept connections from other machines on the network)"
+        "seatbelt (partial: the sandbox cannot limit its listening ports to the loopback interface)"
     );
 }
 
@@ -765,8 +765,8 @@ fn a_homebrew_path_entry_lets_the_app_read_its_programs_but_never_its_data_or_co
 /// Makes a Homebrew prefix in `root` whose `etc` holds OpenSSL's
 /// directories, each with its configuration, certificates, a private key
 /// and a `cert.pem` link to the CA bundle in `etc/ca-certificates`, as
-/// Homebrew lays them out, and another configuration directory, and
-/// returns it.
+/// Homebrew lays them out, its system git configuration, and another
+/// configuration directory, and returns it.
 fn homebrew_prefix_in(root: &std::path::Path) -> PathBuf {
     let prefix = root.join("homebrew");
     for dir in ["etc/openssl@3", "etc/openssl"] {
@@ -797,6 +797,11 @@ fn homebrew_prefix_in(root: &std::path::Path) -> PathBuf {
     }
     std::fs::create_dir_all(prefix.join("etc/other")).unwrap();
     std::fs::create_dir_all(prefix.join("etc/opensslish")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test writes the system git configuration of the prefix"
+    )]
+    std::fs::write(prefix.join("etc/gitconfig"), "[core]\n").unwrap();
     prefix
 }
 
@@ -808,6 +813,7 @@ fn a_homebrew_prefix_lets_the_app_read_its_openssl_configuration_but_no_other_co
     let read = homebrew_read(&prefix);
 
     assert!(read.contains(&prefix.join("bin")));
+    assert!(read.contains(&prefix.join("etc/gitconfig")));
     for dir in ["etc/openssl@3", "etc/openssl"] {
         for name in ["openssl.cnf", "cert.pem", "certs"] {
             assert!(read.contains(&prefix.join(dir).join(name)), "{dir}/{name}");
@@ -833,13 +839,13 @@ fn a_spec_records_each_toolchain_path_that_is_a_link_so_the_app_can_follow_it() 
     add_toolchain(
         &mut spec.read,
         &mut spec.read_only,
-        &mut spec.links,
+        &mut spec.metadata,
         &homebrew_read(&prefix),
         &|_| false,
     );
 
     let link = prefix.join("etc/openssl@3/cert.pem");
-    assert!(spec.links.contains(&link), "{:?}", spec.links);
+    assert!(spec.metadata.contains(&link), "{:?}", spec.metadata);
     assert!(
         spec.read
             .contains(&prefix.join("etc/ca-certificates/cert.pem"))
@@ -851,9 +857,27 @@ fn a_spec_records_each_toolchain_path_that_is_a_link_so_the_app_can_follow_it() 
     );
     assert!(
         !spec
-            .links
+            .metadata
             .contains(&prefix.join("etc/openssl@3/openssl.cnf"))
     );
+}
+
+#[test]
+fn a_spec_lets_the_app_stat_only_the_git_configuration_in_the_home_directory() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    for name in [".gitconfig", ".config/git", ".config/git/config"] {
+        assert!(spec.metadata.contains(&fixture.home().join(name)), "{name}");
+    }
+    assert!(
+        !spec
+            .metadata
+            .contains(&fixture.home().join(".cargo/config.toml"))
+    );
+    assert!(!spec.read.contains(&fixture.home().join(".gitconfig")));
 }
 
 #[test]
@@ -1217,6 +1241,63 @@ fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_loca
     assert_eq!(read, ["bin", "lib", "local/bin", "local/share"]);
 }
 
+/// Returns the variables that `command` sets or removes, in name order.
+fn environment(command: &std::process::Command) -> Vec<(String, Option<String>)> {
+    command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_sandboxed_command_gets_the_sandbox_temporary_directory_and_reads_no_global_git_configuration()
+{
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the environment it sets and never starts the command"
+    )]
+    let mut command = std::process::Command::new("true");
+    command.env("TMPDIR", "/elsewhere");
+
+    super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+
+    assert_eq!(
+        environment(&command),
+        vec![
+            ("GIT_CONFIG_GLOBAL".to_owned(), Some("/dev/null".to_owned())),
+            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn a_sandboxed_command_keeps_the_git_configuration_that_its_environment_names() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the environment it sets and never starts the command"
+    )]
+    let mut command = std::process::Command::new("true");
+    command.env("GIT_CONFIG_GLOBAL", "/plan/gitconfig");
+
+    super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+
+    assert_eq!(
+        environment(&command),
+        vec![
+            (
+                "GIT_CONFIG_GLOBAL".to_owned(),
+                Some("/plan/gitconfig".to_owned())
+            ),
+            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
+        ]
+    );
+}
+
 /// The tests of phase's Seatbelt rules, which are plain text, so they run
 /// on the Linux pull-request lane too.
 mod rules {
@@ -1318,12 +1399,12 @@ mod rules {
     }
 
     #[test]
-    fn the_profile_lets_the_app_read_the_metadata_of_each_link_of_the_spec() {
+    fn the_profile_lets_the_app_read_only_the_metadata_of_each_metadata_path_of_the_spec() {
         let fixture = Fixture::new();
         let api = fixture.app(sh("true"), 41_000);
         let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
         let link = fixture.outside().join("cert.pem");
-        spec.links.insert(link.clone());
+        spec.metadata.insert(link.clone());
 
         let rules = rules(&spec);
 
@@ -1335,19 +1416,17 @@ mod rules {
     }
 
     #[test]
-    fn the_profile_lets_a_path_through_the_var_link_resolve() {
+    fn the_profile_lets_a_path_through_the_var_or_etc_link_resolve() {
         let fixture = Fixture::new();
         let api = fixture.app(sh("true"), 41_000);
         let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
 
         let rules = rules(&spec);
 
-        assert!(
-            rules
-                .iter()
-                .any(|rule| rule == "(allow file-read-metadata (literal \"/var\"))"),
-            "{rules:?}"
-        );
+        for link in ["/var", "/etc"] {
+            let wanted = format!("(allow file-read-metadata (literal \"{link}\"))");
+            assert!(rules.contains(&wanted), "{rules:?}");
+        }
     }
 
     #[test]
@@ -1451,6 +1530,56 @@ mod seatbelt {
             .unwrap();
         let status = child.wait().unwrap();
         (output, status.code().unwrap_or(-1))
+    }
+
+    #[test]
+    fn a_sandboxed_app_can_stat_the_git_configuration_but_never_read_it_or_list_a_protected_directory()
+     {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.home().join(".config/git")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the protected files that the sandbox may stat"
+        )]
+        {
+            std::fs::write(fixture.home().join(".gitconfig"), "[user]\n").unwrap();
+            std::fs::write(fixture.home().join(".config/git/config"), "[user]\n").unwrap();
+            std::fs::write(fixture.home().join(".cargo/config.toml"), "[net]\n").unwrap();
+            std::fs::write(fixture.home().join(".ssh/id_ed25519"), "key").unwrap();
+        }
+        let script = format!(
+            r#"
+            check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+            case=stat-gitconfig check stat "{home}/.gitconfig"
+            case=read-gitconfig check cat "{home}/.gitconfig"
+            case=stat-xdg check stat "{home}/.config/git/config"
+            case=read-xdg check cat "{home}/.config/git/config"
+            case=list-xdg check ls "{home}/.config/git"
+            case=stat-cargo-config check stat "{home}/.cargo/config.toml"
+            case=list-ssh check ls "{home}/.ssh"
+            case=stat-ssh-key check stat "{home}/.ssh/id_ed25519"
+            case=read-ssh-key check cat "{home}/.ssh/id_ed25519"
+            "#,
+            home = fixture.home().display(),
+        );
+
+        let (output, _) = sandboxed(&fixture, &script, 41_000, 41_005);
+
+        // cargo stops when it can stat but not read `~/.cargo/config.toml`,
+        // so only the git configuration keeps its metadata.
+        for (case, expected) in [
+            ("stat-gitconfig", "allowed"),
+            ("read-gitconfig", "denied"),
+            ("stat-xdg", "allowed"),
+            ("read-xdg", "denied"),
+            ("list-xdg", "denied"),
+            ("stat-cargo-config", "denied"),
+            ("list-ssh", "denied"),
+            ("stat-ssh-key", "denied"),
+            ("read-ssh-key", "denied"),
+        ] {
+            assert_eq!(outcome(&output, case), expected, "{case}: {output}");
+        }
     }
 
     /// Returns the label of the launchd job that the sandboxed case tries
@@ -1675,10 +1804,10 @@ mod seatbelt {
             .env_clear()
             .env("PATH", &path)
             .env("HOME", &home)
-            .env("TMPDIR", &spec.tmp)
             .env("CARGO_TARGET_DIR", fixture.checkout().join("target"))
             .current_dir(fixture.checkout())
             .stdin(Stdio::null());
+        crate::sandbox::sandboxed_environment(&mut command, &spec.tmp);
         #[expect(
             clippy::disallowed_methods,
             reason = "the test starts this test binary as the launcher"
@@ -1709,6 +1838,7 @@ mod seatbelt {
                 case=config check cat "{dir}/openssl.cnf"
                 case=bundle check cat "{dir}/cert.pem"
                 case=certs check ls "{dir}/certs"
+                case=gitconfig check cat "{prefix}/etc/gitconfig"
                 case=key check cat "{dir}/private/key.pem"
                 case=list check ls "{dir}/private"
                 case=other check ls "{prefix}/etc/other"
@@ -1725,7 +1855,7 @@ mod seatbelt {
             crate::sandbox::add_toolchain(
                 &mut spec.read,
                 &mut spec.read_only,
-                &mut spec.links,
+                &mut spec.metadata,
                 &crate::sandbox::homebrew_read(&prefix),
                 &|_| false,
             );
@@ -1758,6 +1888,7 @@ mod seatbelt {
                 ("config", "allowed"),
                 ("bundle", "allowed"),
                 ("certs", "allowed"),
+                ("gitconfig", "allowed"),
                 ("key", "denied"),
                 ("list", "denied"),
                 ("other", "denied"),
@@ -1769,6 +1900,162 @@ mod seatbelt {
                 );
             }
         }
+    }
+
+    /// Runs `program` with `args` outside the sandbox in `dir`, with only
+    /// `HOME` and `PATH` set, and panics with its output when it fails.
+    fn outside(
+        program: &str,
+        args: &[&str],
+        dir: &std::path::Path,
+        home: &std::path::Path,
+        path: &str,
+    ) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test prepares, outside the sandbox, what the sandboxed process reads"
+        )]
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Returns the sysroot of the Rust toolchain that this machine's
+    /// `rustc` names, whose `bin` holds its `cargo` and `rustc`.
+    fn rust_sysroot() -> PathBuf {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test asks rustc where the real toolchain lies"
+        )]
+        let output = Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .unwrap();
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    }
+
+    /// Records why a protected path keeps its metadata: libgit2 stats
+    /// `~/.gitconfig` before it opens a repository, and when the stat
+    /// fails it treats a git dependency that cargo fetched as unusable and
+    /// tries to delete it, which the sandbox refuses, so cargo exits 101.
+    #[test]
+    fn cargo_reads_a_git_dependency_fetched_outside_the_sandbox_while_gitconfig_is_protected() {
+        let fixture = Fixture::new();
+        let home = fixture.home();
+        let sysroot = rust_sysroot();
+        let bin = sysroot.join("bin");
+        let outside_path = format!("{}:/usr/bin:/bin", bin.display());
+        let dependency = fixture.outside().join("dep");
+        std::fs::create_dir_all(dependency.join("src")).unwrap();
+        std::fs::create_dir_all(fixture.checkout().join("src")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the crate, its git dependency and the protected gitconfig"
+        )]
+        {
+            std::fs::write(home.join(".gitconfig"), "[user]\n\tname = phase\n").unwrap();
+            std::fs::write(
+                dependency.join("Cargo.toml"),
+                "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .unwrap();
+            std::fs::write(dependency.join("src/lib.rs"), "pub fn two() -> u8 { 2 }\n").unwrap();
+            std::fs::write(
+                fixture.checkout().join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = {{ git = \"file://{}\" }}\n\n[workspace]\n",
+                    dependency.display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(fixture.checkout().join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.email=phase@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "dep",
+            ],
+        ] {
+            outside("git", args, &dependency, &home, "/usr/bin:/bin");
+        }
+        // cargo fetches the dependency into the home's `.cargo/git` and
+        // writes the lock file, outside the sandbox.
+        outside(
+            "cargo",
+            &["generate-lockfile"],
+            &fixture.checkout(),
+            &home,
+            &outside_path,
+        );
+
+        let script = "cargo metadata --locked --offline --format-version 1 >/dev/null";
+        let path = format!("{}:{outside_path}", home.join(".cargo/bin").display());
+        let api = fixture.app(sh(script), 41_000);
+        let mut spec = fixture.spec_of(&api, &path, BTreeSet::new()).unwrap();
+        // The toolchain lies outside the fixture's home, so the spec does
+        // not know it as one and grants only its `bin`.
+        spec.read.insert(crate::sandbox::canonical(&sysroot));
+        let mut command = launcher_command(&spec, &sh(script)).unwrap();
+        command
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env("TMPDIR", &spec.tmp)
+            .current_dir(fixture.checkout())
+            .stdin(Stdio::null());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let output = command.output().unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn git_reports_its_version_and_the_status_of_a_checkout_under_the_sandbox() {
+        if !on_path("git") {
+            return;
+        }
+        let fixture = Fixture::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test reads this machine's real PATH to find git"
+        )]
+        let path = std::env::var("PATH").unwrap();
+        outside(
+            "git",
+            &["init", "-q"],
+            &fixture.checkout(),
+            &fixture.home(),
+            &path,
+        );
+
+        let (output, code) = with_real_toolchains(&fixture, "git --version && git status");
+
+        assert_eq!(code, 0, "{output}");
     }
 
     /// Reports whether `program` is on this machine's `PATH`.
@@ -2073,7 +2360,7 @@ mod landlock {
         crate::sandbox::add_toolchain(
             &mut spec.read,
             &mut spec.read_only,
-            &mut spec.links,
+            &mut spec.metadata,
             &crate::sandbox::homebrew_read(&prefix),
             &|_| false,
         );

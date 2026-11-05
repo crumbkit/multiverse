@@ -1274,7 +1274,11 @@ The sandbox allows (decision P18):
   the CA bundle that Homebrew copies from the system keychain. Neither is
   secret, and every TLS client that links Homebrew's OpenSSL opens them
   when it starts: Homebrew's node exits with "OpenSSL configuration error"
-  when it cannot read `openssl.cnf`. Each OpenSSL directory also holds
+  when it cannot read `openssl.cnf`. A sandboxed process may also read
+  the prefix's `etc/gitconfig`, the system configuration of Homebrew's
+  git, which git reads when it starts and stops on when it cannot. Homebrew
+  or an administrator installs it, and it holds no secret. Each OpenSSL
+  directory also holds
   `private`, OpenSSL's conventional directory for private keys, which a
   user may fill, so no sandboxed process may read it. phase therefore
   grants only the directory's `openssl.cnf`, `cert.pem` and `certs`, on
@@ -1301,7 +1305,12 @@ The sandbox allows (decision P18):
   checks the metadata of every name of a path as the kernel resolves it, so
   reading
   the link through `/var` also needs the metadata of the `/var` link
-  itself, and the profile allows that one literal path. nono allows a
+  itself, and the profile allows that one literal path. It allows the
+  `/etc` link's metadata for the same reason: git stats `/etc/gitconfig`,
+  and when the stat of a missing file through `/etc` fails with "Operation
+  not permitted" in place of "No such file", git stops with "unable to
+  access". An exec test of a sandboxed `git status` with `PATH` set to
+  `/usr/bin:/bin` found this. nono allows a
   link's metadata only when a granted path or a `PATH` entry is spelt
   through it. Without the rule, `xcode-select` failed with "unable to read
   data link" on a machine whose `PATH` names no directory under `/var`,
@@ -1362,6 +1371,29 @@ read nor write:
   every other checkout, and the workspace's manifest and `AGENTS.md`, which
   mxv names. phase refuses to sandbox an app whose checkout is the
   workspace's own directory, because its checkout would hold all of them.
+
+On macOS a sandboxed process may read the metadata of git's global
+configuration, `~/.gitconfig`, `~/.config/git` and `~/.config/git/config`,
+and of no other protected path. It may `stat` them, so it can learn that
+each exists, and its size, mode and times, but it may not read their
+contents or list the directory. libgit2, which cargo uses for git
+dependencies, stats `~/.gitconfig` before it opens a repository. When the
+stat failed, cargo treated a git dependency that it had fetched outside the
+sandbox as unusable, tried to delete it, and exited with status 101 when
+the sandbox refused the delete. The other protected paths keep their
+metadata denied, because cargo stops with "could not load Cargo
+configuration" when it can stat `~/.cargo/config.toml` but cannot read it.
+On Linux, Landlock does not restrict reading metadata, so a process can
+stat every protected path there and learn the same facts about each.
+
+Every sandboxed app runs with `GIT_CONFIG_GLOBAL=/dev/null` unless the
+app's environment sets `GIT_CONFIG_GLOBAL`, so git reads no global
+configuration. The keeper sets it after the app's environment and keeps a
+value that the plan gave, so a plan can still name a configuration file
+that the app may read. git stops with "unable
+to access" when `~/.gitconfig` or `~/.config/git/config` exists but cannot
+be read, so without it a sandboxed git ran no command on a machine that
+has either.
 
 The sandbox lets an app read, but never write, the launcher program, each
 link of its chain of symbolic links and each one's directory, the
@@ -1425,8 +1457,8 @@ would fail the macOS test, and the exact pin means only a pull request
 that moves the pin can bring one in.
 
 On macOS the sandbox is partial, and `status` shows it as `seatbelt
-(partial: its listening ports accept connections from other machines on
-the network)`.
+(partial: the sandbox cannot limit its listening ports to the loopback
+interface)`.
 Seatbelt restricts a bind by port and never by address, and its
 `localhost` matches every address of the machine. An inbound rule that
 also names the remote side refuses the `listen` itself, because `listen`
@@ -1764,6 +1796,6 @@ Each decision states what this draft assumes until it is decided.
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
-| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
+| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt cannot limit an app's listening ports to the loopback interface, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |
