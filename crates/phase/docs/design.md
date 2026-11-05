@@ -1140,7 +1140,13 @@ The sandbox allows (decision P18):
   `registry` and `git` directories and rustup's home, never Cargo's
   credentials. For mise they are its data directory. For Homebrew they are
   the prefix's `bin`, `sbin`, `Cellar`, `opt`, `lib`, `libexec`, `share`,
-  `include` and `Frameworks`, never its `var` or `etc`. A `PATH` entry that
+  `include` and `Frameworks`, never its `var` or `etc`, with one exception
+  inside `etc`. A sandboxed process may read the prefix's `etc/openssl`
+  and each `etc/openssl@<version>`, which hold OpenSSL's configuration and
+  the CA bundle that Homebrew copies from the system keychain. Neither is
+  secret, and every TLS client that links Homebrew's OpenSSL opens them
+  when it starts: Homebrew's node exits with "OpenSSL configuration error"
+  when it cannot read `openssl.cnf`. The rest of `etc` stays unreadable. A `PATH` entry that
   would reach a protected path, such as the home directory, adds nothing.
   On macOS the system directories also include the developer directory
   that `/var/select/developer_dir` names, which `xcode-select --switch`

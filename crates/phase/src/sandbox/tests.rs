@@ -14,8 +14,8 @@ use tempfile::TempDir;
 
 use super::{
     AppDirs, Context, LANDLOCK_UNSANDBOXED, Launcher, Platform, SandboxError, SandboxSpec,
-    Sandboxing, UNDECLARED, WorkspacePaths, developer_dir, launch, launcher_command, sandboxing,
-    spec, toolchain, usr_without_local_data, verify,
+    Sandboxing, UNDECLARED, WorkspacePaths, developer_dir, homebrew_read, launch, launcher_command,
+    sandboxing, spec, toolchain, usr_without_local_data, verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
 use crate::record::testing::{app, workspace};
@@ -697,6 +697,28 @@ fn a_homebrew_path_entry_lets_the_app_read_its_programs_but_never_its_data_or_co
             .any(|dir| dir.ends_with("var") || dir.ends_with("etc"))
     );
     assert!(!dirs.contains(&PathBuf::from("/opt/homebrew")));
+}
+
+#[test]
+fn a_homebrew_prefix_lets_the_app_read_its_openssl_configuration_but_no_other_configuration() {
+    let prefix = tempfile::tempdir().unwrap();
+    for dir in [
+        "etc/openssl@3",
+        "etc/openssl",
+        "etc/other",
+        "etc/opensslish",
+    ] {
+        std::fs::create_dir_all(prefix.path().join(dir)).unwrap();
+    }
+
+    let dirs = homebrew_read(prefix.path());
+
+    assert!(dirs.contains(&prefix.path().join("etc/openssl@3")));
+    assert!(dirs.contains(&prefix.path().join("etc/openssl")));
+    assert!(dirs.contains(&prefix.path().join("bin")));
+    assert!(!dirs.contains(&prefix.path().join("etc/other")));
+    assert!(!dirs.contains(&prefix.path().join("etc/opensslish")));
+    assert!(!dirs.contains(&prefix.path().join("etc")));
 }
 
 #[cfg(target_os = "macos")]

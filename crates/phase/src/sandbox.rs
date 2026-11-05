@@ -634,7 +634,11 @@ fn always_protected(home: Option<&Path>) -> Vec<Protected> {
 
 /// The directories of a Homebrew prefix that a sandboxed process may read.
 /// Its `var` and `etc`, which hold services' data and configuration, are
-/// left out.
+/// left out. [`homebrew_read`] adds one exception inside `etc`: OpenSSL's
+/// directories, `etc/openssl` and each `etc/openssl@<version>`, which hold
+/// OpenSSL's configuration and the CA bundle that Homebrew copies from the
+/// system keychain. Neither is secret, and every TLS client that links
+/// Homebrew's OpenSSL, such as Homebrew's node, opens them when it starts.
 const HOMEBREW_READ: &[&str] = &[
     "bin",
     "sbin",
@@ -650,8 +654,8 @@ const HOMEBREW_READ: &[&str] = &[
 /// Returns the toolchain directories that the `PATH` entry `entry` lets a
 /// sandboxed process read: for Cargo its `bin`, `registry` and `git`
 /// directories and rustup's home, never Cargo's credentials; mise's data
-/// directory; the program directories of a Homebrew prefix; and otherwise
-/// the entry itself.
+/// directory; the program directories and OpenSSL's directories of a
+/// Homebrew prefix; and otherwise the entry itself.
 fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     if let Some(home) = home {
         let cargo = home.join(".cargo");
@@ -671,13 +675,32 @@ fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     }
     for root in ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"] {
         if entry.starts_with(root) {
-            return HOMEBREW_READ
-                .iter()
-                .map(|name| Path::new(root).join(name))
-                .collect();
+            return homebrew_read(Path::new(root));
         }
     }
     vec![entry.to_path_buf()]
+}
+
+/// Returns the directories of the Homebrew prefix `prefix` that a
+/// sandboxed process may read: [`HOMEBREW_READ`], and the entries of its
+/// `etc` named `openssl` or `openssl@<version>`. No other entry of `etc`
+/// is returned.
+fn homebrew_read(prefix: &Path) -> Vec<PathBuf> {
+    let is_openssl = |name: &str| name == "openssl" || name.starts_with("openssl@");
+    let openssl = std::fs::read_dir(prefix.join("etc"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_str().is_some_and(is_openssl))
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_else(|_| Vec::new());
+    HOMEBREW_READ
+        .iter()
+        .map(|name| prefix.join(name))
+        .chain(openssl)
+        .collect()
 }
 
 /// Returns the sandbox of `process` of the host `app`, whose permissions
