@@ -32,7 +32,11 @@
 //!   --timestamps`, at most once each [`LOG_INTERVAL`], and each read asks
 //!   only for the lines since the last line it handed over.
 //! - A process without a probe is watched for the start grace, and a
-//!   container that exits meanwhile fails to start.
+//!   container that exits meanwhile fails to start. It is ready only once
+//!   a read of its state that began after the grace found it running,
+//!   because a slow Docker can answer a read after the grace with a state
+//!   it took before the container exited. When the caller's deadline
+//!   passes before such a read, the start is uncertain.
 //!
 //! While it waits, `start` reads the container's state at most once each
 //! [`STATE_INTERVAL`]. A container that docker no longer has, that exited,
@@ -96,7 +100,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
-use crate::clock::now;
+use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::container::ContainerError;
 use crate::engine::container::app::{self, reference};
 use crate::engine::container::command::{
@@ -114,7 +118,6 @@ use crate::engine::containers::{
     ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::probe::{self, Check, Goal, LogLines, LogWatch, Outcome};
-use crate::engine::run::watch;
 use crate::env::AppliedEnvironment;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
@@ -588,15 +591,19 @@ impl ComposeRunner {
         let watcher = Watcher::new(inspected);
         let mut ended = || watcher.ended();
         let outcome = match &process.ready {
-            None => {
-                let grace_end = began + self.start_grace;
-                match watch(grace_end.min(deadline), &mut ended, start.cancel) {
-                    // The ready deadline cut the watch short, so the
-                    // container may still end within its start grace.
-                    Outcome::Ready if start.deadline < grace_end => return Readiness::Uncertain,
-                    outcome => outcome,
-                }
-            }
+            None => match watch_grace(
+                began + self.start_grace,
+                start.deadline,
+                &mut ended,
+                &|| watcher.running_since(),
+                start.cancel,
+            ) {
+                // The operation's deadline passed before a read of the
+                // container's state that began after its start grace found
+                // it running, so the container may have ended within it.
+                Outcome::NotReady { .. } => return Readiness::Uncertain,
+                outcome => outcome,
+            },
             Some(probe) => {
                 let exec = DockerExec { id: id.clone() };
                 let mut logs = DockerLogs::new(id.clone());
@@ -648,6 +655,43 @@ impl ComposeRunner {
             Outcome::NotReady { waited, .. } => Readiness::Failed(StartProblem::not_ready(waited)),
             Outcome::Failing { .. } => Readiness::Failed(StartProblem::not_ready(now() - began)),
         }
+    }
+}
+
+/// Watches a container without a probe through its start grace, which
+/// ends at `grace_end`. The container is ready once a read of its state
+/// that began at or after `grace_end` found it running, as
+/// `running_since` tells. A read that a slow Docker answers late can
+/// report a container running that has since exited, so the wall clock
+/// passing `grace_end` proves nothing by itself. The watch ends early when
+/// `ended` reports the container ended or `cancel` is set, and returns
+/// [`Outcome::NotReady`] once `deadline` passes with no such read.
+pub(crate) fn watch_grace(
+    grace_end: Instant,
+    deadline: Instant,
+    ended: &mut dyn FnMut() -> bool,
+    running_since: &dyn Fn() -> Option<Instant>,
+    cancel: &Cancel,
+) -> Outcome {
+    let began = now();
+    loop {
+        if cancel.is_cancelled() {
+            return Outcome::Cancelled;
+        }
+        if ended() {
+            return Outcome::Ended;
+        }
+        if running_since().is_some_and(|since| since >= grace_end) {
+            return Outcome::Ready;
+        }
+        let at = now();
+        if at >= deadline {
+            return Outcome::NotReady {
+                waited: at - began,
+                last: None,
+            };
+        }
+        pause(POLL_INTERVAL.min(deadline - at));
     }
 }
 
@@ -1214,6 +1258,8 @@ struct Watcher {
     last: Cell<Option<Instant>>,
     /// Whether the container has ended.
     ended: Cell<bool>,
+    /// When the last read that found the container running began.
+    running_since: Cell<Option<Instant>>,
     /// The exit code that docker reported, once the container exited.
     code: Cell<Option<i32>>,
 }
@@ -1225,6 +1271,7 @@ impl Watcher {
             container: inspected.container.clone(),
             last: Cell::new(None),
             ended: Cell::new(false),
+            running_since: Cell::new(None),
             code: Cell::new(None),
         }
     }
@@ -1256,11 +1303,20 @@ impl Watcher {
                     // restart policy, so a container that crashes in a loop
                     // never shows as exited. Its first exit ends the wait.
                     self.ended.set(true);
+                } else {
+                    self.running_since.set(Some(at));
                 }
             }
             Err(_) => {}
         }
         self.ended.get()
+    }
+
+    /// Returns when the last read that found the container running began.
+    /// Docker takes the state it reports after the read begins, so the
+    /// container ran at least until then.
+    fn running_since(&self) -> Option<Instant> {
+        self.running_since.get()
     }
 
     /// Returns the exit code of a container that exited.

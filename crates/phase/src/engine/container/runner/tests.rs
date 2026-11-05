@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use super::watch_grace;
 use crate::cancel::Cancel;
+use crate::clock::now;
+use crate::engine::probe::Outcome;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::phase::{Phase, UpDeadlines};
@@ -343,7 +346,9 @@ fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_output
                 "{log_tail:?}"
             );
         }
-        other => panic!("{other:?}"),
+        other => {
+            panic!("the up reported {other:?} for the container, and the report was {report:?}")
+        }
     }
     let label = format!("label=mxv.workspace-id={}", world.id);
     let left = docker(&["container", "ls", "--all", "--quiet", "--filter", &label]).unwrap();
@@ -2606,4 +2611,85 @@ fn a_rewrite_gives_the_files_the_owner_the_container_was_created_with_after_its_
     assert_eq!(read, ROTATED);
     world.down();
     let _ = docker(&["image", "rm", "--force", created_from.trim()]);
+}
+
+/// The start grace of the tests of [`watch_grace`].
+const GRACE: Duration = Duration::from_millis(100);
+
+/// How long a test of [`watch_grace`] lets the watch run at most.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+// A slow Docker answers a read that began within the grace after the grace
+// has ended, with a state it took before the container exited. That read
+// proves nothing about the end of the grace, so the watch goes on until a
+// later read finds the container exited.
+#[test]
+fn a_container_that_a_read_from_within_its_grace_found_running_is_not_ready_once_the_grace_passes()
+{
+    let grace_end = now() + GRACE;
+    let mut ended = || now() >= grace_end + GRACE;
+    let within = || Some(grace_end - GRACE / 2);
+
+    let outcome = watch_grace(
+        grace_end,
+        now() + PATIENCE,
+        &mut ended,
+        &within,
+        &Cancel::new(),
+    );
+
+    assert!(matches!(outcome, Outcome::Ended), "{outcome:?}");
+}
+
+#[test]
+fn a_container_that_a_read_from_after_its_grace_found_running_is_ready() {
+    let grace_end = now() + GRACE;
+    let mut ended = || false;
+    let read_now = || Some(now());
+
+    let outcome = watch_grace(
+        grace_end,
+        now() + PATIENCE,
+        &mut ended,
+        &read_now,
+        &Cancel::new(),
+    );
+
+    assert!(matches!(outcome, Outcome::Ready), "{outcome:?}");
+    assert!(now() >= grace_end);
+}
+
+#[test]
+fn a_container_that_no_read_found_running_after_its_grace_is_not_ready_at_the_deadline() {
+    let grace_end = now() + GRACE;
+    let mut ended = || false;
+    let unread = || None;
+
+    let outcome = watch_grace(
+        grace_end,
+        grace_end + GRACE,
+        &mut ended,
+        &unread,
+        &Cancel::new(),
+    );
+
+    assert!(matches!(outcome, Outcome::NotReady { .. }), "{outcome:?}");
+}
+
+#[test]
+fn a_cancelled_watch_of_a_containers_grace_ends_at_once() {
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let mut ended = || false;
+    let unread = || None;
+
+    let outcome = watch_grace(
+        now() + PATIENCE,
+        now() + PATIENCE,
+        &mut ended,
+        &unread,
+        &cancel,
+    );
+
+    assert!(matches!(outcome, Outcome::Cancelled), "{outcome:?}");
 }
