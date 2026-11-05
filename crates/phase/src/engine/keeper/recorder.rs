@@ -24,7 +24,7 @@ use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::logfile::Diagnostics;
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::run::{Ended, HostProcess, ObjectKey, Started};
+use crate::record::run::{Ended, EntryState, HostProcess, ObjectKey, Started};
 use crate::record::store::{Journal, RunStore};
 
 /// How long the writer waits for the lifecycle lock before it drops a
@@ -35,7 +35,7 @@ pub(crate) const RECORD_LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// A change of the app's state.
 #[derive(Clone, Debug)]
-enum Note {
+pub(super) enum Note {
     /// The app started as this process. It applies when the entry names
     /// no process or this one.
     Started(HostProcess),
@@ -48,16 +48,23 @@ enum Note {
     Stopping(HostProcess),
     /// This process ended by itself as the end says, and the keeper is
     /// about to stop what is left of its group. It applies when the entry
-    /// names this process.
+    /// names this process and another operation has not recorded it
+    /// stopped.
     Ending(HostProcess, Ended),
     /// This process ended as the end says, and its group is gone. It
-    /// applies when the entry names this process.
+    /// applies when the entry names this process and another operation has
+    /// not recorded it stopped.
     Stopped(HostProcess, Ended),
 }
 
 impl Note {
-    /// Reports whether the note applies to an entry that names `recorded`.
-    fn applies_to(&self, recorded: Option<&HostProcess>) -> bool {
+    /// Reports whether the note applies to an entry that names `recorded`
+    /// and is in `state`. An entry that another operation already recorded
+    /// as stopped keeps the end that operation recorded.
+    pub(super) fn applies_to(&self, recorded: Option<&HostProcess>, state: EntryState) -> bool {
+        if matches!(self, Self::Ending(..) | Self::Stopped(..)) && state == EntryState::Stopped {
+            return false;
+        }
         match (self, recorded) {
             (Self::Started(_), None) => true,
             (
@@ -240,9 +247,13 @@ fn write(
     while let Some(current) = note {
         note = queue.try_recv().ok();
         let recorded = recorded_host(&journal, key);
-        if !current.applies_to(recorded.as_ref()) {
+        let state = journal
+            .record()
+            .and_then(|record| record.state(key))
+            .unwrap_or(EntryState::Planned);
+        if !current.applies_to(recorded.as_ref(), state) {
             diagnostics.note(&format!(
-                "the run record names another process, so the keeper skips {}",
+                "the run record names another process or already records its stop, so the keeper skips {}",
                 current.describe()
             ));
             continue;

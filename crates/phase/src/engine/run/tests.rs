@@ -1994,7 +1994,21 @@ fn up_forgets_the_entries_of_apps_it_never_tried_to_start() {
 }
 
 #[test]
-fn an_up_that_leaves_nothing_running_removes_the_record() {
+fn an_up_that_leaves_nothing_running_and_no_exit_removes_the_record() {
+    let world = World::new();
+    let mut api = host_app("api", None, &[]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    api.processes[0].ready_timeout = Duration::from_millis(50);
+
+    world
+        .up(&plan(vec![api]), &Selection::All, &Env::default())
+        .unwrap();
+
+    assert_eq!(world.record(), None);
+}
+
+#[test]
+fn an_up_whose_process_ended_by_itself_keeps_the_record_of_its_end() {
     let world = World::new();
     world.host.ends("api/server");
 
@@ -2006,7 +2020,12 @@ fn an_up_that_leaves_nothing_running_removes_the_record() {
         )
         .unwrap();
 
-    assert_eq!(world.record(), None);
+    let record = world.record().unwrap();
+    assert_eq!(record.processes[0].state, EntryState::Stopped);
+    assert_eq!(
+        record.processes[0].ended,
+        Some(crate::record::run::Ended::by_itself(None))
+    );
 }
 
 #[test]
@@ -2338,4 +2357,37 @@ fn a_real_keeper_reports_the_code_or_signal_of_a_process_that_ends_during_readin
             "{script}"
         );
     }
+}
+
+#[test]
+fn a_failed_up_leaves_the_process_that_ended_exited_with_its_code_until_down() {
+    let world = World::new();
+    world.host.ends_as("api/server", Exit::Code(3));
+    let mut api = host_app("api", None, &[]);
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::log("never".to_owned())));
+    let plan = plan(vec![api]);
+
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    let sources = crate::status::Sources {
+        state_dir: world.state.path(),
+        processes: &crate::record::testing::FakeProcesses::default(),
+        docker: &crate::record::testing::Unreachable,
+    };
+    let store = RunStore::new(world.state.path());
+    let status = crate::status::status(&store, &workspace(), Some(&plan), sources).unwrap();
+    assert_eq!(
+        status.rows[0].state,
+        crate::status::ProcessState::exited(Some(3))
+    );
+    let status = crate::status::status(&store, &workspace(), None, sources).unwrap();
+    assert_eq!(status.rows.len(), 1);
+    assert_eq!(
+        status.rows[0].state,
+        crate::status::ProcessState::exited(Some(3))
+    );
+
+    world.down(&Selection::All);
+
+    assert_eq!(world.record(), None);
 }

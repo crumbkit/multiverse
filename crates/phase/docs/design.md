@@ -305,9 +305,17 @@ line. When the readiness wait or the start grace sees the process gone,
 `up` reads the end line for up to 2 seconds, and the failed start reports
 the code or the signal. The keeper writes the line as soon as it has
 reaped the process, so the wait is short, and when the line does not come
-in time, the failed start reports neither. When the process becomes ready,
-`up` closes its end of the keeper's standard output, and the keeper's later
-end line is lost, which is harmless because the record holds the end.
+in time, the failed start reports neither. A cancel ends that wait at
+once. A wait that ends first leaves its reader thread behind until the
+keeper writes the line or exits. `up` records the end that the line gave
+before it stops the process, and the stop keeps that end, so `status`
+shows the failed process as exited with its code until `down` or the next
+start. When the process becomes ready, `up` closes its end of the
+keeper's standard output, and the keeper's later end line is lost, which
+is harmless because the record holds the end. The keeper handles
+`SIGPIPE` itself, so that write fails with `EPIPE` even when the program
+that links phase leaves `SIGPIPE` at its default, and the app's program
+starts with `SIGPIPE` at its default.
 
 The library never reads the environment. The program that links phase
 reads its own environment in `main` into an opaque `KeeperEnvironment`,
@@ -596,7 +604,7 @@ The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 ### Run record and sweep
 
-phase writes a run record (`phase/run/v1`) for each workspace. It names every
+phase writes a run record (`phase/run/v2`) for each workspace. It names every
 keeper and app process by pid, process start time and process group, every
 container by id, and the hash of the plan that started them. It holds no
 environment values.
@@ -614,13 +622,29 @@ the record has a state: `planned`, `running`, `stopping` or `stopped`.
 A host process's entry also records how the process last ended, as
 `ended`: its `exit`, which is `{"code": 3}` or `{"signal": 9}` and is left
 out when nobody could read it, and `requested`, which says whether a stop
-request caused the end. The keeper records it when its app ends. `down`,
+request caused the end. The keeper records it when its app ends, unless
+another operation has already recorded the entry stopped. `down`,
 `restart` and `sweep` record the end as requested, with no exit, when they
 begin to stop the process, because the keeper that reads the exit drops
-its notes while they hold the lock. A keeper's restart keeps the end, so
-the record shows the last crash of a process that restarts, and phase's
-own start of the process clears it. A record without `ended` reads as a
-process that has not ended, so the record stays `phase/run/v1`.
+its notes while they hold the lock. They keep an end that no stop request
+caused when the entry is already `stopping` or `stopped`, because that
+process had ended by itself first, as after a failed start. `sweep`
+records a process that the record names as running and that it finds gone
+as ended with no exit and not requested, because nothing recorded how it
+ended. A keeper's restart keeps the end, so the record shows the last
+crash of a process that restarts, and phase's own start of the process
+clears it. The entry also records the restart policy that phase started
+the process with, as `restart`, so `status` can tell whether the keeper
+restarts a process that ended.
+
+`up` keeps the record when nothing in it runs but a process's entry
+records an end that no stop request caused, so `status` can show it.
+`down` and `sweep` remove it.
+
+The record is `phase/run/v2`, which adds `ended` and `restart`. phase
+reads a `phase/run/v1` record as one with neither and writes it back as
+v2. A phase that reads only v1 refuses a v2 record as written by a newer
+phase and asks for an upgrade.
 
 A process's start time is in microseconds: since the Unix epoch on macOS,
 where `proc_pidinfo` reports it, and since boot on Linux, where
@@ -705,9 +729,18 @@ does not answer or reports a state that phase does not know, such as
 `removing`, and never as stopped. A host process whose entry records
 that it ended by itself, and that its keeper did not restart, shows as
 `exited` with its code or signal. One that a stop request ended shows as
-`stopped`. A host process that its keeper restarted shows its last crash
-as `last_exit`, with its code or signal, while it runs or waits to
-restart. A container that the record plans and
+`stopped`. A process that the record names as running, while neither it
+nor its keeper is there, shows as `exited` with the reason `unrecorded`,
+because its keeper ended before it recorded the end. A process whose
+keeper runs and whose app has gone shows as `restarting` only when its
+recorded restart policy restarts it: before the keeper records the end,
+only a policy that restarts however the process ended counts, and
+afterwards the policy decides with the recorded exit and the restarts so
+far. Otherwise it shows as `stopping` while the keeper stops what is
+left, and as `exited` once the keeper has recorded it. A host process
+that its keeper restarted shows its last crash as `last_exit`, with its
+code or signal, while it runs or waits to restart. A `down` while the
+keeper waits out a backoff replaces that crash with a requested end. A container that the record plans and
 Docker has not started shows as `starting`. A container that Docker is
 restarting under its restart policy shows as `restarting`, and a paused
 container shows as `paused`, which counts as partly running. The workspace's state comes

@@ -10,5 +10,5 @@ pub(crate) mod containers;
 pub mod host;
 pub mod keeper;
 pub(crate) mod probe;
-mod restart;
+pub(crate) mod restart;
 pub(crate) mod run;

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use super::{Journal, RunStore};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::plan::restart::{Stop, StopSignal};
+use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
 use crate::record::run::{
     Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, PlanHash, RunRecord, Started,
 };
@@ -100,7 +100,7 @@ fn the_record_holds_the_schema_and_no_environment() {
     let text = fs::read_to_string(store.path(&workspace())).unwrap();
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-    assert_eq!(json["schema"], "phase/run/v1");
+    assert_eq!(json["schema"], "phase/run/v2");
     assert_eq!(json["workspace"], "0b9f3c8e");
     assert_eq!(
         json["processes"][0]["host"]["started_at_us"],
@@ -186,7 +186,7 @@ fn a_record_from_a_newer_phase_asks_for_an_upgrade() {
     fs::create_dir_all(state.path().join("runs")).unwrap();
     write_file(
         &store.path(&workspace()),
-        r#"{"schema":"phase/run/v2","something":"new"}"#,
+        r#"{"schema":"phase/run/v3","something":"new"}"#,
     );
 
     let error = store.read(&workspace()).unwrap_err();
@@ -406,6 +406,7 @@ fn launching(grace_ms: u64, hash: u8) -> Launching {
             grace: Duration::from_millis(grace_ms),
         },
         listen: None,
+        restart: Restart::No,
     }
 }
 
@@ -588,4 +589,58 @@ fn a_stop_that_phase_begins_records_the_end_as_requested() {
     let keeper = ObjectKey::Keeper(app("api"), process("server"));
     journal.stopping(&keeper).unwrap();
     assert_eq!(on_disk(&store).keepers[0].ended, None);
+}
+
+#[test]
+fn a_record_that_an_older_phase_wrote_reads_and_is_written_back_in_the_new_version() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    write_file(&path, &text.replace("phase/run/v2", "phase/run/v1"));
+
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    assert_eq!(journal.record(), Some(&planned()));
+    journal.started(&server(), Started::Host(host())).unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(json["schema"], "phase/run/v2");
+}
+
+#[test]
+fn a_stop_that_phase_begins_keeps_the_end_of_a_process_that_already_ended_by_itself() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.ending(&server(), crashed(3)).unwrap();
+
+    journal.stopping(&server()).unwrap();
+    journal.stopped(&server()).unwrap();
+
+    assert_eq!(on_disk(&store).processes[0].ended, Some(crashed(3)));
+}
+
+#[test]
+fn launching_a_process_records_its_restart_policy() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    let mut always = launching(300, 1);
+    always.restart = Restart::always(RestartLimits::default());
+
+    journal
+        .launching(&app("api"), &process("server"), &always)
+        .unwrap();
+
+    assert_eq!(
+        on_disk(&store).processes[0].restart,
+        Some(Restart::always(RestartLimits::default()))
+    );
 }

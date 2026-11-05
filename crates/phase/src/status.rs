@@ -118,7 +118,9 @@ pub struct StatusRow {
     /// How a host process last ended by itself, which no stop request
     /// caused, or `None` when it has not since phase last started it. A
     /// process that its keeper restarted keeps the end of its last crash
-    /// here. In JSON it is left out when it is `None`.
+    /// here. A stop that phase begins, such as a `down` while the keeper
+    /// waits out a backoff, replaces the crash with a requested end, so
+    /// this is then `None`. In JSON it is left out when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<LastExit>,
     /// The path of its log file, or `None` for a container, whose log comes
@@ -254,6 +256,10 @@ pub enum ProcessState {
         /// left out when it is `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signal: Option<i32>,
+        /// Why phase knows neither the code nor the signal, or `None`. In
+        /// JSON it is left out when it is `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<ExitReason>,
     },
     /// phase cannot tell what the process is doing. The run record keeps
     /// its entry, which `down` and `sweep` leave alone.
@@ -262,6 +268,18 @@ pub enum ProcessState {
         /// Why phase cannot tell.
         reason: UnknownReason,
     },
+}
+
+/// Why `status` knows neither the code nor the signal of a process that
+/// exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum ExitReason {
+    /// Nothing recorded how the process ended. Its keeper ended before it
+    /// recorded the end, as when something killed the keeper or the
+    /// machine restarted, or the keeper could not read the status.
+    Unrecorded,
 }
 
 /// Why `status` cannot tell what a process is doing.
@@ -296,7 +314,22 @@ impl ProcessState {
     /// restart.
     #[must_use]
     pub const fn exited(code: Option<i32>) -> Self {
-        Self::Exited { code, signal: None }
+        Self::Exited {
+            code,
+            signal: None,
+            reason: None,
+        }
+    }
+
+    /// Returns the state of a process that ended while nothing recorded
+    /// how, as [`ExitReason::Unrecorded`] says.
+    #[must_use]
+    pub const fn unrecorded() -> Self {
+        Self::Exited {
+            code: None,
+            signal: None,
+            reason: Some(ExitReason::Unrecorded),
+        }
     }
 
     /// Returns the state of a process that `signal` ended, and that phase
@@ -306,6 +339,7 @@ impl ProcessState {
         Self::Exited {
             code: None,
             signal: Some(signal),
+            reason: None,
         }
     }
 

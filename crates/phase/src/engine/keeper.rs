@@ -145,7 +145,7 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use crate::engine::restart::Ended;
+use crate::engine::restart::RunEnd;
 use crate::env::EnvironmentSource;
 
 mod args;
@@ -228,11 +228,11 @@ impl KeeperExit {
     }
 }
 
-impl From<Ended> for KeeperExit {
-    fn from(ended: Ended) -> Self {
+impl From<RunEnd> for KeeperExit {
+    fn from(ended: RunEnd) -> Self {
         match ended {
-            Ended::Completed => Self::Completed,
-            Ended::Failed => Self::Failed,
+            RunEnd::Completed => Self::Completed,
+            RunEnd::Failed => Self::Failed,
         }
     }
 }
@@ -246,7 +246,12 @@ impl From<KeeperExit> for ExitCode {
 /// Runs the keeper that `args` names: starts a session of its own, reads
 /// its specification from `input`, starts the app, writes the handshake
 /// line to `output`, and supervises the app until it is stopped or its
-/// policy leaves it ended. The app's first start receives the resolved
+/// policy leaves it ended. Once the app's first start ends, the keeper
+/// writes one end line to `output`, which says how the app ended. The
+/// engine reads it only while it waits for the app to be ready, and closes
+/// its end of the pipe afterwards, so `run` handles `SIGPIPE` itself and
+/// ignores a write that fails. The caller writes nothing to its standard
+/// output after `run` returns, because the engine may have closed it. The app's first start receives the resolved
 /// values that `environment` holds. When a restart needs a fresh
 /// environment, the keeper resolves it through `source`. The program that
 /// links phase passes the environment it read in `main`, its own

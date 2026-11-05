@@ -56,7 +56,7 @@ use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
 use crate::record::process::{Identity, vouched};
 use crate::record::run::{
-    ContainerEntry, EntryState, Exit, HostProcess, Launching, Listen, ObjectKey, PlanHash,
+    ContainerEntry, Ended, EntryState, Exit, HostProcess, Launching, Listen, ObjectKey, PlanHash,
     RunRecord, Started,
 };
 use crate::record::store::{Journal, RunStore};
@@ -299,7 +299,7 @@ impl Op<'_, '_> {
             .filter(|name| !attempted.contains(name))
             .collect();
         self.journal.forget_unstarted(&unattempted)?;
-        self.journal.finish()?;
+        self.journal.finish_keeping_exits()?;
         Ok(report)
     }
 
@@ -592,6 +592,7 @@ impl Op<'_, '_> {
                 plan_hash: self.plan_hash.clone(),
                 stop: process.stop,
                 listen: listen.clone(),
+                restart: process.restart.clone(),
             },
         )?;
         let (keeper, started, end, lines) = match self.launch(app, process, environment.as_ref()) {
@@ -616,6 +617,17 @@ impl Op<'_, '_> {
             Started::Host(started.clone()),
         )?;
         let step = self.await_ready(app, process, &target, environment.as_ref(), end, lines);
+        if let Step::Failed(StartProblem::Exited { code, signal, .. }) = &step {
+            // The keeper cannot record the end while this operation holds
+            // the lifecycle lock, so the engine records what the keeper's
+            // end line said. The stop that follows keeps it, and `status`
+            // shows the process as exited.
+            let exit = code.map(Exit::Code).or(signal.map(Exit::Signal));
+            self.journal.ending(
+                &ObjectKey::Process(app.name.clone(), process.name.clone()),
+                Ended::by_itself(exit),
+            )?;
+        }
         if let (Step::Ready, Some(listen)) = (&step, &listen) {
             match port_holder(host, started.group, listen.port, LookupFailed::Report) {
                 PortHolder::Free | PortHolder::Group(_) => {}
@@ -837,7 +849,7 @@ impl Op<'_, '_> {
             Outcome::Ready => Step::Ready,
             Outcome::Cancelled => Step::Cancelled,
             Outcome::Ended => {
-                let exit = end.wait(now() + END_LINE_WAIT);
+                let exit = end.wait(now() + END_LINE_WAIT, self.cancel);
                 Step::Failed(StartProblem::exited(
                     exit.and_then(Exit::code),
                     exit.and_then(Exit::signal),

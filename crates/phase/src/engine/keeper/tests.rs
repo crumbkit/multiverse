@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use rustix::process::Signal;
 use tempfile::TempDir;
 
+use super::recorder::Note;
 use super::spawn::{command_line, read_handshake};
 use super::spec::{Handshake, NotInherited, read_spec, write_handshake};
 use super::supervise::keep;
@@ -23,14 +24,15 @@ use super::{
     BadKeeperArgs, KeeperArgs, KeeperCommand, KeeperEnvironment, KeeperExit, KeeperSpec, Kept,
     Launch, run, spawn,
 };
+use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, now, pause};
-use crate::engine::restart::Ended;
+use crate::engine::restart::RunEnd;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
 use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits, Stop};
 use crate::record::process::{Processes, Start, System};
-use crate::record::run::{Ended as AppEnded, EntryState, Exit, HostProcess, ObjectKey};
+use crate::record::run::{Ended, EntryState, Exit, HostProcess, ObjectKey};
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{app, empty_record, process, workspace};
 
@@ -62,6 +64,19 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
         reason = "the test binary runs as a keeper, which writes its handshake to standard output"
     )]
     let stdout = std::io::stdout();
+    if keeper_args.process().as_str() == "default-sigpipe" {
+        // The program that links phase may leave `SIGPIPE` at its default,
+        // which ends a process that writes to a closed pipe.
+        #[expect(
+            unsafe_code,
+            reason = "the test keeper restores the default SIGPIPE disposition, which only libc can set"
+        )]
+        // SAFETY: the keeper has started no thread yet, and `SIG_DFL` is a
+        // valid disposition for `SIGPIPE`.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
     let output: Box<dyn Write> = if keeper_args.process().as_str() == "slow-handshake" {
         Box::new(Slow(stdout))
     } else {
@@ -323,7 +338,7 @@ impl Fixture {
     }
 
     /// Returns how the run record says the app last ended.
-    fn ended(&self) -> Option<AppEnded> {
+    fn ended(&self) -> Option<Ended> {
         let record = RunStore::new(&self.dir).read(&workspace()).unwrap()?;
         record
             .processes
@@ -413,8 +428,8 @@ fn alive(host: &HostProcess) -> bool {
 
 #[test]
 fn a_keeper_exits_completed_or_failed_as_its_app_ended() {
-    assert_eq!(KeeperExit::from(Ended::Completed), KeeperExit::Completed);
-    assert_eq!(KeeperExit::from(Ended::Failed), KeeperExit::Failed);
+    assert_eq!(KeeperExit::from(RunEnd::Completed), KeeperExit::Completed);
+    assert_eq!(KeeperExit::from(RunEnd::Failed), KeeperExit::Failed);
 }
 
 #[test]
@@ -916,11 +931,9 @@ fn a_keeper_leaves_a_record_entry_that_names_another_process_unchanged() {
         fixture.recorded(),
         Some((EntryState::Running, Some(other), 7))
     );
-    assert!(
-        fixture
-            .diagnostics_text()
-            .contains("the run record names another process, so the keeper skips")
-    );
+    assert!(fixture.diagnostics_text().contains(
+        "the run record names another process or already records its stop, so the keeper skips"
+    ));
 }
 
 #[test]
@@ -1010,7 +1023,7 @@ fn a_keeper_records_the_exit_code_of_an_app_that_ended_by_itself() {
     assert_eq!(running.exit_code(), i32::from(KeeperExit::Failed.code()));
 
     eventually("the keeper's record of the end", || {
-        fixture.ended() == Some(AppEnded::by_itself(Some(Exit::Code(3))))
+        fixture.ended() == Some(Ended::by_itself(Some(Exit::Code(3))))
     });
     assert!(matches!(
         fixture.recorded(),
@@ -1032,10 +1045,7 @@ fn a_keeper_records_a_stop_request_as_the_cause_of_its_apps_end() {
     running.signal_keeper(Signal::TERM);
 
     assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
-    assert_eq!(
-        fixture.ended(),
-        Some(AppEnded::requested(Some(Exit::Code(7))))
-    );
+    assert_eq!(fixture.ended(), Some(Ended::requested(Some(Exit::Code(7)))));
 }
 
 #[test]
@@ -1055,7 +1065,7 @@ fn a_keeper_keeps_the_last_crash_of_an_app_that_it_restarted() {
 
     assert_eq!(
         fixture.ended(),
-        Some(AppEnded::by_itself(Some(Exit::Signal(9))))
+        Some(Ended::by_itself(Some(Exit::Signal(9))))
     );
 }
 
@@ -1070,7 +1080,11 @@ fn the_engine_reads_from_the_keeper_how_its_app_ended_after_the_handshake() {
         let mut running = fixture.start(&spec).unwrap();
         let end = std::mem::take(&mut running.kept.end);
 
-        assert_eq!(end.wait(now() + PATIENCE), Some(exit), "{script}");
+        assert_eq!(
+            end.wait(now() + PATIENCE, &Cancel::new()),
+            Some(exit),
+            "{script}"
+        );
     }
 }
 
@@ -1081,5 +1095,84 @@ fn the_engine_reads_no_end_of_an_app_that_still_runs_once_its_wait_passes() {
     let mut running = fixture.start(&spec).unwrap();
     let end = std::mem::take(&mut running.kept.end);
 
-    assert_eq!(end.wait(now() + Duration::from_millis(100)), None);
+    assert_eq!(
+        end.wait(now() + Duration::from_millis(100), &Cancel::new()),
+        None
+    );
+}
+
+#[test]
+fn the_engine_stops_waiting_for_the_end_line_once_its_operation_is_cancelled() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("while :; do sleep 0.05; done", Restart::No, Stop::default());
+    let mut running = fixture.start(&spec).unwrap();
+    let end = std::mem::take(&mut running.kept.end);
+    let cancel = Cancel::new();
+    cancel.cancel();
+    let started = Instant::now();
+
+    assert_eq!(end.wait(now() + PATIENCE, &cancel), None);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_keeper_records_and_restarts_an_app_that_crashes_after_the_engine_stopped_reading() {
+    // `default-sigpipe` runs the keeper with `SIGPIPE` at its default, as a
+    // program that links phase may leave it.
+    for name in ["server", "default-sigpipe"] {
+        let fixture = Fixture::of(name);
+        let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+        let spec = fixture.spec(
+            "if [ -e crashed ]; then while :; do sleep 0.05; done; fi; sleep 0.3; touch crashed; exit 3",
+            restart,
+            Stop::default(),
+        );
+        let mut running = fixture.start(&spec).unwrap();
+        drop(std::mem::take(&mut running.kept.end));
+
+        eventually("the restart after the crash", || {
+            matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+        });
+        assert_eq!(
+            fixture.ended(),
+            Some(Ended::by_itself(Some(Exit::Code(3)))),
+            "{name}"
+        );
+        assert!(running.kept.exited().is_none(), "{name}");
+    }
+}
+
+#[test]
+fn an_app_receives_sigpipe_at_its_default_disposition() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec(
+        "(yes; echo \"yes ended with $?\" >&2) | head -n 1 >/dev/null; while :; do sleep 0.05; done",
+        Restart::No,
+        Stop::default(),
+    );
+    let _running = fixture.start(&spec).unwrap();
+
+    // A shell reports a child that a signal ended as 128 plus the signal.
+    eventually("the end of yes", || {
+        fixture.log_text().contains("yes ended")
+    });
+    assert_eq!(fixture.log_text().trim(), "yes ended with 141");
+}
+
+#[test]
+fn a_keepers_end_and_stop_skip_an_entry_that_another_operation_already_stopped() {
+    let host = HostProcess {
+        pid: 4242,
+        started_at_us: 1,
+        group: 4242,
+        boot_id: None,
+    };
+    let ended = Ended::by_itself(Some(Exit::Code(3)));
+    for note in [
+        Note::Ending(host.clone(), ended),
+        Note::Stopped(host.clone(), ended),
+    ] {
+        assert!(note.applies_to(Some(&host), EntryState::Stopping));
+        assert!(!note.applies_to(Some(&host), EntryState::Stopped));
+    }
 }

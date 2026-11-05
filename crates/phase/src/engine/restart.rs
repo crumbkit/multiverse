@@ -26,12 +26,12 @@ pub(crate) enum AfterExit {
         resolve: Resolve,
     },
     /// The process stays ended, with the outcome given.
-    Leave(Ended),
+    Leave(RunEnd),
 }
 
 /// How a process that stays ended ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Ended {
+pub(crate) enum RunEnd {
     /// The process exited with status 0.
     Completed,
     /// The process exited with a status other than 0 or a signal ended it,
@@ -44,9 +44,9 @@ pub(crate) enum Ended {
 /// attempt to resolve the environment counts as a failed run.
 pub(crate) fn after_exit(restart: &Restart, failed: bool, restarts: u32) -> AfterExit {
     let leave = AfterExit::Leave(if failed {
-        Ended::Failed
+        RunEnd::Failed
     } else {
-        Ended::Completed
+        RunEnd::Completed
     });
     let limits: &RestartLimits = match restart {
         Restart::No => return leave,

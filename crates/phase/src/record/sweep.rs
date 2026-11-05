@@ -25,7 +25,7 @@ use crate::name::WorkspaceId;
 use crate::record::docker::{Docker, DockerKind, DockerObject};
 use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{
-    EntryState, HostEntry, HostProcess, ObjectKey, RunRecord, VolumeLifetime,
+    Ended, EntryState, HostEntry, HostProcess, ObjectKey, RunRecord, VolumeLifetime,
 };
 use crate::record::store::{Journal, RunStore};
 use crate::record::{
@@ -256,11 +256,11 @@ impl Sweeper<'_, '_, '_> {
             }
             Some(host) => match *identity.insert(vouched(keeper, self.identify(host)?)) {
                 Identity::Gone => {
-                    self.stopped(&key)?;
+                    self.found_gone(&key, entry)?;
                     Some(SweepOutcome::Gone)
                 }
                 Identity::Reused => {
-                    self.stopped(&key)?;
+                    self.found_gone(&key, entry)?;
                     Some(SweepOutcome::PidReused)
                 }
                 Identity::Unknown | Identity::LeaderGone => Some(SweepOutcome::Unknown),
@@ -353,6 +353,17 @@ impl Sweeper<'_, '_, '_> {
         }
         self.journal_step(|journal| journal.stopped(key))?;
         Ok((SweepOutcome::Stopped, Some(id)))
+    }
+
+    /// Records that `key`, whose entry is `entry`, is gone, unless this is
+    /// a dry run. A host process that the record names as running ended
+    /// while nothing recorded how, so its entry records an end with no
+    /// exit that no stop request caused, which replaces an earlier crash.
+    fn found_gone(&mut self, key: &ObjectKey, entry: &HostEntry) -> Result<(), PhaseError> {
+        if matches!(key, ObjectKey::Process(..)) && entry.state == EntryState::Running {
+            return self.journal_step(|journal| journal.stopped_after(key, Ended::by_itself(None)));
+        }
+        self.stopped(key)
     }
 
     /// Records that `key` is gone, unless this is a dry run.

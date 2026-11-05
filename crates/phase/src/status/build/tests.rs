@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use super::{Sources, status};
 use crate::engine::container::ContainerState;
 use crate::name::WorkspaceId;
+use crate::plan::restart::{Restart, RestartLimits};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::docker::{Docker, DockerKind};
 use crate::record::process::{Processes, Start};
@@ -15,7 +16,9 @@ use crate::record::testing::{
 };
 use crate::record::{ContainerId, Handle};
 use crate::source::Source;
-use crate::status::{LastExit, ProcessState, SourceSummary, UnknownReason, WorkspaceState};
+use crate::status::{
+    ExitReason, LastExit, ProcessState, SourceSummary, UnknownReason, WorkspaceState,
+};
 
 /// Writes `record` as the run record of the tests' workspace under
 /// `state`, as phase would have left it.
@@ -148,10 +151,11 @@ fn a_running_process_is_reported_from_the_record_and_the_process_table_without_a
     }
 }
 
-// The record still names the process as running, as it does after an
-// outside `TERM` stopped a keeper that dropped its notes.
+// The record still names the process as running, as it does after
+// something killed the keeper, or after an outside `TERM` stopped a keeper
+// that dropped its notes. Nothing recorded how the process ended.
 #[test]
-fn a_process_that_the_record_names_as_running_and_that_has_gone_is_stopped() {
+fn a_process_that_the_record_names_as_running_and_that_has_gone_is_exited_unrecorded() {
     let state = tempfile::tempdir().unwrap();
     let mut ended = Spawned::shell("echo ready; exec sleep 0.1");
     let host = ended.host();
@@ -171,7 +175,7 @@ fn a_process_that_the_record_names_as_running_and_that_has_gone_is_stopped() {
         &Unreachable,
     );
 
-    assert_eq!(status.rows[0].state, ProcessState::Stopped);
+    assert_eq!(status.rows[0].state, ProcessState::unrecorded());
     assert_eq!(status.rows[0].handle, None);
     assert_eq!(status.state, WorkspaceState::Stopped);
 }
@@ -565,4 +569,130 @@ fn a_process_that_restarts_shows_how_it_last_ended() {
     assert_eq!(status.rows[0].last_exit, Some(LastExit::new(Some(1), None)));
     let json = serde_json::to_value(&status).unwrap();
     assert_eq!(json["rows"][0]["last_exit"], serde_json::json!({"code": 1}));
+}
+
+/// Returns a record whose `api/server` keeper is process 100, which runs,
+/// and whose process 200 has gone, with `restart` as its policy and `state`
+/// and `ended` as its entry holds them.
+fn crashed_record(restart: Restart, state: EntryState, ended: Option<Ended>) -> RunRecord {
+    let mut record = host_record(
+        Some((EntryState::Running, host_at(100, 1))),
+        Some((state, host_at(200, 2))),
+    );
+    record.processes[0].restart = Some(restart);
+    record.processes[0].ended = ended;
+    record
+}
+
+#[test]
+fn a_crashed_process_shows_as_restarting_only_when_its_policy_restarts_it() {
+    let keeper = FakeProcesses::default().with(100, Start::At(1), None);
+    let limits = RestartLimits::default();
+    let one = RestartLimits {
+        max: std::num::NonZeroU32::new(1),
+        ..RestartLimits::default()
+    };
+    let crash = Some(Ended::by_itself(Some(Exit::Code(3))));
+    let clean = Some(Ended::by_itself(Some(Exit::Code(0))));
+    let cases = [
+        // The keeper has not recorded the end yet.
+        (
+            Restart::No,
+            EntryState::Running,
+            None,
+            0,
+            ProcessState::Stopping,
+        ),
+        (
+            Restart::always(limits.clone()),
+            EntryState::Running,
+            None,
+            0,
+            ProcessState::Restarting,
+        ),
+        (
+            Restart::on_failure(limits.clone()),
+            EntryState::Running,
+            None,
+            0,
+            ProcessState::Stopping,
+        ),
+        // The keeper recorded the end and is stopping what is left.
+        (
+            Restart::No,
+            EntryState::Stopping,
+            crash,
+            0,
+            ProcessState::Stopping,
+        ),
+        // The keeper recorded that the group is gone.
+        (
+            Restart::No,
+            EntryState::Stopped,
+            crash,
+            0,
+            ProcessState::exited(Some(3)),
+        ),
+        (
+            Restart::on_failure(limits.clone()),
+            EntryState::Stopped,
+            clean,
+            0,
+            ProcessState::exited(Some(0)),
+        ),
+        (
+            Restart::on_failure(limits.clone()),
+            EntryState::Stopped,
+            crash,
+            0,
+            ProcessState::Restarting,
+        ),
+        (
+            Restart::on_failure(one),
+            EntryState::Stopped,
+            crash,
+            1,
+            ProcessState::exited(Some(3)),
+        ),
+        (
+            Restart::always(limits.clone()),
+            EntryState::Stopped,
+            clean,
+            0,
+            ProcessState::Restarting,
+        ),
+    ];
+    for (restart, entry_state, ended, restarts, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = crashed_record(restart.clone(), entry_state, ended);
+        record.processes[0].restarts = restarts;
+        write_record(dir.path(), &record);
+
+        assert_eq!(
+            only_state(dir.path(), &keeper),
+            expected,
+            "{restart:?} {entry_state:?} {ended:?} {restarts}"
+        );
+    }
+}
+
+#[test]
+fn a_running_process_whose_keeper_and_app_have_gone_is_exited_without_a_recorded_end() {
+    for ended in [None, Some(Ended::by_itself(Some(Exit::Code(1))))] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = host_record(
+            Some((EntryState::Running, host_at(100, 1))),
+            Some((EntryState::Running, host_at(200, 2))),
+        );
+        record.processes[0].ended = ended;
+        write_record(dir.path(), &record);
+
+        let state = only_state(dir.path(), &FakeProcesses::default());
+
+        assert_eq!(state, ProcessState::unrecorded(), "{ended:?}");
+        let ProcessState::Exited { reason, .. } = state else {
+            panic!("{state:?}");
+        };
+        assert_eq!(reason, Some(ExitReason::Unrecorded));
+    }
 }

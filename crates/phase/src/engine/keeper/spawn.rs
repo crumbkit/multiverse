@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use rustix::process::Signal;
 
+use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
@@ -109,13 +110,15 @@ impl AppEnd {
     }
 
     /// Waits until `deadline` for the keeper's end line, and returns how
-    /// the app exited, or `None` when the line does not come by then, the
-    /// keeper's output ends first, or the keeper could not read the exit.
+    /// the app exited, or `None` when the line does not come by then,
+    /// `cancel` is cancelled first, the keeper's output ends first, or the
+    /// keeper could not read the exit.
     ///
     /// A thread reads the line, because a pipe gives no read with a
-    /// deadline. When the deadline passes first, the thread ends once the
-    /// keeper writes its end line or exits.
-    pub(crate) fn wait(self, deadline: Instant) -> Option<Exit> {
+    /// deadline. When the wait ends first, the thread is left behind, and
+    /// it ends once the keeper writes its end line or exits, so the
+    /// keeper's life bounds it.
+    pub(crate) fn wait(self, deadline: Instant, cancel: &Cancel) -> Option<Exit> {
         let mut output = match self.0 {
             EndSource::Unreported => return None,
             #[cfg(test)]
@@ -126,10 +129,22 @@ impl AppEnd {
         thread::spawn(move || {
             let _ = sender.send(read_end(&mut output));
         });
-        receiver
-            .recv_timeout(deadline.saturating_duration_since(now()))
-            .ok()
-            .flatten()
+        // A cancel gives no event, so the wait looks at it between slices
+        // of the poll interval (BASE-11).
+        loop {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            let left = deadline.saturating_duration_since(now());
+            if left.is_zero() {
+                return None;
+            }
+            match receiver.recv_timeout(left.min(POLL_INTERVAL)) {
+                Ok(exit) => return exit,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
     }
 }
 

@@ -29,8 +29,8 @@ use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::name::{AppName, ProcessName};
 use crate::record::run::{
-    Ended, EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, RunRecord, Started,
-    Unplanned,
+    Ended, EntryState, HostProcess, Launching, ObjectKey, RUN_VERSION, RunRecord, RunSchema,
+    Started, Unplanned,
 };
 
 #[cfg(test)]
@@ -133,8 +133,11 @@ impl RunStore {
                 schema: versioned.schema,
             });
         }
-        let record: RunRecord =
+        let mut record: RunRecord =
             serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string()))?;
+        // A `phase/run/v1` record reads as v2 with no ends and no restart
+        // policies, and phase writes it back as v2.
+        record.schema = RunSchema::V2;
         if &record.workspace != workspace {
             return Err(unreadable(format!(
                 "it names the workspace {}",
@@ -569,15 +572,23 @@ impl<'s> Journal<'s> {
 
     /// Records that phase is about to stop or remove the object `key`.
     /// A stop request causes the end of a host process that phase stops,
-    /// so its entry records the end as requested, with no exit, which
-    /// replaces the end of an earlier crash.
+    /// so its entry records the end as requested, as
+    /// [`RunRecord::mark_stop_requested`] says.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`Journal::started`].
     pub(crate) fn stopping(&mut self, key: &ObjectKey) -> Result<(), PhaseError> {
-        let ended = matches!(key, ObjectKey::Process(..)).then_some(Ended::requested(None));
-        self.change(key, EntryState::Stopping, ended)
+        let mut record = self.current(key)?;
+        if matches!(key, ObjectKey::Process(..)) {
+            record
+                .mark_stop_requested(key)
+                .map_err(|unplanned| self.unplanned(&unplanned))?;
+        }
+        record
+            .set_state(key, EntryState::Stopping)
+            .map_err(|unplanned| self.unplanned(&unplanned))?;
+        self.commit(record)
     }
 
     /// Records that the host process `key` ended as `ended`, and that its
@@ -611,6 +622,21 @@ impl<'s> Journal<'s> {
         ended: Ended,
     ) -> Result<(), PhaseError> {
         self.change(key, EntryState::Stopped, Some(ended))
+    }
+
+    /// Deletes the record as [`Journal::finish`] does, unless a host
+    /// process's entry records an end that no stop request caused, which
+    /// `status` shows as exited until `down` or a later start, and reports
+    /// whether it deleted it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Journal::finish`].
+    pub(crate) fn finish_keeping_exits(&mut self) -> Result<bool, PhaseError> {
+        if self.record.as_ref().is_some_and(RunRecord::holds_an_exit) {
+            return Ok(false);
+        }
+        self.finish()
     }
 
     /// Deletes the record when every object in it is stopped, apart from

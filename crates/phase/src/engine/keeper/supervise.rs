@@ -11,12 +11,14 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
-use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::consts::{SIGINT, SIGPIPE, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use crate::clock::{POLL_INTERVAL, now, pause, wall_now};
@@ -68,6 +70,19 @@ pub(crate) fn run(
             )),
         );
         return KeeperExit::BadInput;
+    }
+    // The engine closes its end of the keeper's standard output once it
+    // stops reading, and the end line may come after that. With `SIGPIPE`
+    // at its default, that write would end the keeper. A handler of its
+    // own makes the write fail with `EPIPE` instead, which the keeper
+    // ignores, and unlike an ignored signal it reverts to the default in
+    // the app when the app's program starts.
+    if let Err(error) = signal_hook::flag::register(SIGPIPE, Arc::new(AtomicBool::new(false))) {
+        write_handshake(
+            output,
+            &Handshake::Unstartable(format!("the keeper cannot handle SIGPIPE: {error}")),
+        );
+        return KeeperExit::Unstartable;
     }
     keep(args, environment, source, input, output)
 }
