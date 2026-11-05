@@ -60,6 +60,21 @@ pub const DIRECTORY_TAKEN: Code = Code::new("mxv", "directory", "taken");
 pub const CHECKOUT_UNOWNED: Code = Code::new("mxv", "checkout", "unowned");
 /// The code of a new workspace whose branch already exists.
 pub const BRANCH_EXISTS: Code = Code::new("mxv", "branch", "exists");
+/// The code of a checkout whose folder another checkout of the workspace
+/// has, compared without case, or that names a file mxv writes in the
+/// workspace's directory.
+pub const CHECKOUT_NAME_TAKEN: Code = Code::new("mxv", "checkout", "name_taken");
+/// The code of an `--as` folder name that breaks the naming rules.
+pub const CHECKOUT_INVALID_NAME: Code = Code::new("mxv", "checkout", "invalid_name");
+/// The code of a checkout folder that the workspace does not have.
+pub const CHECKOUT_NOT_FOUND: Code = Code::new("mxv", "checkout", "not_found");
+/// The code of `mxv add` on a workspace of git worktrees, which mxv made
+/// before clones.
+pub const WORKSPACE_WORKTREE_KIND: Code = Code::new("mxv", "workspace", "worktree_kind");
+/// The code of `mxv add` on a workspace with one checkout whose workspace
+/// manifest names paths relative to that checkout, which would name other
+/// places once the workspace has two checkouts.
+pub const MANIFEST_CHECKOUT_RELATIVE: Code = Code::new("mxv", "manifest", "checkout_relative");
 /// The code of a `--repo` that is not a git repository.
 pub const REPOSITORY_NOT_FOUND: Code = Code::new("mxv", "repository", "not_found");
 /// The code of a repository without a remote named `origin`.
@@ -259,6 +274,47 @@ pub(crate) enum MxvFailure {
         /// The branch.
         branch: String,
     },
+    /// Two checkouts of the workspace would share a folder, or a folder
+    /// would take the name of a file that mxv writes.
+    FolderTaken {
+        /// The repository whose checkout would take the folder.
+        repository: PathBuf,
+        /// The folder.
+        folder: String,
+    },
+    /// An `--as` folder name breaks the naming rules.
+    BadFolder {
+        /// The folder name as the caller typed it.
+        folder: String,
+        /// The rule it breaks.
+        reason: String,
+    },
+    /// The workspace has no checkout with the folder.
+    CheckoutNotFound {
+        /// The workspace's name.
+        name: String,
+        /// The folder.
+        checkout: String,
+        /// The folders that the workspace has.
+        checkouts: Vec<String>,
+    },
+    /// `mxv add` named a workspace of git worktrees.
+    Worktrees {
+        /// The workspace's name.
+        name: String,
+    },
+    /// `mxv add` named a workspace with one checkout whose workspace
+    /// manifest names paths relative to that checkout.
+    CheckoutRelative {
+        /// The workspace's name.
+        name: String,
+        /// The workspace manifest.
+        manifest: PathBuf,
+        /// The checkout's folder.
+        folder: String,
+        /// The paths that do not lie below the folder.
+        paths: Vec<String>,
+    },
     /// mxv finds no home directory.
     NoHome,
     /// `MXV_ROOT` is a relative path.
@@ -331,6 +387,11 @@ pub(crate) const CODES: &[&Code] = &[
     &DIRECTORY_TAKEN,
     &CHECKOUT_UNOWNED,
     &BRANCH_EXISTS,
+    &CHECKOUT_NAME_TAKEN,
+    &CHECKOUT_INVALID_NAME,
+    &CHECKOUT_NOT_FOUND,
+    &WORKSPACE_WORKTREE_KIND,
+    &MANIFEST_CHECKOUT_RELATIVE,
     &REPOSITORY_NOT_FOUND,
     &REPOSITORY_NO_ORIGIN,
     &REPOSITORY_EMPTY_ORIGIN,
@@ -457,6 +518,11 @@ impl Failure for MxvFailure {
             Self::DirectoryTaken { .. } => &DIRECTORY_TAKEN,
             Self::Unowned { .. } => &CHECKOUT_UNOWNED,
             Self::BranchExists { .. } => &BRANCH_EXISTS,
+            Self::FolderTaken { .. } => &CHECKOUT_NAME_TAKEN,
+            Self::BadFolder { .. } => &CHECKOUT_INVALID_NAME,
+            Self::CheckoutNotFound { .. } => &CHECKOUT_NOT_FOUND,
+            Self::Worktrees { .. } => &WORKSPACE_WORKTREE_KIND,
+            Self::CheckoutRelative { .. } => &MANIFEST_CHECKOUT_RELATIVE,
             Self::NoHome => &ENVIRONMENT_NO_DIRECTORY,
             Self::RelativeRoot { .. } => &ENVIRONMENT_RELATIVE_ROOT,
             Self::BadConfig { .. } => &CONFIG_INVALID,
@@ -568,6 +634,28 @@ impl Failure for MxvFailure {
             Self::BranchExists { repository, branch } => hint(format!(
                 "choose another name, or delete the branch {branch} in {}",
                 shown(repository)
+            )),
+            Self::FolderTaken { repository, folder } => hint(format!(
+                "give the checkout of {} another folder with `--as <FOLDER>` right after its `--repo`, because the folder {folder} is taken",
+                shown(repository)
+            )),
+            Self::BadFolder { .. } => hint(
+                "use 1 to 64 lowercase letters, digits, '-', '_' and '.', starting with a letter or a digit, other than mxv.toml",
+            ),
+            Self::CheckoutNotFound { name, .. } => {
+                Recovery::Run(Call::new(&["show"]).value("names", name))
+            }
+            Self::Worktrees { name } => hint(format!(
+                "create a new workspace with every repository, such as `mxv new <NAME> --repo <A> --repo <B>`, because the workspace {name} holds git worktrees, which mxv made before clones, and mxv adds no checkout to it"
+            )),
+            Self::CheckoutRelative {
+                name,
+                manifest,
+                folder,
+                ..
+            } => hint(format!(
+                "a workspace with two checkouts reads its workspace manifest's paths from the workspace's directory, so move each listed path of {} under `{folder}/`, such as `cwd = \"{folder}\"` for a process that ran at the checkout's root, and then run `mxv add -w {name}` again",
+                shown(manifest)
             )),
             Self::NoHome => hint("set HOME to your home directory"),
             Self::RelativeRoot { .. } => hint(
@@ -695,6 +783,34 @@ impl Failure for MxvFailure {
             Self::BranchExists { repository, branch } => vec![
                 Field::new("repository", shown(repository)),
                 Field::new("branch", branch),
+            ],
+            Self::FolderTaken { repository, folder } => vec![
+                Field::new("repository", shown(repository)),
+                Field::new("folder", folder),
+            ],
+            Self::BadFolder { folder, reason } => {
+                vec![Field::new("folder", folder), Field::new("reason", reason)]
+            }
+            Self::CheckoutNotFound {
+                name,
+                checkout,
+                checkouts,
+            } => vec![
+                Field::new("name", name),
+                Field::new("checkout", checkout),
+                Field::new("checkouts", FieldValue::list(checkouts.iter())),
+            ],
+            Self::Worktrees { name } => vec![Field::new("name", name)],
+            Self::CheckoutRelative {
+                name,
+                manifest,
+                folder,
+                paths,
+            } => vec![
+                Field::new("name", name),
+                Field::new("manifest", shown(manifest)),
+                Field::new("folder", folder),
+                Field::new("paths", FieldValue::list(paths.iter())),
             ],
             Self::NoHome => Vec::new(),
             Self::RelativeRoot { value } => vec![Field::new("value", shown(value))],
@@ -1014,6 +1130,36 @@ impl fmt::Display for MxvFailure {
                 "the repository {} already has a branch named {branch}",
                 shown(repository)
             ),
+            Self::FolderTaken { repository, folder } => write!(
+                formatter,
+                "the checkout of {} would take the folder {folder}, which another checkout of the workspace or a file that mxv writes already has",
+                shown(repository)
+            ),
+            Self::BadFolder { folder, reason } => {
+                write!(formatter, "`{folder}` is not a folder name: {reason}")
+            }
+            Self::CheckoutNotFound {
+                name, checkout, ..
+            } => write!(
+                formatter,
+                "the workspace {name} has no checkout in the folder {checkout}"
+            ),
+            Self::Worktrees { name } => write!(
+                formatter,
+                "the workspace {name} holds git worktrees, and mxv adds checkouts only to a workspace of clones"
+            ),
+            Self::CheckoutRelative {
+                name,
+                manifest,
+                folder,
+                paths,
+            } => write!(
+                formatter,
+                "the workspace manifest {} of the workspace {name} names {} relative to the checkout {folder}, which would name other places once the workspace has two checkouts: {}",
+                shown(manifest),
+                if paths.len() == 1 { "a path" } else { "paths" },
+                paths.join(", ")
+            ),
             Self::NoHome => formatter.write_str(
                 "mxv cannot find your home directory, which holds its state, config and data directories",
             ),
@@ -1062,6 +1208,11 @@ impl std::error::Error for MxvFailure {
             | Self::DirectoryTaken { .. }
             | Self::Unowned { .. }
             | Self::BranchExists { .. }
+            | Self::FolderTaken { .. }
+            | Self::BadFolder { .. }
+            | Self::CheckoutNotFound { .. }
+            | Self::Worktrees { .. }
+            | Self::CheckoutRelative { .. }
             | Self::IgnoredFiles { .. }
             | Self::ManifestDisposable { .. }
             | Self::Changed { .. }

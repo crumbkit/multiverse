@@ -41,6 +41,9 @@ pub const MANIFEST_RESERVED: Code = Code::new("mxv", "manifest", "reserved");
 pub const MANIFEST_INVALID: Code = Code::new("mxv", "manifest", "invalid");
 /// The code of a manifest that exists and cannot be read.
 pub const MANIFEST_UNREADABLE: Code = Code::new("mxv", "manifest", "unreadable");
+/// The code of two manifests of a workspace with several checkouts that
+/// declare the same merged name.
+pub const MANIFEST_NAME_CLASH: Code = Code::new("mxv", "manifest", "name_clash");
 /// The code of a process name that the workspace does not know.
 pub const PROCESS_NOT_FOUND: Code = Code::new("mxv", "process", "not_found");
 /// The code of a process that exited before it was ready.
@@ -74,6 +77,7 @@ pub(crate) const CODES: &[&Code] = &[
     &MANIFEST_RESERVED,
     &MANIFEST_INVALID,
     &MANIFEST_UNREADABLE,
+    &MANIFEST_NAME_CLASH,
     &PROCESS_NOT_FOUND,
     &PROCESS_EXITED,
     &PROCESS_NOT_READY,
@@ -355,6 +359,7 @@ impl Failure for RunFailure {
                 ManifestProblem::Unreadable { .. } => &MANIFEST_UNREADABLE,
                 ManifestProblem::UnitName { .. } => &MANIFEST_UNIT_NAME,
                 ManifestProblem::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
+                ManifestProblem::NameClash { .. } => &MANIFEST_NAME_CLASH,
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
@@ -420,6 +425,11 @@ impl Failure for RunFailure {
                 ManifestProblem::UnitName { name } => hint(format!(
                     "rename the unit `{name}` in {} to 1 to 64 lowercase letters, digits, `-` and `_`, starting with a letter or a digit",
                     shown(&error.path)
+                )),
+                ManifestProblem::NameClash { name, other } => hint(format!(
+                    "rename `{name}` in {} or in {}, or give one of the checkouts another folder, whose name prefixes its names, with `--as`",
+                    shown(&error.path),
+                    shown(other)
                 )),
                 _ if error.line.is_some() => hint(format!(
                     "fix the line of {} that the message names",
@@ -649,6 +659,10 @@ fn manifest_fields(error: &ManifestError) -> Vec<Field<'_>> {
         | ManifestProblem::Unreadable { message }
         | ManifestProblem::Unrunnable { message } => {
             fields.push(Field::new("message", message));
+        }
+        ManifestProblem::NameClash { name, other } => {
+            fields.push(Field::new("name", name));
+            fields.push(Field::new("other", shown(other)));
         }
         _ => {}
     }

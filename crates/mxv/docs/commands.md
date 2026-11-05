@@ -8,10 +8,11 @@ Create, archive and restore task workspaces that span several git repositories
 
 ### Commands
 
-- [`mxv new`](#mxv-new): Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin
+- [`mxv new`](#mxv-new): Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin
+- [`mxv add`](#mxv-add): Add a clone of a repository to a workspace, on the workspace's branch
 - [`mxv list`](#mxv-list): List the workspaces
 - [`mxv show`](#mxv-show): Show workspaces by name, in the order given
-- [`mxv cd`](#mxv-cd): Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
+- [`mxv cd`](#mxv-cd): Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
 - [`mxv up`](#mxv-up): Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
 - [`mxv down`](#mxv-down): Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
 - [`mxv restart`](#mxv-restart): Stop a workspace's processes and start them again
@@ -36,17 +37,18 @@ Create, archive and restore task workspaces that span several git repositories
 
 ## `mxv new`
 
-Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin.
+Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin.
 
-The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG\_DATA\_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
+Each --repo adds one clone, in the folder \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that an --as right after that --repo gives. Two folders with the same name, compared without case, are refused. Every clone is on the branch NAME. The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG\_DATA\_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
 
 The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
 ### Arguments
 
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
-- `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
-- `--no-clone`: Clone none of the repository's ignored directories, such as node\_modules/, into the new checkout
+- `--repo <PATH>`: A git repository to check out, or a directory inside it; repeat it or use commas for several. Required. Takes more than one value.
+- `--as <FOLDER>`: The folder of the checkout of the --repo right before it, which defaults to the repository's name. Takes more than one value.
+- `--no-clone`: Clone none of the repositories' ignored directories, such as node\_modules/, into the new checkouts
 - `--manifest <FILE>`: Copy FILE into the new workspace as its workspace manifest, \<ROOT\>/\<NAME\>/mxv.toml, in place of a template
 - `--dry-run`: Report what the command would change, and change nothing
 
@@ -56,6 +58,12 @@ Print the workspace that a checkout of the repository app would get.
 
 ```sh
 mxv new triage --repo app --dry-run
+```
+
+Print the workspace that checkouts of the repositories app and web would get.
+
+```sh
+mxv new triage --repo app --repo web --dry-run
 ```
 
 ### Columns
@@ -68,14 +76,58 @@ mxv new triage --repo app --dry-run
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `cloned`: Each ignored directory of the repository that `new` cloned into the checkout, or would clone on a dry run, with the checkout's name in front, such as `app: web/node_modules/`. A clone shares its disk with the repository's copy until a file in either changes.
 - `clone_warning`: Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
-- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace.
 - `manifest_from`: The file that `new` copied into the workspace manifest: the `--manifest` file, or the template whose `[template]` table lists the repository's origin, or null when it copied none.
 - `warnings`: The sentences, joined with `; `, for each template that `new` skipped because it cannot use it, and for each table of the copied manifest that mxv ignores although its name is close to one of mxv's own, or null.
 
 ### Columns that `--long` adds
 
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
-- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
+- `repositories`: The top-level directory of each repository that the workspace checks out.
+
+Effects: additive, not idempotent, open-world.
+
+## `mxv add`
+
+Add a clone of a repository to a workspace, on the workspace's branch.
+
+The clone lives in \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's processes, containers and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's processes or containers run, and moves the host ports that the workspace holds to the new names.
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
+- `--as <FOLDER>`: The checkout's folder, which defaults to the repository's name
+- `--no-clone`: Clone none of the repository's ignored directories, such as node\_modules/, into the new checkout
+- `--dry-run`: Report what the command would change, and change nothing
+
+### Examples
+
+Print the checkout that adding the repository web to the workspace triage would make.
+
+```sh
+mxv add -w triage --repo web --dry-run
+```
+
+### Columns
+
+- `name`: The workspace's name, which is also the name of its directory and of its checkouts' branch.
+- `branch`: The branch that the workspace's checkouts were created on.
+- `path`: The workspace's directory, which `mxv cd` prints. It comes from the workspace's record, so it stays where the workspace was created when the root changes later.
+- `root`: The workspace root that the run used, in which `new` creates a workspace's directory.
+- `root_source`: Where the root came from: `env` for `MXV_ROOT`, `config` for the config file's `root`, or `default` for `$XDG_DATA_HOME/mxv/workspaces`.
+- `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+- `cloned`: Each ignored directory of the repository that `new` cloned into the checkout, or would clone on a dry run, with the checkout's name in front, such as `app: web/node_modules/`. A clone shares its disk with the repository's copy until a file in either changes.
+- `clone_warning`: Why `new` cloned fewer directories than the globs name, such as a file system that cannot clone, or null. `new` never copies the directories in full.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace.
+- `manifest_from`: The file that `new` copied into the workspace manifest: the `--manifest` file, or the template whose `[template]` table lists the repository's origin, or null when it copied none.
+- `warnings`: The sentences, joined with `; `, for each template that `new` skipped because it cannot use it, and for each table of the copied manifest that mxv ignores although its name is close to one of mxv's own, or null.
+
+### Columns that `--long` adds
+
+- `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: additive, not idempotent, open-world.
@@ -111,8 +163,8 @@ mxv list
 ### Columns that `--long` adds
 
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.
-- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace. Null in a row whose record mxv cannot read.
-- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace. Null in a row whose record mxv cannot read.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 
 Effects: read-only, closed-world.
@@ -148,8 +200,8 @@ mxv show reading-list
 ### Columns that `--long` adds
 
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
-- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, or `none` for a bare workspace.
-- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none.
+- `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace.
+- `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 - `disposable_paths`: Each disposable path with its checkout and the bytes it takes.
 - `kept_paths`: Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.
@@ -158,11 +210,12 @@ Effects: read-only, closed-world.
 
 ## `mxv cd`
 
-Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
+Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
 
 ### Arguments
 
 - `<NAME>`: The name of the workspace. Required.
+- `<CHECKOUT>`: The folder of one of the workspace's checkouts, whose directory to print in place of the workspace's
 
 ### Examples
 

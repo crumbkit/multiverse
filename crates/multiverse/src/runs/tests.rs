@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, RECORD_VERSION, Workspace};
+use crate::record::{Checkout, ID_RECORD_VERSION, Workspace};
 use crate::run_files::RunHost;
 use crate::runs::{DownOutcome, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail};
 use crate::store::{Created, Store};
@@ -436,7 +436,7 @@ fn the_run_host_saves_a_stable_id_in_a_record_without_one_and_then_returns_the_s
     let id = host.saved_workspace_id(&workspace.name).unwrap();
     let saved = store.read(&workspace.name).unwrap().unwrap();
     assert_eq!(saved.id.as_ref(), Some(&id));
-    assert_eq!(saved.version, RECORD_VERSION);
+    assert_eq!(saved.version, ID_RECORD_VERSION);
     assert_eq!(host.saved_workspace_id(&workspace.name).unwrap(), id);
 }
 

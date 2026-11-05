@@ -33,6 +33,16 @@
     },
     {
       "rule": "examples/run",
+      "applies_to": "mxv add",
+      "reason": "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
       "applies_to": "mxv archive",
       "reason": "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.",
       "costs": [
@@ -166,6 +176,15 @@
     },
     {
       "rule": "twins/no-twin",
+      "applies_to": "mxv add -w reading-list --repo app --dry-run",
+      "reason": "The kind of the workspace's record causes the failure, and the fixture holds no workspace of clones to name instead.",
+      "costs": [
+        "No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "twins/no-twin",
       "applies_to": "mxv new triage --repo app --dry-run",
       "reason": "The config file causes the failure, and no word of the command line names the config file.",
       "costs": [
@@ -186,7 +205,7 @@
   "customisations": [
     {
       "declaration": "root-verbs",
-      "applies_to": "mxv new, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove, mxv clean",
+      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove, mxv clean",
       "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
       "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
     },

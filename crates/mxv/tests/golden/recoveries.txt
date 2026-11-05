@@ -83,6 +83,23 @@ mxv clean --over-limit --dry-run
   fails with mxv::config::no_limit
   hint
 
+mxv new triage --repo app --repo app --as app --dry-run
+  fails with mxv::checkout::name_taken
+  hint
+
+mxv new triage --repo app --as AGENTS.md --dry-run
+  fails with mxv::checkout::invalid_name
+  hint
+
+mxv cd reading-list missing
+  fails with mxv::checkout::not_found
+  run mxv show reading-list
+    exits 0
+
+mxv add -w reading-list --repo app --dry-run
+  fails with mxv::workspace::worktree_kind
+  hint
+
 mxv remove changed --dry-run
   fails with mxv::workspace::dirty
   hint
@@ -152,6 +169,8 @@ codes that no start provokes:
   mxv::port::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::reserved: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::invalid: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::manifest::name_clash: Only two checkouts whose mxv.toml files declare names that clash once prefixed provoke it, and the fixture's workspace has one checkout; tests/workspaces.rs provokes it.
+  mxv::manifest::checkout_relative: Only `mxv add` to a live workspace of one checkout whose workspace manifest names paths inside that checkout provokes it, and the fixture's workspace holds a git worktree; tests/workspaces.rs provokes it.
   mxv::manifest::unreadable: Only an mxv.toml without read permission provokes it, in a live checkout that the fixture cannot hold.
   mxv::process::not_found: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::process::exited: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.

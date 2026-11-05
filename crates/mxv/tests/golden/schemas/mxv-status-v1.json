@@ -59,6 +59,58 @@
     "summary"
   ],
   "$defs": {
+    "CheckoutStateRow": {
+      "description": "One checkout of a workspace, as `mxv status` reports it.",
+      "type": "object",
+      "properties": {
+        "branch": {
+          "description": "The branch that the checkout has checked out, or null for a\ndetached `HEAD` or a checkout that git cannot read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changes": {
+          "description": "How many entries of the checkout are uncommitted changes or\nuntracked paths, as `git status --porcelain` counts them, or null\nwhen git cannot read the checkout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "commit": {
+          "description": "The commit that the checkout's `HEAD` names, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The checkout's folder, which `mxv cd <NAME> <CHECKOUT>` takes.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The checkout's directory.",
+          "type": "string"
+        },
+        "problem": {
+          "description": "Why git cannot read the checkout, such as a directory that is\ngone, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "branch",
+        "commit",
+        "changes",
+        "problem"
+      ]
+    },
     "KindName": {
       "description": "Whether a row is a process or a container.",
       "oneOf": [
@@ -86,6 +138,11 @@
           "description": "The checkout's own `mxv.toml`.",
           "type": "string",
           "const": "repository"
+        },
+        {
+          "description": "The workspace manifest and each checkout's own `mxv.toml`, merged,\nin a workspace with several checkouts.",
+          "type": "string",
+          "const": "merged"
         },
         {
           "description": "Neither file, so the workspace is bare.",
@@ -225,8 +282,15 @@
       "description": "What `mxv status` says above its rows: which manifest the workspace\nreads, whether it could be read, and its warnings.",
       "type": "object",
       "properties": {
+        "checkouts": {
+          "description": "Each checkout of the workspace, with the branch and commit it has\nchecked out and how many of its entries are uncommitted or\nuntracked.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckoutStateRow"
+          }
+        },
         "manifest": {
-          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, or `none` for a bare workspace.",
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, `merged` for the files of a workspace\nwith several checkouts, or `none` for a bare workspace.",
           "$ref": "#/$defs/ManifestRow"
         },
         "manifest_error": {
@@ -244,11 +308,18 @@
           ]
         },
         "manifest_path": {
-          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none.",
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none. For a merged manifest, it is the\nworkspace manifest when it exists, or else the first checkout's\n`mxv.toml`.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "manifest_paths": {
+          "description": "Every file that the workspace's commands read.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "warnings": {
           "description": "One sentence for each table of the manifest that mxv ignores\nalthough its name is close to one of mxv's own, such as\n`[proceses.web]`.",
@@ -261,9 +332,11 @@
       "required": [
         "manifest",
         "manifest_path",
+        "manifest_paths",
         "manifest_error",
         "manifest_error_code",
-        "warnings"
+        "warnings",
+        "checkouts"
       ]
     }
   }

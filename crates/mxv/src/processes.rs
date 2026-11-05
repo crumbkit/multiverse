@@ -13,14 +13,14 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    DownOutcome, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable, UpOutcome,
-    Volumes, Workspace, WorkspaceName,
+    DownOutcome, Git, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable,
+    UpOutcome, Volumes, Workspace, WorkspaceName,
 };
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
-use crate::rows::{LogLine, PortRow, ProcessRow, StatusSummary};
+use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
 use crate::run_failures::{LogTail, NotMoved, RunFailure};
 use crate::verbs;
 
@@ -131,7 +131,10 @@ fn context(
 
 /// Returns the workspace whose directory holds the current directory, or
 /// `None`.
-fn current(store: &Store, environment: &Environment) -> Result<Option<Workspace>, MxvFailure> {
+pub(crate) fn current(
+    store: &Store,
+    environment: &Environment,
+) -> Result<Option<Workspace>, MxvFailure> {
     let Some(dir) = environment.current_dir() else {
         return Ok(None);
     };
@@ -474,10 +477,17 @@ pub(crate) fn status(
         .status(&context.workspace, manifest.as_ref())
         .map_err(MxvFailure::from)?;
     let rows = statuses.iter().map(ProcessRow::from).collect();
+    let checkouts = context
+        .workspace
+        .checkouts
+        .iter()
+        .map(|checkout| CheckoutStateRow::read(&Git, checkout))
+        .collect();
     Ok(Listing::from_all(rows, None).summary(StatusSummary::new(
         &context.workspace,
         manifest.as_ref(),
         error.map(RunFailure::Manifest).as_ref(),
+        checkouts,
     )))
 }
 

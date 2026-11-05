@@ -1,10 +1,13 @@
-Print the directory of a workspace, so `cd "$(mxv cd NAME)"` resumes it
+Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
 
-Usage: mxv cd [OPTIONS] <NAME>
+Usage: mxv cd [OPTIONS] <NAME> [CHECKOUT]
 
 Arguments:
   <NAME>
           The name of the workspace
+
+  [CHECKOUT]
+          The folder of one of the workspace's checkouts, whose directory to print in place of the workspace's
 
 Options:
       --json

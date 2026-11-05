@@ -80,6 +80,21 @@ fn a_checkout_starts_at_the_fetched_base_on_a_branch_that_tracks_nothing() {
 }
 
 #[test]
+fn the_head_names_the_current_branch_and_commit_and_no_branch_when_detached() {
+    let fixture = fixture();
+    let commit = git(&fixture.clone, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let head = Git.head(&fixture.clone).unwrap();
+    assert_eq!(head.branch.as_deref(), Some("main"));
+    assert_eq!(head.commit.as_deref(), Some(commit.as_str()));
+    git(&fixture.clone, &["switch", "--quiet", "--detach"]);
+    let head = Git.head(&fixture.clone).unwrap();
+    assert_eq!(head.branch, None);
+    assert_eq!(head.commit.as_deref(), Some(commit.as_str()));
+}
+
+#[test]
 fn a_new_file_in_a_checkout_is_a_change() {
     let fixture = fixture();
     assert_eq!(Git.changes(&fixture.clone).unwrap(), Changes::default());

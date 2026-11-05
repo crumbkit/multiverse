@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::backend::Backend;
 use crate::disposable::{CLONE_NEVER, PathGlob};
 use crate::error::Error;
-use crate::record::Workspace;
+use crate::record::{Checkout, Workspace};
 use crate::workspaces::{Entry, Mode, Workspaces};
 
 #[cfg(test)]
@@ -106,11 +106,32 @@ impl<B: Backend> Workspaces<B> {
         globs: &[PathGlob],
         mode: Mode,
     ) -> Result<Cloned, Error> {
+        let each: Vec<(&Checkout, Vec<PathGlob>)> = workspace
+            .checkouts
+            .iter()
+            .map(|checkout| (checkout, globs.to_vec()))
+            .collect();
+        self.clone_ignored_each(&each, mode)
+    }
+
+    /// Clones into each checkout of `each` the ignored directories of its
+    /// repository that the checkout's own globs match, as
+    /// [`Workspaces::clone_ignored`] does, for a workspace whose checkouts
+    /// read different manifests.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of `git status` in a repository.
+    pub fn clone_ignored_each(
+        &self,
+        each: &[(&Checkout, Vec<PathGlob>)],
+        mode: Mode,
+    ) -> Result<Cloned, Error> {
         let mut cloned = Cloned::default();
-        if globs.is_empty() {
-            return Ok(cloned);
-        }
-        for checkout in &workspace.checkouts {
+        for (checkout, globs) in each {
+            if globs.is_empty() {
+                continue;
+            }
             let changes = self.backend.changes(&checkout.source)?;
             for path in changes.ignored {
                 let Some(body) = path.strip_suffix('/') else {

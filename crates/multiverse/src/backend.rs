@@ -33,6 +33,17 @@ pub struct Changes {
     pub ignored: Vec<String>,
 }
 
+/// What a checkout has checked out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Head {
+    /// The branch that `HEAD` names, such as `triage`, or `None` for a
+    /// detached `HEAD`.
+    pub branch: Option<String>,
+    /// The commit that `HEAD` names, or `None` before the first commit.
+    pub commit: Option<String>,
+}
+
 /// A checkout as its repository lists it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -148,6 +159,13 @@ pub trait Backend {
     ///
     /// Returns the failure of the status command.
     fn changes(&self, checkout: &Path) -> Result<Changes, Error>;
+
+    /// Returns the branch and the commit that `checkout` has checked out.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the commands that read them.
+    fn head(&self, checkout: &Path) -> Result<Head, Error>;
 
     /// Reports whether the repository tracks `path`, a path relative to
     /// `checkout` such as `target/`, or any file below it. A path that

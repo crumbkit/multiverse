@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, RECORD_VERSION, Workspace, WorkspaceKind};
+use crate::record::{
+    Checkout, ID_RECORD_VERSION, MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceKind,
+};
 use crate::store::{Created, Store, cap_log, lock, rotate_log};
 use crate::testing::write;
 
@@ -92,11 +94,11 @@ fn a_record_of_a_newer_version_is_refused() {
     let store = Store::new(dir.path().to_path_buf());
     write(
         dir.path().join("app.json"),
-        r#"{"version": 4, "future": true}"#,
+        r#"{"version": 5, "future": true}"#,
     );
     let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(
-        matches!(error, Error::NewerRecord { version: 4, .. }),
+        matches!(error, Error::NewerRecord { version: 5, .. }),
         "{error:?}"
     );
 }
@@ -320,7 +322,7 @@ fn a_record_without_a_stable_id_reads_with_none_and_its_first_write_gives_it_one
     assert_eq!(id.as_str().len(), 32);
     let mut again = store.read(&name).unwrap().unwrap();
     assert_eq!(again.id.as_ref(), Some(&id));
-    assert_eq!(again.version, RECORD_VERSION);
+    assert_eq!(again.version, ID_RECORD_VERSION);
     store.update(&mut again).unwrap();
     assert_eq!(store.read(&name).unwrap().unwrap().id, Some(id));
 }
@@ -348,4 +350,57 @@ fn two_workspaces_get_different_stable_ids() {
     assert!(first.ensure_id().unwrap());
     assert!(second.ensure_id().unwrap());
     assert_ne!(first.id, second.id);
+}
+
+fn with_two_checkouts(name: &str) -> Workspace {
+    let mut workspace = workspace(name);
+    let mut second = workspace.checkouts[0].clone();
+    second.name = "web".to_owned();
+    second.source = PathBuf::from("/home/agent/src/web");
+    second.path = workspace.path.join("web");
+    workspace.checkouts.push(second);
+    workspace
+}
+
+#[test]
+fn a_record_of_a_workspace_with_two_checkouts_has_version_four() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = with_two_checkouts("app");
+    assert_eq!(store.create(&mut workspace).unwrap(), Created::Written);
+    let text = fs::read_to_string(dir.path().join("app.json")).unwrap();
+    // An older mxv refuses a record of version 4, so it never reads the
+    // workspace manifest's globs relative to each checkout.
+    assert!(text.contains("\"version\": 4"), "{text}");
+    let read = store.read(&"app".parse().unwrap()).unwrap().unwrap();
+    assert_eq!(read.checkouts.len(), 2);
+    assert_eq!(read.version, MULTI_CHECKOUT_RECORD_VERSION);
+}
+
+#[test]
+fn a_record_with_one_checkout_written_again_keeps_version_three() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = workspace("app");
+    store.create(&mut workspace).unwrap();
+    store.update(&mut workspace).unwrap();
+    let text = fs::read_to_string(dir.path().join("app.json")).unwrap();
+    assert!(text.contains("\"version\": 3"), "{text}");
+}
+
+#[test]
+fn a_record_of_version_five_is_refused_as_newer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = with_two_checkouts("app");
+    store.create(&mut workspace).unwrap();
+    let path = dir.path().join("app.json");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"version\": 4", "\"version\": 5");
+    write(&path, text);
+    assert!(matches!(
+        store.read(&"app".parse().unwrap()),
+        Err(Error::NewerRecord { version: 5, .. })
+    ));
 }

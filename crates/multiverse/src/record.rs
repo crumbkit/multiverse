@@ -11,16 +11,27 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 
-/// The version of the record form that this version of multiverse writes
-/// for a workspace of clones, and the highest that it reads. A record with
-/// a higher version is refused (DUR-3). Version 1 is a workspace of git
-/// worktrees, which records without a `kind` are, and its record keeps
-/// version 1 so that an older mxv still reads it. Version 2 adds `kind`,
-/// so an older mxv refuses a workspace of clones rather than treating
-/// its checkouts as worktrees. Version 3 adds the stable `id`, and every
-/// record that holds one has version 3, whatever its kind, so an older mxv
-/// refuses the record rather than dropping the id when it rewrites it.
-pub const RECORD_VERSION: u32 = 3;
+/// The highest version of the record form that this version of multiverse
+/// reads. A record with a higher version is refused (DUR-3). Version 1 is
+/// a workspace of git worktrees, which records without a `kind` are, and
+/// its record keeps version 1 so that an older mxv still reads it.
+/// Version 2 adds `kind`, so an older mxv refuses a workspace of clones
+/// rather than treating its checkouts as worktrees. Version 3 adds the
+/// stable `id`, and every record that holds one has at least version 3,
+/// whatever its kind, so an older mxv refuses the record rather than
+/// dropping the id when it rewrites it. Version 4 is a workspace with more
+/// than one checkout, whose workspace manifest's paths are relative to the
+/// workspace's directory, so an older mxv refuses it rather than reading
+/// those paths relative to each checkout.
+pub const RECORD_VERSION: u32 = MULTI_CHECKOUT_RECORD_VERSION;
+
+/// The version of the record form of a workspace with more than one
+/// checkout.
+pub const MULTI_CHECKOUT_RECORD_VERSION: u32 = 4;
+
+/// The version of the record form of a workspace with one checkout and a
+/// stable id.
+pub const ID_RECORD_VERSION: u32 = 3;
 
 /// The version of the record form of a workspace of clones without a
 /// stable id.
@@ -66,8 +77,9 @@ pub enum BackendKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Checkout {
-    /// The repository's name, which is the last component of `source` and
-    /// the name of the checkout's directory, such as `app`.
+    /// The name of the checkout's directory, its folder, such as `app`. It
+    /// is the repository's name, the last component of `source`, unless
+    /// the person gave the checkout another folder with `--as`.
     pub name: String,
     /// The version-control system that made the checkout.
     pub backend: BackendKind,
@@ -113,7 +125,8 @@ pub struct Workspace {
     /// The workspace's directory, which holds its `AGENTS.md` and one
     /// directory for each checkout.
     pub path: PathBuf,
-    /// The workspace's checkouts. A workspace made by `mxv new` has one.
+    /// The workspace's checkouts, one for each repository, in the order
+    /// that `mxv new` and `mxv add` made them.
     pub checkouts: Vec<Checkout>,
     /// The host port that the workspace holds for each named port of its
     /// manifest. The first `mxv up` allocates them, and every later one
@@ -141,11 +154,11 @@ impl Workspace {
 
     /// Returns the record as one of a workspace of git worktrees, with the
     /// version that such a record has: [`WORKTREE_RECORD_VERSION`], or
-    /// [`RECORD_VERSION`] once it holds a stable id.
+    /// [`ID_RECORD_VERSION`] once it holds a stable id.
     #[must_use]
     pub const fn of_worktrees(mut self) -> Self {
         self.version = if self.id.is_some() {
-            RECORD_VERSION
+            ID_RECORD_VERSION
         } else {
             WORKTREE_RECORD_VERSION
         };
@@ -155,7 +168,9 @@ impl Workspace {
 
     /// Gives the workspace a new stable id when its record has none, and
     /// reports whether it did. An id that the record holds is never
-    /// changed. A record that holds an id has [`RECORD_VERSION`].
+    /// changed. A record that holds an id has at least
+    /// [`ID_RECORD_VERSION`], and a record with more than one checkout has
+    /// [`MULTI_CHECKOUT_RECORD_VERSION`].
     ///
     /// # Errors
     ///
@@ -172,7 +187,10 @@ impl Workspace {
             self.id = Some(id);
             true
         };
-        self.version = self.version.max(RECORD_VERSION);
+        self.version = self.version.max(ID_RECORD_VERSION);
+        if self.checkouts.len() > 1 {
+            self.version = self.version.max(MULTI_CHECKOUT_RECORD_VERSION);
+        }
         Ok(minted)
     }
 
@@ -231,22 +249,31 @@ impl Checkout {
 pub const AGENTS_FILE: &str = "AGENTS.md";
 
 /// Returns the text of a workspace's `AGENTS.md`, which tells an agent
-/// where it is, which repository and branch each checkout holds, and how to
-/// list, resume or remove the workspace with `mxv`.
+/// where it is, which repository, origin and branch each checkout holds,
+/// and how to list, resume or remove the workspace with `mxv`. `origins`
+/// holds the origin URL of each checkout, in the record's order, without a
+/// user name or password.
 #[must_use]
-pub fn agents_text(workspace: &Workspace) -> String {
+pub fn agents_text(workspace: &Workspace, origins: &[String]) -> String {
     let name = workspace.name.as_str();
+    let several = workspace.checkouts.len() > 1;
+    let work = if several {
+        "Work inside the checkouts below, and commit and push\n\
+         from each of them."
+    } else {
+        "Work inside the checkout below, and commit and push\n\
+         from there."
+    };
     let mut text = format!(
         "# Workspace {name}\n\
          \n\
          This directory is the multiverse workspace `{name}`. mxv created it and\n\
-         keeps its record. Work inside the checkout below, and commit and push\n\
-         from there.\n\
+         keeps its record. {work}\n\
          \n\
          ## Checkouts\n\
          \n"
     );
-    for checkout in &workspace.checkouts {
+    for (index, checkout) in workspace.checkouts.iter().enumerate() {
         let made = match workspace.kind {
             WorkspaceKind::Worktree => format!("a git worktree of `{}`", checkout.source.display()),
             WorkspaceKind::Clone => format!(
@@ -258,6 +285,18 @@ pub fn agents_text(workspace: &Workspace) -> String {
             "- `{}/` is {made} on the branch `{}`, which started from `{}`.\n",
             checkout.name, checkout.branch, checkout.base,
         ));
+        text.push_str(&format!("  Its path is `{}`", checkout.path.display()));
+        match origins.get(index) {
+            Some(origin) => text.push_str(&format!(" and its origin is `{origin}`.\n")),
+            None => text.push_str(".\n"),
+        }
+    }
+    if several {
+        text.push_str(
+            "\nmxv merges the workspace's `mxv.toml` with each checkout's own `mxv.toml`.\n\
+             Each process, container and port of a checkout's file is named\n\
+             `<folder>-<name>`, such as `api-server` for the process `server` of `api/`.\n",
+        );
     }
     let refuses = match workspace.kind {
         WorkspaceKind::Worktree => {

@@ -52,24 +52,24 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    BRANCH_EXISTS, CHECKOUT_LOCKED, CHECKOUT_ORIGIN_UNREACHABLE, CHECKOUT_STASHES,
-    CHECKOUT_UNOWNED, CHECKOUT_UNPUSHED_COMMITS, CHECKOUT_UNREACHABLE_COMMITS, CODES,
-    CONFIG_INVALID, CONFIG_NO_LIMIT, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN,
-    DOCKER_ADDRESS_POOLS_EXHAUSTED, DOCKER_COMPOSE_MISSING, DOCKER_FAILED, DOCKER_FOREIGN_OBJECT,
-    DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
-    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, MANIFEST_INVALID,
-    MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME,
-    MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, MANIFEST_UNTRUSTED,
-    MIRROR_FETCH_FAILED, MIRROR_LOCKED, PATH_INACCESSIBLE, PHASE_FAILED, PORT_EXHAUSTED,
-    PORT_NOT_FOUND, PORT_TAKEN, PROCESS_DETACHED_LISTENER, PROCESS_EXITED,
-    PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE,
-    PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT,
-    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES,
-    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, VOLUME_NOT_MOVED,
-    WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
-    WORKSPACE_IGNORED_FILES, WORKSPACE_LEGACY_RUNNING, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND,
-    WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    BRANCH_EXISTS, CHECKOUT_INVALID_NAME, CHECKOUT_LOCKED, CHECKOUT_NAME_TAKEN, CHECKOUT_NOT_FOUND,
+    CHECKOUT_ORIGIN_UNREACHABLE, CHECKOUT_STASHES, CHECKOUT_UNOWNED, CHECKOUT_UNPUSHED_COMMITS,
+    CHECKOUT_UNREACHABLE_COMMITS, CODES, CONFIG_INVALID, CONFIG_NO_LIMIT, CONFIG_UNREADABLE, Cli,
+    DIRECTORY_TAKEN, DOCKER_ADDRESS_POOLS_EXHAUSTED, DOCKER_COMPOSE_MISSING, DOCKER_FAILED,
+    DOCKER_FOREIGN_OBJECT, DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, ENVIRONMENT_NO_DIRECTORY,
+    ENVIRONMENT_RELATIVE_ROOT, FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE,
+    MANIFEST_CHECKOUT_RELATIVE, MANIFEST_INVALID, MANIFEST_NAME_CLASH, MANIFEST_NEWER,
+    MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME, MANIFEST_UNKNOWN_KEY,
+    MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, MANIFEST_UNTRUSTED, MIRROR_FETCH_FAILED,
+    MIRROR_LOCKED, PATH_INACCESSIBLE, PHASE_FAILED, PORT_EXHAUSTED, PORT_NOT_FOUND, PORT_TAKEN,
+    PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
+    PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE, PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE,
+    PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, RUN_CODES, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES,
+    VOLUME_NOT_MOVED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY,
+    WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_LEGACY_RUNNING, WORKSPACE_NOT_CURRENT,
+    WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
 
@@ -96,6 +96,11 @@ const ALLOW: &[Allow] = &[
     Allow::new(Rule::Examples, "up", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "restart", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "logs", NO_LIVE_CHECKOUT),
+    Allow::new(
+        Rule::Examples,
+        "add",
+        "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
+    ),
     Allow::new(Rule::Examples, "archive", NO_RUN),
     Allow::new(Rule::Examples, "restore", NO_RUN),
     Allow::new(
@@ -133,6 +138,10 @@ const ALLOW: &[Allow] = &[
     Allow::untwinned(
         MISMATCHED_RECORD,
         "The record that holds another name causes the failure, and every word of the command line that names it reads the same record.",
+    ),
+    Allow::untwinned(
+        ADD_TO_WORKTREES,
+        "The kind of the workspace's record causes the failure, and the fixture holds no workspace of clones to name instead.",
     ),
     Allow::untwinned(
         BAD_CONFIG,
@@ -202,6 +211,11 @@ fn repositories() -> Repositories {
     let root = dir.path().canonicalize().unwrap();
     let app = repository(&root);
     git(&app, &["branch", "taken"]);
+    git(&root, &["clone", "--quiet", "origin.git", "web"]);
+    git(
+        &root.join("web"),
+        &["remote", "set-url", "origin", "../origin.git"],
+    );
     let plain = root.join("plain");
     std::fs::create_dir(&plain).unwrap();
     git(&plain, &["init", "--quiet"]);
@@ -413,6 +427,48 @@ const STATUS_OUTSIDE: Failing<'static> = Failing::new(&WORKSPACE_NOT_CURRENT, &[
 const STATUS_MISSING: Failing<'static> =
     Failing::new(&WORKSPACE_NOT_FOUND, &["status", "-w", "missing"]);
 
+/// `new` of two checkouts in the folder `app`.
+const NEW_TAKEN_FOLDER: Failing<'static> = Failing::new(
+    &CHECKOUT_NAME_TAKEN,
+    &[
+        "new",
+        "triage",
+        "--repo",
+        "app",
+        "--repo",
+        "app",
+        "--as",
+        "app",
+        "--dry-run",
+    ],
+);
+
+/// `new` of a checkout in the folder that holds the workspace's
+/// `AGENTS.md`.
+const NEW_RESERVED_FOLDER: Failing<'static> = Failing::new(
+    &CHECKOUT_INVALID_NAME,
+    &[
+        "new",
+        "triage",
+        "--repo",
+        "app",
+        "--as",
+        "AGENTS.md",
+        "--dry-run",
+    ],
+);
+
+/// `cd` of a checkout that the fixture's workspace does not have.
+const CD_MISSING_CHECKOUT: Failing<'static> =
+    Failing::new(&CHECKOUT_NOT_FOUND, &["cd", "reading-list", "missing"]);
+
+/// `add` to the fixture's workspace, whose record of version 1 holds a git
+/// worktree.
+const ADD_TO_WORKTREES: Failing<'static> = Failing::new(
+    &WORKSPACE_WORKTREE_KIND,
+    &["add", "-w", "reading-list", "--repo", "app", "--dry-run"],
+);
+
 /// The words of `new` that the fixture accepts, which each `new` line above
 /// differs from in one word.
 const NEW_TRIAGE: &[&str] = &["new", "triage", "--repo", "app", "--dry-run"];
@@ -440,6 +496,10 @@ const STARTS: &[Failing<'static>] = &[
     STATUS_OUTSIDE,
     STATUS_MISSING,
     CLEAN_NO_LIMIT,
+    NEW_TAKEN_FOLDER,
+    NEW_RESERVED_FOLDER,
+    CD_MISSING_CHECKOUT,
+    ADD_TO_WORKTREES,
 ];
 
 /// The declared codes that no command line in this test provokes, because
@@ -545,6 +605,14 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(&PORT_NOT_FOUND, LIVE),
     Unprovoked::new(&MANIFEST_RESERVED, LIVE),
     Unprovoked::new(&MANIFEST_INVALID, LIVE),
+    Unprovoked::new(
+        &MANIFEST_NAME_CLASH,
+        "Only two checkouts whose mxv.toml files declare names that clash once prefixed provoke it, and the fixture's workspace has one checkout; tests/workspaces.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &MANIFEST_CHECKOUT_RELATIVE,
+        "Only `mxv add` to a live workspace of one checkout whose workspace manifest names paths inside that checkout provokes it, and the fixture's workspace holds a git worktree; tests/workspaces.rs provokes it.",
+    ),
     Unprovoked::new(
         &MANIFEST_UNREADABLE,
         "Only an mxv.toml without read permission provokes it, in a live checkout that the fixture cannot hold.",
@@ -786,6 +854,25 @@ const PAIRS: &[Twin<'static>] = &[
     Twin::variable(NEW_NO_GIT, "PATH"),
     Twin::new(STATUS_OUTSIDE, &["status", "--workspace=reading-list"]),
     Twin::new(CLEAN_NO_LIMIT, &["clean", "--all", "--dry-run"]),
+    Twin::new(
+        NEW_TAKEN_FOLDER,
+        &[
+            "new",
+            "triage",
+            "--repo",
+            "app",
+            "--repo",
+            "app",
+            "--as",
+            "copy",
+            "--dry-run",
+        ],
+    ),
+    Twin::new(
+        NEW_RESERVED_FOLDER,
+        &["new", "triage", "--repo", "app", "--as", "api", "--dry-run"],
+    ),
+    Twin::new(CD_MISSING_CHECKOUT, &["cd", "reading-list", "app"]),
 ];
 
 #[test]

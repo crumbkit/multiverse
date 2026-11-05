@@ -33,6 +33,7 @@ use phase::{
 
 use crate::manifest::{Container, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
+use crate::record::Workspace;
 use crate::redacted::Redacted;
 
 #[cfg(test)]
@@ -188,14 +189,71 @@ pub(crate) struct Inputs<'a> {
     pub(crate) workspace: &'a WorkspaceName,
     /// The workspace's stable id.
     pub(crate) id: &'a WorkspaceId,
-    /// The checkout that holds the manifest, an absolute path.
+    /// The checkout that holds the manifest, an absolute path. A process
+    /// whose `cwd` is relative runs from it.
     pub(crate) checkout: &'a Path,
+    /// The directories that a process whose `cwd` is absolute may run in,
+    /// which [`roots`] lists for a workspace: a merged manifest gives each
+    /// process the absolute directory of its checkout or of the workspace.
+    /// Such a process's source is the root that holds its `cwd`, and its
+    /// `cwd` becomes the rest of the path.
+    pub(crate) roots: Vec<PathBuf>,
     /// The workspace's host ports, by port name.
     pub(crate) ports: &'a BTreeMap<String, u16>,
     /// How long a process gets after its stop signal.
     pub(crate) grace: Duration,
     /// The caller's environment.
     pub(crate) caller: &'a CallerEnvironment,
+}
+
+/// Returns the directories that a process of `workspace`'s merged manifest
+/// may run in: each checkout's directory, then the workspace's own, so the
+/// checkout that holds a process's directory is found before the
+/// workspace that holds every checkout.
+pub(crate) fn roots(workspace: &Workspace) -> Vec<PathBuf> {
+    workspace
+        .checkouts
+        .iter()
+        .map(|checkout| checkout.path.clone())
+        .chain(std::iter::once(workspace.path.clone()))
+        .collect()
+}
+
+/// Returns the source directory of `process`, named `name`, and the
+/// directory it runs in relative to that source, or `None` when it runs at
+/// the source's top.
+///
+/// # Errors
+///
+/// Returns [`Unrunnable`] when the process's `cwd` is absolute and lies in
+/// none of `inputs.roots`.
+fn placed(
+    inputs: &Inputs<'_>,
+    name: &str,
+    process: &Process,
+) -> Result<(PathBuf, Option<PathBuf>), Unrunnable> {
+    let relative =
+        |cwd: &Path| (cwd != Path::new(".") && cwd != Path::new("")).then(|| cwd.to_path_buf());
+    if !process.cwd.is_absolute() {
+        return Ok((inputs.checkout.to_path_buf(), relative(&process.cwd)));
+    }
+    inputs
+        .roots
+        .iter()
+        .find_map(|root| {
+            process
+                .cwd
+                .strip_prefix(root)
+                .ok()
+                .map(|rest| (root.clone(), relative(rest)))
+        })
+        .ok_or_else(|| Unrunnable {
+            unit: Some(name.to_owned()),
+            message: format!(
+                "the process `{name}` runs in {}, which is in none of the workspace's checkouts",
+                process.cwd.display()
+            ),
+        })
 }
 
 /// Returns the plan of every process and container of `inputs.manifest`,
@@ -332,17 +390,16 @@ fn host_app(
             vars.insert(variable.clone(), Redacted::new(number.to_string()));
         }
     }
+    let (source, cwd) = placed(inputs, name, process)?;
     let mut plan = AppPlan::new(
         app.clone(),
         RunnerKind::Host,
-        Source::checkout(inputs.checkout.to_path_buf(), None),
+        Source::checkout(source, None),
     );
     plan.ports = app_ports(inputs, name, used)?;
     plan.depends = depends(&process.depends_on)?;
     let mut main = ProcessPlan::new(main_process()?, process.argv.clone());
-    if process.cwd != Path::new(".") {
-        main.cwd = Some(process.cwd.clone());
-    }
+    main.cwd = cwd;
     main.env = vars.keys().cloned().collect();
     main.port = process
         .listen

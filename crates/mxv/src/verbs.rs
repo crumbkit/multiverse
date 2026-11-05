@@ -5,11 +5,12 @@ use crumbkit::{Batch, Call, Document, Listing, Output, Prose};
 use std::path::PathBuf;
 
 use multiverse::{
-    Allow, Cloned, DEFAULT_CLONE_ON_NEW, Git, Manifest, Mode, NewOutcome, PathGlob, RemovalOutcome,
-    RemovalPlan, Store, Workspace, WorkspaceName, Workspaces,
+    AddOutcome, Allow, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined, Manifest,
+    ManifestProblem, Mode, NewOutcome, PathGlob, RemovalOutcome, RemovalPlan, Repo, Store,
+    Workspace, WorkspaceName, Workspaces, checkout_prefix, prefixed,
 };
 
-use crate::cli::{CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
+use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -22,6 +23,14 @@ pub(crate) const NEW: Document<NewRow> = Document::new(
     "new",
     1,
     "The workspace that the run created, or would create on a dry run, and the ignored directories that it cloned into the checkout.",
+);
+
+/// The document that `mxv add` prints.
+pub(crate) const ADD: Document<NewRow> = Document::new(
+    "mxv",
+    "add",
+    1,
+    "The workspace with the checkout that the run added, or would add on a dry run, and the ignored directories that it cloned into the new checkout.",
 );
 
 /// The document that `mxv list` prints.
@@ -46,7 +55,7 @@ pub(crate) const CD: Document<Prose<String>> = Document::new(
     "mxv",
     "cd",
     1,
-    "The directory of the workspace, for `cd \"$(mxv cd <NAME>)\"`.",
+    "The directory of the workspace or of one of its checkouts, for `cd \"$(mxv cd <NAME>)\"`.",
 );
 
 /// The document that `mxv remove` prints.
@@ -88,19 +97,62 @@ struct Copied {
     from: PathBuf,
     /// The text to write, which parses as a manifest.
     text: String,
+    /// The names of the checkouts that the manifest joins, which its units
+    /// may refer to in a workspace of several repositories.
+    joined: Joined,
+}
+
+/// Returns the repositories that `args` names, each with the folder that
+/// its `--as` gives.
+fn repos(args: &NewArgs) -> Result<Vec<Repo>, MxvFailure> {
+    args.repos
+        .repos
+        .iter()
+        .map(|repo| repo_of(&repo.path, repo.folder.as_deref()))
+        .collect()
+}
+
+/// Returns the repository at `path` with the folder `folder`, when one is
+/// given.
+fn repo_of(path: &std::path::Path, folder: Option<&str>) -> Result<Repo, MxvFailure> {
+    match folder {
+        Some(folder) => Repo::named(path, folder).map_err(|reason| MxvFailure::BadFolder {
+            folder: folder.to_owned(),
+            reason,
+        }),
+        None => Ok(Repo::new(path)),
+    }
+}
+
+/// Returns the names that the checkouts of `repos` declare in their own
+/// `mxv.toml`, prefixed as a workspace with several checkouts prefixes
+/// them, for checking a workspace manifest that refers to them. A
+/// repository whose `mxv.toml` does not parse adds none.
+fn joined_names(workspaces: &Workspaces<Git>, repos: &[Repo]) -> Result<Joined, MxvFailure> {
+    let mut joined = Joined::default();
+    for repo in repos {
+        let (source, folder) = workspaces.resolve(repo)?;
+        if let Ok(Some(own)) = Manifest::read(&source) {
+            let prefix = checkout_prefix(&folder);
+            joined.add(&own.renamed(&|name| prefixed(&prefix, name)));
+        }
+    }
+    Ok(joined)
 }
 
 /// Returns the workspace manifest that `new` copies: the `--manifest`
-/// file when `args` names one, or else the template in
-/// `$XDG_CONFIG_HOME/mxv/templates` that lists the repository's origin,
-/// or else none. It also returns the warnings to report: the templates
-/// that it skipped, and the tables of the copied manifest that mxv
-/// ignores although their names are close to its own. `root` is the
-/// root of the workspaces.
+/// file when `args` names one, or else, for a workspace of one
+/// repository, the template in `$XDG_CONFIG_HOME/mxv/templates` that lists
+/// the repository's origin, or else none. A workspace of several
+/// repositories copies no template, because a template names one origin.
+/// It also returns the warnings to report: the templates that it skipped,
+/// and the tables of the copied manifest that mxv ignores although their
+/// names are close to its own. `root` is the root of the workspaces.
 fn copied(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     args: &NewArgs,
+    repos: &[Repo],
     root: &std::path::Path,
 ) -> Result<(Option<Copied>, Vec<String>), crumbkit::Error> {
     let (copied, mut warnings) = if let Some(file) = &args.manifest {
@@ -110,40 +162,60 @@ fn copied(
             Some(dir) if file.is_relative() => dir.join(file),
             _ => file.clone(),
         };
-        let text = Manifest::read_named(&from).map_err(RunFailure::Manifest)?;
+        let joined = if repos.len() > 1 {
+            joined_names(workspaces, repos)?
+        } else {
+            Joined::default()
+        };
+        let text = Manifest::read_named_joining(&from, &joined).map_err(RunFailure::Manifest)?;
         workspaces
             .check_manifest_source(&from, root)
             .map_err(MxvFailure::from)?;
-        (Some(Copied { from, text }), Vec::new())
-    } else {
+        (Some(Copied { from, text, joined }), Vec::new())
+    } else if let [repo] = repos {
         let templates = environment.templates()?;
         let found = workspaces
-            .template(&templates, &args.repo, root)
+            .template(&templates, &repo.path, root)
             .map_err(MxvFailure::from)?;
         let copied = found.template.map(|template| Copied {
             from: template.path,
             text: template.text,
+            joined: Joined::default(),
         });
         (copied, found.skipped)
+    } else {
+        (None, Vec::new())
     };
     if let Some(copied) = &copied
-        && let Ok(manifest) = Manifest::parse(&copied.text, &copied.from)
+        && let Ok(manifest) = copied.parse()
     {
         warnings.extend(manifest.warnings);
     }
     Ok((copied, warnings))
 }
 
-/// Returns the globs of the ignored directories that `new` clones from the
-/// repository at `source`: the config file's `clone_on_new`, or else
-/// [`DEFAULT_CLONE_ON_NEW`], and the `clone_on_new` of the one manifest
-/// that the workspace reads, which is `copied` when `new` copies a
-/// workspace manifest, or else the repository's own. A manifest that does
-/// not parse adds nothing, and its error becomes the warning that the
+impl Copied {
+    /// Returns the copied manifest, parsed with the names of the checkouts
+    /// that it joins.
+    fn parse(&self) -> Result<Manifest, multiverse::ManifestError> {
+        Manifest::parse_joining(&self.text, &self.from, &self.joined)
+    }
+}
+
+/// Returns the globs of the ignored directories that `new` or `add` clones
+/// from the repository of `checkout`: the config file's `clone_on_new`, or
+/// else [`DEFAULT_CLONE_ON_NEW`], and the manifest's. In a workspace with
+/// one checkout, the manifest is the one that the workspace reads, which
+/// is `copied` when `new` copies a workspace manifest, or else the
+/// repository's own. In a workspace with several checkouts, it is the
+/// repository's own and the globs of the workspace manifest, `copied` or
+/// the one the workspace holds, that apply in the checkout. A manifest that
+/// does not parse adds nothing, and its error becomes the warning that the
 /// result returns.
 fn clone_globs(
     environment: &Environment,
-    source: &std::path::Path,
+    workspace: &Workspace,
+    checkout: &Checkout,
     copied: Option<&Copied>,
 ) -> Result<(Vec<PathGlob>, Option<String>), MxvFailure> {
     let mut globs = match environment.config()?.clone_on_new {
@@ -153,26 +225,55 @@ fn clone_globs(
             .filter_map(|text| PathGlob::parse_clone(text).ok())
             .collect(),
     };
-    let read = match copied {
-        Some(copied) => Manifest::parse(&copied.text, &copied.from).map(Some),
-        None => Manifest::read(source),
+    let failed = |error: multiverse::ManifestError| {
+        Some(format!(
+            "mxv cloned only the directories that the config file names, because the manifest does not parse: {error}"
+        ))
     };
-    match read {
+    let shared = match copied {
+        Some(copied) => copied.parse().map(Some),
+        None => workspace.workspace_manifest(),
+    };
+    if !workspace.has_several_checkouts() {
+        let read = match shared {
+            Ok(Some(manifest)) => Ok(Some(manifest)),
+            Ok(None) => Manifest::read(&checkout.source),
+            Err(error) => Err(error),
+        };
+        return Ok(match read {
+            Ok(manifest) => {
+                globs.extend(
+                    manifest
+                        .map(|manifest| manifest.clone_on_new)
+                        .unwrap_or_default(),
+                );
+                (globs, None)
+            }
+            Err(error) => (globs, failed(error)),
+        });
+    }
+    let mut warning = None;
+    match Manifest::read(&checkout.source) {
+        Ok(manifest) => {
+            globs.extend(
+                manifest
+                    .map(|manifest| manifest.clone_on_new)
+                    .unwrap_or_default(),
+            );
+        }
+        Err(error) => warning = failed(error),
+    }
+    match shared {
         Ok(manifest) => globs.extend(
             manifest
                 .map(|manifest| manifest.clone_on_new)
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|glob| glob.within(&checkout.name)),
         ),
-        Err(error) => {
-            return Ok((
-                globs,
-                Some(format!(
-                    "mxv cloned only the directories that the config file names, because the manifest does not parse: {error}"
-                )),
-            ));
-        }
+        Err(error) => warning = failed(error),
     }
-    Ok((globs, None))
+    Ok((globs, warning))
 }
 
 /// Creates the workspace that `args` names, or plans it on a dry run.
@@ -192,17 +293,26 @@ pub(crate) fn new(
     if output.progress_allowed() {
         workspaces = workspaces.with_mirror_notice(crate::mirror_wait_notice);
     }
-    let (copied, warnings) = copied(environment, &workspaces, args, &root.path)?;
+    let repos = repos(args)?;
+    let (copied, warnings) = copied(environment, &workspaces, args, &repos, &root.path)?;
     let text = copied.as_ref().map(|copied| copied.text.as_str());
     let outcome = workspaces
-        .create_with_manifest(&root.path, &name, &args.repo, mode, text)
+        .create_repos(&root.path, &name, &repos, mode, text)
         .map_err(MxvFailure::from)?;
     match outcome {
         NewOutcome::Created(workspace) | NewOutcome::Planned(workspace) => {
             let cloned = if args.no_clone {
                 Cloned::default()
             } else {
-                clone_into(environment, &workspaces, &workspace, mode, copied.as_ref())?
+                let checkouts: Vec<&Checkout> = workspace.checkouts.iter().collect();
+                clone_into(
+                    environment,
+                    &workspaces,
+                    &workspace,
+                    &checkouts,
+                    mode,
+                    copied.as_ref(),
+                )?
             };
             let from = copied.as_ref().map(|copied| copied.from.as_path());
             Ok(NewRow::new(&workspace, &root, cloned, from).with_warnings(&warnings))
@@ -215,30 +325,33 @@ pub(crate) fn new(
         NewOutcome::BranchTaken { repository, branch } => {
             Err(MxvFailure::BranchExists { repository, branch }.into())
         }
+        NewOutcome::FolderTaken { folder, repository } => {
+            Err(MxvFailure::FolderTaken { repository, folder }.into())
+        }
     }
 }
 
-/// Clones the ignored directories of the repository of `workspace` that
-/// the config file and the manifest name into its checkout, or names them
-/// on a dry run. The workspace exists by then, so a failure of the cloning
-/// becomes the warning of the result.
+/// Clones the ignored directories of the repositories of `checkouts`, which
+/// belong to `workspace`, that the config file and the manifests name,
+/// into each checkout, or names them on a dry run. The workspace exists by
+/// then, so a failure of the cloning becomes the warning of the result.
 fn clone_into(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     workspace: &Workspace,
+    checkouts: &[&Checkout],
     mode: Mode,
     copied: Option<&Copied>,
 ) -> Result<Cloned, MxvFailure> {
-    let Some(source) = workspace
-        .checkouts
-        .first()
-        .map(|checkout| checkout.source.clone())
-    else {
-        return Ok(Cloned::default());
-    };
-    let (globs, warning) = clone_globs(environment, &source, copied)?;
+    let mut each = Vec::new();
+    let mut warning = None;
+    for checkout in checkouts {
+        let (globs, failed) = clone_globs(environment, workspace, checkout, copied)?;
+        warning = warning.or(failed);
+        each.push((*checkout, globs));
+    }
     let mut cloned = workspaces
-        .clone_ignored(workspace, &globs, mode)
+        .clone_ignored_each(&each, mode)
         .unwrap_or_else(|error| {
             let mut failed = Cloned::default();
             failed.warning = Some(format!("mxv cloned no ignored directory: {error}"));
@@ -248,6 +361,103 @@ fn clone_into(
         cloned.warning = warning;
     }
     Ok(cloned)
+}
+
+/// Adds the checkout that `args` names to a workspace, or plans it on a
+/// dry run. It holds the workspace's lock, which `up` and `down` take, and
+/// refuses while the workspace's processes or containers run, because
+/// adding a second checkout renames the first checkout's units and ports.
+pub(crate) fn add(
+    output: &Output,
+    environment: &Environment,
+    args: &AddArgs,
+) -> Result<NewRow, crumbkit::Error> {
+    let mode = if output.is_dry_run() {
+        Mode::DryRun
+    } else {
+        Mode::Change
+    };
+    let root = environment.root()?;
+    let mut workspaces = workspaces(environment)?;
+    if output.progress_allowed() {
+        workspaces = workspaces.with_mirror_notice(crate::mirror_wait_notice);
+    }
+    let workspace = match &args.workspace {
+        Some(text) => {
+            let name = parse_name(text)?;
+            workspaces
+                .find(&name)
+                .map_err(MxvFailure::from)?
+                .ok_or_else(|| MxvFailure::NotFound { name: text.clone() })?
+        }
+        None => {
+            processes::current(&store(environment)?, environment)?.ok_or(RunFailure::NotCurrent)?
+        }
+    };
+    let name = workspace.name.clone();
+    let repo = repo_of(&args.repo, args.folder.as_deref())?;
+    let _lock = processes::lock(environment, &name)?;
+    let running = processes::running(environment, &workspace)?;
+    if !running.is_empty() {
+        return Err(RunFailure::Running {
+            workspace: name.to_string(),
+            processes: running,
+        }
+        .into());
+    }
+    let outcome = workspaces
+        .add(&name, &repo, mode)
+        .map_err(MxvFailure::from)?;
+    let workspace = match outcome {
+        AddOutcome::Added(workspace) | AddOutcome::Planned(workspace) => workspace,
+        AddOutcome::NotFound => {
+            return Err(MxvFailure::NotFound {
+                name: name.to_string(),
+            }
+            .into());
+        }
+        AddOutcome::Worktrees(_) => {
+            return Err(MxvFailure::Worktrees {
+                name: name.to_string(),
+            }
+            .into());
+        }
+        AddOutcome::FolderTaken {
+            folder, repository, ..
+        } => return Err(MxvFailure::FolderTaken { repository, folder }.into()),
+        AddOutcome::BranchTaken { repository, branch } => {
+            return Err(MxvFailure::BranchExists { repository, branch }.into());
+        }
+        AddOutcome::ManifestCheckoutRelative {
+            manifest,
+            folder,
+            paths,
+            ..
+        } => {
+            return Err(MxvFailure::CheckoutRelative {
+                name: name.to_string(),
+                manifest,
+                folder,
+                paths,
+            }
+            .into());
+        }
+    };
+    let cloned = match workspace.checkouts.last() {
+        Some(added) if !args.no_clone => {
+            clone_into(environment, &workspaces, &workspace, &[added], mode, None)?
+        }
+        _ => Cloned::default(),
+    };
+    let warnings = workspace
+        .manifest()
+        .map(|manifest| {
+            manifest
+                .map(|manifest| manifest.warnings)
+                .unwrap_or_default()
+        })
+        .unwrap_or_else(|error| vec![error.to_string()]);
+    Ok(NewRow::new(&workspace, &root, cloned, None).with_warnings(&warnings))
 }
 
 /// Returns the first page of the workspaces: a row for each record that
@@ -303,14 +513,22 @@ pub(crate) fn show(
                 name: name.to_string(),
             })?;
             let usage = workspaces.disk_usage(&workspace)?;
-            // The disk usage already warns about a manifest that cannot be
-            // read, so only a manifest that parses adds its own warnings.
-            let warnings = workspace
-                .manifest()
-                .ok()
-                .flatten()
-                .map(|manifest| manifest.warnings)
-                .unwrap_or_default();
+            // The disk usage already warns about a manifest file that
+            // cannot be read, so only a manifest that parses adds its own
+            // warnings. Two files of a merged manifest whose names clash
+            // each parse, so the disk usage cannot see the clash, and the
+            // merge's error is added here.
+            let warnings = match workspace.manifest() {
+                Ok(manifest) => manifest
+                    .map(|manifest| manifest.warnings)
+                    .unwrap_or_default(),
+                Err(error) if matches!(error.problem, ManifestProblem::NameClash { .. }) => {
+                    vec![format!(
+                        "the merged manifest cannot be used, and `mxv up` fails with mxv::manifest::name_clash: {error}"
+                    )]
+                }
+                Err(_) => Vec::new(),
+            };
             Ok(ShowRow::new(&workspace, &root, &usage).with_warnings(&warnings))
         });
         batch.push(found);
@@ -318,7 +536,8 @@ pub(crate) fn show(
     Ok(batch)
 }
 
-/// Returns the directory of the workspace that `args` names.
+/// Returns the directory of the workspace that `args` names, or of its
+/// checkout in the folder that `args` names.
 pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<String>, MxvFailure> {
     let name = parse_name(&args.name)?;
     let workspace = store(environment)?
@@ -326,7 +545,23 @@ pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<Strin
         .ok_or(MxvFailure::NotFound {
             name: name.to_string(),
         })?;
-    Ok(Prose::new(workspace.path.display().to_string()))
+    let Some(folder) = &args.checkout else {
+        return Ok(Prose::new(workspace.path.display().to_string()));
+    };
+    let checkout = workspace
+        .checkouts
+        .iter()
+        .find(|checkout| &checkout.name == folder)
+        .ok_or_else(|| MxvFailure::CheckoutNotFound {
+            name: name.to_string(),
+            checkout: folder.clone(),
+            checkouts: workspace
+                .checkouts
+                .iter()
+                .map(|checkout| checkout.name.clone())
+                .collect(),
+        })?;
+    Ok(Prose::new(checkout.path.display().to_string()))
 }
 
 /// Removes the workspace that `args` names, after the person confirms, or

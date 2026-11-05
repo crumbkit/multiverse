@@ -339,6 +339,7 @@ impl Runs {
             workspace: &workspace.name,
             id,
             checkout: checkout(workspace),
+            roots: phase_plan::roots(workspace),
             ports: &workspace.ports,
             grace: self.grace,
             caller: &self.caller,

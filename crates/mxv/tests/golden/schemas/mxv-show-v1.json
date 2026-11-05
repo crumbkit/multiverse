@@ -513,6 +513,11 @@
           "const": "repository"
         },
         {
+          "description": "The workspace manifest and each checkout's own `mxv.toml`, merged,\nin a workspace with several checkouts.",
+          "type": "string",
+          "const": "merged"
+        },
+        {
           "description": "Neither file, so the workspace is bare.",
           "type": "string",
           "const": "none"
@@ -579,15 +584,22 @@
           "$ref": "#/$defs/KindRow"
         },
         "manifest": {
-          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, or `none` for a bare workspace.",
+          "description": "Which manifest the workspace's commands read: `workspace` for the\nworkspace manifest above the checkout, `repository` for the\ncheckout's own `mxv.toml`, `merged` for the files of a workspace\nwith several checkouts, or `none` for a bare workspace.",
           "$ref": "#/$defs/ManifestRow"
         },
         "manifest_path": {
-          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none.",
+          "description": "The path of the manifest that the workspace's commands read, or\nnull when they read none. For a merged manifest, it is the\nworkspace manifest when it exists, or else the first checkout's\n`mxv.toml`.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "manifest_paths": {
+          "description": "Every file that the workspace's commands read: the one manifest of\na workspace with one checkout, or the workspace manifest and each\ncheckout's `mxv.toml` that exist in a workspace with several.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "name": {
           "description": "The workspace's name, which is also the name of its directory and of\nits checkouts' branch.",

@@ -7,9 +7,9 @@ use std::path::Path;
 use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
-    Allow, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource, Fate, Kind,
-    MANIFEST_FILE, Manifest, ManifestSource, ProcessState, ProcessStatus, Removal, Workspace,
-    WorkspaceKind,
+    Allow, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource,
+    Fate, Kind, MANIFEST_FILE, Manifest, ManifestSource, ProcessState, ProcessStatus, Removal,
+    Workspace, WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -39,12 +39,19 @@ pub(crate) struct WorkspaceRow {
     kind: Option<KindRow>,
     /// Which manifest the workspace's commands read: `workspace` for the
     /// workspace manifest above the checkout, `repository` for the
-    /// checkout's own `mxv.toml`, or `none` for a bare workspace. Null in a
+    /// checkout's own `mxv.toml`, `merged` for the files of a workspace
+    /// with several checkouts, or `none` for a bare workspace. Null in a
     /// row whose record mxv cannot read.
     manifest: Option<ManifestRow>,
     /// The path of the manifest that the workspace's commands read, or
-    /// null when they read none.
+    /// null when they read none. For a merged manifest, it is the
+    /// workspace manifest when it exists, or else the first checkout's
+    /// `mxv.toml`.
     manifest_path: Option<String>,
+    /// Every file that the workspace's commands read: the one manifest of
+    /// a workspace with one checkout, or the workspace manifest and each
+    /// checkout's `mxv.toml` that exist in a workspace with several.
+    manifest_paths: Vec<String>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
     /// Why mxv cannot read the workspace's record, such as a record that
@@ -94,11 +101,18 @@ pub(crate) struct PlacedRow {
     kind: KindRow,
     /// Which manifest the workspace's commands read: `workspace` for the
     /// workspace manifest above the checkout, `repository` for the
-    /// checkout's own `mxv.toml`, or `none` for a bare workspace.
+    /// checkout's own `mxv.toml`, `merged` for the files of a workspace
+    /// with several checkouts, or `none` for a bare workspace.
     manifest: ManifestRow,
     /// The path of the manifest that the workspace's commands read, or
-    /// null when they read none.
+    /// null when they read none. For a merged manifest, it is the
+    /// workspace manifest when it exists, or else the first checkout's
+    /// `mxv.toml`.
     manifest_path: Option<String>,
+    /// Every file that the workspace's commands read: the one manifest of
+    /// a workspace with one checkout, or the workspace manifest and each
+    /// checkout's `mxv.toml` that exist in a workspace with several.
+    manifest_paths: Vec<String>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
     /// The host port that the workspace holds for each named port of its
@@ -114,6 +128,9 @@ pub(crate) enum ManifestRow {
     Workspace,
     /// The checkout's own `mxv.toml`.
     Repository,
+    /// The workspace manifest and each checkout's own `mxv.toml`, merged,
+    /// in a workspace with several checkouts.
+    Merged,
     /// Neither file, so the workspace is bare.
     None,
 }
@@ -123,6 +140,7 @@ impl From<ManifestSource> for ManifestRow {
         match source {
             ManifestSource::Workspace => Self::Workspace,
             ManifestSource::Repository => Self::Repository,
+            ManifestSource::Merged => Self::Merged,
             ManifestSource::None => Self::None,
         }
     }
@@ -133,6 +151,7 @@ impl fmt::Display for ManifestRow {
         formatter.write_str(match self {
             Self::Workspace => "workspace",
             Self::Repository => "repository",
+            Self::Merged => "merged",
             Self::None => "none",
         })
     }
@@ -182,6 +201,7 @@ impl PlacedRow {
             kind: workspace.kind.into(),
             manifest: row.manifest.unwrap_or(ManifestRow::None),
             manifest_path: row.manifest_path,
+            manifest_paths: row.manifest_paths,
             checkouts: row.checkouts,
             ports: row.ports,
         }
@@ -265,6 +285,11 @@ impl From<&Workspace> for WorkspaceRow {
             kind: Some(workspace.kind.into()),
             manifest: Some(inputs.source().into()),
             manifest_path: inputs.chosen().map(|path| path.display().to_string()),
+            manifest_paths: inputs
+                .files()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
             ports: workspace.ports.clone(),
@@ -296,6 +321,7 @@ impl WorkspaceRow {
             kind: None,
             manifest: None,
             manifest_path: None,
+            manifest_paths: Vec::new(),
             checkouts: Vec::new(),
             problem: error.to_string(),
             ports: BTreeMap::new(),
@@ -510,15 +536,39 @@ impl NewRow {
         copied: Option<&Path>,
     ) -> Self {
         let mut placed = PlacedRow::new(workspace, root);
-        if copied.is_some() {
+        if workspace.has_several_checkouts() {
+            // A dry run writes no file, so the row names the files that
+            // the merged manifest would read.
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            if copied.is_some() {
+                paths.push(workspace.manifest_file());
+            }
+            for checkout in &workspace.checkouts {
+                if checkout.source.join(MANIFEST_FILE).is_file() {
+                    paths.push(checkout.path.join(MANIFEST_FILE));
+                }
+            }
+            placed.manifest = if paths.is_empty() {
+                ManifestRow::None
+            } else {
+                ManifestRow::Merged
+            };
+            placed.manifest_path = paths.first().map(|path| path.display().to_string());
+            placed.manifest_paths = paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+        } else if copied.is_some() {
             placed.manifest = ManifestRow::Workspace;
             placed.manifest_path = Some(workspace.manifest_file().display().to_string());
+            placed.manifest_paths = placed.manifest_path.iter().cloned().collect();
         } else if placed.manifest == ManifestRow::None
             && let Some(checkout) = workspace.manifest_checkout()
             && checkout.source.join(MANIFEST_FILE).is_file()
         {
             placed.manifest = ManifestRow::Repository;
             placed.manifest_path = Some(checkout.path.join(MANIFEST_FILE).display().to_string());
+            placed.manifest_paths = placed.manifest_path.iter().cloned().collect();
         }
         Self {
             placed,
@@ -1094,11 +1144,16 @@ fn unmerged(count: Option<u32>) -> String {
 pub(crate) struct StatusSummary {
     /// Which manifest the workspace's commands read: `workspace` for the
     /// workspace manifest above the checkout, `repository` for the
-    /// checkout's own `mxv.toml`, or `none` for a bare workspace.
+    /// checkout's own `mxv.toml`, `merged` for the files of a workspace
+    /// with several checkouts, or `none` for a bare workspace.
     manifest: ManifestRow,
     /// The path of the manifest that the workspace's commands read, or
-    /// null when they read none.
+    /// null when they read none. For a merged manifest, it is the
+    /// workspace manifest when it exists, or else the first checkout's
+    /// `mxv.toml`.
     manifest_path: Option<String>,
+    /// Every file that the workspace's commands read.
+    manifest_paths: Vec<String>,
     /// The manifest's error when it cannot be read or does not parse, in
     /// which case the rows come from the run records alone, or null.
     manifest_error: Option<String>,
@@ -1110,20 +1165,107 @@ pub(crate) struct StatusSummary {
     /// although its name is close to one of mxv's own, such as
     /// `[proceses.web]`.
     warnings: Vec<String>,
+    /// Each checkout of the workspace, with the branch and commit it has
+    /// checked out and how many of its entries are uncommitted or
+    /// untracked.
+    checkouts: Vec<CheckoutStateRow>,
+}
+
+/// One checkout of a workspace, as `mxv status` reports it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CheckoutStateRow {
+    /// The checkout's folder, which `mxv cd <NAME> <CHECKOUT>` takes.
+    name: String,
+    /// The checkout's directory.
+    path: String,
+    /// The branch that the checkout has checked out, or null for a
+    /// detached `HEAD` or a checkout that git cannot read.
+    branch: Option<String>,
+    /// The commit that the checkout's `HEAD` names, or null.
+    commit: Option<String>,
+    /// How many entries of the checkout are uncommitted changes or
+    /// untracked paths, as `git status --porcelain` counts them, or null
+    /// when git cannot read the checkout.
+    changes: Option<usize>,
+    /// Why git cannot read the checkout, such as a directory that is
+    /// gone, or null.
+    problem: Option<String>,
+}
+
+impl CheckoutStateRow {
+    /// Returns the state of `checkout` that `backend` reads.
+    pub(crate) fn read(backend: &impl Backend, checkout: &Checkout) -> Self {
+        let mut row = Self {
+            name: checkout.name.clone(),
+            path: checkout.path.display().to_string(),
+            branch: None,
+            commit: None,
+            changes: None,
+            problem: None,
+        };
+        match backend
+            .head(&checkout.path)
+            .and_then(|head| Ok((head, backend.changes(&checkout.path)?)))
+        {
+            Ok((head, changes)) => {
+                row.branch = head.branch;
+                row.commit = head.commit;
+                row.changes = Some(changes.changed.len());
+            }
+            Err(error) => row.problem = Some(error.to_string()),
+        }
+        row
+    }
+}
+
+impl fmt::Display for CheckoutStateRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(problem) = &self.problem {
+            return write!(
+                formatter,
+                "The checkout {} at {} cannot be read: {problem}.",
+                self.name, self.path
+            );
+        }
+        let commit = self
+            .commit
+            .as_deref()
+            .map_or("no commit", |commit| commit.get(..12).unwrap_or(commit));
+        let changes = self.changes.unwrap_or_default();
+        match &self.branch {
+            Some(branch) => write!(
+                formatter,
+                "The checkout {} at {} is on {branch} at {commit}, with {changes} uncommitted or untracked entries.",
+                self.name, self.path
+            ),
+            None => write!(
+                formatter,
+                "The checkout {} at {} has a detached HEAD at {commit}, with {changes} uncommitted or untracked entries.",
+                self.name, self.path
+            ),
+        }
+    }
 }
 
 impl StatusSummary {
     /// Returns the summary of a status of `workspace`, whose manifest is
-    /// `manifest`, or failed with `error`.
+    /// `manifest`, or failed with `error`, and whose checkouts are in the
+    /// states `checkouts`.
     pub(crate) fn new(
         workspace: &Workspace,
         manifest: Option<&Manifest>,
         error: Option<&RunFailure>,
+        checkouts: Vec<CheckoutStateRow>,
     ) -> Self {
         let inputs = workspace.manifest_inputs();
         Self {
             manifest: inputs.source().into(),
             manifest_path: inputs.chosen().map(|path| path.display().to_string()),
+            manifest_paths: inputs
+                .files()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
             manifest_error: error.map(ToString::to_string),
             manifest_error_code: error.map(|error| {
                 let code = crumbkit::Failure::code(error);
@@ -1132,12 +1274,14 @@ impl StatusSummary {
             warnings: manifest
                 .map(|manifest| manifest.warnings.clone())
                 .unwrap_or_default(),
+            checkouts,
         }
     }
 }
 
 /// Prints which manifest the workspace reads, one more line when the
-/// manifest cannot be read or does not parse, and a line for each warning.
+/// manifest cannot be read or does not parse, a line for each warning, and
+/// a line for each checkout.
 impl fmt::Display for StatusSummary {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (&self.manifest, &self.manifest_path) {
@@ -1146,6 +1290,13 @@ impl fmt::Display for StatusSummary {
             }
             (ManifestRow::Repository, Some(path)) => {
                 write!(formatter, "The manifest is the repository's {path}.")?;
+            }
+            (ManifestRow::Merged, Some(_)) => {
+                write!(
+                    formatter,
+                    "The manifest merges {}.",
+                    self.manifest_paths.join(", ")
+                )?;
             }
             _ => formatter.write_str("The workspace has no manifest.")?,
         }
@@ -1157,6 +1308,9 @@ impl fmt::Display for StatusSummary {
         }
         for warning in &self.warnings {
             write!(formatter, "\nWarning: {warning}.")?;
+        }
+        for checkout in &self.checkouts {
+            write!(formatter, "\n{checkout}")?;
         }
         Ok(())
     }

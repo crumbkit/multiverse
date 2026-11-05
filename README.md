@@ -14,11 +14,12 @@ The repository holds three crates:
 
 ## Quick start
 
-`mxv` builds with `cargo install --path crates/mxv`. A workspace of one
-repository starts from a local clone that has a remote named `origin`:
+`mxv` builds with `cargo install --path crates/mxv`. A workspace starts
+from local clones that each have a remote named `origin`:
 
 ```sh
 mxv new reading-list --repo ~/src/app   # fetch origin, branch reading-list from origin/main
+mxv add -w reading-list --repo ~/src/web # add a second repository on the same branch
 cd "$(mxv cd reading-list)"             # resume the workspace
 mxv list                                # list the workspaces
 mxv show reading-list                   # print its record
@@ -37,8 +38,9 @@ of a workspace, the root and its config file, the `mxv.toml` manifest and the wo
 mxv keeps its records, how mxv measures and frees disk space, and the
 variables it reads.
 
-multiverse is under construction. A workspace holds one repository for
-now. `mxv archive` and `mxv restore` are declared and fail with
+multiverse is under construction. A workspace holds one or more
+repositories, and `mxv new --repo api --repo web` or `mxv add` gives it
+several. `mxv archive` and `mxv restore` are declared and fail with
 `mxv::command::unbuilt` until each one is built.
 
 ## Licence

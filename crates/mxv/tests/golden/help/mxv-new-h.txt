@@ -1,4 +1,4 @@
-Create a workspace with its own clone of a repository, on a new branch from the freshly fetched origin
+Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin
 
 Usage: mxv new [OPTIONS] --repo <PATH> <NAME>
 
@@ -6,14 +6,16 @@ Arguments:
   <NAME>  The workspace's name, which also names its directory and its branch
 
 Options:
-      --repo <PATH>      The git repository to check out, or any directory inside it
-      --no-clone         Clone none of the repository's ignored directories, such as node_modules/, into the new checkout
+      --repo <PATH>      A git repository to check out, or a directory inside it; repeat it or use commas for several
+      --as <FOLDER>      The folder of the checkout of the --repo right before it, which defaults to the repository's name
+      --no-clone         Clone none of the repositories' ignored directories, such as node_modules/, into the new checkouts
       --manifest <FILE>  Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template
       --dry-run          Report what the command would change, and change nothing
   -h, --help             Print help (see more with '--help')
 
 Examples:
   mxv new triage --repo app --dry-run
+  mxv new triage --repo app --repo web --dry-run
 
 Effects: additive, not idempotent, open-world.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv new --help` describes them.

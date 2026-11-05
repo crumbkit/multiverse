@@ -19,6 +19,8 @@ use crate::template::Found as FoundTemplate;
 #[cfg(test)]
 mod clone_tests;
 #[cfg(test)]
+mod multi_tests;
+#[cfg(test)]
 mod tests;
 
 /// Whether an operation changes anything.
@@ -66,6 +68,79 @@ pub struct Workspaces<B> {
 /// whole fetch and a clone without files, which is what the lock covers.
 pub const MIRROR_WAIT: Duration = FETCH_DEADLINE.saturating_add(LOCAL_DEADLINE);
 
+/// A repository that a workspace checks out, and the folder that holds its
+/// checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repo {
+    /// The person's repository, or any directory inside it.
+    pub path: PathBuf,
+    /// The checkout's folder, which defaults to the repository's name.
+    pub folder: Option<String>,
+}
+
+impl Repo {
+    /// Returns the repository at `path`, checked out in a folder named
+    /// after it.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            folder: None,
+        }
+    }
+
+    /// Returns the repository at `path`, checked out in the folder
+    /// `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns why `folder` is not a folder name, as [`folder_name`]
+    /// checks it.
+    pub fn named(path: impl Into<PathBuf>, folder: &str) -> Result<Self, String> {
+        Ok(Self {
+            path: path.into(),
+            folder: Some(folder_name(folder)?),
+        })
+    }
+}
+
+/// The names in a workspace's directory that mxv writes itself, which no
+/// checkout's folder may take. File systems such as macOS's default ignore
+/// case, so they are compared without it.
+const RESERVED_FOLDERS: &[&str] = &[crate::record::AGENTS_FILE, crate::manifest::MANIFEST_FILE];
+
+/// Checks `text`, a folder name that the person gives a checkout, and
+/// returns it. A folder name follows the rule of a workspace name: 1 to
+/// [`crate::MOST_NAME_BYTES`] lowercase ASCII letters, digits, `-`, `_`
+/// and `.`, starting with a letter or a digit, without `..`, and not
+/// ending with `.` or `.lock`. It may not be `AGENTS.md` or `mxv.toml`.
+///
+/// # Errors
+///
+/// Returns why `text` is not a folder name, in a sentence.
+pub fn folder_name(text: &str) -> Result<String, String> {
+    WorkspaceName::try_from(text.to_owned()).map_err(|error| error.to_string())?;
+    if RESERVED_FOLDERS
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(text))
+    {
+        return Err(format!(
+            "`{text}` is a file that mxv writes in the workspace's directory"
+        ));
+    }
+    Ok(text.to_owned())
+}
+
+/// Reports whether a checkout's folder named `folder` would take the place
+/// of one of `taken`, or of a file that mxv writes in the workspace's
+/// directory, on a file system that ignores case.
+fn folder_taken<'a>(folder: &str, mut taken: impl Iterator<Item = &'a str>) -> bool {
+    RESERVED_FOLDERS
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(folder))
+        || taken.any(|other| other.eq_ignore_ascii_case(folder))
+}
+
 /// The outcome of [`Workspaces::create`].
 #[derive(Debug)]
 pub enum NewOutcome {
@@ -86,6 +161,62 @@ pub enum NewOutcome {
         repository: PathBuf,
         /// The branch's name.
         branch: String,
+    },
+    /// Two repositories would have checkouts in the same folder, compared
+    /// without case, or a checkout's folder would take the name of a file
+    /// that mxv writes in the workspace's directory.
+    FolderTaken {
+        /// The folder's name.
+        folder: String,
+        /// The repository whose checkout would take it.
+        repository: PathBuf,
+    },
+}
+
+/// The outcome of [`Workspaces::add`].
+#[derive(Debug)]
+pub enum AddOutcome {
+    /// The checkout was added, and the workspace's record holds it.
+    Added(Workspace),
+    /// A dry run found nothing in the way, and the workspace is what a run
+    /// would make it. The new checkout has no commit.
+    Planned(Workspace),
+    /// No workspace has the name.
+    NotFound,
+    /// The workspace's checkouts are git worktrees, which mxv made before
+    /// clones, and mxv adds no checkout to such a workspace.
+    Worktrees(Workspace),
+    /// The new checkout's folder is taken, as [`NewOutcome::FolderTaken`]
+    /// describes.
+    FolderTaken {
+        /// The workspace's record.
+        workspace: Workspace,
+        /// The folder's name.
+        folder: String,
+        /// The repository whose checkout would take it.
+        repository: PathBuf,
+    },
+    /// The repository already has a local branch with the workspace's name.
+    BranchTaken {
+        /// The repository's top-level directory.
+        repository: PathBuf,
+        /// The branch's name.
+        branch: String,
+    },
+    /// The workspace has one checkout and a workspace manifest whose paths
+    /// are relative to that checkout. Once the workspace has two
+    /// checkouts, those paths are relative to the workspace's directory,
+    /// so the manifest must first name them below the checkout's folder.
+    ManifestCheckoutRelative {
+        /// The workspace's record.
+        workspace: Workspace,
+        /// The workspace manifest.
+        manifest: PathBuf,
+        /// The checkout's folder, below which each path must lie.
+        folder: String,
+        /// The paths that do not lie below the folder, such as
+        /// `processes.web.cwd = "."`.
+        paths: Vec<String>,
     },
 }
 
@@ -627,6 +758,9 @@ impl<B: Backend> Workspaces<B> {
         workspace: &Workspace,
         checkout: &Checkout,
     ) -> (DisposableSet, Option<String>) {
+        if workspace.has_several_checkouts() {
+            return self.merged_disposable_set(workspace, checkout);
+        }
         let inputs = workspace.manifest_inputs_for(Some(checkout));
         // Only a workspace manifest that no repository can have written
         // counts like the config file. One that is a link counts like the
@@ -662,6 +796,66 @@ impl<B: Backend> Workspaces<B> {
             DisposableSet::built_in()
                 .with(&declared, source)
                 .with(&self.disposable, DisposableSource::Config),
+            warning,
+        )
+    }
+
+    /// Returns the disposable set of `checkout` of `workspace`, a
+    /// workspace with several checkouts: the built-in [`DISPOSABLE`]
+    /// directories, the globs of the checkout's own `mxv.toml`
+    /// ([`DisposableSource::Manifest`]), the globs of the workspace
+    /// manifest that apply in the checkout, as [`PathGlob::within`]
+    /// decides, and the person's globs. The workspace manifest's globs
+    /// count as the person's own ([`DisposableSource::Workspace`]) only
+    /// while [`Workspace::manifest_trusted`] holds. A manifest that cannot
+    /// be read adds no globs, and the returned warning says so.
+    fn merged_disposable_set(
+        &self,
+        workspace: &Workspace,
+        checkout: &Checkout,
+    ) -> (DisposableSet, Option<String>) {
+        let mut set = DisposableSet::built_in();
+        let mut warnings = Vec::new();
+        match crate::manifest::Manifest::read(&checkout.path) {
+            Ok(manifest) => {
+                if let Some(manifest) = manifest {
+                    set = set.with(&manifest.disposable, DisposableSource::Manifest);
+                }
+            }
+            Err(error) => warnings.push(format!(
+                "the manifest {} of the checkout {} is invalid, so mxv uses only the built-in disposable set, the workspace manifest's globs and the config file's globs there: {error}",
+                error.path.display(),
+                checkout.name
+            )),
+        }
+        match workspace.workspace_manifest() {
+            Ok(Some(manifest)) => {
+                let globs: Vec<PathGlob> = manifest
+                    .disposable
+                    .iter()
+                    .filter_map(|glob| glob.within(&checkout.name))
+                    .collect();
+                let source = if workspace.manifest_trusted() {
+                    DisposableSource::Workspace
+                } else {
+                    warnings.push(format!(
+                        "the workspace manifest {} is a symbolic link or a hard link of another file, so mxv deletes the paths it declares disposable only after a confirmation, as it does for a repository's mxv.toml",
+                        workspace.manifest_file().display()
+                    ));
+                    DisposableSource::Manifest
+                };
+                set = set.with(&globs, source);
+            }
+            Ok(None) => {}
+            Err(error) => warnings.push(format!(
+                "the workspace manifest {} is invalid, so mxv adds none of its globs in the checkout {}: {error}",
+                error.path.display(),
+                checkout.name
+            )),
+        }
+        let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+        (
+            set.with(&self.disposable, DisposableSource::Config),
             warning,
         )
     }
@@ -747,6 +941,20 @@ impl<B: Backend> Workspaces<B> {
         crate::template::find(templates, &url, &repository.root, root)
     }
 
+    /// Returns the top-level directory of the repository of `repo` and the
+    /// folder that its checkout gets: the one that `repo` gives, or else
+    /// the repository's name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryNotFound`] for a path that is not in a
+    /// git repository.
+    pub fn resolve(&self, repo: &Repo) -> Result<(PathBuf, String), Error> {
+        let repository = self.backend.repository(&repo.path)?;
+        let folder = repo.folder.clone().unwrap_or(repository.name);
+        Ok((repository.root, folder))
+    }
+
     /// Checks that `path`, a file that the person names to copy as a
     /// workspace manifest, is the person's own. A workspace manifest's
     /// `disposable` globs are deleted without asking, so mxv refuses a file
@@ -806,42 +1014,82 @@ impl<B: Backend> Workspaces<B> {
         mode: Mode,
         manifest: Option<&str>,
     ) -> Result<NewOutcome, Error> {
+        self.create_repos(root, name, &[Repo::new(repository)], mode, manifest)
+    }
+
+    /// Creates the workspace `name` as [`Workspaces::create_with_manifest`]
+    /// does, with one checkout of each of `repos`, in the order given. Each
+    /// checkout lives in `<root>/<name>/<folder>`, where the folder is the
+    /// repository's name or the one that [`Repo::folder`] gives, and each
+    /// is on a new branch `name`. A failure of any checkout deletes every
+    /// checkout that the run made.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Workspaces::create`].
+    pub fn create_repos(
+        &self,
+        root: &Path,
+        name: &WorkspaceName,
+        repos: &[Repo],
+        mode: Mode,
+        manifest: Option<&str>,
+    ) -> Result<NewOutcome, Error> {
         if let Some(existing) = self.store.read(name)? {
             return Ok(NewOutcome::NameTaken(existing));
         }
-        let repository = self.backend.repository(repository)?;
         let path = root.join(name.as_str());
+        let mut found: Vec<(crate::backend::Repository, String)> = Vec::new();
+        for repo in repos {
+            let repository = self.backend.repository(&repo.path)?;
+            let folder = repo
+                .folder
+                .clone()
+                .unwrap_or_else(|| repository.name.clone());
+            if folder_taken(&folder, found.iter().map(|(_, taken)| taken.as_str())) {
+                return Ok(NewOutcome::FolderTaken {
+                    folder,
+                    repository: repository.root,
+                });
+            }
+            found.push((repository, folder));
+        }
         if Entry::at(&path)? != Entry::Absent {
             return Ok(NewOutcome::PathTaken(path));
         }
         // A clone's branch lives in the clone, and a branch of the same
         // name in the person's repository would still be confusing once
         // either is pushed, so both kinds refuse it.
-        if self
-            .backend
-            .branch_tip(&repository.root, name.as_str())?
-            .is_some()
-        {
-            return Ok(NewOutcome::BranchTaken {
-                repository: repository.root,
-                branch: name.to_string(),
-            });
+        for (repository, _) in &found {
+            if self
+                .backend
+                .branch_tip(&repository.root, name.as_str())?
+                .is_some()
+            {
+                return Ok(NewOutcome::BranchTaken {
+                    repository: repository.root.clone(),
+                    branch: name.to_string(),
+                });
+            }
         }
         if let Some(mirrors) = &self.mirrors {
-            return self.create_clone(root, name, &repository, mirrors, mode, manifest);
+            return self.create_clone(root, name, &found, mirrors, mode, manifest);
         }
-        if mode == Mode::Change {
-            self.backend.fetch(&repository.root)?;
+        let mut checkouts = Vec::new();
+        for (repository, folder) in &found {
+            if mode == Mode::Change {
+                self.backend.fetch(&repository.root)?;
+            }
+            let base = self.backend.base(&repository.root)?;
+            checkouts.push(Checkout::new(
+                folder.clone(),
+                &repository.root,
+                path.join(folder),
+                name.to_string(),
+                base,
+            ));
         }
-        let base = self.backend.base(&repository.root)?;
-        let checkout = Checkout::new(
-            repository.name.clone(),
-            &repository.root,
-            path.join(&repository.name),
-            name.to_string(),
-            base,
-        );
-        let mut workspace = Workspace::new(name.clone(), path, vec![checkout]).of_worktrees();
+        let mut workspace = Workspace::new(name.clone(), path, checkouts).of_worktrees();
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -865,32 +1113,53 @@ impl<B: Backend> Workspaces<B> {
         }
     }
 
-    /// Creates the workspace `name` of [`Workspaces::create`] as a clone of
-    /// the mirror of `repository`'s origin below `mirrors`.
-    fn create_clone(
+    /// Returns the checkout of `repository` in the folder `folder` of the
+    /// workspace `name` at `path`, as a clone of the mirror of its origin
+    /// below `mirrors`, and the origin's URL.
+    fn planned_clone(
         &self,
-        root: &Path,
         name: &WorkspaceName,
+        path: &Path,
         repository: &crate::backend::Repository,
+        folder: &str,
         mirrors: &Path,
-        mode: Mode,
-        manifest: Option<&str>,
-    ) -> Result<NewOutcome, Error> {
-        let path = root.join(name.as_str());
+    ) -> Result<(Checkout, String), Error> {
         let url = self.backend.origin_url(&repository.root)?;
         let origin = Origin::parse(&url, &repository.root).ok_or_else(|| Error::NoOrigin {
             repository: repository.root.clone(),
         })?;
         let base = self.backend.base(&repository.root)?;
         let mut checkout = Checkout::new(
-            repository.name.clone(),
+            folder.to_owned(),
             &repository.root,
-            path.join(&repository.name),
+            path.join(folder),
             name.to_string(),
             base,
         );
         checkout.mirror = Some(mirrors.join(&origin.key));
-        let mut workspace = Workspace::new(name.clone(), path, vec![checkout]);
+        Ok((checkout, origin.url))
+    }
+
+    /// Creates the workspace `name` of [`Workspaces::create_repos`] with a
+    /// clone of the mirror below `mirrors` of each repository's origin.
+    fn create_clone(
+        &self,
+        root: &Path,
+        name: &WorkspaceName,
+        found: &[(crate::backend::Repository, String)],
+        mirrors: &Path,
+        mode: Mode,
+        manifest: Option<&str>,
+    ) -> Result<NewOutcome, Error> {
+        let path = root.join(name.as_str());
+        let mut checkouts = Vec::new();
+        let mut urls = Vec::new();
+        for (repository, folder) in found {
+            let (checkout, url) = self.planned_clone(name, &path, repository, folder, mirrors)?;
+            checkouts.push(checkout);
+            urls.push(url);
+        }
+        let mut workspace = Workspace::new(name.clone(), path, checkouts);
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -901,10 +1170,116 @@ impl<B: Backend> Workspaces<B> {
             ));
         }
         let mut made = Made::default();
-        match self.make_clones(root, &mut workspace, &origin.url, manifest, &mut made) {
+        match self.make_clones(root, &mut workspace, &urls, manifest, &mut made) {
             Ok(()) => Ok(NewOutcome::Created(workspace)),
             Err(error) => {
                 self.undo(&workspace, &made);
+                Err(error)
+            }
+        }
+    }
+
+    /// Adds a checkout of `repo` to the workspace `name`, as a clone of the
+    /// mirror of its origin on the branch `name`, in the folder
+    /// `<workspace>/<folder>`, and writes `AGENTS.md` and the record again.
+    ///
+    /// When the workspace had one checkout, its checkout's units and ports
+    /// gain their prefix, so `add` moves each host port that the record
+    /// holds for a port of that checkout's `mxv.toml` to the prefixed name,
+    /// keeps the ports of the workspace manifest, and releases every other
+    /// port. Such a workspace's workspace manifest must already name its
+    /// paths below the checkout's folder, or `add` returns
+    /// [`AddOutcome::ManifestCheckoutRelative`] and changes nothing.
+    ///
+    /// It writes the record with the new checkout before it clones, so a
+    /// run that stops partway leaves a record that [`Workspaces::remove`]
+    /// cleans up. A failure deletes the new clone and writes the record and
+    /// `AGENTS.md` as they were. The caller makes sure that none of the
+    /// workspace's processes run, because the names of its units change.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Workspaces::create`].
+    pub fn add(&self, name: &WorkspaceName, repo: &Repo, mode: Mode) -> Result<AddOutcome, Error> {
+        let Some(mut workspace) = self.store.read(name)? else {
+            return Ok(AddOutcome::NotFound);
+        };
+        let Some(mirrors) = self
+            .mirrors
+            .as_ref()
+            .filter(|_| workspace.kind == WorkspaceKind::Clone)
+        else {
+            return Ok(AddOutcome::Worktrees(workspace));
+        };
+        let repository = self.backend.repository(&repo.path)?;
+        let folder = repo
+            .folder
+            .clone()
+            .unwrap_or_else(|| repository.name.clone());
+        let taken = folder_taken(
+            &folder,
+            workspace
+                .checkouts
+                .iter()
+                .map(|checkout| checkout.name.as_str()),
+        ) || Entry::at(&workspace.path.join(&folder))? != Entry::Absent;
+        if taken {
+            return Ok(AddOutcome::FolderTaken {
+                workspace,
+                folder,
+                repository: repository.root,
+            });
+        }
+        if self
+            .backend
+            .branch_tip(&repository.root, name.as_str())?
+            .is_some()
+        {
+            return Ok(AddOutcome::BranchTaken {
+                repository: repository.root,
+                branch: name.to_string(),
+            });
+        }
+        if !workspace.has_several_checkouts()
+            && let Some(first) = workspace.checkouts.first()
+        {
+            let paths = checkout_relative_paths(&workspace, &first.name);
+            if !paths.is_empty() {
+                return Ok(AddOutcome::ManifestCheckoutRelative {
+                    manifest: workspace.manifest_file(),
+                    folder: first.name.clone(),
+                    paths,
+                    workspace,
+                });
+            }
+        }
+        let before = workspace.clone();
+        let (checkout, url) =
+            self.planned_clone(name, &workspace.path.clone(), &repository, &folder, mirrors)?;
+        workspace.ports = ports_after_add(&workspace);
+        workspace.checkouts.push(checkout);
+        if mode == Mode::DryRun {
+            return Ok(AddOutcome::Planned(workspace));
+        }
+        self.store.update(&mut workspace)?;
+        let mut clones = 0;
+        let made = match workspace.checkouts.last_mut() {
+            Some(checkout) => self.make_clone(checkout, &url, &mut clones),
+            None => Ok(()),
+        }
+        .and_then(|()| self.write_agents(&workspace))
+        .and_then(|()| self.store.update(&mut workspace));
+        match made {
+            Ok(()) => Ok(AddOutcome::Added(workspace)),
+            Err(error) => {
+                if clones > 0
+                    && let Some(checkout) = workspace.checkouts.last()
+                {
+                    let _ = delete_clone(&checkout.path);
+                }
+                let mut before = before;
+                let _ = self.write_agents(&before);
+                let _ = self.store.update(&mut before);
                 Err(error)
             }
         }
@@ -918,7 +1293,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         root: &Path,
         workspace: &mut Workspace,
-        url: &str,
+        urls: &[String],
         manifest: Option<&str>,
         made: &mut Made,
     ) -> Result<(), Error> {
@@ -929,48 +1304,80 @@ impl<B: Backend> Workspaces<B> {
         fs::create_dir_all(root).map_err(unwritable(root))?;
         fs::create_dir(&workspace.path).map_err(unwritable(&workspace.path))?;
         made.directory = true;
-        for checkout in &mut workspace.checkouts {
-            let Some(mirror) = checkout.mirror.clone() else {
-                continue;
-            };
-            let default = checkout
-                .base
-                .strip_prefix("refs/remotes/origin/")
-                .unwrap_or(&checkout.base)
-                .to_owned();
-            {
-                let _lock = self.lock_mirror(&mirror)?;
-                self.backend.prepare_mirror(&mirror)?;
-                self.backend.fetch_mirror(&mirror, url, &default)?;
-                made.clones += 1;
-                self.backend.clone_mirror(&mirror, &checkout.path, url)?;
-            }
-            self.copy_excludes(checkout)?;
-            if self
-                .backend
-                .create_branch(&checkout.path, &checkout.branch, &checkout.base)?
-                .is_none()
-            {
-                return Err(Error::CommandFailed {
-                    operation: "update-ref",
-                    dir: checkout.path.clone(),
-                    code: None,
-                    message: format!(
-                        "the new clone already holds a branch named {}",
-                        checkout.branch
-                    ),
-                });
-            }
-            let commit = self
-                .backend
-                .switch_branch(&checkout.path, &checkout.branch)?;
-            checkout.commit = Some(commit);
+        for (checkout, url) in workspace.checkouts.iter_mut().zip(urls) {
+            self.make_clone(checkout, url, &mut made.clones)?;
         }
         made.agents = true;
-        store::replace_file(&workspace.agents_file(), agents_text(workspace).as_bytes())?;
+        self.write_agents(workspace)?;
         write_manifest(workspace, manifest, made)?;
         self.store.update(workspace)?;
         Ok(())
+    }
+
+    /// Makes the clone of `checkout` from its mirror, fetched from `url`,
+    /// on its branch, and sets its commit. It adds one to `clones` once it
+    /// starts the clone, which may leave a directory behind.
+    fn make_clone(
+        &self,
+        checkout: &mut Checkout,
+        url: &str,
+        clones: &mut usize,
+    ) -> Result<(), Error> {
+        let Some(mirror) = checkout.mirror.clone() else {
+            return Ok(());
+        };
+        let default = checkout
+            .base
+            .strip_prefix("refs/remotes/origin/")
+            .unwrap_or(&checkout.base)
+            .to_owned();
+        {
+            let _lock = self.lock_mirror(&mirror)?;
+            self.backend.prepare_mirror(&mirror)?;
+            self.backend.fetch_mirror(&mirror, url, &default)?;
+            *clones += 1;
+            self.backend.clone_mirror(&mirror, &checkout.path, url)?;
+        }
+        self.copy_excludes(checkout)?;
+        if self
+            .backend
+            .create_branch(&checkout.path, &checkout.branch, &checkout.base)?
+            .is_none()
+        {
+            return Err(Error::CommandFailed {
+                operation: "update-ref",
+                dir: checkout.path.clone(),
+                code: None,
+                message: format!(
+                    "the new clone already holds a branch named {}",
+                    checkout.branch
+                ),
+            });
+        }
+        let commit = self
+            .backend
+            .switch_branch(&checkout.path, &checkout.branch)?;
+        checkout.commit = Some(commit);
+        Ok(())
+    }
+
+    /// Writes the `AGENTS.md` of `workspace`, which names the origin of each
+    /// checkout as the checkout's own `origin` holds it, without a user
+    /// name or password.
+    fn write_agents(&self, workspace: &Workspace) -> Result<(), Error> {
+        let origins: Vec<String> = workspace
+            .checkouts
+            .iter()
+            .map(|checkout| {
+                self.backend
+                    .origin_url(&checkout.path)
+                    .map(|url| crate::mirror::redacted(&url))
+            })
+            .collect::<Result<_, _>>()?;
+        store::replace_file(
+            &workspace.agents_file(),
+            agents_text(workspace, &origins).as_bytes(),
+        )
     }
 
     /// Copies the `info/exclude` file of the person's repository into the
@@ -1053,7 +1460,7 @@ impl<B: Backend> Workspaces<B> {
             checkout.commit = Some(commit);
         }
         made.agents = true;
-        store::replace_file(&workspace.agents_file(), agents_text(workspace).as_bytes())?;
+        self.write_agents(workspace)?;
         write_manifest(workspace, manifest, made)?;
         self.store.update(workspace)?;
         Ok(Making::Done)
@@ -1561,6 +1968,91 @@ impl<B: Backend> Workspaces<B> {
 /// practice, and saturates when it is.
 fn count(items: &[String]) -> u32 {
     u32::try_from(items.len()).unwrap_or(u32::MAX)
+}
+
+/// Returns each path of the workspace manifest of `workspace`, a workspace
+/// with one checkout in the folder `folder`, that would not name the same
+/// place once the workspace has several checkouts and the manifest's paths
+/// are relative to the workspace's directory: each process's `cwd` that
+/// does not start with `folder`, and each anchored `disposable` or
+/// `clone_on_new` glob whose first component does not match it. A glob
+/// with no `/` but a trailing one, or one that starts with `**`, names
+/// the same paths either way. A manifest that does not parse once read
+/// from the workspace's directory is returned as its error. A workspace
+/// without a workspace manifest returns none.
+fn checkout_relative_paths(workspace: &Workspace, folder: &str) -> Vec<String> {
+    if workspace.checkouts.len() != 1 {
+        return Vec::new();
+    }
+    let path = workspace.manifest_file();
+    if fs::symlink_metadata(&path).is_err() || workspace.checkout_holds_manifest_file() {
+        return Vec::new();
+    }
+    let manifest = match crate::manifest::Manifest::read_file(&path, &workspace.path) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return Vec::new(),
+        Err(error) => return vec![error.to_string()],
+    };
+    let mut paths = Vec::new();
+    for (name, process) in &manifest.processes {
+        if !process.cwd.starts_with(folder) {
+            paths.push(format!(
+                "processes.{name}.cwd = \"{}\"",
+                process.cwd.display()
+            ));
+        }
+    }
+    for (key, globs) in [
+        ("disposable", &manifest.disposable),
+        ("clone_on_new", &manifest.clone_on_new),
+    ] {
+        for glob in globs {
+            let anchored = glob.as_str().trim_end_matches('/').contains('/');
+            if anchored && glob.within(folder).is_none() {
+                paths.push(format!("{key} \"{glob}\""));
+            }
+        }
+    }
+    paths
+}
+
+/// Returns the host ports that `workspace`, a workspace about to gain a
+/// checkout, holds afterwards. A workspace with several checkouts keeps
+/// every port. A workspace with one checkout keeps the ports of its
+/// workspace manifest under their names, moves the ports of its
+/// checkout's `mxv.toml` to their prefixed names, and releases every other
+/// port, so no port stays held under a name that nothing declares. When a
+/// manifest cannot be read, the ports stay as they are, and the next
+/// `mxv up` releases those that nothing declares.
+fn ports_after_add(workspace: &Workspace) -> std::collections::BTreeMap<String, u16> {
+    if workspace.has_several_checkouts() {
+        return workspace.ports.clone();
+    }
+    let Some(checkout) = workspace.checkouts.first() else {
+        return workspace.ports.clone();
+    };
+    let (Ok(own), Ok(shared)) = (
+        crate::manifest::Manifest::read(&checkout.path),
+        workspace.workspace_manifest(),
+    ) else {
+        return workspace.ports.clone();
+    };
+    let prefix = crate::lookup::checkout_prefix(&checkout.name);
+    let mut ports = std::collections::BTreeMap::new();
+    for (name, number) in &workspace.ports {
+        if shared
+            .as_ref()
+            .is_some_and(|manifest| manifest.ports.contains(name))
+        {
+            ports.insert(name.clone(), *number);
+        } else if own
+            .as_ref()
+            .is_some_and(|manifest| manifest.ports.contains(name))
+        {
+            ports.insert(crate::lookup::prefixed(&prefix, name), *number);
+        }
+    }
+    ports
 }
 
 /// Writes `manifest`, when it is given, as the workspace manifest of
