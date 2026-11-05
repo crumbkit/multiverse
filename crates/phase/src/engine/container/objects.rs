@@ -115,9 +115,6 @@ pub struct Inspected {
     /// The volumes that it mounts and that carry no name of the scope,
     /// which are the anonymous volumes of its image.
     pub(crate) anonymous: Vec<AnonymousVolume>,
-    /// The seconds that `docker stop` waits after the stop signal, as the
-    /// container was created with, or `None` when it has Docker's default.
-    pub(crate) stop_timeout: Option<u64>,
 }
 
 /// A named volume of the scope whose labels name the scope and the
@@ -166,7 +163,7 @@ impl Volume {
 /// [`mint_container`] reads.
 fn container_format() -> String {
     format!(
-        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.Config.StopTimeout}}}}",
+        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}",
         labels_format(".Config.Labels")
     )
 }
@@ -214,7 +211,6 @@ pub(super) fn mint_container(
         .filter_map(|volume| VolumeName::new(volume).ok())
         .map(|name| AnonymousVolume { name })
         .collect();
-    let stop_timeout = lines.next().and_then(|line| line.trim().parse().ok());
     Ok(Inspected {
         container: OwnedContainer {
             scope: scope.clone(),
@@ -224,7 +220,6 @@ pub(super) fn mint_container(
         state,
         started,
         anonymous,
-        stop_timeout,
     })
 }
 
@@ -242,6 +237,41 @@ fn inspect(scope: &Scope, service: &ServiceName, target: &str) -> Result<Option<
     }
     let printed = finished.checked("container inspect", Some(service.as_str()))?;
     mint_container(scope, service, target, &printed).map(Some)
+}
+
+/// Returns the seconds that `docker stop` waits after the stop signal for
+/// `container`, as it was created with, or `None` when it has Docker's
+/// default or docker does not say.
+///
+/// Docker omits `StopTimeout` from a container's config when it was
+/// created without one, and a template that names the missing key fails.
+/// The config is therefore read as JSON, apart from [`container_format`].
+pub(crate) fn stop_timeout(container: &OwnedContainer) -> Option<u64> {
+    let finished = quick(
+        [
+            "container",
+            "inspect",
+            "--format",
+            "{{json .Config}}",
+            "--",
+            container.id.as_str(),
+        ],
+        "container inspect",
+    )
+    .ok()?;
+    if !finished.status.success() {
+        return None;
+    }
+    stop_timeout_of(&finished.stdout)
+}
+
+/// Returns the `StopTimeout` of a container's config, which docker printed
+/// as JSON in `printed`.
+pub(super) fn stop_timeout_of(printed: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(printed)
+        .ok()?
+        .get("StopTimeout")?
+        .as_u64()
 }
 
 /// Inspects the container with the id `id`, which mxv recorded as the

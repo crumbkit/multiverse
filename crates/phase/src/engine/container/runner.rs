@@ -62,7 +62,8 @@ use crate::engine::container::command::{
 use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
 use crate::engine::container::objects::{
-    ContainerState, Inspected, ensure_volume, inspect_id, inspect_named, reinspect, remove, stop,
+    self, ContainerState, Inspected, ensure_volume, inspect_id, inspect_named, reinspect, remove,
+    stop,
 };
 use crate::engine::containers::{
     ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
@@ -238,8 +239,7 @@ impl ComposeRunner {
             if let Some(existing) =
                 inspect_named(&scope, &service).map_err(|error| docker_error(&error))?
             {
-                let grace = existing
-                    .stop_timeout
+                let grace = objects::stop_timeout(&existing.container)
                     .map_or(DEFAULT_STOP_GRACE, Duration::from_secs);
                 discard(&existing, grace)?;
             }
@@ -502,9 +502,8 @@ fn stop_one(
         Err(ContainerError::Foreign { .. }) => return Ok(ContainerStopped::Unstoppable),
         Err(error) => return Err(docker_error(&error)),
     };
-    let own = inspected
-        .stop_timeout
-        .map_or(DEFAULT_STOP_GRACE, Duration::from_secs);
+    let own =
+        objects::stop_timeout(&inspected.container).map_or(DEFAULT_STOP_GRACE, Duration::from_secs);
     let left = deadline.saturating_duration_since(now());
     discard(&inspected, own.min(left))?;
     match reinspect(&inspected.container) {

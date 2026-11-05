@@ -13,7 +13,7 @@ use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
-    ContainerState, mint_anonymous, mint_container, mint_volume,
+    ContainerState, mint_anonymous, mint_container, mint_volume, stop_timeout_of,
 };
 use crate::name::WorkspaceName;
 
@@ -708,4 +708,15 @@ fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_o
     assert!(scope.owns(&volume, "mxv.volume", "data"));
     assert!(app_scope("web").owns(&volume, "mxv.volume", "data"));
     assert!(!scope.owns(&volume, "mxv.volume", "cache"));
+}
+
+#[test]
+fn a_containers_stop_timeout_is_read_from_its_config_and_is_none_when_docker_omits_it() {
+    assert_eq!(
+        stop_timeout_of(r#"{"Image":"busybox","StopTimeout":3}"#),
+        Some(3)
+    );
+    assert_eq!(stop_timeout_of(r#"{"Image":"busybox"}"#), None);
+    assert_eq!(stop_timeout_of(r#"{"StopTimeout":null}"#), None);
+    assert_eq!(stop_timeout_of("not json"), None);
 }
