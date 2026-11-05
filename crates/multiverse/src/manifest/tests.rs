@@ -79,7 +79,7 @@ fn an_unknown_top_level_key_fails_and_names_the_key_and_its_line() {
 #[test]
 fn a_top_level_table_of_another_tool_is_accepted_and_left_alone() {
     let manifest = parse(
-        "ports = [\"api\"]\n\n[app]\nname = \"reading-list\"\n\n[service.web]\nimage = \"x\"\n\n[needs.db]\nkind = \"postgres\"\n\n[release]\nchannel = \"beta\"\n\n[[steps]]\nrun = \"make\"\n",
+        "ports = [\"api\"]\n\n[app]\nname = \"reading-list\"\n\n[needs.db]\nkind = \"postgres\"\n\n[release]\nchannel = \"beta\"\n\n[[steps]]\nrun = \"make\"\n",
     )
     .unwrap();
     assert_eq!(manifest.ports, ["api"]);
@@ -138,7 +138,7 @@ fn a_misspelt_name_of_one_of_mxvs_tables_parses_with_a_warning_that_names_it() {
 #[test]
 fn the_tables_of_phase_and_of_other_tools_parse_without_a_warning() {
     let manifest = parse(
-        "[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[needs.db]\na = 1\n[service.web]\na = 1\n[deploy]\na = 1\n",
+        "[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[needs.db]\na = 1\n[deploy]\na = 1\n",
     )
     .unwrap();
     assert_eq!(manifest.warnings, Vec::<String>::new());
@@ -1113,6 +1113,7 @@ fn a_listen_permission_on_a_port_that_a_joined_unit_listens_on_fails_with_its_li
         units: vec!["api-server".to_owned()],
         listened: vec![("api-http".to_owned(), "api-server".to_owned())],
         checkouts: vec!["api".to_owned()],
+        services: Vec::new(),
     };
     let error = Manifest::parse_joining(
         "[processes.proxy]\nargv = [\"true\"]\nports = { UPSTREAM = \"api-http\" }\npermissions = { listen = [\"api-http\"] }\n",
