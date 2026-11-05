@@ -554,6 +554,9 @@ struct Env {
     failing: BTreeSet<String>,
     /// Each `app/process` resolved, in order.
     resolved: RefCell<Vec<String>>,
+    /// The apps whose environment the source resolves without any
+    /// variable.
+    empty: BTreeSet<String>,
 }
 
 impl EnvironmentSource for Env {
@@ -571,8 +574,30 @@ impl EnvironmentSource for Env {
                 "the vault is locked".into(),
             ));
         }
+        if self.empty.contains(app.as_str()) {
+            return Ok(Box::new(Nothing));
+        }
         Ok(Box::new(Secret))
     }
+}
+
+/// An environment that holds no variable.
+struct Nothing;
+
+impl AppliedEnvironment for Nothing {
+    fn names(&self) -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    fn expires_at(&self) -> Option<SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(&self, _command: &mut Command, _reference: &dyn Fn(&str) -> Option<String>) {}
 }
 
 /// An environment that holds `API_TOKEN`.
@@ -2390,4 +2415,38 @@ fn a_failed_up_leaves_the_process_that_ended_exited_with_its_code_until_down() {
     world.down(&Selection::All);
 
     assert_eq!(world.record(), None);
+}
+
+#[test]
+fn an_up_whose_source_leaves_out_a_required_variable_launches_nothing() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    let empty = Env {
+        empty: BTreeSet::from(["api".to_owned()]),
+        ..Env::default()
+    };
+
+    let error = world.up(&plan, &Selection::All, &empty).unwrap_err();
+
+    assert_eq!(error.code(), "phase::environment");
+    assert!(world.host.launches().is_empty());
+}
+
+#[test]
+fn a_restart_whose_source_leaves_out_a_required_variable_stops_nothing() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    let empty = Env {
+        empty: BTreeSet::from(["api".to_owned()]),
+        ..Env::default()
+    };
+
+    let error = world
+        .engine()
+        .restart(&plan, &Selection::All, &empty, soon(), &Cancel::new())
+        .unwrap_err();
+
+    assert_eq!(error.code(), "phase::environment");
+    assert!(world.host.stops().is_empty());
 }

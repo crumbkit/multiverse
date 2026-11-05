@@ -585,6 +585,12 @@ impl Op<'_, '_> {
                     source,
                 })?,
         };
+        crate::env::require(process.required_env(), environment.as_ref()).map_err(|source| {
+            PhaseError::Environment {
+                app: app.name.clone(),
+                source,
+            }
+        })?;
         self.journal.launching(
             &app.name,
             &process.name,
@@ -758,6 +764,7 @@ impl Op<'_, '_> {
             engine.settings.kill_wait,
         )
         .expiring(environment.expires_at())
+        .requiring(process.required_env().cloned().collect())
         .inheriting(engine.settings.inherited.clone())
         .map_err(|error| unstartable(error.to_string()))?;
         let lines = engine.host.follow_log(&log).map_err(Step::Errored)?;
@@ -1038,6 +1045,15 @@ impl Op<'_, '_> {
                 let environment = self
                     .env
                     .resolve(&target.app, &target.process, self.deadlines.ready)
+                    .and_then(|environment| {
+                        let required = choice
+                            .app
+                            .processes
+                            .iter()
+                            .filter(|process| process.name == target.process)
+                            .flat_map(ProcessPlan::required_env);
+                        crate::env::require(required, environment.as_ref()).map(|()| environment)
+                    })
                     .map_err(|source| PhaseError::Environment {
                         app: choice.app.name.clone(),
                         source,

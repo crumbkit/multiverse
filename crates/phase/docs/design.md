@@ -543,7 +543,8 @@ phase writes the files in two steps, each a `docker exec --interactive
    0400). A feed that was cut short, or a script that fails, removes its
    file.
 2. Once every secret is staged, one script renames each staged file over
-   `/run/secrets/<NAME>`.
+   `/run/secrets/<NAME>`, and removes the file of each optional secret
+   that has lost its value.
 
 When a staging fails, phase removes every staged file and renames
 nothing, so the container keeps its whole old set of files. A reader of
@@ -600,7 +601,9 @@ mark useless for a secret. The service keeps its tmpfs, its wrapper and
 Docker's `no` restart policy whether or not the value is there, so its
 plan hash does not depend on the value either. A later rewrite of the
 files, such as a rotation, writes the optional secrets that then have a
-value, and leaves the old file of one that has lost its value in place.
+value, and removes the file of one that has lost its value in the same
+script that renames the staged files, so the container never keeps an
+old value of a secret that the source no longer supplies.
 
 An image that can read a secret only from an environment variable falls
 back to environment references when its process sets
@@ -806,7 +809,15 @@ variable unset, and leaves the variable out of the service in the compose
 file that a container process's `docker compose up` child reads, so the
 container does not receive it, and does not receive an empty string in
 its place. A required variable without a value still makes the source
-fail, and `up` reports that error as before. The host program's `EnvironmentSource` supplies every value, and
+fail, and `up` reports that error as before. phase also checks each
+resolved environment against the process's required variables, those in
+`env` and not in `optional_env`: before a host process's keeper starts,
+when a keeper resolves a fresh environment for a restart, and before a
+container starts. An environment whose names lack a required variable
+fails with the same environment error, which names the variable and no
+value, so a source that leaves one out fails the start, and the process
+never runs with the variable unset or empty. A keeper counts such a fresh
+environment as one it could not resolve. The host program's `EnvironmentSource` supplies every value, and
 mxv's renders its manifest's literal values and their `{port.NAME}`
 placeholders before phase sees them. phase resolves each process's
 environment separately, so two processes of one app can receive different

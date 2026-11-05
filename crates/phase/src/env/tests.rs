@@ -169,3 +169,25 @@ fn two_processes_of_one_app_receive_different_values_for_one_name() {
         vec![(OsStr::new("PORT"), Some(OsStr::new("41001")))]
     );
 }
+
+#[test]
+fn a_required_variable_missing_from_the_names_fails_with_an_error_that_names_it_and_no_value() {
+    let required = ["PATH".to_owned(), "LANG".to_owned()];
+
+    let error = super::require(required.iter(), fixed().as_ref()).unwrap_err();
+
+    assert_eq!(error.variable(), "LANG");
+    assert_eq!(
+        error.to_string(),
+        "the environment source could not supply the variable LANG"
+    );
+    assert!(!format!("{error:?}").contains("a value"));
+}
+
+#[test]
+fn an_environment_that_holds_every_required_variable_passes() {
+    let required = ["PATH".to_owned(), "STRIPE_KEY".to_owned()];
+
+    super::require(required.iter(), fixed().as_ref()).unwrap();
+    super::require([].iter(), fixed().as_ref()).unwrap();
+}

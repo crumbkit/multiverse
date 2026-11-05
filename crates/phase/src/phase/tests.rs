@@ -517,3 +517,24 @@ fn a_required_variable_that_the_source_cannot_supply_fails_a_host_start_as_befor
         "{error}"
     );
 }
+
+#[test]
+fn a_source_that_leaves_out_a_required_variable_fails_a_host_start() {
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+
+    let (up, hash) = up_with_optional_lang(
+        state.path(),
+        checkout.path(),
+        &Listed::of(&[("LANG", "C")]),
+        "^ready",
+    );
+
+    let error = up.unwrap_err();
+    assert_eq!(error.code(), "phase::environment");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "the environment source could not supply the variable GREETING"
+    );
+    assert_eq!(hash, None);
+}

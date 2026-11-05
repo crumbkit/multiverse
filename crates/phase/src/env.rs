@@ -88,7 +88,9 @@ pub trait AppliedEnvironment: Send {
     /// unset, leaves the variable out of a container's service, and writes
     /// no secret file for it. For a required variable without a value the
     /// source returns an [`EnvironmentError`] from
-    /// [`EnvironmentSource::resolve`] instead.
+    /// [`EnvironmentSource::resolve`] instead, and phase refuses an
+    /// environment whose names lack a required variable with the same
+    /// error, so the process never starts with it unset or empty.
     fn names(&self) -> BTreeSet<String>;
 
     /// Returns the earliest time at which one of the values expires, such as
@@ -141,6 +143,51 @@ pub trait AppliedEnvironment: Send {
     /// keeper receives its environment this way.
     fn apply(&self, command: &mut Command) {
         self.apply_as(command, &|name| Some(name.to_owned()));
+    }
+}
+
+/// The resolver that [`require`] names in its error: the environment
+/// source as a whole, which returned an environment without the variable.
+const SOURCE: &str = "the environment source";
+
+/// The reason of a [`require`] error, which holds no value.
+#[derive(Debug)]
+struct LeftOut;
+
+impl fmt::Display for LeftOut {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "the resolved environment does not name the variable, which the plan requires",
+        )
+    }
+}
+
+impl Error for LeftOut {}
+
+/// Checks that `environment` names each variable of `required`, the
+/// variables that a process receives and does not mark optional. phase
+/// calls it wherever it applies a resolved environment: before a host
+/// process's keeper starts, when a keeper resolves a fresh environment for
+/// a restart, and before a container starts. A source that leaves out a
+/// required variable therefore fails the start, and the process never runs
+/// with the variable unset or empty.
+///
+/// # Errors
+///
+/// Returns an [`EnvironmentError`] that names the first required variable
+/// that `environment` lacks, and holds no value.
+pub(crate) fn require<'n>(
+    required: impl IntoIterator<Item = &'n String>,
+    environment: &dyn AppliedEnvironment,
+) -> Result<(), EnvironmentError> {
+    let names = environment.names();
+    match required.into_iter().find(|name| !names.contains(*name)) {
+        Some(name) => Err(EnvironmentError::new(
+            name.clone(),
+            SOURCE.to_owned(),
+            Box::new(LeftOut),
+        )),
+        None => Ok(()),
     }
 }
 

@@ -378,14 +378,17 @@ impl ComposeRunner {
             let plan_hash = app::plan_hash(&scope, app, name)?;
             // The environment is resolved before the old container is
             // removed, so a resolver that fails leaves it running.
-            let environment =
-                start
-                    .env
-                    .resolve(&app.name, name, start.deadline)
-                    .map_err(|source| PhaseError::Environment {
-                        app: app.name.clone(),
-                        source,
-                    })?;
+            let environment = start
+                .env
+                .resolve(&app.name, name, start.deadline)
+                .and_then(|environment| {
+                    crate::env::require(process.required_env(), environment.as_ref())
+                        .map(|()| environment)
+                })
+                .map_err(|source| PhaseError::Environment {
+                    app: app.name.clone(),
+                    source,
+                })?;
             // The owner and the values of the secret files are settled
             // before the old container is removed, so a refusal, or an
             // environment that cannot write a value, leaves it running.
@@ -470,6 +473,10 @@ impl ComposeRunner {
                     &inspected,
                     Delivery {
                         values,
+                        // A new container has no old file, so this
+                        // removes nothing, and a start and a rewrite
+                        // name the same files.
+                        removed: lost_secrets(app, process, environment.as_ref()),
                         owner,
                         docker_environment: self.docker_environment.as_ref(),
                     },
@@ -602,8 +609,8 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
 /// them before it removes the process's old container, so an environment
 /// that cannot write a value leaves that container running. An optional
 /// secret that the environment's names lack is absent: it has no value
-/// here and gets no file. A rewrite of a running container's files leaves
-/// the old file of such a secret in place.
+/// here and gets no file, and [`lost_secrets`] names it so that a rewrite
+/// removes its old file.
 ///
 /// # Errors
 ///
@@ -635,11 +642,29 @@ pub(crate) fn secret_values(
         .collect()
 }
 
+/// Returns the optional secrets of `process` of `app` that it receives as
+/// files and that `environment` has no value for, in name order. A rewrite
+/// removes their files, so a secret that lost its value keeps no old one.
+pub(crate) fn lost_secrets(
+    app: &AppPlan,
+    process: &ProcessPlan,
+    environment: &dyn AppliedEnvironment,
+) -> Vec<String> {
+    let present = environment.names();
+    app::file_secrets(app, process)
+        .filter(|name| process.optional_env.contains(*name) && !present.contains(*name))
+        .cloned()
+        .collect()
+}
+
 /// What [`write_secrets`] writes: the values of a process's secrets, from
-/// [`secret_values`], and the owner its files get.
+/// [`secret_values`], the optional secrets whose files it removes, from
+/// [`lost_secrets`], and the owner its files get.
 pub(crate) struct Delivery<'a> {
     /// Each secret's name and value.
     pub(crate) values: Vec<(String, SecretBytes)>,
+    /// The secrets whose files the commit removes.
+    pub(crate) removed: Vec<String>,
     /// The owner of the files, in the form that `chown` reads.
     pub(crate) owner: &'a str,
     /// The only environment of the `docker exec` that writes each secret,
@@ -691,9 +716,12 @@ pub(crate) fn write_secrets(
         }
     }
     let committed = staged.and_then(|()| {
-        quick(secrets::commit(id, names.iter()), "secret commit")?
-            .checked("secret commit", Some(service))
-            .map(drop)
+        quick(
+            secrets::commit(id, names.iter(), delivery.removed.iter()),
+            "secret commit",
+        )?
+        .checked("secret commit", Some(service))
+        .map(drop)
     });
     committed.map_err(|error| {
         let _ = quick(secrets::discard(id), "secret discard");

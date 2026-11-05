@@ -1105,6 +1105,7 @@ fn a_secret_is_in_no_argument_list_or_environment_inside_the_container_while_it_
             &inspected,
             super::Delivery {
                 values: super::secret_values(&db, &db.processes[0], &values).unwrap(),
+                removed: Vec::new(),
                 owner: "1000:1000",
                 docker_environment: Some(&docker_environment),
             },
@@ -1159,6 +1160,7 @@ fn writing_secrets_again_replaces_their_files_in_the_running_container_without_a
         &world.inspected(&db),
         super::Delivery {
             values: super::secret_values(&db, &db.processes[0], fresh.as_ref()).unwrap(),
+            removed: Vec::new(),
             owner: "1000:1000",
             docker_environment: None,
         },
@@ -1220,6 +1222,7 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
                     super::SecretBytes::of(&values, "TOKEN").unwrap().cut(4),
                 ),
             ],
+            removed: Vec::new(),
             owner: "1000:1000",
             docker_environment: None,
         },
@@ -1279,7 +1282,7 @@ fn a_secret_feed_cut_short_fails_and_leaves_no_staged_file() {
 }
 
 #[test]
-fn a_secret_that_cannot_be_written_fails_the_start_and_removes_the_container() {
+fn a_required_secret_without_a_value_fails_the_start_before_a_container_exists() {
     if !docker_ready() {
         return;
     }
@@ -1289,12 +1292,7 @@ fn a_secret_that_cannot_be_written_fails_the_start_and_removes_the_container() {
     let report = world.up_with(&plan, &Secrets::new(None));
 
     match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(
-                message.contains("supplied no value for the secret TOKEN"),
-                "{message}"
-            );
-        }
+        AppOutcome::Errored { code, .. } => assert_eq!(code, "phase::environment"),
         other => panic!("{other:?}"),
     }
     assert!(!world.has_containers());
@@ -1535,6 +1533,41 @@ fn an_image_without_sleep_fails_its_start_with_the_wrappers_own_line() {
     assert!(!world.has_containers());
 }
 
+/// An environment source whose environment names `MODE`, `TOKEN` and
+/// `KEY`, and keeps the default `write_value`, which cannot write a value.
+struct Unwritable;
+
+impl EnvironmentSource for Unwritable {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        _process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        Ok(Box::new(Unwritable))
+    }
+}
+
+impl AppliedEnvironment for Unwritable {
+    fn names(&self) -> BTreeSet<String> {
+        ["MODE", "TOKEN", "KEY"].map(str::to_owned).into()
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>) {
+        if let Some(name) = reference("MODE") {
+            command.env(name, MODE);
+        }
+    }
+}
+
 #[test]
 fn an_environment_that_cannot_write_a_secret_leaves_the_running_container_in_place() {
     if !docker_ready() {
@@ -1548,9 +1581,9 @@ fn an_environment_that_cannot_write_a_secret_leaves_the_running_container_in_pla
     let mut changed = db;
     changed.processes[0].run[2] = format!("{COPY_SECRETS} # changed");
 
-    // `Mode`'s environment keeps the default `write_value`, which cannot
-    // write a value.
-    let report = world.up_with(&world.plan(vec![changed]), &Mode);
+    // `Unwritable`'s environment names every variable and keeps the
+    // default `write_value`, which cannot write a value.
+    let report = world.up_with(&world.plan(vec![changed]), &Unwritable);
 
     match outcome(&report, "db") {
         AppOutcome::Errored { message, .. } => {
@@ -2134,5 +2167,64 @@ fn an_absent_optional_secret_gets_no_file_and_the_wrapper_does_not_wait_for_it()
         TOKEN
     );
     assert!(docker(&["exec", "--", &id, "test", "-e", "/run/secrets/KEY"]).is_none());
+    world.down();
+}
+
+#[test]
+fn a_source_that_leaves_out_a_required_variable_fails_a_container_start() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![optional_app("db")]);
+
+    let report = world.up_with(&plan, &Listed::of(&[("LANG", LANG)]));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, .. } => assert_eq!(code, "phase::environment"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+}
+
+#[test]
+fn a_rotation_removes_the_file_of_an_optional_secret_that_lost_its_value() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = optional_secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    env.set(SecretValues {
+        token: Some(ROTATED),
+        key: None,
+    });
+    let fresh = env
+        .resolve(&db.name, &db.processes[0].name, Instant::now())
+        .unwrap();
+
+    super::write_secrets(
+        &world.inspected(&db),
+        super::Delivery {
+            values: super::secret_values(&db, &db.processes[0], fresh.as_ref()).unwrap(),
+            removed: super::lost_secrets(&db, &db.processes[0], fresh.as_ref()),
+            owner: "1000:1000",
+            docker_environment: None,
+        },
+        (Instant::now() + Duration::from_secs(30), &Cancel::new()),
+    )
+    .unwrap();
+
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, ROTATED);
+    let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
+    assert_eq!(
+        listed.split_whitespace().collect::<Vec<_>>(),
+        [".", "..", "TOKEN"]
+    );
     world.down();
 }

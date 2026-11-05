@@ -158,13 +158,23 @@ trap - EXIT
     )
 }
 
+/// The argument of the commit script that separates the secrets whose
+/// staged files it renames from those whose files it removes. No variable
+/// name is `--`, so it never names a secret.
+const REMOVALS: &str = "--";
+
 /// Returns the script that renames each staged file in `dir` named by its
-/// arguments over its secret's file.
+/// arguments over its secret's file, and removes the file of each secret
+/// named after [`REMOVALS`].
 fn commit_script(dir: &str) -> String {
     format!(
         r#"set -eu
 d='{dir}'
-for n do mv -f "$d/.$n.new" "$d/$n"; done
+r=
+for n do
+if [ "$n" = '{REMOVALS}' ]; then r=1; continue; fi
+if [ -n "$r" ]; then rm -f "$d/$n"; else mv -f "$d/.$n.new" "$d/$n"; fi
+done
 "#
     )
 }
@@ -194,11 +204,18 @@ pub(crate) fn stage(id: &str, name: &str, owner: &str) -> Vec<String> {
 }
 
 /// Returns the arguments of `docker` that rename the staged files of
-/// `names` in the container `id` over their secrets' files.
-pub(crate) fn commit<'n>(id: &str, names: impl Iterator<Item = &'n String>) -> Vec<String> {
+/// `names` in the container `id` over their secrets' files, and remove
+/// the files of `removed`, in one script.
+pub(crate) fn commit<'n>(
+    id: &str,
+    names: impl Iterator<Item = &'n String>,
+    removed: impl Iterator<Item = &'n String>,
+) -> Vec<String> {
     let mut args = exec_as_root(id, commit_script(SECRETS_DIR));
     args.push("phase-secret-commit".to_owned());
     args.extend(names.cloned());
+    args.push(REMOVALS.to_owned());
+    args.extend(removed.cloned());
     args
 }
 

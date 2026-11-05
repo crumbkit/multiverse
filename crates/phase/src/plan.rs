@@ -324,7 +324,8 @@ pub struct ProcessPlan {
     /// no file, and phase's wrapper does not wait for one. A variable that
     /// this set does not name is required, and the source fails for it
     /// with an [`EnvironmentError`](crate::EnvironmentError) when it has no
-    /// value. Each name is also in `env`, and the plan holds no value. In
+    /// value, and phase refuses an environment that lacks it in the same
+    /// way. Each name is also in `env`, and the plan holds no value. In
     /// JSON it is `"optional_env"`, left out when it is empty.
     pub optional_env: BTreeSet<String>,
     /// The app port the process listens on, or `None`.
@@ -399,6 +400,14 @@ impl SecretDelivery {
 }
 
 impl ProcessPlan {
+    /// Returns the names of the variables that the process receives and
+    /// does not mark optional, in name order.
+    pub(crate) fn required_env(&self) -> impl Iterator<Item = &String> {
+        self.env
+            .iter()
+            .filter(|name| !self.optional_env.contains(*name))
+    }
+
     /// Returns a long-running process named `name` that runs `run` in its
     /// app's directory, with no dependencies, variables, ports, volumes or
     /// probe, no optional variables, and a ready timeout of
