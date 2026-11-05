@@ -39,6 +39,7 @@ use phase::container::{
     self as docker, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle,
     OwnedContainer, Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
 };
+use phase::host::LogFollower;
 
 use crate::error::Error;
 use crate::manifest::{Container, LogPattern, Manifest, Process, ReadyCheck, Unit};
@@ -81,7 +82,7 @@ pub const MOST_TAIL_BYTES: u64 = 64 * 1024;
 
 /// The most bytes that one read of a followed log takes. The rest waits
 /// for the next read.
-pub const MOST_FOLLOW_BYTES: u64 = 1024 * 1024;
+pub use phase::host::MOST_FOLLOW_BYTES;
 
 /// Why mxv does not know the exit code of a process that exited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1711,16 +1712,12 @@ pub fn tail(path: &Path, lines: usize) -> Vec<String> {
     all.into_iter().skip(skip).map(str::to_owned).collect()
 }
 
-/// A log file that `mxv logs -f` reads as it grows.
+/// A log file that `mxv logs -f` reads as it grows, through phase's
+/// [`LogFollower`].
 #[derive(Debug)]
 pub struct Follower {
-    /// The log's path, for errors.
-    path: PathBuf,
-    /// The open log, positioned after the last byte read.
-    file: File,
-    /// The bytes after the last line break, which wait for the rest of
-    /// their line.
-    partial: Vec<u8>,
+    /// The follower of the log.
+    log: LogFollower,
 }
 
 impl Follower {
@@ -1733,15 +1730,11 @@ impl Follower {
     /// [`Error::StateUnreadable`] when it cannot be opened.
     pub(crate) fn new_log(path: &Path) -> Result<Self, Error> {
         drop(store::append_file(path)?);
-        let file = File::open(path).map_err(|source| Error::StateUnreadable {
+        let log = LogFollower::from_start(path).map_err(|source| Error::StateUnreadable {
             path: path.to_path_buf(),
             source,
         })?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            file,
-            partial: Vec::new(),
-        })
+        Ok(Self { log })
     }
 
     /// Opens the log at `path` at its end, or returns `None` when it does
@@ -1751,21 +1744,12 @@ impl Follower {
     ///
     /// Returns [`Error::StateUnreadable`] when the log cannot be opened.
     pub fn at_end(path: &Path) -> Result<Option<Self>, Error> {
-        let unreadable = |source| Error::StateUnreadable {
-            path: path.to_path_buf(),
-            source,
-        };
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(unreadable(error)),
-        };
-        file.seek(SeekFrom::End(0)).map_err(unreadable)?;
-        Ok(Some(Self {
-            path: path.to_path_buf(),
-            file,
-            partial: Vec::new(),
-        }))
+        Ok(LogFollower::at_end(path)
+            .map_err(|source| Error::StateUnreadable {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .map(|log| Self { log }))
     }
 
     /// Returns the complete lines written since the last read, up to
@@ -1777,41 +1761,10 @@ impl Follower {
     ///
     /// Returns [`Error::StateUnreadable`] when the log cannot be read.
     pub fn lines(&mut self) -> Result<Vec<String>, Error> {
-        let unreadable = |source| Error::StateUnreadable {
-            path: self.path.clone(),
+        self.log.lines().map_err(|source| Error::StateUnreadable {
+            path: self.log.path().to_path_buf(),
             source,
-        };
-        let position = self.file.stream_position().map_err(unreadable)?;
-        let length = self.file.metadata().map_err(unreadable)?.len();
-        if length < position {
-            // A cap emptied the log, so the next line starts at its start.
-            self.file.seek(SeekFrom::Start(0)).map_err(unreadable)?;
-            self.partial.clear();
-        }
-        let mut bytes = Vec::new();
-        (&mut self.file)
-            .take(MOST_FOLLOW_BYTES)
-            .read_to_end(&mut bytes)
-            .map_err(|source| Error::StateUnreadable {
-                path: self.path.clone(),
-                source,
-            })?;
-        self.partial.extend_from_slice(&bytes);
-        let Some(end) = self.partial.iter().rposition(|byte| *byte == b'\n') else {
-            if u64::try_from(self.partial.len()).unwrap_or(u64::MAX) > MOST_FOLLOW_BYTES {
-                // A line longer than the bound is returned in parts, so the
-                // buffer never holds more than one read's worth of bytes.
-                let part = std::mem::take(&mut self.partial);
-                return Ok(vec![String::from_utf8_lossy(&part).into_owned()]);
-            }
-            return Ok(Vec::new());
-        };
-        let rest = self.partial.split_off(end + 1);
-        let complete = std::mem::replace(&mut self.partial, rest);
-        Ok(String::from_utf8_lossy(&complete)
-            .lines()
-            .map(str::to_owned)
-            .collect())
+        })
     }
 
     /// Pauses for [`FOLLOW_INTERVAL`] before the next read. A log file

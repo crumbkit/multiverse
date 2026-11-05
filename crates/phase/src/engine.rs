@@ -3,7 +3,7 @@
 //! decisions are built, and the host runner is empty until its code lands.
 
 pub mod container;
-mod host;
+pub mod host;
 pub mod keeper;
 #[cfg_attr(
     not(test),

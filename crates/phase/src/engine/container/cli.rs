@@ -130,7 +130,7 @@ fn format(kind: DockerKind) -> String {
 }
 
 /// Returns the labels that `docker inspect` printed as `printed`, the JSON
-/// of [`format`]'s second line, or `None` when they are not a map of
+/// of [`fn@format`]'s second line, or `None` when they are not a map of
 /// strings. Docker prints `null` for an object without labels.
 fn labels(printed: &str) -> Option<BTreeMap<String, String>> {
     serde_json::from_str::<Option<BTreeMap<String, String>>>(printed)

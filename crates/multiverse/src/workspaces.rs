@@ -116,7 +116,7 @@ pub struct CheckoutRemoval {
     pub stashes: Vec<String>,
     /// Whether the removal unlocks the checkout first, because a killed
     /// `git worktree add` left it locked with the reason
-    /// [`INITIALIZING`](crate::backend::INITIALIZING).
+    /// [`INITIALIZING`].
     pub unlock: bool,
     /// The checkout's disposable directories, relative to the checkout,
     /// such as `target/`. The removal deletes them by file descriptor
@@ -334,7 +334,7 @@ pub enum RemovalPlan {
         stashes: u32,
     },
     /// A checkout is locked for a reason other than
-    /// [`INITIALIZING`](crate::backend::INITIALIZING), so something else may
+    /// [`INITIALIZING`], so something else may
     /// still use it, such as a checkout on a removable disk.
     Locked {
         /// The workspace's record.

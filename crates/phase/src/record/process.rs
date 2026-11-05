@@ -3,10 +3,16 @@
 //! recorded one, so a pid that the system gave to another process is never
 //! mistaken for it.
 //!
-//! [`start_time`] reads `/proc/<pid>/stat` on Linux and calls
-//! `proc_pidinfo` on macOS, as multiverse's process module does. The call
-//! into libproc is in the `darwin` module, which holds phase's only unsafe
-//! code.
+//! [`raw_start`] reads `/proc/<pid>/stat` on Linux and calls
+//! `proc_pidinfo` on macOS. It is the one place in phase and mxv that reads
+//! a process's start: [`start_time`] gives it to `sweep` in microseconds,
+//! and mxv keeps it in the form that its run records hold. The calls into
+//! libproc are in the `darwin` module, which holds the only unsafe code of
+//! phase and mxv. This module also signals process groups and processes
+//! for `sweep` and for mxv.
+
+use std::fmt;
+use std::io;
 
 use rustix::process::{Pid, Signal};
 
@@ -14,7 +20,146 @@ use crate::error::PhaseError;
 use crate::record::run::HostProcess;
 
 #[cfg(target_os = "macos")]
-mod darwin;
+pub(crate) mod darwin;
+
+/// The most bytes of a `/proc` file that this module and the host
+/// runner's listener lookup read. A busy host's socket table may need
+/// several megabytes.
+#[cfg(target_os = "linux")]
+pub(crate) const MOST_PROC_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A failure to read the process table.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProcessError {
+    /// The process table, or a file of it, cannot be read.
+    #[non_exhaustive]
+    Table {
+        /// What failed.
+        message: String,
+    },
+    /// A libproc call wrote a struct of another size than the one that
+    /// phase reads, so this macOS's structs differ from those phase knows.
+    #[non_exhaustive]
+    Unsupported {
+        /// The call, such as `proc_pidinfo(PROC_PIDTBSDINFO)`.
+        call: &'static str,
+        /// The process that the call was about, or 0 for a call about every
+        /// process.
+        pid: u32,
+        /// The bytes that the call wrote.
+        written: usize,
+        /// The bytes of the struct that phase reads.
+        expected: usize,
+    },
+}
+
+impl ProcessError {
+    /// Returns the failure of a table that cannot be read, which `message`
+    /// describes.
+    pub(crate) const fn table(message: String) -> Self {
+        Self::Table { message }
+    }
+}
+
+impl fmt::Display for ProcessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Table { message } => formatter.write_str(message),
+            Self::Unsupported {
+                call,
+                pid,
+                written,
+                expected,
+            } => write!(
+                formatter,
+                "{call} for the process {pid} wrote {written} bytes, and phase reads a struct of {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProcessError {}
+
+impl From<ProcessError> for PhaseError {
+    fn from(error: ProcessError) -> Self {
+        Self::ProcessTable {
+            message: error.to_string(),
+        }
+    }
+}
+
+/// Returns the failure of a libproc call about `pid` that gave no struct.
+#[cfg(target_os = "macos")]
+pub(crate) fn darwin_error(failure: &darwin::Failure, pid: u32) -> ProcessError {
+    match failure {
+        darwin::Failure::Size {
+            call,
+            written,
+            expected,
+        } => ProcessError::Unsupported {
+            call,
+            pid,
+            written: *written,
+            expected: *expected,
+        },
+        darwin::Failure::Os(error) => {
+            ProcessError::table(format!("libproc cannot read the process {pid}: {error}"))
+        }
+        darwin::Failure::Growing { call, tries } => ProcessError::table(format!(
+            "{call} filled every buffer in {tries} tries, because the list kept growing"
+        )),
+    }
+}
+
+/// A process's start as the process table gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RawStart {
+    /// No process has the pid.
+    Absent,
+    /// A process of another user has the pid, and its start may not be
+    /// read. Every process that phase or mxv records is the caller's, so it
+    /// is never a recorded process.
+    Unreadable,
+    /// The process started this many clock ticks after the machine booted,
+    /// as field 22 of `/proc/<pid>/stat` gives on Linux.
+    Ticks(u64),
+    /// The process started this many seconds and microseconds after the
+    /// Unix epoch, as `proc_pidinfo` gives on macOS.
+    Since {
+        /// The whole seconds.
+        seconds: u64,
+        /// The microseconds after them.
+        microseconds: u64,
+    },
+}
+
+/// Returns the start of the process `pid` as the process table gives it.
+///
+/// # Errors
+///
+/// Returns [`ProcessError::Table`] when the process table cannot be read,
+/// or this system is neither Linux nor macOS, and
+/// [`ProcessError::Unsupported`] when macOS's struct differs from the one
+/// that phase reads.
+pub fn raw_start(pid: u32) -> Result<RawStart, ProcessError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_raw_start(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_raw_start(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Err(ProcessError::table(
+            "phase reads process start times only on Linux and macOS".to_owned(),
+        ))
+    }
+}
 
 /// What the process table holds at a pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,91 +185,144 @@ pub(crate) enum Start {
 /// Returns [`PhaseError::ProcessTable`] when the process table cannot be
 /// read.
 pub(crate) fn start_time(pid: u32) -> Result<Start, PhaseError> {
-    #[cfg(target_os = "macos")]
-    {
-        macos_start_time(pid)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        linux_start_time(pid)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        Err(table(
-            "phase reads process start times only on Linux and macOS".to_owned(),
-        ))
-    }
+    let overflow = || ProcessError::table(format!("the start time of the process {pid} overflows"));
+    Ok(match raw_start(pid)? {
+        RawStart::Absent => Start::Absent,
+        RawStart::Unreadable => Start::Unreadable,
+        RawStart::Ticks(ticks) => {
+            Start::At(ticks_to_micros(ticks, clock_ticks_per_second()).ok_or_else(overflow)?)
+        }
+        RawStart::Since {
+            seconds,
+            microseconds,
+        } => Start::At(
+            seconds
+                .checked_mul(1_000_000)
+                .and_then(|micros| micros.checked_add(microseconds))
+                .ok_or_else(overflow)?,
+        ),
+    })
 }
 
-/// Returns the error of a process table that cannot be read.
-fn table(message: String) -> PhaseError {
-    PhaseError::ProcessTable { message }
+/// Returns the clock ticks in a second, in which Linux counts a process's
+/// start.
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_second() -> u64 {
+    rustix::param::clock_ticks_per_second()
+}
+
+/// Returns 0: only Linux counts a process's start in clock ticks.
+#[cfg(not(target_os = "linux"))]
+const fn clock_ticks_per_second() -> u64 {
+    0
 }
 
 /// Returns the start that `proc_pidinfo(PROC_PIDTBSDINFO)` reports for
 /// `pid`.
 #[cfg(target_os = "macos")]
-fn macos_start_time(pid: u32) -> Result<Start, PhaseError> {
+fn macos_raw_start(pid: u32) -> Result<RawStart, ProcessError> {
     let Ok(id) = i32::try_from(pid) else {
-        return Ok(Start::Absent);
+        return Ok(RawStart::Absent);
     };
     match darwin::bsd_info(id) {
-        Ok(info) => bsd_info_start(&info)
-            .map(Start::At)
-            .ok_or_else(|| table(format!("the start time of the process {pid} overflows"))),
-        Err(failure) if failure.errno() == Some(libc::ESRCH) => Ok(Start::Absent),
-        Err(failure) if failure.errno() == Some(libc::EPERM) => Ok(Start::Unreadable),
-        Err(darwin::Failure::Size { written }) => Err(table(format!(
-            "proc_pidinfo(PROC_PIDTBSDINFO) for the process {pid} wrote {written} bytes, and phase reads a struct of {}",
-            darwin::BSDINFO_BYTES
-        ))),
-        Err(darwin::Failure::Os(error)) => Err(table(format!(
-            "libproc cannot read the process {pid}: {error}"
-        ))),
+        Ok(info) => bsd_info_since(&info).ok_or_else(|| {
+            ProcessError::table(format!("libproc gave no start time for the process {pid}"))
+        }),
+        Err(failure) if failure.errno() == Some(libc::ESRCH) => Ok(RawStart::Absent),
+        Err(failure) if failure.errno() == Some(libc::EPERM) => Ok(RawStart::Unreadable),
+        Err(failure) => Err(darwin_error(&failure, pid)),
     }
 }
 
-/// Returns the start time in `info`, the bytes of `struct proc_bsdinfo`,
-/// whose `pbi_start_tvsec` and `pbi_start_tvusec` are 64-bit fields at
-/// offsets 120 and 128, as microseconds since the epoch.
+/// Returns the start in `info`, the bytes of `struct proc_bsdinfo`, whose
+/// `pbi_start_tvsec` and `pbi_start_tvusec` are 64-bit fields at offsets
+/// 120 and 128.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn bsd_info_start(info: &[u8]) -> Option<u64> {
-    let read = |offset: usize| -> Option<u64> {
-        let field = info.get(offset..offset.checked_add(8)?)?;
-        Some(u64::from_ne_bytes(field.try_into().ok()?))
-    };
-    read(120)?.checked_mul(1_000_000)?.checked_add(read(128)?)
+pub(crate) fn bsd_info_since(info: &[u8]) -> Option<RawStart> {
+    Some(RawStart::Since {
+        seconds: read_u64(info, 120)?,
+        microseconds: read_u64(info, 128)?,
+    })
 }
 
-/// Returns the start in field 22 of `/proc/<pid>/stat`, converted from
-/// clock ticks to microseconds.
-#[cfg(target_os = "linux")]
-fn linux_start_time(pid: u32) -> Result<Start, PhaseError> {
-    use std::io::{self, Read as _};
+/// Returns the start time in `info`, the bytes of `struct proc_bsdinfo`, as
+/// microseconds since the epoch.
+#[cfg(test)]
+pub(crate) fn bsd_info_start(info: &[u8]) -> Option<u64> {
+    match bsd_info_since(info)? {
+        RawStart::Since {
+            seconds,
+            microseconds,
+        } => seconds.checked_mul(1_000_000)?.checked_add(microseconds),
+        _ => None,
+    }
+}
 
-    let path = format!("/proc/{pid}/stat");
+/// Returns the native-endian `u64` at `offset` of `bytes`, or `None` when
+/// `bytes` ends first.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let field = bytes.get(offset..offset.checked_add(8)?)?;
+    Some(u64::from_ne_bytes(field.try_into().ok()?))
+}
+
+/// Returns the native-endian `i32` at `offset` of `bytes`, or `None` when
+/// `bytes` ends first.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn read_i32(bytes: &[u8], offset: usize) -> Option<i32> {
+    let field = bytes.get(offset..offset.checked_add(4)?)?;
+    Some(i32::from_ne_bytes(field.try_into().ok()?))
+}
+
+/// What a read of a `/proc` file gave.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) enum ProcRead {
+    /// The file's text.
+    Text(String),
+    /// The file does not exist or gives ESRCH, as for a process that ends
+    /// meanwhile.
+    Absent,
+    /// The file gives EACCES, as some files of another user's process do.
+    Denied,
+}
+
+/// Reads up to [`MOST_PROC_BYTES`] of the `/proc` file at `path`.
+///
+/// # Errors
+///
+/// Returns [`ProcessError::Table`] for any other failure.
+#[cfg(target_os = "linux")]
+pub(crate) fn read_proc(path: &str) -> Result<ProcRead, ProcessError> {
+    use std::io::Read as _;
+
     let mut text = String::new();
-    let read =
-        std::fs::File::open(&path).and_then(|file| file.take(4096).read_to_string(&mut text));
+    let read = std::fs::File::open(path)
+        .and_then(|file| file.take(MOST_PROC_BYTES).read_to_string(&mut text));
     match read {
-        Ok(_) => {}
+        Ok(_) => Ok(ProcRead::Text(text)),
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
                 || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
         {
-            return Ok(Start::Absent);
+            Ok(ProcRead::Absent)
         }
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-            return Ok(Start::Unreadable);
-        }
-        Err(error) => return Err(table(format!("cannot read {path}: {error}"))),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(ProcRead::Denied),
+        Err(error) => Err(ProcessError::table(format!("cannot read {path}: {error}"))),
     }
-    let ticks =
-        stat_start_ticks(&text).ok_or_else(|| table(format!("{path} holds no start time")))?;
-    ticks_to_micros(ticks, rustix::param::clock_ticks_per_second())
-        .map(Start::At)
-        .ok_or_else(|| table(format!("the start time in {path} overflows")))
+}
+
+/// Returns the start in field 22 of `/proc/<pid>/stat`, in clock ticks.
+#[cfg(target_os = "linux")]
+fn linux_raw_start(pid: u32) -> Result<RawStart, ProcessError> {
+    let path = format!("/proc/{pid}/stat");
+    match read_proc(&path)? {
+        ProcRead::Text(text) => stat_start_ticks(&text)
+            .map(RawStart::Ticks)
+            .ok_or_else(|| ProcessError::table(format!("{path} holds no start time"))),
+        ProcRead::Absent => Ok(RawStart::Absent),
+        ProcRead::Denied => Ok(RawStart::Unreadable),
+    }
 }
 
 /// Returns field 22 of `text`, the contents of `/proc/<pid>/stat`, which is
@@ -133,21 +331,149 @@ fn linux_start_time(pid: u32) -> Result<Start, PhaseError> {
 /// the last `)`, after which field 3 comes.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn stat_start_ticks(text: &str) -> Option<u64> {
+    stat_field(text, 22)
+}
+
+/// Returns the numeric field `field` of `text`, the contents of
+/// `/proc/<pid>/stat`, counted from the last `)` as [`stat_start_ticks`]
+/// counts. Field 4 is the parent and field 5 the process group.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn stat_field<T: std::str::FromStr>(text: &str, field: usize) -> Option<T> {
     let fields = text.rfind(')').and_then(|end| text.get(end + 1..))?;
-    fields.split_whitespace().nth(22 - 3)?.parse().ok()
+    fields
+        .split_whitespace()
+        .nth(field.checked_sub(3)?)?
+        .parse()
+        .ok()
 }
 
 /// Returns `ticks` clock ticks, of which a second holds `per_second`, as
 /// microseconds, or `None` when the result overflows or `per_second` is 0.
-#[cfg(any(target_os = "linux", test))]
 pub(crate) fn ticks_to_micros(ticks: u64, per_second: u64) -> Option<u64> {
     ticks.checked_mul(1_000_000)?.checked_div(per_second)
 }
 
-/// Returns `pid` as rustix's process id, or `None` for 0 or an id past
-/// `i32::MAX`, which name no single process.
-fn pid_of(pid: u32) -> Option<Pid> {
-    i32::try_from(pid).ok().and_then(Pid::from_raw)
+/// A process id that phase may signal. It is never 0, which `kill(2)` reads
+/// as the caller's own group, never 1, which is init and which as a group
+/// id makes `kill(2)` signal every process the caller may signal, and never
+/// an id past `i32::MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProcessId(Pid);
+
+/// A process group id that may be signalled, with the same limits as
+/// [`ProcessId`]: a group of 0 names the caller's own group and a group of
+/// 1 makes `kill(2)` signal every process the caller may signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProcessGroup(Pid);
+
+/// The refusal of an id that [`ProcessId`] or [`ProcessGroup`] does not
+/// accept: 0, 1, or an id past `i32::MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadProcessId {
+    /// The refused id.
+    pub id: u32,
+}
+
+impl fmt::Display for BadProcessId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "phase refuses to signal the id {}, because 0, 1 and ids past {} name no single process or group",
+            self.id,
+            i32::MAX
+        )
+    }
+}
+
+impl std::error::Error for BadProcessId {}
+
+impl From<BadProcessId> for io::Error {
+    fn from(refused: BadProcessId) -> Self {
+        Self::new(io::ErrorKind::InvalidInput, refused)
+    }
+}
+
+impl ProcessId {
+    /// Returns `pid` as an id that may be signalled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadProcessId`] for 0, 1 and any id past `i32::MAX`.
+    pub fn new(pid: u32) -> Result<Self, BadProcessId> {
+        checked(pid).map(Self)
+    }
+
+    /// Returns the id as a number.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.as_raw_nonzero().get().unsigned_abs()
+    }
+}
+
+impl ProcessGroup {
+    /// Returns `group` as a group id that may be signalled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadProcessId`] for 0, 1 and any id past `i32::MAX`.
+    pub fn new(group: u32) -> Result<Self, BadProcessId> {
+        checked(group).map(Self)
+    }
+
+    /// Returns the id as a number.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.as_raw_nonzero().get().unsigned_abs()
+    }
+}
+
+/// Returns `id` as rustix's process id when it is above 1 and at most
+/// `i32::MAX`.
+fn checked(id: u32) -> Result<Pid, BadProcessId> {
+    i32::try_from(id)
+        .ok()
+        .filter(|raw| *raw > 1)
+        .and_then(Pid::from_raw)
+        .ok_or(BadProcessId { id })
+}
+
+/// Sends `signal` to the process group `group`.
+///
+/// # Errors
+///
+/// Returns the failure of `kill(2)`, such as ESRCH when the group is gone.
+pub fn signal_group(group: ProcessGroup, signal: Signal) -> io::Result<()> {
+    rustix::process::kill_process_group(group.0, signal).map_err(io::Error::from)
+}
+
+/// Sends `signal` to the process `pid` alone.
+///
+/// # Errors
+///
+/// Returns the failure of `kill(2)`, such as ESRCH when no process has the
+/// id.
+pub fn signal_pid(pid: ProcessId, signal: Signal) -> io::Result<()> {
+    rustix::process::kill_process(pid.0, signal).map_err(io::Error::from)
+}
+
+/// Reports whether the process group `group` still has a member. A group
+/// that the caller may not signal still exists.
+#[must_use]
+pub fn group_exists(group: ProcessGroup) -> bool {
+    match rustix::process::test_kill_process_group(group.0) {
+        Ok(()) => true,
+        Err(error) => error != rustix::io::Errno::SRCH,
+    }
+}
+
+/// Reaps `pid` when it is an ended child of this process, because an
+/// unreaped child keeps its pid and stays a member of its group. A pid
+/// that is not this process's child is left alone.
+///
+/// A caller that holds a [`std::process::Child`] for the same pid loses its
+/// exit status to this call: the child's own `wait` then fails with ECHILD.
+pub fn reap(pid: ProcessId) {
+    let _ = rustix::process::waitpid(Some(pid.0), rustix::process::WaitOptions::NOHANG);
 }
 
 /// The calls that `sweep` makes on the process table, behind a trait so
@@ -205,25 +531,19 @@ impl Processes for System {
     }
 
     fn group_exists(&self, group: u32) -> bool {
-        let Some(group) = pid_of(group) else {
-            return false;
-        };
-        match rustix::process::test_kill_process_group(group) {
-            Ok(()) => true,
-            Err(error) => error != rustix::io::Errno::SRCH,
-        }
+        ProcessGroup::new(group).is_ok_and(group_exists)
     }
 
     fn reap(&self, pid: u32) {
-        if let Some(process) = pid_of(pid) {
-            let _ = rustix::process::waitpid(Some(process), rustix::process::WaitOptions::NOHANG);
+        if let Ok(pid) = ProcessId::new(pid) {
+            reap(pid);
         }
     }
 
     fn signal(&self, host: &HostProcess, signal: Signal) -> Result<(), PhaseError> {
-        let Some(process) = pid_of(host.pid) else {
-            return Ok(());
-        };
+        let process = checked(host.pid).map_err(|refused| PhaseError::ProcessTable {
+            message: refused.to_string(),
+        })?;
         // A group keeps its id while it has a member. Between sweep's check
         // and this signal, the id can name another group only if every
         // member ended and a new process took the id in that time.
@@ -235,10 +555,12 @@ impl Processes for System {
         match sent {
             Ok(()) => Ok(()),
             Err(error) if error == rustix::io::Errno::SRCH => Ok(()),
-            Err(error) => Err(table(format!(
-                "cannot send {signal:?} to the process {}: {error}",
-                host.pid
-            ))),
+            Err(error) => Err(PhaseError::ProcessTable {
+                message: format!(
+                    "cannot send {signal:?} to the process {}: {error}",
+                    host.pid
+                ),
+            }),
         }
     }
 }
@@ -286,7 +608,9 @@ fn boot_id() -> Result<Option<String>, PhaseError> {
     let mut text = String::new();
     std::fs::File::open(path)
         .and_then(|file| file.take(128).read_to_string(&mut text))
-        .map_err(|error| table(format!("cannot read {path}: {error}")))?;
+        .map_err(|error| PhaseError::ProcessTable {
+            message: format!("cannot read {path}: {error}"),
+        })?;
     Ok(Some(text.trim().to_owned()))
 }
 

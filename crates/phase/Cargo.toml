@@ -42,8 +42,9 @@ wait-timeout = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["param"] }
 
-# macOS reads a process's start time to the microsecond with libproc's
-# `proc_pidinfo`, which libc declares.
+# macOS reads a process's start time to the microsecond, and the sockets of
+# a process's descriptors, with libproc's `proc_pidinfo`, `proc_pidfdinfo`
+# and `proc_listpids`, which libc declares.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 
