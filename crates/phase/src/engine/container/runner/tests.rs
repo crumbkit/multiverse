@@ -644,3 +644,365 @@ fn a_container_runs_its_own_command_and_receives_its_literal_variables() {
     assert!(!config.contains(SERVICES), "{config}");
     world.down();
 }
+
+/// The value of `TOKEN` that [`Secrets`] gives first, a test value.
+const TOKEN: &str = "test-token-3f9a2c71";
+
+/// The value of `TOKEN` that [`Secrets`] gives after a rotation.
+const ROTATED: &str = "test-token-rotated-b04e";
+
+/// An environment source that gives every process `MODE` and the secret
+/// `TOKEN`, whose value the test may change, or that leaves `TOKEN` out
+/// when `token` is `None`.
+struct Secrets {
+    token: std::sync::Mutex<Option<&'static str>>,
+}
+
+impl Secrets {
+    fn new(token: Option<&'static str>) -> Self {
+        Self {
+            token: std::sync::Mutex::new(token),
+        }
+    }
+}
+
+impl EnvironmentSource for Secrets {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        _process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        Ok(Box::new(SecretValues(*self.token.lock().unwrap())))
+    }
+}
+
+/// The environment that holds `MODE` and, when it is `Some`, `TOKEN`.
+struct SecretValues(Option<&'static str>);
+
+impl AppliedEnvironment for SecretValues {
+    fn names(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::from(["MODE".to_owned()]);
+        if self.0.is_some() {
+            names.insert("TOKEN".to_owned());
+        }
+        names
+    }
+
+    fn expires_at(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    fn digest(&self, key: &[u8; 32]) -> [u8; 32] {
+        *key
+    }
+
+    fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>) {
+        if let Some(name) = reference("MODE") {
+            command.env(name, MODE);
+        }
+        if let (Some(name), Some(token)) = (reference("TOKEN"), self.0) {
+            command.env(name, token);
+        }
+    }
+}
+
+impl World {
+    fn up_with(&self, plan: &Plan, env: &dyn EnvironmentSource) -> Report {
+        let ready = Instant::now() + Duration::from_secs(60);
+        self.phase
+            .up(
+                plan,
+                &Selection::All,
+                env,
+                UpDeadlines::new(ready, ready),
+                &Cancel::new(),
+            )
+            .unwrap()
+    }
+
+    /// Returns the text of every file under the state directory, which
+    /// holds the run record.
+    fn state_text(&self) -> String {
+        fn walk(dir: &std::path::Path, text: &mut String) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, text);
+                } else {
+                    text.push_str(&String::from_utf8_lossy(&std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut text = String::new();
+        walk(self.state.path(), &mut text);
+        text
+    }
+}
+
+/// Returns the container app `app` whose `server` receives `MODE` and the
+/// secret `TOKEN`, runs as user 1000, copies the secret's file when it
+/// starts, and is ready once it has.
+fn secret_app(name: &str) -> AppPlan {
+    let mut app = app(
+        name,
+        "cat /run/secrets/TOKEN > /tmp/seen && touch /tmp/ready; exec sleep 60",
+    );
+    app.processes[0].env.insert("TOKEN".to_owned());
+    app.permissions.secrets.insert("TOKEN".to_owned());
+    app.container.user = Some("1000:1000".to_owned());
+    app.processes[0].ready = Some(Probe::new(ProbeCheck::command(vec![
+        "test".to_owned(),
+        "-e".to_owned(),
+        "/tmp/ready".to_owned(),
+    ])));
+    app
+}
+
+/// Runs `docker compose config` on the compose file that `up` gives
+/// `docker compose up` for `app` of `world`, with `env`'s values on the
+/// child as `up` sets them, and returns what it printed.
+fn compose_config(world: &World, app: &AppPlan, env: &dyn AppliedEnvironment) -> String {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let runner = super::ComposeRunner::new(world.state.path().to_path_buf(), Duration::ZERO);
+    let scope = runner.scope(&world.id, &app.name);
+    let image = super::objects::image_command(IMAGE).unwrap();
+    let file = super::app::compose_file(&scope, app, Some(&image)).unwrap();
+    let process = &app.processes[0].name;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test asks the real docker compose how it reads the file"
+    )]
+    let mut command = Command::new("docker");
+    command
+        .args(["compose", "--project-name", scope.project().as_str()])
+        .args(["--project-directory", &world.state.path().to_string_lossy()])
+        .args(["--env-file", "/dev/null", "--file", "-", "config"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    env.apply_as(&mut command, &|name| {
+        super::app::reference(app, process, name)
+    });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test asks the real docker compose how it reads the file"
+    )]
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(file.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let mut printed = file.to_string();
+    printed.push_str(&String::from_utf8_lossy(&output.stdout));
+    printed
+}
+
+#[test]
+fn a_container_reads_its_secret_from_a_tmpfs_file_and_the_value_appears_nowhere_else() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let env = Secrets::new(Some(TOKEN));
+
+    let report = world.up_with(&plan, &env);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert!(!format!("{report:?}").contains(TOKEN));
+    let id = world.container("db", "server").unwrap();
+    // The app read the file when it started, so the wrapper waited for it.
+    let seen = docker(&["exec", "--", &id, "cat", "/tmp/seen"]).unwrap();
+    assert_eq!(seen, TOKEN);
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, TOKEN);
+    let listed = docker(&["exec", "--", &id, "ls", "-lan", "/run/secrets"]).unwrap();
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.starts_with("drwx------")
+                && line.split_whitespace().nth(2) == Some("1000")),
+        "{listed}"
+    );
+    assert!(
+        listed.lines().any(|line| line.starts_with("-r--------")
+            && line.ends_with(" TOKEN")
+            && line.split_whitespace().nth(2) == Some("1000")),
+        "{listed}"
+    );
+    let mounts = docker(&["exec", "--", &id, "cat", "/proc/mounts"]).unwrap();
+    assert!(
+        mounts
+            .lines()
+            .any(|line| line.starts_with("tmpfs /run/secrets tmpfs")),
+        "{mounts}"
+    );
+    let environment = docker(&["exec", "--", &id, "env"]).unwrap();
+    assert!(!environment.contains(TOKEN), "{environment}");
+    let inspected = docker(&["container", "inspect", &id]).unwrap();
+    assert!(!inspected.contains(TOKEN), "{inspected}");
+    assert!(inspected.contains("mxv.workspace-id"));
+    let config = compose_config(&world, &db, &SecretValues(Some(TOKEN)));
+    assert!(config.contains("/run/secrets"), "{config}");
+    assert!(!config.contains(TOKEN), "{config}");
+    let state = world.state_text();
+    assert!(state.contains(&id));
+    assert!(!state.contains(TOKEN));
+    world.down();
+}
+
+#[test]
+fn writing_a_secret_again_replaces_its_file_in_the_running_container_without_a_restart() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = secret_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let started = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.State.StartedAt}}",
+        &id,
+    ]);
+    let runner = super::ComposeRunner::new(world.state.path().to_path_buf(), Duration::ZERO);
+    let scope = runner.scope(&world.id, &db.name);
+    let service = super::app::service(&db, &db.processes[0].name).unwrap();
+    let inspected = super::inspect_named(&scope, &service).unwrap().unwrap();
+    *env.token.lock().unwrap() = Some(ROTATED);
+    let fresh = env
+        .resolve(&db.name, &db.processes[0].name, Instant::now())
+        .unwrap();
+
+    super::write_secrets(
+        &db,
+        &db.processes[0],
+        &inspected,
+        fresh.as_ref(),
+        (Instant::now() + Duration::from_secs(30), &Cancel::new()),
+    )
+    .unwrap();
+
+    let read = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
+    assert_eq!(read, ROTATED);
+    let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
+    assert_eq!(
+        listed.split_whitespace().collect::<Vec<_>>(),
+        [".", "..", "TOKEN"]
+    );
+    assert_eq!(
+        docker(&[
+            "container",
+            "inspect",
+            "--format",
+            "{{.State.StartedAt}}",
+            &id
+        ]),
+        started
+    );
+    assert_eq!(
+        world.container("db", "server").as_deref(),
+        Some(id.as_str())
+    );
+    world.down();
+}
+
+#[test]
+fn a_secret_that_cannot_be_written_fails_the_start_and_removes_the_container() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![secret_app("db")]);
+
+    let report = world.up_with(&plan, &Secrets::new(None));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(
+                message.contains("supplied no value for the secret TOKEN"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let label = format!("label=mxv.workspace-id={}", world.id);
+    let left = docker(&["container", "ls", "--all", "--quiet", "--filter", &label]).unwrap();
+    assert_eq!(left.trim(), "");
+}
+
+#[test]
+fn a_container_that_opts_into_environment_secrets_receives_them_as_variables() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = app("db", "exec sleep 60");
+    db.processes[0].env.insert("TOKEN".to_owned());
+    db.permissions.secrets.insert("TOKEN".to_owned());
+    db.processes[0].secret_delivery = crate::plan::SecretDelivery::Env;
+    let plan = world.plan(vec![db]);
+
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let printed = docker(&["exec", "--", &id, "printenv", "TOKEN"]).unwrap();
+    assert_eq!(printed.trim(), TOKEN);
+    let mounts = docker(&["exec", "--", &id, "cat", "/proc/mounts"]).unwrap();
+    assert!(!mounts.contains("/run/secrets"), "{mounts}");
+    world.down();
+}
+
+#[test]
+fn up_replaces_a_container_that_docker_restarted_and_that_waits_for_its_emptied_secrets() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = secret_app("db");
+    db.processes[0].run[2] =
+        "cat /run/secrets/TOKEN > /tmp/seen && touch /tmp/ready; sleep 2; exit 1".to_owned();
+    db.processes[0].restart = Restart::on_failure(RestartLimits::default());
+    let plan = world.plan(vec![db]);
+    let env = Secrets::new(Some(TOKEN));
+    let report = world.up_with(&plan, &env);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    let began = Instant::now();
+    while docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.RestartCount}}",
+        &first,
+    ])
+    .is_some_and(|count| count.trim() == "0")
+    {
+        assert!(began.elapsed() < Duration::from_secs(20));
+        crate::clock::pause(Duration::from_millis(200));
+    }
+
+    let report = world.up_with(&plan, &env);
+
+    assert_ne!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    let second = world.container("db", "server").unwrap();
+    assert_ne!(second, first);
+    world.down();
+}

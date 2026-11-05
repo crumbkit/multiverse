@@ -460,8 +460,63 @@ environment.
 - phase never serves a secret on the Mac's loopback, because OrbStack lets
   every container reach the Mac's `127.0.0.1`.
 
+A process receives each variable that its app's permissions name as a
+secret this way, unless its plan sets `secret_delivery = "env"`.
+
+The compose file passes the wrapper as the service's `entrypoint`:
+`/bin/sh -c <script> phase-secrets <NAME>... --`, followed by the service's
+`command`. Replacing an image's entrypoint makes Docker drop the image's
+command too, so after the image is pulled phase reads the image's
+entrypoint and command with `docker image inspect`, and the service's
+command is the image's entrypoint followed by the plan's command, or by
+the image's command when the plan has none. The container therefore runs
+what it would have run without the wrapper. The run record's plan hash
+covers the plan's command and not the image's.
+
+The wrapper's script needs only `/bin/sh`. It waits until
+`/run/secrets/<NAME>` exists for each name, then replaces itself with the
+command, so the app is the container's first process and receives its
+stop signal. While it waits, a stop signal ends it. It pauses a tenth of a
+second between checks with `sleep` when the image has that program, and
+gives up after 60 seconds of pauses with status 1 and a line that names
+the missing file. An image without `sleep` makes it check without pausing
+and without a time limit.
+
+phase writes each secret with `docker exec --interactive --user 0`,
+running a script of `/bin/sh` that reads the value from standard input
+into a temporary file in the same tmpfs, gives the directory and the file
+to the user and group of the container's first process, makes the file
+readable by its owner alone (mode 0400), and renames it over
+`/run/secrets/<NAME>`. A reader sees the old value or the new one. On the
+Mac, the host's `/bin/sh` hands the value to `docker exec` with its
+built-in `printf`, so the value is in the environment of that shell alone
+and in no argument list. Every write happens before the readiness wait. A
+write that fails, including one for a secret that the environment source
+did not supply, fails the start, and phase removes the container.
+
+An image that runs with secret files must therefore provide `/bin/sh`,
+`cat`, `chown`, `chmod`, `mv` and `rm`, which busybox and the base images
+of the common distributions do, and `sleep` to pause between checks. The
+app reads its secrets as the user it starts as. An image whose entrypoint
+starts as root and then switches to another user, which many official
+images do, reads the files while it is still root, because the files
+belong to the user of the first process when phase writes them.
+
+A Docker restart under the container's restart policy empties the tmpfs,
+and phase is not there to write the files again, so the restarted
+container waits in the wrapper and then exits with status 1. Each `up`
+treats a container with secret files that Docker has restarted as not
+running, and replaces it.
+
+Rotation is `write_secrets` in the container runner, which writes the
+files of a running container again from a fresh environment. Nothing calls
+it on a timer yet. phase runs only while `up`, `restart` or `down` runs, so
+the follow-up is a long-running caller that resolves the environment again
+before `AppliedEnvironment::expires_at` and rewrites the files.
+
 An image that can read a secret only from an environment variable falls
-back to environment references. The Compose file maps the variable to a
+back to environment references when its process sets
+`secret_delivery = "env"`. The Compose file maps the variable to a
 private reference, such as `POSTGRES_PASSWORD: "${MXV_ENV_postgres_1:-}"`,
 and phase sets the `MXV_ENV_*` values only on that service's
 `docker compose up` child process. phase never lists a variable by its
@@ -473,11 +528,8 @@ a new value means recreating the container. Compose also hashes each
 service's interpolated values into the `com.docker.compose.config-hash`
 label of its container, so that label changes with a value. The hash is
 unsalted, so anyone who can read the container's labels can test a guess
-of a low-entropy value against it. phase passes no secret this way yet,
-and this matters once the secret fallback lands.
-
-Until P3 lands, phase refuses a container process that receives a secret,
-and reaches only its plain variables through environment references.
+of a low-entropy value against it. The fallback is opt-in for that reason,
+and a host process that sets it is refused by the plan.
 
 The eval `/evals/container-secret-delivery-orbstack` in the owner's board
 measured each option on OrbStack 2.2.5 with test values. Compose secrets

@@ -19,11 +19,15 @@
 //! process's variables in name order. [`reference()`] returns that name, and
 //! only that service's child receives the values.
 //!
-//! A variable that the app's permissions name as a secret is never in the
-//! compose file. phase delivers a container's secrets as files in a tmpfs
-//! (decision P3), which this module does not do yet, so [`objects`]
-//! refuses a process that receives a secret with
-//! [`NotRunnable::ContainerSecrets`].
+//! A variable that the app's permissions name as a secret reaches the
+//! container as a file in a tmpfs at `/run/secrets` (decision P3), and its
+//! name never appears in the service's `environment`. The service of a
+//! process that receives such a file mounts the tmpfs and starts through
+//! phase's wrapper, which waits for the files, as [`super::secrets`] says.
+//! [`file_secrets`] returns the names that `up` writes after the container
+//! starts. A process whose plan sets
+//! [`SecretDelivery::Env`] receives its
+//! secrets through private references like its other variables instead.
 
 use std::path::Path;
 use std::time::Duration;
@@ -33,12 +37,13 @@ use serde_json::{Map, Value, json};
 use crate::engine::container::compose::{literal, variable_of};
 use crate::engine::container::names::{CONTAINER_LABEL, Scope, ServiceName, VolumeKey};
 use crate::engine::container::objects::stop_seconds;
+use crate::engine::container::secrets::{ImageCommand, SECRETS_DIR, SECRETS_MODE, entrypoint};
 use crate::engine::containers::ContainerObjects;
 use crate::engine::run::order::sorted;
 use crate::error::{NotRunnable, PhaseError};
 use crate::name::{ProcessName, VolumeName};
 use crate::plan::restart::{Restart, StopSignal};
-use crate::plan::{AppPlan, ProcessKind, ProcessPlan, digest};
+use crate::plan::{AppPlan, ProcessKind, ProcessPlan, SecretDelivery, digest};
 use crate::record::run::{PlanHash, VolumeLifetime};
 use crate::record::{DockerName, MOST_DOCKER_NAME_BYTES};
 use crate::source::Source;
@@ -61,14 +66,31 @@ fn volume_key(volume: &VolumeName) -> VolumeKey {
     VolumeKey::of(volume)
 }
 
-/// Returns the variables of `process` that reach its container: those that
-/// the plan names and the app's permissions do not name as secrets, in
-/// name order.
+/// Returns the variables of `process` that reach its container's
+/// environment, in name order: those that the plan names and the app's
+/// permissions do not name as secrets, and the secrets too when the
+/// process receives them through its environment.
 fn variables<'p>(app: &AppPlan, process: &'p ProcessPlan) -> impl Iterator<Item = &'p String> {
+    let secrets_too = process.secret_delivery == SecretDelivery::Env;
     process
         .env
         .iter()
-        .filter(|name| !app.permissions.secrets.contains(*name))
+        .filter(move |name| secrets_too || !app.permissions.secrets.contains(*name))
+}
+
+/// Returns the variables of `process` that phase writes as files into its
+/// container's `/run/secrets`, in name order: those that the plan names
+/// and the app's permissions name as secrets, unless the process receives
+/// them through its environment.
+pub(crate) fn file_secrets<'p>(
+    app: &'p AppPlan,
+    process: &'p ProcessPlan,
+) -> impl Iterator<Item = &'p String> {
+    let files = process.secret_delivery == SecretDelivery::File;
+    process
+        .env
+        .iter()
+        .filter(move |name| files && app.permissions.secrets.contains(*name))
 }
 
 /// Returns the name of the variable of the `docker compose up` child of
@@ -132,13 +154,6 @@ fn runnable(app: &AppPlan, process: &ProcessPlan) -> Result<(), PhaseError> {
     };
     if let ProcessKind::Oneshot { .. } = process.kind {
         return refuse(NotRunnable::Oneshot);
-    }
-    if process
-        .env
-        .iter()
-        .any(|name| app.permissions.secrets.contains(name))
-    {
-        return refuse(NotRunnable::ContainerSecrets);
     }
     if process.cwd.is_some() {
         return refuse(NotRunnable::ContainerWorkingDirectory);
@@ -260,11 +275,22 @@ fn path(path: &Path) -> String {
 /// Returns the compose file of `app` in `scope`. It holds no value of a
 /// variable, as the module docs say.
 ///
+/// A process that receives secrets as files starts through the wrapper,
+/// which replaces the image's entrypoint, and Docker then drops the
+/// image's command too. With `image_command`, the image's entrypoint and command
+/// as Docker reports them, the service's command is what the container
+/// would run without the wrapper. Without it, the service's command is the
+/// plan's, which is the form that [`plan_hash`] hashes.
+///
 /// # Errors
 ///
 /// Returns [`PhaseError::NotRunnable`] for an app that does not run from
 /// an image, and the errors of [`objects`].
-pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseError> {
+pub(crate) fn compose_file(
+    scope: &Scope,
+    app: &AppPlan,
+    image_command: Option<&ImageCommand>,
+) -> Result<Value, PhaseError> {
     let Source::Image { image } = &app.source else {
         return Err(PhaseError::NotRunnable {
             app: app.name.clone(),
@@ -301,6 +327,14 @@ pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseE
                 mounts.push(mount);
             }
         }
+        let secrets: Vec<&String> = file_secrets(app, process).collect();
+        if !secrets.is_empty() {
+            mounts.push(json!({
+                "type": "tmpfs",
+                "target": SECRETS_DIR,
+                "tmpfs": {"mode": SECRETS_MODE},
+            }));
+        }
         for mount in &app.container.mounts {
             mounts.push(json!({
                 "type": "bind",
@@ -323,14 +357,20 @@ pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseE
             "labels".to_owned(),
             escaped(scope.labels(CONTAINER_LABEL, service.as_str())),
         );
-        if !process.run.is_empty() {
+        let command = match image_command {
+            Some(image) if !secrets.is_empty() => image.argv(&process.run),
+            _ => process.run.clone(),
+        };
+        if !secrets.is_empty() {
+            definition.insert(
+                "entrypoint".to_owned(),
+                entrypoint(secrets.into_iter()).into_iter().collect(),
+            );
+        }
+        if !command.is_empty() {
             definition.insert(
                 "command".to_owned(),
-                process
-                    .run
-                    .iter()
-                    .map(|argument| literal(argument))
-                    .collect(),
+                command.iter().map(|argument| literal(argument)).collect(),
             );
         }
         if let Some(user) = &app.container.user {
@@ -366,7 +406,9 @@ pub(crate) fn compose_file(scope: &Scope, app: &AppPlan) -> Result<Value, PhaseE
 /// Returns the hash of the part of `app` that makes the container of
 /// `process` in `scope`: its service in the compose file, which holds the
 /// image, command, user, ports, mounts, labels, restart policy and stop,
-/// and the names of its variables but no value. A container whose
+/// and the names of its variables and secrets but no value. The hash
+/// covers the plan's command and not the image's, which the compose file
+/// of a process with secret files also holds. A container whose
 /// recorded hash differs runs another plan, and `up` replaces it.
 ///
 /// # Errors
@@ -377,7 +419,7 @@ pub(crate) fn plan_hash(
     app: &AppPlan,
     process: &ProcessName,
 ) -> Result<PlanHash, PhaseError> {
-    let file = compose_file(scope, app)?;
+    let file = compose_file(scope, app, None)?;
     let service = service(app, process)?;
     let part = file
         .get("services")

@@ -56,6 +56,73 @@ impl ChildEnv for Referenced<'_> {
     }
 }
 
+/// The variable of the shell that writes a secret into a container which
+/// holds the secret's value. The shell hands the value to `docker exec` on
+/// standard input, and the `docker` program does not inherit it.
+const SECRET_VARIABLE: &str = "MXV_SECRET";
+
+/// The value of one secret of a process's resolved environment, which
+/// reaches the shell of [`write_secret`] as [`SECRET_VARIABLE`] and no
+/// other variable of the environment.
+struct SecretValue<'a> {
+    /// The process's resolved environment.
+    environment: &'a dyn AppliedEnvironment,
+    /// The name of the secret.
+    name: &'a str,
+}
+
+impl ChildEnv for SecretValue<'_> {
+    fn set_on(self, command: &mut Command) {
+        command.env_remove(SECRET_VARIABLE);
+        let name = self.name;
+        self.environment.apply_as(command, &|variable| {
+            (variable == name).then(|| SECRET_VARIABLE.to_owned())
+        });
+    }
+}
+
+/// The script of the host's shell that runs `docker` with its arguments
+/// and the value of [`SECRET_VARIABLE`] on standard input. `printf` is a
+/// built-in command of the shell, so the value is in no argument list,
+/// and `docker` starts without the variable. A shell that did not receive
+/// the variable fails with status 64 and says so.
+const SECRET_FEED: &str = r#"if [ -z "${MXV_SECRET+set}" ]; then
+  echo 'the environment source supplied no value for the secret' >&2
+  exit 64
+fi
+printf '%s' "$MXV_SECRET" | { unset MXV_SECRET; exec "$0" "$@"; }
+"#;
+
+/// Writes the secret `name` of `environment` into the container `id`
+/// with `docker <args>`, where `args` are [`super::secrets::write_args`],
+/// within `deadline` or until `cancel` is set. The host's `/bin/sh`
+/// feeds the value to `docker exec` on standard input, so it never
+/// appears in an argument list, and its error holds what `docker` printed
+/// on standard error, which the writer never fills with the value.
+pub(super) fn write_secret(
+    args: &[String],
+    environment: &dyn AppliedEnvironment,
+    name: &str,
+    deadline: Duration,
+    cancel: &Cancel,
+) -> Result<Finished, Error> {
+    let shell = ["-c", SECRET_FEED, DOCKER]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(args.iter().cloned());
+    run_full(
+        "/bin/sh".as_ref(),
+        shell,
+        SecretValue { environment, name },
+        None,
+        "secret write",
+        Until {
+            deadline,
+            cancel: Some(cancel),
+        },
+    )
+}
+
 /// The program that this backend runs.
 pub(crate) const DOCKER: &str = "docker";
 

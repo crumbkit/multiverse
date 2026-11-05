@@ -195,15 +195,20 @@ impl Phase {
     /// each to be ready, and records each container by its id. A process
     /// receives its variables that are not secrets through private
     /// references on its own `docker compose up` child, and no value
-    /// reaches the compose file, an argument or a label.
+    /// reaches the compose file, an argument or a label. After its
+    /// container starts, `up` writes each of its secrets to a file in the
+    /// container's `/run/secrets` tmpfs through `docker exec`, with the
+    /// value on standard input, before it waits for the process to be
+    /// ready. A process whose plan sets
+    /// [`SecretDelivery::Env`](crate::SecretDelivery::Env) receives its
+    /// secrets through private references instead.
     ///
     /// When a process fails to start, `up` stops what it started of that
     /// app, starts no further app, and reports which apps started. An app
     /// whose program comes from a release or a build, and a container app
-    /// whose process receives a secret, runs once or names a working
-    /// directory, is reported as errored with [`PhaseError::NotRunnable`]'s
-    /// code, since a later release does that work, and the apps that depend
-    /// on it do not start.
+    /// whose process runs once or names a working directory, is reported
+    /// as errored with [`PhaseError::NotRunnable`]'s code, since a later
+    /// release does that work, and the apps that depend on it do not start.
     ///
     /// # Errors
     ///

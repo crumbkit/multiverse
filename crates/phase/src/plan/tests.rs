@@ -7,7 +7,7 @@ use super::probe::{Probe, ProbeCheck};
 use super::restart::{Restart, RestartLimits};
 use super::{
     AppPlan, ContainerProblem, MOST_READY_TIMEOUT, Plan, PlanError, ProcessKind, ProcessPlan,
-    ProcessProblem, RunnerKind, SourceProblem,
+    ProcessProblem, RunnerKind, SecretDelivery, SourceProblem,
 };
 use crate::source::{BuildSpec, ReleaseSpec, Source, Verification};
 
@@ -873,4 +873,30 @@ fn a_plan_refuses_a_stop_grace_longer_than_an_hour() {
     );
     api.processes[0].stop.grace = Duration::from_secs(3600);
     assert!(plan(vec![api]).is_ok());
+}
+
+#[test]
+fn a_process_receives_its_container_secrets_as_files_unless_it_opts_into_the_environment() {
+    let mut db = container_app("db");
+    assert_eq!(db.processes[0].secret_delivery, SecretDelivery::File);
+    db.processes[0].secret_delivery = SecretDelivery::Env;
+    let original = plan(vec![db, host_app("api")]).unwrap();
+
+    let json = serde_json::to_value(&original).unwrap();
+
+    assert_eq!(json["apps"][0]["processes"][0]["secret_delivery"], "env");
+    assert!(
+        json["apps"][1]["processes"][0]
+            .get("secret_delivery")
+            .is_none()
+    );
+    assert_eq!(serde_json::from_value::<Plan>(json).unwrap(), original);
+}
+
+#[test]
+fn a_plan_refuses_environment_secret_delivery_on_a_host_process() {
+    let mut api = host_app("api");
+    api.processes[0].secret_delivery = SecretDelivery::Env;
+
+    assert_eq!(process_problem(api), ProcessProblem::ContainerFieldOnHost);
 }

@@ -185,8 +185,9 @@ pub enum ProcessProblem {
     /// The process, or its probe, names a port its app does not have.
     #[non_exhaustive]
     UnknownPort(PortName),
-    /// A host process publishes a port or mounts a volume, which only a
-    /// container process does.
+    /// A host process publishes a port, mounts a volume or asks for its
+    /// secrets in its container's environment, which only a container
+    /// process does.
     ContainerFieldOnHost,
     /// A volume is mounted at a relative path inside the container.
     #[non_exhaustive]
@@ -379,7 +380,9 @@ impl fmt::Display for ProcessProblem {
             }
             Self::UnknownPort(port) => write!(formatter, "it names the unknown port {port}"),
             Self::ContainerFieldOnHost => {
-                formatter.write_str("it runs on the host but publishes a port or mounts a volume")
+                formatter.write_str(
+                "it runs on the host but publishes a port, mounts a volume or sets secret_delivery",
+            )
             }
             Self::RelativeContainerPath(path) => {
                 write!(
@@ -709,7 +712,10 @@ fn check_ports(app: &AppPlan, process: &ProcessPlan) -> Result<(), ProcessProble
         return Err(ProcessProblem::UnknownPort(port.clone()));
     }
     if app.runner == RunnerKind::Host {
-        if process.publish.is_empty() && process.volumes.is_empty() {
+        if process.publish.is_empty()
+            && process.volumes.is_empty()
+            && process.secret_delivery.is_file()
+        {
             return Ok(());
         }
         return Err(ProcessProblem::ContainerFieldOnHost);

@@ -175,10 +175,6 @@ pub enum NotRunnable {
     /// The app's program is built from its checkout, which phase does not
     /// do yet.
     CheckoutBuild,
-    /// A process of the container app receives a variable that the app's
-    /// permissions name as a secret. phase delivers a container's secrets
-    /// as files in a tmpfs, which it does not do yet.
-    ContainerSecrets,
     /// A process of the container app names a working directory, which
     /// phase does not set for a container yet.
     ContainerWorkingDirectory,
@@ -193,7 +189,6 @@ impl fmt::Display for NotRunnable {
         formatter.write_str(match self {
             Self::Release => "phase does not download and verify a release yet",
             Self::CheckoutBuild => "phase does not build a checkout's program yet",
-            Self::ContainerSecrets => "phase does not deliver secrets to a container yet",
             Self::ContainerWorkingDirectory => {
                 "phase does not set a container's working directory yet"
             }

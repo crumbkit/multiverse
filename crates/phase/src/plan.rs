@@ -334,6 +334,46 @@ pub struct ProcessPlan {
     pub restart: Restart,
     /// How phase stops the process.
     pub stop: Stop,
+    /// How a container process receives the variables that its app's
+    /// permissions name as secrets. A host process keeps the default,
+    /// [`SecretDelivery::File`], and receives its secrets in its keeper's
+    /// environment.
+    pub secret_delivery: SecretDelivery,
+}
+
+/// How a container process receives its secrets.
+///
+/// In JSON it is `"secret_delivery": "file"` or `"secret_delivery":
+/// "env"`, and a process that omits it receives its secrets as files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SecretDelivery {
+    /// phase writes each secret to `/run/secrets/<NAME>`, a file in a
+    /// memory-only directory of the container, and starts the process
+    /// through phase's entrypoint wrapper, which waits for the files. No
+    /// value reaches the container's environment, `docker inspect` or the
+    /// compose file.
+    #[default]
+    File,
+    /// The process receives each secret as an environment variable, through
+    /// the same private reference on its `docker compose up` child as a
+    /// variable that is not secret. It is for an image that can read a
+    /// secret only from its environment. `docker inspect` and every process
+    /// in the container can then read the value, a new value means a new
+    /// container, and Compose hashes the value, unsalted, into the
+    /// container's `com.docker.compose.config-hash` label, so anyone who
+    /// can read the container's labels can test a guess of a low-entropy
+    /// value against that label.
+    Env,
+}
+
+impl SecretDelivery {
+    /// Reports whether this is the default, [`SecretDelivery::File`].
+    #[must_use]
+    pub const fn is_file(&self) -> bool {
+        matches!(self, Self::File)
+    }
 }
 
 impl ProcessPlan {
@@ -357,6 +397,7 @@ impl ProcessPlan {
             ready_timeout: DEFAULT_READY_TIMEOUT,
             restart: Restart::No,
             stop: Stop::default(),
+            secret_delivery: SecretDelivery::File,
         }
     }
 }

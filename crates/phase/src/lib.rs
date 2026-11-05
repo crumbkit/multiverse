@@ -58,7 +58,7 @@ pub use crate::plan::restart::{
 pub use crate::plan::{
     AppPlan, ContainerProblem, DEFAULT_READY_TIMEOUT, MOST_READY_TIMEOUT, MOST_STOP_GRACE,
     OnceWithoutOneshot, Permissions, Plan, PlanError, ProcessKind, ProcessPlan, ProcessProblem,
-    RunnerKind, SourceProblem,
+    RunnerKind, SecretDelivery, SourceProblem,
 };
 pub use crate::record::{
     BadContainerId, BadDockerName, ContainerId, DockerError, DockerName, Handle,
