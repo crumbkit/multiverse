@@ -339,7 +339,7 @@ impl Fixture {
             // The guard of `Running` ends the keeper's session, so it
             // tests nothing unless the keeper leads one.
             assert_eq!(
-                session_of(kept.keeper.pid),
+                live_session_of(kept.keeper.pid),
                 Some(kept.keeper.pid),
                 "the keeper leads no session of its own"
             );
@@ -457,41 +457,61 @@ fn session_members(session: u32) -> Vec<u32> {
     all_processes()
         .into_iter()
         .filter(|pid| *pid != session)
-        .filter(|pid| session_of(*pid) == Some(session))
-        .filter(|pid| {
-            rustix::process::Pid::from_raw(i32::try_from(*pid).unwrap())
-                .and_then(|pid| rustix::process::getpgid(Some(pid)).ok())
-                .and_then(|group| {
-                    crate::record::process::ProcessGroup::new(
-                        group.as_raw_nonzero().get().cast_unsigned(),
-                    )
-                    .ok()
-                })
-                .and_then(crate::record::process::live_members)
-                .is_some_and(|members| members.iter().any(|member| member.pid == *pid))
-        })
+        .filter(|pid| live_session_of(*pid) == Some(session))
         .collect()
 }
 
-/// Returns the session of `pid`, or `None` when it has ended.
-fn session_of(pid: u32) -> Option<u32> {
-    rustix::process::Pid::from_raw(i32::try_from(pid).unwrap())
-        .and_then(|pid| rustix::process::getsid(Some(pid)).ok())
-        .and_then(|sid| u32::try_from(sid.as_raw_nonzero().get()).ok())
+/// Returns the session of `pid`, or `None` when it has ended, is a zombie,
+/// or its session cannot be read.
+///
+/// On Linux it reads the state and the session from `/proc/<pid>/stat`,
+/// and never asks `getsid`. A process whose session lies outside this pid
+/// namespace, such as one in a container, reports the session 0, and
+/// rustix's `getsid` debug-asserts that a pid is above 0, so `getsid` of
+/// such a process panics. A session of 0 is returned as `None`.
+#[cfg(target_os = "linux")]
+fn live_session_of(pid: u32) -> Option<u32> {
+    use crate::record::process::stat_field;
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state: char = stat_field(&text, 3)?;
+    let session: u32 = stat_field(&text, 6)?;
+    (!matches!(state, 'Z' | 'X') && session > 0).then_some(session)
 }
 
-/// Returns the ids of every process on this machine.
+/// Returns the session of `pid`, or `None` when it has ended, is a zombie,
+/// or its session cannot be read.
+///
+/// On macOS it reads the process's status from libproc, where `SZOMB`
+/// (5) marks a zombie, and then asks `getsid`. macOS has no pid
+/// namespaces, and every process other than `kernel_task`, pid 0, which
+/// the listing leaves out, has a session of 1 or more, so the `Pid` that
+/// rustix builds from the answer is never 0.
+#[cfg(target_os = "macos")]
+fn live_session_of(pid: u32) -> Option<u32> {
+    const SZOMB: i32 = 5;
+    let raw = i32::try_from(pid).ok().filter(|raw| *raw > 0)?;
+    let info = crate::record::process::darwin::bsd_info(raw).ok()?;
+    if crate::record::process::read_i32(&info, 4)? == SZOMB {
+        return None;
+    }
+    let sid = rustix::process::getsid(Some(rustix::process::Pid::from_raw(raw)?)).ok()?;
+    u32::try_from(sid.as_raw_nonzero().get()).ok()
+}
+
+/// Returns the ids of every process on this machine, leaving out pid 0.
 fn all_processes() -> Vec<u32> {
     #[cfg(target_os = "macos")]
     let ids = crate::record::process::darwin::all_processes()
         .unwrap()
         .into_iter()
         .filter_map(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
         .collect();
     #[cfg(target_os = "linux")]
     let ids = std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|pid: &u32| *pid > 0)
         .collect();
     ids
 }
