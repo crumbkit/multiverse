@@ -8,8 +8,8 @@ use crumbkit::Row;
 use multiverse::Error;
 use multiverse::{
     Allow, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource,
-    Fate, Kind, MANIFEST_FILE, Manifest, ManifestSource, ProcessState, ProcessStatus, Removal,
-    Workspace, WorkspaceKind,
+    Fate, Kind, MANIFEST_FILE, Manifest, ManifestSource, ProcessNote, ProcessState, ProcessStatus,
+    Removal, Workspace, WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -18,6 +18,9 @@ use crate::environment::{Root, RootSource};
 use crate::failures::remove_line;
 use crate::run_failures::RunFailure;
 use crate::units::Size;
+
+#[cfg(test)]
+mod tests;
 
 /// One workspace, as `list` prints it.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -952,6 +955,13 @@ pub(crate) struct ProcessRow {
     /// ready yet, `stopping`, `restarting` while docker restarts a
     /// container, or `unknown` when mxv cannot tell.
     state: StateName,
+    /// Whether the process has been ready since it last started: true
+    /// once its readiness check passed, or once a process without one
+    /// outlasted its start grace, and false while it runs and has not,
+    /// such as after its keeper or docker restarted it. It is null when it
+    /// does not run, and for a process that mxv started before phase ran
+    /// its processes.
+    ready: Option<bool>,
     /// The process id, which is also its process group's id, while a
     /// process runs, and null for a container.
     pid: Option<u32>,
@@ -980,6 +990,51 @@ pub(crate) struct ProcessRow {
     /// The process's log file, which `mxv logs` prints, or null for a
     /// container, whose output docker keeps and `mxv logs` also prints.
     log: Option<String>,
+    /// Whether phase runs a host process under its sandbox, as phase
+    /// describes it, such as `unsandboxed (its app declares no
+    /// permissions)`, or null for a container and for a process that
+    /// phase does not run.
+    sandbox: Option<String>,
+    /// What `up` and `restart` found about the process beside its state:
+    /// a warning when the process's running container still has its
+    /// earlier secret files, because `up` could not rewrite them, and an
+    /// info line when `up` rewrote them. Every other command prints none.
+    notes: Vec<NoteRow>,
+}
+
+/// Something that `up` or `restart` found about a process, as its row
+/// prints it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct NoteRow {
+    /// `warning` when something did not happen as asked, or `info`.
+    level: NoteLevel,
+    /// phase's sentence, which names the process and holds no value.
+    message: String,
+}
+
+/// How much a note matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NoteLevel {
+    /// Something did not happen as asked, such as a rewrite of secret
+    /// files that failed.
+    Warning,
+    /// Something happened that the person may want to know, such as a
+    /// rewrite of secret files.
+    Info,
+}
+
+impl From<&ProcessNote> for NoteRow {
+    fn from(note: &ProcessNote) -> Self {
+        Self {
+            level: if note.is_warning() {
+                NoteLevel::Warning
+            } else {
+                NoteLevel::Info
+            },
+            message: note.message().to_owned(),
+        }
+    }
 }
 
 /// Whether a row is a process or a container.
@@ -1019,6 +1074,7 @@ impl Row for ProcessRow {
         "name",
         "kind",
         "state",
+        "ready",
         "pid",
         "code",
         "signal",
@@ -1026,13 +1082,27 @@ impl Row for ProcessRow {
         "group_alive",
         "ports",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["log"];
+    const LONG_COLUMNS: &'static [&'static str] = &["log", "sandbox"];
+    const CHILDREN: Option<&'static str> = Some("notes");
+    const CHILDREN_HELP: Option<&'static str> = Some(
+        "one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.",
+    );
     // A person copies the name into `mxv logs`.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 
     /// An exited process reports a problem unless it exited with code 0.
     fn is_problem(&self) -> bool {
         self.state == StateName::Exited && self.code != Some(0)
+    }
+
+    fn child_lines(&self) -> Vec<String> {
+        self.notes
+            .iter()
+            .map(|note| match note.level {
+                NoteLevel::Warning => format!("warning: {}", note.message),
+                NoteLevel::Info => format!("info: {}", note.message),
+            })
+            .collect()
     }
 }
 
@@ -1067,6 +1137,7 @@ impl From<&ProcessStatus> for ProcessRow {
                 Kind::Container => KindName::Container,
             },
             state,
+            ready: status.ready,
             pid,
             code,
             signal,
@@ -1078,6 +1149,8 @@ impl From<&ProcessStatus> for ProcessRow {
                 .map(|(variable, number)| format!("{variable}={number}"))
                 .collect(),
             log: status.log.as_ref().map(|log| log.display().to_string()),
+            sandbox: status.sandbox.clone(),
+            notes: status.notes.iter().map(NoteRow::from).collect(),
         }
     }
 }

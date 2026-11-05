@@ -130,9 +130,15 @@ fn a_host_process_keeps_its_command_directory_listen_port_readiness_and_dependen
 fn a_host_process_receives_its_env_with_ports_rendered_and_its_port_variables_by_name() {
     let built = plan_of(&manifest(APP), &CallerEnvironment::default());
     let api = built.plan.app(&app("api")).unwrap();
+    let process = &api.processes[0];
+    let required: BTreeSet<&str> = process
+        .env
+        .difference(&process.optional_env)
+        .map(String::as_str)
+        .collect();
     assert_eq!(
-        api.processes[0].env,
-        BTreeSet::from(["DATABASE_URL", "PORT", "RUST_LOG"].map(str::to_owned))
+        required,
+        BTreeSet::from(["DATABASE_URL", "PORT", "RUST_LOG"])
     );
     let values = resolved(&built, "api");
     assert_eq!(values["PORT"], "41000");
@@ -199,24 +205,50 @@ fn a_host_process_receives_the_passed_through_variables_of_the_caller_and_no_oth
 }
 
 #[test]
-fn the_plan_and_its_json_depend_on_which_passed_through_variables_the_caller_holds() {
+fn the_plan_and_its_json_are_the_same_whichever_passed_through_variables_the_caller_holds() {
     let manifest = manifest(APP);
     let without = plan_of(&manifest, &CallerEnvironment::default()).plan;
     let with = plan_of(
         &manifest,
-        &CallerEnvironment::from_vars(vars(&[("TZ", "UTC")])),
+        &CallerEnvironment::from_vars(vars(&[
+            ("TZ", "UTC"),
+            ("LANG", "C.UTF-8"),
+            ("LC_TIME", "C"),
+            ("SSH_AUTH_SOCK", "/private/agent.sock"),
+        ])),
     )
     .plan;
-    let other_value = plan_of(
-        &manifest,
-        &CallerEnvironment::from_vars(vars(&[("TZ", "Europe/Helsinki")])),
-    )
-    .plan;
-    assert_ne!(without, with);
+    assert_eq!(without, with);
     let json = |plan: &Plan| serde_json::to_string(plan).unwrap();
-    assert_ne!(json(&without), json(&with));
-    assert!(json(&with).contains("\"TZ\""));
-    assert_eq!(json(&with), json(&other_value));
+    assert_eq!(json(&without), json(&with));
+    assert!(json(&without).contains("\"TZ\""));
+}
+
+#[test]
+fn a_passed_through_variable_is_optional_unless_the_manifest_sets_it() {
+    let built = plan_of(&manifest(APP), &CallerEnvironment::default());
+    let api = &built.plan.app(&app("api")).unwrap().processes[0];
+    for name in ["TZ", "LANG", "LC_TIME", "SSH_AUTH_SOCK"] {
+        assert!(api.env.contains(name), "{name} is not declared");
+        assert!(api.optional_env.contains(name), "{name} is required");
+    }
+    for name in ["RUST_LOG", "DATABASE_URL", "PORT"] {
+        assert!(api.env.contains(name), "{name} is not declared");
+        assert!(!api.optional_env.contains(name), "{name} is optional");
+    }
+    let db = &built.plan.app(&app("db")).unwrap().processes[0];
+    assert!(db.optional_env.is_empty());
+    assert!(!db.env.contains("TZ"));
+}
+
+#[test]
+fn a_locale_variable_outside_the_standard_categories_does_not_pass() {
+    let caller = CallerEnvironment::from_vars(vars(&[("LC_TIME", "C"), ("LC_TERMINAL", "iTerm2")]));
+    let built = plan_of(&manifest(APP), &caller);
+    let values = resolved(&built, "api");
+    assert_eq!(values["LC_TIME"], "C");
+    assert!(!values.contains_key("LC_TERMINAL"));
+    assert!(PASSED_THROUGH.contains(&"LC_ALL"));
 }
 
 #[test]
@@ -297,19 +329,37 @@ fn docker_variables_reach_only_the_docker_environment_and_never_a_host_process()
 #[test]
 fn the_environment_returns_every_variable_that_each_process_of_the_plan_names() {
     // phase fails a start when the source leaves out a variable that a
-    // process names and does not mark optional, and mxv marks none optional.
+    // process names and does not mark optional. The source names each
+    // required variable, and each optional one that the caller holds.
     let caller = CallerEnvironment::from_vars(vars(&[("LANG", "C.UTF-8"), ("LC_TIME", "C")]));
     let built = plan_of(&manifest(APP), &caller);
     for app in built.plan.apps() {
         for process in &app.processes {
-            assert!(process.optional_env.is_empty());
             let applied = built
                 .environment
                 .resolve(&app.name, &process.name, Instant::now())
                 .unwrap();
-            assert_eq!(applied.names(), process.env, "{}", app.name);
+            let names = applied.names();
+            let required: BTreeSet<String> = process
+                .env
+                .difference(&process.optional_env)
+                .cloned()
+                .collect();
+            assert!(names.is_subset(&process.env), "{}", app.name);
+            assert!(required.is_subset(&names), "{}", app.name);
         }
     }
+    let api = built
+        .environment
+        .resolve(
+            &app("api"),
+            &ProcessName::try_from(MAIN.to_owned()).unwrap(),
+            Instant::now(),
+        )
+        .unwrap()
+        .names();
+    assert!(api.contains("LANG") && api.contains("LC_TIME"));
+    assert!(!api.contains("TZ"));
 }
 
 /// The manifest of a checkout whose process `server` runs in `server/` and

@@ -416,6 +416,13 @@
           "description": "`running`, `exited` when it ended on its own or something other\nthan `mxv down` stopped it, `created` for a container that docker\ncreated and did not start, `stopped`, `starting` while it is not\nready yet, `stopping`, `restarting` while docker restarts a\ncontainer, or `unknown` when mxv cannot tell.",
           "$ref": "#/$defs/StateName"
         },
+        "ready": {
+          "description": "Whether the process has been ready since it last started: true\nonce its readiness check passed, or once a process without one\noutlasted its start grace, and false while it runs and has not,\nsuch as after its keeper or docker restarted it. It is null when it\ndoes not run, and for a process that mxv started before phase ran\nits processes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "pid": {
           "description": "The process id, which is also its process group's id, while a\nprocess runs, and null for a container.",
           "type": [
@@ -468,18 +475,34 @@
             "string",
             "null"
           ]
+        },
+        "sandbox": {
+          "description": "Whether phase runs a host process under its sandbox, as phase\ndescribes it, such as `unsandboxed (its app declares no\npermissions)`, or null for a container and for a process that\nphase does not run.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "description": "What `up` and `restart` found about the process beside its state:\na warning when the process's running container still has its\nearlier secret files, because `up` could not rewrite them, and an\ninfo line when `up` rewrote them. Every other command prints none.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteRow"
+          }
         }
       },
       "required": [
         "name",
         "kind",
         "state",
+        "ready",
         "pid",
         "code",
         "signal",
         "reason",
         "group_alive",
-        "ports"
+        "ports",
+        "notes"
       ]
     },
     "KindName": {
@@ -539,6 +562,39 @@
           "description": "mxv cannot tell the process's state.",
           "type": "string",
           "const": "unknown"
+        }
+      ]
+    },
+    "NoteRow": {
+      "description": "Something that `up` or `restart` found about a process, as its row\nprints it.",
+      "type": "object",
+      "properties": {
+        "level": {
+          "description": "`warning` when something did not happen as asked, or `info`.",
+          "$ref": "#/$defs/NoteLevel"
+        },
+        "message": {
+          "description": "phase's sentence, which names the process and holds no value.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "message"
+      ]
+    },
+    "NoteLevel": {
+      "description": "How much a note matters.",
+      "oneOf": [
+        {
+          "description": "Something did not happen as asked, such as a rewrite of secret\nfiles that failed.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Something happened that the person may want to know, such as a\nrewrite of secret files.",
+          "type": "string",
+          "const": "info"
         }
       ]
     }

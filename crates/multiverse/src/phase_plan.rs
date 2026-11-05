@@ -14,9 +14,11 @@
 //! process receives, and [`ManifestEnvironment`] resolves each name. A host
 //! process receives its manifest `env`, its port variables, and the
 //! variables of [`PASSED_THROUGH`] that the caller's environment holds. A
-//! container receives only its manifest `env`. Because the plan names the
-//! passed-through variables that are present, the plan, and its digest,
-//! depend on which of them the caller's environment holds.
+//! container receives only its manifest `env`. The plan declares every
+//! variable of [`PASSED_THROUGH`] for each host process, and marks each one
+//! that the manifest does not set as optional, so phase starts the process
+//! without the ones that the caller's environment lacks. The plan, and its
+//! digest, are therefore the same whichever shell runs `mxv up`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -46,13 +48,28 @@ pub const MAIN: &str = "main";
 /// when the caller's environment holds them, on top of `PATH` and `HOME`,
 /// which phase passes itself. They cover the locale, the terminal, the
 /// user, the temporary and XDG directories, and the tool managers that
-/// `cargo run`, `pnpm run dev` and `sh -c` rely on. Each variable whose
-/// name starts with `LC_` passes too. Credentials, such as cloud keys and
-/// tokens, and build overrides, such as `RUSTFLAGS` or
+/// `cargo run`, `pnpm run dev` and `sh -c` rely on. The locale variables
+/// are `LANG`, `LANGUAGE` and the standard `LC_` categories; another
+/// variable whose name starts with `LC_`, such as `LC_TERMINAL`, does not
+/// pass, because the plan names each variable. Credentials, such as cloud
+/// keys and tokens, and build overrides, such as `RUSTFLAGS` or
 /// `CARGO_TARGET_DIR`, do not pass.
 pub const PASSED_THROUGH: &[&str] = &[
     "LANG",
     "LANGUAGE",
+    "LC_ALL",
+    "LC_ADDRESS",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NAME",
+    "LC_NUMERIC",
+    "LC_PAPER",
+    "LC_TELEPHONE",
+    "LC_TIME",
     "TZ",
     "TERM",
     "COLORTERM",
@@ -96,7 +113,7 @@ fn chooses_docker(name: &str) -> bool {
 
 /// Reports whether a host process receives the caller's variable `name`.
 fn passes(name: &str) -> bool {
-    PASSED_THROUGH.contains(&name) || name.starts_with("LC_")
+    PASSED_THROUGH.contains(&name)
 }
 
 /// The environment that mxv's `main` read, which phase's keepers and the
@@ -435,7 +452,19 @@ fn host_app(
     plan.depends = depends(&process.depends_on)?;
     let mut main = ProcessPlan::new(main_process()?, process.argv.clone());
     main.cwd = cwd;
-    main.env = vars.keys().cloned().collect();
+    // Each passed-through variable that the manifest does not set is
+    // optional, so the plan names the same variables whatever the caller's
+    // environment holds, and the source leaves out those it lacks.
+    main.optional_env = PASSED_THROUGH
+        .iter()
+        .map(|name| (*name).to_owned())
+        .filter(|name| !process.env.contains_key(name) && !process.ports.contains_key(name))
+        .collect();
+    main.env = vars
+        .keys()
+        .cloned()
+        .chain(main.optional_env.iter().cloned())
+        .collect();
     main.port = process
         .listen
         .as_deref()

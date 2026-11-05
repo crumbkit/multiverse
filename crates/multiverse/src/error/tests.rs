@@ -13,7 +13,7 @@ fn a_missing_compose_plugin_keeps_dockers_own_line() {
         "Docker refused a request of the run: docker's compose plugin is not installed: docker: unknown command: docker compose",
     );
     assert!(
-        matches!(&error, Error::DockerComposeMissing { message } if message == "docker: unknown command: docker compose"),
+        matches!(&error, Error::DockerComposeMissing { message, .. } if message == "docker: unknown command: docker compose"),
         "{error:?}"
     );
 }
@@ -25,7 +25,7 @@ fn a_daemon_that_does_not_answer_reads_as_docker_unavailable() {
         "Docker did not answer, so phase cannot tell what is running: the docker daemon does not answer: dial unix /nowhere.sock",
     );
     assert!(
-        matches!(&error, Error::DockerUnavailable { message } if message == "dial unix /nowhere.sock"),
+        matches!(&error, Error::DockerUnavailable { message, .. } if message == "dial unix /nowhere.sock"),
         "{error:?}"
     );
 }
@@ -39,7 +39,7 @@ fn a_failed_docker_command_names_its_operation_its_container_and_dockers_message
     assert!(
         matches!(
             &error,
-            Error::DockerFailed { operation: "compose up", container: Some(container), message }
+            Error::DockerFailed { operation: "compose up", container: Some(container), message, .. }
                 if container == "web" && message == "port is already allocated"
         ),
         "{error:?}"
@@ -49,7 +49,7 @@ fn a_failed_docker_command_names_its_operation_its_container_and_dockers_message
         "Docker refused a request of the run: docker pull failed: not found",
     );
     assert!(
-        matches!(&error, Error::DockerFailed { operation: "pull", container: None, message } if message == "not found"),
+        matches!(&error, Error::DockerFailed { operation: "pull", container: None, message, .. } if message == "not found"),
         "{error:?}"
     );
 }
@@ -83,19 +83,24 @@ fn an_object_whose_labels_name_another_scope_reads_as_foreign() {
 }
 
 #[test]
-fn a_docker_error_whose_cause_is_an_unavailable_daemon_reads_as_docker_unavailable() {
+fn a_docker_error_whose_cause_is_an_unavailable_daemon_reads_as_docker_unavailable_with_its_whole_message()
+ {
     let source = phase::DockerError::unavailable(
         "the docker daemon does not answer: dial unix /nowhere.sock".to_owned(),
     );
     let error = Error::of_docker_error(&source, "phase::docker::unavailable");
     assert!(
-        matches!(&error, Error::DockerUnavailable { message } if message == "dial unix /nowhere.sock"),
+        matches!(
+            &error,
+            Error::DockerUnavailable { message, .. }
+                if message == "the docker daemon does not answer: dial unix /nowhere.sock"
+        ),
         "{error:?}"
     );
 }
 
 #[test]
-fn a_refused_docker_error_names_its_operation_and_container_from_its_message() {
+fn a_refused_docker_error_never_reads_its_operation_or_container_from_its_message() {
     let source = phase::DockerError::refused(
         "docker pull failed for the container web: manifest unknown".to_owned(),
     );
@@ -103,8 +108,8 @@ fn a_refused_docker_error_names_its_operation_and_container_from_its_message() {
     assert!(
         matches!(
             &error,
-            Error::DockerFailed { operation: "pull", container: Some(container), message }
-                if container == "web" && message == "manifest unknown"
+            Error::DockerFailed { operation: "request", container: None, message, .. }
+                if message == "docker pull failed for the container web: manifest unknown"
         ),
         "{error:?}"
     );
@@ -126,5 +131,37 @@ fn the_cause_of_a_docker_error_chooses_the_failure_whatever_its_message_says() {
             }
         ),
         "{error:?}"
+    );
+}
+
+#[test]
+fn a_docker_error_from_phase_prints_phases_message_alone() {
+    let source = phase::DockerError::unavailable(
+        "the docker daemon does not answer: dial unix /nowhere.sock".to_owned(),
+    );
+    let error = Error::of_docker_error(&source, "phase::docker::unavailable");
+    assert_eq!(
+        error.to_string(),
+        "the docker daemon does not answer: dial unix /nowhere.sock"
+    );
+    let source = phase::DockerError::refused(
+        "docker stop failed for the container web: permission denied".to_owned(),
+    );
+    let error = Error::of_docker_error(&source, "phase::docker::refused");
+    assert_eq!(
+        error.to_string(),
+        "docker stop failed for the container web: permission denied"
+    );
+}
+
+#[test]
+fn a_docker_error_read_from_an_apps_outcome_keeps_mxvs_own_wording() {
+    let error = Error::of_docker(
+        true,
+        "Docker did not answer, so phase cannot tell what is running: the docker daemon does not answer: dial unix /nowhere.sock",
+    );
+    assert_eq!(
+        error.to_string(),
+        "the docker daemon does not answer: dial unix /nowhere.sock"
     );
 }

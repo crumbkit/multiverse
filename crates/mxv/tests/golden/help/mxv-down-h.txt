@@ -14,5 +14,6 @@ Examples:
 
 Effects: destructive, idempotent, closed-world.
 Writes: reports each item and exits 1 when any item fails.
+Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv down --help` describes them.
 Next: mxv down --help explains each column.

@@ -250,6 +250,7 @@ mxv up -w reading-list web
 - `name`: The process's or container's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
+- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
@@ -260,10 +261,13 @@ mxv up -w reading-list web
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: additive, idempotent, open-world.
 
 Writes: applies all items or none.
+
+Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv down`
 
@@ -287,6 +291,7 @@ mxv down -w reading-list
 - `name`: The process's or container's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
+- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
@@ -297,10 +302,13 @@ mxv down -w reading-list
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: destructive, idempotent, closed-world.
 
 Writes: reports each item and exits 1 when any item fails.
+
+Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv restart`
 
@@ -324,6 +332,7 @@ mxv restart -w reading-list web
 - `name`: The process's or container's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
+- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
@@ -334,10 +343,13 @@ mxv restart -w reading-list web
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: destructive, not idempotent, open-world.
 
 Writes: applies all items or none.
+
+Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv status`
 
@@ -360,6 +372,7 @@ mxv status -w reading-list
 - `name`: The process's or container's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
+- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
 - `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
 - `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
@@ -370,8 +383,11 @@ mxv status -w reading-list
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: read-only, closed-world.
+
+Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv logs`
 

@@ -215,6 +215,7 @@ impl Host for RunHost<'_> {
             operation: "workspace id",
             container: None,
             message: message.to_owned(),
+            from_phase: false,
         };
         let store = self
             .records

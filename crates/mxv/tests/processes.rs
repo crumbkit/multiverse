@@ -427,6 +427,39 @@ fn down_stops_every_process_and_status_reports_them_stopped() {
 }
 
 #[test]
+fn status_shows_that_a_running_process_is_ready_and_runs_without_a_sandbox() {
+    let setup = Setup::new();
+    setup.workspace("triage", &server_and_worker());
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let server = &document["data"][0];
+    assert_eq!(server["name"], "server", "{document}");
+    assert_eq!(server["ready"], true, "{document}");
+    assert_eq!(server["notes"], serde_json::json!([]), "{document}");
+    let (exit, document) = setup.json(&["status", "-w", "triage", "--full"]);
+    assert_eq!(exit, 0, "{document}");
+    let server = &document["data"][0];
+    assert_eq!(server["ready"], true, "{document}");
+    assert_eq!(
+        server["sandbox"], "unsandboxed (its app declares no permissions)",
+        "{document}"
+    );
+    let (exit, text) = setup.text(&["status", "-w", "triage", "--long"]);
+    assert_eq!(exit, 0, "{text}");
+    assert!(
+        text.contains("unsandboxed (its app declares no permissions)"),
+        "{text}"
+    );
+    setup.json(&["down", "-w", "triage"]);
+    let (_, document) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(
+        document["data"][0]["ready"],
+        serde_json::Value::Null,
+        "{document}"
+    );
+}
+
+#[test]
 fn status_and_down_in_another_time_zone_than_up_still_find_and_stop_the_process() {
     let setup = Setup::new();
     setup.workspace("triage", &server_and_worker());

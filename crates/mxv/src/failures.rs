@@ -1063,15 +1063,16 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("version", *version),
         ],
         Error::ProcessUnstartable { process, .. } => vec![Field::new("process", process)],
-        Error::DockerUnavailable { message }
-        | Error::DockerComposeMissing { message }
-        | Error::DockerNoAddressPool { message } => {
+        Error::DockerUnavailable { message, .. }
+        | Error::DockerComposeMissing { message, .. }
+        | Error::DockerNoAddressPool { message, .. } => {
             vec![Field::new("message", message)]
         }
         Error::DockerFailed {
             operation,
             container,
             message,
+            ..
         } => {
             let mut fields = vec![Field::new("operation", *operation)];
             if let Some(container) = container {

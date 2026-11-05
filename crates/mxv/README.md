@@ -376,7 +376,8 @@ stopped:
 phase starts each host process from an empty environment. The process
 receives `PATH` and `HOME` from the environment that `mxv` itself was run
 with, its manifest `env`, its port variables, and these variables of mxv's
-environment when they are set: `LANG`, `LANGUAGE`, every `LC_*`, `TZ`,
+environment when they are set: `LANG`, `LANGUAGE`, `LC_ALL`, the twelve standard `LC_` categories, such as
+`LC_CTYPE` and `LC_TIME`, `TZ`,
 `TERM`, `COLORTERM`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, the `XDG_*`
 directories, `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `NVM_DIR`,
 `PNPM_HOME`, `COREPACK_HOME`, `NPM_CONFIG_PREFIX`, `NODE_EXTRA_CA_CERTS`,
@@ -388,11 +389,11 @@ shell does not reach the process, and a process that needs one has to set
 its value in its manifest `env`. A manifest may not set `PATH` or `HOME`,
 which fails with `mxv::manifest::unrunnable`.
 
-The plan that phase runs names each variable that a process receives, so it
-depends on which of the variables above are set when `mxv up` runs. phase
-starts a host process only when it is not running, so an `up` from a shell
-with other variables leaves running processes as they are; `mxv restart`
-starts them with the new set. A container receives only its manifest `env`.
+The plan that phase runs declares every variable above for each host
+process and marks it optional, so the plan is the same whichever shell runs
+`mxv up`. An `up` from a shell with other variables leaves running
+processes as they are, and `mxv restart` starts them with the variables of
+the current shell. A container receives only its manifest `env`.
 The decision record
 [host-process-environment.md](docs/decisions/host-process-environment.md)
 says why mxv passes these variables and what follows from it.
@@ -516,6 +517,18 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   restarted, both are null and `reason` says why. An exited process
   whose `code` is anything but 0, including null, makes `status` exit with
   code 1. `group_alive` is null for every process that phase runs.
+  `ready` is true for a running process once its readiness check has
+  passed since it last started, or once a process without one has outlasted
+  its start grace, and false while it runs and has not, such as after its
+  keeper or docker restarted it. `--long` adds `sandbox`, which says
+  whether phase runs a host process under its sandbox. mxv's manifest
+  declares no permissions yet, so every host process reads
+  `unsandboxed (its app declares no permissions)`.
+- `mxv up` and `mxv restart` print a line under a container whose secret
+  files they found running: `info:` when `up` rewrote them, and `warning:`
+  when it could not, so the container still runs with its earlier files.
+  The JSON holds these lines in each row's `notes`. mxv's manifest
+  declares no secrets yet, so neither line appears until it does.
 - `mxv status` and `mxv down` read phase's run record when the manifest does
   not parse, so a broken manifest never keeps processes running.
 - `mxv logs` prints the last 50 lines of a log, or `--lines N`. With `-f`
