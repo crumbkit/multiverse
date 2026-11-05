@@ -495,7 +495,7 @@ impl ContainerRunner for FakeContainers {
                     process: process.clone(),
                     id: "c0".repeat(32).try_into().unwrap(),
                     plan_hash: fake_plan_hash(),
-                    ready: *self.ready.borrow(),
+                    ready: self.ready.borrow().clone(),
                 })
                 .collect(),
             ..ContainersStarted::default()
@@ -959,7 +959,7 @@ fn up_records_when_a_process_passed_its_readiness_probe() {
         .up(&plan(vec![api]), &Selection::All, &Env::default())
         .unwrap();
 
-    let ready = world.record().unwrap().processes[0].ready.unwrap();
+    let ready = world.record().unwrap().processes[0].ready.clone().unwrap();
     assert_eq!(ready.restarts, 0);
     assert!(ready.at_ms >= before, "{ready:?}");
 }

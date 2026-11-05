@@ -221,6 +221,7 @@ fn host_row(
 fn observed_ready(entry: &HostEntry) -> bool {
     entry
         .ready
+        .as_ref()
         .is_some_and(|ready| ready.restarts == entry.restarts)
 }
 
@@ -373,19 +374,16 @@ fn container_row(
     row
 }
 
-/// Reports whether phase observed the container of `entry` ready since
-/// Docker last started it: Docker has not restarted it under its restart
-/// policy since, and its last start came no later than the readiness. The
-/// start time also catches a start that Docker does not count as a
-/// restart, such as `docker restart`, a `docker start` after a stop, or a
-/// restart of the daemon. A count or a time that phase cannot read counts
-/// as not ready.
+/// Reports whether phase observed the container of `entry` ready in the
+/// start that Docker reports now: the start that the readiness records is
+/// the one Docker printed. Every start changes Docker's start time,
+/// including a restart under the restart policy, `docker restart`, a
+/// `docker start` after a stop and a restart of the daemon, so any of them
+/// makes the container not ready. A start time that Docker did not print,
+/// or readiness that records none, counts as not ready.
 fn observed(entry: &ContainerEntry, seen: &SeenContainer) -> bool {
-    entry.ready.is_some_and(|ready| {
-        seen.restarts == Some(ready.restarts)
-            && seen
-                .started_at_ms
-                .is_some_and(|started| started <= ready.at_ms)
+    entry.ready.as_ref().is_some_and(|ready| {
+        ready.container_started_at.is_some() && ready.container_started_at == seen.started_at
     })
 }
 

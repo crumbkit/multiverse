@@ -551,7 +551,7 @@ impl ComposeRunner {
             }
             drop(environment);
             match self.ready(app, process, &inspected, start) {
-                Readiness::Ready => started.ready(name, inspected.restarts),
+                Readiness::Ready => started.ready(name, inspected.restarts, &inspected.started),
                 Readiness::Cancelled => return Err(Halt::Cancelled),
                 Readiness::Uncertain => {
                     started.uncertain = Some(name.clone());
@@ -1413,21 +1413,6 @@ impl fmt::Display for Stamp {
             self.nanos,
         )
     }
-}
-
-/// Returns the time `stamp`, as docker prints it in `YYYY-MM-DDTHH:MM:SS.fZ`
-/// form, in milliseconds since the Unix epoch, or `None` when it has
-/// another form or lies before the epoch, as the zero time of a container
-/// that never started does.
-pub(super) fn docker_time_ms(stamp: &str) -> Option<u64> {
-    let stamp = Stamp::parse(stamp)?;
-    let seconds = u64::try_from(stamp.days)
-        .ok()?
-        .checked_mul(u64::from(Stamp::DAY))?
-        .checked_add(u64::from(stamp.seconds))?;
-    seconds
-        .checked_mul(1000)?
-        .checked_add(u64::from(stamp.nanos / 1_000_000))
 }
 
 /// Reads `text`, which holds only ASCII digits, as a number.

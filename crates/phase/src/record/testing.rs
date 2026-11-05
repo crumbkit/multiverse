@@ -346,13 +346,10 @@ pub(crate) struct FakeObject {
     /// The state of a container, which is running unless a test says
     /// otherwise.
     pub(crate) state: ContainerState,
-    /// How many times Docker has restarted a container, which is 0 unless
-    /// a test says otherwise.
-    pub(crate) restarts: u32,
-    /// When Docker last started a container, in milliseconds since the
-    /// Unix epoch, which is 0 unless a test says otherwise. `None` stands
-    /// for a time that phase cannot read.
-    pub(crate) started_at_ms: Option<u64>,
+    /// When Docker last started a container, as Docker prints it, which
+    /// is a fixed time unless a test says otherwise. `None` stands for a
+    /// time that phase cannot read.
+    pub(crate) started_at: Option<String>,
 }
 
 /// A fake Docker that holds objects in memory.
@@ -393,28 +390,16 @@ impl FakeDocker {
             id: id.to_owned(),
             workspace: label.map(str::to_owned),
             state: ContainerState::Running,
-            restarts: 0,
-            started_at_ms: Some(0),
+            started_at: Some("2026-11-05T10:00:00Z".to_owned()),
         });
         self
     }
 
     /// Sets when Docker last started the container whose id is `id`.
-    pub(crate) fn started_at(self, id: &str, started_at_ms: Option<u64>) -> Self {
+    pub(crate) fn started_at(self, id: &str, started_at: Option<&str>) -> Self {
         for object in self.objects.borrow_mut().iter_mut() {
             if object.id == id {
-                object.started_at_ms = started_at_ms;
-            }
-        }
-        self
-    }
-
-    /// Sets how many times Docker has restarted the container whose id is
-    /// `id`.
-    pub(crate) fn restarted(self, id: &str, restarts: u32) -> Self {
-        for object in self.objects.borrow_mut().iter_mut() {
-            if object.id == id {
-                object.restarts = restarts;
+                object.started_at = started_at.map(str::to_owned);
             }
         }
         self
@@ -469,9 +454,9 @@ impl Docker for FakeDocker {
         &self,
         object: &DockerObject<'_>,
     ) -> Result<Option<SeenContainer>, DockerError> {
-        Ok(self.matching(object)?.map(|found| {
-            SeenContainer::new(found.state, Some(found.restarts), found.started_at_ms)
-        }))
+        Ok(self
+            .matching(object)?
+            .map(|found| SeenContainer::new(found.state, Some(0), found.started_at.clone())))
     }
 
     fn remove(&self, kind: DockerKind, id: &str, _wait: Duration) -> Result<(), DockerError> {

@@ -182,10 +182,13 @@ pub(crate) struct ContainersStarted {
 
 impl ContainersStarted {
     /// Records that the container of `process` became ready after
-    /// `restarts` restarts by Docker. The readiness wait counts a restart
-    /// by Docker as an end, so these are the restarts that the container
-    /// had when the start inspected it.
-    pub(crate) fn ready(&mut self, process: &ProcessName, restarts: u32) {
+    /// `restarts` restarts by Docker, in the start that Docker printed as
+    /// `started_at`. The readiness wait counts a restart by Docker as an
+    /// end, so these are the restarts and the start that the container had
+    /// when the start inspected it. A start that docker did not print
+    /// leaves the readiness without one, which `status` counts as not
+    /// ready.
+    pub(crate) fn ready(&mut self, process: &ProcessName, restarts: u32, started_at: &str) {
         let container = self
             .containers
             .iter_mut()
@@ -195,7 +198,12 @@ impl ContainersStarted {
             "a start observed {process} ready before it recorded its container"
         );
         if let Some(container) = container {
-            container.ready = Some(Ready::now(restarts));
+            let ready = Ready::now(restarts);
+            container.ready = Some(if started_at.is_empty() {
+                ready
+            } else {
+                ready.with_container_start(started_at.to_owned())
+            });
         }
     }
 }

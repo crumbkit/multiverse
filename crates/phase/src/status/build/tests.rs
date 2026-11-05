@@ -764,54 +764,57 @@ fn a_process_that_was_ready_and_has_gone_is_not_ready() {
 }
 
 #[test]
-fn a_running_container_that_phase_observed_ready_since_docker_last_restarted_it_is_ready() {
+fn a_running_container_is_ready_only_while_docker_reports_the_start_that_phase_saw_ready() {
+    const STARTED: &str = "2026-11-05T10:20:30.123456789Z";
     let state = tempfile::tempdir().unwrap();
     let id = container_id();
     let mut record =
         empty_record().container(&app("db"), &process("server"), "db-server".parse().unwrap());
     record.containers[0].state = EntryState::Running;
     record.containers[0].id = Some(id.clone());
-    let docker = |restarts| {
+    let docker = |started: Option<&str>| {
         FakeDocker::default()
             .with(DockerKind::Container, "db-server", id.as_str())
-            .restarted(id.as_str(), restarts)
-            .started_at(id.as_str(), Some(1_793_000_000_000))
+            .started_at(id.as_str(), started)
     };
 
     write_record(state.path(), &record);
     assert_eq!(
-        container_state(state.path(), &docker(0)),
+        container_state(state.path(), &docker(Some(STARTED))),
         ProcessState::Running
     );
 
-    record.containers[0].ready = Some(Ready::new(1_793_000_000_123, 0));
+    // The readiness time comes from the host's clock, and Docker's clock
+    // may run ahead of it, so only the start that Docker reports counts.
+    record.containers[0].ready =
+        Some(Ready::new(1_000, 0).with_container_start(STARTED.to_owned()));
     write_record(state.path(), &record);
     assert_eq!(
-        container_state(state.path(), &docker(0)),
+        container_state(state.path(), &docker(Some(STARTED))),
         ProcessState::Ready
     );
-    // Docker restarted the container after phase observed it ready.
+    // Docker started the container again, under its restart policy or
+    // because something outside phase restarted it.
     assert_eq!(
-        container_state(state.path(), &docker(1)),
+        container_state(state.path(), &docker(Some("2026-11-05T10:20:31Z"))),
         ProcessState::Running
     );
-    // Something outside phase restarted the container, as `docker
-    // restart` does, which Docker does not count as a restart.
-    let restarted_outside = FakeDocker::default()
-        .with(DockerKind::Container, "db-server", id.as_str())
-        .started_at(id.as_str(), Some(1_793_000_000_124));
     assert_eq!(
-        container_state(state.path(), &restarted_outside),
+        container_state(state.path(), &docker(None)),
         ProcessState::Running
     );
-    let unreadable = docker(0).started_at(id.as_str(), None);
-    assert_eq!(
-        container_state(state.path(), &unreadable),
-        ProcessState::Running
-    );
-    let exited = docker(0).in_state(id.as_str(), ContainerState::Exited(3));
+    let exited = docker(Some(STARTED)).in_state(id.as_str(), ContainerState::Exited(3));
     assert_eq!(
         container_state(state.path(), &exited),
         ProcessState::exited(Some(3))
+    );
+
+    // Readiness without a recorded start, which no container entry should
+    // hold, counts as not ready.
+    record.containers[0].ready = Some(Ready::new(1_000, 0));
+    write_record(state.path(), &record);
+    assert_eq!(
+        container_state(state.path(), &docker(Some(STARTED))),
+        ProcessState::Running
     );
 }

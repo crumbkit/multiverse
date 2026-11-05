@@ -21,7 +21,7 @@ use rustix::process::Signal;
 use signal_hook::consts::{SIGINT, SIGPIPE, SIGTERM};
 use signal_hook::iterator::Signals;
 
-use crate::clock::{POLL_INTERVAL, now, pause, wall_now};
+use crate::clock::{POLL_INTERVAL, deadline_in, now, pause, wall_now};
 use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
 use crate::engine::keeper::recorder::{Hurry, RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::apply_sandbox;
@@ -325,7 +325,9 @@ impl Supervisor<'_> {
             // outlasts its start grace, as `up` counts the first start.
             let grace = self.spec.ready_grace().filter(|_| restarted);
             let graced = match grace {
-                Some(grace) => self.ended_within(began + grace),
+                // A grace too long for an `Instant` waits a century, so a
+                // malformed specification cannot make the keeper panic.
+                Some(grace) => self.ended_within(deadline_in(grace)),
                 None => Within::Running,
             };
             let ended = match graced {

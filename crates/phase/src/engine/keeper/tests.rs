@@ -350,6 +350,7 @@ impl Fixture {
             .iter()
             .find(|entry| entry.process == process(self.process))?
             .ready
+            .clone()
     }
 
     /// Returns how the run record says the app last ended.
@@ -1107,6 +1108,41 @@ fn a_keeper_records_a_restarted_app_without_a_readiness_probe_ready_after_its_st
 
     assert!(now() >= restarted + Duration::from_millis(500));
     assert_eq!(fixture.ready().unwrap().restarts, 1);
+}
+
+#[test]
+fn a_keeper_records_no_readiness_of_an_app_whose_stop_comes_within_its_start_grace() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let spec = fixture
+        .spec(CRASH_ONCE, restart, Stop::default())
+        .ready_after(Some(Duration::from_secs(5)));
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(fixture.ready(), None);
+}
+
+#[test]
+fn a_keeper_spec_whose_start_grace_is_too_long_for_a_deadline_does_not_panic() {
+    let fixture = Fixture::new();
+    let restart = Restart::on_failure(limits(None, Duration::from_millis(20), Resolve::Never));
+    let mut spec = fixture.spec(CRASH_ONCE, restart, Stop::default());
+    spec.ready_after_ms = Some(u64::MAX);
+    let mut running = fixture.start(&spec).unwrap();
+    eventually("the restart", || {
+        matches!(fixture.recorded(), Some((EntryState::Running, _, 1)))
+    });
+
+    running.signal_keeper(Signal::TERM);
+
+    assert_eq!(running.exit_code(), i32::from(KeeperExit::Stopped.code()));
+    assert_eq!(fixture.ready(), None);
 }
 
 #[test]

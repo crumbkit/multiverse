@@ -715,10 +715,14 @@ fn a_container_records_readiness_until_phase_starts_it_again() {
         .started(&key, Started::Container(id(), hash()))
         .unwrap();
 
-    journal.ready(&key, Ready::new(100, 1)).unwrap();
+    let ready = Ready::new(100, 1).with_container_start("2026-11-05T10:20:30Z".to_owned());
+    journal.ready(&key, ready.clone()).unwrap();
+    assert_eq!(on_disk(&store).containers[0].ready, Some(ready));
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
     assert_eq!(
-        on_disk(&store).containers[0].ready,
-        Some(Ready::new(100, 1))
+        json["containers"][0]["ready"]["container_started_at"],
+        "2026-11-05T10:20:30Z"
     );
 
     journal

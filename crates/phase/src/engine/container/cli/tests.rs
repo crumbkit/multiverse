@@ -906,7 +906,7 @@ fn a_containers_restarts_and_start_time_come_from_its_inspection_with_its_state(
     fake.labelled(
         &[&unreadable],
         &unreadable,
-        &format!("{ours}\nrunning 0\nmany \n0001-01-01T00:00:00Z"),
+        &format!("{ours}\nrunning 0\nmany \n"),
     );
     let workspace = workspace();
     let db = name("db");
@@ -919,11 +919,19 @@ fn a_containers_restarts_and_start_time_come_from_its_inspection_with_its_state(
 
     assert_eq!(
         seen(&fresh),
-        SeenContainer::new(ContainerState::Running, Some(0), Some(1_793_874_030_123))
+        SeenContainer::new(
+            ContainerState::Running,
+            Some(0),
+            Some("2026-11-05T10:20:30.123456789Z".to_owned())
+        )
     );
     assert_eq!(
         seen(&restarted),
-        SeenContainer::new(ContainerState::Running, Some(3), Some(1_500))
+        SeenContainer::new(
+            ContainerState::Running,
+            Some(3),
+            Some("1970-01-01T00:00:01.5Z".to_owned())
+        )
     );
     assert_eq!(
         seen(&unreadable),

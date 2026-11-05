@@ -168,24 +168,47 @@ pub(crate) struct HostEntry {
 
 /// When phase observed a process ready: its readiness probe passed, or a
 /// process without a probe was running. It holds no environment value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Ready {
-    /// When phase observed it, in milliseconds since the Unix epoch.
+    /// When phase observed it, in milliseconds since the Unix epoch, by
+    /// the host's clock.
     pub(crate) at_ms: u64,
     /// How many times the process had been restarted when phase observed
     /// it: by its keeper for a host process, and by Docker for a
-    /// container. `status` counts the readiness only while the count is
-    /// the same, so a restart that the record did not hear of makes the
-    /// process count as not ready.
+    /// container. `status` counts a host process's readiness only while
+    /// its keeper's count is the same, so a restart that the record did
+    /// not hear of makes the process count as not ready.
     pub(crate) restarts: u32,
+    /// When Docker last started a container that phase observed ready,
+    /// exactly as `docker container inspect` printed its `State.StartedAt`,
+    /// or `None` for a host process. Every start of the container changes
+    /// it, including a restart under Docker's restart policy and one that
+    /// phase did not ask for, so `status` counts a container's readiness
+    /// only while Docker still reports this start. Comparing the two texts
+    /// uses no clock, so a Docker clock that differs from the host's
+    /// changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) container_started_at: Option<String>,
 }
 
 impl Ready {
     /// Returns the readiness that phase observed at `at_ms` after
     /// `restarts` restarts.
     pub(crate) const fn new(at_ms: u64, restarts: u32) -> Self {
-        Self { at_ms, restarts }
+        Self {
+            at_ms,
+            restarts,
+            container_started_at: None,
+        }
+    }
+
+    /// Returns this readiness of a container whose last start Docker
+    /// printed as `started_at`.
+    #[must_use]
+    pub(crate) fn with_container_start(mut self, started_at: String) -> Self {
+        self.container_started_at = Some(started_at);
+        self
     }
 
     /// Returns the readiness that phase observes now, after `restarts`

@@ -758,13 +758,15 @@ no other read path.
 The run record keeps when phase last observed each host process and each
 container ready, as `ready`, so `status` can tell a process that has
 become ready from one that only runs. `ready` holds the time in
-milliseconds since the Unix epoch and the number of restarts the process
-had then. It holds no environment value.
+milliseconds since the Unix epoch, the number of restarts the process
+had then, and for a container the start that Docker reported, exactly as
+`docker container inspect` printed `State.StartedAt`. It holds no
+environment value.
 
 - `up` records it when a process passes its readiness probe, after the
-  port check that follows. For a container, the restarts are the ones
-  Docker had counted when phase inspected the started container, which
-  are 0 for a new container.
+  port check that follows. For a container, the restarts and the start
+  are the ones Docker reported when phase inspected the started
+  container.
 - A process with no readiness probe counts as ready once it runs for its
   start grace. `up` records it once the process has outlasted its start
   grace. The keeper's specification carries the grace of such a process,
@@ -780,17 +782,14 @@ had then. It holds no environment value.
   its own note of that start, which it would otherwise write once `up`
   releases the lock, so the note does not clear the readiness.
 - `status` counts the readiness of a host process only while the
-  keeper's count of restarts matches the one it recorded. For a container
-  it also needs Docker's `RestartCount` to match, and Docker's
-  `State.StartedAt` to be no later than the time of the readiness. A
-  start that Docker does not count as a restart, such as `docker restart`,
-  a `docker start` after a stop, or a restart of the Docker daemon,
-  changes the start time, so the container counts as not ready. A count
-  or a start time that phase cannot read also counts as not ready. The
-  start time comes from Docker's clock and the readiness from the host's,
-  so a Docker clock that runs ahead of the host's by more than the time
-  between the start and the readiness makes a ready container show as
-  `running`.
+  keeper's count of restarts matches the one it recorded. It counts the
+  readiness of a container only while Docker's `State.StartedAt` is
+  exactly the start that the readiness records. Every start changes it:
+  a restart under Docker's restart policy, `docker restart`, a `docker
+  start` after a stop, and a restart of the Docker daemon. Comparing the
+  two texts uses no clock, so a Docker clock that differs from the host's,
+  as a virtual machine's can after the host sleeps, changes nothing. A
+  start time that Docker does not print counts as not ready.
 
 A keeper that an older phase started reads the record before each write.
 Once a newer phase rewrites the record in a newer version, that keeper

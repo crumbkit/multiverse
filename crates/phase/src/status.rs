@@ -233,9 +233,10 @@ pub enum ProcessState {
     /// The process runs, and phase observed it ready since its last start
     /// or restart: its readiness probe passed, or it has no probe and
     /// outlasted its start grace after `up` started it or its keeper
-    /// restarted it. A container also needs Docker's record of its last
-    /// start to come no later than the readiness, so a start outside phase,
-    /// such as `docker restart`, makes it not ready.
+    /// restarted it. A container also needs Docker to report the same
+    /// start that phase observed ready, so any later start, such as one
+    /// under Docker's restart policy or a `docker restart`, makes it not
+    /// ready.
     Ready,
     /// The process runs, and phase has not observed it ready since its
     /// last start or restart. Its readiness probe has not passed yet, or

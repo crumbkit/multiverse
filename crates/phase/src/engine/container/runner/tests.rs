@@ -190,6 +190,7 @@ impl World {
             .iter()
             .find(|entry| entry.app.as_str() == app && entry.process.as_str() == process)?
             .ready
+            .clone()
     }
 
     /// Removes every container and volume that carries this workspace's
