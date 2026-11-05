@@ -56,6 +56,18 @@ pub(crate) const SECRETS_MODE: u32 = 0o700;
 /// How long the wrapper waits for the secrets' files, in seconds.
 pub(crate) const WAIT_SECONDS: u32 = 60;
 
+/// The status with which the stage script exits when the first line of its
+/// input is no length.
+pub(crate) const NO_LENGTH: i32 = 65;
+
+/// The status with which the stage script exits when the value's bytes
+/// differ from its length.
+pub(crate) const SHORT_FEED: i32 = 66;
+
+/// The status with which the commit script exits when the file of a lapsed
+/// optional secret remains after its removal failed.
+pub(crate) const REMOVAL_REMAINED: i32 = 67;
+
 /// The status with which the wrapper exits when it cannot start the app.
 pub(crate) const WRAPPER_FAILED: i32 = 70;
 
@@ -132,8 +144,11 @@ pub(crate) fn entrypoint<'n>(names: impl Iterator<Item = &'n String>) -> Vec<Str
 
 /// Returns the script that stages the secret named by its first argument
 /// in `dir` for the owner named by its second, from its standard input,
-/// as the module docs say. It exits with 65 when the first line is no
-/// length, and 66 when the value's bytes differ from the length.
+/// as the module docs say. It exits with [`NO_LENGTH`] when the first line
+/// is no length, and [`SHORT_FEED`] when the value's bytes differ from the
+/// length, with one line on standard error for a person who runs it by
+/// hand. phase discards that line, as it discards everything an exec into
+/// a container prints.
 pub(crate) fn stage_script(dir: &str) -> String {
     format!(
         r#"set -eu
@@ -142,14 +157,14 @@ t="$d/.$1.new"
 trap 'rm -f "$t"' EXIT
 IFS= read -r n
 case "$n" in
-  ''|*[!0-9]*) echo "phase: the length of the secret $1 is not a number" >&2; exit 65 ;;
+  ''|*[!0-9]*) echo "phase: the length of the secret $1 is not a number" >&2; exit {NO_LENGTH} ;;
 esac
 umask 077
 cat > "$t"
 m=$(wc -c < "$t")
 if [ "$((m))" -ne "$n" ]; then
   echo "phase: the secret $1 arrived with $((m)) of $n bytes" >&2
-  exit 66
+  exit {SHORT_FEED}
 fi
 chown "$2" "$d" "$t"
 chmod 0400 "$t"
@@ -166,8 +181,8 @@ const REMOVALS: &str = "--";
 /// Returns the script that renames each staged file in `dir` named by its
 /// arguments over its secret's file, and removes the file of each secret
 /// named after [`REMOVALS`]. A removal that fails after the renames exits
-/// with 67 and one line on standard error that names the secret whose
-/// file remains, so the failure reaches the caller.
+/// with [`REMOVAL_REMAINED`], so the failure reaches the caller, and with
+/// one line on standard error that phase discards.
 fn commit_script(dir: &str) -> String {
     format!(
         r#"set -eu
@@ -176,7 +191,7 @@ r=
 for n do
 if [ "$n" = '{REMOVALS}' ]; then r=1; continue; fi
 if [ -z "$r" ]; then mv -f "$d/.$n.new" "$d/$n"; continue; fi
-rm -f "$d/$n" || {{ echo "phase: the file of the lapsed optional secret $n could not be removed and remains in $d" >&2; exit 67; }}
+rm -f "$d/$n" || {{ echo "phase: the file of the lapsed optional secret $n could not be removed and remains in $d" >&2; exit {REMOVAL_REMAINED}; }}
 done
 "#
     )

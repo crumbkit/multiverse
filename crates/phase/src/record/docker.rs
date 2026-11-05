@@ -13,7 +13,8 @@ use crate::record::DockerName;
 
 /// A kind of Docker object that the run record names, and that a
 /// [`DockerError`] about a foreign object names. In JSON a kind is its name
-/// in snake case, such as `"volume"`.
+/// in snake case, such as `"volume"`, and a name that this version does not
+/// know reads as [`DockerKind::Unknown`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -24,6 +25,12 @@ pub enum DockerKind {
     Network,
     /// A volume.
     Volume,
+    /// A kind that this version of phase does not know, read from JSON
+    /// that a newer phase wrote. phase never gives it to an object.
+    /// Serializing it again writes `"unknown"`, so the kind's original name
+    /// is not kept.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A Docker object that the run record names: by its id once phase has
@@ -209,9 +216,10 @@ pub struct DockerContext {
     /// connect to the docker API at`. `docker compose up --detach` gives
     /// its last line of standard error in one of these forms. `docker
     /// logs` gives such a line only when it is the last of standard error
-    /// and docker then exits with code 1. Every other command, including
-    /// the `docker exec` of a secret write, gives its last line only when
-    /// every line of its standard error is in one of these forms. Any
+    /// and docker then exits with code 1. The `docker exec` of a secret
+    /// script never gives one, because phase never reads what it prints.
+    /// Every other command gives its last line only when every line of its
+    /// standard error is in one of these forms. Any
     /// other failure leaves it `None`, so a line that a container or an
     /// app wrote, which may hold a credential, does not become it. The
     /// section on containers in phase's design says more.
@@ -309,7 +317,7 @@ const CUT: &str = "...";
 /// label: a value reaches only the environment of a `docker compose up`
 /// child, under a private reference that the compose file names. So a
 /// message that echoes what phase sent holds no value.
-fn bounded(mut message: String) -> String {
+pub(crate) fn bounded(mut message: String) -> String {
     if message.len() <= MOST_DOCKER_MESSAGE_BYTES {
         return message;
     }

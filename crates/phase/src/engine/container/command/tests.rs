@@ -343,3 +343,16 @@ fn a_failed_command_carries_dockers_line_only_when_standard_error_is_dockers_alo
     let leaked = docker_line(&format!("{SECRET}\nError response from daemon: {SECRET}\n"));
     assert_eq!(leaked, None);
 }
+
+#[test]
+fn the_message_of_a_failed_command_is_kept_to_the_most_bytes_of_a_docker_message() {
+    let long = format!("Error response from daemon: {}\n", "x".repeat(10_000));
+    let kept = super::message(&long);
+    assert!(
+        kept.len() <= crate::MOST_DOCKER_MESSAGE_BYTES,
+        "{}",
+        kept.len()
+    );
+    assert!(kept.starts_with("Error response from daemon: x"));
+    assert!(kept.ends_with("..."));
+}

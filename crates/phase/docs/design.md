@@ -532,12 +532,10 @@ Each command adds its own rule:
   error, after which docker exits with code 1, as it does after it prints
   its own error. The same line becomes the failure's message, and phase
   holds it back from the log's lines.
-- Every other command, including the `docker exec` of the secret write
-  and commit scripts, gives a line only when every line of its standard
-  error is in one of the forms. Docker prints its own error for a `docker
-  exec` only when it cannot run the process, and then the process wrote
-  nothing, so a line that a secret script wrote never becomes the Docker
-  line.
+- The `docker exec` of a secret script never gives a line, because phase
+  never reads what it prints, as the section on container secrets says.
+- Every other command gives a line only when every line of its standard
+  error is in one of the forms.
 
 Any other failure leaves the Docker line out.
 
@@ -615,6 +613,28 @@ phase writes the files in two steps, each a `docker exec --interactive
 2. Once every secret is staged, one script renames each staged file over
    `/run/secrets/<NAME>`, and removes the file of each optional secret
    that has lost its value.
+
+phase never reads what a `docker exec` into a container prints into an
+error's `message` or into the Docker line. A `docker exec` passes on the
+standard error of the process it runs, and that process is the image's
+own `/bin/sh` with a secret's value on its standard input, so an image
+could print the value. The `docker exec` of each secret script writes its
+standard output and standard error to `/dev/null`, and a failure's message
+is phase's own sentence about its exit status:
+
+- 65 says that the secret's length did not reach the stage script.
+- 66 says that the secret arrived with fewer or more bytes than its
+  length.
+- 67 says that the file of a lapsed optional secret could not be removed.
+- 125, 126 and 127 are the statuses of `docker exec` itself, and say that
+  Docker could not run the script.
+- Any other status, such as 1, may be the script's or Docker's, so phase
+  inspects the container. A container that Docker no longer has, or that
+  no longer runs, explains the failure. Otherwise the message says that
+  the script exited with that status.
+
+A command probe of a container sends its output to `/dev/null` too, and
+phase runs no other `docker exec`.
 
 When a staging fails, phase removes every staged file and renames
 nothing, so the container keeps its whole old set of files. A reader of

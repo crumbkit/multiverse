@@ -108,7 +108,7 @@ fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
     let _ = stdin.write_all(input.framed());
 }
 
-/// Why [`write_secret`] stopped `docker` before it exited.
+/// Why [`secret_exec`] stopped `docker` before it exited.
 enum Stop {
     /// The caller cancelled the write.
     Cancelled,
@@ -120,26 +120,56 @@ enum Stop {
 
 /// Runs `docker <args>`, where `args` are a `docker exec --interactive`
 /// that stages a secret, with `input`, the secret's framed bytes, on its
-/// standard input, which it then closes, within the deadline of `until` or
-/// until its cancel flag is set.
+/// standard input, which it then closes, as [`secret_exec`] does.
+///
+/// # Errors
+///
+/// Returns the errors of [`secret_exec`].
+pub(super) fn write_secret(
+    args: &[String],
+    input: SecretBytes,
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+    until: (Duration, &Cancel),
+) -> Result<ExitStatus, Error> {
+    secret_exec(args, Some(input), environment, "secret write", until)
+}
+
+/// Runs `docker <args>`, where `args` are a `docker exec` of one of the
+/// secret scripts, with `input` on its standard input when there is one,
+/// within the deadline of `until` or until its cancel flag is set, and
+/// returns how it exited.
+///
+/// The standard output and the standard error of `docker` go to
+/// `/dev/null`, and phase never reads them. A `docker exec` passes on
+/// what the process inside the container writes, and that process, which
+/// the container's image supplies as `/bin/sh`, receives the secret's
+/// value. So the only fact that phase takes from the exec is its exit
+/// status, and a failure's message is phase's own sentence about that
+/// status.
 ///
 /// `docker` starts in a process group of its own. With `environment`, it
 /// receives those variables alone, which the host program chose, and
 /// otherwise the host program's environment, as phase's other `docker`
 /// commands do. No secret's value is in either. When the deadline passes
 /// or the caller cancels, phase kills the group, reaps `docker`, and joins
-/// the threads that fed and read it, whose pipes the kill closed. The
-/// feeder's next write to the closed pipe then fails with `EPIPE` and the
-/// feeder ends, because Rust's runtime ignores `SIGPIPE` in every program
-/// it starts, so the write does not kill the host program.
-pub(super) fn write_secret(
+/// the thread that fed it, whose pipe the kill closed. The feeder's next
+/// write to the closed pipe then fails with `EPIPE` and the feeder ends,
+/// because Rust's runtime ignores `SIGPIPE` in every program it starts, so
+/// the write does not kill the host program.
+///
+/// # Errors
+///
+/// Returns [`Error::Missing`] when no `docker` program is on `PATH`,
+/// [`Error::Cancelled`], and [`Error::Failed`] when the deadline passes or
+/// phase cannot wait for `docker`.
+pub(super) fn secret_exec(
     args: &[String],
-    input: SecretBytes,
+    input: Option<SecretBytes>,
     environment: Option<&std::collections::BTreeMap<String, String>>,
+    operation: &'static str,
     until: (Duration, &Cancel),
-) -> Result<Finished, Error> {
+) -> Result<ExitStatus, Error> {
     let (deadline, cancel) = until;
-    let operation = "secret write";
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
@@ -151,9 +181,13 @@ pub(super) fn write_secret(
     command
         .args(args)
         .env("LC_ALL", "C")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0);
     #[expect(
         clippy::disallowed_methods,
@@ -175,9 +209,8 @@ pub(super) fn write_secret(
     let feeder = child
         .stdin
         .take()
-        .map(|stdin| thread::spawn(move || feed(stdin, &input)));
-    let stdout = child.stdout.take().map(drain);
-    let stderr = child.stderr.take().map(drain);
+        .zip(input)
+        .map(|(stdin, input)| thread::spawn(move || feed(stdin, &input)));
     let ends = now() + deadline;
     let stopped = loop {
         match exited(pid) {
@@ -203,8 +236,6 @@ pub(super) fn write_secret(
     if let Some(feeder) = feeder {
         let _ = feeder.join();
     }
-    let stdout = joined(stdout);
-    let stderr = joined(stderr);
     match (stopped, reaped) {
         (Some(Stop::Cancelled), _) => Err(Error::Cancelled { operation }),
         (Some(Stop::WaitFailed(error)), _) => Err(Error::unexpected(
@@ -219,11 +250,7 @@ pub(super) fn write_secret(
                 deadline.as_secs()
             ),
         )),
-        (None, Ok(status)) => Ok(Finished {
-            status,
-            stdout,
-            stderr,
-        }),
+        (None, Ok(status)) => Ok(status),
         (None, Err(source)) => Err(Error::unexpected(operation, None, source.to_string())),
     }
 }
@@ -333,7 +360,8 @@ pub(super) fn says_missing(line: &str) -> bool {
 
 /// Returns the line of docker's standard error that says what failed: the
 /// first line that starts with `docker:` or `Error`, which is where docker
-/// puts its own message, and otherwise the last line that is not empty.
+/// puts its own message, and otherwise the last line that is not empty. It
+/// keeps the line to [`crate::MOST_DOCKER_MESSAGE_BYTES`] bytes.
 pub(crate) fn message(stderr: &str) -> String {
     let mut lines = stderr
         .lines()
@@ -343,8 +371,8 @@ pub(crate) fn message(stderr: &str) -> String {
         .clone()
         .find(|line| line.starts_with("docker:") || line.starts_with("Error"))
         .or_else(|| lines.next_back())
+        .map(|line| crate::record::docker::bounded(line.to_owned()))
         .unwrap_or_default()
-        .to_owned()
 }
 
 /// The starts of the lines that the docker client prints for its own
@@ -370,12 +398,12 @@ fn is_docker_form(line: &str) -> bool {
 /// last line that is not empty, and only when every line that is not
 /// empty is in one of Docker's own forms, as [`is_docker_form`] says.
 ///
-/// A `docker exec` passes on what the process it runs writes to standard
-/// error, such as the scripts of a secret write. Docker prints its own
-/// error only when it cannot run the process, and then the process wrote
-/// nothing. So a line of the process never becomes Docker's line, unless
-/// the process wrote nothing but lines in Docker's forms. Every other
-/// command prints only Docker's own lines on standard error.
+/// The commands that reach it print only Docker's own lines on standard
+/// error. A `docker exec` into a container never reaches it: phase runs
+/// the secret scripts through [`secret_exec`], which discards what they
+/// print, and a probe's command, whose output goes to `/dev/null`. The rule
+/// that every line must be in Docker's forms keeps a line that some other
+/// program wrote from becoming Docker's line all the same.
 pub(super) fn docker_line(stderr: &str) -> Option<String> {
     let mut lines = stderr.lines().filter(|line| !line.trim().is_empty());
     if !lines.clone().all(is_docker_form) {

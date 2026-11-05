@@ -1291,8 +1291,7 @@ fn a_rotation_that_fails_on_one_secret_leaves_every_old_file_in_place() {
 
     let error = failed.unwrap_err().to_string();
     assert!(error.contains("the secret TOKEN arrived with"), "{error}");
-    assert!(!error.contains(ROTATED), "{error}");
-    assert!(!error.contains("test-key-rotated"), "{error}");
+    holds_no_value(&error);
     let key = docker(&["exec", "--", &id, "cat", "/run/secrets/KEY"]).unwrap();
     assert_eq!(key, KEY);
     let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
@@ -1327,13 +1326,7 @@ fn a_secret_feed_cut_short_fails_and_leaves_no_staged_file() {
     )
     .unwrap();
 
-    assert_eq!(finished.status.code(), Some(66));
-    assert!(
-        finished.stderr.contains("arrived with"),
-        "{}",
-        finished.stderr
-    );
-    assert!(!finished.stderr.contains("rotated"));
+    assert_eq!(finished.code(), Some(super::secrets::SHORT_FEED));
     let listed = docker(&["exec", "--", &id, "ls", "-a", "/run/secrets"]).unwrap();
     assert!(!listed.contains(".new"), "{listed}");
     let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
@@ -2829,8 +2822,7 @@ fn a_failed_secret_write_reports_its_context_without_a_docker_line_or_a_secret_v
         errored,
     ))
     .unwrap();
-    assert!(!json.contains(ROTATED), "{json}");
-    assert!(!json.contains(KEY), "{json}");
+    holds_no_value(&json);
     assert!(!json.contains("docker_line"), "{json}");
     world.down();
 }
@@ -2874,4 +2866,95 @@ fn a_container_failure_passes_dockers_own_line_to_the_docker_error_and_keeps_its
         panic!("{cancelled:?}");
     };
     assert_eq!(source.docker_line(), None);
+}
+
+/// The distinctive marks inside the test values [`TOKEN`], [`ROTATED`] and
+/// [`KEY`], and a prefix of each, none of which any phase sentence holds.
+const VALUE_MARKS: [&str; 6] = [
+    "3f9a2c71",
+    "b04e",
+    "55d1e0",
+    "test-token",
+    "test-key",
+    "test-tok",
+];
+
+/// Asserts that `text` holds no mark or prefix of a test value.
+fn holds_no_value(text: &str) {
+    for mark in VALUE_MARKS {
+        assert!(!text.contains(mark), "{mark} in {text}");
+    }
+}
+
+/// Builds an image whose `/bin/sh` runs `leak` in place of the stage
+/// script of a secret write, with the framed value on its standard input,
+/// and runs every other script with busybox's own shell.
+fn leaking_shell(leak: &str) -> Option<BuiltImage> {
+    BuiltImage::build(&format!(
+        "FROM {IMAGE}\n\
+         RUN [\"/bin/busybox\", \"mkdir\", \"/real\"]\n\
+         RUN [\"/bin/busybox\", \"ln\", \"-s\", \"/bin/busybox\", \"/real/sh\"]\n\
+         RUN [\"/bin/busybox\", \"rm\", \"/bin/sh\"]\n\
+         COPY --chmod=755 <<'SHIM' /bin/sh\n\
+         #!/real/sh\n\
+         if [ \"$3\" = {stage} ]; then {leak}; exit 1; fi\n\
+         exec /real/sh \"$@\"\n\
+         SHIM\n",
+        stage = super::secrets::STAGE_NAME,
+    ))
+}
+
+/// Starts an app on `image` with the secrets of [`Secrets`], whose stage
+/// script the image's shell replaces, and asserts that the failed start
+/// reports no value of a secret anywhere.
+fn assert_start_reports_no_value(image: &BuiltImage) {
+    let world = World::new();
+    let plan = world.plan(vec![built_app(
+        "db",
+        image,
+        vec!["sleep".to_owned(), "60".to_owned()],
+    )]);
+
+    let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored {
+            message, context, ..
+        } => {
+            holds_no_value(message);
+            let context = context.as_ref().unwrap();
+            assert_eq!(context.operation.as_deref(), Some("secret write"));
+            assert_eq!(context.docker_line, None);
+            assert!(
+                message.contains("the script exited with status 1"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    holds_no_value(&format!("{report:?}"));
+    holds_no_value(&serde_json::to_string(&report).unwrap());
+    assert!(!world.has_containers());
+}
+
+#[test]
+fn a_shell_that_copies_the_secret_to_standard_error_leaks_nothing_into_the_report() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = leaking_shell("cat >&2") else {
+        return;
+    };
+    assert_start_reports_no_value(&image);
+}
+
+#[test]
+fn a_shell_that_prints_the_secret_as_dockers_error_leaks_nothing_into_the_report() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = leaking_shell("echo \"Error response from daemon: $(cat)\" >&2") else {
+        return;
+    };
+    assert_start_reports_no_value(&image);
 }

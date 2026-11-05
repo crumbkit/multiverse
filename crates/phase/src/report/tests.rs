@@ -169,7 +169,11 @@ fn an_errored_outcome_names_a_foreign_object_and_reads_a_context_field_that_a_ne
         "outcome": "errored",
         "code": "phase::docker::refused",
         "message": "Docker refused a request of the run: no",
-        "context": { "operation": "image push", "registry": "example" },
+        "context": {
+            "operation": "image push",
+            "registry": "example",
+            "foreign": { "kind": "socket", "name": "phase-0123456789abcdef.sock" },
+        },
     }))
     .unwrap();
     let AppOutcome::Errored {
@@ -180,4 +184,7 @@ fn an_errored_outcome_names_a_foreign_object_and_reads_a_context_field_that_a_ne
         panic!("{report:?}");
     };
     assert_eq!(context.operation.as_deref(), Some("image push"));
+    let foreign = context.foreign.unwrap();
+    assert_eq!(foreign.kind(), DockerKind::Unknown);
+    assert_eq!(foreign.name(), "phase-0123456789abcdef.sock");
 }

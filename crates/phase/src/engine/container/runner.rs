@@ -107,7 +107,8 @@ use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::container::ContainerError;
 use crate::engine::container::app::{self, reference};
 use crate::engine::container::command::{
-    DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message, quick, write_secret,
+    DOCKER_DEADLINE, DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message,
+    quick, secret_exec, write_secret,
 };
 use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
@@ -840,7 +841,6 @@ pub(crate) fn write_secrets(
     until: (Instant, &Cancel),
 ) -> Result<(), ContainerError> {
     let id = inspected.container.id().as_str();
-    let service = inspected.container.service().as_str();
     let names: Vec<String> = delivery
         .values
         .iter()
@@ -856,27 +856,115 @@ pub(crate) fn write_secrets(
             delivery.docker_environment,
             (left(deadline), cancel),
         )
-        .and_then(|finished| finished.checked("secret write", Some(service)).map(drop));
+        .and_then(|status| {
+            script_ended(inspected, "secret write", status, |code| match code {
+                secrets::NO_LENGTH => Some(format!(
+                    "the length of the secret {name} did not reach the stage script"
+                )),
+                secrets::SHORT_FEED => Some(format!(
+                    "the secret {name} arrived with fewer or more bytes than its length"
+                )),
+                _ => None,
+            })
+        });
         if staged.is_err() {
             break;
         }
     }
+    let removed = delivery.removed.join(", ");
     let committed = staged.and_then(|()| {
-        quick(
-            secrets::commit(id, names.iter(), delivery.removed.iter()),
+        let status = secret_exec(
+            &secrets::commit(id, names.iter(), delivery.removed.iter()),
+            None,
+            delivery.docker_environment,
             "secret commit",
-        )?
-        .checked("secret commit", Some(service))
-        .map(drop)
+            (left(deadline), cancel),
+        )?;
+        script_ended(inspected, "secret commit", status, |code| {
+            (code == secrets::REMOVAL_REMAINED).then(|| {
+                format!(
+                    "the file of one of the lapsed optional secrets {removed} could not be removed and remains in {}",
+                    secrets::SECRETS_DIR
+                )
+            })
+        })
     });
     committed.map_err(|error| {
-        let _ = quick(secrets::discard(id), "secret discard");
+        // The discard runs even after the caller cancelled, so it has a
+        // cancel flag and a deadline of its own.
+        let _ = secret_exec(
+            &secrets::discard(id),
+            None,
+            delivery.docker_environment,
+            "secret discard",
+            (DOCKER_DEADLINE, &Cancel::new()),
+        );
         if delivery_starting {
             ended_early(inspected).unwrap_or(error)
         } else {
             error
         }
     })
+}
+
+/// The exit statuses that `docker exec` gives when it cannot run the
+/// process itself: 125 when Docker's own run fails, 126 when the process
+/// cannot be invoked, and 127 when it is not found.
+const EXEC_OWN_STATUSES: [i32; 3] = [125, 126, 127];
+
+/// Returns `Ok` when the `docker exec` of a secret script for `operation`
+/// on the container `inspected` exited with `status` 0, and its failure
+/// otherwise.
+///
+/// The failure's message is phase's own sentence, chosen from the exit
+/// status and from Docker's view of the container afterwards, and never
+/// from what the exec printed, which [`secret_exec`] discards. `own` gives
+/// the sentence for a status that the script itself exits with, such as
+/// [`secrets::SHORT_FEED`]. A status of `docker exec` itself, one of
+/// [`EXEC_OWN_STATUSES`], says that Docker could not run the script. Any
+/// other status, such as 1, may be the script's or Docker's, so phase
+/// inspects the container: one that Docker no longer has, or that no
+/// longer runs, explains the failure, and otherwise the message names the
+/// status.
+///
+/// # Errors
+///
+/// Returns the errors of checking that docker answers, and
+/// [`ContainerError::Failed`] for any status other than 0.
+fn script_ended(
+    inspected: &Inspected,
+    operation: &'static str,
+    status: std::process::ExitStatus,
+    own: impl Fn(i32) -> Option<String>,
+) -> Result<(), ContainerError> {
+    if status.success() {
+        return Ok(());
+    }
+    check()?;
+    let code = status.code();
+    let message = match code.and_then(&own) {
+        Some(said) => said,
+        None => match code {
+            Some(code) if EXEC_OWN_STATUSES.contains(&code) => {
+                format!("docker exec could not run the script and exited with status {code}")
+            }
+            _ => match reinspect(&inspected.container) {
+                Ok(None) => "docker no longer has the container".to_owned(),
+                Ok(Some(fresh)) if !fresh.state.runs() => {
+                    "the container stopped before the script finished".to_owned()
+                }
+                _ => code.map_or_else(
+                    || "a signal ended the script".to_owned(),
+                    |code| format!("the script exited with status {code}"),
+                ),
+            },
+        },
+    };
+    Err(ContainerError::failed(
+        operation,
+        Some(inspected.container.service().as_str()),
+        message,
+    ))
 }
 
 /// Returns the failure of a container `inspected` that ended before its

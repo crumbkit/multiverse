@@ -256,6 +256,8 @@ const fn inspect_operation(kind: DockerKind) -> &'static str {
         DockerKind::Container => "container inspect",
         DockerKind::Network => "network inspect",
         DockerKind::Volume => "volume inspect",
+        // [`unknown_kind`] refuses this kind before any inspect.
+        DockerKind::Unknown => "inspect",
     }
 }
 
@@ -266,6 +268,8 @@ const fn inspect_of(kind: DockerKind) -> (&'static str, &'static str, &'static s
         DockerKind::Container => ("container", "{{.Id}}", ".Config.Labels"),
         DockerKind::Network => ("network", "{{.Id}}", ".Labels"),
         DockerKind::Volume => ("volume", "{{.Name}}", ".Labels"),
+        // [`unknown_kind`] refuses this kind before any inspect.
+        DockerKind::Unknown => ("object", "{{.Id}}", ".Labels"),
     }
 }
 
@@ -275,6 +279,19 @@ const fn inspect_of(kind: DockerKind) -> (&'static str, &'static str, &'static s
 fn format(kind: DockerKind) -> String {
     let (_, id, labels) = inspect_of(kind);
     format!("{id}\n{{{{json {labels}}}}}")
+}
+
+/// Refuses [`DockerKind::Unknown`], which only JSON from a newer phase
+/// holds, so phase never runs a docker command on an object whose kind it
+/// does not know.
+fn unknown_kind(kind: DockerKind) -> Result<(), DockerError> {
+    if kind == DockerKind::Unknown {
+        return Err(
+            DockerError::refused("phase does not know the kind of the object".to_owned())
+                .with_cause(crate::record::DockerCause::Unexpected),
+        );
+    }
+    Ok(())
 }
 
 /// Returns the labels that `docker inspect` printed as `printed`, the JSON
@@ -288,6 +305,7 @@ fn labels(printed: &str) -> Option<BTreeMap<String, String>> {
 
 impl Docker for DockerCli {
     fn find(&self, object: &DockerObject<'_>) -> Result<Option<String>, DockerError> {
+        unknown_kind(object.kind)?;
         Ok(self
             .inspect(object, &format(object.kind))?
             .map(|(id, _)| id))
@@ -312,8 +330,9 @@ impl Docker for DockerCli {
     }
 
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError> {
+        unknown_kind(kind)?;
         let removed = match kind {
-            DockerKind::Container => return self.remove_container(id, wait),
+            DockerKind::Container | DockerKind::Unknown => return self.remove_container(id, wait),
             DockerKind::Network => {
                 quick_with(self.program(), ["network", "rm", "--", id], "network rm")
             }
