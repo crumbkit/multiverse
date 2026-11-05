@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
-use crate::engine::containers::{ContainerRunner, ContainerStart};
+use crate::engine::containers::{ContainerRewrite, ContainerRunner, ContainerStart, Rewritten};
 use crate::engine::host::{Holder, HostRunner, is_gone};
 use crate::engine::keeper::{AppEnd, KeeperArgs, KeeperCommand, KeeperSpec, Launch};
 use crate::engine::probe::{self, Check, Goal, HostExec, LogLines, LogWatch, Outcome};
@@ -464,7 +464,7 @@ impl Op<'_, '_> {
             .into_iter()
             .filter(|entry| entry.state == EntryState::Running && entry.id.is_some())
             .collect();
-        let running: BTreeSet<ProcessName> = if recorded.is_empty() {
+        let mut running: BTreeSet<ProcessName> = if recorded.is_empty() {
             BTreeSet::new()
         } else {
             match self
@@ -476,6 +476,47 @@ impl Op<'_, '_> {
                 Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new())),
             }
         };
+        // Each `up` writes the secret files of a container that still runs
+        // again from a fresh environment, and replaces one that cannot
+        // receive them. A rewrite that fails leaves the container running
+        // with its earlier files, which a note reports. Docker that cannot
+        // be reached fails the app, because phase cannot tell what the
+        // container holds.
+        let mut notes = Vec::new();
+        for entry in &recorded {
+            if !running.contains(&entry.process) {
+                continue;
+            }
+            let rewrite = ContainerRewrite {
+                workspace: &self.workspace,
+                app,
+                entry,
+                env: self.env,
+                deadline: self.deadlines.ready,
+                cancel: self.cancel,
+            };
+            match self.engine.containers.rewrite(&rewrite) {
+                Ok(Rewritten::NoFiles) => {}
+                Ok(Rewritten::Written { files, removed }) => notes.push(Note::secrets_rewritten(
+                    &app.name,
+                    entry.process.clone(),
+                    files,
+                    removed,
+                )),
+                Ok(Rewritten::Kept { reason }) => notes.push(Note::secrets_kept(
+                    &app.name,
+                    entry.process.clone(),
+                    &reason,
+                )),
+                Ok(Rewritten::Replace) => {
+                    running.remove(&entry.process);
+                }
+                Err(_) if self.cancel.is_cancelled() => {
+                    return Ok(AppStep::Cancelled(notes));
+                }
+                Err(error) => return Ok(AppStep::Done(AppOutcome::errored(&error), notes)),
+            }
+        }
         let processes: Vec<ProcessName> = choice
             .processes
             .iter()
@@ -483,7 +524,7 @@ impl Op<'_, '_> {
             .filter(|process| !running.contains(process))
             .collect();
         if processes.is_empty() {
-            return Ok(AppStep::Done(AppOutcome::AlreadyRunning, Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::AlreadyRunning, notes));
         }
         let start = ContainerStart {
             workspace: &self.workspace,
@@ -520,18 +561,17 @@ impl Op<'_, '_> {
                 .stopped(&ObjectKey::Container(app.name.clone(), process))?;
         }
         if let Some(error) = started.failure {
-            return Ok(AppStep::Done(AppOutcome::errored(&error), Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::errored(&error), notes));
         }
         if self.cancel.is_cancelled() {
-            return Ok(AppStep::Cancelled(Vec::new()));
+            return Ok(AppStep::Cancelled(notes));
         }
         if started.uncertain.is_some() {
-            return Ok(AppStep::Done(AppOutcome::StartUncertain, Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::StartUncertain, notes));
         }
         let Some((process, problem)) = started.problem else {
-            return Ok(AppStep::Done(AppOutcome::Started, Vec::new()));
+            return Ok(AppStep::Done(AppOutcome::Started, notes));
         };
-        let mut notes = Vec::new();
         self.stop_since(mark, &mut StopsByApp::new(), &mut notes)?;
         Ok(AppStep::Done(AppOutcome::failed(process, problem), notes))
     }
@@ -576,20 +616,15 @@ impl Op<'_, '_> {
             return Ok(Step::Failed(problem));
         }
         let environment = match environment {
-            Some(environment) => environment,
-            None => self
-                .env
-                .resolve(&app.name, &process.name, self.deadlines.ready)
-                .map_err(|source| PhaseError::Environment {
-                    app: app.name.clone(),
-                    source,
-                })?,
-        };
-        crate::env::require(process.required_env(), environment.as_ref()).map_err(|source| {
-            PhaseError::Environment {
-                app: app.name.clone(),
-                source,
+            Some(environment) => crate::env::require(process.required_env(), environment.as_ref())
+                .map(|()| environment),
+            None => {
+                crate::env::resolve_required(self.env, &app.name, process, self.deadlines.ready)
             }
+        }
+        .map_err(|source| PhaseError::Environment {
+            app: app.name.clone(),
+            source,
         })?;
         self.journal.launching(
             &app.name,

@@ -77,6 +77,46 @@ pub(crate) trait ContainerRunner {
         containers: &[ContainerEntry],
     ) -> Result<Vec<ProcessName>, PhaseError>;
 
+    /// Writes the secret files of the running container of
+    /// `rewrite.entry` again from a fresh environment of its process, which
+    /// it resolves through `rewrite.env`, until `rewrite.deadline` or
+    /// `rewrite.cancel`. It writes the file of each secret that has a
+    /// value and removes the file of each optional secret that has lost
+    /// its value, and the container keeps running. The files belong to the
+    /// owner that the container was created with. `up` calls it for each
+    /// container that [`ContainerRunner::running`] reports, so each `up`
+    /// keeps the files of a running container current.
+    ///
+    /// It inspects the container first, and resolves the environment only
+    /// when a write or a replacement may follow:
+    ///
+    /// - [`Rewritten::NoFiles`] for a process that receives no secret
+    ///   files, and for a container without secret files whose fresh
+    ///   environment has no value for any of its optional secrets.
+    /// - [`Rewritten::Replace`] for a container that is gone, no longer
+    ///   runs, or has secret files and was restarted by Docker, as
+    ///   [`ContainerRunner::running`] judges it, and for a container
+    ///   without secret files whose fresh environment has a value for one
+    ///   of its secrets. Such a container started while every one of its
+    ///   secrets was optional and absent, so it has no tmpfs and no
+    ///   wrapper. `up` then replaces the container.
+    /// - [`Rewritten::Kept`] when the environment cannot be resolved, a
+    ///   value cannot be read, or Docker refuses the inspection or the
+    ///   write while the container still runs. The container keeps its
+    ///   earlier files whole, apart from a lapsed optional secret's file
+    ///   whose removal failed, which the reason names.
+    /// - [`Rewritten::Written`] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::Docker`] when the caller cancels, with the
+    /// cancelled cause, and when Docker itself cannot be reached or does
+    /// not answer in time: no `docker` program, a daemon that does not
+    /// answer, or a command that missed its deadline. `up` then reports
+    /// the app as errored, because phase cannot tell what the container
+    /// holds.
+    fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError>;
+
     /// Stops and removes the containers of `stop.containers`, in reverse
     /// order, until `stop.deadline`, and returns what happened to each, by
     /// process. A failure that kept Docker from acting on one container,
@@ -150,6 +190,49 @@ pub(crate) struct StartedContainer {
     /// The hash of the process's part of the plan, which the run record
     /// keeps for [`ContainerRunner::running`].
     pub(crate) plan_hash: PlanHash,
+}
+
+/// What [`ContainerRunner::rewrite`] rewrites.
+pub(crate) struct ContainerRewrite<'a> {
+    /// The workspace.
+    pub(crate) workspace: &'a WorkspaceId,
+    /// The app.
+    pub(crate) app: &'a AppPlan,
+    /// The run record's entry of the running container, which names it
+    /// by id.
+    pub(crate) entry: &'a ContainerEntry,
+    /// The source of the process's environment.
+    pub(crate) env: &'a dyn EnvironmentSource,
+    /// When the rewrite gives up.
+    pub(crate) deadline: Instant,
+    /// The flag that asks the rewrite to stop.
+    pub(crate) cancel: &'a Cancel,
+}
+
+/// How [`ContainerRunner::rewrite`] ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Rewritten {
+    /// The container has no secret files and needs none, so nothing was
+    /// written. phase resolves no environment for a process that receives
+    /// no secret files.
+    NoFiles,
+    /// The container's secret files hold the fresh environment's values.
+    Written {
+        /// How many files the rewrite wrote.
+        files: usize,
+        /// How many files of lapsed optional secrets it removed.
+        removed: usize,
+    },
+    /// The container cannot receive the files that the fresh environment
+    /// has values for, or no longer runs as planned, so `up` must replace
+    /// it.
+    Replace,
+    /// The rewrite failed and the container still runs with its earlier
+    /// files.
+    Kept {
+        /// Why, which holds no value.
+        reason: String,
+    },
 }
 
 /// What [`ContainerRunner::stop`] stops.

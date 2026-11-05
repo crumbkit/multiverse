@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
+use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
 use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run, run_until};
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
@@ -137,6 +138,17 @@ pub struct Inspected {
     pub state: ContainerState,
     /// How many times Docker has restarted it under its restart policy.
     pub(crate) restarts: u32,
+    /// Whether it receives secret files: its labels carry the secrets
+    /// label, so it mounts the tmpfs at `/run/secrets` and starts through
+    /// phase's wrapper. A container without it has no tmpfs, so it cannot
+    /// receive a secret file without being recreated.
+    pub(crate) files: bool,
+    /// The user that it runs as, in Docker's `USER[:GROUP]` form, which is
+    /// empty for root: the app's run-as user, or else the user of its image
+    /// when it was created. A later image under the same tag does not
+    /// change it. An inspection whose user cannot be read fails with
+    /// [`DockerCause::Unexpected`](crate::DockerCause::Unexpected).
+    pub(crate) user: String,
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
     pub(crate) started: String,
@@ -191,7 +203,7 @@ impl Volume {
 /// [`mint_container`] reads.
 fn container_format() -> String {
     format!(
-        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.RestartCount}}}}",
+        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.RestartCount}}}}\n{{{{json .Config.User}}}}",
         labels_format(".Config.Labels")
     )
 }
@@ -203,8 +215,8 @@ fn container_format() -> String {
 /// # Errors
 ///
 /// Returns [`Error::Foreign`] when the labels do not name `scope` and
-/// `service`, and [`Error::Failed`] when docker printed no container
-/// id.
+/// `service`, and [`Error::Failed`] when docker printed no container id or
+/// a user that is not a JSON string.
 pub(super) fn mint_container(
     scope: &Scope,
     service: &ServiceName,
@@ -212,11 +224,8 @@ pub(super) fn mint_container(
     printed: &str,
 ) -> Result<Inspected, Error> {
     let mut lines = printed.lines();
-    if !scope.owns(
-        lines.next().unwrap_or_default(),
-        CONTAINER_LABEL,
-        service.as_str(),
-    ) {
+    let labels = lines.next().unwrap_or_default();
+    if !scope.owns(labels, CONTAINER_LABEL, service.as_str()) {
         return Err(Error::Foreign {
             kind: "container",
             name: target.to_owned(),
@@ -246,6 +255,16 @@ pub(super) fn mint_container(
         .next()
         .and_then(|line| line.trim().parse().ok())
         .unwrap_or_default();
+    // An empty user means root, so a user that cannot be read is an error
+    // and never counts as root.
+    let printed_user = lines.next().unwrap_or_default().trim();
+    let user = serde_json::from_str::<String>(printed_user).map_err(|_| {
+        Error::unexpected(
+            "container inspect",
+            Some(service.as_str()),
+            format!("docker printed {printed_user:?} as the container's user"),
+        )
+    })?;
     Ok(Inspected {
         container: OwnedContainer {
             scope: scope.clone(),
@@ -254,9 +273,20 @@ pub(super) fn mint_container(
         },
         state,
         restarts,
+        files: has_secret_files(labels),
+        user,
         started,
         anonymous,
     })
+}
+
+/// Reports whether `labels`, a container's labels printed as JSON, carry
+/// the label of a container that receives secret files.
+fn has_secret_files(labels: &str) -> bool {
+    serde_json::from_str::<Option<std::collections::BTreeMap<String, String>>>(labels)
+        .ok()
+        .flatten()
+        .is_some_and(|labels| labels.get(SECRETS_LABEL).map(String::as_str) == Some(SECRET_FILES))
 }
 
 /// Inspects the container that `target`, its id or its name, names, and

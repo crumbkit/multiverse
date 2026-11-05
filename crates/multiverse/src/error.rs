@@ -224,8 +224,10 @@ pub enum Error {
     DockerFailed {
         /// The docker command, such as `run`.
         operation: &'static str,
-        /// The manifest name of the container that the command worked on,
-        /// when it worked on one.
+        /// The compose service of the container that the command worked
+        /// on, which is the name of its process in the manifest, such as
+        /// `server`, when it worked on one. It is never a container's id
+        /// or Docker name.
         container: Option<String>,
         /// The line of docker's standard error that says what failed.
         message: String,
@@ -480,12 +482,12 @@ impl From<phase::container::ContainerError> for Error {
             Container::Unavailable { message, .. } => Self::DockerUnavailable { message },
             Container::Failed {
                 operation,
-                container,
+                service,
                 message,
                 ..
             } => Self::DockerFailed {
                 operation,
-                container,
+                container: service,
                 message,
             },
             Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },

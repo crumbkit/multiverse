@@ -50,7 +50,7 @@ pub enum ContainerError {
         /// The compose service of the container that the command worked
         /// on, which is its process's name, such as `server`, when it
         /// worked on one. It is never a container's id or Docker name.
-        container: Option<String>,
+        service: Option<String>,
         /// The line of docker's standard error that says what failed.
         message: String,
         /// What kind of failure it is: [`DockerCause::Refused`],
@@ -86,14 +86,15 @@ pub enum ContainerError {
 }
 
 impl ContainerError {
-    /// Returns the failure of the docker command `operation` on
-    /// `container`, which docker answered with the error `message`.
+    /// Returns the failure of the docker command `operation` on the
+    /// container of the compose service `service`, which docker answered
+    /// with the error `message`.
     pub(crate) fn failed(
         operation: &'static str,
-        container: Option<&str>,
+        service: Option<&str>,
         message: impl Into<String>,
     ) -> Self {
-        Self::failure(operation, container, message, DockerCause::Refused)
+        Self::failure(operation, service, message, DockerCause::Refused)
     }
 
     /// Returns the failure of the docker command `operation`, which did
@@ -102,27 +103,28 @@ impl ContainerError {
         Self::failure(operation, None, message, DockerCause::TimedOut)
     }
 
-    /// Returns the failure of the step `operation` on `container` around a
-    /// docker command, which `message` describes, such as a check of a
-    /// scope or a read of what docker printed.
+    /// Returns the failure of the step `operation` on the container of
+    /// `service` around a docker command, which `message` describes, such
+    /// as a check of a scope or a read of what docker printed.
     pub(crate) fn unexpected(
         operation: &'static str,
-        container: Option<&str>,
+        service: Option<&str>,
         message: impl Into<String>,
     ) -> Self {
-        Self::failure(operation, container, message, DockerCause::Unexpected)
+        Self::failure(operation, service, message, DockerCause::Unexpected)
     }
 
-    /// Returns the failure of `operation` on `container` with `cause`.
+    /// Returns the failure of `operation` on the container of `service`
+    /// with `cause`.
     fn failure(
         operation: &'static str,
-        container: Option<&str>,
+        service: Option<&str>,
         message: impl Into<String>,
         cause: DockerCause,
     ) -> Self {
         Self::Failed {
             operation,
-            container: container.map(str::to_owned),
+            service: service.map(str::to_owned),
             message: message.into(),
             cause,
         }
@@ -161,10 +163,8 @@ impl ContainerError {
     pub(crate) fn describe(&self, error: DockerError) -> DockerError {
         match self {
             Self::Failed {
-                operation,
-                container,
-                ..
-            } => error.during(operation, container.as_deref()),
+                operation, service, ..
+            } => error.during(operation, service.as_deref()),
             Self::Cancelled { operation } => error.during(operation, None),
             Self::Foreign { kind, name } => match foreign_kind(kind) {
                 Some(kind) => error.about_foreign(kind, name),
@@ -217,13 +217,13 @@ impl fmt::Display for ContainerError {
             }
             Self::Failed {
                 operation,
-                container,
+                service,
                 message,
                 ..
             } => {
                 write!(formatter, "docker {operation} failed")?;
-                if let Some(container) = container {
-                    write!(formatter, " for the container {container}")?;
+                if let Some(service) = service {
+                    write!(formatter, " for the container {service}")?;
                 }
                 write!(formatter, ": {message}")
             }

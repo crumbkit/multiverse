@@ -15,8 +15,8 @@ use crate::plan::{AppPlan, ProcessPlan, RunnerKind};
 use crate::source::Source;
 
 use super::{
-    ImageConfig, SecretBytes, WRAPPER_FAILED, commit_script, entrypoint, owner, stage,
-    stage_script, waiting_wrapper,
+    ImageConfig, SecretBytes, WRAPPER_FAILED, commit_script, container_owner, entrypoint, owner,
+    stage, stage_script, waiting_wrapper,
 };
 
 /// Runs `script` in the host's `/bin/sh` with `args`, `input` on its
@@ -340,6 +340,22 @@ fn the_secret_files_belong_to_the_secret_owner_then_the_run_as_user_then_the_ima
 }
 
 #[test]
+fn a_rewrite_takes_the_owner_from_the_running_containers_user_and_not_from_the_image() {
+    let (_, process) = app_with(None, None);
+    assert_eq!(
+        container_owner(&process, "1000:1000").as_deref(),
+        Some("1000:1000")
+    );
+    assert_eq!(container_owner(&process, ""), None);
+    assert_eq!(container_owner(&process, "root"), None);
+    let (_, owned) = app_with(None, Some("999:999"));
+    assert_eq!(
+        container_owner(&owned, "1000:1000").as_deref(),
+        Some("999:999")
+    );
+}
+
+#[test]
 fn files_that_would_belong_to_root_without_a_secret_owner_have_no_owner() {
     let unprivileged = ImageConfig::new(&[], &[], "999");
     for user in ["0", "root", "0:0", "root:root", ""] {
@@ -436,4 +452,30 @@ fn committing_removes_the_file_of_a_secret_named_after_the_separator_with_the_re
         "new-test-value"
     );
     assert_eq!(listed(dir.path()), ["TOKEN"]);
+}
+
+#[test]
+fn a_removal_that_fails_after_the_renames_fails_the_commit_and_names_the_file_that_remains() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("KEY"), "old-test-key");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let commit = sh(
+        &commit_script(&dir.path().to_string_lossy()),
+        &["--", "KEY"],
+        b"",
+        None,
+    );
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(commit.status.code(), Some(67), "{commit:?}");
+    let said = String::from_utf8_lossy(&commit.stderr);
+    assert!(
+        said.lines().last().unwrap_or_default().contains(
+            "the file of the lapsed optional secret KEY could not be removed and remains"
+        ),
+        "{said}"
+    );
+    assert_eq!(listed(dir.path()), ["KEY"]);
 }

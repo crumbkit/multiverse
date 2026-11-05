@@ -12,8 +12,8 @@ use super::{Engine, Settings};
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::containers::{
-    ContainerObjects, ContainerRunner, ContainerStart, ContainerStop, ContainerStopped,
-    ContainersStarted, StartedContainer,
+    ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
+    ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
 use crate::engine::keeper::{AppEnd, KeeperCommand, Kept, Launch};
@@ -377,6 +377,16 @@ struct FakeContainers {
     start_ending: RefCell<Option<StartEnding>>,
     /// The processes whose containers each stop was asked for, in order.
     stop_order: RefCell<Vec<String>>,
+    /// How the rewrite of the secret files of each `app/process` container
+    /// ends, after it resolves the process's environment. A container that
+    /// it does not name has no secret files.
+    rewrite_ending: RefCell<BTreeMap<String, Rewritten>>,
+    /// Each `app/process` whose secret files a rewrite was asked for, in
+    /// order.
+    rewrites: RefCell<Vec<String>>,
+    /// The `app/process` containers whose rewrite finds the Docker daemon
+    /// unavailable.
+    rewrite_unreachable: RefCell<BTreeSet<String>>,
 }
 
 /// How a fake container start ends after it creates every container.
@@ -519,6 +529,30 @@ impl ContainerRunner for FakeContainers {
             .collect())
     }
 
+    fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError> {
+        assert_eq!(rewrite.workspace, &workspace());
+        assert!(rewrite.entry.id.is_some());
+        let process = format!("{}/{}", rewrite.app.name, rewrite.entry.process);
+        self.rewrites.borrow_mut().push(process.clone());
+        if self.rewrite_unreachable.borrow().contains(&process) {
+            return Err(PhaseError::Docker {
+                source: DockerError::unavailable("the fake daemon does not answer".to_owned()),
+            });
+        }
+        let Some(ending) = self.rewrite_ending.borrow().get(&process).cloned() else {
+            return Ok(Rewritten::NoFiles);
+        };
+        match rewrite
+            .env
+            .resolve(&rewrite.app.name, &rewrite.entry.process, rewrite.deadline)
+        {
+            Ok(_) => Ok(ending),
+            Err(source) => Ok(Rewritten::Kept {
+                reason: source.to_string(),
+            }),
+        }
+    }
+
     fn stop(
         &self,
         stop: &ContainerStop<'_>,
@@ -552,6 +586,8 @@ impl ContainerRunner for FakeContainers {
 struct Env {
     /// The apps whose environment cannot be resolved.
     failing: BTreeSet<String>,
+    /// The `app/process` processes whose environment cannot be resolved.
+    failing_processes: BTreeSet<String>,
     /// Each `app/process` resolved, in order.
     resolved: RefCell<Vec<String>>,
     /// The apps whose environment the source resolves without any
@@ -567,7 +603,9 @@ impl EnvironmentSource for Env {
         _deadline: Instant,
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
         self.resolved.borrow_mut().push(format!("{app}/{process}"));
-        if self.failing.contains(app.as_str()) {
+        if self.failing.contains(app.as_str())
+            || self.failing_processes.contains(&format!("{app}/{process}"))
+        {
             return Err(EnvironmentError::new(
                 "API_TOKEN".to_owned(),
                 "vault".to_owned(),
@@ -1359,6 +1397,179 @@ fn up_leaves_a_container_that_still_runs_alone_and_starts_only_the_others() {
     );
     assert_eq!(
         world.record().unwrap().state(&key),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn up_rewrites_the_secret_files_of_a_container_that_still_runs_and_leaves_it_running() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+    world.containers.rewrite_ending.borrow_mut().insert(
+        "db/server".to_owned(),
+        Rewritten::Written {
+            files: 2,
+            removed: 0,
+        },
+    );
+    let env = Env::default();
+
+    let report = world.up(&plan, &Selection::All, &env).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::AlreadyRunning);
+    assert_eq!(
+        notes(&report, "db"),
+        [Note::secrets_rewritten(&name("db"), name("server"), 2, 0)]
+    );
+    match &notes(&report, "db")[0] {
+        Note::SecretsRewritten { message, .. } => {
+            assert_eq!(message, "rewrote 2 secret files of db/server");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    assert_eq!(
+        *world.containers.rewrites.borrow(),
+        vec!["db/server".to_owned(), "db/worker".to_owned()]
+    );
+    assert_eq!(*env.resolved.borrow(), vec!["db/server".to_owned()]);
+    assert!(world.containers.stopped.borrow().is_empty());
+    assert_eq!(
+        world
+            .record()
+            .unwrap()
+            .state(&ObjectKey::Container(name("db"), name("server"))),
+        Some(EntryState::Running)
+    );
+}
+
+#[test]
+fn a_secret_rewrite_that_cannot_reach_docker_fails_the_app_without_a_note_for_it() {
+    let world = World::new();
+    let plan = plan(vec![container_app("db"), host_app("api", None, &["db"])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .insert("db/server".to_owned());
+    world
+        .containers
+        .rewrite_unreachable
+        .borrow_mut()
+        .insert("db/server".to_owned());
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, cause, .. } => {
+            assert_eq!(code, "phase::docker::unavailable");
+            assert_eq!(*cause, Some(crate::record::DockerCause::DaemonUnavailable));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(notes(&report, "db").is_empty());
+    assert_ne!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    assert!(world.containers.stopped.borrow().is_empty());
+}
+
+#[test]
+fn up_replaces_a_running_container_that_cannot_receive_its_secret_files() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+    world
+        .containers
+        .rewrite_ending
+        .borrow_mut()
+        .insert("db/server".to_owned(), Rewritten::Replace);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
+    assert_eq!(
+        world.containers.starts.borrow().last().unwrap(),
+        &vec!["db/server".to_owned()]
+    );
+}
+
+#[test]
+fn a_secret_rewrite_that_fails_keeps_the_container_running_with_a_note_and_rewrites_the_others() {
+    let world = World::new();
+    let mut db = container_app("db");
+    db.processes
+        .push(ProcessPlan::new(name("worker"), Vec::new()));
+    let plan = plan(vec![db, host_app("api", None, &["db"])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world
+        .containers
+        .running
+        .borrow_mut()
+        .extend(["db/server".to_owned(), "db/worker".to_owned()]);
+    for process in ["db/server", "db/worker"] {
+        world.containers.rewrite_ending.borrow_mut().insert(
+            process.to_owned(),
+            Rewritten::Written {
+                files: 1,
+                removed: 1,
+            },
+        );
+    }
+    let locked = Env {
+        failing_processes: BTreeSet::from(["db/server".to_owned()]),
+        ..Env::default()
+    };
+
+    let report = world.up(&plan, &Selection::All, &locked).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::AlreadyRunning);
+    assert_eq!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(
+        *world.containers.rewrites.borrow(),
+        vec!["db/server".to_owned(), "db/worker".to_owned()]
+    );
+    let messages: Vec<&str> = notes(&report, "db")
+        .iter()
+        .map(|note| match note {
+            Note::SecretsKept { message, .. } | Note::SecretsRewritten { message, .. } => {
+                message.as_str()
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "db/server still runs with its earlier secret files: vault could not supply the variable API_TOKEN",
+            "rewrote 1 secret file of db/worker and removed 1 file of lapsed optional secrets",
+        ]
+    );
+    assert!(messages.iter().all(|message| !message.contains(SECRET)));
+    assert_eq!(world.containers.starts.borrow().len(), 1);
+    assert!(world.containers.stopped.borrow().is_empty());
+    assert_eq!(
+        world
+            .record()
+            .unwrap()
+            .state(&ObjectKey::Container(name("db"), name("server"))),
         Some(EntryState::Running)
     );
 }
