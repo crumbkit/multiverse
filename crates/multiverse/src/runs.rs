@@ -49,7 +49,8 @@ use crate::process::{self, Holder, Launch, Launched};
 use crate::record::Workspace;
 use crate::redacted::Redacted;
 use crate::run_files::{
-    RUN_VERSION, RunDir, RunHost, RunRecord, owns_group, read_json, remove_if_present, write_json,
+    Ownership, RUN_VERSION, RunDir, RunHost, RunRecord, ownership, read_json, remove_if_present,
+    write_json,
 };
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
@@ -283,7 +284,8 @@ pub enum DownOutcome {
     UnknownProcess(String),
 }
 
-/// A process whose group outlived SIGKILL and [`KILL_WAIT`].
+/// A process whose group outlived SIGKILL and [`KILL_WAIT`], or whose
+/// group `down` left alone because it could not prove the group its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Unstoppable {
@@ -291,6 +293,10 @@ pub struct Unstoppable {
     pub process: String,
     /// Its process group's id.
     pub pid: u32,
+    /// Whether `down` left the group without signalling it, because the
+    /// process that led it has ended and nothing proves that the members
+    /// left in the group are the ones `up` started.
+    pub unverified: bool,
 }
 
 /// How a wait for readiness ended.
@@ -558,14 +564,27 @@ impl Runs {
         Ok(running)
     }
 
-    /// Reports whether the process group that the run record of `process`
-    /// names is the one that `up` started and still has a member, as
-    /// [`owns_group`] decides.
-    fn group_lives(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+    /// Returns whether the process group that the run record of `process`
+    /// names is the one that `up` started, as [`ownership`] decides, or
+    /// `None` when no record names it.
+    fn group_ownership(
+        &self,
+        name: &WorkspaceName,
+        process: &str,
+    ) -> Result<Option<Ownership>, Error> {
         match self.record(name, process)? {
-            Some(record) => owns_group(&record),
-            None => Ok(false),
+            Some(record) => Ok(Some(ownership(&record, &self.file(name, process, "exit"))?)),
+            None => Ok(None),
         }
+    }
+
+    /// Reports whether the process group that the run record of `process`
+    /// names may still be the one that `up` started, so that mxv starts
+    /// nothing in its place.
+    fn group_lives(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
+        Ok(self
+            .group_ownership(name, process)?
+            .is_some_and(Ownership::may_live))
     }
 
     /// Returns the manifest's processes and containers in start order,
@@ -1052,16 +1071,25 @@ impl Runs {
                 )));
                 continue;
             }
-            if let Some(record) = self.record(&workspace.name, process)?
-                && owns_group(&record)?
-                && !self.stop_group(record.pid)
-            {
-                let pid = record.pid;
-                results.push(Err(Unstoppable {
-                    process: process.clone(),
-                    pid,
-                }));
-                continue;
+            if let Some(record) = self.record(&workspace.name, process)? {
+                let exit_file = self.file(&workspace.name, process, "exit");
+                let owned = ownership(&record, &exit_file)?;
+                let stopped = match owned {
+                    Ownership::Ours => self.stop_group(record.pid),
+                    // `down` keeps the record of a group it cannot prove
+                    // its own and reports the group, which it never
+                    // signals.
+                    Ownership::Unverified => false,
+                    Ownership::Gone => true,
+                };
+                if !stopped {
+                    results.push(Err(Unstoppable {
+                        process: process.clone(),
+                        pid: record.pid,
+                        unverified: owned == Ownership::Unverified,
+                    }));
+                    continue;
+                }
             }
             remove_if_present(&self.file(&workspace.name, process, "json"))?;
             remove_if_present(&self.file(&workspace.name, process, "exit"))?;
@@ -1102,7 +1130,7 @@ impl Runs {
         let mut live = BTreeSet::new();
         for process in self.recorded(&workspace.name)? {
             if let Some(record) = self.record(&workspace.name, &process)?
-                && owns_group(&record)?
+                && ownership(&record, &self.file(&workspace.name, &process, "exit"))?.may_live()
             {
                 live.extend(record.ports.values().copied());
             }
@@ -1588,6 +1616,13 @@ const fn container_state(state: ContainerState) -> ProcessState {
         ContainerState::Created => ProcessState::Created,
         ContainerState::Exited(code) => ProcessState::Exited {
             code: Some(code),
+            signal: None,
+            reason: None,
+        },
+        // A status that docker printed and phase does not know, such as
+        // `removing`, gives no exit code.
+        ContainerState::Unknown => ProcessState::Exited {
+            code: None,
             signal: None,
             reason: None,
         },

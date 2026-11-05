@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::clock::{POLL_INTERVAL, deadline_in, now, pause};
 use crate::engine::containers::{ContainerRunner, ContainerStart};
 use crate::engine::host::{Holder, HostRunner, is_gone};
 use crate::engine::keeper::{KeeperArgs, KeeperCommand, KeeperSpec, Launch};
@@ -54,7 +54,7 @@ use crate::phase::UpDeadlines;
 use crate::plan::probe::{LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
-use crate::record::process::Identity;
+use crate::record::process::{Identity, vouched};
 use crate::record::run::{
     ContainerEntry, EntryState, HostProcess, Launching, Listen, ObjectKey, PlanHash, RunRecord,
     Started,
@@ -268,6 +268,10 @@ enum Recorded {
     Ours,
     /// A keeper or process of it that phase tried to stop is still there.
     Left,
+    /// The process that led the group `0` has ended and the group still
+    /// has members, which nothing proves are phase's own, so phase leaves
+    /// the group and starts nothing in its place.
+    Unverified(u32),
     /// phase may not read a recorded keeper or process of it.
     Unknown,
 }
@@ -504,6 +508,10 @@ impl Op<'_, '_> {
             Ok(Recorded::Nothing) => {}
             Ok(Recorded::Ours) => return Ok(Step::AlreadyRunning),
             Ok(Recorded::Left) => return Ok(Step::Left),
+            Ok(Recorded::Unverified(group)) => {
+                notes.push(Note::group_unverified(process.name.clone(), group));
+                return Ok(Step::Left);
+            }
             Ok(Recorded::Unknown) => {
                 return Ok(Step::Errored(PhaseError::ProcessTable {
                     message: format!(
@@ -613,7 +621,9 @@ impl Op<'_, '_> {
         let (keeper, entry) = record.host_pair(&app.name, &process.name);
         let mut ours = false;
         let mut left = false;
+        let mut unverified = None;
         let mut keeper_runs = false;
+        let mut keeper_identity = Identity::Gone;
         for (is_keeper, entry) in [(true, keeper), (false, entry)] {
             let Some(entry) = entry else {
                 continue;
@@ -621,12 +631,22 @@ impl Op<'_, '_> {
             let Some(host) = entry.host.as_ref().filter(|_| entry.live()) else {
                 continue;
             };
-            match self.engine.host.identity(host)? {
+            let mut identity = self.engine.host.identity(host)?;
+            if is_keeper {
+                keeper_identity = identity;
+            } else {
+                identity = vouched(keeper_identity, identity);
+            }
+            match identity {
                 Identity::Ours if entry.state == EntryState::Stopping => left = true,
                 Identity::Ours => {
                     ours = true;
                     keeper_runs |= is_keeper;
                 }
+                // A group whose leader has gone and that nothing proves
+                // ours may be a stranger's, so `up` starts nothing in its
+                // place and reports it as left.
+                Identity::LeaderGone => unverified = Some(host.group),
                 Identity::Unknown => return Ok(Recorded::Unknown),
                 Identity::Reused | Identity::Gone => {}
             }
@@ -635,6 +655,8 @@ impl Op<'_, '_> {
         // entry reads `stopping`, so the process counts as running.
         Ok(if keeper_runs {
             Recorded::Ours
+        } else if let Some(group) = unverified {
+            Recorded::Unverified(group)
         } else if left {
             Recorded::Left
         } else if ours {
@@ -818,13 +840,19 @@ impl Op<'_, '_> {
         let kill_wait = self.engine.settings.kill_wait;
         match begun {
             Begun::Host(target) => {
-                let deadline = now() + target.stop.grace + kill_wait * 2;
+                let deadline = deadline_in(
+                    target
+                        .stop
+                        .grace
+                        .saturating_add(kill_wait.saturating_mul(2)),
+                );
                 let stopped =
                     stop::stop_target(self.engine, &mut self.journal, target, deadline, notes)?;
                 Ok(stopped == Stopped::Stopped)
             }
             Begun::Containers(app) => {
-                let deadline = now() + DEFAULT_STOP_GRACE + kill_wait * 2;
+                let deadline =
+                    deadline_in(DEFAULT_STOP_GRACE.saturating_add(kill_wait.saturating_mul(2)));
                 let containers = self.recorded_containers(app, None);
                 stop::stop_containers(self.engine, &mut self.journal, app, &containers, deadline)
             }

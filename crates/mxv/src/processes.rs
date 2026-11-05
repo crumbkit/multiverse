@@ -347,6 +347,7 @@ fn stop_every(
             return Err(RunFailure::Unstoppable {
                 process: unstoppable.process,
                 pid: unstoppable.pid,
+                unverified: unstoppable.unverified,
             }
             .into());
         }
@@ -378,6 +379,7 @@ pub(crate) fn down(
             Err(unstoppable) => Err(RunFailure::Unstoppable {
                 process: unstoppable.process.clone(),
                 pid: unstoppable.pid,
+                unverified: unstoppable.unverified,
             }),
         });
     }

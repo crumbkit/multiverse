@@ -178,12 +178,17 @@ pub(crate) enum RunFailure {
         /// The last lines of its log.
         tail: LogTail,
     },
-    /// A process group outlived SIGKILL.
+    /// A process group outlived SIGKILL, or `down` left it alone because
+    /// it could not prove the group its own.
     Unstoppable {
         /// The process.
         process: String,
         /// Its process group's id.
         pid: u32,
+        /// Whether `down` left the group without signalling it, because
+        /// the process that led it has ended and nothing proves that the
+        /// members left in it are the ones `up` started.
+        unverified: bool,
     },
     /// The workspace has running processes, so `remove` refuses.
     Running {
@@ -447,7 +452,7 @@ impl Failure for RunFailure {
                 Field::new("log", shown(log)),
                 Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
-            Self::Unstoppable { process, pid } => {
+            Self::Unstoppable { process, pid, .. } => {
                 vec![Field::new("process", process), Field::new("pid", *pid)]
             }
             Self::PortTaken {
@@ -591,9 +596,21 @@ impl fmt::Display for RunFailure {
                 formatter,
                 "the process {pid}, which {process} started, listens on {port} (port {number}) and left {process}'s process group, so `mxv down` could not stop it; mxv stopped both"
             ),
-            Self::Unstoppable { process, pid } => write!(
+            Self::Unstoppable {
+                process,
+                pid,
+                unverified: false,
+            } => write!(
                 formatter,
                 "the process group {pid} of {process} still runs after SIGKILL"
+            ),
+            Self::Unstoppable {
+                process,
+                pid,
+                unverified: true,
+            } => write!(
+                formatter,
+                "the process that led the process group {pid} of {process} has ended and the group still has members, but mxv cannot prove they are the ones it started, so `mxv down` did not signal them and kept the record"
             ),
             Self::PortTaken {
                 workspace,

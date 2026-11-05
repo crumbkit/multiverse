@@ -81,6 +81,10 @@ pub enum WorkspaceState {
     PartlyRunning,
     /// No process is running.
     Stopped,
+    /// phase cannot tell what the processes it cannot read are doing, and
+    /// they decide the workspace's state: every other process is running,
+    /// or none of the others runs.
+    Unknown,
 }
 
 /// The status of one process.
@@ -234,6 +238,15 @@ pub enum UnknownReason {
     /// Docker did not answer, so phase cannot tell whether the container
     /// runs.
     DockerUnavailable,
+    /// Docker reported a container status that phase does not know, such
+    /// as `removing`.
+    UnrecognisedState,
+    /// The recorded process has ended and left members in its process
+    /// group, and nothing proves that the group is still phase's own: the
+    /// group may have emptied and its id passed to another program's
+    /// group. A keeper that phase proved its own vouches for its app's
+    /// group, and then the process is not unknown.
+    LeaderGone,
 }
 
 impl ProcessState {

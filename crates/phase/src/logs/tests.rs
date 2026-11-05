@@ -113,6 +113,11 @@ fn a_tail_returns_the_last_lines_and_drops_a_line_cut_by_its_bound() {
     let long = "x".repeat(usize::try_from(MOST_TAIL_BYTES).unwrap());
     write_file(&path, &format!("{long}\nlast\n"));
     assert_eq!(tail(&path, 10), ["last"]);
+    // A read whose bound falls just after a newline starts a whole line,
+    // which it keeps.
+    let whole = "y".repeat(usize::try_from(MOST_TAIL_BYTES).unwrap() - "\nlast\n".len());
+    write_file(&path, &format!("first\n{whole}\nlast\n"));
+    assert_eq!(tail(&path, 10), [whole.as_str(), "last"]);
 }
 
 #[test]

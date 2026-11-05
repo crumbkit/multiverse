@@ -460,6 +460,29 @@ When phase may not read the process that has a recorded pid, as inside an
 agent's sandbox, `sweep` reports the process as unknown, leaves it alone,
 and keeps its entry unchanged.
 
+A process that leads its group can end and leave members in the group.
+The group keeps its id while it has a member, but once the last member
+ends, another program can start a group with the same id. So when no
+process has the recorded pid and a group with that id still has a member,
+phase counts the group as its own only when something proves it:
+
+- The keeper that started the app is still the one phase started. It
+  recorded the app's group and still supervises it, so it vouches for it.
+- Within one stop, phase already found the leader to be its own before it
+  ended. The group cannot have emptied since, because phase saw the leader
+  in it.
+
+Without that proof, phase never signals the group. `down` and `restart`
+keep the entry, report the app as left, and add a note that names the
+group. `up` starts nothing in its place and reports it the same way.
+`sweep` reports the process as unknown, and `status` shows it as `unknown`
+with the reason `leader-gone`.
+
+A member of a group that has ended and that its parent has not reaped yet,
+a zombie, runs nothing, and no signal ends it. A group whose only members
+are zombies counts as gone. macOS refuses a signal to such a group with
+`EPERM`, which phase treats as nothing left to signal.
+
 Each volume in the record has a lifetime. A `run` volume, such as a scratch
 cache, belongs to one run, and `sweep` removes it. A `workspace` volume
 holds data that outlives a run, such as a database's, and `sweep` leaves
@@ -500,7 +523,11 @@ another operation holds the lock drops its record notes. A process that
 phase cannot prove is its own, such as one it may not read or an entry
 with a group of 1, which `sweep` leaves until someone removes it, shows
 as `unknown` with its reason. A container shows as `unknown` when Docker
-does not answer, and never as stopped. With the workspace's plan, the rows
+does not answer or reports a state that phase does not know, such as
+`removing`, and never as stopped. A container that the record plans and
+Docker has not started shows as `starting`. The workspace's state comes
+from the rows that are not unknown. It is `unknown` when the unknown rows
+decide it: every other row is running, or none of the others runs. With the workspace's plan, the rows
 follow the plan and carry its sources and addresses, and record entries
 that the plan lacks still show. Without a plan, as when the manifest is
 invalid, the rows are the record's live entries and leave the plan's
@@ -747,7 +774,8 @@ and redesigns are the evidence for each one.
   exits 0, and the processes that depend on it wait for that. It runs on
   every `up` unless it declares `once = true`.
 - Ctrl-C during a foreground `up` stops what that `up` started. Status
-  shows each workspace as starting, running, partly running or stopped.
+  shows each workspace as starting, running, partly running, stopped, or
+  unknown when processes phase cannot read decide which of those it is.
 
 ### Restarts and expiring credentials
 

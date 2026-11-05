@@ -214,6 +214,64 @@ fn a_process_that_phase_may_not_read_is_unknown() {
 }
 
 #[test]
+fn a_group_whose_leader_has_gone_is_unknown_unless_its_keeper_runs() {
+    let state = tempfile::tempdir().unwrap();
+    let processes = FakeProcesses::default()
+        .with(100, Start::At(1), None)
+        .with_leaderless(200, None);
+
+    write_record(
+        state.path(),
+        &host_record(None, Some((EntryState::Running, host_at(200, 2)))),
+    );
+    assert_eq!(
+        only_state(state.path(), &processes),
+        ProcessState::unknown(UnknownReason::LeaderGone)
+    );
+    let status = read(state.path(), None, &processes, &Unreachable);
+    assert_eq!(status.state, WorkspaceState::Unknown);
+    assert_eq!(status.rows[0].handle, Some(Handle::pid(200, 2)));
+
+    write_record(
+        state.path(),
+        &host_record(
+            Some((EntryState::Running, host_at(100, 1))),
+            Some((EntryState::Running, host_at(200, 2))),
+        ),
+    );
+    assert_eq!(only_state(state.path(), &processes), ProcessState::Running);
+}
+
+#[test]
+fn a_workspace_is_unknown_only_when_its_unknown_processes_decide_its_state() {
+    let state = tempfile::tempdir().unwrap();
+    let processes =
+        FakeProcesses::default()
+            .with(200, Start::At(2), None)
+            .with(4242, Start::Unreadable, None);
+    let mut record = host_record(None, Some((EntryState::Running, host_at(4242, 2))));
+    let other = empty_record().host_process(&app("web"), &process("server"));
+    record.keepers.extend(other.keepers);
+    record.processes.extend(other.processes);
+    write_record(state.path(), &record);
+
+    // The other process has no record of a start, so it is stopped, and
+    // the unknown one decides whether anything runs.
+    assert_eq!(
+        read(state.path(), None, &processes, &Unreachable).state,
+        WorkspaceState::Unknown
+    );
+
+    record.processes[1].state = EntryState::Running;
+    record.processes[1].host = Some(host_at(200, 2));
+    write_record(state.path(), &record);
+    assert_eq!(
+        read(state.path(), None, &processes, &Unreachable).state,
+        WorkspaceState::Unknown
+    );
+}
+
+#[test]
 fn a_running_keeper_makes_its_process_starting_before_its_first_start_and_restarting_after() {
     let state = tempfile::tempdir().unwrap();
     let processes = FakeProcesses::default().with(100, Start::At(1), None);
@@ -348,6 +406,40 @@ fn a_container_state_comes_from_docker() {
     assert_eq!(
         container_state(state.path(), &FakeDocker::default()),
         ProcessState::Stopped
+    );
+}
+
+#[test]
+fn a_planned_container_that_docker_has_not_started_is_starting() {
+    let state = tempfile::tempdir().unwrap();
+    container_record(state.path(), EntryState::Planned);
+    let id = container_id();
+    let created = FakeDocker::default()
+        .with(DockerKind::Container, "db-server", id.as_str())
+        .in_state(id.as_str(), ContainerState::Created);
+
+    assert_eq!(
+        container_state(state.path(), &FakeDocker::default()),
+        ProcessState::Starting
+    );
+    assert_eq!(
+        container_state(state.path(), &created),
+        ProcessState::Starting
+    );
+}
+
+#[test]
+fn a_container_in_a_state_that_phase_does_not_know_is_unknown() {
+    let state = tempfile::tempdir().unwrap();
+    container_record(state.path(), EntryState::Running);
+    let id = container_id();
+    let removing = FakeDocker::default()
+        .with(DockerKind::Container, "db-server", id.as_str())
+        .in_state(id.as_str(), ContainerState::Unknown);
+
+    assert_eq!(
+        container_state(state.path(), &removing),
+        ProcessState::unknown(UnknownReason::UnrecognisedState)
     );
 }
 

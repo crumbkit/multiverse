@@ -53,17 +53,25 @@ pub enum ContainerState {
     Created,
     /// The container has stopped, with the exit code that docker reports.
     Exited(i32),
+    /// docker printed a status that phase does not know, such as
+    /// `removing`, or an exit code that is not a number, so phase cannot
+    /// tell whether the container runs.
+    Unknown,
 }
 
 impl ContainerState {
-    /// Returns the state that docker prints as `<status> <exit code>`.
+    /// Returns the state that docker prints as `<status> <exit code>`. A
+    /// `dead` container is one that docker failed to remove after it
+    /// stopped, so it has exited.
     pub(crate) fn parse(printed: &str) -> Self {
-        let printed = printed.trim();
-        let (status, code) = printed.split_once(' ').unwrap_or((printed, "0"));
-        match status {
-            "running" | "paused" | "restarting" => Self::Running,
-            "created" => Self::Created,
-            _ => Self::Exited(code.trim().parse().unwrap_or_default()),
+        let mut fields = printed.split_whitespace();
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some("running" | "paused" | "restarting"), _, None) => Self::Running,
+            (Some("created"), _, None) => Self::Created,
+            (Some("exited" | "dead"), Some(code), None) => {
+                code.parse().map_or(Self::Unknown, Self::Exited)
+            }
+            _ => Self::Unknown,
         }
     }
 }

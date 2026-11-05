@@ -153,6 +153,10 @@ fn stop_host(
             notes.push(Note::not_ours(target.process.clone()));
             Ok(Stopped::Left)
         }
+        HostStopped::GroupUnverified { group } => {
+            notes.push(Note::group_unverified(target.process.clone(), group));
+            Ok(Stopped::Left)
+        }
         HostStopped::Unstoppable { group } => {
             notes.push(Note::unstoppable(target.process.clone(), group));
             Ok(Stopped::Left)
@@ -204,8 +208,13 @@ pub(super) fn running_targets(
             continue;
         };
         let mut ours = false;
+        // A group whose leader has gone is a target too, so the stop
+        // decides whether anything proves it ours and notes it when not.
         for host in [&target.keeper, &target.host].into_iter().flatten() {
-            ours |= engine.host.identity(host)? == Identity::Ours;
+            ours |= matches!(
+                engine.host.identity(host)?,
+                Identity::Ours | Identity::LeaderGone
+            );
         }
         if ours {
             targets.push(target);

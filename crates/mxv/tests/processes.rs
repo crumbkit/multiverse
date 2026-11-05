@@ -628,6 +628,90 @@ fn down_stops_the_children_that_an_exited_process_left_in_its_group() {
     );
 }
 
+/// Returns the pids of the members of the process group `group` that have
+/// not ended, as `ps` lists them.
+fn live_members(group: u64) -> Vec<u64> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pid=,pgid=,stat="])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let pgid: u64 = fields.next()?.parse().ok()?;
+            let stat = fields.next()?;
+            (pgid == group && !stat.starts_with('Z')).then_some(pid)
+        })
+        .collect()
+}
+
+// The wrapper exits, and later a child it left starts the only member that
+// the group keeps. That member started after the wrapper's exit file was
+// written, so nothing proves that the group is the one `up` started:
+// another program's group could have taken the id. `down` must signal
+// nothing, keep the record and report the group.
+#[test]
+fn down_leaves_a_group_whose_members_all_started_after_its_process_exited_and_reports_it() {
+    let setup = Setup::new();
+    let late = setup.dir.path().join("late.pid");
+    setup.workspace(
+        "triage",
+        &format!(
+            "[processes.wrapper]\nargv = [\"sh\", \"-c\", \"(sleep 2; sleep 60 & echo $! > \\\"$0.tmp\\\"; mv \\\"$0.tmp\\\" \\\"$0\\\") & sleep 1; exit 0\", \"{}\"]\n",
+            late.display()
+        ),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let pid = row(&document, "wrapper")["pid"].as_u64().unwrap();
+    let mut member = None;
+    for () in waiting() {
+        if let Ok(text) = fs::read_to_string(&late) {
+            let late: u64 = text.trim().parse().unwrap();
+            if live_members(pid) == [late] {
+                member = Some(late);
+                break;
+            }
+        }
+    }
+    let member = member.expect("the late member should be the group's only member");
+
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{document}");
+    let failure = &document["failures"][0];
+    assert_eq!(failure["code"], "mxv::process::unstoppable", "{document}");
+    assert_eq!(failure["fields"]["pid"], pid, "{document}");
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot prove"),
+        "{document}"
+    );
+    assert_eq!(live_members(pid), [member], "down signalled the group");
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(row(&status, "wrapper")["group_alive"], true, "{status}");
+
+    let killed = Command::new("kill")
+        .args(["-KILL", &member.to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(killed.status.success());
+    for () in waiting() {
+        if !group_exists(pid) {
+            break;
+        }
+    }
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+}
+
 #[test]
 fn a_port_held_by_a_leftover_child_of_the_workspace_names_that_process_and_not_an_outside_program()
 {

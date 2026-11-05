@@ -283,6 +283,11 @@ fn docker_states_parse_into_running_created_or_exited_with_dockers_code() {
         ContainerState::Exited(137)
     );
     assert_eq!(ContainerState::parse("dead 3"), ContainerState::Exited(3));
+    assert_eq!(ContainerState::parse("removing 0"), ContainerState::Unknown);
+    assert_eq!(ContainerState::parse("exited"), ContainerState::Unknown);
+    assert_eq!(ContainerState::parse("exited x"), ContainerState::Unknown);
+    assert_eq!(ContainerState::parse("frozen 0"), ContainerState::Unknown);
+    assert_eq!(ContainerState::parse(""), ContainerState::Unknown);
 }
 
 #[test]

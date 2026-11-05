@@ -14,12 +14,12 @@
 use std::fmt;
 use std::io;
 
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::process::{Pid, Signal};
 
 use crate::clock::{POLL_INTERVAL, now, pause};
-use crate::engine::host::{HostStop, HostStopped, is_gone};
+use crate::engine::host::{HostStop, HostStopped};
 use crate::error::PhaseError;
 use crate::record::run::HostProcess;
 
@@ -460,14 +460,151 @@ pub fn signal_pid(pid: ProcessId, signal: Signal) -> io::Result<()> {
     rustix::process::kill_process(pid.0, signal).map_err(io::Error::from)
 }
 
-/// Reports whether the process group `group` still has a member. A group
-/// that the caller may not signal still exists.
+/// Reports whether the process group `group` still has a member that has
+/// not ended. A group that the caller may not signal still exists. A
+/// member that has ended and that its parent has not reaped yet, a zombie,
+/// runs nothing and no signal ends it, so a group of only such members
+/// counts as gone. When the members cannot be listed, a group that
+/// `kill(2)` finds counts as existing.
 #[must_use]
 pub fn group_exists(group: ProcessGroup) -> bool {
     match rustix::process::test_kill_process_group(group.0) {
-        Ok(()) => true,
-        Err(error) => error != rustix::io::Errno::SRCH,
+        Err(error) if error == rustix::io::Errno::SRCH => false,
+        Ok(()) | Err(_) => live_members(group).is_none_or(|members| !members.is_empty()),
     }
+}
+
+/// A member of a process group that has not ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Member {
+    /// The member's pid.
+    pub pid: u32,
+    /// Its start, as [`raw_start`] gives it.
+    pub start: RawStart,
+}
+
+/// Returns the members of `group` that have not ended and that phase may
+/// read, or `None` when this system gives no way to list them or the
+/// process table cannot be read. A member of another user that phase may
+/// not read is left out.
+#[must_use]
+pub fn live_members(group: ProcessGroup) -> Option<Vec<Member>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut members = Vec::new();
+        for entry in std::fs::read_dir("/proc").ok()? {
+            let Some(pid) = entry
+                .ok()
+                .and_then(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if let ProcRead::Text(text) = read_proc(&format!("/proc/{pid}/stat")).ok()? {
+                members.extend(stat_member(&text, pid, group.get()));
+            }
+        }
+        Some(members)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut members = Vec::new();
+        for pid in darwin::all_processes().ok()? {
+            match darwin::bsd_info(pid) {
+                Ok(info) => {
+                    members.extend(bsd_info_member(&info, pid.cast_unsigned(), group.get()));
+                }
+                Err(failure) if matches!(failure.errno(), Some(libc::ESRCH | libc::EPERM)) => {}
+                Err(_) => return None,
+            }
+        }
+        Some(members)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = group;
+        None
+    }
+}
+
+/// Returns the member `pid` of `group` that the text of its
+/// `/proc/<pid>/stat` describes, or `None` when it is in another group or
+/// has ended: its state, field 3, is `Z` for a zombie or `X` for a dead
+/// process.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn stat_member(text: &str, pid: u32, group: u32) -> Option<Member> {
+    let state: char = stat_field(text, 3)?;
+    if stat_field::<u32>(text, 5)? != group || matches!(state, 'Z' | 'X') {
+        return None;
+    }
+    let start = stat_field(text, 22).map_or(RawStart::Unreadable, RawStart::Ticks);
+    Some(Member { pid, start })
+}
+
+/// `SZOMB` of `<sys/proc.h>`: the `pbi_status` of a zombie.
+#[cfg(any(target_os = "macos", test))]
+const SZOMB: i32 = 5;
+
+/// Returns the member `pid` of `group` that `info`, the bytes of its
+/// `struct proc_bsdinfo`, describes, or `None` when it is in another group
+/// or is a zombie: `pbi_status` at offset 4 is `SZOMB`, and `pbi_pgid` is
+/// at offset 100.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn bsd_info_member(info: &[u8], pid: u32, group: u32) -> Option<Member> {
+    let status = read_i32(info, 4)?;
+    if read_i32(info, 100)?.cast_unsigned() != group || status == SZOMB {
+        return None;
+    }
+    Some(Member {
+        pid,
+        start: bsd_info_since(info)?,
+    })
+}
+
+/// Returns when a process whose start is `start` started, or `None` when
+/// phase cannot tell. On macOS the start counts from the epoch. On Linux it
+/// counts in clock ticks from the boot, whose time is the current time less
+/// the uptime of `/proc/uptime`, so the result can be off by a few
+/// hundredths of a second.
+#[must_use]
+pub fn started_at(start: RawStart) -> Option<SystemTime> {
+    match start {
+        RawStart::Since {
+            seconds,
+            microseconds,
+        } => UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))?
+            .checked_add(Duration::from_micros(microseconds)),
+        RawStart::Ticks(ticks) => {
+            let since_boot = ticks_to_micros(ticks, clock_ticks_per_second())?;
+            boot_time()?.checked_add(Duration::from_micros(since_boot))
+        }
+        RawStart::Absent | RawStart::Unreadable => None,
+    }
+}
+
+/// Returns when this machine booted, from `/proc/uptime`, or `None` off
+/// Linux.
+fn boot_time() -> Option<SystemTime> {
+    #[cfg(target_os = "linux")]
+    {
+        let ProcRead::Text(text) = read_proc("/proc/uptime").ok()? else {
+            return None;
+        };
+        SystemTime::now().checked_sub(uptime(&text)?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Returns the uptime in the first field of the text of `/proc/uptime`,
+/// such as `12345.67 54321.00`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn uptime(text: &str) -> Option<Duration> {
+    let seconds: f64 = text.split_whitespace().next()?.parse().ok()?;
+    Duration::try_from_secs_f64(seconds).ok()
 }
 
 /// Reaps `pid` when it is an ended child of this process, because an
@@ -559,6 +696,19 @@ impl Processes for System {
         match sent {
             Ok(()) => Ok(()),
             Err(error) if error == rustix::io::Errno::SRCH => Ok(()),
+            // macOS refuses a signal to a group whose members have all
+            // ended and wait to be reaped, with EPERM. Nothing in such a
+            // group runs, so the signal has nothing left to do.
+            Err(error)
+                if error == rustix::io::Errno::PERM
+                    && host.group == host.pid
+                    && ProcessGroup::new(host.group)
+                        .ok()
+                        .and_then(live_members)
+                        .is_some_and(|members| members.is_empty()) =>
+            {
+                Ok(())
+            }
             Err(error) => Err(PhaseError::ProcessTable {
                 message: format!(
                     "cannot send {signal:?} to the process {}: {error}",
@@ -631,37 +781,15 @@ const fn boot_id() -> Result<Option<String>, PhaseError> {
 
 /// Returns when a process whose recorded start is `started_at_us`
 /// started, in milliseconds since the Unix epoch, or `None` when phase
-/// cannot tell. macOS records the start since the epoch. Linux records it
-/// since boot, and the boot's time in `/proc/stat` is in whole seconds, so
-/// the result can be up to a second early.
+/// cannot tell, as [`started_at`] says.
 pub(crate) fn started_at_ms(started_at_us: u64) -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        Some(started_at_us / 1000)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let ProcRead::Text(text) = read_proc("/proc/stat").ok()? else {
-            return None;
-        };
-        boot_seconds(&text)?
-            .checked_mul(1000)?
-            .checked_add(started_at_us / 1000)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = started_at_us;
-        None
-    }
-}
-
-/// Returns the time of the boot, in seconds since the Unix epoch, from
-/// the `btime` line of `/proc/stat`.
-#[cfg(any(target_os = "linux", test))]
-pub(crate) fn boot_seconds(stat: &str) -> Option<u64> {
-    stat.lines()
-        .find_map(|line| line.strip_prefix("btime "))
-        .and_then(|seconds| seconds.trim().parse().ok())
+    let since = Duration::from_micros(started_at_us);
+    let started = if cfg!(target_os = "macos") {
+        UNIX_EPOCH.checked_add(since)?
+    } else {
+        boot_time()?.checked_add(since)?
+    };
+    u64::try_from(started.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
 /// What a recorded host process is now.
@@ -674,14 +802,23 @@ pub(crate) enum Identity {
     /// phase may not read the process that has the pid, so it cannot tell
     /// whether it is the recorded one.
     Unknown,
+    /// The recorded process led its group and has gone, and a group with
+    /// its id still has a live member. That group may be the one phase
+    /// started, or a stranger's: another program may have taken the free
+    /// pid and made it the leader of a new group with `setsid`. phase
+    /// treats it as its own only when something proves it, such as its own
+    /// keeper still running, or an earlier look in the same stop that found
+    /// the leader.
+    LeaderGone,
     /// Nothing of the recorded process is left.
     Gone,
 }
 
 /// Returns what the recorded process `host` is now, as `processes` shows
-/// it. A process whose pid has no process may have left members in its
-/// group, and those are still ours, because the system never gives a new
-/// process the id of a group that has members. It reaps nothing.
+/// it. A leader whose pid has no process may have left members in its
+/// group, and the group is then [`Identity::LeaderGone`], because nothing
+/// here proves that the group was never empty since the leader ended. It
+/// reaps nothing.
 ///
 /// A start time counts from the boot on a system that has a boot id, so a
 /// process recorded in another boot is gone, and a process recorded there
@@ -707,7 +844,7 @@ pub(crate) fn identify(
         Start::At(_) => Identity::Reused,
         Start::Unreadable => Identity::Unknown,
         Start::Absent if host.group == host.pid && processes.group_exists(host.group) => {
-            Identity::Ours
+            Identity::LeaderGone
         }
         Start::Absent => Identity::Gone,
     })
@@ -728,11 +865,15 @@ pub(crate) fn signallable(host: &HostProcess) -> bool {
 /// app's grace and kill wait count from the signal that `stop_host` sends
 /// it, so an app whose keeper ends late still has its whole grace, up to
 /// `deadline`. After `KILL`, it waits the kill wait even when `deadline` has
-/// passed, so it returns by `deadline` plus the kill wait. A
-/// recorded pid or group of 0 or 1 makes it signal nothing and report
-/// [`HostStopped::NotOurs`]. It
-/// reaps each of them when it is an ended child of this process, so a
-/// keeper that this process started is not kept as a zombie.
+/// passed, so it returns by `deadline` plus the kill wait. A wait that does
+/// not fit in an [`Instant`] ends at `deadline`.
+///
+/// A recorded pid or group of 0 or 1 makes it signal nothing and report
+/// [`HostStopped::NotOurs`]. A group whose leader has gone counts as ours
+/// only when [`vouched`] or [`settle`] proves it. Otherwise `stop_host`
+/// signals nothing and reports [`HostStopped::GroupUnverified`]. It reaps
+/// each process when it is an ended child of this process, so a keeper
+/// that this process started is not kept as a zombie.
 ///
 /// # Errors
 ///
@@ -760,33 +901,30 @@ pub(crate) fn stop_host(
         return Ok(HostStopped::NotOurs);
     }
     let keeper = look(stop.keeper)?;
-    let app = look(stop.app)?;
+    let app = vouched(keeper, look(stop.app)?);
     if keeper != Identity::Ours && app != Identity::Ours {
-        return Ok(if keeper == Identity::Unknown || app == Identity::Unknown {
-            HostStopped::NotOurs
-        } else {
-            HostStopped::AlreadyGone
-        });
+        return Ok(ended(stop, keeper, app).unwrap_or(HostStopped::AlreadyGone));
     }
     let signal = stop.signal.signal();
     let mut app_signalled = false;
     if let (Some(host), Identity::Ours) = (stop.keeper, keeper) {
         processes.signal(host, Signal::TERM)?;
     }
-    let mut first = (now() + stop.grace + stop.kill_wait).min(deadline);
+    let mut first = after(stop.grace.saturating_add(stop.kill_wait), deadline).min(deadline);
     let (mut keeper, mut app) = (keeper, app);
     loop {
         keeper = settle(keeper, look(stop.keeper)?);
-        app = settle(app, look(stop.app)?);
+        app = settle(app, vouched(keeper, look(stop.app)?));
         if keeper != Identity::Ours && app != Identity::Ours {
-            return Ok(ended(keeper, app));
+            return Ok(ended(stop, keeper, app).unwrap_or(HostStopped::Stopped));
         }
         if keeper != Identity::Ours && !app_signalled {
-            if let Some(host) = stop.app {
+            if let Some(host) = stop.app.filter(|_| app == Identity::Ours) {
                 processes.signal(host, signal)?;
                 // The app has its whole grace from its own signal, so a
                 // keeper that ended late does not shorten it.
-                first = first.max((now() + stop.grace + stop.kill_wait).min(deadline));
+                first = first
+                    .max(after(stop.grace.saturating_add(stop.kill_wait), deadline).min(deadline));
             }
             app_signalled = true;
         }
@@ -800,12 +938,12 @@ pub(crate) fn stop_host(
             processes.signal(host, Signal::KILL)?;
         }
     }
-    let last = now() + stop.kill_wait;
+    let last = after(stop.kill_wait, deadline);
     loop {
         keeper = settle(keeper, look(stop.keeper)?);
-        app = settle(app, look(stop.app)?);
+        app = settle(app, vouched(keeper, look(stop.app)?));
         if keeper != Identity::Ours && app != Identity::Ours {
-            return Ok(ended(keeper, app));
+            return Ok(ended(stop, keeper, app).unwrap_or(HostStopped::Stopped));
         }
         if now() >= last {
             let left = if app == Identity::Ours {
@@ -821,18 +959,46 @@ pub(crate) fn stop_host(
     }
 }
 
-/// Returns what a process that was `before` is now that it reads as
-/// `after`. A process that phase stopped stays stopped, even when its pid
-/// is reused meanwhile.
-const fn settle(before: Identity, after: Identity) -> Identity {
-    if is_gone(before) { before } else { after }
+/// Returns the time `wait` from now, or `deadline` when that does not fit
+/// in an [`Instant`], as for a wait of [`Duration::MAX`].
+fn after(wait: Duration, deadline: Instant) -> Instant {
+    now().checked_add(wait).unwrap_or(deadline)
 }
 
-/// Returns how a stop ended once neither the keeper nor the app is ours.
-fn ended(keeper: Identity, app: Identity) -> HostStopped {
-    if keeper == Identity::Unknown || app == Identity::Unknown {
-        HostStopped::NotOurs
+/// Returns what the app is, given that its keeper is `keeper`. A keeper
+/// that phase proved its own started the app, recorded the app's group,
+/// and reaps the app when it ends, so while the keeper runs, a group of
+/// the app's whose leader has gone is the app's own group.
+pub(crate) fn vouched(keeper: Identity, app: Identity) -> Identity {
+    if keeper == Identity::Ours && app == Identity::LeaderGone {
+        Identity::Ours
     } else {
-        HostStopped::Stopped
+        app
     }
+}
+
+/// Returns what a process that was `before` is now that it reads as
+/// `after`. A process that phase stopped stays stopped, even when its pid
+/// is reused meanwhile. A group whose leader this stop found to be phase's
+/// own stays its own after the leader ends, because a group keeps its id
+/// while it has a member, so no stranger can take the id meanwhile.
+const fn settle(before: Identity, after: Identity) -> Identity {
+    match (before, after) {
+        (Identity::Gone | Identity::Reused, _) => before,
+        (Identity::Ours, Identity::LeaderGone) => Identity::Ours,
+        _ => after,
+    }
+}
+
+/// Returns how a stop ended once neither the keeper nor the app is ours,
+/// or `None` when nothing of either is left. A group whose leader has gone
+/// and that nothing proved ours is reported by its id, and phase never
+/// signalled it.
+fn ended(stop: &HostStop<'_>, keeper: Identity, app: Identity) -> Option<HostStopped> {
+    for (host, identity) in [(stop.app, app), (stop.keeper, keeper)] {
+        if let (Some(host), Identity::LeaderGone) = (host, identity) {
+            return Some(HostStopped::GroupUnverified { group: host.group });
+        }
+    }
+    (keeper == Identity::Unknown || app == Identity::Unknown).then_some(HostStopped::NotOurs)
 }

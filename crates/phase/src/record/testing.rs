@@ -135,6 +135,26 @@ impl Spawned {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Waits up to five seconds for the process, a member of `group`, to
+    /// end, and leaves it unreaped, so that it stays in the group as a
+    /// zombie.
+    pub(crate) fn wait_for_end_unreaped(&self, group: u32) {
+        let group = super::process::ProcessGroup::new(group).unwrap();
+        let deadline = crate::clock::deadline_in(std::time::Duration::from_secs(5));
+        while super::process::live_members(group)
+            .unwrap()
+            .iter()
+            .any(|member| member.pid == self.pid())
+        {
+            assert!(
+                crate::clock::now() < deadline,
+                "the process {} did not end",
+                self.pid()
+            );
+            crate::clock::pause(crate::clock::POLL_INTERVAL);
+        }
+    }
+
     /// Waits for the process to end and reaps it.
     pub(crate) fn wait_for_exit(&mut self) {
         self.child.wait().unwrap();
@@ -171,6 +191,10 @@ pub(crate) struct FakeProcess {
     /// The signal that ends it, or `None` for a process that no signal
     /// ends. `KILL` ends a process that `TERM` ends.
     pub(crate) ends_on: Option<Signal>,
+    /// For a group leader, whether it leaves members in its group when it
+    /// ends, and the signal to the group that ends them, as in
+    /// [`FakeProcesses::leaderless`].
+    pub(crate) leaves: Option<Option<Signal>>,
 }
 
 /// A fake process table.
@@ -182,15 +206,46 @@ pub(crate) struct FakeProcesses {
     pub(crate) boot_id: Option<String>,
     /// Each pid that was signalled, with the signal, in order.
     pub(crate) signals: RefCell<Vec<(u32, Signal)>>,
+    /// The groups whose leader has ended and that still have members, by
+    /// id, with the signal that ends the members, or `None` when no signal
+    /// does.
+    pub(crate) leaderless: RefCell<BTreeMap<u32, Option<Signal>>>,
 }
 
 impl FakeProcesses {
     /// Adds the process `pid`, whose table entry is `start`, which `ends_on`
     /// ends.
     pub(crate) fn with(self, pid: u32, start: Start, ends_on: Option<Signal>) -> Self {
-        self.processes
-            .borrow_mut()
-            .insert(pid, FakeProcess { start, ends_on });
+        self.processes.borrow_mut().insert(
+            pid,
+            FakeProcess {
+                start,
+                ends_on,
+                leaves: None,
+            },
+        );
+        self
+    }
+
+    /// Adds the group leader `pid`, as [`FakeProcesses::with`] does, which
+    /// leaves members in its group when it ends, and `KILL` to the group
+    /// ends them.
+    pub(crate) fn with_leaving(self, pid: u32, start: Start, ends_on: Signal) -> Self {
+        self.processes.borrow_mut().insert(
+            pid,
+            FakeProcess {
+                start,
+                ends_on: Some(ends_on),
+                leaves: Some(Some(Signal::KILL)),
+            },
+        );
+        self
+    }
+
+    /// Adds the group `group`, whose leader has ended and whose members
+    /// `ends_on` ends.
+    pub(crate) fn with_leaderless(self, group: u32, ends_on: Option<Signal>) -> Self {
+        self.leaderless.borrow_mut().insert(group, ends_on);
         self
     }
 }
@@ -210,6 +265,7 @@ impl Processes for FakeProcesses {
 
     fn group_exists(&self, group: u32) -> bool {
         self.processes.borrow().contains_key(&group)
+            || self.leaderless.borrow().contains_key(&group)
     }
 
     fn reap(&self, _pid: u32) {}
@@ -220,8 +276,18 @@ impl Processes for FakeProcesses {
         let ends = processes.get(&host.pid).is_some_and(|found| {
             found.ends_on == Some(signal) || (signal == Signal::KILL && found.ends_on.is_some())
         });
-        if ends {
-            processes.remove(&host.pid);
+        if ends && let Some(ended) = processes.remove(&host.pid) {
+            if let Some(members) = ended.leaves {
+                self.leaderless.borrow_mut().insert(host.pid, members);
+            }
+            return Ok(());
+        }
+        let mut leaderless = self.leaderless.borrow_mut();
+        let members_end = leaderless
+            .get(&host.group)
+            .is_some_and(|ends_on| *ends_on == Some(signal));
+        if host.group == host.pid && members_end {
+            leaderless.remove(&host.group);
         }
         Ok(())
     }

@@ -294,6 +294,75 @@ fn an_app_that_survives_kill_is_unstoppable_and_names_its_group() {
 }
 
 #[test]
+fn a_group_whose_leader_has_gone_and_that_nothing_vouches_for_is_never_signalled() {
+    let processes = FakeProcesses::default().with_leaderless(200, Some(Signal::TERM));
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(&stop(None, Some(&app)), now() + Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::GroupUnverified { group: 200 });
+    assert!(processes.signals.borrow().is_empty());
+}
+
+#[test]
+fn a_keeper_that_is_phases_own_vouches_for_its_apps_group_after_the_leader_has_gone() {
+    let processes = FakeProcesses::default()
+        .with(100, Start::At(1), Some(Signal::TERM))
+        .with_leaderless(200, Some(Signal::TERM));
+    let (keeper, app) = (host_at(100, 1), host_at(200, 2));
+
+    let stopped = processes
+        .stop(
+            &stop(Some(&keeper), Some(&app)),
+            now() + Duration::from_secs(1),
+        )
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Stopped);
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(100, Signal::TERM), (200, Signal::TERM)]
+    );
+}
+
+#[test]
+fn a_group_whose_leader_this_stop_found_its_own_stays_its_own_after_the_leader_ends() {
+    let processes = FakeProcesses::default().with_leaving(200, Start::At(2), Signal::TERM);
+    let app = host_at(200, 2);
+
+    let stopped = processes
+        .stop(&stop(None, Some(&app)), now() + Duration::from_secs(1))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Stopped);
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(200, Signal::TERM), (200, Signal::KILL)]
+    );
+}
+
+#[test]
+fn a_grace_and_kill_wait_too_long_for_an_instant_stop_at_the_deadline_without_panicking() {
+    let processes = FakeProcesses::default().with(200, Start::At(2), None);
+    let app = host_at(200, 2);
+    let endless = app_stop(&app, Duration::MAX, Duration::MAX);
+    let started = now();
+
+    let stopped = processes
+        .stop(&endless, now() + Duration::from_millis(100))
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Unstoppable { group: 200 });
+    assert!(now() - started < Duration::from_secs(5));
+    assert_eq!(
+        *processes.signals.borrow(),
+        vec![(200, Signal::TERM), (200, Signal::KILL)]
+    );
+}
+
+#[test]
 fn stopping_leaves_a_process_that_phase_may_not_read_and_reports_it_as_not_ours() {
     let processes = FakeProcesses::default().with(200, Start::Unreadable, Some(Signal::TERM));
     let app = host_at(200, 2);
@@ -497,6 +566,37 @@ fn app_stop(
     }
 }
 
+// The shell leads its own group, starts a member in it, and exits, and
+// the test reaps it, so no process has the recorded pid while the group
+// still has a member. Nothing proves that member is the one phase started,
+// so the stop must signal nothing, which `NoSignals` checks.
+#[test]
+fn the_system_runner_never_signals_a_real_group_whose_leader_has_gone() {
+    let mut leader = Spawned::shell_lines("sleep 30 & echo $!; echo ready", 2);
+    let member: u32 = leader.lines[0].parse().unwrap();
+    // The leader may have ended before the test could read its start, and
+    // a leader with no process matches no start, so any start will do.
+    let app = crate::record::run::HostProcess {
+        boot_id: System.boot_id().unwrap(),
+        ..host_at(leader.pid(), 0)
+    };
+    leader.wait_for_exit();
+    assert!(crate::record::testing::alive(member));
+
+    assert_eq!(System.identity(&app).unwrap(), Identity::LeaderGone);
+    assert_eq!(
+        stop_unsignalled(&app_stop(
+            &app,
+            Duration::from_millis(50),
+            Duration::from_millis(50)
+        )),
+        HostStopped::GroupUnverified { group: app.group }
+    );
+    assert!(System.group_exists(app.group));
+    assert!(crate::record::testing::alive(member));
+    drop(leader);
+}
+
 #[test]
 fn the_system_runner_leaves_a_running_process_whose_recorded_start_does_not_match() {
     let mut sleeper = Spawned::sleeper();
@@ -685,19 +785,18 @@ fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
 }
 
 // A member of the app's group that has ended and that its parent, this
-// test, has not reaped stays in the group, and `KILL` cannot end it. The
-// stop signals only that group, which holds only this test's children.
-// macOS refuses `KILL` to a group that holds only such members with EPERM,
-// so there the stop fails as a process-table error, and the test runs on
-// Linux alone.
-#[cfg(target_os = "linux")]
+// test, has not reaped stays in the group, and no signal ends it. It runs
+// nothing, so once the leader ends the group counts as gone and the stop
+// reports it stopped, on Linux and on macOS, which refuses a signal to
+// such a group with EPERM. The stop signals only that group, which holds
+// only this test's children.
 #[test]
-fn the_system_runner_reports_a_group_that_outlives_kill_and_the_kill_wait_as_unstoppable() {
+fn the_system_runner_reports_a_group_left_with_only_ended_members_as_stopped() {
     let leader = Spawned::sleeper();
     let app = leader.host();
     let mut zombie = Spawned::shell_in_group("echo ready", 1, app.group);
+    zombie.wait_for_end_unreaped(app.group);
     let (grace, kill_wait) = (Duration::from_millis(100), Duration::from_millis(200));
-    let started = now();
 
     let stopped = System
         .stop(
@@ -706,9 +805,8 @@ fn the_system_runner_reports_a_group_that_outlives_kill_and_the_kill_wait_as_uns
         )
         .unwrap();
 
-    assert_eq!(stopped, HostStopped::Unstoppable { group: app.group });
-    assert!(now() - started >= grace + kill_wait + kill_wait);
-    zombie.wait_for_exit();
+    assert_eq!(stopped, HostStopped::Stopped);
     assert!(!System.group_exists(app.group));
+    zombie.wait_for_exit();
     drop(leader);
 }

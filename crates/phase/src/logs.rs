@@ -16,6 +16,7 @@ use crate::engine::host::LogFollower;
 use crate::error::{Operation, PhaseError};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::record::process::{self, Identity, Processes};
+use crate::record::run::HostEntry;
 use crate::record::store::RunStore;
 
 /// How long [`logs`] waits before it reads a followed log again. A log
@@ -48,19 +49,33 @@ pub fn tail(path: &Path, lines: usize) -> Vec<String> {
     };
     let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
     let start = length.saturating_sub(MOST_TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
+    // The read takes the byte before `start` too, so that it can tell
+    // whether `start` begins a line.
+    let before = start.saturating_sub(1);
+    if file.seek(SeekFrom::Start(before)).is_err() {
         return Vec::new();
     }
     let mut bytes = Vec::new();
-    if file.take(MOST_TAIL_BYTES).read_to_end(&mut bytes).is_err() {
+    if file
+        .take(MOST_TAIL_BYTES + (start - before))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
         return Vec::new();
     }
-    let text = String::from_utf8_lossy(&bytes);
-    let mut all: Vec<&str> = text.lines().collect();
-    if start > 0 && !all.is_empty() {
-        // The read started inside a line, so its first line is partial.
-        all.remove(0);
-    }
+    let read = if start > 0 {
+        // A read that starts inside a line drops that partial line, and
+        // one that starts just after a newline drops only the newline.
+        bytes
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .and_then(|newline| bytes.get(newline + 1..))
+            .unwrap_or_default()
+    } else {
+        &bytes[..]
+    };
+    let text = String::from_utf8_lossy(read);
+    let all: Vec<&str> = text.lines().collect();
     let skip = all.len().saturating_sub(lines);
     all.into_iter().skip(skip).map(str::to_owned).collect()
 }
@@ -153,17 +168,21 @@ fn writing(
         return Ok(false);
     };
     let (keeper, entry) = record.host_pair(app, process);
-    for host in [keeper, entry]
-        .into_iter()
-        .flatten()
-        .filter(|named| named.live())
-        .filter_map(|named| named.host.as_ref())
-    {
-        if process::identify(processes, host)? == Identity::Ours {
-            return Ok(true);
+    let look = |named: Option<&HostEntry>| -> Result<Identity, PhaseError> {
+        match named
+            .filter(|named| named.live())
+            .and_then(|named| named.host.as_ref())
+        {
+            Some(host) => process::identify(processes, host),
+            None => Ok(Identity::Gone),
         }
-    }
-    Ok(false)
+    };
+    let keeper = look(keeper)?;
+    // Members that the process left in its group hold the log open and
+    // may still write to it, so following goes on while they run. Reading
+    // a log signals nothing, so no proof that the group is phase's own is
+    // needed here.
+    Ok(keeper == Identity::Ours || matches!(look(entry)?, Identity::Ours | Identity::LeaderGone))
 }
 
 /// Which log `logs` reads, and how.

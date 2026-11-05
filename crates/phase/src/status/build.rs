@@ -11,7 +11,7 @@ use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::Handle;
 use crate::record::docker::{Docker, DockerKind, DockerObject};
-use crate::record::process::{self, Identity, Processes};
+use crate::record::process::{self, Identity, Processes, vouched};
 use crate::record::run::{ContainerEntry, EntryState, HostEntry, RunRecord};
 use crate::record::store::RunStore;
 use crate::status::{
@@ -229,8 +229,12 @@ pub(crate) fn host_state(
         }
         *identity = process::identify(processes, host)?;
     }
+    identities[1] = vouched(identities[0], identities[1]);
     if identities.contains(&Identity::Unknown) {
         return Ok(ProcessState::unknown(UnknownReason::Unreadable));
+    }
+    if identities.contains(&Identity::LeaderGone) {
+        return Ok(ProcessState::unknown(UnknownReason::LeaderGone));
     }
     let [keeper_ours, process_ours] = identities.map(|identity| identity == Identity::Ours);
     let stopping = [keeper, entry]
@@ -271,10 +275,17 @@ fn container_row(
             id: entry.id.as_ref().map(crate::record::ContainerId::as_str),
         })
     };
+    // A container that the record plans and Docker has not started yet is
+    // starting, as a host process whose keeper has not started it is.
+    let planned = entry.state == EntryState::Planned;
     let state = match state {
         Ok(Some(ContainerState::Running)) => ProcessState::Running,
         Ok(Some(ContainerState::Exited(code))) => ProcessState::exited(Some(code)),
+        Ok(Some(ContainerState::Created) | None) if planned => ProcessState::Starting,
         Ok(Some(ContainerState::Created) | None) => ProcessState::Stopped,
+        Ok(Some(ContainerState::Unknown)) => {
+            ProcessState::unknown(UnknownReason::UnrecognisedState)
+        }
         Err(_) => ProcessState::unknown(UnknownReason::DockerUnavailable),
     };
     let mut row = StatusRow::new(
@@ -290,20 +301,37 @@ fn container_row(
     row
 }
 
-/// Returns the state of a workspace whose processes are in `rows`.
+/// Returns the state of a workspace whose processes are in `rows`. A
+/// process whose state is unknown may or may not run, so the state comes
+/// from the other processes, and is unknown when the unknown ones decide
+/// it: every other process runs, or none of them does.
 fn workspace_state(rows: &[StatusRow]) -> WorkspaceState {
-    let states: Vec<ProcessState> = rows.iter().map(|row| row.state).collect();
-    if states.contains(&ProcessState::Starting) {
+    let unknown = rows
+        .iter()
+        .any(|row| matches!(row.state, ProcessState::Unknown { .. }));
+    let known: Vec<ProcessState> = rows
+        .iter()
+        .map(|row| row.state)
+        .filter(|state| !matches!(state, ProcessState::Unknown { .. }))
+        .collect();
+    let decided = |state| {
+        if unknown {
+            WorkspaceState::Unknown
+        } else {
+            state
+        }
+    };
+    if known.contains(&ProcessState::Starting) {
         WorkspaceState::Starting
-    } else if !states.iter().any(|state| state.may_run()) {
-        WorkspaceState::Stopped
-    } else if states.iter().all(|state| {
+    } else if !known.iter().any(|state| state.may_run()) {
+        decided(WorkspaceState::Stopped)
+    } else if known.iter().all(|state| {
         matches!(
             state,
             ProcessState::Running | ProcessState::Ready | ProcessState::Completed
         )
     }) {
-        WorkspaceState::Running
+        decided(WorkspaceState::Running)
     } else {
         WorkspaceState::PartlyRunning
     }

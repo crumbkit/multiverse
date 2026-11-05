@@ -433,13 +433,20 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
 - `mxv down` sends SIGTERM to the process group that a run record names,
   waits up to 10 seconds, then sends SIGKILL. It signals the group only
   when it is the group that `up` started: the process with the recorded id
-  has the recorded start time, or no process has that id and a group with
-  it still exists. A group keeps its id while any member lives, so in the
-  second case the group holds the children that an exited process left
-  behind. When another process has taken the recorded id, `down` signals
-  nothing and deletes the record. `running`, `remove` and `logs -f` apply
-  the same rule. A descendant that leaves its process group is not
-  reached.
+  has the recorded start time, or no process has that id and a member of
+  the group with that id started at least 50 milliseconds before the
+  process's shell wrote its exit file. A group keeps its id while any
+  member lives, so in the second case the group holds the children that an
+  exited process left behind. A group whose members all started later may
+  belong to another program, which took the id after the group emptied, so
+  `down` signals nothing, keeps the record, and fails that process with
+  `mxv::process::unstoppable` and a message that says it could not prove
+  the group its own. When another process has taken the recorded id,
+  `down` signals nothing and deletes the record. `running`, `remove` and
+  `logs -f` apply the same rule, and count an unproven group as still
+  running. A member of a group that has ended and waits to be reaped, a
+  zombie, does not count. A descendant that leaves its process group is
+  not reached.
 - `mxv restart` stops the named processes, or every process, and starts them
   again.
 - `mxv status` reports each process as `running`, `exited` with its code,

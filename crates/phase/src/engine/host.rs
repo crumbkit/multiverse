@@ -32,8 +32,8 @@ use crate::error::PhaseError;
 use crate::plan::restart::StopSignal;
 use crate::record::process::{self, Identity, System};
 pub use crate::record::process::{
-    BadProcessId, ProcessError, ProcessGroup, ProcessId, RawStart, group_exists, raw_start, reap,
-    signal_group, signal_pid,
+    BadProcessId, Member, ProcessError, ProcessGroup, ProcessId, RawStart, group_exists,
+    live_members, raw_start, reap, signal_group, signal_pid, started_at,
 };
 use crate::record::run::HostProcess;
 
@@ -140,6 +140,13 @@ pub(crate) enum HostStopped {
     /// process is its own, and `stop` left it alone. A process that phase
     /// proved its own was stopped.
     NotOurs,
+    /// A recorded process led `group` and has gone, and the group still
+    /// has a live member, but nothing proves the group is the one phase
+    /// started, so `stop` signalled nothing of it.
+    GroupUnverified {
+        /// The group that `stop` left alone.
+        group: u32,
+    },
     /// Something of `group` was still there after `KILL` and the kill
     /// wait.
     Unstoppable {
