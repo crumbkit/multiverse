@@ -236,7 +236,43 @@ pub struct Process {
     pub ready: Option<Ready>,
     /// The processes that start, and are ready, before this one.
     pub depends_on: Vec<String>,
+    /// What the process may do under phase's sandbox, or `None` when it
+    /// runs unsandboxed. An empty [`Permissions`] runs it sandboxed with no
+    /// grants beyond phase's own.
+    pub permissions: Option<Permissions>,
 }
+
+/// What a sandboxed process may do beyond what phase's sandbox always
+/// allows, which is to read its checkout and the system's directories and
+/// to write its own state and temporary directories.
+///
+/// phase's first-stage sandbox lets a process connect over loopback to the
+/// ports of every unit it depends on, so a sandboxed process can reach a
+/// unit only when its `depends_on` names it, and it can reach each unit
+/// that `depends_on` names. `connect` must name only units of
+/// `depends_on`, and the manifest fails otherwise. A sandboxed process
+/// cannot reach any external host until phase runs its allowlist proxy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Permissions {
+    /// The paths that the process may write: `$STATE`, the process's own
+    /// state directory, or a path relative to the checkout without `..`,
+    /// such as `target`. A merged manifest holds each relative path as an
+    /// absolute path below the directory that its file's paths are
+    /// relative to.
+    pub write: BTreeSet<String>,
+    /// The ports of [`Manifest::ports`] that the process may listen on.
+    /// Each is its `listen` port or a port it receives, and a process with
+    /// a `listen` port must name it.
+    pub listen: BTreeSet<String>,
+    /// The processes and containers that the process may connect to, each
+    /// one a unit that it depends on.
+    pub connect: BTreeSet<String>,
+}
+
+/// The write path of a process's [`Permissions`] that names the process's
+/// own state directory.
+pub(crate) const STATE: &str = "$STATE";
 
 /// A readiness check, which must pass within the timeout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -595,6 +631,24 @@ struct RawProcess {
     /// The dependencies.
     #[serde(default)]
     depends_on: Vec<Spanned<String>>,
+    /// The sandbox's permissions.
+    permissions: Option<Spanned<RawPermissions>>,
+}
+
+/// The permissions of a process as TOML holds them. A key that is not one
+/// of these, such as phase's `secrets`, fails as unknown.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPermissions {
+    /// The paths that the process may write.
+    #[serde(default)]
+    write: Vec<Spanned<String>>,
+    /// The ports that the process may listen on.
+    #[serde(default)]
+    listen: Vec<Spanned<String>>,
+    /// The units that the process may connect to.
+    #[serde(default)]
+    connect: Vec<Spanned<String>>,
 }
 
 /// One container as TOML holds it.
@@ -619,6 +673,9 @@ struct RawContainer {
     /// The dependencies.
     #[serde(default)]
     depends_on: Vec<Spanned<String>>,
+    /// Permissions, which a container cannot take, so it fails with a
+    /// sentence that says so.
+    permissions: Option<Spanned<IgnoredAny>>,
 }
 
 /// A readiness check as TOML holds it.
@@ -681,16 +738,10 @@ impl Errors<'_> {
 
 /// The top-level tables of phase, which reads the same `mxv.toml`. mxv
 /// never warns about them, except `process`, which phase uses for what
-/// mxv calls `processes`.
-const PHASE_TABLES: &[&str] = &[
-    "app",
-    "release",
-    "build",
-    "process",
-    "permissions",
-    "needs",
-    "service",
-];
+/// mxv calls `processes`. phase's top-level `permissions` is not among
+/// them: mxv refuses it, because mxv sandboxes each process by its own
+/// `[processes.<name>.permissions]`.
+const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs", "service"];
 
 /// Checks that `raw`'s `version` is 1 or greater and no greater than
 /// [`MANIFEST_VERSION`], and that it holds none of the reserved tables
@@ -759,6 +810,12 @@ fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<Vec<String>, Manif
                 ManifestProblem::UnknownKey {
                     key: name.to_owned(),
                 },
+            ));
+        }
+        if name == "permissions" {
+            return Err(errors.invalid(
+                &key.span(),
+                "the top-level table `[permissions]` sandboxes nothing, because mxv sandboxes each process on its own; move its keys to `[processes.<name>.permissions]` of each process that should run sandboxed".to_owned(),
             ));
         }
         let place = format!("{}:{}", errors.path.display(), errors.line(&key.span()));
@@ -897,6 +954,11 @@ fn check_runnable(
     let mut checked = manifest.clone();
     for process in checked.processes.values_mut() {
         own(&mut process.depends_on);
+        if let Some(permissions) = &mut process.permissions {
+            permissions
+                .connect
+                .retain(|name| !joined.units.contains(name));
+        }
     }
     for container in checked.containers.values_mut() {
         own(&mut container.depends_on);
@@ -1349,6 +1411,15 @@ impl Manifest {
                     listen: process.listen.as_deref().map(rename),
                     ready: ready(&process.ready),
                     depends_on: names(&process.depends_on),
+                    permissions: process.permissions.as_ref().map(|permissions| Permissions {
+                        write: permissions.write.clone(),
+                        listen: permissions.listen.iter().map(|port| rename(port)).collect(),
+                        connect: permissions
+                            .connect
+                            .iter()
+                            .map(|unit| rename(unit))
+                            .collect(),
+                    }),
                 };
                 (rename(name), renamed)
             })
@@ -1553,6 +1624,24 @@ fn check_process(
         &declared,
     )?;
     let depends_on = check_dependencies(errors, process, &raw.depends_on, names)?;
+    let permissions = match &raw.permissions {
+        Some(permissions) => Some(check_permissions(
+            errors,
+            process,
+            permissions,
+            &Granted {
+                ports,
+                listen: listen.as_ref(),
+                receives: &|port| {
+                    port_variables.values().any(|received| received == port)
+                        || templated.contains(port)
+                },
+                names,
+                depends_on: &depends_on,
+            },
+        )?),
+        None => None,
+    };
     Ok(Process {
         argv: raw.argv.get_ref().clone(),
         cwd,
@@ -1561,7 +1650,144 @@ fn check_process(
         listen,
         ready,
         depends_on,
+        permissions,
     })
+}
+
+/// What a process's permissions are checked against.
+struct Granted<'a> {
+    /// The ports that the manifest declares or joins.
+    ports: &'a [String],
+    /// The process's listen port, or `None`.
+    listen: Option<&'a String>,
+    /// Reports whether the process receives a port.
+    receives: &'a dyn Fn(&String) -> bool,
+    /// The processes and containers of the manifest and of the manifests
+    /// it joins.
+    names: &'a BTreeSet<&'a str>,
+    /// The units that the process depends on.
+    depends_on: &'a [String],
+}
+
+/// Checks the permissions `raw` of the process `process` against what
+/// `granted` says of it, and returns them: each write path is `$STATE` or
+/// a relative path inside the checkout, each listen port is a port that
+/// the process listens on or receives, its own listen port is among them,
+/// and each connection names a unit that the process depends on.
+fn check_permissions(
+    errors: &Errors<'_>,
+    process: &str,
+    raw: &Spanned<RawPermissions>,
+    granted: &Granted<'_>,
+) -> Result<Permissions, ManifestError> {
+    let mut permissions = Permissions::default();
+    for path in &raw.get_ref().write {
+        if let Some(reason) = write_problem(path.get_ref()) {
+            return Err(errors.invalid(
+                &path.span(),
+                format!(
+                    "the write path {:?} of `{process}` {reason}; a write path is `$STATE` or a path relative to the checkout, such as `target`",
+                    path.get_ref()
+                ),
+            ));
+        }
+        permissions.write.insert(path.get_ref().clone());
+    }
+    for port in &raw.get_ref().listen {
+        let name = port.get_ref();
+        if !granted.ports.contains(name) {
+            return Err(errors.invalid(
+                &port.span(),
+                format!(
+                    "the permissions of `{process}` let it listen on `{name}`, which `ports` does not declare"
+                ),
+            ));
+        }
+        if granted.listen != Some(name) && !(granted.receives)(name) {
+            return Err(errors.invalid(
+                &port.span(),
+                format!(
+                    "the permissions of `{process}` let it listen on `{name}`, which it neither listens on nor receives; add a variable for it to `ports`"
+                ),
+            ));
+        }
+        permissions.listen.insert(name.clone());
+    }
+    if let Some(listen) = granted.listen
+        && !permissions.listen.contains(listen)
+    {
+        return Err(errors.invalid(
+            &raw.span(),
+            format!(
+                "the process `{process}` listens on `{listen}`, which its permissions do not let it listen on; add `listen = [\"{listen}\"]` to its permissions"
+            ),
+        ));
+    }
+    for unit in &raw.get_ref().connect {
+        let name = unit.get_ref();
+        if !granted.names.contains(name.as_str()) {
+            return Err(errors.invalid(
+                &unit.span(),
+                format!(
+                    "the permissions of `{process}` let it connect to `{name}`, which the manifest does not declare as a process or a container; a sandboxed process cannot reach an external host until phase's allowlist proxy is built"
+                ),
+            ));
+        }
+        if !granted.depends_on.contains(name) {
+            return Err(errors.invalid(
+                &unit.span(),
+                format!(
+                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because the sandbox opens only the ports of the units that a process depends on"
+                ),
+            ));
+        }
+        permissions.connect.insert(name.clone());
+    }
+    Ok(permissions)
+}
+
+/// Returns why `path` cannot be a write path of a process's permissions,
+/// or `None` when it can: it is `$STATE`, or a relative path that names a
+/// directory inside the checkout without `..` and holds no quote,
+/// backslash or control character, which phase's sandbox profile cannot
+/// hold.
+fn write_problem(path: &str) -> Option<&'static str> {
+    if path == STATE {
+        return None;
+    }
+    if path.is_empty() {
+        return Some("is empty");
+    }
+    if path.starts_with('$') {
+        return Some("starts with `$`, which only `$STATE` may");
+    }
+    if path.contains('\\') {
+        return Some("holds a backslash");
+    }
+    if path
+        .chars()
+        .any(|character| character == '"' || character.is_control())
+    {
+        return Some("holds a quote or a control character");
+    }
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return Some("is absolute");
+    }
+    let mut names = 0_usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => names = names.saturating_add(1),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Some("holds `..`");
+            }
+        }
+    }
+    if names == 0 {
+        return Some("names the whole checkout, whose `.git` a sandboxed process may only read");
+    }
+    None
 }
 
 /// Checks the `env` table of the process `process`: each variable's name,
@@ -1904,6 +2130,14 @@ fn check_container(
             timeout: DEFAULT_READY_TIMEOUT,
         }),
     };
+    if let Some(permissions) = &raw.permissions {
+        return Err(errors.invalid(
+            &permissions.span(),
+            format!(
+                "the container `{container}` has permissions, which only a host process takes, because phase's sandbox holds host processes and Docker runs a container"
+            ),
+        ));
+    }
     let depends_on = check_dependencies(errors, container, &raw.depends_on, names)?;
     Ok(Container {
         image: image.clone(),

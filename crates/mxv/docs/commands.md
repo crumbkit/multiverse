@@ -257,11 +257,11 @@ mxv up -w reading-list web
 - `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
-- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: additive, idempotent, open-world.
 
@@ -298,11 +298,11 @@ mxv down -w reading-list
 - `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
-- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: destructive, idempotent, closed-world.
 
@@ -339,11 +339,11 @@ mxv restart -w reading-list web
 - `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
-- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: destructive, not idempotent, open-world.
 
@@ -379,11 +379,11 @@ mxv status -w reading-list
 - `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
+- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
 - `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
-- `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it, such as `unsandboxed (its app declares no permissions)`, or null for a container and for a process that phase does not run.
 
 Effects: read-only, closed-world.
 

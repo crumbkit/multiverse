@@ -991,9 +991,11 @@ pub(crate) struct ProcessRow {
     /// container, whose output docker keeps and `mxv logs` also prints.
     log: Option<String>,
     /// Whether phase runs a host process under its sandbox, as phase
-    /// describes it, such as `unsandboxed (its app declares no
-    /// permissions)`, or null for a container and for a process that
-    /// phase does not run.
+    /// describes it: `seatbelt (partial: <what it leaves open>)` on macOS,
+    /// or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares
+    /// no permissions)` for a process whose manifest has no `permissions`
+    /// table. It is null for a container and for a process that phase
+    /// does not run.
     sandbox: Option<String>,
     /// What `up` and `restart` found about the process beside its state:
     /// a warning when the process's running container still has its
@@ -1081,8 +1083,9 @@ impl Row for ProcessRow {
         "reason",
         "group_alive",
         "ports",
+        "sandbox",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["log", "sandbox"];
+    const LONG_COLUMNS: &'static [&'static str] = &["log"];
     const CHILDREN: Option<&'static str> = Some("notes");
     const CHILDREN_HELP: Option<&'static str> = Some(
         "one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.",

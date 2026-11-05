@@ -225,7 +225,8 @@ fn declare<'a>(
 }
 
 /// Moves the units, ports and warnings of `from` into `into`, with each
-/// process's `cwd` made absolute below `root`.
+/// process's `cwd` and each write path of its permissions other than
+/// `$STATE` made absolute below `root`.
 fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
     for (name, mut process) in from.processes {
         process.cwd = if process.cwd == Path::new(".") {
@@ -233,6 +234,19 @@ fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
         } else {
             root.join(&process.cwd)
         };
+        if let Some(permissions) = &mut process.permissions {
+            permissions.write = permissions
+                .write
+                .iter()
+                .map(|path| {
+                    if path == crate::manifest::STATE {
+                        path.clone()
+                    } else {
+                        root.join(path).display().to_string()
+                    }
+                })
+                .collect();
+        }
         into.processes.insert(name, process);
     }
     into.containers.extend(from.containers);

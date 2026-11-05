@@ -54,7 +54,7 @@ pub use crate::lookup::{ManifestInputs, ManifestSource, checkout_prefix, prefixe
 pub use crate::manifest::{
     Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
     MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
-    ManifestProblem, Process, Published, Ready, ReadyCheck, Unit,
+    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Unit,
 };
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};

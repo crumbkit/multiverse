@@ -436,7 +436,7 @@ fn status_shows_that_a_running_process_is_ready_and_runs_without_a_sandbox() {
     assert_eq!(server["name"], "server", "{document}");
     assert_eq!(server["ready"], true, "{document}");
     assert_eq!(server["notes"], serde_json::json!([]), "{document}");
-    let (exit, document) = setup.json(&["status", "-w", "triage", "--full"]);
+    let (exit, document) = setup.json(&["status", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
     let server = &document["data"][0];
     assert_eq!(server["ready"], true, "{document}");
@@ -444,7 +444,7 @@ fn status_shows_that_a_running_process_is_ready_and_runs_without_a_sandbox() {
         server["sandbox"], "unsandboxed (its app declares no permissions)",
         "{document}"
     );
-    let (exit, text) = setup.text(&["status", "-w", "triage", "--long"]);
+    let (exit, text) = setup.text(&["status", "-w", "triage"]);
     assert_eq!(exit, 0, "{text}");
     assert!(
         text.contains("unsandboxed (its app declares no permissions)"),

@@ -260,6 +260,10 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
 | `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
+| `processes.<name>.permissions` | Runs the process under phase's sandbox, with the grants of `write`, `listen` and `connect`. An empty table runs it sandboxed with no grants, and a process without the table runs unsandboxed. [Sandboxed processes](#sandboxed-processes) describes it. |
+| `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
+| `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. |
+| `processes.<name>.permissions.connect` | Processes and containers that the process may connect to. Each must be a unit that the process depends on through `depends_on`. |
 | `disposable` | Globs of more disposable directories of this repository, such as `["web/test-results/"]`. Each glob must end with `/` and have a literal last name. [Disk space](#disk-space) describes them. |
 | `clone_on_new` | Globs of more ignored directories that `mxv new` clones from this repository, such as `["web/.venv/"]`, under the same rule. |
 
@@ -329,6 +333,10 @@ depends_on = ["dynamodb", "localstack"]
 | `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. A container's readiness check waits only for a port, so `log` is invalid here, and a container's `env` values hold no port placeholders. |
 | `containers.<name>.depends_on` | Processes or containers that start, and are ready, before this one. |
 
+A container takes no `permissions`, because Docker runs it and phase's
+sandbox holds only host processes. `permissions` under `[containers.*]`
+fails with `mxv::manifest::invalid` and its line.
+
 Processes and containers share one set of names, and either may depend on
 the other. A process receives a container's host port through its own
 `ports`, as `api` receives `DYNAMODB_PORT` above.
@@ -348,6 +356,84 @@ mints and `mxv up` adds to a record that an earlier mxv wrote. phase keeps
 its run record and the logs of host processes under
 `$XDG_STATE_HOME/mxv/phase`. A host process's log is
 `$XDG_STATE_HOME/mxv/phase/logs/<id>/<unit>.main.log`.
+
+#### Sandboxed processes
+
+A process whose manifest has a `permissions` table runs under phase's
+sandbox, which is Seatbelt on macOS. A process without the table runs
+unsandboxed, as every process did before. The sandbox lets a process read
+the system's directories, the toolchains on `PATH` and its checkout, and
+write its own state and temporary directories. `permissions` adds:
+
+- `write`: the directories that the process may write, relative to the
+  repository root, such as `target`. phase creates a missing directory
+  when it starts the process. `$STATE` names the process's own state
+  directory, which it may always write.
+- `listen`: the ports that the process may listen on, on the loopback
+  address. A process with a `listen` port must name it here, and the
+  manifest fails without it.
+- `connect`: the processes and containers that the process may connect to
+  over the loopback address.
+
+phase's sandbox opens the ports of every unit that a process depends on,
+and no other. A unit of `connect` must therefore be one of the process's
+`depends_on`, and the manifest fails with `mxv::manifest::invalid` and a
+hint to add it to `depends_on` otherwise. A sandboxed process can also
+reach each unit of its `depends_on` that `connect` leaves out. A sandboxed
+process cannot reach any host off the machine until phase runs its
+allowlist proxy, so a name in `connect` that is not a unit of the manifest
+fails. `permissions` has no `secrets` key, because mxv has no secrets yet,
+and that key fails with `mxv::manifest::unknown_key`.
+
+This manifest runs four sandboxed processes beside two containers:
+
+```toml
+ports = ["auth", "api", "web", "dynamodb", "localstack"]
+
+[containers.dynamodb]
+image = "amazon/dynamodb-local:2.5.4"
+ports = { 8000 = "dynamodb" }
+
+[containers.localstack]
+image = "localstack/localstack:4.0.3"
+ports = { 4566 = "localstack" }
+
+[processes.auth]
+argv = ["cargo", "run", "--bin", "auth"]
+ports = { PORT = "auth" }
+listen = "auth"
+permissions = { write = ["target"], listen = ["auth"] }
+
+[processes.server]
+argv = ["cargo", "run", "--bin", "server"]
+ports = { PORT = "api", AUTH_PORT = "auth", DYNAMODB_PORT = "dynamodb", LOCALSTACK_PORT = "localstack" }
+listen = "api"
+depends_on = ["auth", "dynamodb", "localstack"]
+permissions = { write = ["target"], listen = ["api"], connect = ["auth", "dynamodb", "localstack"] }
+
+[processes.worker]
+argv = ["cargo", "run", "--bin", "worker"]
+ports = { DYNAMODB_PORT = "dynamodb", LOCALSTACK_PORT = "localstack" }
+ready = { log = "^worker ready" }
+depends_on = ["dynamodb", "localstack"]
+permissions = { write = ["target"], connect = ["dynamodb", "localstack"] }
+
+[processes.web]
+argv = ["pnpm", "run", "dev"]
+cwd = "web"
+ports = { PORT = "web", API_PORT = "api", AUTH_PORT = "auth" }
+listen = "web"
+depends_on = ["server", "auth"]
+permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"], connect = ["server", "auth"] }
+```
+
+The `sandbox` column of `up`, `down`, `restart` and `status` shows how
+phase runs each host process: `seatbelt (partial: ...)` on macOS, where
+Seatbelt lets the process's listening ports accept connections from other
+machines on the network, or `unsandboxed (<reason>)`, such as
+`unsandboxed (its app declares no permissions)`. It is null for a
+container. A process that phase started is shown as its run record
+recorded it.
 
 #### Workspaces that an earlier mxv started
 
@@ -520,10 +606,9 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   `ready` is true for a running process once its readiness check has
   passed since it last started, or once a process without one has outlasted
   its start grace, and false while it runs and has not, such as after its
-  keeper or docker restarted it. `--long` adds `sandbox`, which says
-  whether phase runs a host process under its sandbox. mxv's manifest
-  declares no permissions yet, so every host process reads
-  `unsandboxed (its app declares no permissions)`.
+  keeper or docker restarted it. `sandbox` says whether phase runs a
+  host process under its sandbox, as
+  [Sandboxed processes](#sandboxed-processes) describes.
 - `mxv up` and `mxv restart` print a line under a container whose secret
   files they found running: `info:` when `up` rewrote them, and `warning:`
   when it could not, so the container still runs with its earlier files.
@@ -620,9 +705,12 @@ tool that owns it. A table whose name is close to one of mxv's own, such as
 would declare nothing, so mxv warns about it: `up` and `restart` print the
 warning on standard error, `status` puts it in the summary's `warnings`,
 and `show` and `new` put it in the row's `warnings`. phase's own tables,
-`[app]`, `[release]`, `[build]`, `[permissions]`, `[needs.*]` and
-`[service.*]`, get no warning. phase's `[process.*]` gets a warning that
-mxv runs only `[processes.*]`. `up` also warns when the manifest declares
+`[app]`, `[release]`, `[build]`, `[needs.*]` and `[service.*]`, get no
+warning. phase's `[process.*]` gets a warning that mxv runs only
+`[processes.*]`. A top-level `[permissions]` table would sandbox nothing,
+because mxv sandboxes each process on its own, so it fails with
+`mxv::manifest::invalid` and a hint to move its keys to
+`[processes.<name>.permissions]`. `up` also warns when the manifest declares
 no processes and no containers, and starts nothing.
 
 A workspace manifest that is a symbolic link leading nowhere cannot be
@@ -672,7 +760,13 @@ reports `merged`, with every file it read in `manifest_paths`.
   depend on the checkouts' prefixed names and use their prefixed ports.
   Its paths, such as a process's `cwd` or a `disposable` glob, are
   relative to the workspace directory, so a process that runs in the
-  checkout `api` has `cwd = "api"`.
+  checkout `api` has `cwd = "api"`. A write path of a process's
+  `permissions` is relative to the workspace directory too, and it must
+  lie inside the checkout that the process runs in, so that process
+  writes `api/target`.
+- The `listen` ports and `connect` units of a checkout's `permissions`
+  follow the new names too, and its write paths stay relative to its own
+  checkout.
 - Two names that are the same once prefixed, such as the process `b-c` of
   the checkout `a` and the process `c` of the checkout `a-b`, or two
   volumes of the same name in two files, fail with

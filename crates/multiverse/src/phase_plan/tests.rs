@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use phase::{AppName, EnvironmentSource as _, Plan, ProcessName, RunnerKind, Source, WorkspaceId};
+use phase::{
+    AppName, EnvironmentSource as _, Plan, PortName, ProcessName, RunnerKind, Source, WorkspaceId,
+};
 
 use crate::manifest::{Manifest, ManifestProblem};
 use crate::name::WorkspaceName;
@@ -541,4 +543,179 @@ fn a_cwd_that_leaves_the_workspace_is_unrunnable() {
         panic!("a cwd outside the workspace built a plan");
     };
     assert_eq!(unrunnable.unit.as_deref(), Some("api"));
+}
+
+/// A checkout's manifest whose process `server` runs sandboxed: it writes
+/// `target`, listens on `http` and connects to the container `db`.
+const SANDBOXED_SERVER: &str = r#"ports = ["http", "db"]
+
+[containers.db]
+image = "postgres:17.2"
+ports = { 5432 = "db" }
+
+[processes.server]
+argv = ["cargo", "run"]
+cwd = "server"
+ports = { PORT = "http", DB_PORT = "db" }
+listen = "http"
+depends_on = ["db"]
+permissions = { write = ["target", "$STATE"], listen = ["http"], connect = ["db"] }
+
+[processes.tool]
+argv = ["true"]
+"#;
+
+/// Returns the strings of `names`.
+fn strings<const N: usize>(names: [&str; N]) -> BTreeSet<String> {
+    names.into_iter().map(str::to_owned).collect()
+}
+
+#[test]
+fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connections() {
+    let ports = BTreeMap::from([("http".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let manifest = manifest(SANDBOXED_SERVER);
+    let built = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: Path::new("/work/triage/app"),
+        roots: Vec::new(),
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    })
+    .unwrap();
+    let server = built.plan.app(&app("server")).unwrap();
+    let permissions = server.permissions.as_ref().unwrap();
+    assert_eq!(permissions.write, strings(["target", "$STATE"]));
+    assert_eq!(
+        permissions.listen,
+        BTreeSet::from([PortName::try_from("http".to_owned()).unwrap()])
+    );
+    assert_eq!(permissions.connect, strings(["db"]));
+    assert!(permissions.secrets.is_empty());
+    assert_eq!(server.depends, vec![app("db")]);
+}
+
+#[test]
+fn a_process_without_permissions_and_a_container_give_their_apps_none() {
+    let built = plan_of(&manifest(APP), &CallerEnvironment::default());
+    assert_eq!(built.plan.app(&app("api")).unwrap().permissions, None);
+    assert_eq!(built.plan.app(&app("db")).unwrap().permissions, None);
+}
+
+#[test]
+fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let path = root.join("triage");
+    let checkouts = ["api", "web"]
+        .iter()
+        .map(|folder| {
+            std::fs::create_dir_all(path.join(folder).join("server")).unwrap();
+            write(path.join(folder).join("mxv.toml"), SANDBOXED_SERVER);
+            Checkout::new(
+                (*folder).to_owned(),
+                &root.join("source").join(folder),
+                path.join(folder),
+                "triage".to_owned(),
+                "refs/remotes/origin/main".to_owned(),
+            )
+        })
+        .collect();
+    // The workspace manifest's process runs in the checkout `web`, and its
+    // write path is relative to the workspace's directory.
+    write(
+        path.join("mxv.toml"),
+        "[processes.proxy]\nargv = [\"caddy\", \"run\"]\ncwd = \"web\"\ndepends_on = [\"api-server\"]\npermissions = { write = [\"web/dist\"], connect = [\"api-server\"] }\n",
+    );
+    let workspace = Workspace::new("triage".parse().unwrap(), path, checkouts);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    let ports: BTreeMap<String, u16> = ["api-http", "api-db", "web-http", "web-db"]
+        .into_iter()
+        .zip(41_000..)
+        .map(|(port, number)| (port.to_owned(), number))
+        .collect();
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let built = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: &workspace.path,
+        roots: roots(&workspace),
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    })
+    .unwrap();
+    for prefix in ["api", "web"] {
+        let server = built.plan.app(&app(&format!("{prefix}-server"))).unwrap();
+        let permissions = server.permissions.as_ref().unwrap();
+        assert_eq!(permissions.write, strings(["target", "$STATE"]), "{prefix}");
+        assert_eq!(
+            permissions.listen,
+            BTreeSet::from([PortName::try_from(format!("{prefix}-http")).unwrap()]),
+            "{prefix}"
+        );
+        assert_eq!(
+            permissions.connect,
+            BTreeSet::from([format!("{prefix}-db")]),
+            "{prefix}"
+        );
+        assert_eq!(
+            built
+                .plan
+                .app(&app(&format!("{prefix}-tool")))
+                .unwrap()
+                .permissions,
+            None
+        );
+    }
+    let proxy = built.plan.app(&app("proxy")).unwrap();
+    let permissions = proxy.permissions.as_ref().unwrap();
+    assert_eq!(permissions.write, strings(["dist"]));
+    assert_eq!(permissions.connect, strings(["api-server"]));
+}
+
+#[test]
+fn a_workspace_manifests_write_path_outside_the_checkout_its_process_runs_in_is_unrunnable() {
+    let mut manifest = manifest(SANDBOXED_SERVER);
+    let server = manifest.processes.get_mut("server").unwrap();
+    server.cwd = PathBuf::from("/work/triage/web");
+    server.permissions.as_mut().unwrap().write =
+        BTreeSet::from(["/work/triage/api/target".to_owned()]);
+    let ports = BTreeMap::from([("http".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let Err(unrunnable) = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: Path::new("/work/triage"),
+        roots: vec![
+            PathBuf::from("/work/triage/api"),
+            PathBuf::from("/work/triage/web"),
+            PathBuf::from("/work/triage"),
+        ],
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+    }) else {
+        panic!("a write path in another checkout built a plan");
+    };
+    assert_eq!(unrunnable.unit.as_deref(), Some("server"));
+    assert!(
+        unrunnable.message.contains("/work/triage/api/target"),
+        "{}",
+        unrunnable.message
+    );
 }

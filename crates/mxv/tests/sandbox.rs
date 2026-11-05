@@ -2,10 +2,17 @@
 //! builds, so phase's sandbox runs under mxv's real layout: phase keeps its
 //! state in `<mxv state>/phase`, mxv protects its state directory and its
 //! mirrors, and the built `mxv` binary is the keeper and the launcher.
-//! mxv's manifest cannot declare permissions yet, so the test gives the
-//! app its permissions in phase's plan.
+//! The first test gives the app its permissions in phase's plan. The
+//! second declares them in a manifest's `[processes.<name>.permissions]`
+//! and runs the built `mxv` binary, on macOS, where phase's sandbox is
+//! Seatbelt.
 
+#![cfg(test)]
 #![cfg(any(target_os = "macos", target_os = "linux"))]
+
+#[cfg(target_os = "macos")]
+#[path = "support/git.rs"]
+mod support;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -118,5 +125,138 @@ fn a_sandboxed_app_starts_under_mxvs_own_layout_and_writes_its_own_state() {
         matches!(sandbox, Sandboxing::Seatbelt { .. })
             || cfg!(target_os = "linux") && matches!(sandbox, Sandboxing::Unsandboxed { .. }),
         "{sandbox:?}"
+    );
+}
+
+/// A workspace that the built `mxv` binary runs in a directory of the
+/// build's target directory, with its own config, state and workspace
+/// root, which it stops when it is dropped.
+#[cfg(target_os = "macos")]
+struct Sandboxed {
+    /// The temporary directory.
+    dir: tempfile::TempDir,
+}
+
+#[cfg(target_os = "macos")]
+impl Sandboxed {
+    /// Creates a repository and the workspace `triage` of it, and writes
+    /// `manifest` as the `mxv.toml` of its checkout. The per-user
+    /// temporary directory is protected, so the files lie in the build's
+    /// target directory.
+    fn new(manifest: &str) -> Self {
+        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let sandboxed = Self { dir };
+        support::repository(&sandboxed.root());
+        let (exit, document) = sandboxed.json(&["new", "triage", "--repo", "app"]);
+        assert_eq!(exit, 0, "{document}");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the manifest that a person would write in a checkout"
+        )]
+        std::fs::write(sandboxed.checkout().join("mxv.toml"), manifest).unwrap();
+        sandboxed
+    }
+
+    fn root(&self) -> PathBuf {
+        self.dir.path().canonicalize().unwrap()
+    }
+
+    fn checkout(&self) -> PathBuf {
+        self.root().join("workspaces/triage/app")
+    }
+
+    fn command(&self, args: &[&str]) -> snapbox::cmd::Command {
+        let root = self.root();
+        snapbox::cmd::Command::new(env!("CARGO_BIN_EXE_mxv"))
+            .args(args)
+            .current_dir(&root)
+            .env_clear()
+            .env("PATH", support::PATH)
+            .envs(support::GIT_ENV.iter().copied())
+            .env("HOME", &root)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("MXV_ROOT", root.join("workspaces"))
+    }
+
+    /// Runs `mxv` with `args` and `--json`, and returns the exit code and
+    /// the JSON document.
+    fn json(&self, args: &[&str]) -> (i32, serde_json::Value) {
+        let output = self.command(args).arg("--json").output().unwrap();
+        let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{args:?} printed no JSON ({error}): {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.code().unwrap(), document)
+    }
+
+    /// Runs `mxv` with `args`, and returns its standard output.
+    fn text(&self, args: &[&str]) -> String {
+        let output = self.command(args).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Sandboxed {
+    fn drop(&mut self) {
+        let _ = self.json(&["down", "-w", "triage"]);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_process_whose_manifest_grants_permissions_runs_sandboxed_and_cannot_write_outside_its_grants()
+{
+    let script = "echo granted > out/file && echo granted=written; \
+        if echo denied > denied 2>/dev/null; then echo denied=written; else echo denied=refused; fi; \
+        echo ready; exec sleep 60";
+    let sandboxed = Sandboxed::new(&format!(
+        r#"[processes.writer]
+argv = ["/bin/sh", "-c", {script:?}]
+ready = {{ log = "^ready$" }}
+permissions = {{ write = ["out"] }}
+
+[processes.plain]
+argv = ["/bin/sh", "-c", "echo ready; exec sleep 60"]
+ready = {{ log = "^ready$" }}
+"#
+    ));
+
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    let logs = sandboxed.text(&["logs", "-w", "triage", "writer"]);
+    let (_, status) = sandboxed.json(&["status", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{up}");
+    // The shell reports the refused redirection itself.
+    assert_eq!(
+        logs,
+        "granted=written\n/bin/sh: denied: Operation not permitted\ndenied=refused\nready\n"
+    );
+    let checkout = sandboxed.checkout();
+    assert!(checkout.join("out/file").exists());
+    assert!(!checkout.join("denied").exists());
+    let sandbox = |name: &str| {
+        status["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("no row {name} in {status}"))["sandbox"]
+            .clone()
+    };
+    assert!(
+        sandbox("writer")
+            .as_str()
+            .is_some_and(|sandbox| sandbox.starts_with("seatbelt (partial: ")),
+        "{status}"
+    );
+    assert_eq!(
+        sandbox("plain"),
+        "unsandboxed (its app declares no permissions)"
     );
 }

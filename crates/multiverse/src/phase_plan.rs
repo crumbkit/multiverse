@@ -446,7 +446,7 @@ fn host_app(
     let mut plan = AppPlan::new(
         app.clone(),
         RunnerKind::Host,
-        Source::checkout(source, None),
+        Source::checkout(source.clone(), None),
     );
     plan.ports = app_ports(inputs, name, used)?;
     plan.depends = depends(&process.depends_on)?;
@@ -479,7 +479,59 @@ fn host_app(
     }
     main.stop.grace = inputs.grace;
     plan.processes = vec![main];
+    plan.permissions = process
+        .permissions
+        .as_ref()
+        .map(|permissions| app_permissions(name, permissions, &source))
+        .transpose()?;
     Ok((plan, vars.into_iter().collect()))
+}
+
+/// Returns the permissions of the app of the process `name`, whose source
+/// directory is `source`: its write paths, its listen ports as phase's port
+/// names and the units it connects to as app names. A process of a merged
+/// manifest holds each write path other than `$STATE` as an absolute path,
+/// which becomes relative to `source`.
+///
+/// # Errors
+///
+/// Returns [`Unrunnable`] when a write path is absolute and lies outside
+/// `source`, such as a workspace manifest's path into another checkout
+/// than the one the process runs in, or a port or unit name is not one
+/// that phase accepts.
+fn app_permissions(
+    name: &str,
+    permissions: &crate::manifest::Permissions,
+    source: &Path,
+) -> Result<phase::Permissions, Unrunnable> {
+    let mut granted = phase::Permissions::default();
+    for path in &permissions.write {
+        let written = Path::new(path);
+        if !written.is_absolute() {
+            granted.write.insert(path.clone());
+            continue;
+        }
+        let relative = lexical(written)
+            .strip_prefix(lexical(source))
+            .ok()
+            .filter(|rest| !rest.as_os_str().is_empty())
+            .map(|rest| rest.display().to_string())
+            .ok_or_else(|| Unrunnable {
+                unit: Some(name.to_owned()),
+                message: format!(
+                    "the process `{name}` may write {path}, which is outside {}, the checkout it runs in",
+                    source.display()
+                ),
+            })?;
+        granted.write.insert(relative);
+    }
+    for port in &permissions.listen {
+        granted.listen.insert(port_name(name, port)?);
+    }
+    for unit in &permissions.connect {
+        granted.connect.insert(app_name(unit)?.to_string());
+    }
+    Ok(granted)
 }
 
 /// Returns the plan of the container `container`, named `name`, and the

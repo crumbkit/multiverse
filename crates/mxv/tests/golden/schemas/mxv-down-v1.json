@@ -477,7 +477,7 @@
           ]
         },
         "sandbox": {
-          "description": "Whether phase runs a host process under its sandbox, as phase\ndescribes it, such as `unsandboxed (its app declares no\npermissions)`, or null for a container and for a process that\nphase does not run.",
+          "description": "Whether phase runs a host process under its sandbox, as phase\ndescribes it: `seatbelt (partial: <what it leaves open>)` on macOS,\nor `unsandboxed (<reason>)`, such as `unsandboxed (its app declares\nno permissions)` for a process whose manifest has no `permissions`\ntable. It is null for a container and for a process that phase\ndoes not run.",
           "type": [
             "string",
             "null"
@@ -502,6 +502,7 @@
         "reason",
         "group_alive",
         "ports",
+        "sandbox",
         "notes"
       ]
     },
