@@ -523,7 +523,7 @@ impl AppDirs {
 
 /// The system directories that every sandboxed process may read on macOS.
 /// `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
-/// profile allows the resolved paths. Of `/Library` it allows only what
+/// profile allows the resolved paths and the metadata of the `/var` link. Of `/Library` it allows only what
 /// toolchains read.
 #[cfg(target_os = "macos")]
 const SYSTEM_READ: &[&str] = &[
@@ -545,6 +545,13 @@ const SYSTEM_READ: &[&str] = &[
 const SYSTEM_READ: &[&str] = &[
     "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/dev", "/proc",
 ];
+
+/// The link that `xcode-select --switch` sets to the active developer
+/// directory, which `xcode-select`, `xcrun` and the `/usr/bin` shims of
+/// the developer tools read. [`SYSTEM_READ`] grants the link, and the
+/// spec grants the directory it names, which [`developer_dir`] finds.
+#[cfg(target_os = "macos")]
+const DEVELOPER_DIR_LINK: &str = "/private/var/select/developer_dir";
 
 /// The directories inside [`SYSTEM_READ`] that the macOS profile denies
 /// again: the data and configuration of a Homebrew under `/usr/local`.
@@ -732,6 +739,10 @@ pub(crate) fn spec(
         .filter(|path| path.exists())
         .map(|path| canonical(path))
         .collect();
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = developer_dir(Path::new(DEVELOPER_DIR_LINK)).filter(|dir| !reaches(dir)) {
+        read.insert(dir);
+    }
     read.insert(checkout.clone());
     if let Some(program) = process.run.first().map(Path::new)
         && program.is_absolute()
@@ -989,6 +1000,23 @@ fn system_read() -> Vec<PathBuf> {
     } else {
         paths.collect()
     }
+}
+
+/// Returns the resolved directory that the symbolic link `link` names,
+/// when the link holds an absolute path to a directory at least two names
+/// below the root. A link to `/` or to a directory beside `/Applications`
+/// therefore names nothing, and a sandbox never reads all of one.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only the macOS spec reads a developer directory")
+)]
+fn developer_dir(link: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    if !target.is_absolute() {
+        return None;
+    }
+    let dir = target.canonicalize().ok()?;
+    (dir.is_dir() && dir.components().count() > 2).then_some(dir)
 }
 
 /// Returns the entries of `usr`, with `local` replaced by its entries

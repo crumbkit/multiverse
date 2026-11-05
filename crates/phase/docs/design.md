@@ -1141,7 +1141,20 @@ The sandbox allows (decision P18):
   credentials. For mise they are its data directory. For Homebrew they are
   the prefix's `bin`, `sbin`, `Cellar`, `opt`, `lib`, `libexec`, `share`,
   `include` and `Frameworks`, never its `var` or `etc`. A `PATH` entry that
-  would reach a protected path, such as the home directory, adds nothing;
+  would reach a protected path, such as the home directory, adds nothing.
+  On macOS the system directories also include the developer directory
+  that `/var/select/developer_dir` names, which `xcode-select --switch`
+  sets and which `xcode-select`, `xcrun` and the developer tools' shims in
+  `/usr/bin`, such as `cc`, read. phase grants the directory only when the
+  link holds an absolute path at least two names below the root, so a link
+  to `/` or to `/Applications` grants nothing. Seatbelt checks the
+  metadata of every name of a path as the kernel resolves it, so reading
+  the link through `/var` also needs the metadata of the `/var` link
+  itself, and the profile allows that one literal path. nono allows a
+  link's metadata only when a granted path or a `PATH` entry is spelt
+  through it. Without the rule, `xcode-select` failed with "unable to read
+  data link" on a machine whose `PATH` names no directory under `/var`,
+  such as GitHub's macOS runner;
 - writing the app's state directory `<phase state>/apps/<workspace
   id>/<app>/state`, which `$STATE` names, its temporary directory `.../tmp`,
   which becomes the app's `TMPDIR`, and the paths of `write`. phase sets

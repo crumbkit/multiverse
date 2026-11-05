@@ -14,8 +14,8 @@ use tempfile::TempDir;
 
 use super::{
     AppDirs, Context, LANDLOCK_UNSANDBOXED, Launcher, Platform, SandboxError, SandboxSpec,
-    Sandboxing, UNDECLARED, WorkspacePaths, launch, launcher_command, sandboxing, spec, toolchain,
-    usr_without_local_data, verify,
+    Sandboxing, UNDECLARED, WorkspacePaths, developer_dir, launch, launcher_command, sandboxing,
+    spec, toolchain, usr_without_local_data, verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
 use crate::record::testing::{app, workspace};
@@ -917,6 +917,37 @@ fn a_spec_looks_nothing_up_in_a_path_entry_that_reaches_a_protected_path() {
 }
 
 #[test]
+fn the_developer_directory_is_the_resolved_directory_that_the_link_names() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("Xcode.app/Contents/Developer");
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = root.path().join("developer_dir");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+
+    assert_eq!(developer_dir(&link), Some(dir.canonicalize().unwrap()));
+}
+
+#[test]
+fn a_link_to_the_root_or_a_directory_beside_it_or_nowhere_names_no_developer_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let link = |name: &str, target: &str| {
+        let link = root.path().join(name);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        link
+    };
+
+    for link in [
+        link("root", "/"),
+        link("beside", "/usr"),
+        link("relative", "Xcode.app/Contents/Developer"),
+        link("dangling", "/nonexistent/Xcode.app/Contents/Developer"),
+        root.path().join("absent"),
+    ] {
+        assert_eq!(developer_dir(&link), None, "{}", link.display());
+    }
+}
+
+#[test]
 fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_local() {
     let usr = tempfile::tempdir().unwrap();
     for dir in [
@@ -1000,6 +1031,22 @@ mod rules {
         ));
         assert!(deny < allow);
         assert!(git < allow);
+    }
+
+    #[test]
+    fn the_profile_lets_a_path_through_the_var_link_resolve() {
+        let fixture = Fixture::new();
+        let api = fixture.app(sh("true"), 41_000);
+        let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+        let rules = rules(&spec);
+
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule == "(allow file-read-metadata (literal \"/var\"))"),
+            "{rules:?}"
+        );
     }
 
     #[test]

@@ -26,12 +26,21 @@ pub(crate) const DENIED_SERVICES: &[&str] = &[
     "com.apple.coreservices.quarantine-resolver",
 ];
 
+/// The symbolic links at the root whose own metadata a sandboxed process
+/// may read. Seatbelt checks the metadata of every name of a path as the
+/// kernel resolves it, so a process that reads
+/// `/var/select/developer_dir`, as `xcode-select` and `xcrun` do, needs the
+/// `/var` link itself as well as the `/private/var/select` that it leads
+/// to. nono grants a link's metadata only when a granted path or a `PATH`
+/// entry is spelt through it.
+const ROOT_LINKS: &[&str] = &["/var"];
+
 /// Returns phase's own Seatbelt rules for `spec`, in the order they apply.
 ///
 /// The filesystem rules deny the spec's protected paths, deny writes to
-/// the paths it may only read, and then allow again the grants that lie
-/// inside a denied path. The Mach rules deny [`DENIED_SERVICES`] and
-/// sending Apple events. The network rules allow the loopback ports, and
+/// the paths it may only read, allow again the grants that lie inside a
+/// denied path, and allow the metadata of [`ROOT_LINKS`]. The Mach rules
+/// deny [`DENIED_SERVICES`] and sending Apple events. The network rules allow the loopback ports, and
 /// each starts with [`NETWORK_RULE`].
 pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
     let quoted = |path: &Path| format!("(subpath \"{}\")", canonical(path).display());
@@ -57,6 +66,9 @@ pub(crate) fn rules(spec: &SandboxSpec) -> Vec<String> {
             "(allow file-read-data file-write* {})",
             quoted(path)
         ));
+    }
+    for link in ROOT_LINKS {
+        rules.push(format!("(allow file-read-metadata (literal \"{link}\"))"));
     }
     for service in DENIED_SERVICES {
         rules.push(format!("(deny mach-lookup (global-name \"{service}\"))"));
