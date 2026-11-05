@@ -12,8 +12,8 @@
 //! The library reads no environment variable and writes to no standard
 //! stream. The `mxv` command links it.
 //!
-//! Every operation of [`Phase`] other than [`Phase::sweep`] returns
-//! [`PhaseError::NotBuilt`] until its code lands.
+//! [`Phase::status`], [`Phase::logs`] and [`Phase::exec`] return
+//! [`PhaseError::NotBuilt`] until their code lands.
 
 mod cancel;
 mod clock;
@@ -37,7 +37,7 @@ pub use crate::engine::container;
 pub use crate::engine::host;
 pub use crate::engine::keeper;
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
-pub use crate::error::{Operation, PhaseError};
+pub use crate::error::{NotRunnable, Operation, PhaseError};
 pub use crate::logs::{LineSink, LogLine, LogRequest, LogStream};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
@@ -63,7 +63,7 @@ pub use crate::record::{
     BadContainerId, BadDockerName, ContainerId, DockerError, DockerName, Handle,
     MOST_DOCKER_NAME_BYTES, ObjectKind, Role, SweepOutcome, Swept, SweptItem, SweptObject,
 };
-pub use crate::report::{AppOutcome, AppReport, Report, StartProblem};
+pub use crate::report::{AppOutcome, AppReport, Note, Report, StartProblem};
 pub use crate::select::{BadTarget, Selection, Target};
 pub use crate::source::{
     BadSourceText, BuildSpec, GithubRepository, ImageReference, MOST_IMAGE_BYTES,

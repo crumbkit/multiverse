@@ -282,8 +282,18 @@ the keeper's start of the process takes longer than that wait, the engine
 kills the keeper before it can stop the process, which then runs with no
 keeper and no entry in the run record. A stop request during a backoff or
 while the keeper resolves an environment ends the keeper without a
-restart, and a stop request while the keeper waits for its last record
-writes cuts that wait to two seconds.
+restart.
+
+A keeper that a stop request (`TERM` or `INT`) ends does not wait for the
+lifecycle lock. It tries the lock once more without waiting. When the lock
+is free, as it is after a `TERM` from outside phase, the keeper writes the
+record changes still queued. When another process holds the lock, as the
+`down` or `sweep` that stopped the keeper usually does, the keeper drops
+those changes and notes each one in its diagnostic log, and that operation
+records the stop itself. A keeper that waited would only delay that
+operation. A keeper whose app ended any other way waits for its writes as
+long as the writer waits for the lock, and a stop request during that wait
+ends it in the same way.
 
 The library never reads the environment. The program that links phase
 reads its own environment in `main` into an opaque `KeeperEnvironment`,
@@ -500,6 +510,9 @@ A secret value takes only these paths:
 
 - for a host process, from starmap's resolvers into the keeper's
   environment, and from the keeper into the app process when it starts;
+- for a host process's `command` readiness probe, from starmap's
+  resolvers into the environment of the probe command that phase runs
+  during `up`'s readiness wait;
 - for a container, from starmap's resolvers into phase, and from phase
   through `docker exec -i` standard input into a file in the container's
   tmpfs at `/run/secrets` (see [Container secrets](#container-secrets));

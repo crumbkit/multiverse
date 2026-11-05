@@ -14,8 +14,12 @@
 use std::fmt;
 use std::io;
 
+use std::time::Instant;
+
 use rustix::process::{Pid, Signal};
 
+use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::engine::host::{HostStop, HostStopped, is_gone};
 use crate::error::PhaseError;
 use crate::record::run::HostProcess;
 
@@ -623,4 +627,170 @@ fn boot_id() -> Result<Option<String>, PhaseError> {
 )]
 const fn boot_id() -> Result<Option<String>, PhaseError> {
     Ok(None)
+}
+
+/// What a recorded host process is now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// The recorded process, or a member of its group, is running.
+    Ours,
+    /// Another process has the pid.
+    Reused,
+    /// phase may not read the process that has the pid, so it cannot tell
+    /// whether it is the recorded one.
+    Unknown,
+    /// Nothing of the recorded process is left.
+    Gone,
+}
+
+/// Returns what the recorded process `host` is now, as `processes` shows
+/// it. A process whose pid has no process may have left members in its
+/// group, and those are still ours, because the system never gives a new
+/// process the id of a group that has members. It reaps nothing.
+///
+/// A start time counts from the boot on a system that has a boot id, so a
+/// process recorded in another boot is gone, and a process recorded there
+/// without a boot id cannot be matched and is unknown.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::ProcessTable`] when the process table cannot be
+/// read.
+pub(crate) fn identify(
+    processes: &dyn Processes,
+    host: &HostProcess,
+) -> Result<Identity, PhaseError> {
+    match (&host.boot_id, processes.boot_id()?) {
+        (Some(recorded), current) if current.as_ref() != Some(recorded) => {
+            return Ok(Identity::Gone);
+        }
+        (None, Some(_)) => return Ok(Identity::Unknown),
+        _ => {}
+    }
+    Ok(match processes.start_time(host.pid)? {
+        Start::At(started) if started == host.started_at_us => Identity::Ours,
+        Start::At(_) => Identity::Reused,
+        Start::Unreadable => Identity::Unknown,
+        Start::Absent if host.group == host.pid && processes.group_exists(host.group) => {
+            Identity::Ours
+        }
+        Start::Absent => Identity::Gone,
+    })
+}
+
+/// Reports whether phase may signal the recorded process `host`: its pid
+/// and its group are both ids that [`ProcessId`] and [`ProcessGroup`]
+/// accept, which refuse 0, 1 and ids past `i32::MAX`. The stop checks this
+/// first so that it reports such a record as not ours rather than failing
+/// at the signal. A signal to group 0 reaches the sender's own group, and `kill(-1)` reaches every process the user may
+/// signal, so phase never sends either.
+pub(crate) fn signallable(host: &HostProcess) -> bool {
+    ProcessId::new(host.pid).is_ok() && ProcessGroup::new(host.group).is_ok()
+}
+
+/// Stops the keeper and the app of `stop` through `processes`, as
+/// [`HostStop`] describes, and gives up the first wait at `deadline`. A
+/// recorded pid or group of 0 or 1 makes it signal nothing and report
+/// [`HostStopped::NotOurs`]. It
+/// reaps each of them when it is an ended child of this process, so a
+/// keeper that this process started is not kept as a zombie.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::ProcessTable`] when the process table cannot be
+/// read or a signal cannot be sent.
+pub(crate) fn stop_host(
+    processes: &dyn Processes,
+    stop: &HostStop<'_>,
+    deadline: Instant,
+) -> Result<HostStopped, PhaseError> {
+    let look = |host: Option<&HostProcess>| -> Result<Identity, PhaseError> {
+        match host {
+            Some(host) => {
+                processes.reap(host.pid);
+                identify(processes, host)
+            }
+            None => Ok(Identity::Gone),
+        }
+    };
+    if [stop.keeper, stop.app]
+        .into_iter()
+        .flatten()
+        .any(|host| !signallable(host))
+    {
+        return Ok(HostStopped::NotOurs);
+    }
+    let keeper = look(stop.keeper)?;
+    let app = look(stop.app)?;
+    if keeper != Identity::Ours && app != Identity::Ours {
+        return Ok(if keeper == Identity::Unknown || app == Identity::Unknown {
+            HostStopped::NotOurs
+        } else {
+            HostStopped::AlreadyGone
+        });
+    }
+    let signal = stop.signal.signal();
+    let mut app_signalled = false;
+    if let (Some(host), Identity::Ours) = (stop.keeper, keeper) {
+        processes.signal(host, Signal::TERM)?;
+    }
+    let first = (now() + stop.grace + stop.kill_wait).min(deadline);
+    let (mut keeper, mut app) = (keeper, app);
+    loop {
+        keeper = settle(keeper, look(stop.keeper)?);
+        app = settle(app, look(stop.app)?);
+        if keeper != Identity::Ours && app != Identity::Ours {
+            return Ok(ended(keeper, app));
+        }
+        if keeper != Identity::Ours && !app_signalled {
+            if let Some(host) = stop.app {
+                processes.signal(host, signal)?;
+            }
+            app_signalled = true;
+        }
+        if now() >= first {
+            break;
+        }
+        pause(POLL_INTERVAL);
+    }
+    for (host, identity) in [(stop.keeper, keeper), (stop.app, app)] {
+        if let (Some(host), Identity::Ours) = (host, identity) {
+            processes.signal(host, Signal::KILL)?;
+        }
+    }
+    let last = now() + stop.kill_wait;
+    loop {
+        keeper = settle(keeper, look(stop.keeper)?);
+        app = settle(app, look(stop.app)?);
+        if keeper != Identity::Ours && app != Identity::Ours {
+            return Ok(ended(keeper, app));
+        }
+        if now() >= last {
+            let left = if app == Identity::Ours {
+                stop.app
+            } else {
+                stop.keeper
+            };
+            return Ok(HostStopped::Unstoppable {
+                group: left.map_or(0, |host| host.group),
+            });
+        }
+        pause(POLL_INTERVAL);
+    }
+}
+
+/// Returns what a process that was `before` is now that it reads as
+/// `after`. A process that phase stopped stays stopped, even when its pid
+/// is reused meanwhile.
+const fn settle(before: Identity, after: Identity) -> Identity {
+    if is_gone(before) { before } else { after }
+}
+
+/// Returns how a stop ended once neither the keeper nor the app is ours.
+fn ended(keeper: Identity, app: Identity) -> HostStopped {
+    if keeper == Identity::Unknown || app == Identity::Unknown {
+        HostStopped::NotOurs
+    } else {
+        HostStopped::Stopped
+    }
 }

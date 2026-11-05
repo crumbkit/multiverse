@@ -18,6 +18,18 @@ pub(crate) trait LogLines {
     ///
     /// Returns the error that kept the log from being read.
     fn new_lines(&mut self) -> io::Result<Vec<String>>;
+
+    /// Returns the last complete lines of the log, up to its current end,
+    /// once the reader is done with it. A follower that reads a bounded
+    /// amount per call skips ahead to the last part of the log, so the
+    /// lines end at the log's end. By default it returns the new lines.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error that kept the log from being read.
+    fn rest(&mut self) -> io::Result<Vec<String>> {
+        self.new_lines()
+    }
 }
 
 /// A log pattern and whether a line has matched it since phase started

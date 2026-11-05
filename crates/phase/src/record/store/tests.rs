@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use super::{Journal, RunStore};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
-use crate::record::run::{EntryState, HostProcess, ObjectKey, PlanHash, RunRecord, Started};
+use crate::plan::restart::{Stop, StopSignal};
+use crate::record::run::{
+    EntryState, HostProcess, Launching, ObjectKey, PlanHash, RunRecord, Started,
+};
 use crate::record::testing::{app, empty_record, process, workspace, write_file};
 
 const SHORT: Duration = Duration::from_millis(50);
@@ -393,4 +396,99 @@ fn a_record_without_restart_counts_reads_as_no_restarts() {
     write_file(&path, &json.to_string());
 
     assert_eq!(on_disk(&store).processes[0].restarts, 0);
+}
+
+fn launching(grace_ms: u64, hash: u8) -> Launching {
+    Launching {
+        plan_hash: PlanHash::new([hash; 32]),
+        stop: Stop {
+            signal: StopSignal::Int,
+            grace: Duration::from_millis(grace_ms),
+        },
+        listen: None,
+    }
+}
+
+#[test]
+fn launching_a_process_again_writes_its_entries_back_to_planned_with_no_host() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    let keeper = ObjectKey::Keeper(app("api"), process("server"));
+    journal.started(&keeper, Started::Host(host())).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.restarted(&server(), host(), 2).unwrap();
+    journal.stopped(&server()).unwrap();
+
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 9))
+        .unwrap();
+
+    let record = on_disk(&store);
+    for entry in [&record.keepers[0], &record.processes[0]] {
+        assert_eq!(entry.state, EntryState::Planned);
+        assert_eq!(entry.host, None);
+        assert_eq!(entry.restarts, 0);
+    }
+    assert_eq!(record.processes[0].stop, Some(launching(300, 9).stop));
+    assert_eq!(record.processes[0].plan_hash, Some(PlanHash::new([9; 32])));
+}
+
+#[test]
+fn planning_again_keeps_how_a_known_process_stops_and_the_plan_it_started_from() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal
+        .launching(&app("api"), &process("server"), &launching(300, 1))
+        .unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+
+    let again = RunRecord::new(workspace(), PlanHash::new([2; 32])).planned_host_process(
+        &app("api"),
+        &process("server"),
+        Some(launching(900, 2).stop),
+        None,
+    );
+    journal.plan(again).unwrap();
+
+    let record = on_disk(&store);
+    assert_eq!(record.processes[0].stop, Some(launching(300, 1).stop));
+    assert_eq!(record.processes[0].plan_hash, Some(PlanHash::new([1; 32])));
+}
+
+#[test]
+fn a_fresh_start_of_a_process_counts_its_restarts_from_zero() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    journal.started(&server(), Started::Host(host())).unwrap();
+    journal.restarted(&server(), host(), 3).unwrap();
+
+    journal.started(&server(), Started::Host(host())).unwrap();
+
+    assert_eq!(on_disk(&store).processes[0].restarts, 0);
+}
+
+#[test]
+fn a_write_whose_directory_sync_fails_after_the_rename_keeps_the_new_record_in_the_journal() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(planned()).unwrap();
+    let runs = state.path().join("runs");
+    set_mode(&runs, 0o300);
+
+    let started = journal.started(&server(), Started::Host(host()));
+    set_mode(&runs, 0o700);
+
+    assert_eq!(started.unwrap_err().code(), "phase::state::unwritable");
+    assert_eq!(on_disk(&store).state(&server()), Some(EntryState::Running));
+    assert_eq!(
+        journal.record().unwrap().state(&server()),
+        Some(EntryState::Running)
+    );
 }

@@ -7,13 +7,22 @@
 //! keeper's own app: a `down` or another `up` that recorded a process of
 //! its own meanwhile keeps its entry, and the writer notes the skipped
 //! change in the diagnostic log.
+//!
+//! Once the keeper is told to hurry, as it is after a stop request, the
+//! writer asks for the lifecycle lock once more without waiting. When
+//! another operation holds the lock, the writer drops the changes it
+//! holds and notes each one in the diagnostic log, because that operation
+//! records the stop itself.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
 use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::logfile::Diagnostics;
+use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::record::run::{HostProcess, ObjectKey, Started};
 use crate::record::store::{Journal, RunStore};
@@ -73,6 +82,25 @@ impl Note {
 pub(crate) struct Recorder {
     /// The changes to write, in order.
     notes: Sender<Note>,
+    /// Whether the writer should stop waiting for the lock.
+    hurry: Hurry,
+}
+
+/// The flag that tells the writer to stop waiting for the lifecycle lock
+/// after its next try.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Hurry(Arc<AtomicBool>);
+
+impl Hurry {
+    /// Tells the writer to try the lock once more and then give up.
+    pub(crate) fn now(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Reports whether the writer has been told to hurry.
+    fn asked(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 impl Recorder {
@@ -88,13 +116,22 @@ impl Recorder {
         let store = RunStore::new(args.state_dir());
         let workspace = args.workspace().clone();
         let key = ObjectKey::Process(args.app().clone(), args.process().clone());
+        let hurry = Hurry::default();
+        let hurried = hurry.clone();
         thread::spawn(move || {
+            let writer = Writer {
+                store: &store,
+                workspace: &workspace,
+                key: &key,
+                diagnostics: &diagnostics,
+                hurry: &hurried,
+            };
             while let Ok(note) = queue.recv() {
-                write(&store, &workspace, &key, note, &queue, &diagnostics);
+                writer.write(note, &queue);
             }
             finished();
         });
-        Self { notes }
+        Self { notes, hurry }
     }
 
     /// Records that the app started as `host`.
@@ -119,33 +156,67 @@ impl Recorder {
     }
 
     /// Tells the writer that no change follows, so it ends once it has
-    /// written the changes it holds.
-    pub(crate) fn close(self) {
+    /// written the changes it holds, and returns the flag that makes it
+    /// stop waiting for the lock.
+    pub(crate) fn close(self) -> Hurry {
         drop(self.notes);
+        self.hurry
+    }
+}
+
+/// What the writer thread writes with.
+struct Writer<'w> {
+    /// The store.
+    store: &'w RunStore,
+    /// The workspace.
+    workspace: &'w WorkspaceId,
+    /// The process's entry.
+    key: &'w ObjectKey,
+    /// The diagnostic log.
+    diagnostics: &'w Diagnostics,
+    /// Whether to stop waiting for the lock.
+    hurry: &'w Hurry,
+}
+
+impl Writer<'_> {
+    /// Writes `first`, and every change queued behind it, as [`write`]
+    /// does. When the keeper has been told to hurry and another operation
+    /// holds the lock, it drops them and notes each one.
+    fn write(&self, first: Note, queue: &Receiver<Note>) {
+        let hurry = self.hurry;
+        let opened = Journal::open_unless(self.store, self.workspace, RECORD_LOCK_WAIT, &|| {
+            hurry.asked()
+        });
+        match opened {
+            Ok(journal) => write(journal, self.key, first, queue, self.diagnostics),
+            Err(PhaseError::Busy { .. }) if hurry.asked() => {
+                let mut note = Some(first);
+                while let Some(current) = note {
+                    self.diagnostics.note(&format!(
+                        "another operation holds the lifecycle lock and records the stop, so the keeper drops {}",
+                        current.describe()
+                    ));
+                    note = queue.try_recv().ok();
+                }
+            }
+            Err(error) => self.diagnostics.note(&format!(
+                "the run record could not be written ({}): {error}",
+                error.code()
+            )),
+        }
     }
 }
 
 /// Writes `first`, and every change queued behind it, under one hold of
-/// the lifecycle lock. A change that cannot be written is noted in
+/// the lifecycle lock that `journal` holds. A change that cannot be written is noted in
 /// `diagnostics` and dropped, because the keeper must go on supervising.
 fn write(
-    store: &RunStore,
-    workspace: &WorkspaceId,
+    mut journal: Journal<'_>,
     key: &ObjectKey,
     first: Note,
     queue: &Receiver<Note>,
     diagnostics: &Diagnostics,
 ) {
-    let mut journal = match Journal::open(store, workspace, RECORD_LOCK_WAIT) {
-        Ok(journal) => journal,
-        Err(error) => {
-            diagnostics.note(&format!(
-                "the run record could not be written ({}): {error}",
-                error.code()
-            ));
-            return;
-        }
-    };
     let mut note = Some(first);
     while let Some(current) = note {
         note = queue.try_recv().ok();

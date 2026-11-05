@@ -1,11 +1,16 @@
 //! The operations that mxv and other hosts call.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
 use crate::engine::container::DockerCli;
+use crate::engine::containers::Unbuilt;
+use crate::engine::keeper::KeeperCommand;
+use crate::engine::run::{Engine, Settings};
 use crate::env::EnvironmentSource;
 use crate::error::{Operation, PhaseError};
 use crate::logs::{LineSink, LogRequest};
@@ -50,6 +55,12 @@ pub struct Phase {
     start_grace: Duration,
     /// How long phase waits after `KILL`.
     kill_wait: Duration,
+    /// The program that runs keepers, or `None` until the builder names
+    /// one.
+    keeper: Option<KeeperCommand>,
+    /// The variables that keepers and their apps inherit from the program
+    /// that links phase: only ever `PATH` and `HOME`.
+    inherited: BTreeMap<String, String>,
 }
 
 /// The deadlines of one `up`. A deadline that cuts off a start makes that
@@ -83,7 +94,30 @@ impl Phase {
             lock_wait: DEFAULT_LOCK_WAIT,
             start_grace: DEFAULT_START_GRACE,
             kill_wait: DEFAULT_KILL_WAIT,
+            keeper: None,
+            inherited: BTreeMap::new(),
         }
+    }
+
+    /// Returns this `Phase` with `program` as the program that runs
+    /// keepers, followed by `leading`, the words of its hidden subcommand,
+    /// such as `mxv` and `phase keep`. `up` cannot start a host process
+    /// until the builder names it.
+    #[must_use]
+    pub fn with_keeper(mut self, program: PathBuf, leading: Vec<OsString>) -> Self {
+        self.keeper = Some(KeeperCommand::new(program, leading));
+        self
+    }
+
+    /// Returns this `Phase` with `inherited` as the variables that keepers
+    /// and their apps inherit, which the program that links phase reads in
+    /// `main`. phase reads no environment itself. Only `PATH` and `HOME`
+    /// may be inherited, and `up` fails a host process's start when
+    /// `inherited` names another variable.
+    #[must_use]
+    pub fn with_inherited(mut self, inherited: BTreeMap<String, String>) -> Self {
+        self.inherited = inherited;
+        self
     }
 
     /// Returns this `Phase` with `wait` as how long an operation waits for
@@ -143,20 +177,36 @@ impl Phase {
     }
 
     /// Starts the selected apps of `plan`, and the apps they depend on, in
-    /// dependency order, resolving each app's environment through `env`.
-    /// When `cancel` is set, `up` stops what it started and returns.
+    /// dependency order, resolving each process's environment through `env`
+    /// just before it starts. When `cancel` is set, `up` stops what it
+    /// started and returns.
     ///
-    /// An app whose permissions grew beyond its grant does not start, and
-    /// the report gives it [`AppOutcome::AwaitingGrant`]. The other apps
-    /// start.
+    /// `up` takes the workspace's lifecycle lock, waiting up to the lock
+    /// wait, and writes every process and container it will start into the
+    /// run record before it starts any. For each host process it checks
+    /// that nothing holds the process's port, starts the process's keeper,
+    /// and waits until the readiness probe passes, before
+    /// `deadlines.ready` and the process's ready timeout. A process
+    /// without a probe is watched for the start grace instead. A process
+    /// that ends meanwhile fails to start. A process that the run record
+    /// names as running is left alone.
+    ///
+    /// When a process fails to start, `up` stops what it started of that
+    /// app, starts no further app, and reports which apps started. An app
+    /// whose program comes from a release or a build, or that runs in
+    /// containers, is reported as errored with
+    /// [`PhaseError::NotRunnable`]'s code, since a later release does that
+    /// work, and the apps that depend on it do not start.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::Environment`] when a value cannot be resolved,
-    /// and [`PhaseError::NotBuilt`] until phase carries the operation out.
-    ///
-    /// [`AppOutcome::AwaitingGrant`]: crate::AppOutcome::AwaitingGrant
-    #[expect(unused_variables, reason = "phase does not carry out `up` yet")]
+    /// Returns [`PhaseError::UnknownTarget`] when `select` names what the
+    /// plan lacks, [`PhaseError::Busy`] when another operation holds the
+    /// lock, the errors of reading and writing the run record, and
+    /// [`PhaseError::Environment`] when a value cannot be resolved. `up`
+    /// resolves each process's environment just before it starts the
+    /// process, so it may already have started earlier apps, and it stops
+    /// everything it started before it returns any error.
     pub fn up(
         &self,
         plan: &Plan,
@@ -165,20 +215,23 @@ impl Phase {
         deadlines: UpDeadlines,
         cancel: &Cancel,
     ) -> Result<Report, PhaseError> {
-        Err(PhaseError::NotBuilt {
-            operation: Operation::Up,
-        })
+        self.engine().up(plan, select, env, deadlines, cancel)
     }
 
-    /// Resolves the environment of the selected apps of `plan` again
-    /// through `env`, then restarts their processes, before `deadline`.
-    /// When `cancel` is set, `restart` stops what it started and returns.
+    /// Resolves the environment of the selected processes of `plan` that
+    /// run again through `env`, then stops each one and starts it with its
+    /// new environment, before `deadline`. A selected app with no running
+    /// process is reported as not running, and `restart` starts nothing it
+    /// depends on. Its stops give up at `deadline`, and a stop that
+    /// `deadline` cuts off reports the app's stop as uncertain. When
+    /// `cancel` is set, `restart` stops what it started of the app it was
+    /// restarting, leaves the apps it already restarted running, and
+    /// reports the apps it had not reached as untouched.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::Environment`] when a value cannot be resolved,
-    /// and [`PhaseError::NotBuilt`] until phase carries the operation out.
-    #[expect(unused_variables, reason = "phase does not carry out `restart` yet")]
+    /// Returns the errors of [`Phase::up`]. When a value cannot be
+    /// resolved, `restart` has stopped nothing.
     pub fn restart(
         &self,
         plan: &Plan,
@@ -187,29 +240,48 @@ impl Phase {
         deadline: Instant,
         cancel: &Cancel,
     ) -> Result<Report, PhaseError> {
-        Err(PhaseError::NotBuilt {
-            operation: Operation::Restart,
-        })
+        self.engine().restart(plan, select, env, deadline, cancel)
     }
 
     /// Stops the selected apps of the workspace whose stable id is
     /// `workspace`, in reverse dependency order, before `deadline`. The run
-    /// record holds the order.
+    /// record holds the order, so `down` needs no plan.
+    ///
+    /// `down` never signals a process that phase cannot prove is its own.
+    /// Such a process, and one that survives `KILL`, keeps its entry in the
+    /// run record, and the report notes it. The run record is removed once
+    /// everything it names is stopped.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::NotBuilt`] until phase carries the operation
-    /// out.
-    #[expect(unused_variables, reason = "phase does not carry out `down` yet")]
+    /// Returns [`PhaseError::Busy`] when another operation holds the lock,
+    /// the errors of reading and writing the run record, and
+    /// [`PhaseError::ProcessTable`] when phase cannot read or signal
+    /// processes.
     pub fn down(
         &self,
         workspace: &WorkspaceId,
         select: &Selection,
         deadline: Instant,
     ) -> Result<Report, PhaseError> {
-        Err(PhaseError::NotBuilt {
-            operation: Operation::Down,
-        })
+        self.engine().down(workspace, select, deadline)
+    }
+
+    /// Returns the engine that carries out `up`, `down` and `restart` on
+    /// this machine.
+    fn engine(&self) -> Engine<'_> {
+        Engine {
+            settings: Settings {
+                state_dir: &self.state_dir,
+                lock_wait: self.lock_wait,
+                start_grace: self.start_grace,
+                kill_wait: self.kill_wait,
+                keeper: self.keeper.as_ref(),
+                inherited: &self.inherited,
+            },
+            host: &System,
+            containers: &Unbuilt,
+        }
     }
 
     /// Returns the status of the workspace whose stable id is `workspace`.
@@ -287,6 +359,7 @@ impl Phase {
         let reach = Reach {
             docker: &DockerCli::new(),
             processes: &System,
+            host: &System,
         };
         sweep::sweep(&store, workspace, dry_run, reach, waits)
     }

@@ -12,7 +12,7 @@
 //! - [`wait`] runs a check under the probe's thresholds until the process
 //!   is ready, or for liveness until it fails, or until the deadline
 //!   passes, the process ends or the caller cancels. A readiness wait
-//!   attempts the check every [`READY_INTERVAL`], or every period when the
+//!   attempts the check every [`READY_INTERVAL`](runner::READY_INTERVAL), or every period when the
 //!   period is shorter, so `up` learns of readiness as soon as mxv's
 //!   20 ms polling did, within one interval. A liveness wait attempts it
 //!   once each period. Every pause goes through [`crate::clock`].
@@ -57,9 +57,13 @@ mod runner;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use command::{CommandEnd, HostExec, ProbeExec, run_bounded};
+#[cfg(test)]
+pub(crate) use command::{CommandEnd, run_bounded};
+pub(crate) use command::{HostExec, ProbeExec};
 pub(crate) use log::{LogLines, LogWatch};
-pub(crate) use runner::{Goal, Outcome, READY_INTERVAL, Tally, Verdict, wait};
+pub(crate) use runner::{Goal, Outcome, wait};
+#[cfg(test)]
+pub(crate) use runner::{READY_INTERVAL, Tally, Verdict};
 
 /// The most bytes of an HTTP response that a probe reads while it looks
 /// for the status line. A response whose status line is longer fails the

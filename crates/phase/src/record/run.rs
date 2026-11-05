@@ -7,7 +7,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::name::{AppName, ProcessName, WorkspaceId};
+use crate::name::{AppName, PortName, ProcessName, WorkspaceId};
+use crate::plan::restart::Stop;
 use crate::record::{BadHex, ContainerId, DockerName, hex_id};
 
 /// The version of the run record.
@@ -41,6 +42,33 @@ pub(crate) struct RunRecord {
     pub(crate) networks: Vec<NetworkEntry>,
     /// Each Docker volume.
     pub(crate) volumes: Vec<VolumeEntry>,
+    /// Each app that a run planned, in the order phase starts apps, with
+    /// the apps it depends on, so `down` stops them in the reverse order. A
+    /// record that lacks it reads as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) apps: Vec<AppEntry>,
+}
+
+/// An app of a run, and the apps it depends on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppEntry {
+    /// The app.
+    pub(crate) name: AppName,
+    /// The apps that it depends on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) depends: Vec<AppName>,
+}
+
+/// The port that a host process listens on, by its app port's name and the
+/// host port that the plan gave it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Listen {
+    /// The app port's name.
+    pub(crate) name: PortName,
+    /// The host port.
+    pub(crate) port: u16,
 }
 
 /// Where an object is in its life. phase writes each state before the
@@ -76,6 +104,39 @@ pub(crate) struct HostEntry {
     /// record that lacks it reads as 0.
     #[serde(default)]
     pub(crate) restarts: u32,
+    /// How phase stops the process, so `down` needs no plan. It is `None`
+    /// for a keeper, and a process that lacks it stops with the default
+    /// [`Stop`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop: Option<Stop>,
+    /// The port that the process listens on, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) listen: Option<Listen>,
+    /// The hash of the plan that phase last started the process from. It
+    /// is `None` for a keeper and for a process that phase has not started
+    /// yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) plan_hash: Option<PlanHash>,
+}
+
+impl HostEntry {
+    /// Reports whether the entry may name a running process: phase has not
+    /// checked that it is gone.
+    pub(crate) fn live(&self) -> bool {
+        self.state != EntryState::Stopped
+    }
+}
+
+/// What phase writes into a host process's entry before it launches the
+/// process: the plan it starts from, how the process stops, and its port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Launching {
+    /// The hash of the plan.
+    pub(crate) plan_hash: PlanHash,
+    /// How the process stops.
+    pub(crate) stop: Stop,
+    /// The port that the process listens on, or `None`.
+    pub(crate) listen: Option<Listen>,
 }
 
 /// A started host process.
@@ -220,13 +281,6 @@ impl From<NetworkId> for String {
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct PlanHash(String);
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the engine writes its runs through the write-ahead journal when `up` lands"
-    )
-)]
 impl PlanHash {
     /// Returns the hash whose bytes are `digest`.
     pub(crate) fn new(digest: [u8; 32]) -> Self {
@@ -276,13 +330,6 @@ impl fmt::Display for ObjectKey {
 }
 
 /// What phase learned when an object started.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the engine writes its runs through the write-ahead journal when `up` lands"
-    )
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Started {
     /// A keeper or host process.
@@ -300,13 +347,6 @@ pub(crate) enum Started {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Unplanned(pub(crate) ObjectKey);
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the engine writes its runs through the write-ahead journal when `up` lands"
-    )
-)]
 impl RunRecord {
     /// Returns the record of a run of `workspace` from the plan whose hash
     /// is `plan_hash`, with no objects.
@@ -320,21 +360,49 @@ impl RunRecord {
             containers: Vec::new(),
             networks: Vec::new(),
             volumes: Vec::new(),
+            apps: Vec::new(),
         }
     }
 
     /// Adds the keeper of `process` of `app`, and the process, as planned.
+    #[cfg(test)]
     #[must_use]
-    pub(crate) fn host_process(mut self, app: &AppName, process: &ProcessName) -> Self {
-        for list in [&mut self.keepers, &mut self.processes] {
-            list.push(HostEntry {
-                app: app.clone(),
-                process: process.clone(),
-                state: EntryState::Planned,
-                host: None,
-                restarts: 0,
-            });
-        }
+    pub(crate) fn host_process(self, app: &AppName, process: &ProcessName) -> Self {
+        self.planned_host_process(app, process, None, None)
+    }
+
+    /// Adds the keeper of `process` of `app`, and the process, which stops
+    /// as `stop` says and listens on `listen`, as planned.
+    #[must_use]
+    pub(crate) fn planned_host_process(
+        mut self,
+        app: &AppName,
+        process: &ProcessName,
+        stop: Option<Stop>,
+        listen: Option<Listen>,
+    ) -> Self {
+        let entry = |stop, listen| HostEntry {
+            app: app.clone(),
+            process: process.clone(),
+            state: EntryState::Planned,
+            host: None,
+            restarts: 0,
+            stop,
+            listen,
+            plan_hash: None,
+        };
+        self.keepers.push(entry(None, None));
+        self.processes.push(entry(stop, listen));
+        self
+    }
+
+    /// Adds the app `name`, which depends on `depends`.
+    #[must_use]
+    pub(crate) fn app(mut self, name: &AppName, depends: &[AppName]) -> Self {
+        self.apps.push(AppEntry {
+            name: name.clone(),
+            depends: depends.to_vec(),
+        });
         self
     }
 
@@ -379,9 +447,11 @@ impl RunRecord {
     }
 
     /// Adds each object of `planned` that this record does not name, as
-    /// planned, and takes the plan hash of `planned`. An object that this
-    /// record already names keeps its state, and an object that `planned`
-    /// does not name stays, because it may still be running.
+    /// planned, and takes the plan hash of `planned` as the plan of the
+    /// latest operation. An object that this record already names keeps
+    /// its state, its stop, its port and the plan it started from, which
+    /// change only when phase starts it again, and an object that
+    /// `planned` does not name stays, because it may still be running.
     pub(crate) fn merge(&mut self, planned: Self) {
         self.plan_hash = planned.plan_hash;
         let host = |a: &HostEntry, b: &HostEntry| a.app == b.app && a.process == b.process;
@@ -394,6 +464,12 @@ impl RunRecord {
             a.name == b.name
         });
         Self::add_missing(&mut self.volumes, planned.volumes, |a, b| a.name == b.name);
+        for app in planned.apps {
+            match self.apps.iter_mut().find(|known| known.name == app.name) {
+                Some(known) => known.depends = app.depends,
+                None => self.apps.push(app),
+            }
+        }
     }
 
     /// Appends each entry of `planned` that no entry of `list` matches.
@@ -403,6 +479,42 @@ impl RunRecord {
                 list.push(entry);
             }
         }
+    }
+
+    /// Returns the keeper and the process of each host process that the
+    /// record names, either of which may be missing, in the record's order
+    /// of keepers and then of the processes that no keeper names.
+    pub(crate) fn host_pairs(&self) -> Vec<(Option<&HostEntry>, Option<&HostEntry>)> {
+        let same = |a: &HostEntry, b: &HostEntry| a.app == b.app && a.process == b.process;
+        let mut pairs: Vec<_> = self
+            .keepers
+            .iter()
+            .map(|keeper| {
+                let process = self.processes.iter().find(|process| same(keeper, process));
+                (Some(keeper), process)
+            })
+            .collect();
+        pairs.extend(
+            self.processes
+                .iter()
+                .filter(|process| !self.keepers.iter().any(|keeper| same(keeper, process)))
+                .map(|process| (None, Some(process))),
+        );
+        pairs
+    }
+
+    /// Returns the keeper and the entry of `process` of `app`, either of
+    /// which may be missing.
+    pub(crate) fn host_pair(
+        &self,
+        app: &AppName,
+        process: &ProcessName,
+    ) -> (Option<&HostEntry>, Option<&HostEntry>) {
+        let same = |entry: &&HostEntry| &entry.app == app && &entry.process == process;
+        (
+            self.keepers.iter().find(same),
+            self.processes.iter().find(same),
+        )
     }
 
     /// Returns the state of the object `key`, or `None` when the record
@@ -460,6 +572,7 @@ impl RunRecord {
                     find_host_mut(&mut self.processes, app, process).ok_or_else(unplanned)?;
                 entry.host = Some(host);
                 entry.state = EntryState::Running;
+                entry.restarts = 0;
             }
             (ObjectKey::Container(app, process), Started::Container(id)) => {
                 let entry = self
@@ -514,6 +627,73 @@ impl RunRecord {
         entry.state = EntryState::Running;
         entry.restarts = restarts;
         Ok(())
+    }
+
+    /// Writes the keeper and the entry of `process` of `app` back to
+    /// planned with no process, before phase launches the process again,
+    /// and gives the process's entry what `launching` holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unplanned`] when the record names neither entry.
+    pub(crate) fn mark_launching(
+        &mut self,
+        app: &AppName,
+        process: &ProcessName,
+        launching: &Launching,
+    ) -> Result<(), Unplanned> {
+        let keeper = find_host_mut(&mut self.keepers, app, process)
+            .ok_or_else(|| Unplanned(ObjectKey::Keeper(app.clone(), process.clone())))?;
+        keeper.state = EntryState::Planned;
+        keeper.host = None;
+        keeper.restarts = 0;
+        let entry = find_host_mut(&mut self.processes, app, process)
+            .ok_or_else(|| Unplanned(ObjectKey::Process(app.clone(), process.clone())))?;
+        entry.state = EntryState::Planned;
+        entry.host = None;
+        entry.restarts = 0;
+        entry.stop = Some(launching.stop);
+        entry.listen.clone_from(&launching.listen);
+        entry.plan_hash = Some(launching.plan_hash.clone());
+        Ok(())
+    }
+
+    /// Removes the keeper and the entry of each host process of `apps`
+    /// that is planned and names no process, and the containers of `apps`
+    /// that are planned and have no id, because phase never tried to start
+    /// them. An app with no entry left is removed too.
+    pub(crate) fn forget_unstarted(&mut self, apps: &[AppName]) {
+        let unstarted = |entry: &HostEntry| {
+            apps.contains(&entry.app) && entry.state == EntryState::Planned && entry.host.is_none()
+        };
+        let both: Vec<(AppName, ProcessName)> = self
+            .host_pairs()
+            .into_iter()
+            .filter(|(keeper, process)| {
+                keeper.is_none_or(&unstarted) && process.is_none_or(&unstarted)
+            })
+            .filter_map(|(keeper, process)| {
+                keeper
+                    .or(process)
+                    .map(|entry| (entry.app.clone(), entry.process.clone()))
+            })
+            .collect();
+        let named = |entry: &HostEntry| {
+            both.iter()
+                .any(|(app, process)| &entry.app == app && &entry.process == process)
+        };
+        self.keepers.retain(|entry| !named(entry));
+        self.processes.retain(|entry| !named(entry));
+        self.containers.retain(|entry| {
+            !(apps.contains(&entry.app) && entry.state == EntryState::Planned && entry.id.is_none())
+        });
+        let (keepers, processes, containers) = (&self.keepers, &self.processes, &self.containers);
+        self.apps.retain(|app| {
+            !apps.contains(&app.name)
+                || keepers.iter().any(|entry| entry.app == app.name)
+                || processes.iter().any(|entry| entry.app == app.name)
+                || containers.iter().any(|entry| entry.app == app.name)
+        });
     }
 
     /// Sets the state of the object `key` to `state`.

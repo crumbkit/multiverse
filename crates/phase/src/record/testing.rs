@@ -10,10 +10,13 @@ use std::time::Duration;
 
 use rustix::process::Signal;
 
+use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
+use crate::engine::keeper::{Kept, Launch};
+use crate::engine::probe::LogLines;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
-use crate::record::process::{Processes, Start, System};
+use crate::record::process::{self, Identity, Processes, Start, System};
 use crate::record::run::{HostProcess, PlanHash, RunRecord};
 
 /// Returns the workspace id of the tests.
@@ -214,6 +217,44 @@ impl Processes for FakeProcesses {
             processes.remove(&host.pid);
         }
         Ok(())
+    }
+}
+
+/// The fake process table stops and identifies processes as the system
+/// runner does, and starts, follows and finds nothing.
+impl HostRunner for FakeProcesses {
+    fn launch(&self, launch: &Launch<'_>) -> Result<Kept, PhaseError> {
+        Err(PhaseError::KeeperUnstartable {
+            app: launch.args.app().clone(),
+            process: launch.args.process().clone(),
+            reason: "the fake process table starts nothing".to_owned(),
+        })
+    }
+
+    fn stop(
+        &self,
+        stop: &HostStop<'_>,
+        deadline: std::time::Instant,
+    ) -> Result<HostStopped, PhaseError> {
+        process::stop_host(self, stop, deadline)
+    }
+
+    fn identity(&self, host: &HostProcess) -> Result<Identity, PhaseError> {
+        process::identify(self, host)
+    }
+
+    fn follow_log(&self, _log: &std::path::Path) -> Result<Box<dyn LogLines + Send>, PhaseError> {
+        Err(PhaseError::ProcessTable {
+            message: "the fake process table follows no log".to_owned(),
+        })
+    }
+
+    fn port_in_use(&self, _port: u16) -> Result<bool, PhaseError> {
+        Ok(false)
+    }
+
+    fn listener(&self, _group: u32, _port: u16) -> Result<Option<Holder>, PhaseError> {
+        Ok(None)
     }
 }
 

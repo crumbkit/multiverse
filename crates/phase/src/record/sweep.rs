@@ -18,13 +18,12 @@
 
 use std::time::Duration;
 
-use rustix::process::Signal;
-
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::clock::now;
+use crate::engine::host::{HostRunner, HostStop, HostStopped};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::record::docker::{Docker, DockerKind, DockerObject};
-use crate::record::process::{Processes, Start};
+use crate::record::process::{self, Identity, Processes};
 use crate::record::run::{
     EntryState, HostEntry, HostProcess, ObjectKey, RunRecord, VolumeLifetime,
 };
@@ -50,8 +49,10 @@ pub(crate) struct Waits {
 pub(crate) struct Reach<'a> {
     /// The Docker calls.
     pub(crate) docker: &'a dyn Docker,
-    /// The process table.
+    /// The process table, which tells what a recorded process is now.
     pub(crate) processes: &'a dyn Processes,
+    /// The host runner, which stops a keeper and its process.
+    pub(crate) host: &'a dyn HostRunner,
 }
 
 /// Sweeps the workspace `workspace`, as the module docs say. A workspace
@@ -99,20 +100,6 @@ pub(crate) fn sweep(
     Ok(swept)
 }
 
-/// What a recorded host process is now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Identity {
-    /// The recorded process, or a member of its group, is running.
-    Ours,
-    /// Another process has the pid.
-    Reused,
-    /// phase may not read the process that has the pid, so it cannot tell
-    /// whether it is the recorded one.
-    Unknown,
-    /// Nothing of the recorded process is left.
-    Gone,
-}
-
 /// One sweep in progress.
 struct Sweeper<'j, 's, 'a> {
     /// The workspace, whose label a Docker object found by name carries.
@@ -129,14 +116,15 @@ impl Sweeper<'_, '_, '_> {
     /// Sweeps every object of `record`.
     fn run(&mut self, record: &RunRecord) -> Result<Swept, PhaseError> {
         let mut swept = Swept::default();
-        for (role, entries) in [
-            (Role::Keeper, &record.keepers),
-            (Role::Process, &record.processes),
-        ] {
-            for entry in entries {
-                swept.items.push(self.host(role, entry)?);
-            }
+        let mut keepers = Vec::new();
+        let mut processes = Vec::new();
+        for (keeper, process) in record.host_pairs() {
+            let (keeper, process) = self.host_pair(keeper, process)?;
+            keepers.extend(keeper);
+            processes.extend(process);
         }
+        swept.items.extend(keepers);
+        swept.items.extend(processes);
         for entry in &record.containers {
             let key = ObjectKey::Container(entry.app.clone(), entry.process.clone());
             let object = DockerObject {
@@ -196,109 +184,121 @@ impl Sweeper<'_, '_, '_> {
         Ok(swept)
     }
 
-    /// Sweeps the keeper or host process `entry`.
-    fn host(&mut self, role: Role, entry: &HostEntry) -> Result<SweptItem, PhaseError> {
+    /// Sweeps the keeper `keeper` and the host process `process` of one
+    /// app process, either of which the record may lack. Each that phase
+    /// can prove is its own is stopped through the host runner, which stops
+    /// the keeper first so that it does not restart its process.
+    fn host_pair(
+        &mut self,
+        keeper: Option<&HostEntry>,
+        process: Option<&HostEntry>,
+    ) -> Result<(Option<SweptItem>, Option<SweptItem>), PhaseError> {
+        let keeper = keeper
+            .map(|entry| self.look(Role::Keeper, entry))
+            .transpose()?;
+        let process = process
+            .map(|entry| self.look(Role::Process, entry))
+            .transpose()?;
+        let (ours_keeper, ours_process) = (ours(keeper.as_ref()), ours(process.as_ref()));
+        if (ours_keeper.is_some() || ours_process.is_some()) && self.journal.is_some() {
+            for look in [&keeper, &process].into_iter().flatten() {
+                if look.outcome.is_none() {
+                    self.journal_step(|journal| journal.stopping(&look.key))?;
+                }
+            }
+            let stop = HostStop {
+                keeper: ours_keeper,
+                app: ours_process,
+                signal: crate::plan::restart::StopSignal::Term,
+                grace: self.waits.kill,
+                kill_wait: self.waits.kill,
+            };
+            let deadline = now() + self.waits.kill + self.waits.kill;
+            // The runner reports how the pair ended, and each process is
+            // then looked at again, so each gets its own outcome.
+            let _: HostStopped = self.reach.host.stop(&stop, deadline)?;
+        }
+        let keeper = keeper.map(|look| self.conclude(look)).transpose()?;
+        let process = process.map(|look| self.conclude(look)).transpose()?;
+        Ok((keeper, process))
+    }
+
+    /// Looks at the keeper or host process `entry` in `role`, and records
+    /// it as stopped when nothing of it is left.
+    fn look<'e>(&mut self, role: Role, entry: &'e HostEntry) -> Result<Look<'e>, PhaseError> {
         let key = match role {
             Role::Keeper => ObjectKey::Keeper(entry.app.clone(), entry.process.clone()),
             Role::Process => ObjectKey::Process(entry.app.clone(), entry.process.clone()),
         };
-        let handle = entry
-            .host
-            .as_ref()
-            .map(|host| Handle::pid(host.pid, host.started_at_us));
         let outcome = match &entry.host {
-            _ if entry.state == EntryState::Stopped => SweepOutcome::Gone,
+            _ if entry.state == EntryState::Stopped => Some(SweepOutcome::Gone),
+            // phase never signals pid or group 0 or 1, so it cannot stop
+            // such a process and leaves the entry as it is.
+            Some(host) if !process::signallable(host) => Some(SweepOutcome::Unknown),
             None => {
                 self.stopped(&key)?;
-                SweepOutcome::Gone
+                Some(SweepOutcome::Gone)
             }
             Some(host) => match self.identify(host)? {
                 Identity::Gone => {
                     self.stopped(&key)?;
-                    SweepOutcome::Gone
+                    Some(SweepOutcome::Gone)
                 }
                 Identity::Reused => {
                     self.stopped(&key)?;
-                    SweepOutcome::PidReused
+                    Some(SweepOutcome::PidReused)
+                }
+                Identity::Unknown => Some(SweepOutcome::Unknown),
+                Identity::Ours if self.journal.is_none() => Some(SweepOutcome::WouldStop),
+                Identity::Ours => None,
+            },
+        };
+        Ok(Look {
+            role,
+            entry,
+            key,
+            outcome,
+        })
+    }
+
+    /// Returns the item of `look`. A process that phase tried to stop is
+    /// looked at again: it is stopped when nothing of it is left, and
+    /// unstoppable otherwise.
+    fn conclude(&mut self, look: Look<'_>) -> Result<SweptItem, PhaseError> {
+        let handle = look
+            .entry
+            .host
+            .as_ref()
+            .map(|host| Handle::pid(host.pid, host.started_at_us));
+        let outcome = match (look.outcome, &look.entry.host) {
+            (Some(outcome), _) => outcome,
+            (None, None) => SweepOutcome::Gone,
+            (None, Some(host)) => match self.identify(host)? {
+                Identity::Gone | Identity::Reused => {
+                    self.stopped(&look.key)?;
+                    SweepOutcome::Stopped
                 }
                 Identity::Unknown => SweepOutcome::Unknown,
-                Identity::Ours => self.stop_host(&key, host)?,
+                Identity::Ours => SweepOutcome::Unstoppable,
             },
         };
         Ok(SweptItem::new(
-            entry.app.clone(),
-            entry.process.clone(),
-            role,
+            look.entry.app.clone(),
+            look.entry.process.clone(),
+            look.role,
             handle,
             outcome,
         ))
     }
 
-    /// Stops the running host process `host`, whose object is `key`.
-    fn stop_host(
-        &mut self,
-        key: &ObjectKey,
-        host: &HostProcess,
-    ) -> Result<SweepOutcome, PhaseError> {
-        if self.journal.is_none() {
-            return Ok(SweepOutcome::WouldStop);
-        }
-        self.journal_step(|journal| journal.stopping(key))?;
-        for signal in [Signal::TERM, Signal::KILL] {
-            self.reach.processes.signal(host, signal)?;
-            if self.wait_until_gone(host)? {
-                self.journal_step(|journal| journal.stopped(key))?;
-                return Ok(SweepOutcome::Stopped);
-            }
-        }
-        Ok(SweepOutcome::Unstoppable)
-    }
-
-    /// Returns what the recorded process `host` is now. A process whose
-    /// pid has no process may have left members in its group, and those
-    /// are still ours, because the system never gives a new process the id
-    /// of a group that has members. A dry run reaps nothing.
+    /// Returns what the recorded process `host` is now. A dry run reaps
+    /// nothing.
     fn identify(&self, host: &HostProcess) -> Result<Identity, PhaseError> {
         let processes = self.reach.processes;
         if self.journal.is_some() {
             processes.reap(host.pid);
         }
-        // A start time counts from the boot on a system that has a boot id,
-        // so a process recorded there without one cannot be matched, and
-        // phase leaves it alone.
-        match (&host.boot_id, processes.boot_id()?) {
-            (Some(recorded), current) if current.as_ref() != Some(recorded) => {
-                return Ok(Identity::Gone);
-            }
-            (None, Some(_)) => return Ok(Identity::Unknown),
-            _ => {}
-        }
-        Ok(match processes.start_time(host.pid)? {
-            Start::At(started) if started == host.started_at_us => Identity::Ours,
-            Start::At(_) => Identity::Reused,
-            Start::Unreadable => Identity::Unknown,
-            Start::Absent if host.group == host.pid && processes.group_exists(host.group) => {
-                Identity::Ours
-            }
-            Start::Absent => Identity::Gone,
-        })
-    }
-
-    /// Polls `host` until nothing of it is left or the kill wait passes,
-    /// and reports whether it went.
-    fn wait_until_gone(&self, host: &HostProcess) -> Result<bool, PhaseError> {
-        let deadline = now() + self.waits.kill;
-        // A process that phase did not start gives phase no event when it
-        // ends, so `sweep` polls the process table (BASE-11).
-        loop {
-            if matches!(self.identify(host)?, Identity::Gone | Identity::Reused) {
-                return Ok(true);
-            }
-            if now() >= deadline {
-                return Ok(false);
-            }
-            pause(POLL_INTERVAL);
-        }
+        process::identify(processes, host)
     }
 
     /// Sweeps the Docker object `object`, whose record entry is `key` in
@@ -351,4 +351,23 @@ impl Sweeper<'_, '_, '_> {
             None => Ok(()),
         }
     }
+}
+
+/// A keeper or host process that a sweep has looked at.
+struct Look<'e> {
+    /// Whether it is a keeper or a process.
+    role: Role,
+    /// Its record entry.
+    entry: &'e HostEntry,
+    /// Its key in the record.
+    key: ObjectKey,
+    /// Its outcome when the sweep leaves it alone, or `None` when it is
+    /// running and phase stops it.
+    outcome: Option<SweepOutcome>,
+}
+
+/// Returns the recorded process of `look` when the sweep stops it.
+fn ours<'e>(look: Option<&Look<'e>>) -> Option<&'e HostProcess> {
+    look.filter(|look| look.outcome.is_none())
+        .and_then(|look| look.entry.host.as_ref())
 }

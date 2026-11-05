@@ -60,14 +60,16 @@ fn real(docker: &dyn Docker) -> Reach<'_> {
     Reach {
         docker,
         processes: &System,
+        host: &System,
     }
 }
 
 /// Returns the fake process table `processes` with no Docker.
-fn fake(processes: &dyn Processes) -> Reach<'_> {
+fn fake(processes: &FakeProcesses) -> Reach<'_> {
     Reach {
         docker: &Unreachable,
         processes,
+        host: processes,
     }
 }
 
@@ -600,5 +602,25 @@ fn a_removal_that_docker_refuses_fails_with_its_own_code_and_keeps_the_record() 
     let down = sweep(&store, &workspace(), false, real(&unavailable), WAITS).unwrap_err();
     assert_eq!(down.code(), "phase::docker::unavailable");
     assert!(down.to_string().contains("did not answer"), "{down}");
+    assert!(store.read(&workspace()).unwrap().is_some());
+}
+
+#[test]
+fn sweep_leaves_a_process_recorded_in_group_1_as_unknown_and_signals_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let processes = FakeProcesses::default().with(4242, Start::At(1), Some(Signal::TERM));
+    record_host(
+        &store,
+        HostProcess {
+            group: 1,
+            ..host_at(4242, 1)
+        },
+    );
+
+    let swept = sweep(&store, &workspace(), false, fake(&processes), QUICK).unwrap();
+
+    assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Unknown);
+    assert!(processes.signals.borrow().is_empty());
     assert!(store.read(&workspace()).unwrap().is_some());
 }

@@ -82,6 +82,13 @@ pub(crate) enum Goal {
     Ready,
     /// Liveness, in a keeper. The wait attempts the check once each period,
     /// and ends when the failures in a row reach the failure threshold.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a keeper waits for liveness when liveness probes land"
+        )
+    )]
     Failing,
 }
 
