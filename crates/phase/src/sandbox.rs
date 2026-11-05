@@ -521,8 +521,10 @@ impl AppDirs {
     }
 }
 
-/// The system directories that every sandboxed process may read on macOS.
-/// `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
+/// The system directories that every sandboxed process may read on macOS,
+/// and the one file of `/Library/Preferences` that records whether the
+/// Xcode license was accepted, which `xcodebuild` reads before `xcrun`
+/// runs a tool. `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
 /// profile allows the resolved paths and the metadata of the `/var` link. Of `/Library` it allows only what
 /// toolchains read.
 #[cfg(target_os = "macos")]
@@ -537,6 +539,7 @@ const SYSTEM_READ: &[&str] = &[
     "/private/etc",
     "/private/var/db/timezone",
     "/private/var/select",
+    "/Library/Preferences/com.apple.dt.Xcode.plist",
     "/dev",
 ];
 
@@ -548,9 +551,9 @@ const SYSTEM_READ: &[&str] = &[
 
 /// The link that `xcode-select --switch` sets to the active developer
 /// directory, which `xcode-select`, `xcrun` and the `/usr/bin` shims of
-/// the developer tools read. [`SYSTEM_READ`] grants the link, and the
-/// spec grants the directory it names, which [`developer_dir`] finds.
-#[cfg(target_os = "macos")]
+/// the developer tools read. On macOS [`SYSTEM_READ`] grants the link, and
+/// the spec grants the directory it names, which [`developer_dir`] finds.
+/// Linux has no such link, so there the spec grants nothing for it.
 const DEVELOPER_DIR_LINK: &str = "/private/var/select/developer_dir";
 
 /// The directories inside [`SYSTEM_READ`] that the macOS profile denies
@@ -739,7 +742,6 @@ pub(crate) fn spec(
         .filter(|path| path.exists())
         .map(|path| canonical(path))
         .collect();
-    #[cfg(target_os = "macos")]
     if let Some(dir) = developer_dir(Path::new(DEVELOPER_DIR_LINK)).filter(|dir| !reaches(dir)) {
         read.insert(dir);
     }
@@ -1005,17 +1007,25 @@ fn system_read() -> Vec<PathBuf> {
 /// Returns the resolved directory that the symbolic link `link` names,
 /// when the link holds an absolute path to a directory at least two names
 /// below the root. A link to `/` or to a directory beside `/Applications`
-/// therefore names nothing, and a sandbox never reads all of one.
-#[cfg_attr(
-    not(target_os = "macos"),
-    expect(dead_code, reason = "only the macOS spec reads a developer directory")
-)]
+/// therefore names nothing, and a sandbox never reads all of one. When the
+/// directory is the `Contents/Developer` of an app bundle, such as
+/// `/Applications/Xcode.app`, it returns the bundle, because Xcode's tools
+/// also read the bundle's `Info.plist` and load its `SharedFrameworks`.
 fn developer_dir(link: &Path) -> Option<PathBuf> {
     let target = std::fs::read_link(link).ok()?;
     if !target.is_absolute() {
         return None;
     }
     let dir = target.canonicalize().ok()?;
+    let bundle = dir
+        .ancestors()
+        .nth(2)
+        .filter(|bundle| {
+            dir.ends_with("Contents/Developer")
+                && bundle.extension() == Some(std::ffi::OsStr::new("app"))
+        })
+        .map(Path::to_path_buf);
+    let dir = bundle.unwrap_or(dir);
     (dir.is_dir() && dir.components().count() > 2).then_some(dir)
 }
 

@@ -919,12 +919,23 @@ fn a_spec_looks_nothing_up_in_a_path_entry_that_reaches_a_protected_path() {
 #[test]
 fn the_developer_directory_is_the_resolved_directory_that_the_link_names() {
     let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("Xcode.app/Contents/Developer");
+    let dir = root.path().join("CommandLineTools");
     std::fs::create_dir_all(&dir).unwrap();
     let link = root.path().join("developer_dir");
     std::os::unix::fs::symlink(&dir, &link).unwrap();
 
     assert_eq!(developer_dir(&link), Some(dir.canonicalize().unwrap()));
+}
+
+#[test]
+fn the_developer_directory_of_an_xcode_is_its_whole_app_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = root.path().join("Xcode_26.6.app");
+    std::fs::create_dir_all(bundle.join("Contents/Developer")).unwrap();
+    let link = root.path().join("developer_dir");
+    std::os::unix::fs::symlink(bundle.join("Contents/Developer"), &link).unwrap();
+
+    assert_eq!(developer_dir(&link), Some(bundle.canonicalize().unwrap()));
 }
 
 #[test]

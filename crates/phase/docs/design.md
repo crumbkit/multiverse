@@ -1145,9 +1145,16 @@ The sandbox allows (decision P18):
   On macOS the system directories also include the developer directory
   that `/var/select/developer_dir` names, which `xcode-select --switch`
   sets and which `xcode-select`, `xcrun` and the developer tools' shims in
-  `/usr/bin`, such as `cc`, read. phase grants the directory only when the
-  link holds an absolute path at least two names below the root, so a link
-  to `/` or to `/Applications` grants nothing. Seatbelt checks the
+  `/usr/bin`, such as `cc`, read. When that directory is the
+  `Contents/Developer` of an app bundle, such as
+  `/Applications/Xcode_26.6.app` on GitHub's runner, phase grants the whole
+  bundle, because `xcodebuild` reads the bundle's `Info.plist` and loads
+  its `SharedFrameworks`. It also grants the one file
+  `/Library/Preferences/com.apple.dt.Xcode.plist`, which records whether
+  the Xcode license was accepted. phase grants the directory or bundle only
+  when the link holds an absolute path and the grant lies at least two
+  names below the root, so a link to `/` or to `/Applications` grants
+  nothing. Seatbelt checks the
   metadata of every name of a path as the kernel resolves it, so reading
   the link through `/var` also needs the metadata of the `/var` link
   itself, and the profile allows that one literal path. nono allows a
