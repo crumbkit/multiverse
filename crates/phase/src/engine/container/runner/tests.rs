@@ -477,6 +477,86 @@ fn up_leaves_a_running_container_of_the_same_plan_alone_and_replaces_a_stopped_o
 
 /// Returns what `docker logs --timestamps` prints for `text` at the
 /// nanosecond `at` of a fixed second.
+#[test]
+fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_text() {
+    use super::ContainerError;
+    use crate::error::PhaseError;
+    use crate::record::docker::{DockerCause, DockerError};
+
+    let cases = [
+        (
+            ContainerError::Missing {
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            true,
+            DockerCause::DockerMissing,
+        ),
+        (
+            ContainerError::Unavailable {
+                message: "Cannot connect".to_owned(),
+            },
+            true,
+            DockerCause::DaemonUnavailable,
+        ),
+        (
+            ContainerError::ComposeMissing {
+                message: "unknown command".to_owned(),
+            },
+            false,
+            DockerCause::ComposeMissing,
+        ),
+        (
+            ContainerError::NoAddressPool {
+                message: "all predefined address pools have been fully subnetted".to_owned(),
+            },
+            false,
+            DockerCause::NoAddressPool,
+        ),
+        (
+            ContainerError::failed("pull", None, "manifest unknown").in_pull(),
+            false,
+            DockerCause::PullFailed,
+        ),
+        (
+            ContainerError::failed("compose up", Some("db"), "Error response from daemon: no"),
+            false,
+            DockerCause::Refused,
+        ),
+        (
+            ContainerError::timed_out("stop", "docker did not finish within 3 seconds"),
+            false,
+            DockerCause::TimedOut,
+        ),
+        (
+            ContainerError::Cancelled { operation: "pull" },
+            false,
+            DockerCause::Cancelled,
+        ),
+        (
+            ContainerError::foreign("container", "phase-db"),
+            false,
+            DockerCause::Foreign,
+        ),
+        (
+            ContainerError::unexpected("scope check", None, "the scope does not match"),
+            false,
+            DockerCause::Unexpected,
+        ),
+    ];
+    for (error, unavailable, cause) in cases {
+        let text = error.to_string();
+        let PhaseError::Docker { source } = super::docker_error(&error) else {
+            panic!("{error:?}");
+        };
+        assert_eq!(source.cause(), cause, "{error:?}");
+        if unavailable {
+            assert_eq!(source, DockerError::unavailable(text).with_cause(cause));
+        } else {
+            assert_eq!(source, DockerError::refused(text).with_cause(cause));
+        }
+    }
+}
+
 fn logged(at: u32, text: &str) -> String {
     format!("2026-11-05T10:00:00.{at:09}Z {text}\n")
 }
@@ -540,11 +620,11 @@ fn a_line_longer_than_a_read_keeps_is_handed_over_cut_and_the_reads_move_past_it
 fn a_refused_restart_policy_update_fails_only_a_container_that_still_runs() {
     use crate::engine::container::ContainerState;
     let refused = || {
-        Err(crate::engine::container::ContainerError::Failed {
-            operation: "update",
-            container: Some("server".to_owned()),
-            message: "cannot update a stopped container".to_owned(),
-        })
+        Err(crate::engine::container::ContainerError::failed(
+            "update",
+            Some("server"),
+            "cannot update a stopped container",
+        ))
     };
     let runs = |state: &ContainerState| state.runs();
     assert!(super::settled(refused(), Some(ContainerState::Running), runs).is_err());
@@ -1562,4 +1642,187 @@ fn a_cancelled_secret_write_stops_and_leaves_no_exec() {
     let token = docker(&["exec", "--", &id, "cat", "/run/secrets/TOKEN"]).unwrap();
     assert_eq!(token, TOKEN);
     world.down();
+}
+
+/// The Dockerfile of an image that declares `VOLUME /data`, so docker
+/// gives each of its containers an anonymous volume at `/data`.
+fn volume_dockerfile() -> String {
+    format!("FROM {IMAGE}\nVOLUME /data\n")
+}
+
+/// Returns the app `name` whose `server` runs `image`, with the plan's
+/// named volume `keep` at `/keep`, and is ready once `/tmp/ready` exists.
+/// Its script writes the line of its mount table that holds `/data` into
+/// `/keep/data-mount`, so a test can learn the anonymous volume's name
+/// after the container is gone.
+fn volume_app(name: &str, image: &BuiltImage) -> AppPlan {
+    let mut app = app(
+        name,
+        "grep ' /data ' /proc/self/mountinfo > /keep/data-mount && touch /tmp/ready; exec sleep 60",
+    );
+    app.source = Source::image(image.tag.parse().unwrap());
+    app.processes[0]
+        .volumes
+        .insert("keep".parse().unwrap(), PathBuf::from("/keep"));
+    app.processes[0].ready = Some(Probe::new(ProbeCheck::command(vec![
+        "test".to_owned(),
+        "-e".to_owned(),
+        "/tmp/ready".to_owned(),
+    ])));
+    app
+}
+
+/// Returns the name of the volume that the container `id` mounts at
+/// `path`.
+fn volume_at(id: &str, path: &str) -> Option<String> {
+    let printed = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{range .Mounts}}{{if eq .Type \"volume\"}}{{.Destination}} {{.Name}}\n{{end}}{{end}}",
+        "--",
+        id,
+    ])?;
+    printed
+        .lines()
+        .find_map(|line| line.strip_prefix(path)?.strip_prefix(' '))
+        .map(str::to_owned)
+}
+
+/// Reports whether docker has the volume `name`.
+fn volume_exists(name: &str) -> bool {
+    docker(&["volume", "inspect", "--", name]).is_some()
+}
+
+/// Volumes that a test removes when it ends, so a test that fails leaves
+/// none behind.
+struct Leftovers(Vec<String>);
+
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            let _ = docker(&["volume", "rm", "--force", "--", name]);
+        }
+    }
+}
+
+#[test]
+fn down_removes_the_anonymous_volume_of_an_images_volume_path_and_keeps_the_named_volume() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&volume_dockerfile()) else {
+        return;
+    };
+    let world = World::new();
+    let plan = world.plan(vec![volume_app("db", &image)]);
+    let report = world.up(&plan);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let id = world.container("db", "server").unwrap();
+    let anonymous = volume_at(&id, "/data").unwrap();
+    let named = volume_at(&id, "/keep").unwrap();
+    let _leftovers = Leftovers(vec![anonymous.clone()]);
+    assert!(volume_exists(&anonymous));
+
+    let report = world.down();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Stopped, "{report:?}");
+    assert!(docker(&["container", "inspect", &id]).is_none());
+    assert!(!volume_exists(&anonymous), "{anonymous} was left behind");
+    assert!(volume_exists(&named), "{named} was removed");
+}
+
+#[test]
+fn restart_removes_the_anonymous_volume_of_the_replaced_container_and_keeps_the_named_volume() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&volume_dockerfile()) else {
+        return;
+    };
+    let world = World::new();
+    let plan = world.plan(vec![volume_app("db", &image)]);
+    world.up(&plan);
+    let first = world.container("db", "server").unwrap();
+    let anonymous = volume_at(&first, "/data").unwrap();
+    let named = volume_at(&first, "/keep").unwrap();
+    let mut leftovers = Leftovers(vec![anonymous.clone()]);
+
+    let report = world
+        .phase
+        .restart(
+            &plan,
+            &Selection::All,
+            &Mode,
+            Instant::now() + Duration::from_secs(60),
+            &Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
+    let second = world.container("db", "server").unwrap();
+    assert_ne!(first, second);
+    let fresh = volume_at(&second, "/data").unwrap();
+    leftovers.0.push(fresh.clone());
+    assert_ne!(fresh, anonymous);
+    assert!(!volume_exists(&anonymous), "{anonymous} was left behind");
+    assert_eq!(volume_at(&second, "/keep").as_deref(), Some(named.as_str()));
+    world.down();
+    assert!(!volume_exists(&fresh), "{fresh} was left behind");
+    assert!(volume_exists(&named), "{named} was removed");
+}
+
+#[test]
+fn a_failed_start_removes_the_anonymous_volumes_of_the_containers_it_cleans_up() {
+    if !docker_ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&volume_dockerfile()) else {
+        return;
+    };
+    let world = World::new();
+    let mut db = volume_app("db", &image);
+    // The second process needs a secret that the environment does not
+    // supply, so the start fails after the first process is ready.
+    let broken = secret_app_running("db", COPY_SECRETS).processes.remove(0);
+    let mut broken = broken;
+    broken.name = "broken".parse().unwrap();
+    broken.secret_owner = Some("1000:1000".to_owned());
+    for secret in ["TOKEN", "KEY"] {
+        db.permissions.secrets.insert(secret.to_owned());
+    }
+    db.processes.push(broken);
+    let plan = world.plan(vec![db]);
+
+    let report = world.up_with(&plan, &Secrets::new(None));
+
+    assert!(
+        matches!(outcome(&report, "db"), AppOutcome::Errored { .. }),
+        "{report:?}"
+    );
+    assert!(!world.has_containers());
+    // The named volume holds the line of the mount table that names the
+    // anonymous volume of the removed container.
+    let label = format!("label=mxv.workspace-id={}", world.id);
+    let named = docker(&["volume", "ls", "--quiet", "--filter", &label]).unwrap();
+    let named = named.trim();
+    assert!(!named.is_empty());
+    let mount = docker(&[
+        "run",
+        "--rm",
+        "--volume",
+        &format!("{named}:/keep"),
+        IMAGE,
+        "cat",
+        "/keep/data-mount",
+    ])
+    .unwrap();
+    let anonymous = mount
+        .split('/')
+        .find(|part| part.len() == 64 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or_else(|| panic!("no volume name in {mount}"))
+        .to_owned();
+    let _leftovers = Leftovers(vec![anonymous.clone()]);
+    assert!(!volume_exists(&anonymous), "{anonymous} was left behind");
+    assert!(volume_exists(named), "{named} was removed");
 }

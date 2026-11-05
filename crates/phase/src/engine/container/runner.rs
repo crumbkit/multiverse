@@ -64,7 +64,13 @@
 //! set, waits the container's stop grace or until the deadline, whichever
 //! comes first, removes it, and checks that docker no longer has it. It
 //! removes any other container at once. A failure on one container is that
-//! container's result, and `stop` goes on to the next. Volumes stay.
+//! container's result, and `stop` goes on to the next.
+//!
+//! Every removal of a container, in `stop`, in the replacement of a
+//! container by `start` and in the clean-up after a failed start, removes
+//! the container's anonymous volumes with it. docker makes one for each
+//! `VOLUME` path of the image, and nothing records it, so it would
+//! otherwise stay behind. The workspace's named volumes stay.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -84,8 +90,8 @@ use crate::engine::container::command::{
 use crate::engine::container::compose::{Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope};
 use crate::engine::container::objects::{
-    self, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id, inspect_named,
-    no_restart, reinspect, remove, stop, stop_until,
+    self, AnonymousVolumes, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id,
+    inspect_named, no_restart, reinspect, remove, stop, stop_until,
 };
 use crate::engine::container::secrets::{self, ImageConfig, SecretBytes};
 use crate::engine::containers::{
@@ -220,9 +226,9 @@ impl ComposeRunner {
 
 /// Returns the failure of a container step as phase reports it: Docker
 /// did not answer when its program is missing or its daemon does not
-/// answer, and it refused otherwise. The message holds no value of a
-/// variable, because no value is ever an argument, a compose file entry or
-/// a label.
+/// answer, and it refused otherwise. It keeps the step's cause. The
+/// message holds no value of a variable, because no value is ever an
+/// argument, a compose file entry or a label.
 pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
     let source = match error {
         ContainerError::Missing { .. } | ContainerError::Unavailable { .. } => {
@@ -230,13 +236,15 @@ pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
         }
         _ => DockerError::refused(error.to_string()),
     };
-    PhaseError::Docker { source }
+    PhaseError::Docker {
+        source: source.with_cause(error.cause()),
+    }
 }
 
 /// Returns the record's id of the container that `inspected` names.
 fn record_id(inspected: &Inspected) -> Result<ContainerId, PhaseError> {
     ContainerId::try_from(inspected.container.id().as_str().to_owned()).map_err(|_| {
-        docker_error(&ContainerError::failed(
+        docker_error(&ContainerError::unexpected(
             "container inspect",
             Some(inspected.container.service().as_str()),
             "docker printed a container id that is not 64 hex digits",
@@ -351,7 +359,7 @@ impl ComposeRunner {
         for key in app::volume_keys(app) {
             ensure_volume(&scope, &key).map_err(|error| halt(&error))?;
             let name: DockerName = scope.volume_name(&key).as_str().parse().map_err(|_| {
-                docker_error(&ContainerError::failed(
+                docker_error(&ContainerError::unexpected(
                     "volume create",
                     None,
                     format!("{} is not a Docker name", scope.volume_name(&key)),
@@ -431,7 +439,7 @@ impl ComposeRunner {
                             Some((name.clone(), StartProblem::port_taken(port, Vec::new())));
                         return Ok(());
                     }
-                    return Err(Halt::Failed(docker_error(&ContainerError::failed(
+                    return Err(Halt::Failed(docker_error(&ContainerError::unexpected(
                         "compose up",
                         Some(service.as_str()),
                         "docker reported a port that the process does not publish as allocated",
@@ -574,10 +582,12 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
             operation,
             container,
             message,
+            cause,
         } if files && message.contains("/bin/sh") => ContainerError::Failed {
             operation,
             container,
             message: format!("{message}; {NO_SHELL_HINT}"),
+            cause,
         },
         other => other,
     }
@@ -745,7 +755,9 @@ fn settled<T>(
 /// status again. A running or paused container gets its stop signal and
 /// its grace. Any other container, such as one that Docker was restarting,
 /// is removed at once, because `docker stop` would first wait out Docker's
-/// restart delay.
+/// restart delay. docker removes the container's anonymous volumes with
+/// it, the ones it made for its image's `VOLUME` paths, which nothing else
+/// records. Its named volumes stay.
 fn discard(inspected: &Inspected, grace: Duration) -> Result<(), ContainerError> {
     let Some(fresh) = settle(&inspected.container)? else {
         return Ok(());
@@ -753,7 +765,7 @@ fn discard(inspected: &Inspected, grace: Duration) -> Result<(), ContainerError>
     if fresh.state.runs() {
         stop(&fresh.container, grace)?;
     }
-    remove(fresh.container)
+    remove(fresh.container, AnonymousVolumes::Remove)
 }
 
 /// Stops and removes the container `inspected` as [`discard`] does, and
@@ -765,7 +777,7 @@ fn discard_until(inspected: &Inspected, grace: Duration, cancel: &Cancel) -> Res
     if fresh.state.runs() {
         stop_until(&fresh.container, grace, cancel).map_err(|error| halt(&error))?;
     }
-    remove(fresh.container).map_err(|error| halt(&error))
+    remove(fresh.container, AnonymousVolumes::Remove).map_err(|error| halt(&error))
 }
 
 /// Stops and removes each container of `started`, after a failure ended

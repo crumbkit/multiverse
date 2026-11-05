@@ -14,7 +14,7 @@ use crate::engine::container::cli::DockerCli;
 use crate::engine::container::names::{Scope, StoreId};
 use crate::name::{WorkspaceId, WorkspaceName};
 use crate::record::DockerName;
-use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
+use crate::record::docker::{Docker, DockerCause, DockerError, DockerKind, DockerObject};
 
 /// The fake `docker` program. It appends each call's arguments to
 /// `calls`. While the file `down` exists it fails every call as docker does
@@ -419,7 +419,10 @@ fn removing_a_container_stops_it_within_the_wait_and_then_removes_it() {
     assert!(!fake.has(&id));
     let calls = fake.calls();
     assert!(calls.contains(&format!("stop --time 7 -- {id}")), "{calls}");
-    assert!(calls.contains(&format!("rm --force -- {id}")), "{calls}");
+    assert!(
+        calls.contains(&format!("rm --force --volumes -- {id}")),
+        "{calls}"
+    );
 }
 
 #[test]
@@ -448,7 +451,10 @@ fn removing_a_container_that_docker_is_restarting_removes_it_without_a_stop() {
     assert!(!fake.has(&id));
     let calls = fake.calls();
     assert!(!calls.contains("stop "), "{calls}");
-    assert!(calls.contains(&format!("rm --force -- {id}")), "{calls}");
+    assert!(
+        calls.contains(&format!("rm --force --volumes -- {id}")),
+        "{calls}"
+    );
 }
 
 #[test]
@@ -475,7 +481,7 @@ fn removing_a_running_container_whose_update_docker_refuses_fails_as_refused() {
         .docker()
         .remove(DockerKind::Container, &id, Duration::from_secs(7));
     assert!(
-        matches!(&removed, Err(DockerError::Refused { message }) if message.contains("cannot update")),
+        matches!(&removed, Err(DockerError::Refused { message, .. }) if message.contains("cannot update")),
         "{removed:?}"
     );
     assert!(fake.has(&id));
@@ -523,7 +529,7 @@ fn a_removal_that_docker_answers_and_refuses_fails_as_refused() {
         .docker()
         .remove(DockerKind::Volume, "data", Duration::ZERO);
     assert!(
-        matches!(&removed, Err(DockerError::Refused { message }) if message.contains("in use")),
+        matches!(&removed, Err(DockerError::Refused { message, .. }) if message.contains("in use")),
         "{removed:?}"
     );
 }
@@ -539,6 +545,37 @@ fn a_removal_while_docker_does_not_answer_fails_as_unavailable() {
         matches!(removed, Err(DockerError::Unavailable { .. })),
         "{removed:?}"
     );
+}
+
+#[test]
+fn the_failures_of_sweeps_docker_carry_the_cause_of_what_failed() {
+    let workspace = workspace();
+    let db = name("db");
+    let missing = DockerCli::with_program("/nonexistent/docker".into())
+        .find(&object(&workspace, DockerKind::Container, &db, None))
+        .unwrap_err();
+    assert_eq!(missing.cause(), DockerCause::DockerMissing);
+    assert!(
+        matches!(missing, DockerError::Unavailable { .. }),
+        "{missing:?}"
+    );
+
+    let fake = Fake::new();
+    fake.mark("down");
+    let down = fake
+        .docker()
+        .remove(DockerKind::Volume, "data", Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(down.cause(), DockerCause::DaemonUnavailable);
+
+    let fake = Fake::new();
+    fake.object(&["data"], ["data", WORKSPACE_ID, "", ""]);
+    fake.mark("refuse");
+    let refused = fake
+        .docker()
+        .remove(DockerKind::Volume, "data", Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(refused.cause(), DockerCause::Refused);
 }
 
 /// Runs the real `docker <args>` and reports whether it succeeded.
@@ -615,6 +652,77 @@ fn a_real_daemon_finds_and_removes_a_volume_and_a_container_by_this_workspaces_i
 }
 
 #[test]
+fn a_real_daemon_removes_a_containers_anonymous_volume_with_it_and_keeps_its_named_volume() {
+    if !real_docker(&["version", "--format", "{{.Server.Version}}"]) {
+        println!("skipping: no docker daemon answers");
+        return;
+    }
+    if !real_docker(&["image", "inspect", "busybox:1.37.0"]) {
+        println!("skipping: busybox:1.37.0 is not pulled");
+        return;
+    }
+    let id = crate::random::hex_id().unwrap();
+    let label = format!("mxv.workspace-id={id}");
+    let named = format!("phase-test-{id}.keep");
+    let container = format!("phase-test-{id}.db");
+    assert!(real_docker(&[
+        "volume", "create", "--label", &label, &named
+    ]));
+    assert!(real_docker(&[
+        "container",
+        "create",
+        "--name",
+        &container,
+        "--label",
+        &label,
+        "--volume",
+        &format!("{named}:/keep"),
+        "--volume",
+        "/data",
+        "busybox:1.37.0"
+    ]));
+    let anonymous = real_output(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{range .Mounts}}{{if eq .Destination \"/data\"}}{{.Name}}{{end}}{{end}}",
+        "--",
+        &container,
+    ])
+    .unwrap_or_default();
+
+    let removed = DockerCli::new().remove(DockerKind::Container, &container, Duration::ZERO);
+
+    let anonymous_left =
+        !anonymous.is_empty() && real_docker(&["volume", "inspect", "--", &anonymous]);
+    let named_left = real_docker(&["volume", "inspect", "--", &named]);
+    let _ = real_docker(&["rm", "--force", "--", &container]);
+    let _ = real_docker(&["volume", "rm", "--force", "--", &anonymous]);
+    let _ = real_docker(&["volume", "rm", "--force", "--", &named]);
+    removed.unwrap();
+    assert_eq!(anonymous.len(), 64, "{anonymous}");
+    assert!(!anonymous_left, "{anonymous} was left behind");
+    assert!(named_left, "{named} was removed");
+}
+
+/// Runs the real `docker <args>` and returns its standard output, trimmed,
+/// when it succeeded.
+fn real_output(args: &[&str]) -> Option<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads objects of its own in a real docker daemon"
+    )]
+    let output = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[test]
 fn a_label_value_that_holds_tabs_or_spaces_never_matches() {
     let fake = Fake::new();
     let workspace = workspace();
@@ -657,7 +765,7 @@ fn an_unknown_docker_context_fails_a_find_and_a_removal_and_never_reports_an_obj
         let db = name("db");
         let found = docker.find(&object(&workspace, kind, &db, Some(&id)));
         assert!(
-            matches!(&found, Err(DockerError::Unavailable { message }) if message.contains("context not found")),
+            matches!(&found, Err(DockerError::Unavailable { message, .. }) if message.contains("context not found")),
             "{kind:?}: {found:?}"
         );
         let removed = docker.remove(kind, &id, Duration::ZERO);

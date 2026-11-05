@@ -9,6 +9,8 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+use crate::record::DockerCause;
+
 /// A failure of a step of the container engine.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -50,6 +52,10 @@ pub enum ContainerError {
         container: Option<String>,
         /// The line of docker's standard error that says what failed.
         message: String,
+        /// What kind of failure it is: [`DockerCause::Refused`],
+        /// [`DockerCause::PullFailed`], [`DockerCause::TimedOut`] or
+        /// [`DockerCause::Unexpected`].
+        cause: DockerCause,
     },
     /// The caller cancelled the operation while a docker command ran, so
     /// the engine stopped the command.
@@ -79,17 +85,73 @@ pub enum ContainerError {
 }
 
 impl ContainerError {
-    /// Returns the failure of the step `operation` on `container`, which
-    /// `message` describes.
+    /// Returns the failure of the docker command `operation` on
+    /// `container`, which docker answered with the error `message`.
     pub(crate) fn failed(
         operation: &'static str,
         container: Option<&str>,
         message: impl Into<String>,
     ) -> Self {
+        Self::failure(operation, container, message, DockerCause::Refused)
+    }
+
+    /// Returns the failure of the docker command `operation`, which did
+    /// not finish within its deadline, as `message` says.
+    pub(crate) fn timed_out(operation: &'static str, message: impl Into<String>) -> Self {
+        Self::failure(operation, None, message, DockerCause::TimedOut)
+    }
+
+    /// Returns the failure of the step `operation` on `container` around a
+    /// docker command, which `message` describes, such as a check of a
+    /// scope or a read of what docker printed.
+    pub(crate) fn unexpected(
+        operation: &'static str,
+        container: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::failure(operation, container, message, DockerCause::Unexpected)
+    }
+
+    /// Returns the failure of `operation` on `container` with `cause`.
+    fn failure(
+        operation: &'static str,
+        container: Option<&str>,
+        message: impl Into<String>,
+        cause: DockerCause,
+    ) -> Self {
         Self::Failed {
             operation,
             container: container.map(str::to_owned),
             message: message.into(),
+            cause,
+        }
+    }
+
+    /// Returns this failure of a pull of an image: a refusal becomes
+    /// [`DockerCause::PullFailed`], and any other failure stays as it is.
+    #[must_use]
+    pub(crate) fn in_pull(mut self) -> Self {
+        if let Self::Failed { cause, .. } = &mut self
+            && *cause == DockerCause::Refused
+        {
+            *cause = DockerCause::PullFailed;
+        }
+        self
+    }
+
+    /// Returns what kind of failure this is. A failure to read the run
+    /// directory is [`DockerCause::Unexpected`].
+    #[must_use]
+    pub const fn cause(&self) -> DockerCause {
+        match self {
+            Self::Missing { .. } => DockerCause::DockerMissing,
+            Self::ComposeMissing { .. } => DockerCause::ComposeMissing,
+            Self::NoAddressPool { .. } => DockerCause::NoAddressPool,
+            Self::Unavailable { .. } => DockerCause::DaemonUnavailable,
+            Self::Failed { cause, .. } => *cause,
+            Self::Cancelled { .. } => DockerCause::Cancelled,
+            Self::Foreign { .. } => DockerCause::Foreign,
+            Self::Unreadable { .. } => DockerCause::Unexpected,
         }
     }
 
@@ -123,6 +185,7 @@ impl fmt::Display for ContainerError {
                 operation,
                 container,
                 message,
+                ..
             } => {
                 write!(formatter, "docker {operation} failed")?;
                 if let Some(container) = container {

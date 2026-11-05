@@ -22,7 +22,7 @@ use crate::engine::container::command::{
 };
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
-use crate::engine::container::objects::stop_seconds;
+use crate::engine::container::objects::{AnonymousVolumes, rm_args, stop_seconds};
 use crate::engine::container::{ContainerError, ContainerState};
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject};
 
@@ -144,6 +144,8 @@ impl DockerCli {
     /// at once, because `docker stop` would first wait out Docker's restart
     /// delay. Docker refuses to update a container that has stopped, so a
     /// refused update fails the removal only when the container still runs.
+    /// docker removes the container's anonymous volumes with it, and its
+    /// named volumes stay.
     fn remove_container(&self, id: &str, wait: Duration) -> Result<(), DockerError> {
         let updated = quick_with(
             self.program(),
@@ -181,7 +183,7 @@ impl DockerCli {
                 return Err(self.failure(&stopped));
             }
         }
-        let removed = quick_with(self.program(), ["rm", "--force", "--", id], "rm")
+        let removed = quick_with(self.program(), rm_args(id, AnonymousVolumes::Remove), "rm")
             .map_err(|error| unavailable(&error))?;
         if removed.status.success() || removed.missing() {
             Ok(())
@@ -223,9 +225,10 @@ fn status_state(printed: &str) -> ContainerState {
     }
 }
 
-/// Returns the failure of a Docker that `error` shows does not answer.
+/// Returns the failure of a Docker that `error` shows does not answer,
+/// with the cause of `error`.
 fn unavailable(error: &ContainerError) -> DockerError {
-    DockerError::unavailable(error.to_string())
+    DockerError::unavailable(error.to_string()).with_cause(error.cause())
 }
 
 /// Returns the words of the inspect command of `kind`, and the Go template

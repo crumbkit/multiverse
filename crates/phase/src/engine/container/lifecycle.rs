@@ -37,8 +37,9 @@ use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeName,
 };
 use crate::engine::container::objects::{
-    AnonymousVolume, ContainerState, Inspected, OwnedContainer, Volume, delete_volume, follow_args,
-    inspect_anonymous, inspect_id, inspect_named, inspect_volume, reinspect_volume, remove, stop,
+    AnonymousVolume, AnonymousVolumes, ContainerState, Inspected, OwnedContainer, Volume,
+    delete_volume, follow_args, inspect_anonymous, inspect_id, inspect_named, inspect_volume,
+    reinspect_volume, remove, stop,
 };
 use crate::engine::container::{ContainerError, RunDir};
 use crate::name::{WorkspaceId, WorkspaceName};
@@ -127,7 +128,7 @@ fn new_store_id() -> Result<StoreId, ContainerError> {
         source,
     })?;
     StoreId::new(&text).map_err(|_| {
-        ContainerError::failed(
+        ContainerError::unexpected(
             "store id",
             None,
             format!("mxv made the store id {text:?}, which is not 32 hex digits"),
@@ -319,7 +320,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     /// [`ContainerError::Failed`] before any docker command runs.
     pub fn prepare(&self, phase: &Phase, saved: &SavedWorkspaceId) -> Result<Prepared, H::Error> {
         if saved.workspace != self.workspace {
-            return Err(ContainerError::failed(
+            return Err(ContainerError::unexpected(
                 "scope check",
                 None,
                 format!(
@@ -365,7 +366,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         if prepared.dir == self.dir {
             Ok(&prepared.scope)
         } else {
-            Err(ContainerError::failed(
+            Err(ContainerError::unexpected(
                 "scope check",
                 None,
                 format!(
@@ -646,7 +647,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     /// anonymous volumes, which stay until `mxv remove --delete-volumes`.
     fn discard(&self, inspected: Inspected) -> Result<(), H::Error> {
         stop(&inspected.container, self.grace)?;
-        remove(inspected.container)?;
+        remove(inspected.container, AnonymousVolumes::Keep)?;
         self.record_anonymous(&inspected.anonymous)
     }
 
