@@ -154,10 +154,11 @@ pub(crate) struct HostEntry {
     /// yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) plan_hash: Option<PlanHash>,
-    /// The hash of the process's own part of the plan that phase last
-    /// launched it from, which `AppPlan::process_digest` gives, so a later
-    /// `up` restarts a running process whose part changed. It holds no
-    /// environment value. It is `None` for a keeper, for a process that
+    /// The hash of what phase last launched the process from: its own
+    /// part of the plan, which `AppPlan::process_digest` gives, and for a
+    /// sandboxed process the ports of the apps it depends on, which its
+    /// sandbox lets it connect to. A later `up` restarts a running process
+    /// whose hash changed. It holds no environment value. It is `None` for a keeper, for a process that
     /// phase has not started yet, and in a record that phase wrote before
     /// it recorded the part, which a later `up` reads as a change.
     #[serde(default, skip_serializing_if = "Option::is_none")]

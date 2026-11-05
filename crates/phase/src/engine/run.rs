@@ -19,7 +19,8 @@
 //! records no hash, `up` resolves the process's environment, stops it as
 //! `down` does, and launches it again, with a note that says why. The
 //! processes that depend on it keep running, as the apps that depend on a
-//! replaced container do.
+//! replaced container do, unless their own hash changed. The hash of a
+//! sandboxed process covers the ports of the apps it depends on.
 //!
 //! Before each launch, `up` writes the process's keeper and entry back to
 //! planned with no process, so a record that names a stopped or stale
@@ -80,7 +81,7 @@ mod stop;
 #[cfg(test)]
 mod tests;
 
-use oneshot::{Rerun, completed_targets, part_hash};
+use oneshot::{Rerun, completed_targets};
 use order::{Chosen, choose};
 use stop::{Stopped, Target};
 
@@ -695,7 +696,7 @@ impl Op<'_, '_> {
             &process.name,
             &Launching {
                 plan_hash: self.plan_hash.clone(),
-                part_hash: part_hash(app, process),
+                part_hash: self.launch_part(app, process),
                 stop: process.stop,
                 listen: listen.clone(),
                 restart: process.restart.clone(),
@@ -810,7 +811,7 @@ impl Op<'_, '_> {
         let record = self.journal.record()?;
         let (_, entry) = record.host_pair(&app.name, &process.name);
         match entry.and_then(|entry| entry.part_hash.as_ref()) {
-            Some(recorded) if *recorded == part_hash(app, process) => None,
+            Some(recorded) if *recorded == self.launch_part(app, process) => None,
             Some(_) => Some(Note::plan_changed(&app.name, process.name.clone())),
             None => Some(Note::plan_unrecorded(&app.name, process.name.clone())),
         }
@@ -968,6 +969,50 @@ impl Op<'_, '_> {
             Err(_) if now() >= self.deadlines.ready => Err(Step::Uncertain),
             Err(error) => Err(Step::Errored(error)),
         }
+    }
+
+    /// Returns the hash of what `process` of `app` is launched from, which
+    /// its entry records as `part_hash`. It is the hash of the process's
+    /// part of the plan, which [`AppPlan::process_digest`] gives. For a
+    /// process that runs under the sandbox, it also covers the loopback
+    /// ports of the apps that its app depends on, which the sandbox lets it
+    /// connect to, so a dependency's new port restarts it. The ports it
+    /// listens on are already in its part. A oneshot's completion keeps
+    /// the part's own hash.
+    fn launch_part(&self, app: &AppPlan, process: &ProcessPlan) -> PlanHash {
+        let part = app.process_digest(process);
+        let sandboxed =
+            app.permissions.is_some() && matches!(sandbox::platform(), Platform::Available(_));
+        if !sandboxed {
+            return PlanHash::new(part);
+        }
+        /// What the hash of a sandboxed process covers.
+        #[derive(serde::Serialize)]
+        struct Sandboxed {
+            /// The digest of the process's part of the plan.
+            part: [u8; 32],
+            /// The ports that the sandbox lets the process connect to.
+            connect: BTreeSet<u16>,
+        }
+        let launched = Sandboxed {
+            part,
+            connect: self.connect_ports(app),
+        };
+        // The fields are plain data, so they always serialize.
+        PlanHash::new(crate::plan::digest(
+            &serde_json::to_vec(&launched).unwrap_or_default(),
+        ))
+    }
+
+    /// Returns the loopback ports of the apps that `app` depends on, which
+    /// its sandbox lets it connect to.
+    fn connect_ports(&self, app: &AppPlan) -> BTreeSet<u16> {
+        app.depends
+            .iter()
+            .filter_map(|depends| self.ports.get(depends))
+            .flatten()
+            .copied()
+            .collect()
     }
 
     /// Returns the sandbox of `process` of `app`, whose keeper runs as

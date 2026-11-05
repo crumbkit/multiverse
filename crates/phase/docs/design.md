@@ -1619,12 +1619,19 @@ and redesigns are the evidence for each one.
 Built 5 November 2026.
 
 - When phase launches a host process, it records in the process's run
-  record entry, as `part_hash`, the hash of the process's own part of the
-  plan, the same hash that a oneshot's `oneshot` records. It covers the
-  app's runner, source, ports, permissions and override names, and the
+  record entry, as `part_hash`, the hash of what it launches the process
+  from. The hash covers the process's own part of the plan: the app's
+  runner, source, ports, permissions and override names, and the
   process's own plan, such as its command, variable names, working
-  directory, port, probes and restart policy. It holds no environment
-  value. `restart` records it too.
+  directory, port, probes and restart policy. The app's ports and its
+  permissions' `listen` give the ports the sandbox lets the process
+  listen on. For a process that runs under the sandbox, the hash also
+  covers the loopback ports of the apps that its app depends on, which
+  the sandbox lets it connect to, so a dependency that moves to another
+  port restarts its sandboxed dependents. An unsandboxed process's hash
+  is the same hash that a oneshot's `oneshot` records, and a oneshot's
+  completion keeps that hash whether or not it runs sandboxed. The hash
+  holds no environment value. `restart` records it too.
 - A later `up` that finds the process's keeper running compares the
   recorded hash with the hash of the process's part of the new plan. When
   they are equal, `up` leaves the process alone and reports it as already
@@ -1648,10 +1655,11 @@ Built 5 November 2026.
   that leaves something behind reports the app as `left`, or as
   uncertain once the deadline has passed, and starts nothing in its
   place.
-- `up` restarts no other process because of the change. The processes
+- The restart of one process restarts no other process. The processes
   and apps that depend on the restarted process keep running when their
-  own parts are unchanged, as the apps that depend on a replaced container
-  do. A `once = false` oneshot that depends on it runs again, because its
+  own hashes are unchanged, as the apps that depend on a replaced
+  container do. A sandboxed dependent's hash changes when a dependency
+  moves to another port, so `up` restarts it for its own change. A `once = false` oneshot that depends on it runs again, because its
   dependency's run changed.
 - A oneshot that still runs is left, as before, and a completed oneshot
   is compared by its completion, as [Oneshot
@@ -1660,9 +1668,9 @@ Built 5 November 2026.
   not restart a host process. `AppliedEnvironment::digest` gives a keyed
   hash of the values, but phase has no key of its own to give it yet, and
   would have to resolve every running process's environment on each `up`
-  to compare it. The hash also does not cover the ports of the apps that
-  the app depends on, which a sandboxed app's profile allows it to
-  connect to, so a dependency's new port alone does not restart it.
+  to compare it. An unsandboxed process that reads a dependency's port
+  from its environment therefore keeps running when only that port
+  changes.
 
 ### Oneshot processes
 
