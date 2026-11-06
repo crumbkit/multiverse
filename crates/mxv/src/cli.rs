@@ -39,7 +39,7 @@ pub const GUIDE: Guide = Guide::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",
-            "archive", "restore", "remove", "clean",
+            "exec", "archive", "restore", "remove", "clean",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
     )
@@ -49,7 +49,7 @@ pub const GUIDE: Guide = Guide::new()
             Goal::new("Work in a workspace", &["new", "add", "list", "show", "cd"]),
             Goal::new(
                 "Run a workspace's app",
-                &["up", "down", "restart", "status", "logs", "ports"],
+                &["up", "down", "restart", "status", "logs", "exec", "ports"],
             ),
             Goal::new("Put a workspace away", &["archive", "restore", "remove"]),
             Goal::new("Free disk space", &["clean"]),
@@ -129,6 +129,13 @@ pub const GUIDE: Guide = Guide::new()
             )])
             .effects(Effects::read_only())
             .stream(LOGS),
+        Leaf::new(&["exec"])
+            .examples(&[Example::new(
+                &["-w", "reading-list", "web", "--", "env"],
+                "Print the variables that a command receives in the context of web",
+            )])
+            .effects(Effects::destructive().open_world().all_or_none())
+            .passes_on_exit("the command"),
         Leaf::new(&["ports", "reset"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "api"],
@@ -219,6 +226,10 @@ pub(crate) enum Verb {
     Status(StatusArgs),
     /// Print the last lines of a process's log, and follow it with --follow.
     Logs(LogsArgs),
+    /// Run a one-off command in the context of a running process or container, and exit with its exit code.
+    ///
+    /// A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
+    Exec(ExecArgs),
     /// Archive a workspace, so restore can rebuild it at the same commits.
     Archive(WriteArgs),
     /// Rebuild an archived workspace at its archived commits.
@@ -593,6 +604,22 @@ pub(crate) struct StatusArgs {
     /// The workspace, which defaults to the one that holds the current directory
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
+}
+
+/// The arguments of `mxv exec`.
+#[derive(Debug, Args)]
+pub(crate) struct ExecArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+
+    /// The running process or container in whose context the command runs
+    #[arg(value_name = "PROCESS")]
+    pub(crate) process: String,
+
+    /// The command's program and its arguments, after `--`
+    #[arg(value_name = "COMMAND", last = true, required = true, num_args = 1..)]
+    pub(crate) command: Vec<String>,
 }
 
 /// The arguments of `mxv logs`.

@@ -556,3 +556,46 @@ permissions = {{ write = ["out"] }}
     let (exit, document) = setup.json(&["down", "-w", name]);
     assert_eq!(exit, 0, "{document}");
 }
+
+#[test]
+fn exec_in_a_process_that_needs_a_service_receives_the_same_service_variables_as_the_process() {
+    if !docker_runs("exec_in_a_process_that_needs_a_service") {
+        return;
+    }
+    let name = "mxvtest-services-exec";
+    let setup = Setup::new(
+        name,
+        "[service.files]\nkind = \"s3\"\nbuckets = [\"mxv-test-exec\"]\nenv = { FILES_BUCKET = \"{bucket.mxv-test-exec}\" }\n\n[processes.worker]\nargv = [\"sh\", \"-c\", \"env | sort > env.txt; echo ready; exec sleep 600\"]\nneeds = [\"files\"]\nready = { log = \"^ready$\", timeout_seconds = 120 }\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+
+    let output = setup
+        .command(&["exec", "-w", name, "worker", "--", "env"])
+        .env("MXV_TEST_SECRET", "not-for-the-command")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let service_lines = |text: &str| -> Vec<String> {
+        let mut lines: Vec<String> = text
+            .lines()
+            .filter(|line| line.starts_with("AWS_") || line.starts_with("FILES_"))
+            .map(str::to_owned)
+            .collect();
+        lines.sort();
+        lines
+    };
+    let exec_env = String::from_utf8(output.stdout).unwrap();
+    let process_env = fs::read_to_string(setup.checkout().join("env.txt")).unwrap();
+    assert_eq!(service_lines(&exec_env), service_lines(&process_env));
+    assert!(
+        exec_env.contains("FILES_BUCKET=mxv-test-exec"),
+        "{exec_env}"
+    );
+    assert!(!exec_env.contains("MXV_TEST_SECRET"), "{exec_env}");
+    assert!(!exec_env.contains("AWS_PROFILE"), "{exec_env}");
+    assert!(!exec_env.contains("not-a-real-key"), "{exec_env}");
+    let (exit, document) = setup.json(&["down", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+}

@@ -348,3 +348,106 @@ fn up_warns_that_a_running_process_whose_manifest_gained_permissions_needs_a_res
     );
     assert_eq!(writer["notes"], serde_json::json!([]), "{third}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_in_a_sandboxed_process_runs_the_command_under_the_processs_sandbox() {
+    let sandboxed = Sandboxed::new(
+        "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\npermissions = { write = [\"out\"] }\n",
+    );
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+
+    let output = sandboxed
+        .command(&[
+            "exec",
+            "-w",
+            "triage",
+            "writer",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo granted > out/file && echo granted=written; \
+             if echo denied > denied 2>/dev/null; then echo denied=written; else echo denied=refused; fi",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "granted=written\ndenied=refused\n"
+    );
+    assert!(sandboxed.checkout().join("out/file").exists());
+    assert!(!sandboxed.checkout().join("denied").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sigint_to_mxv_stops_a_sandboxed_command_that_ignores_sigint() {
+    use std::io::BufRead as _;
+    let sandboxed = Sandboxed::new(
+        "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\npermissions = { write = [\"out\"] }\n",
+    );
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+    let root = sandboxed.root();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mxv"));
+    command
+        .args([
+            "exec",
+            "-w",
+            "triage",
+            "writer",
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap '' INT; echo started; sleep 60",
+        ])
+        .current_dir(&root)
+        .env_clear()
+        .env("PATH", support::PATH)
+        .envs(support::GIT_ENV.iter().copied())
+        .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("MXV_ROOT", root.join("workspaces"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut child = command.spawn().unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "started\n");
+
+    let sent = snapbox::cmd::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .env("PATH", support::PATH)
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            panic!("mxv exec did not stop the sandboxed command");
+        }
+        std::thread::yield_now();
+    };
+    assert_eq!(status.code(), Some(143), "{status:?}");
+}
