@@ -57,3 +57,8 @@ tempfile = { workspace = true }
 # A keeper test restores SIGPIPE to its default before it runs the keeper,
 # as a program that links phase may leave it, and only libc sets it.
 libc = { workspace = true }
+
+# A macOS sandbox test loads the system's trusted roots under the sandbox
+# with the crate that the AWS SDK's native-roots TLS uses.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+rustls-native-certs = { workspace = true }
