@@ -139,6 +139,42 @@ pub enum PhaseError {
         /// The target as `APP` or `APP/PROCESS`.
         target: String,
     },
+    /// `exec` into a container process found no running container of the
+    /// process that the app's labels name, so it ran nothing. `exec` never
+    /// starts a container: `up` does.
+    #[non_exhaustive]
+    NotRunning {
+        /// The app.
+        app: AppName,
+        /// The process.
+        process: ProcessName,
+    },
+    /// `exec` could not start the command in the context of a process, for
+    /// example because its program does not exist or its sandbox cannot
+    /// be built.
+    #[non_exhaustive]
+    ExecUnstartable {
+        /// The app.
+        app: AppName,
+        /// The process whose context the command runs in.
+        process: ProcessName,
+        /// Why, which holds no environment value.
+        reason: String,
+    },
+    /// `exec` refused a sandboxed host command under
+    /// [`ExecIo::Inherit`](crate::ExecIo::Inherit) whose caller said its
+    /// standard input is a terminal, or whose caller's standard input,
+    /// output or error is one. A sandboxed command runs in a session of its
+    /// own with no controlling terminal, so that it cannot push input into
+    /// the caller's shell or read what the user types, and phase does not
+    /// relay a terminal to it yet.
+    #[non_exhaustive]
+    ExecNeedsTerminal {
+        /// The app.
+        app: AppName,
+        /// The process whose context the command would run in.
+        process: ProcessName,
+    },
     /// phase tried to record a change to an object that the run record does
     /// not name, which is a fault in phase.
     #[non_exhaustive]
@@ -173,6 +209,9 @@ impl PhaseError {
             Self::SecretOwnerUnknown { .. } => "phase::container::secret_owner_unknown",
             Self::NotRunnable { .. } => "phase::app::not_runnable",
             Self::UnknownTarget { .. } => "phase::select::unknown",
+            Self::NotRunning { .. } => "phase::exec::not_running",
+            Self::ExecUnstartable { .. } => "phase::exec::unstartable",
+            Self::ExecNeedsTerminal { .. } => "phase::exec::sandboxed_terminal",
             Self::Unplanned { .. } => "phase::record::unplanned",
         }
     }
@@ -325,6 +364,22 @@ impl fmt::Display for PhaseError {
             Self::UnknownTarget { target } => {
                 write!(formatter, "the plan has no {target}")
             }
+            Self::NotRunning { app, process } => write!(
+                formatter,
+                "the container of {app}/{process} is not running, so phase cannot run a command in it; start it with up first"
+            ),
+            Self::ExecUnstartable {
+                app,
+                process,
+                reason,
+            } => write!(
+                formatter,
+                "the command in the context of {app}/{process} could not start: {reason}"
+            ),
+            Self::ExecNeedsTerminal { app, process } => write!(
+                formatter,
+                "{app}/{process} runs under the sandbox, and a sandboxed command cannot have the terminal yet; run it with no terminal on its standard input, output or error, since a relay of the terminal is not built yet"
+            ),
             Self::Unplanned { workspace, object } => write!(
                 formatter,
                 "the run record of the workspace {workspace} does not name {object}"
@@ -351,6 +406,9 @@ impl std::error::Error for PhaseError {
             | Self::SecretOwnerUnknown { .. }
             | Self::NotRunnable { .. }
             | Self::UnknownTarget { .. }
+            | Self::NotRunning { .. }
+            | Self::ExecUnstartable { .. }
+            | Self::ExecNeedsTerminal { .. }
             | Self::Unplanned { .. } => None,
         }
     }

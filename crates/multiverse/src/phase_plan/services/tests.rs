@@ -177,6 +177,7 @@ fn localstack_serves_the_declared_kinds_with_path_queue_urls_on_its_published_ad
                 ("LOCALSTACK_HOST", "127.0.0.1:41002"),
                 ("SERVICES", "s3,kms"),
                 ("SQS_ENDPOINT_STRATEGY", "path"),
+                ("DISABLE_EVENTS", "1"),
             ]
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
         )
@@ -274,6 +275,7 @@ fn a_process_that_needs_services_receives_only_the_aws_variables_that_mxv_sets()
             ("AWS_ACCESS_KEY_ID", "test"),
             ("AWS_CONFIG_FILE", "/dev/null"),
             ("AWS_EC2_METADATA_DISABLED", "true"),
+            ("AWS_ENDPOINT_URL", "http://127.0.0.1:9"),
             ("AWS_ENDPOINT_URL_DYNAMODB", "http://127.0.0.1:41001"),
             ("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:41002"),
             ("AWS_REGION", "us-east-1"),

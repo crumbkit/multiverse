@@ -106,15 +106,19 @@ impl Probe {
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum ProbeCheck {
-    /// An HTTP `GET` of `path` on the process's own port on 127.0.0.1
-    /// returns a 2xx status. The process has a port.
+    /// An HTTP `GET` of `path` on the process's own port returns a 2xx
+    /// status. The probe connects to 127.0.0.1, and to ::1 when 127.0.0.1
+    /// refuses or fails, so a server that listens only on ::1 passes. It
+    /// sends the request to the address that accepted, with the `Host`
+    /// header `localhost:<port>`. The process has a port.
     #[non_exhaustive]
     Http {
         /// The request path, which starts with `/` and holds only printable
         /// ASCII characters other than space and `#`.
         path: String,
     },
-    /// A TCP connection to the named port of the app on 127.0.0.1 succeeds.
+    /// A TCP connection to the named port of the app succeeds, on 127.0.0.1
+    /// or, when 127.0.0.1 refuses or fails, on ::1.
     #[non_exhaustive]
     Tcp {
         /// One of the app's ports.

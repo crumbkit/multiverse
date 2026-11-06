@@ -350,7 +350,6 @@ fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Returns the hint `text` as a recovery.
 /// Returns the recovery of the process `process` of `workspace`, which
 /// exited or was not ready. mxv starts its own apps, such as
 /// mxv-provision, with the workspace, and `up` takes no name of one, so
@@ -367,6 +366,7 @@ fn start_failed(workspace: &str, process: &str) -> Recovery {
     }
 }
 
+/// Returns the hint `text` as a recovery.
 fn hint(text: impl Into<String>) -> Recovery {
     Recovery::Hint(text.into())
 }

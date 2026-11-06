@@ -131,6 +131,8 @@ fn backend_app(inputs: &Inputs<'_>, backend: Backend) -> Result<Planned, Unrunna
                     "SQS_ENDPOINT_STRATEGY".to_owned(),
                     Redacted::new("path".to_owned()),
                 ),
+                // LocalStack sends no usage events to localstack.cloud.
+                ("DISABLE_EVENTS".to_owned(), Redacted::new("1".to_owned())),
                 // Queue URLs carry this address, so a client on the host
                 // reaches the queues through the published port.
                 (

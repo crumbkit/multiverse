@@ -116,6 +116,7 @@ fn a_process_receives_the_common_variables_each_endpoint_it_needs_and_each_servi
                 ("AWS_ACCESS_KEY_ID", "test"),
                 ("AWS_CONFIG_FILE", "/dev/null"),
                 ("AWS_EC2_METADATA_DISABLED", "true"),
+                ("AWS_ENDPOINT_URL", "http://127.0.0.1:9"),
                 ("AWS_ENDPOINT_URL_DYNAMODB", "http://127.0.0.1:41000"),
                 ("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:41001"),
                 ("AWS_REGION", "us-east-1"),

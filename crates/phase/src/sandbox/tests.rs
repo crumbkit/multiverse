@@ -8,14 +8,15 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
 use super::{
     AppDirs, Context, LANDLOCK_UNSANDBOXED, Launcher, Platform, SandboxError, SandboxSpec,
-    Sandboxing, UNDECLARED, WorkspacePaths, launch, launcher_command, sandboxing, spec, toolchain,
-    usr_without_local_data, verify,
+    Sandboxing, UNDECLARED, WorkspacePaths, add_toolchain, developer_dir, homebrew_deny,
+    homebrew_read, launch, launcher_command, sandboxing, spec, toolchain, usr_without_local_data,
+    verify,
 };
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind};
 use crate::record::testing::{app, workspace};
@@ -252,7 +253,7 @@ fn linux_reports_a_process_under_landlock_as_unsandboxed_and_says_why() {
     );
     assert_eq!(
         Sandboxing::seatbelt().to_string(),
-        "seatbelt (partial: its listening ports accept connections from other machines on the network)"
+        "seatbelt (partial: the sandbox cannot limit its listening ports to the loopback interface)"
     );
 }
 
@@ -303,6 +304,68 @@ fn a_spec_reads_the_checkout_and_writes_only_the_apps_own_directories() {
     assert!(dirs.state.is_dir() && dirs.tmp.is_dir());
     assert!(!spec.read.contains(&fixture.workspace_dir()));
     assert!(spec.deny.contains(&fixture.home().join(".ssh")));
+}
+
+#[test]
+fn a_spec_reads_no_terminal_device_and_none_of_dev_but_the_nodes_toolchains_use() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    let spec = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+
+    let dev: Vec<&PathBuf> = spec
+        .read
+        .iter()
+        .filter(|path| path.starts_with("/dev"))
+        .collect();
+    assert!(!dev.is_empty());
+    for path in dev {
+        assert!(
+            [
+                "/dev/null",
+                "/dev/zero",
+                "/dev/random",
+                "/dev/urandom",
+                "/dev/fd",
+                "/dev/dtracehelper"
+            ]
+            .iter()
+            .any(|node| path == Path::new(node)),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_profile_denies_every_terminal_device_but_the_processs_own() {
+    use crate::sandbox::seatbelt::{TERMINAL_DEVICES, rules};
+
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let spec = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+    let pattern = regex::Regex::new(TERMINAL_DEVICES).unwrap();
+
+    assert!(rules(&spec).contains(&format!(
+        "(deny file-read* file-write* file-ioctl (regex #\"{TERMINAL_DEVICES}\"))"
+    )));
+    for device in ["/dev/ttys004", "/dev/ttys1000", "/dev/ptyp0", "/dev/ttyp0"] {
+        assert!(pattern.is_match(device), "{device}");
+    }
+    for device in [
+        "/dev/tty",
+        "/dev/ptmx",
+        "/dev/null",
+        "/dev/ttys",
+        "/dev/ttys004x",
+    ] {
+        assert!(!pattern.is_match(device), "{device}");
+    }
 }
 
 #[test]
@@ -699,6 +762,148 @@ fn a_homebrew_path_entry_lets_the_app_read_its_programs_but_never_its_data_or_co
     assert!(!dirs.contains(&PathBuf::from("/opt/homebrew")));
 }
 
+/// Makes a Homebrew prefix in `root` whose `etc` holds OpenSSL's
+/// directories, each with its configuration, certificates, a private key
+/// and a `cert.pem` link to the CA bundle in `etc/ca-certificates`, as
+/// Homebrew lays them out, its system git configuration, and another
+/// configuration directory, and returns it.
+fn homebrew_prefix_in(root: &std::path::Path) -> PathBuf {
+    let prefix = root.join("homebrew");
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        let dir = prefix.join(dir);
+        std::fs::create_dir_all(dir.join("certs")).unwrap();
+        std::fs::create_dir_all(dir.join("private")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the OpenSSL files that the sandbox may or may not read"
+        )]
+        {
+            std::fs::write(dir.join("openssl.cnf"), "# config\n").unwrap();
+            std::fs::write(dir.join("private/key.pem"), "# key\n").unwrap();
+        }
+    }
+    std::fs::create_dir_all(prefix.join("etc/ca-certificates")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test writes the CA bundle that the OpenSSL directories link to"
+    )]
+    std::fs::write(prefix.join("etc/ca-certificates/cert.pem"), "# bundle\n").unwrap();
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        std::os::unix::fs::symlink(
+            prefix.join("etc/ca-certificates/cert.pem"),
+            prefix.join(dir).join("cert.pem"),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(prefix.join("etc/other")).unwrap();
+    std::fs::create_dir_all(prefix.join("etc/opensslish")).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test writes the system git configuration of the prefix"
+    )]
+    std::fs::write(prefix.join("etc/gitconfig"), "[core]\n").unwrap();
+    prefix
+}
+
+#[test]
+fn a_homebrew_prefix_lets_the_app_read_its_openssl_configuration_but_no_other_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let prefix = homebrew_prefix_in(root.path());
+
+    let read = homebrew_read(&prefix);
+
+    assert!(read.contains(&prefix.join("bin")));
+    assert!(read.contains(&prefix.join("etc/gitconfig")));
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        for name in ["openssl.cnf", "cert.pem", "certs"] {
+            assert!(read.contains(&prefix.join(dir).join(name)), "{dir}/{name}");
+        }
+        assert!(!read.contains(&prefix.join(dir)), "{dir}");
+    }
+    assert!(
+        !read
+            .iter()
+            .any(|path| path.starts_with(prefix.join("etc/other"))
+                || path.starts_with(prefix.join("etc/opensslish")))
+    );
+    assert!(!read.contains(&prefix.join("etc")));
+}
+
+#[test]
+fn a_spec_records_each_toolchain_path_that_is_a_link_so_the_app_can_follow_it() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let prefix = homebrew_prefix_in(&fixture.outside());
+    let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    add_toolchain(
+        &mut spec.read,
+        &mut spec.read_only,
+        &mut spec.metadata,
+        &homebrew_read(&prefix),
+        &|_| false,
+    );
+
+    let link = prefix.join("etc/openssl@3/cert.pem");
+    assert!(spec.metadata.contains(&link), "{:?}", spec.metadata);
+    assert!(
+        spec.read
+            .contains(&prefix.join("etc/ca-certificates/cert.pem"))
+    );
+    assert!(!spec.read.contains(&link));
+    assert!(
+        spec.read
+            .contains(&prefix.join("etc/openssl@3/openssl.cnf"))
+    );
+    assert!(
+        !spec
+            .metadata
+            .contains(&prefix.join("etc/openssl@3/openssl.cnf"))
+    );
+}
+
+#[test]
+fn a_spec_lets_the_app_stat_only_the_git_configuration_in_the_home_directory() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    for name in [".gitconfig", ".config/git", ".config/git/config"] {
+        assert!(spec.metadata.contains(&fixture.home().join(name)), "{name}");
+    }
+    assert!(
+        !spec
+            .metadata
+            .contains(&fixture.home().join(".cargo/config.toml"))
+    );
+    assert!(!spec.read.contains(&fixture.home().join(".gitconfig")));
+}
+
+#[test]
+fn no_grant_of_a_homebrew_prefix_lets_the_app_read_an_openssl_private_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let prefix = homebrew_prefix_in(root.path());
+
+    let read = homebrew_read(&prefix);
+    let deny = homebrew_deny(&prefix);
+
+    for dir in ["etc/openssl@3", "etc/openssl"] {
+        let private = prefix.join(dir).join("private");
+        assert!(
+            !read
+                .iter()
+                .any(|path| path.starts_with(&private) || private.starts_with(path)),
+            "{dir}"
+        );
+        assert_eq!(
+            deny.contains(&private),
+            cfg!(target_os = "macos"),
+            "{dir}: {deny:?}"
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_spec_reads_only_the_toolchain_directories_of_library_and_denies_the_keychains() {
@@ -916,6 +1121,103 @@ fn a_spec_looks_nothing_up_in_a_path_entry_that_reaches_a_protected_path() {
     assert_eq!(spec.path_dirs, [PathBuf::from("/usr/bin")]);
 }
 
+/// A temporary tree with an `Applications` directory for app bundles and a
+/// `Library/Developer` directory for developer tools, in which
+/// [`developer_dir`] may find a developer directory.
+struct DeveloperRoots {
+    root: TempDir,
+}
+
+impl DeveloperRoots {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Applications")).unwrap();
+        std::fs::create_dir_all(root.path().join("Library/Developer")).unwrap();
+        Self { root }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.root.path().canonicalize().unwrap().join(name)
+    }
+
+    /// Returns a link named `name` to `target`.
+    fn link(&self, name: &str, target: &std::path::Path) -> PathBuf {
+        let link = self.path(name);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        link
+    }
+
+    /// Returns the developer directory that `link` names.
+    fn developer_dir(&self, link: &std::path::Path) -> Option<PathBuf> {
+        developer_dir(
+            link,
+            &[self.path("Applications")],
+            &[self.path("Library/Developer")],
+        )
+    }
+}
+
+#[test]
+fn the_developer_directory_of_the_command_line_tools_is_that_directory() {
+    let roots = DeveloperRoots::new();
+    let dir = roots.path("Library/Developer/CommandLineTools");
+    std::fs::create_dir_all(&dir).unwrap();
+    let link = roots.link("developer_dir", &dir);
+
+    assert_eq!(roots.developer_dir(&link), Some(dir));
+}
+
+#[test]
+fn the_developer_directory_of_an_xcode_is_its_whole_app_bundle() {
+    let roots = DeveloperRoots::new();
+    let bundle = roots.path("Applications/Xcode_26.6.app");
+    std::fs::create_dir_all(bundle.join("Contents/Developer")).unwrap();
+    let link = roots.link("developer_dir", &bundle.join("Contents/Developer"));
+
+    assert_eq!(roots.developer_dir(&link), Some(bundle));
+}
+
+#[test]
+fn a_link_to_anything_but_an_installed_xcode_or_the_developer_library_names_no_developer_directory()
+{
+    let roots = DeveloperRoots::new();
+    for dir in [
+        "Users/Shared/x",
+        "Users/Shared/Xcode.app/Contents/Developer",
+        "Applications/Tools/Developer",
+        "Applications/Xcode.app/Contents/Other",
+    ] {
+        std::fs::create_dir_all(roots.path(dir)).unwrap();
+    }
+
+    for (name, target) in [
+        ("root", PathBuf::from("/")),
+        ("usr", PathBuf::from("/usr")),
+        ("shared", PathBuf::from("/Users/Shared/x")),
+        ("outside", roots.path("Users/Shared/x")),
+        (
+            "bundle-outside",
+            roots.path("Users/Shared/Xcode.app/Contents/Developer"),
+        ),
+        ("not-a-bundle", roots.path("Applications/Tools/Developer")),
+        (
+            "inside-a-bundle",
+            roots.path("Applications/Xcode.app/Contents/Other"),
+        ),
+        ("applications", roots.path("Applications")),
+        ("library", roots.path("Library/Developer")),
+        ("relative", PathBuf::from("Xcode.app/Contents/Developer")),
+        (
+            "dangling",
+            PathBuf::from("/nonexistent/Xcode.app/Contents/Developer"),
+        ),
+    ] {
+        let link = roots.link(&format!("link-{name}"), &target);
+        assert_eq!(roots.developer_dir(&link), None, "{name}");
+    }
+    assert_eq!(roots.developer_dir(&roots.path("absent")), None);
+}
+
 #[test]
 fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_local() {
     let usr = tempfile::tempdir().unwrap();
@@ -939,10 +1241,68 @@ fn linux_reads_usr_by_its_entries_without_the_data_and_configuration_of_usr_loca
     assert_eq!(read, ["bin", "lib", "local/bin", "local/share"]);
 }
 
+/// Returns the variables that `command` sets or removes, in name order.
+fn environment(command: &std::process::Command) -> Vec<(String, Option<String>)> {
+    command
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_sandboxed_command_gets_the_sandbox_temporary_directory_and_reads_no_global_git_configuration()
+{
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the environment it sets and never starts the command"
+    )]
+    let mut command = std::process::Command::new("true");
+    command.env("TMPDIR", "/elsewhere");
+
+    super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+
+    assert_eq!(
+        environment(&command),
+        vec![
+            ("GIT_CONFIG_GLOBAL".to_owned(), Some("/dev/null".to_owned())),
+            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn a_sandboxed_command_keeps_the_git_configuration_that_its_environment_names() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the environment it sets and never starts the command"
+    )]
+    let mut command = std::process::Command::new("true");
+    command.env("GIT_CONFIG_GLOBAL", "/plan/gitconfig");
+
+    super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+
+    assert_eq!(
+        environment(&command),
+        vec![
+            (
+                "GIT_CONFIG_GLOBAL".to_owned(),
+                Some("/plan/gitconfig".to_owned())
+            ),
+            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
+        ]
+    );
+}
+
 /// The tests of phase's Seatbelt rules, which are plain text, so they run
 /// on the Linux pull-request lane too.
 mod rules {
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     use super::{Fixture, sh};
     use crate::sandbox::seatbelt::{NETWORK_RULE, rules};
@@ -1000,6 +1360,73 @@ mod rules {
         ));
         assert!(deny < allow);
         assert!(git < allow);
+    }
+
+    #[test]
+    fn a_deny_inside_a_grant_that_the_profile_allows_again_comes_after_every_allow_that_covers_it()
+    {
+        let fixture = Fixture::new();
+        let api = fixture.app(sh("true"), 41_000);
+        let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+        let etc = PathBuf::from("/usr/local/etc");
+        let openssl = etc.join("openssl@3");
+        let private = openssl.join("private");
+        spec.deny.extend([etc, private.clone()]);
+        spec.read.insert(openssl);
+
+        let rules = rules(&spec);
+
+        let deny = rules
+            .iter()
+            .position(|rule| {
+                rule.starts_with("(deny file-read-data")
+                    && rule.contains(&format!("\"{}\"", private.display()))
+            })
+            .unwrap_or_else(|| panic!("no deny of {} in {rules:?}", private.display()));
+        let covering = rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.starts_with("(allow file-read-data"))
+            .filter(|(_, rule)| {
+                rule.split('"')
+                    .nth(1)
+                    .is_some_and(|path| private.starts_with(path))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert!(!covering.is_empty(), "{rules:?}");
+        assert!(covering.iter().all(|&allow| allow < deny), "{rules:?}");
+    }
+
+    #[test]
+    fn the_profile_lets_the_app_read_only_the_metadata_of_each_metadata_path_of_the_spec() {
+        let fixture = Fixture::new();
+        let api = fixture.app(sh("true"), 41_000);
+        let mut spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+        let link = fixture.outside().join("cert.pem");
+        spec.metadata.insert(link.clone());
+
+        let rules = rules(&spec);
+
+        let wanted = format!(
+            "(allow file-read-metadata (literal \"{}\"))",
+            link.display()
+        );
+        assert!(rules.contains(&wanted), "{rules:?}");
+    }
+
+    #[test]
+    fn the_profile_lets_a_path_through_the_var_or_etc_link_resolve() {
+        let fixture = Fixture::new();
+        let api = fixture.app(sh("true"), 41_000);
+        let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+        let rules = rules(&spec);
+
+        for link in ["/var", "/etc"] {
+            let wanted = format!("(allow file-read-metadata (literal \"{link}\"))");
+            assert!(rules.contains(&wanted), "{rules:?}");
+        }
     }
 
     #[test]
@@ -1105,6 +1532,56 @@ mod seatbelt {
         (output, status.code().unwrap_or(-1))
     }
 
+    #[test]
+    fn a_sandboxed_app_can_stat_the_git_configuration_but_never_read_it_or_list_a_protected_directory()
+     {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.home().join(".config/git")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the protected files that the sandbox may stat"
+        )]
+        {
+            std::fs::write(fixture.home().join(".gitconfig"), "[user]\n").unwrap();
+            std::fs::write(fixture.home().join(".config/git/config"), "[user]\n").unwrap();
+            std::fs::write(fixture.home().join(".cargo/config.toml"), "[net]\n").unwrap();
+            std::fs::write(fixture.home().join(".ssh/id_ed25519"), "key").unwrap();
+        }
+        let script = format!(
+            r#"
+            check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+            case=stat-gitconfig check stat "{home}/.gitconfig"
+            case=read-gitconfig check cat "{home}/.gitconfig"
+            case=stat-xdg check stat "{home}/.config/git/config"
+            case=read-xdg check cat "{home}/.config/git/config"
+            case=list-xdg check ls "{home}/.config/git"
+            case=stat-cargo-config check stat "{home}/.cargo/config.toml"
+            case=list-ssh check ls "{home}/.ssh"
+            case=stat-ssh-key check stat "{home}/.ssh/id_ed25519"
+            case=read-ssh-key check cat "{home}/.ssh/id_ed25519"
+            "#,
+            home = fixture.home().display(),
+        );
+
+        let (output, _) = sandboxed(&fixture, &script, 41_000, 41_005);
+
+        // cargo stops when it can stat but not read `~/.cargo/config.toml`,
+        // so only the git configuration keeps its metadata.
+        for (case, expected) in [
+            ("stat-gitconfig", "allowed"),
+            ("read-gitconfig", "denied"),
+            ("stat-xdg", "allowed"),
+            ("read-xdg", "denied"),
+            ("list-xdg", "denied"),
+            ("stat-cargo-config", "denied"),
+            ("list-ssh", "denied"),
+            ("stat-ssh-key", "denied"),
+            ("read-ssh-key", "denied"),
+        ] {
+            assert_eq!(outcome(&output, case), expected, "{case}: {output}");
+        }
+    }
+
     /// Returns the label of the launchd job that the sandboxed case tries
     /// to submit, which names this test process.
     fn launchd_label() -> String {
@@ -1127,6 +1604,10 @@ mod seatbelt {
         let free = TcpListener::bind("127.0.0.1:0").unwrap();
         let own = free.local_addr().unwrap().port();
         drop(free);
+        // The dependency also listens on ::1 at its port when this machine
+        // has an IPv6 loopback address, as a dev server such as Vite does.
+        let dependency_ipv6 =
+            TcpListener::bind(("::1", dependency.local_addr().unwrap().port())).ok();
         let agent_dir = tempfile::Builder::new()
             .prefix("phase-agent-")
             .tempdir_in(user_temp_dir())
@@ -1149,10 +1630,12 @@ mod seatbelt {
             case=perl-runs check /usr/bin/perl -e 1
             case=connect-dependency check nc -z -w 2 127.0.0.1 {dependency}
             case=connect-dependency-by-name check nc -z -w 2 localhost {dependency}
+            case=connect-dependency-ipv6 check nc -z -w 2 ::1 {dependency}
             case=connect-other check nc -z -w 2 127.0.0.1 {other}
             case=listen-other check nc -l 127.0.0.1 {other_port}
             listens() {{ nc -l "$1" {own} 2>/dev/null & listener=$!; sleep 1; if kill -0 $listener 2>/dev/null; then echo "$case=allowed"; kill $listener; wait $listener 2>/dev/null; else echo "$case=denied"; fi; }}
             case=listen-own listens 127.0.0.1
+            case=listen-own-ipv6 listens ::1
             case=listen-own-every-address listens 0.0.0.0
             if /usr/bin/perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr => shift, Timeout => 2) or print "$!"' 192.0.2.1:{dependency} | grep -q 'not permitted'; then echo connect-dependency-port-elsewhere=denied; else echo connect-dependency-port-elsewhere=allowed; fi
             limited() {{ /usr/bin/perl -e 'alarm 5; exec @ARGV' "$@"; }}
@@ -1215,6 +1698,14 @@ mod seatbelt {
             ("keeper-environment", "denied"),
         ] {
             assert_eq!(outcome(&output, case), expected, "{case} in {output}");
+        }
+        // Seatbelt's `localhost` in a port rule covers ::1 as well as
+        // 127.0.0.1, so an app may listen on its own port on ::1 and reach
+        // a dependency that listens only there.
+        if dependency_ipv6.is_some() {
+            for case in ["connect-dependency-ipv6", "listen-own-ipv6"] {
+                assert_eq!(outcome(&output, case), "allowed", "{case} in {output}");
+            }
         }
         assert!(!fixture.outside().join("file").exists());
         // DNS is blocked, so whether `localhost` resolves depends on the
@@ -1313,10 +1804,10 @@ mod seatbelt {
             .env_clear()
             .env("PATH", &path)
             .env("HOME", &home)
-            .env("TMPDIR", &spec.tmp)
             .env("CARGO_TARGET_DIR", fixture.checkout().join("target"))
             .current_dir(fixture.checkout())
             .stdin(Stdio::null());
+        crate::sandbox::sandboxed_environment(&mut command, &spec.tmp);
         #[expect(
             clippy::disallowed_methods,
             reason = "the test starts this test binary as the launcher"
@@ -1330,6 +1821,241 @@ mod seatbelt {
             ),
             output.status.code().unwrap_or(-1),
         )
+    }
+
+    #[test]
+    fn a_sandboxed_app_reads_a_homebrew_openssl_configuration_but_never_its_private_keys() {
+        // The second prefix lies inside a denied path, as `/usr/local/etc`
+        // is denied when Homebrew lives at `/usr/local`, so the profile
+        // allows its OpenSSL grants again after the deny.
+        for etc_denied in [false, true] {
+            let fixture = Fixture::new();
+            let prefix = super::homebrew_prefix_in(&fixture.outside());
+            let dir = prefix.join("etc/openssl@3");
+            let script = format!(
+                r#"
+                check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+                case=config check cat "{dir}/openssl.cnf"
+                case=bundle check cat "{dir}/cert.pem"
+                case=certs check ls "{dir}/certs"
+                case=gitconfig check cat "{prefix}/etc/gitconfig"
+                case=key check cat "{dir}/private/key.pem"
+                case=list check ls "{dir}/private"
+                case=other check ls "{prefix}/etc/other"
+                "#,
+                dir = dir.display(),
+                prefix = prefix.display(),
+            );
+            let api = fixture.app(sh(&script), 41_000);
+            let mut spec = fixture
+                .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+                .unwrap();
+            // The spec reads the prefix's grants and denies its OpenSSL
+            // directories' `private`, as `spec` does for a prefix on `PATH`.
+            crate::sandbox::add_toolchain(
+                &mut spec.read,
+                &mut spec.read_only,
+                &mut spec.metadata,
+                &crate::sandbox::homebrew_read(&prefix),
+                &|_| false,
+            );
+            let deny = crate::sandbox::homebrew_deny(&prefix);
+            spec.deny
+                .extend(deny.iter().map(|path| crate::sandbox::canonical(path)));
+            if etc_denied {
+                spec.deny
+                    .insert(crate::sandbox::canonical(&prefix.join("etc")));
+            }
+            let mut command = launcher_command(&spec, &sh(&script)).unwrap();
+            command
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("TMPDIR", &spec.tmp)
+                .current_dir(fixture.checkout())
+                .stdin(Stdio::null());
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the test starts this test binary as the launcher"
+            )]
+            let output = command.output().unwrap();
+            let output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            for (case, expected) in [
+                ("config", "allowed"),
+                ("bundle", "allowed"),
+                ("certs", "allowed"),
+                ("gitconfig", "allowed"),
+                ("key", "denied"),
+                ("list", "denied"),
+                ("other", "denied"),
+            ] {
+                assert_eq!(
+                    outcome(&output, case),
+                    expected,
+                    "{case} with etc denied {etc_denied}: {output}"
+                );
+            }
+        }
+    }
+
+    /// Runs `program` with `args` outside the sandbox in `dir`, with only
+    /// `HOME` and `PATH` set, and panics with its output when it fails.
+    fn outside(
+        program: &str,
+        args: &[&str],
+        dir: &std::path::Path,
+        home: &std::path::Path,
+        path: &str,
+    ) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test prepares, outside the sandbox, what the sandboxed process reads"
+        )]
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{program} {args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Returns the sysroot of the Rust toolchain that this machine's
+    /// `rustc` names, whose `bin` holds its `cargo` and `rustc`.
+    fn rust_sysroot() -> PathBuf {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test asks rustc where the real toolchain lies"
+        )]
+        let output = Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .unwrap();
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    }
+
+    /// Records why a protected path keeps its metadata: libgit2 stats
+    /// `~/.gitconfig` before it opens a repository, and when the stat
+    /// fails it treats a git dependency that cargo fetched as unusable and
+    /// tries to delete it, which the sandbox refuses, so cargo exits 101.
+    #[test]
+    fn cargo_reads_a_git_dependency_fetched_outside_the_sandbox_while_gitconfig_is_protected() {
+        let fixture = Fixture::new();
+        let home = fixture.home();
+        let sysroot = rust_sysroot();
+        let bin = sysroot.join("bin");
+        let outside_path = format!("{}:/usr/bin:/bin", bin.display());
+        let dependency = fixture.outside().join("dep");
+        std::fs::create_dir_all(dependency.join("src")).unwrap();
+        std::fs::create_dir_all(fixture.checkout().join("src")).unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test writes the crate, its git dependency and the protected gitconfig"
+        )]
+        {
+            std::fs::write(home.join(".gitconfig"), "[user]\n\tname = phase\n").unwrap();
+            std::fs::write(
+                dependency.join("Cargo.toml"),
+                "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .unwrap();
+            std::fs::write(dependency.join("src/lib.rs"), "pub fn two() -> u8 { 2 }\n").unwrap();
+            std::fs::write(
+                fixture.checkout().join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = {{ git = \"file://{}\" }}\n\n[workspace]\n",
+                    dependency.display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(fixture.checkout().join("src/main.rs"), "fn main() {}\n").unwrap();
+        }
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.email=phase@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "dep",
+            ],
+        ] {
+            outside("git", args, &dependency, &home, "/usr/bin:/bin");
+        }
+        // cargo fetches the dependency into the home's `.cargo/git` and
+        // writes the lock file, outside the sandbox.
+        outside(
+            "cargo",
+            &["generate-lockfile"],
+            &fixture.checkout(),
+            &home,
+            &outside_path,
+        );
+
+        let script = "cargo metadata --locked --offline --format-version 1 >/dev/null";
+        let path = format!("{}:{outside_path}", home.join(".cargo/bin").display());
+        let api = fixture.app(sh(script), 41_000);
+        let mut spec = fixture.spec_of(&api, &path, BTreeSet::new()).unwrap();
+        // The toolchain lies outside the fixture's home, so the spec does
+        // not know it as one and grants only its `bin`.
+        spec.read.insert(crate::sandbox::canonical(&sysroot));
+        let mut command = launcher_command(&spec, &sh(script)).unwrap();
+        command
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env("TMPDIR", &spec.tmp)
+            .current_dir(fixture.checkout())
+            .stdin(Stdio::null());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let output = command.output().unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn git_reports_its_version_and_the_status_of_a_checkout_under_the_sandbox() {
+        if !on_path("git") {
+            return;
+        }
+        let fixture = Fixture::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test reads this machine's real PATH to find git"
+        )]
+        let path = std::env::var("PATH").unwrap();
+        outside(
+            "git",
+            &["init", "-q"],
+            &fixture.checkout(),
+            &fixture.home(),
+            &path,
+        );
+
+        let (output, code) = with_real_toolchains(&fixture, "git --version && git status");
+
+        assert_eq!(code, 0, "{output}");
     }
 
     /// Reports whether `program` is on this machine's `PATH`.
@@ -1595,6 +2321,77 @@ mod landlock {
             ("read-ssh", "denied"),
             ("connect-dependency", "allowed"),
             ("connect-other", "denied"),
+        ] {
+            let line = format!("{case}={expected}");
+            assert!(
+                output.lines().any(|seen| seen == line),
+                "{line} in {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sandboxed_app_reads_a_homebrew_openssl_configuration_but_never_its_private_keys() {
+        if !matches!(platform(), Platform::Available(_)) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let prefix = super::homebrew_prefix_in(&fixture.outside());
+        let dir = prefix.join("etc/openssl@3");
+        let script = format!(
+            r#"
+            check() {{ if "$@" >/dev/null 2>&1; then echo "$case=allowed"; else echo "$case=denied"; fi; }}
+            case=config check cat "{dir}/openssl.cnf"
+            case=bundle check cat "{dir}/cert.pem"
+            case=certs check ls "{dir}/certs"
+            case=key check cat "{dir}/private/key.pem"
+            case=list check ls "{dir}/private"
+            case=other check ls "{prefix}/etc/other"
+            "#,
+            dir = dir.display(),
+            prefix = prefix.display(),
+        );
+        let api = fixture.app(sh(&script), 41_000);
+        let mut spec = fixture
+            .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+            .unwrap();
+        // The spec reads the prefix's grants, as `spec` does for a prefix
+        // on `PATH`.
+        crate::sandbox::add_toolchain(
+            &mut spec.read,
+            &mut spec.read_only,
+            &mut spec.metadata,
+            &crate::sandbox::homebrew_read(&prefix),
+            &|_| false,
+        );
+        let mut command = launcher_command(&spec, &sh(&script)).unwrap();
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &spec.tmp)
+            .current_dir(fixture.checkout())
+            .stdout(Stdio::piped());
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let mut child = command.spawn().unwrap();
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        child.wait().unwrap();
+
+        for (case, expected) in [
+            ("config", "allowed"),
+            ("bundle", "allowed"),
+            ("certs", "allowed"),
+            ("key", "denied"),
+            ("list", "denied"),
+            ("other", "denied"),
         ] {
             let line = format!("{case}={expected}");
             assert!(

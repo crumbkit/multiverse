@@ -443,10 +443,12 @@ permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"]
 ```
 
 The `sandbox` column of `up`, `down`, `restart` and `status` shows how
-phase runs each host process: `seatbelt (partial: ...)` on macOS, where
-Seatbelt lets the process's listening ports accept connections from other
-machines on the network, or `unsandboxed (<reason>)`, such as
-`unsandboxed (its app declares no permissions)`. It is null for a
+phase runs each host process: `seatbelt (partial: <reason>)` on macOS, or
+`unsandboxed (<reason>)`, such as `unsandboxed (its app declares no
+permissions)`. On macOS the reason is that the sandbox cannot limit the
+process's listening ports to the loopback interface. Seatbelt limits which
+ports a process may listen on but not which addresses, so the process can
+listen on each of its ports on every address of the machine. It is null for a
 container. A process that phase started is shown as its run record
 recorded it.
 
@@ -746,6 +748,7 @@ services' `env`.
 | `AWS_REGION` | `us-east-1`. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `test`. |
 | `AWS_EC2_METADATA_DISABLED` | `true`, so an SDK never asks an instance metadata service for credentials. |
+| `AWS_ENDPOINT_URL` | `http://127.0.0.1:9`, so a client of a kind that the process does not need fails with a refused connection instead of reaching AWS. |
 | `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` | `/dev/null`, so an SDK reads no profile of the person's own AWS configuration. |
 
 A host process never inherits a variable of mxv's own environment other
@@ -755,6 +758,10 @@ with `AWS_`. A process that needs a service therefore receives no
 `AWS_PROFILE`, no real access key and no session token, even when the
 shell that ran `mxv up` holds them. A process or a service that sets an
 `AWS_` variable itself fails with `mxv::manifest::invalid` and its line.
+
+An SDK that reads no endpoint variable, such as boto3 before 1.28 or the
+AWS SDK for Go v1, sends its requests to AWS, which refuses the `test`
+keys. mxv supports only SDKs that read the endpoint variables.
 
 DuckDB's `httpfs` extension does not read `AWS_ENDPOINT_URL_S3`. A
 process that queries S3 through DuckDB passes the endpoint itself:

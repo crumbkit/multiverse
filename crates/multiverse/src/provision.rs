@@ -629,6 +629,9 @@ fn create_bucket(
     }
 }
 
+/// SQS's visibility timeout of a queue that declares none, in seconds.
+const DEFAULT_VISIBILITY_TIMEOUT_SECONDS: u32 = 30;
+
 /// Creates the queue `name`, or gives an existing one the declared
 /// visibility timeout, and returns the line that says what it did. The
 /// queue is looked up first because SQS answers a repeated create with the
@@ -640,11 +643,12 @@ fn create_queue(
     resource: &str,
     deadline: Instant,
 ) -> Result<String, ProvisionError> {
-    let attributes: BTreeMap<&str, String> = queue
+    // A queue with no declared timeout gets SQS's default, so removing the
+    // setting from the manifest resets an existing queue.
+    let seconds = queue
         .visibility_timeout_seconds
-        .map(|seconds| ("VisibilityTimeout", seconds.to_string()))
-        .into_iter()
-        .collect();
+        .unwrap_or(DEFAULT_VISIBILITY_TIMEOUT_SECONDS);
+    let attributes = BTreeMap::from([("VisibilityTimeout", seconds.to_string())]);
     let found = json_request(
         port,
         "AmazonSQS.GetQueueUrl",
@@ -710,6 +714,10 @@ fn create_key(
     if described.code() != "NotFoundException" {
         return Err(described.refusal(resource));
     }
+    // `send` retries after a 5xx answer or a timeout, so a create whose
+    // answer was lost can leave a second key without an alias. The extra
+    // key lives in LocalStack's memory and goes on the next `down`; a
+    // retry that checks for the alias first would remove it.
     let created = json_request(
         port,
         "TrentService.CreateKey",

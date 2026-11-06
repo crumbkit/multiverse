@@ -327,6 +327,7 @@ fn up_starts_the_backends_provisions_every_resource_and_gives_a_process_only_mxv
             ("AWS_ACCESS_KEY_ID", "test"),
             ("AWS_CONFIG_FILE", "/dev/null"),
             ("AWS_EC2_METADATA_DISABLED", "true"),
+            ("AWS_ENDPOINT_URL", "http://127.0.0.1:9"),
             ("AWS_ENDPOINT_URL_DYNAMODB", dynamodb_endpoint.as_str()),
             ("AWS_ENDPOINT_URL_KMS", aws_endpoint.as_str()),
             ("AWS_ENDPOINT_URL_S3", aws_endpoint.as_str()),
