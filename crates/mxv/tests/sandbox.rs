@@ -280,6 +280,37 @@ ready = {{ log = "^ready$" }}
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_sandboxed_node_reports_its_version_into_the_log_that_mxv_keeps() {
+    if !support::PATH
+        .split(':')
+        .any(|dir| std::path::Path::new(dir).join("node").is_file())
+    {
+        println!("node=absent");
+        return;
+    }
+    let sandboxed = Sandboxed::new(
+        r#"[processes.node]
+argv = ["/bin/sh", "-c", "node --version && echo ready; exec sleep 60"]
+ready = { log = "^ready$" }
+permissions = {}
+"#,
+    );
+
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    let logs = sandboxed.text(&["logs", "-w", "triage", "node"]);
+
+    assert_eq!(exit, 0, "{up}\n{logs}");
+    let version = logs.lines().next().unwrap_or_default();
+    assert!(
+        version
+            .strip_prefix('v')
+            .is_some_and(|rest| rest.starts_with(|first: char| first.is_ascii_digit())),
+        "{logs}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn up_warns_that_a_running_process_whose_manifest_gained_permissions_needs_a_restart_to_be_sandboxed()
  {
     let without = "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\n";

@@ -128,21 +128,55 @@ impl fmt::Display for Sandboxing {
 /// `~/.config/git`, and git stops with "unable to access" when its global
 /// configuration exists but cannot be read, so without it a sandboxed git
 /// ran no command at all.
-pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[("GIT_CONFIG_GLOBAL", "/dev/null")];
+///
+/// On macOS `SSL_CERT_FILE=/etc/ssl/cert.pem` names the bundle of the
+/// trusted roots that macOS ships. rustls-native-certs, which the AWS
+/// SDK's TLS uses, reads the roots from that file instead of asking the
+/// keychain's `com.apple.SecurityServer` service, which nono's profile
+/// denies, and OpenSSL reads it as its default bundle. Without it
+/// rustls-native-certs found no roots under the sandbox, and the AWS SDK
+/// panicked at startup. The file is a system file that the sandbox may
+/// already read, so the variable grants nothing. An app that sets
+/// `SSL_CERT_DIR` gets no `SSL_CERT_FILE`, because both readers trust the
+/// roots of the two together, and the app's directory would then no
+/// longer limit what it trusts.
+///
+/// Each entry is the variable, its value, and the variables any of which
+/// the app's environment sets to keep phase from setting it.
+#[cfg(target_os = "macos")]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"]),
+    (
+        "SSL_CERT_FILE",
+        "/etc/ssl/cert.pem",
+        &["SSL_CERT_FILE", "SSL_CERT_DIR"],
+    ),
+];
+
+/// The variables that every sandboxed process receives on Linux unless
+/// its own environment sets them, as the macOS list describes. Linux
+/// reads its trusted roots from `/etc`, which the sandbox may read, so it
+/// needs no `SSL_CERT_FILE`.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] =
+    &[("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"])];
 
 /// Sets on `command` the environment of a process that runs under a
 /// sandbox whose temporary directory is `tmp`. `TMPDIR` names `tmp` and
 /// replaces any other value, because the sandbox lets the process write no
 /// other temporary directory. Each variable of [`SANDBOX_ENVIRONMENT`] is
-/// set only when `command` does not set it already, so a value from the
-/// app's own environment wins. Call it after the command's environment is
-/// set.
+/// set only when `command` sets none of the variables that its entry
+/// names, so a value from the app's own environment wins. Call it after
+/// the command's environment is set.
 pub(crate) fn sandboxed_environment(command: &mut Command, tmp: &Path) {
     command.env("TMPDIR", tmp);
-    for (name, value) in SANDBOX_ENVIRONMENT {
-        let set = command
-            .get_envs()
-            .any(|(key, given)| key == std::ffi::OsStr::new(name) && given.is_some());
+    for (name, value, unless) in SANDBOX_ENVIRONMENT {
+        let set = command.get_envs().any(|(key, given)| {
+            given.is_some()
+                && unless
+                    .iter()
+                    .any(|other| key == std::ffi::OsStr::new(other))
+        });
         if !set {
             command.env(name, value);
         }
