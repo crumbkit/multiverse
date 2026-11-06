@@ -60,7 +60,7 @@ mod phased;
 #[cfg(test)]
 mod tests;
 
-pub use phased::{LogOutput, Volumes};
+pub use phased::{Exec, ExecEnd, ExecTarget, LogOutput, Volumes};
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);

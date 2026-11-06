@@ -580,8 +580,9 @@ whose `phase_code` field holds phase's code.
 Each process verb works on the workspace that `-w/--workspace` names, or on
 the one that holds the current directory when it names none. Its positional
 words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
-`mxv restart`, `mxv status [-w WORKSPACE]` and
-`mxv logs [-w WORKSPACE] PROCESS`.
+`mxv restart`, `mxv status [-w WORKSPACE]`,
+`mxv logs [-w WORKSPACE] PROCESS` and
+`mxv exec [-w WORKSPACE] PROCESS -- COMMAND [ARGS]...`.
 
 - `mxv up` starts the named processes, or every process, with their
   dependencies first. It skips a process that already runs. phase starts
@@ -642,6 +643,30 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   lines, and `-f` prints it once it is finished, also with `--lines 0`. An
   unfinished last line longer than 64 KiB loses its start, so `-f`, even
   with `--lines 0`, starts in the middle of it.
+- `mxv exec` runs a one-off command in the context of a running process
+  or container, and exits with the command's exit code, or with 128 plus
+  the number of the signal that ended it. The command is the words after
+  `--`, which no shell reads, so `mxv exec api -- env` prints the
+  variables that `api` receives.
+  - A host process's command runs in the process's directory, with the
+    variables that the process receives, under its sandbox. It is not one
+    of the workspace's processes, so `mxv down` does not stop it.
+  - A container's command runs inside the container through `docker
+    exec`, with a terminal of its own when mxv's standard input and output
+    are both terminals.
+  - A sandboxed command runs in a session of its own and cannot have the
+    terminal. mxv refuses it with `mxv::exec::sandboxed_terminal` while
+    its standard input, output or error is a terminal. On Ctrl-C, and when
+    the terminal closes, mxv stops the command's process group. It exits
+    with 78 when its sandbox cannot be applied.
+  - An mxv that something sends `SIGTERM` alone ends at once, and the
+    command, of any kind, keeps running until it ends by itself.
+  - A process that is not running fails with `mxv::process::not_running`,
+    whose recovery starts it with `mxv up`. A host program that cannot
+    start fails with `mxv::exec::unstartable` and exit code 1. A
+    container's program that does not exist exits with docker's 127, which
+    mxv passes on. `--json` fails with
+    `mxv::cli::usage`, because the output is the command's own.
 - `mxv ports reset [-w WORKSPACE] [PORT]...` gives the named ports, or
   every port, new host ports that differ from the old ones. It refuses with
   `mxv::workspace::running` while the workspace's processes run, and it is

@@ -65,8 +65,11 @@ const CONTAINERS_RAN: &str = ".containers";
 /// `mxv remove --delete-volumes` reads, and [`CONTAINERS_RAN`].
 const KEPT_FILES: &[&str] = &[".lock", ".volumes", CONTAINERS_RAN];
 
+mod exec;
 #[cfg(test)]
 mod tests;
+
+pub use exec::{Exec, ExecEnd, ExecTarget};
 
 /// Returns the checkout that holds `workspace`'s manifest. A workspace
 /// holds one checkout for now.

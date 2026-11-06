@@ -97,6 +97,12 @@ const ALLOW: &[Allow] = &[
     Allow::new(Rule::Examples, "up", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "restart", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "logs", NO_LIVE_CHECKOUT),
+    Allow::new(Rule::Examples, "exec", NO_LIVE_CHECKOUT),
+    Allow::new(
+        Rule::Yes,
+        "exec",
+        "The person writes the command after `--`, and mxv cannot tell what it changes, so a question from mxv would ask about every command, harmless or not.",
+    ),
     Allow::new(
         Rule::Examples,
         "add",

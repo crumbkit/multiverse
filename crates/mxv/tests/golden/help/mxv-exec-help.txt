@@ -1,0 +1,42 @@
+Run a one-off command in the context of a running process or container, and exit with its exit code.
+
+A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
+
+Usage: mxv exec [OPTIONS] <PROCESS> -- <COMMAND>...
+
+Arguments:
+  <PROCESS>
+          The running process or container in whose context the command runs
+
+  <COMMAND>...
+          The command's program and its arguments, after `--`
+
+Options:
+  -w, --workspace <WORKSPACE>
+          The workspace, which defaults to the one that holds the current directory
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv exec -w reading-list web -- env
+          Print the variables that a command receives in the context of web
+
+Effects: destructive, not idempotent, open-world.
+Writes: applies all items or none.
+Exit code: the command passes on the exit code of the command.

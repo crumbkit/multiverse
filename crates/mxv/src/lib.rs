@@ -8,7 +8,7 @@
 //! hidden from the documentation and outside the semver promise.
 //!
 //! `new`, `add`, `list`, `show`, `cd`, `remove`, `clean` and the process verbs `up`,
-//! `down`, `restart`, `status` and `logs` are built. `archive` and
+//! `down`, `restart`, `status`, `logs` and `exec` are built. `archive` and
 //! `restore` are declared and fail with `mxv::command::unbuilt` until the
 //! pull request that builds each one.
 
@@ -16,6 +16,7 @@ mod clean;
 mod cli;
 mod config;
 mod environment;
+mod exec;
 mod failures;
 mod processes;
 mod rows;
@@ -39,6 +40,8 @@ use crate::cli::{
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
+#[doc(hidden)]
+pub use crate::exec::{EXEC_SANDBOXED_TERMINAL, EXEC_UNSTARTABLE, PROCESS_NOT_RUNNING};
 #[doc(hidden)]
 pub use crate::failures::{
     BRANCH_EXISTS, CHECKOUT_INCOMPLETE, CHECKOUT_INVALID_NAME, CHECKOUT_LOCKED,
@@ -85,6 +88,12 @@ pub const CODES: &[&Code] = failures::CODES;
 /// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
 #[doc(hidden)]
 pub const RUN_CODES: &[&Code] = run_failures::CODES;
+
+/// Every failure code of `mxv exec` that the other process verbs do not
+/// have, which the tests pass to crumbkit-test's codes, recovery and twin
+/// checks beside [`RUN_CODES`].
+#[doc(hidden)]
+pub const EXEC_CODES: &[&Code] = exec::CODES;
 
 /// Parses `args`, runs the command with the variables of `environment` and
 /// returns the process's exit code. The first argument is the program's
@@ -151,6 +160,9 @@ where
         // `logs` prints a stream, so it opens the stream from `output`
         // itself.
         Verb::Logs(args) => return processes::logs(output, environment, &args),
+        // `exec` hands the terminal to the command and exits with its exit
+        // code, so it prints no document.
+        Verb::Exec(args) => return exec::exec(output, environment, &args),
         Verb::Ports {
             command: PortsCommand::Reset(args),
         } => {
@@ -349,6 +361,31 @@ pub fn keep(args: Vec<OsString>, vars: Vec<(OsString, OsString)>) -> ExitCode {
     )]
     let output = std::io::stdout().lock();
     run(&parsed, environment, &NoFreshEnvironment, input, output).into()
+}
+
+/// Reports whether mxv's standard input is a terminal, which `mxv exec`
+/// passes to phase so a container's command gets a terminal of its own.
+pub(crate) fn stdin_is_terminal() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard input, and `mxv exec` asks only whether it is a terminal"
+    )]
+    let stdin = std::io::stdin();
+    stdin.is_terminal()
+}
+
+/// Reports whether mxv's standard output is a terminal, which `mxv exec`
+/// checks with standard input before it gives a container's command a
+/// terminal.
+pub(crate) fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and `mxv exec` asks only whether it is a terminal"
+    )]
+    let stdout = std::io::stdout();
+    stdout.is_terminal()
 }
 
 pub(crate) fn warn(warnings: &[String]) {
