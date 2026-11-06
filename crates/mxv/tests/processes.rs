@@ -1893,3 +1893,64 @@ fn exec_refuses_json_because_the_output_is_the_commands_own() {
     let document: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(document["code"], "mxv::cli::usage", "{document}");
 }
+
+#[test]
+fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code() {
+    use std::io::BufRead as _;
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let root = setup.root();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
+    command
+        .args([
+            "exec",
+            "-w",
+            "triage",
+            "api",
+            "--",
+            "sh",
+            "-c",
+            "echo started; sleep 1; exit 4",
+        ])
+        .current_dir(&root)
+        .env_clear()
+        .env("PATH", PATH)
+        .envs(GIT_ENV.iter().copied())
+        .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("MXV_ROOT", root.join("workspaces"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut child = command.spawn().unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "started\n");
+
+    let sent = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
+
+    let deadline = Instant::now() + MOST_WAIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "mxv exec did not end");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(4), "{status:?}");
+}
