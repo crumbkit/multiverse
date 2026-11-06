@@ -280,8 +280,7 @@ ready = {{ log = "^ready$" }}
 
 #[cfg(target_os = "macos")]
 #[test]
-fn up_warns_that_a_running_process_whose_manifest_gained_permissions_needs_a_restart_to_be_sandboxed()
- {
+fn up_restarts_a_running_process_under_the_sandbox_once_its_manifest_gains_permissions() {
     let without = "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\n";
     let sandboxed = Sandboxed::new(without);
     let (exit, first) = sandboxed.json(&["up", "-w", "triage"]);
@@ -290,30 +289,27 @@ fn up_warns_that_a_running_process_whose_manifest_gained_permissions_needs_a_res
 
     sandboxed.write_manifest(&format!("{without}permissions = {{}}\n"));
     let (exit, second) = sandboxed.json(&["up", "-w", "triage"]);
-    let (restarted, third) = sandboxed.json(&["restart", "-w", "triage", "writer"]);
+    let (again, third) = sandboxed.json(&["up", "-w", "triage"]);
 
     assert_eq!(exit, 0, "{second}");
     let writer = Sandboxed::row(&second, "writer");
-    assert_eq!(writer["pid"], pid, "{second}");
-    assert_eq!(
-        writer["sandbox"], "unsandboxed (its app declares no permissions)",
+    assert_ne!(writer["pid"], pid, "{second}");
+    assert!(
+        writer["sandbox"]
+            .as_str()
+            .is_some_and(|sandbox| sandbox.starts_with("seatbelt (partial: ")),
         "{second}"
     );
     assert_eq!(
         writer["notes"],
         serde_json::json!([{
-            "level": "warning",
-            "message": "writer still runs unsandboxed, because it was running before its manifest gave it permissions; run `mxv restart -w triage writer` to run it under the sandbox",
+            "level": "info",
+            "message": "restarted writer/main because its part of the plan changed",
         }]),
         "{second}"
     );
-    assert_eq!(restarted, 0, "{third}");
-    let writer = Sandboxed::row(&third, "writer");
-    assert!(
-        writer["sandbox"]
-            .as_str()
-            .is_some_and(|sandbox| sandbox.starts_with("seatbelt (partial: ")),
-        "{third}"
-    );
-    assert_eq!(writer["notes"], serde_json::json!([]), "{third}");
+    assert_eq!(again, 0, "{third}");
+    let writer_again = Sandboxed::row(&third, "writer");
+    assert_eq!(writer_again["pid"], writer["pid"], "{third}");
+    assert_eq!(writer_again["notes"], serde_json::json!([]), "{third}");
 }

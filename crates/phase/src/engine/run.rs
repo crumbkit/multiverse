@@ -13,6 +13,15 @@
 //! `oneshot` module says. Container apps go through the
 //! [`ContainerRunner`].
 //!
+//! Each launch records the hash of the process's own part of the plan. A
+//! later `up` that finds the process's keeper running leaves it alone when
+//! the recorded hash is the current one. Otherwise, and when the entry
+//! records no hash, `up` resolves the process's environment, stops it as
+//! `down` does, and launches it again, with a note that says why. The
+//! processes that depend on it keep running, as the apps that depend on a
+//! replaced container do, unless their own hash changed. The hash of a
+//! sandboxed process covers the ports of the apps it depends on.
+//!
 //! Before each launch, `up` writes the process's keeper and entry back to
 //! planned with no process, so a record that names a stopped or stale
 //! process never stands for the new one. It pushes each process it
@@ -615,6 +624,7 @@ impl Op<'_, '_> {
         notes: &mut Vec<Note>,
     ) -> Result<Step, PhaseError> {
         let host = self.engine.host;
+        let mut environment = environment;
         match self.recorded(app, process) {
             Ok(Recorded::Nothing) => {}
             // A oneshot that still runs was started by an operation that
@@ -623,7 +633,32 @@ impl Op<'_, '_> {
             Ok(Recorded::Ours) if matches!(process.kind, ProcessKind::Oneshot { .. }) => {
                 return Ok(Step::Left);
             }
-            Ok(Recorded::Ours) => return Ok(Step::AlreadyRunning),
+            Ok(Recorded::Ours) => {
+                let Some(note) = self.drift(app, process) else {
+                    return Ok(Step::AlreadyRunning);
+                };
+                // The environment is resolved before the stop, so a
+                // resolver that fails leaves the running process alone, as
+                // it leaves a container that `up` would replace.
+                if environment.is_none() {
+                    environment = Some(
+                        crate::env::resolve_required(
+                            self.env,
+                            &app.name,
+                            process,
+                            self.deadlines.ready,
+                        )
+                        .map_err(|source| PhaseError::Environment {
+                            app: app.name.clone(),
+                            source,
+                        })?,
+                    );
+                }
+                if let Some(step) = self.stop_drifted(app, process, notes)? {
+                    return Ok(step);
+                }
+                notes.push(note);
+            }
             Ok(Recorded::Left) => return Ok(Step::Left),
             Ok(Recorded::Unverified(group)) => {
                 notes.push(Note::group_unverified(process.name.clone(), group));
@@ -661,6 +696,7 @@ impl Op<'_, '_> {
             &process.name,
             &Launching {
                 plan_hash: self.plan_hash.clone(),
+                part_hash: self.launch_part(app, process),
                 stop: process.stop,
                 listen: listen.clone(),
                 restart: process.restart.clone(),
@@ -765,6 +801,51 @@ impl Op<'_, '_> {
                 None
             }
         }
+    }
+
+    /// Returns the note that `up` restarts the running `process` of `app`,
+    /// or `None` when its entry records the hash of its current part of
+    /// the plan, so `up` leaves it alone. An entry that records another
+    /// hash, or none, as an entry that an older phase wrote, restarts it.
+    fn drift(&self, app: &AppPlan, process: &ProcessPlan) -> Option<Note> {
+        let record = self.journal.record()?;
+        let (_, entry) = record.host_pair(&app.name, &process.name);
+        match entry.and_then(|entry| entry.part_hash.as_ref()) {
+            Some(recorded) if *recorded == self.launch_part(app, process) => None,
+            Some(_) => Some(Note::plan_changed(&app.name, process.name.clone())),
+            None => Some(Note::plan_unrecorded(&app.name, process.name.clone())),
+        }
+    }
+
+    /// Stops the running `process` of `app`, whose part of the plan
+    /// changed, through the stop that `down` and `restart` use, before
+    /// `up` starts it again. It returns `None` once nothing of it is left,
+    /// and otherwise the step that ends its start: left, or uncertain when
+    /// the readiness deadline has passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of the stop.
+    fn stop_drifted(
+        &mut self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        notes: &mut Vec<Note>,
+    ) -> Result<Option<Step>, PhaseError> {
+        let target = self.journal.record().and_then(|record| {
+            let (keeper, entry) = record.host_pair(&app.name, &process.name);
+            stop::target_of(keeper, entry)
+        });
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        let deadline = self.deadlines.ready;
+        let stopped = stop::stop_target(self.engine, &mut self.journal, &target, deadline, notes)?;
+        Ok(match stopped {
+            Stopped::Stopped => None,
+            Stopped::Left if now() >= deadline => Some(Step::Uncertain),
+            Stopped::Left => Some(Step::Left),
+        })
     }
 
     /// Returns what the run record says of `process` of `app`: whether
@@ -890,6 +971,46 @@ impl Op<'_, '_> {
         }
     }
 
+    /// Returns the hash of what `process` of `app` is launched from, which
+    /// its entry records as `part_hash`. It is the hash of the process's
+    /// part of the plan, which [`AppPlan::process_digest`] gives, and for a
+    /// process that runs under the sandbox, of the sandbox that phase would
+    /// build for it now. That sandbox covers the ports it may listen on
+    /// and connect to, the paths that phase and the host program protect,
+    /// `HOME`, the workspace's paths, phase's state directory and the
+    /// launcher. It leaves out the grants that come only from the
+    /// inherited `PATH`, so an `up` from a shell with another `PATH` does
+    /// not restart every sandboxed process. A sandbox that phase cannot
+    /// build counts by its error, so the launch that follows reports it. A
+    /// oneshot's completion keeps the hash of its part alone.
+    fn launch_part(&self, app: &AppPlan, process: &ProcessPlan) -> PlanHash {
+        let part = app.process_digest(process);
+        let built = self
+            .engine
+            .settings
+            .keeper
+            .map(|command| self.sandbox_from(app, process, command, None));
+        let sandbox = match built {
+            None | Some(Ok(None)) => return PlanHash::new(part),
+            Some(Ok(Some(spec))) => Ok(spec.launch_digest()),
+            Some(Err(error)) => Err(error.to_string()),
+        };
+        /// What the hash of a sandboxed process covers.
+        #[derive(serde::Serialize)]
+        struct Sandboxed {
+            /// The digest of the process's part of the plan.
+            part: [u8; 32],
+            /// The digest of its sandbox without the grants of `PATH`, or
+            /// why phase cannot build the sandbox, which names paths and
+            /// no environment value.
+            sandbox: Result<[u8; 32], String>,
+        }
+        // The fields are plain data, so they always serialize.
+        PlanHash::new(crate::plan::digest(
+            &serde_json::to_vec(&Sandboxed { part, sandbox }).unwrap_or_default(),
+        ))
+    }
+
     /// Returns the sandbox of `process` of `app`, whose keeper runs as
     /// `command`, or `None` when it runs unsandboxed: its app declares no
     /// permissions, or this machine offers no sandbox.
@@ -901,15 +1022,39 @@ impl Op<'_, '_> {
     ) -> Result<Option<SandboxSpec>, SandboxError> {
         process_sandbox(
             &self.engine.settings,
-            &SandboxScope {
-                workspace: &self.workspace,
-                workspace_paths: &self.workspace_paths,
-                ports: &self.ports,
-            },
+            &self.sandbox_scope(),
             app,
             process,
             command,
         )
+    }
+
+    /// Returns the sandbox of `process` of `app`, as [`Op::sandbox`] does,
+    /// built with `path` as the inherited `PATH`.
+    fn sandbox_from(
+        &self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        command: &KeeperCommand,
+        path: Option<&str>,
+    ) -> Result<Option<SandboxSpec>, SandboxError> {
+        sandbox_with_path(
+            &self.engine.settings,
+            &self.sandbox_scope(),
+            app,
+            process,
+            command,
+            path,
+        )
+    }
+
+    /// Returns the workspace that this operation builds sandboxes for.
+    fn sandbox_scope(&self) -> SandboxScope<'_> {
+        SandboxScope {
+            workspace: &self.workspace,
+            workspace_paths: &self.workspace_paths,
+            ports: &self.ports,
+        }
     }
 
     /// Waits until the started `target` is ready, as `process` says. When
@@ -1421,6 +1566,22 @@ pub(crate) fn process_sandbox(
     process: &ProcessPlan,
     command: &KeeperCommand,
 ) -> Result<Option<SandboxSpec>, SandboxError> {
+    let path = settings.inherited.get("PATH").map(String::as_str);
+    sandbox_with_path(settings, scope, app, process, command, path)
+}
+
+/// Returns the sandbox of `process` of `app`, as [`process_sandbox`]
+/// does, built with `path` as the inherited `PATH`. The hash of what a
+/// process is launched from builds it with no `PATH`, so it leaves out the
+/// grants that come only from `PATH`.
+fn sandbox_with_path(
+    settings: &Settings<'_>,
+    scope: &SandboxScope<'_>,
+    app: &AppPlan,
+    process: &ProcessPlan,
+    command: &KeeperCommand,
+    path: Option<&str>,
+) -> Result<Option<SandboxSpec>, SandboxError> {
     let Some(permissions) = &app.permissions else {
         return Ok(None);
     };
@@ -1431,7 +1592,7 @@ pub(crate) fn process_sandbox(
         state_dir: settings.state_dir,
         workspace: scope.workspace,
         workspace_paths: scope.workspace_paths,
-        path: settings.inherited.get("PATH").map(String::as_str),
+        path,
         home: settings.inherited.get("HOME").map(Path::new),
         protected: settings.protected,
         connect: app

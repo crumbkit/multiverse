@@ -10,6 +10,7 @@ use tempfile::TempDir;
 
 use super::{Engine, Settings};
 
+mod drift;
 mod oneshot;
 use crate::cancel::Cancel;
 use crate::clock::now;
@@ -702,7 +703,30 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let state = tempfile::tempdir().unwrap();
+        Self::in_state(tempfile::tempdir().unwrap())
+    }
+
+    /// Returns a world whose state directory lies in the build's target
+    /// directory, outside the per-user temporary directory, which the
+    /// sandbox always denies, so a sandboxed app's spec can be built.
+    fn outside_temp() -> Self {
+        let target = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("sandbox-fixtures");
+        std::fs::create_dir_all(&target).unwrap();
+        Self::in_state(
+            tempfile::Builder::new()
+                .prefix("phase-run-")
+                .tempdir_in(target)
+                .unwrap(),
+        )
+    }
+
+    fn in_state(state: TempDir) -> Self {
         let host = FakeHost::default();
         host.state.borrow_mut().state_dir = Some(state.path().to_path_buf());
         let containers = FakeContainers::default();
