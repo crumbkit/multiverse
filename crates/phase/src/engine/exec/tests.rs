@@ -499,9 +499,10 @@ fn a_sandboxed_apps_exec_runs_git_status_in_its_checkout_while_the_git_configura
 }
 
 /// The sandboxed app `api` depends on `named` and `unnamed`, each a host
-/// app whose port a listener of this test holds, and its `connect` names
-/// only `named`. A command in `api`'s context reaches `named`'s port and is
-/// denied `unnamed`'s.
+/// app whose process listens on a port that a listener of this test holds,
+/// and its `connect` names only `named`. `named` also receives `unnamed`'s
+/// port, as a process that calls another unit does. A command in `api`'s
+/// context reaches `named`'s port and is denied `unnamed`'s.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it_leaves_out() {
@@ -528,10 +529,18 @@ fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it
             "http".parse().unwrap(),
             listener.local_addr().unwrap().port().try_into().unwrap(),
         );
-        app.processes.push(ProcessPlan::new(
+        if name == "named" {
+            app.ports.insert(
+                "peer".parse().unwrap(),
+                unnamed.local_addr().unwrap().port().try_into().unwrap(),
+            );
+        }
+        let mut server = ProcessPlan::new(
             "server".parse().unwrap(),
             vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
-        ));
+        );
+        server.port = Some("http".parse().unwrap());
+        app.processes.push(server);
         apps[0].depends.push(name.parse().unwrap());
         apps.push(app);
     }

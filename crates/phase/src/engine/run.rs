@@ -1386,15 +1386,24 @@ fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
     })
 }
 
-/// Returns the loopback ports of each app of `plan`.
+/// Returns the loopback ports that each app of `plan` serves: the port each
+/// host process listens on and the ports each container process publishes.
+/// An app's `ports` also hold the ports its processes receive from other
+/// apps, and those belong to the apps that serve them, so naming an app in
+/// `connect` opens only the ports it serves. A host process that listens on
+/// a port without naming it as its `port` serves nothing here.
 pub(crate) fn app_ports(plan: &Plan) -> BTreeMap<AppName, BTreeSet<u16>> {
     plan.apps()
         .iter()
         .map(|app| {
-            (
-                app.name.clone(),
-                app.ports.values().map(|port| port.get()).collect(),
-            )
+            let served = app
+                .processes
+                .iter()
+                .flat_map(|process| process.port.iter().chain(process.publish.keys()))
+                .filter_map(|name| app.ports.get(name))
+                .map(|port| port.get())
+                .collect();
+            (app.name.clone(), served)
         })
         .collect()
 }
@@ -1405,7 +1414,7 @@ pub(crate) struct SandboxScope<'a> {
     pub(crate) workspace: &'a WorkspaceId,
     /// The workspace's own directory and protected paths.
     pub(crate) workspace_paths: &'a WorkspacePaths,
-    /// The loopback ports of each app of the plan.
+    /// The loopback ports that each app of the plan serves.
     pub(crate) ports: &'a BTreeMap<AppName, BTreeSet<u16>>,
 }
 
@@ -1435,14 +1444,12 @@ pub(crate) fn process_sandbox(
         home: settings.inherited.get("HOME").map(Path::new),
         protected: settings.protected,
         // The plan refuses a `connect` that names anything but an app the
-        // app depends on, so each name here is such an app. The filter on
-        // `depends` keeps the sandbox closed even for a plan that skipped
-        // that check.
-        connect: app
-            .depends
+        // app depends on, so each name here is such an app.
+        connect: permissions
+            .connect
             .iter()
-            .filter(|depends| permissions.connect.contains(depends.as_str()))
-            .filter_map(|depends| scope.ports.get(depends))
+            .filter_map(|name| name.parse::<AppName>().ok())
+            .filter_map(|name| scope.ports.get(&name))
             .flatten()
             .copied()
             .collect(),

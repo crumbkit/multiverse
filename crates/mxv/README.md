@@ -377,16 +377,19 @@ write its own state and temporary directories. `permissions` adds:
 - `connect`: the processes and containers that the process may connect to
   over the loopback address.
 
-phase's sandbox opens the ports of the units that `connect` names, and no
-other. A unit of `connect` must be one of the process's `depends_on`, and
-the manifest fails with `mxv::manifest::invalid` and a hint to add it to
+phase's sandbox opens the ports that the units of `connect` serve, and no
+other: the `listen` port of a process and the ports that a container
+publishes. A port that a unit only receives through `ports` or an `env`
+placeholder stays closed unless the unit that serves it is in `connect`. A
+unit of `connect` must be one of the process's `depends_on`, and the
+manifest fails with `mxv::manifest::invalid` and a hint to add it to
 `depends_on` otherwise. A sandboxed process cannot reach a unit of its
 `depends_on` that `connect` leaves out, so a process that talks to a
-dependency must name it in `connect`. A sandboxed
-process cannot reach any host off the machine until phase runs its
-allowlist proxy, so a name in `connect` that is not a unit of the manifest
-fails. `permissions` has no `secrets` key, because mxv has no secrets yet,
-and that key fails with `mxv::manifest::unknown_key`.
+dependency must name it in `connect`. A sandboxed process cannot reach any
+host off the machine until phase runs its allowlist proxy, so a name in
+`connect` that is not a unit of the manifest fails. `permissions` has no
+`secrets` key, because mxv has no secrets yet, and that key fails with
+`mxv::manifest::unknown_key`.
 
 A write grant is only as safe as whatever later runs the directory's
 contents outside the sandbox. For example, a sandboxed process that may

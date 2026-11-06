@@ -1957,7 +1957,7 @@ fn check_permissions(
             return Err(errors.invalid(
                 &unit.span(),
                 format!(
-                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because the sandbox opens only the ports of the units that a process depends on"
+                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because a sandboxed process may connect only to units it depends on"
                 ),
             ));
         }
