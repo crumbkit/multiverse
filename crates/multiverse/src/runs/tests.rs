@@ -441,7 +441,8 @@ fn the_run_host_saves_a_stable_id_in_a_record_without_one_and_then_returns_the_s
 }
 
 #[test]
-fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id() {
+fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id_and_says_what_it_cannot_do()
+ {
     let setup = Setup::new();
     let store = setup.store();
     let name: WorkspaceName = "triage".parse().unwrap();
@@ -458,6 +459,11 @@ fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id() {
                 Err(Error::DockerFailed { ref operation, .. }) if operation == "workspace id"
             ),
             "{saved:?}"
+        );
+        let text = saved.unwrap_err().to_string();
+        assert!(
+            text.starts_with("mxv cannot name the workspace's containers, because "),
+            "{text}"
         );
     }
 }

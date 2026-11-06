@@ -29,8 +29,7 @@ use phase::{
 
 use super::{
     DownOutcome, ExitReason, Follower, Kind, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, TAIL_LINES, Unstoppable, UpOutcome, Waited, code_and_signal, received,
-    tail,
+    RenamedVolume, Runs, Unstoppable, UpOutcome, Waited, code_and_signal, received, tail,
 };
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
@@ -950,14 +949,6 @@ impl Runs {
         problem: &StartProblem,
     ) -> Result<UpOutcome, Error> {
         let log = self.phase_log(id, manifest, unit);
-        // The provisioning's failure points to its log and quotes none of
-        // it.
-        let log_tail = || {
-            log.as_deref()
-                .filter(|_| unit != PROVISION_APP)
-                .map(|log| tail(log, TAIL_LINES))
-                .unwrap_or_default()
-        };
         let number = |port: &str| workspace.ports.get(port).copied().unwrap_or_default();
         Ok(match problem {
             StartProblem::PortTaken { port, holders, .. } => {
@@ -979,7 +970,6 @@ impl Runs {
                     process: unit.to_owned(),
                     code,
                     signal,
-                    tail: log_tail(),
                     log,
                 }
             }
@@ -988,7 +978,6 @@ impl Runs {
                 port: port.to_string(),
                 number: number(port.as_str()),
                 pid: holders.first().copied(),
-                tail: log_tail(),
                 log,
             },
             StartProblem::NotReady { waited, .. } => {
@@ -1010,7 +999,6 @@ impl Runs {
                     process: unit.to_owned(),
                     waited: waited_for,
                     timeout: ready.map_or(*waited, |ready| ready.timeout),
-                    tail: log_tail(),
                     log,
                 }
             }

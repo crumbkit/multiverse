@@ -71,8 +71,7 @@ pub use crate::redacted::Redacted;
 pub use crate::runs::{
     DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Follower, KILL_WAIT, Kind, LogOutput,
     MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, START_GRACE, STOP_GRACE, TAIL_LINES, Unstoppable, UpOutcome, Volumes,
-    Waited, tail,
+    RenamedVolume, Runs, START_GRACE, STOP_GRACE, Unstoppable, UpOutcome, Volumes, Waited, tail,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,

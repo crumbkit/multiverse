@@ -79,9 +79,6 @@ pub const START_GRACE: Duration = Duration::from_millis(500);
 /// it.
 pub const MOST_LOG_BYTES: u64 = 32 * 1024 * 1024;
 
-/// The number of log lines that a failed start reports.
-pub const TAIL_LINES: usize = 20;
-
 pub use phase::{MOST_TAIL_BYTES, tail};
 
 /// The most bytes that one read of a followed log takes. The rest waits
@@ -326,8 +323,6 @@ pub enum UpOutcome {
         /// Its log file, or `None` for a container that phase runs, whose
         /// log comes from `docker logs`.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// The readiness port of a process accepted a connection, and no member
     /// of the process's group listens on it, so another program answered
@@ -345,8 +340,6 @@ pub enum UpOutcome {
         /// The process's log file, or `None` for a container that phase
         /// runs.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// The listen port answered, and the process that holds it descends
     /// from the process's shell but left the process group, as a daemon
@@ -364,8 +357,6 @@ pub enum UpOutcome {
         /// The process's log file, or `None` for a container that phase
         /// runs.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// A process ran past its readiness timeout before its readiness check
     /// passed, so `up` stopped it.
@@ -379,8 +370,6 @@ pub enum UpOutcome {
         /// Its log file, or `None` for a container that phase runs, whose
         /// log comes from `docker logs`.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// A process or container that mxv started before phase ran its apps
     /// may still run, so `up` started nothing. `mxv down` stops it.
@@ -1117,7 +1106,6 @@ impl Runs {
                     process: process.to_owned(),
                     code,
                     signal,
-                    tail: tail(&log, TAIL_LINES),
                     log: Some(log),
                 }))
             }
@@ -1142,7 +1130,6 @@ impl Runs {
                     process: process.to_owned(),
                     waited,
                     timeout: ready.timeout,
-                    tail: tail(&log, TAIL_LINES),
                     log: Some(log),
                 }))
             }
@@ -1196,7 +1183,6 @@ impl Runs {
         }
         launched.kill();
         self.drop_run_files(name, process);
-        let tail = tail(&log, TAIL_LINES);
         Ok(Some(match holder {
             Holder::Descendant(pid) => UpOutcome::DetachedListener {
                 process: process.to_owned(),
@@ -1204,7 +1190,6 @@ impl Runs {
                 number,
                 pid,
                 log: Some(log),
-                tail,
             },
             Holder::Group | Holder::Other(_) => UpOutcome::ForeignListener {
                 process: process.to_owned(),
@@ -1215,7 +1200,6 @@ impl Runs {
                     Holder::Group | Holder::Descendant(_) => None,
                 },
                 log: Some(log),
-                tail,
             },
         }))
     }
@@ -1683,7 +1667,6 @@ impl Runs {
             process: container.to_owned(),
             code,
             signal: None,
-            tail: tail(&log, TAIL_LINES),
             log: Some(log),
         }
     }
@@ -1741,7 +1724,6 @@ impl Runs {
                         number: port.unwrap_or_default(),
                     },
                     timeout: ready.timeout,
-                    tail: tail(&log, TAIL_LINES),
                     log: Some(log),
                 }));
             }
