@@ -576,6 +576,10 @@ fn stop_unsignalled(stop: &HostStop<'_>) -> HostStopped {
     crate::record::process::stop_host(&NoSignals, stop, now() + Duration::from_secs(5)).unwrap()
 }
 
+/// A shell loop that waits in short sleeps until a signal's trap ends it.
+/// `IGNORES_TERM` ends in the same loop.
+const NAPS: &str = "while :; do sleep 0.05; done";
+
 /// A shell that ignores `TERM`, as do the commands it runs, and prints a
 /// line once it is ready.
 const IGNORES_TERM: &str = "trap '' TERM; echo ready; while :; do sleep 0.05; done";
@@ -730,6 +734,7 @@ fn the_system_runner_returns_as_soon_as_a_process_ends_on_its_stop_signal() {
 
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(now() - started < Duration::from_secs(5));
+    assert!(!System.group_exists(app.group));
     assert!(sleeper.ends_soon());
 }
 
@@ -780,9 +785,6 @@ fn the_system_runner_cuts_the_grace_short_at_the_deadline_and_returns_within_the
     assert!(took < to_deadline + kill_wait + slack, "{took:?}");
     assert!(stubborn.ends_soon());
 }
-
-/// A shell loop that waits in short sleeps until a signal's trap ends it.
-const NAPS: &str = "while :; do sleep 0.05; done";
 
 #[test]
 fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {

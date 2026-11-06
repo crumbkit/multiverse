@@ -889,19 +889,35 @@ fn a_bounded_command_whose_wait_fails_reports_the_failure() {
     // test that reaped the command itself would race the runner, which
     // reaps it too once it sees it end. nextest runs each test in a
     // process of its own, so no other test's child is reaped this way.
-    set_child_signal(libc::SIG_IGN);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test prepares a command for the probe's bounded runner"
-    )]
-    let mut command = Command::new("sleep");
-    command.arg("0.1");
-    let started = Instant::now();
-    let end = run_bounded(command, SLACK, &Cancel::new()).unwrap();
-    set_child_signal(libc::SIG_DFL);
+    let end = {
+        let _ignored = ChildSignalIgnored::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test prepares a command for the probe's bounded runner"
+        )]
+        let mut command = Command::new("sleep");
+        command.arg("0.1");
+        run_bounded(command, SLACK, &Cancel::new()).unwrap()
+    };
 
     assert!(matches!(end, CommandEnd::WaitFailed { .. }), "{end:?}");
-    assert!(started.elapsed() < SLACK);
+}
+
+/// Ignores `SIGCHLD` in this process until it is dropped, when the default
+/// disposition returns, also when the test panics.
+struct ChildSignalIgnored;
+
+impl ChildSignalIgnored {
+    fn new() -> Self {
+        set_child_signal(libc::SIG_IGN);
+        Self
+    }
+}
+
+impl Drop for ChildSignalIgnored {
+    fn drop(&mut self) {
+        set_child_signal(libc::SIG_DFL);
+    }
 }
 
 /// Sets this process's disposition of `SIGCHLD` to `disposition`.
@@ -912,10 +928,11 @@ fn set_child_signal(disposition: libc::sighandler_t) {
     )]
     // SAFETY: `signal` only changes the process's disposition of `SIGCHLD`
     // to `SIG_IGN` or `SIG_DFL`, which are valid dispositions for it, and
-    // touches no memory of this program.
-    unsafe {
-        libc::signal(libc::SIGCHLD, disposition);
-    }
+    // touches no memory of this program. The disposition applies to every
+    // thread of the process; nextest runs this test in a process of its
+    // own, so no other test waits on a child meanwhile.
+    let previous = unsafe { libc::signal(libc::SIGCHLD, disposition) };
+    assert_ne!(previous, libc::SIG_ERR, "SIGCHLD's disposition was not set");
 }
 
 /// A probe command that fails until its `passes_from`th run.

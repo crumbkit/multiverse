@@ -103,6 +103,7 @@ fn sweep_stops_a_recorded_host_process_and_removes_the_record() {
 
     let swept = run(&store, false, &Unreachable);
 
+    assert!(!System.group_exists(host.group));
     assert!(sleeper.ends_soon());
     assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
     assert_eq!(outcome_of(&swept, Role::Keeper), SweepOutcome::Gone);
