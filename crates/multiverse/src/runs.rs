@@ -244,7 +244,9 @@ pub enum ProcessNote {
         message: String,
     },
     /// `up` restarted a running host process because its part of the plan
-    /// changed since phase started it, such as its `permissions` table.
+    /// changed since phase started it, such as its `permissions` table, or
+    /// because its run record does not say which part of the plan it
+    /// started from.
     PlanChanged {
         /// phase's sentence, which names the app, the process and why, such
         /// as `restarted api/main because its part of the plan changed`.

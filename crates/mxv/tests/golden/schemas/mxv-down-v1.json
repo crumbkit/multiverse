@@ -484,7 +484,7 @@
           ]
         },
         "notes": {
-          "description": "What `up` and `restart` found about the process beside its state:\na warning when the process's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and a warning when `up` left a host\nprocess running that started before its manifest gained or lost\nits `permissions` table, which names the `mxv restart` that applies\nthe change. Every other command prints none.",
+          "description": "What `up` and `restart` found about the process beside its state:\na warning when the process's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and an info line when `up` restarted a\nrunning host process because its part of the plan changed. Every\nother command prints none.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/NoteRow"

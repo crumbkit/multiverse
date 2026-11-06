@@ -298,7 +298,7 @@ impl SandboxSpec {
             path_dirs,
             protected,
             read_only: _,
-            links: _,
+            metadata: _,
             deny: _,
             listen: _,
             connect: _,

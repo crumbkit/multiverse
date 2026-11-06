@@ -394,9 +394,10 @@ write `target` can leave a build script there, and an unsandboxed
 
 A change to a process's `permissions` takes effect at the next `mxv up`.
 `up` restarts a running host process whose manifest gained or lost its
-`permissions` table or changed its grants, and prints an `info:` line
-under it that says it restarted the process because its part of the plan
-changed.
+`permissions` table or changed its grants, as
+[The environment of a host process](#the-environment-of-a-host-process)
+describes for any change to a host
+process's part of the plan.
 
 This manifest runs four sandboxed processes beside two containers:
 
@@ -495,6 +496,13 @@ process and marks it optional, so the plan is the same whichever shell runs
 `mxv up`. An `up` from a shell with other variables leaves running
 processes as they are, and `mxv restart` starts them with the variables of
 the current shell. A container receives only its manifest `env`.
+
+`mxv up` restarts a running host process whose part of the plan changed,
+such as its `argv`, its ports or its `permissions`, and prints an `info:`
+line under it that says so. A changed variable value alone does not
+restart it; `mxv restart` applies that. The first `up` after an upgrade of
+mxv restarts each running host process whose run record does not say which
+part of the plan it started from, and prints an `info:` line that says so.
 The decision record
 [host-process-environment.md](docs/decisions/host-process-environment.md)
 says why mxv passes these variables and what follows from it.
