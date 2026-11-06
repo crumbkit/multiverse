@@ -1751,6 +1751,28 @@ fn exec_runs_a_command_with_the_processs_variables_and_directory_and_exits_with_
 }
 
 #[test]
+fn exec_gives_the_command_none_of_mxvs_own_variables_outside_the_passed_through_ones() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let output = setup
+        .command_in(&setup.root(), &["exec", "-w", "triage", "api", "--", "env"])
+        .env("MXV_TEST_SECRET", "not-for-the-command")
+        .env("AWS_PROFILE", "production")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let env = String::from_utf8(output.stdout).unwrap();
+    assert!(env.lines().any(|line| line == "GREETING=hello"), "{env}");
+    assert!(!env.contains("MXV_TEST_SECRET"), "{env}");
+    assert!(!env.contains("AWS_PROFILE"), "{env}");
+}
+
+#[test]
 fn exec_exits_with_128_plus_the_signal_that_ended_the_command() {
     let setup = Setup::new();
     let checkout = setup.workspace("triage", EXEC_MANIFEST);

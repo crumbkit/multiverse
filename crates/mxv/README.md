@@ -652,13 +652,15 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
     variables that the process receives, under its sandbox. It is not one
     of the workspace's processes, so `mxv down` does not stop it.
   - A container's command runs inside the container through `docker
-    exec`, with a terminal of its own when mxv's standard input is a
-    terminal.
+    exec`, with a terminal of its own when mxv's standard input and output
+    are both terminals.
   - A sandboxed command runs in a session of its own and cannot have the
     terminal. mxv refuses it with `mxv::exec::sandboxed_terminal` while
-    its standard input, output or error is a terminal, and on Ctrl-C mxv
-    stops the command's process group. It exits with 78 when its sandbox
-    cannot be applied.
+    its standard input, output or error is a terminal. On Ctrl-C, and when
+    the terminal closes, mxv stops the command's process group. An mxv
+    that something sends `SIGTERM` ends at once, and the sandboxed command
+    keeps running until it ends by itself. It exits with 78 when its
+    sandbox cannot be applied.
   - A process that is not running fails with `mxv::process::not_running`,
     whose recovery starts it with `mxv up`. A program that cannot start
     fails with `mxv::exec::unstartable`. `--json` fails with

@@ -272,27 +272,38 @@ fn run(environment: &Environment, args: &ExecArgs) -> Result<ExitStatus, crumbki
 /// streams, and handles Ctrl-C while it runs.
 ///
 /// mxv tells crumbkit that a child holds the terminal, so the usage log's
-/// signal thread no longer ends mxv on `SIGINT`, and catches `SIGINT`
-/// itself. A caught signal resets to its default action in the command,
-/// where an ignored one would stay ignored. An unsandboxed command shares
-/// mxv's process group, so the terminal's Ctrl-C reaches it directly, and
-/// mxv waits for it to end. A sandboxed command runs in a session of its
-/// own, which Ctrl-C does not reach, so mxv sets the cancel flag and phase
-/// stops the command's process group.
+/// signal thread no longer ends mxv on `SIGINT`, and catches `SIGINT`,
+/// `SIGHUP` and `SIGQUIT` itself. A caught signal resets to its default
+/// action in the command, where an ignored one would stay ignored. An
+/// unsandboxed command shares mxv's process group, so the terminal's
+/// signals reach it directly, and mxv waits for it to end. A sandboxed
+/// command runs in a session of its own, which the terminal's signals do
+/// not reach, so mxv sets the cancel flag and phase stops the command's
+/// process group.
+///
+/// The usage log's thread still ends mxv on `SIGTERM`, so a sandboxed
+/// command outlives an mxv that something sent `SIGTERM`. A `SIGTERM`
+/// rule in crumbkit's usage log like its `SIGINT` rule would close this.
+///
+/// A container's command gets a terminal only when mxv's standard input
+/// and output are both terminals, so piped output carries no terminal
+/// line endings.
 fn hand_over(exec: Exec<'_>, command: Vec<String>) -> Result<ExecEnd, multiverse::Error> {
     let cancel = Cancel::new();
     crumbkit::events::handed_over();
     catch_interrupts(exec.sandboxed().then(|| cancel.clone()));
-    exec.run(command, crate::stdin_is_terminal(), &cancel)
+    let terminal = crate::stdin_is_terminal() && crate::stdout_is_terminal();
+    exec.run(command, terminal, &cancel)
 }
 
-/// Catches `SIGINT` for the rest of mxv's run, and sets `cancel` on each
-/// one when it is given. When the handler cannot be installed, mxv keeps
-/// the usage log's handler, which also catches `SIGINT`.
+/// Catches `SIGINT`, `SIGHUP` and `SIGQUIT` for the rest of mxv's run,
+/// and sets `cancel` on each one when it is given. When the handler cannot
+/// be installed, mxv keeps the usage log's handler, which also catches
+/// `SIGINT`.
 fn catch_interrupts(cancel: Option<Cancel>) {
-    use signal_hook::consts::SIGINT;
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
     use signal_hook::iterator::Signals;
-    let Ok(mut signals) = Signals::new([SIGINT]) else {
+    let Ok(mut signals) = Signals::new([SIGINT, SIGHUP, SIGQUIT]) else {
         return;
     };
     // The thread ends with mxv, which ends once the command has.

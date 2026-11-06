@@ -13,7 +13,7 @@ fn row(state: Phase) -> StatusRow {
 }
 
 #[test]
-fn a_command_can_run_in_the_context_of_a_unit_that_is_starting_running_or_ready() {
+fn a_command_can_run_in_the_context_of_a_unit_that_is_starting_running_ready_or_paused() {
     assert!(running(&row(Phase::Starting)));
     assert!(running(&row(Phase::Running)));
     assert!(running(&row(Phase::Ready)));
@@ -21,7 +21,7 @@ fn a_command_can_run_in_the_context_of_a_unit_that_is_starting_running_or_ready(
 }
 
 #[test]
-fn no_command_runs_in_the_context_of_a_unit_that_is_stopped_stopping_or_completed() {
+fn no_command_runs_in_the_context_of_a_unit_that_is_stopped_stopping_completed_or_restarting() {
     assert!(!running(&row(Phase::Stopped)));
     assert!(!running(&row(Phase::Stopping)));
     assert!(!running(&row(Phase::Completed)));

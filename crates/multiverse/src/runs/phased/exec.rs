@@ -117,9 +117,11 @@ impl Runs {
     /// whose manifest is `manifest`, in which [`Exec::run`] runs a
     /// command, or the outcome that says why no command can run there.
     ///
-    /// The plan is the one that `up` builds from the same manifest, ports
-    /// and caller's environment, so a host command receives the same
-    /// variables, directory and sandbox as the unit's process. A unit name
+    /// The plan is the one that `up` builds from the same manifest and
+    /// ports, so a host command receives the same variables, directory and
+    /// sandbox as the unit's process. The variables that phase passes
+    /// through, such as `PATH`, come from the environment of the caller of
+    /// `exec`, which can differ from the one that ran `up`. A unit name
     /// of a workspace with several checkouts carries its checkout's
     /// prefix, as `up` and `logs` take it.
     ///
@@ -158,10 +160,10 @@ impl Runs {
         };
         // A unit that only phase's run record names, and the manifest no
         // longer declares, is in no plan, so no command can run in its
-        // context.
+        // context, and `up` would not start it either.
         let sandboxed = match self.phase.exec_sandboxed(&built.plan, &app, &process) {
             Ok(sandboxed) => sandboxed,
-            Err(PhaseError::UnknownTarget { .. }) => return Ok(ExecTarget::NotRunning),
+            Err(PhaseError::UnknownTarget { .. }) => return Ok(ExecTarget::UnknownProcess),
             Err(error) => return Err(self.phase_error(&id, error)),
         };
         Ok(ExecTarget::Ready(Exec {

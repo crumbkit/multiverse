@@ -375,6 +375,19 @@ pub(crate) fn stdin_is_terminal() -> bool {
     stdin.is_terminal()
 }
 
+/// Reports whether mxv's standard output is a terminal, which `mxv exec`
+/// checks with standard input before it gives a container's command a
+/// terminal.
+pub(crate) fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and `mxv exec` asks only whether it is a terminal"
+    )]
+    let stdout = std::io::stdout();
+    stdout.is_terminal()
+}
+
 pub(crate) fn warn(warnings: &[String]) {
     use std::io::Write as _;
     if warnings.is_empty() {
