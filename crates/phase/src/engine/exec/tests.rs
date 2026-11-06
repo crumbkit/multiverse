@@ -501,8 +501,10 @@ fn a_sandboxed_apps_exec_runs_git_status_in_its_checkout_while_the_git_configura
 /// The sandboxed app `api` depends on `named` and `unnamed`, each a host
 /// app whose process listens on a port that a listener of this test holds,
 /// and its `connect` names only `named`. `named` also receives `unnamed`'s
-/// port, as a process that calls another unit does. A command in `api`'s
-/// context reaches `named`'s port and is denied `unnamed`'s.
+/// port, as a process that calls another unit does, and is itself
+/// sandboxed with `permissions.listen` naming a second port it serves,
+/// `extra`. A command in `api`'s context reaches both of `named`'s ports
+/// and is denied `unnamed`'s.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it_leaves_out() {
@@ -516,6 +518,7 @@ fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it
     let workspace_dir = base.join("data/workspaces/reading-list");
     let named = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let unnamed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let extra = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut apps = plan.apps().to_vec();
     for (name, listener) in [("named", &named), ("unnamed", &unnamed)] {
         let dir = workspace_dir.join(name);
@@ -534,6 +537,14 @@ fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it
                 "peer".parse().unwrap(),
                 unnamed.local_addr().unwrap().port().try_into().unwrap(),
             );
+            app.ports.insert(
+                "extra".parse().unwrap(),
+                extra.local_addr().unwrap().port().try_into().unwrap(),
+            );
+            app.permissions = Some(Permissions {
+                listen: ["http", "extra"].map(|port| port.parse().unwrap()).into(),
+                ..Permissions::default()
+            });
         }
         let mut server = ProcessPlan::new(
             "server".parse().unwrap(),
@@ -554,8 +565,9 @@ fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it
         .with_workspace_dir(workspace_dir.clone(), vec![workspace_dir.join("mxv.toml")]);
     let script = format!(
         "check() {{ if nc -z -w 2 127.0.0.1 \"$2\" >/dev/null 2>&1; then echo \"$1=reached\"; else echo \"$1=denied\"; fi; }}; \
-         check named {named}; check unnamed {unnamed}",
+         check named {named}; check named-extra {extra}; check unnamed {unnamed}",
         named = named.local_addr().unwrap().port(),
+        extra = extra.local_addr().unwrap().port(),
         unnamed = unnamed.local_addr().unwrap().port(),
     );
 
@@ -564,6 +576,7 @@ fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it
     assert!(ran.result.unwrap().success(), "{}", ran.output);
     let lines: Vec<&str> = ran.output.lines().collect();
     assert!(lines.contains(&"named=reached"), "{}", ran.output);
+    assert!(lines.contains(&"named-extra=reached"), "{}", ran.output);
     assert!(lines.contains(&"unnamed=denied"), "{}", ran.output);
 }
 

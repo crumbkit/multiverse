@@ -1387,7 +1387,8 @@ fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
 }
 
 /// Returns the loopback ports that each app of `plan` serves: the port each
-/// host process listens on and the ports each container process publishes.
+/// host process listens on, the ports a sandboxed app's `listen` names and
+/// the ports each container process publishes.
 /// An app's `ports` also hold the ports its processes receive from other
 /// apps, and those belong to the apps that serve them, so naming an app in
 /// `connect` opens only the ports it serves. A host process that listens on
@@ -1400,6 +1401,7 @@ pub(crate) fn app_ports(plan: &Plan) -> BTreeMap<AppName, BTreeSet<u16>> {
                 .processes
                 .iter()
                 .flat_map(|process| process.port.iter().chain(process.publish.keys()))
+                .chain(app.permissions.iter().flat_map(|granted| &granted.listen))
                 .filter_map(|name| app.ports.get(name))
                 .map(|port| port.get())
                 .collect();
@@ -1444,7 +1446,7 @@ pub(crate) fn process_sandbox(
         home: settings.inherited.get("HOME").map(Path::new),
         protected: settings.protected,
         // The plan refuses a `connect` that names anything but an app the
-        // app depends on, so each name here is such an app.
+        // app depends on, so each name here parses as such an app.
         connect: permissions
             .connect
             .iter()

@@ -378,7 +378,8 @@ write its own state and temporary directories. `permissions` adds:
   over the loopback address.
 
 phase's sandbox opens the ports that the units of `connect` serve, and no
-other: the `listen` port of a process and the ports that a container
+other: the `listen` port of a process, the ports that a sandboxed
+process's `permissions.listen` names and the ports that a container
 publishes. A port that a unit only receives through `ports` or an `env`
 placeholder stays closed unless the unit that serves it is in `connect`. A
 unit of `connect` must be one of the process's `depends_on`, and the
