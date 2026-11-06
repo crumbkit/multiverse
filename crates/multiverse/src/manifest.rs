@@ -1025,14 +1025,13 @@ fn check_runnable(
                 .connect
                 .retain(|name| !joined.units.contains(name));
         }
-        process.needs.clear();
+        process
+            .needs
+            .retain(|service| manifest.services.contains_key(service));
     }
     for container in checked.containers.values_mut() {
         own(&mut container.depends_on);
     }
-    // mxv cannot run services yet, and `up` refuses a manifest that declares
-    // them, so the check of the rest of the manifest leaves them out.
-    checked.services.clear();
     let manifest = &checked;
     let span = |name: &str| {
         raw.processes
@@ -1050,7 +1049,7 @@ fn check_runnable(
         }
     }
     let ports: BTreeMap<String, u16> = manifest
-        .ports
+        .ledger_ports()
         .iter()
         .chain(&joined.ports)
         .zip(1_u16..)
@@ -1082,6 +1081,7 @@ fn check_runnable(
         workspace_dir: None,
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
+        provisioner: Some(crate::phase_plan::checking_provisioner()),
     };
     match crate::phase_plan::build(&inputs) {
         Ok(_) => Ok(()),

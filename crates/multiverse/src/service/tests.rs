@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::service::{
     AttributeType, Backend, KeyAttribute, Placeholder, Queue, Service, ServiceKind, ServiceValue,
     Table, check_bindings, check_resources, is_bucket_name, is_key_name, is_queue_name,
-    is_table_name, variables,
+    is_table_name, localstack_services, variables,
 };
 
 fn table(hash: &str) -> Table {
@@ -116,6 +116,7 @@ fn a_process_receives_the_common_variables_each_endpoint_it_needs_and_each_servi
                 ("AWS_ACCESS_KEY_ID", "test"),
                 ("AWS_CONFIG_FILE", "/dev/null"),
                 ("AWS_EC2_METADATA_DISABLED", "true"),
+                ("AWS_ENDPOINT_URL", "http://127.0.0.1:9"),
                 ("AWS_ENDPOINT_URL_DYNAMODB", "http://127.0.0.1:41000"),
                 ("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:41001"),
                 ("AWS_REGION", "us-east-1"),
@@ -135,6 +136,13 @@ fn dynamodb_runs_on_dynamodb_local_and_the_other_kinds_share_localstack() {
     for kind in [ServiceKind::S3, ServiceKind::Sqs, ServiceKind::Kms] {
         assert_eq!(kind.backend(), Backend::Aws);
     }
+    let services = [
+        Service::new(ServiceKind::Kms),
+        Service::new(ServiceKind::Dynamodb),
+        Service::new(ServiceKind::S3),
+        Service::new(ServiceKind::Kms),
+    ];
+    assert_eq!(localstack_services(&services), "s3,kms");
 }
 
 #[test]

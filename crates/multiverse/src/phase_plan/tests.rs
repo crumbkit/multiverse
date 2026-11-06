@@ -59,6 +59,11 @@ fn plan_of(manifest: &Manifest, caller: &CallerEnvironment) -> Built {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller,
+        provisioner: Some(vec![
+            "/bin/mxv".to_owned(),
+            "phase".to_owned(),
+            "provision".to_owned(),
+        ]),
     })
     .unwrap()
 }
@@ -424,6 +429,7 @@ fn a_merged_manifest_maps_onto_apps_and_ports_whose_names_do_not_clash() {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
+        provisioner: None,
     })
     .unwrap();
     let names: BTreeSet<String> = built
@@ -486,6 +492,7 @@ fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
+        provisioner: None,
     }) else {
         panic!("a directory outside every root built a plan");
     };
@@ -521,6 +528,7 @@ fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
+        provisioner: None,
     })?;
     let plan = built.plan.app(&app("api")).unwrap();
     Ok((plan.source.clone(), plan.processes[0].cwd.clone()))
@@ -587,6 +595,7 @@ fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connecti
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
+        provisioner: None,
     })
     .unwrap();
     let server = built.plan.app(&app("server")).unwrap();
@@ -653,6 +662,7 @@ fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
+        provisioner: None,
     })
     .unwrap();
     for prefix in ["api", "web"] {
@@ -710,6 +720,7 @@ fn unrunnable_write(write: &str) -> crate::phase_plan::Unrunnable {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
+        provisioner: None,
     }) else {
         panic!("the write path {write} built a plan");
     };
@@ -732,32 +743,4 @@ fn a_write_path_that_is_the_whole_checkout_its_process_runs_in_is_unrunnable_and
         "{message}"
     );
     assert!(!message.contains("outside"), "{message}");
-}
-
-#[test]
-fn a_manifest_that_declares_a_service_is_unrunnable_until_mxv_runs_services() {
-    let manifest = manifest(
-        "[service.store]\nkind = \"dynamodb\"\n[processes.worker]\nargv = [\"worker\"]\nneeds = [\"store\"]\n",
-    );
-    let ports = BTreeMap::new();
-    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
-    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
-    let Err(unrunnable) = build(&Inputs {
-        manifest: &manifest,
-        workspace: &workspace,
-        id: &id,
-        checkout: Path::new("/work/triage/app"),
-        roots: Vec::new(),
-        ports: &ports,
-        workspace_dir: None,
-        grace: Duration::from_secs(5),
-        caller: &CallerEnvironment::default(),
-    }) else {
-        panic!("a manifest with a service built a plan");
-    };
-    assert_eq!(unrunnable.unit, None);
-    assert_eq!(
-        unrunnable.message,
-        "the manifest declares the service `store`, and this mxv cannot run services yet"
-    );
 }
