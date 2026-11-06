@@ -392,6 +392,10 @@ fn sigint_to_mxv_stops_a_sandboxed_command_that_ignores_sigint() {
     let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{up}");
     let root = sandboxed.root();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
     let mut command = Command::new(env!("CARGO_BIN_EXE_mxv"));
     command
         .args([
@@ -427,7 +431,7 @@ fn sigint_to_mxv_stops_a_sandboxed_command_that_ignores_sigint() {
         .unwrap();
     assert_eq!(line, "started\n");
 
-    let sent = Command::new("kill")
+    let sent = snapbox::cmd::Command::new("kill")
         .args(["-INT", &child.id().to_string()])
         .env("PATH", support::PATH)
         .output()
@@ -443,7 +447,7 @@ fn sigint_to_mxv_stops_a_sandboxed_command_that_ignores_sigint() {
             drop(child.kill());
             panic!("mxv exec did not stop the sandboxed command");
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::yield_now();
     };
     assert_eq!(status.code(), Some(143), "{status:?}");
 }

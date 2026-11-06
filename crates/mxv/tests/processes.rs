@@ -1903,6 +1903,12 @@ fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
     let root = setup.root();
+    // The command waits for a file that the test writes after the signal,
+    // so it is still running when mxv receives SIGINT.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
     command
         .args([
@@ -1913,7 +1919,7 @@ fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code
             "--",
             "sh",
             "-c",
-            "echo started; sleep 1; exit 4",
+            "echo started; while [ ! -f go ]; do sleep 0.05; done; exit 4",
         ])
         .current_dir(&root)
         .env_clear()
@@ -1943,14 +1949,20 @@ fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code
         .output()
         .unwrap();
     assert!(sent.status.success(), "{sent:?}");
+    let still = child.try_wait().unwrap().is_none();
+    write(&checkout.join("sub/go"), "");
 
     let deadline = Instant::now() + MOST_WAIT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
-        assert!(Instant::now() < deadline, "mxv exec did not end");
-        std::thread::sleep(Duration::from_millis(50));
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            panic!("mxv exec did not end");
+        }
+        std::thread::yield_now();
     };
+    assert!(still, "mxv exec ended on SIGINT before the command did");
     assert_eq!(status.code(), Some(4), "{status:?}");
 }

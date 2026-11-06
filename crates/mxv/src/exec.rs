@@ -309,24 +309,20 @@ fn hand_over(exec: Exec<'_>, command: Vec<String>) -> Result<(ExecEnd, bool), mu
 /// Catches `SIGINT`, `SIGHUP` and `SIGQUIT` for the rest of mxv's run,
 /// and sets `cancel` on each one when it is given. Returns a flag that
 /// each caught signal sets inside its handler, so the flag is set before
-/// mxv sees the command end. When a handler cannot be installed, mxv
-/// keeps the usage log's handler, which also catches `SIGINT`, and the
-/// flag stays clear.
+/// mxv sees the command end. When the handlers cannot be installed, no
+/// signal cancels a sandboxed command, and the flag stays clear.
 fn catch_interrupts(cancel: Option<Cancel>) -> Arc<AtomicBool> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
     use signal_hook::iterator::Signals;
     let caught = Arc::new(AtomicBool::new(false));
-    // The cancelling handler goes in first, so a signal that sets the flag
-    // also cancels a sandboxed command.
-    let signals = Signals::new([SIGINT, SIGHUP, SIGQUIT]);
+    let Ok(mut signals) = Signals::new([SIGINT, SIGHUP, SIGQUIT]) else {
+        return caught;
+    };
     for signal in [SIGINT, SIGHUP, SIGQUIT] {
         // A flag that cannot be registered leaves the run counted as
         // uninterrupted in the usage log, and changes nothing else.
         drop(signal_hook::flag::register(signal, Arc::clone(&caught)));
     }
-    let Ok(mut signals) = signals else {
-        return caught;
-    };
     // The thread ends with mxv, which ends once the command has.
     drop(
         std::thread::Builder::new()

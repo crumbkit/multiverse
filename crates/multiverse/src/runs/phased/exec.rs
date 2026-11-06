@@ -202,8 +202,9 @@ impl Exec<'_> {
 
     /// Runs `command`, as separate values that no shell reads, in the
     /// unit's context with the caller's standard streams, and returns how
-    /// it ended. `terminal` says whether the caller's standard input is a
-    /// terminal: a container's command then gets a terminal of its own
+    /// it ended. `terminal` says whether the caller gives the command a
+    /// terminal, which mxv does when its standard input and output are
+    /// both terminals: a container's command then gets a terminal of its own
     /// through `docker exec --tty`, and a sandboxed host command is
     /// refused with [`ExecEnd::NeedsTerminal`]. When `cancel` is set,
     /// phase stops the command with `TERM`, and with `KILL` after its kill
