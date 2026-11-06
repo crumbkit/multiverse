@@ -498,6 +498,66 @@ fn a_sandboxed_apps_exec_runs_git_status_in_its_checkout_while_the_git_configura
     assert!(!ran.output.contains("fatal"), "{}", ran.output);
 }
 
+/// The sandboxed app `api` depends on `named` and `unnamed`, each a host
+/// app whose port a listener of this test holds, and its `connect` names
+/// only `named`. A command in `api`'s context reaches `named`'s port and is
+/// denied `unnamed`'s.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_apps_exec_reaches_the_dependency_its_connect_names_and_not_one_it_leaves_out() {
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+    let (phase, plan, root) = workspace(true);
+    let base = root.path().canonicalize().unwrap();
+    let workspace_dir = base.join("data/workspaces/reading-list");
+    let named = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let unnamed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut apps = plan.apps().to_vec();
+    for (name, listener) in [("named", &named), ("unnamed", &unnamed)] {
+        let dir = workspace_dir.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = AppPlan::new(
+            name.parse().unwrap(),
+            RunnerKind::Host,
+            Source::checkout(dir, None),
+        );
+        app.ports.insert(
+            "http".parse().unwrap(),
+            listener.local_addr().unwrap().port().try_into().unwrap(),
+        );
+        app.processes.push(ProcessPlan::new(
+            "server".parse().unwrap(),
+            vec!["/bin/sh".into(), "-c".into(), "exec sleep 30".into()],
+        ));
+        apps[0].depends.push(name.parse().unwrap());
+        apps.push(app);
+    }
+    apps[0]
+        .permissions
+        .get_or_insert_default()
+        .connect
+        .insert("named".to_owned());
+    let plan = Plan::new(plan.workspace().clone(), id(), apps)
+        .unwrap()
+        .with_workspace_dir(workspace_dir.clone(), vec![workspace_dir.join("mxv.toml")]);
+    let script = format!(
+        "check() {{ if nc -z -w 2 127.0.0.1 \"$2\" >/dev/null 2>&1; then echo \"$1=reached\"; else echo \"$1=denied\"; fi; }}; \
+         check named {named}; check unnamed {unnamed}",
+        named = named.local_addr().unwrap().port(),
+        unnamed = unnamed.local_addr().unwrap().port(),
+    );
+
+    let ran = exec_script(&phase, &plan, &greeting(), &script, &base);
+
+    assert!(ran.result.unwrap().success(), "{}", ran.output);
+    let lines: Vec<&str> = ran.output.lines().collect();
+    assert!(lines.contains(&"named=reached"), "{}", ran.output);
+    assert!(lines.contains(&"unnamed=denied"), "{}", ran.output);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_unsandboxed_apps_exec_may_write_outside_its_checkout() {

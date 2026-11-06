@@ -1434,9 +1434,14 @@ pub(crate) fn process_sandbox(
         path: settings.inherited.get("PATH").map(String::as_str),
         home: settings.inherited.get("HOME").map(Path::new),
         protected: settings.protected,
+        // The plan refuses a `connect` that names anything but an app the
+        // app depends on, so each name here is such an app. The filter on
+        // `depends` keeps the sandbox closed even for a plan that skipped
+        // that check.
         connect: app
             .depends
             .iter()
+            .filter(|depends| permissions.connect.contains(depends.as_str()))
             .filter_map(|depends| scope.ports.get(depends))
             .flatten()
             .copied()

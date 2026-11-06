@@ -451,3 +451,41 @@ fn sigint_to_mxv_stops_a_sandboxed_command_that_ignores_sigint() {
     };
     assert_eq!(status.code(), Some(143), "{status:?}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_process_reaches_the_unit_its_connect_names_and_not_a_dependency_it_leaves_out() {
+    let listener = |port: &str| {
+        format!(
+            "[processes.{port}]\nargv = [\"/bin/sh\", \"-c\", \"exec nc -lk 127.0.0.1 \\\"$PORT\\\"\"]\nports = {{ PORT = \"{port}\" }}\nlisten = \"{port}\"\n"
+        )
+    };
+    let sandboxed = Sandboxed::new(&format!(
+        "ports = [\"named\", \"unnamed\"]\n\n{}\n{}\n[processes.client]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nports = {{ NAMED = \"named\", UNNAMED = \"unnamed\" }}\nready = {{ log = \"^ready$\" }}\ndepends_on = [\"named\", \"unnamed\"]\npermissions = {{ connect = [\"named\"] }}\n",
+        listener("named"),
+        listener("unnamed"),
+    ));
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+
+    let output = sandboxed
+        .command(&[
+            "exec",
+            "-w",
+            "triage",
+            "client",
+            "--",
+            "/bin/sh",
+            "-c",
+            "check() { if nc -z -w 2 127.0.0.1 \"$2\" >/dev/null 2>&1; then echo \"$1=reached\"; else echo \"$1=denied\"; fi; }; \
+             check named \"$NAMED\"; check unnamed \"$UNNAMED\"",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "named=reached\nunnamed=denied\n"
+    );
+}

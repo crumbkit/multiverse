@@ -285,11 +285,10 @@ pub struct Process {
 /// allows, which is to read its checkout and the system's directories and
 /// to write its own state and temporary directories.
 ///
-/// phase's first-stage sandbox lets a process connect over loopback to the
-/// ports of every unit it depends on, so a sandboxed process can reach a
-/// unit only when its `depends_on` names it, and it can reach each unit
-/// that `depends_on` names. `connect` must name only units of
-/// `depends_on`, and the manifest fails otherwise. A sandboxed process
+/// phase's first-stage sandbox lets a process connect over loopback only to
+/// the ports of the units that `connect` names. `connect` must name only
+/// units of `depends_on`, and the manifest fails otherwise. A unit of
+/// `depends_on` that `connect` leaves out is unreachable. A sandboxed process
 /// cannot reach any external host until phase runs its allowlist proxy.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]

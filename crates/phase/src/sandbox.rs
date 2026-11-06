@@ -38,8 +38,8 @@
 //!
 //! The network is loopback only until phase runs its allowlist proxy: the
 //! app may listen on the ports its permissions name and connect to the
-//! ports of the apps it depends on. The plan refuses a `connect` that
-//! names an external host. On macOS phase writes its own Seatbelt rules for
+//! ports of the apps its `connect` names. The plan refuses a `connect`
+//! that names an external host or an app the app does not depend on. On macOS phase writes its own Seatbelt rules for
 //! those ports, because nono's port rules allow binding any port. Seatbelt
 //! applies the last rule that matches, so the rules work only because nono
 //! writes them after its `(deny network*)`, which it does for every rule
@@ -538,7 +538,7 @@ pub(crate) struct Context<'a> {
     /// The paths that the host program protects, such as its own state and
     /// data directories.
     pub(crate) protected: &'a [PathBuf],
-    /// The loopback ports of the apps that the app depends on.
+    /// The loopback ports of the apps that the app's `connect` names.
     pub(crate) connect: BTreeSet<u16>,
     /// The program that runs the launcher.
     pub(crate) launcher: Launcher,

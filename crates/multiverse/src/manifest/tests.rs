@@ -867,7 +867,7 @@ cwd = "web"
 ports = { PORT = "web", API_PORT = "api", AUTH_PORT = "auth" }
 listen = "web"
 depends_on = ["server", "auth"]
-permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"], connect = ["server", "auth"] }
+permissions = { write = ["web/node_modules/.vite"], listen = ["web"], connect = ["server", "auth"] }
 "#;
 
 /// Returns a manifest whose process `app` listens on `api`, receives
@@ -905,7 +905,7 @@ fn a_process_with_permissions_parses_its_writes_listen_ports_and_connections() {
     let web = manifest.processes["web"].permissions.as_ref().unwrap();
     assert_eq!(
         web.write,
-        BTreeSet::from(["web/node_modules/.vite", "web/dist"].map(str::to_owned))
+        BTreeSet::from(["web/node_modules/.vite".to_owned()])
     );
     assert_eq!(
         web.connect,

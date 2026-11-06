@@ -377,11 +377,12 @@ write its own state and temporary directories. `permissions` adds:
 - `connect`: the processes and containers that the process may connect to
   over the loopback address.
 
-phase's sandbox opens the ports of every unit that a process depends on,
-and no other. A unit of `connect` must therefore be one of the process's
-`depends_on`, and the manifest fails with `mxv::manifest::invalid` and a
-hint to add it to `depends_on` otherwise. A sandboxed process can also
-reach each unit of its `depends_on` that `connect` leaves out. A sandboxed
+phase's sandbox opens the ports of the units that `connect` names, and no
+other. A unit of `connect` must be one of the process's `depends_on`, and
+the manifest fails with `mxv::manifest::invalid` and a hint to add it to
+`depends_on` otherwise. A sandboxed process cannot reach a unit of its
+`depends_on` that `connect` leaves out, so a process that talks to a
+dependency must name it in `connect`. A sandboxed
 process cannot reach any host off the machine until phase runs its
 allowlist proxy, so a name in `connect` that is not a unit of the manifest
 fails. `permissions` has no `secrets` key, because mxv has no secrets yet,
@@ -439,7 +440,7 @@ cwd = "web"
 ports = { PORT = "web", API_PORT = "api", AUTH_PORT = "auth" }
 listen = "web"
 depends_on = ["server", "auth"]
-permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"], connect = ["server", "auth"] }
+permissions = { write = ["web/node_modules/.vite"], listen = ["web"], connect = ["server", "auth"] }
 ```
 
 The `sandbox` column of `up`, `down`, `restart` and `status` shows how
