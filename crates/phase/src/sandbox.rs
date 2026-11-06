@@ -128,6 +128,26 @@ impl fmt::Display for Sandboxing {
 /// `~/.config/git`, and git stops with "unable to access" when its global
 /// configuration exists but cannot be read, so without it a sandboxed git
 /// ran no command at all.
+///
+/// On macOS `SSL_CERT_FILE=/etc/ssl/cert.pem` names the bundle of the
+/// trusted roots that macOS ships. rustls-native-certs, which the AWS
+/// SDK's TLS uses, reads the roots from that file instead of asking the
+/// keychain's `com.apple.SecurityServer` service, which nono's profile
+/// denies, and OpenSSL reads it as its default bundle. Without it
+/// rustls-native-certs found no roots under the sandbox, and the AWS SDK
+/// panicked at startup. The file is a system file that the sandbox may
+/// already read, so the variable grants nothing.
+#[cfg(target_os = "macos")]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("SSL_CERT_FILE", "/etc/ssl/cert.pem"),
+];
+
+/// The variables that every sandboxed process receives on Linux unless
+/// its own environment sets them, as the macOS list describes. Linux
+/// reads its trusted roots from `/etc`, which the sandbox may read, so it
+/// needs no `SSL_CERT_FILE`.
+#[cfg(not(target_os = "macos"))]
 pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[("GIT_CONFIG_GLOBAL", "/dev/null")];
 
 /// Sets on `command` the environment of a process that runs under a

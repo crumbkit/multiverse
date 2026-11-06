@@ -1386,6 +1386,26 @@ configuration" when it can stat `~/.cargo/config.toml` but cannot read it.
 On Linux, Landlock does not restrict reading metadata, so a process can
 stat every protected path there and learn the same facts about each.
 
+On macOS a sandboxed process may also read the metadata of each regular
+file that its standard input, output or error has open when the launcher
+starts it, such as the log in phase's state directory that its keeper
+gives it, or a file that the caller of `exec` redirects its output to.
+The launcher finds each file's path with `fcntl(F_GETPATH)` before it
+applies the sandbox, and the profile allows `file-read-metadata` of that
+one literal path. Seatbelt checks `fstat` on an open descriptor against
+the file's path, and node checks its standard streams with `fstat` when
+it starts and aborts with signal 6, writing no message, when `fstat`
+fails with anything but `EBADF`. Without the grant every node aborted
+under `up`, because its log lies in phase's state directory, which the
+sandbox denies. The grant reveals only the file's size, mode, owner and
+times, which the process could mostly learn from the descriptor it
+already holds, for example its size with `lseek`. It reveals nothing
+about any other file in the same directory, and it lets the process
+neither read the file's contents through a new descriptor nor list the
+directory. A stream that is a pipe, a socket or a terminal adds no
+grant, and the profile still denies every terminal device of
+[the list above](#the-sandbox-as-built).
+
 Every sandboxed app runs with `GIT_CONFIG_GLOBAL=/dev/null` unless the
 app's environment sets `GIT_CONFIG_GLOBAL`, so git reads no global
 configuration. The keeper sets it after the app's environment and keeps a
@@ -1394,6 +1414,38 @@ that the app may read. git stops with "unable
 to access" when `~/.gitconfig` or `~/.config/git/config` exists but cannot
 be read, so without it a sandboxed git ran no command on a machine that
 has either.
+
+On macOS every sandboxed app also runs with
+`SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app's environment sets
+`SSL_CERT_FILE`, in the same way. rustls-native-certs, which the AWS
+SDK's native-roots TLS uses, reads its trusted roots from the file that
+`SSL_CERT_FILE` names when the variable is set, and otherwise asks the
+macOS trust settings, which go through the keychain's
+`com.apple.SecurityServer` Mach service. nono's profile denies that
+service, so a sandboxed process found no roots, and the AWS SDK panicked
+at startup with "no valid root certificates parsed". `/etc/ssl/cert.pem`
+is the bundle of trusted roots that macOS ships and updates, and the
+sandbox already lets every process read `/private/etc`, so the variable
+grants nothing new. A trace of the sandbox's denials while
+rustls-native-certs ran showed the lookup of `com.apple.SecurityServer`
+and the metadata of `/Library/Keychains` and `~/Library/Keychains`
+denied. phase considered granting those and chose not to. Allowing
+`com.apple.SecurityServer` would let a sandboxed process ask securityd
+for keychain items, which the sandbox's deny of the Keychains exists to
+stop, and a grant of the keychain files alone leaves the trust settings
+API without the service it calls. The variable has two costs. A process trusts only
+the roots that macOS ships: a root that an administrator or the user
+added to a keychain, such as a company's TLS-inspecting proxy or a local
+development authority, is not trusted, and the roots that a person
+marked as distrusted in Keychain Access stay trusted. A plan that needs
+other roots sets `SSL_CERT_FILE` in the app's environment to a bundle
+that the app may read, such as one in its checkout. OpenSSL and the
+programs that link it, such as Python's `ssl` module and Ruby, also read
+`SSL_CERT_FILE` as their default bundle, so under the sandbox they trust
+the same system roots in place of the bundle they were built with. A
+Homebrew OpenSSL's own `cert.pem` already holds the system's roots, so
+this changes little for them. Linux keeps its roots in `/etc`, which the
+sandbox may read, and phase sets no `SSL_CERT_FILE` there.
 
 The sandbox lets an app read, but never write, the launcher program, each
 link of its chain of symbolic links and each one's directory, the
@@ -1797,5 +1849,5 @@ Each decision states what this draft assumes until it is decided.
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
 | P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt cannot limit an app's listening ports to the loopback interface, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
-| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. |
+| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. On 6 November 2026 macOS gained the metadata of the regular files that a process's standard streams have open, so node starts, and `SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app sets it, so rustls-native-certs and the AWS SDK find the system's trusted roots. See [The sandbox as built](#the-sandbox-as-built). |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |
