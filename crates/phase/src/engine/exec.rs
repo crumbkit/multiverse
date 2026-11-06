@@ -6,10 +6,11 @@
 //! resolved environment, checked as a start checks it, its working
 //! directory, `PATH` and `HOME`, and, when its app is sandboxed, the same
 //! sandbox through the same launcher that the process's keeper uses, with
-//! its `TMPDIR`. A container process's command is a `docker exec` into the
-//! process's running container. The second part, [`run`], runs a built
-//! command with the caller's streams, or with streams the caller gives,
-//! until it ends or the caller cancels, and returns its exit status.
+//! the environment that the keeper gives a sandboxed app. A container
+//! process's command is a `docker exec` into the process's running
+//! container. The second part, [`run`], runs a built command with the
+//! caller's streams, or with streams the caller gives, until it ends or
+//! the caller cancels, and returns its exit status.
 //!
 //! `run` knows nothing of apps, and the builders know nothing of terminals,
 //! so a later caller without a terminal, such as an init step that `up`
@@ -45,7 +46,7 @@ use crate::error::{NotRunnable, PhaseError};
 use crate::name::{AppName, ProcessName};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::store::RunStore;
-use crate::sandbox::launcher_command;
+use crate::sandbox::{launcher_command, sandboxed_environment};
 use crate::source::Source;
 
 #[cfg(test)]
@@ -327,8 +328,8 @@ fn unstartable(app: &AppPlan, process: &ProcessPlan, reason: String) -> PhaseErr
 /// `PATH` and `HOME` and the process's environment, which it resolves
 /// through `env` before `deadline` and checks as a start does. When the
 /// app is sandboxed, the command is the launcher of the process's own
-/// sandbox, which receives the sandbox's `TMPDIR`, and which starts a
-/// session of its own. The command does not start here.
+/// sandbox, which receives the environment of a sandboxed app as the
+/// keeper gives it, and which starts a session of its own. The command does not start here.
 ///
 /// # Errors
 ///
@@ -408,7 +409,7 @@ pub(crate) fn host_command(
     environment.apply(&mut command);
     let session = match &sandbox {
         Some(spec) => {
-            command.env("TMPDIR", &spec.tmp);
+            sandboxed_environment(&mut command, &spec.tmp);
             Session::Own
         }
         None => Session::Caller,

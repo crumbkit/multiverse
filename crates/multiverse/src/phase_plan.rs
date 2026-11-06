@@ -304,6 +304,14 @@ fn lexical(path: &Path) -> PathBuf {
 /// is not one that phase pins, or the apps break one of phase's plan
 /// rules.
 pub(crate) fn build(inputs: &Inputs<'_>) -> Result<Built, Unrunnable> {
+    if let Some(service) = inputs.manifest.services.keys().next() {
+        return Err(Unrunnable {
+            unit: None,
+            message: format!(
+                "the manifest declares the service `{service}`, and this mxv cannot run services yet"
+            ),
+        });
+    }
     let mut apps = Vec::new();
     let mut values = BTreeMap::new();
     for name in inputs.manifest.start_order(&[]).unwrap_or_default() {

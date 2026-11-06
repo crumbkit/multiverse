@@ -346,3 +346,83 @@ fn a_workspace_with_one_checkout_keeps_its_names_without_a_prefix() {
     assert_eq!(workspace.manifest().unwrap().unwrap().ports, ["api"]);
     assert_eq!(workspace.manifest_inputs().files().len(), 1);
 }
+
+/// A manifest whose process `worker` needs the dynamodb service `store`.
+const STORE: &str = "[service.store]\nkind = \"dynamodb\"\ntables.inbox = { hash = \"pk:S\" }\nenv = { INBOX_TABLE = \"{table.inbox}\" }\n\n[processes.worker]\nargv = [\"worker\"]\nneeds = [\"store\"]\n";
+
+#[test]
+fn two_checkouts_that_declare_one_service_alike_share_it_and_its_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), STORE);
+    write(workspace.path.join("web/mxv.toml"), STORE);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(manifest.services.keys().collect::<Vec<_>>(), ["store"]);
+    assert_eq!(manifest.processes["api-worker"].needs, ["store"]);
+    assert_eq!(manifest.processes["web-worker"].needs, ["store"]);
+    assert_eq!(manifest.ledger_ports(), ["mxv-dynamodb"]);
+}
+
+#[test]
+fn two_checkouts_that_declare_one_service_differently_fail_with_a_name_clash() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), STORE);
+    write(
+        workspace.path.join("web/mxv.toml"),
+        "[service.store]\nkind = \"s3\"\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(
+        error.problem,
+        ManifestProblem::NameClash {
+            name: "store".to_owned(),
+            other: workspace.path.join("api/mxv.toml"),
+        }
+    );
+}
+
+#[test]
+fn two_checkouts_whose_services_declare_one_table_differently_fail_with_a_service_clash() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), STORE);
+    write(
+        workspace.path.join("web/mxv.toml"),
+        "[service.db]\nkind = \"dynamodb\"\ntables.inbox = { hash = \"id:N\" }\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(error.path, workspace.path.join("web/mxv.toml"));
+    assert!(
+        matches!(&error.problem, ManifestProblem::ServiceClash { name, .. } if name == "inbox"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_workspace_manifest_may_need_a_service_that_a_checkout_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), STORE);
+    write(
+        workspace.path.join("mxv.toml"),
+        "[processes.tests]\nargv = [\"tests\"]\nneeds = [\"store\"]\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(manifest.processes["tests"].needs, ["store"]);
+}
+
+#[test]
+fn a_checkout_folder_that_gives_its_names_the_mxv_prefix_fails_as_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["mxv", "web"]);
+    write(
+        workspace.path.join("mxv/mxv.toml"),
+        "[processes.api]\nargv = [\"api\"]\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert!(
+        matches!(&error.problem, ManifestProblem::Invalid { message } if message.contains("`mxv-api`")),
+        "{error}"
+    );
+}

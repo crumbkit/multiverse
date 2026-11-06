@@ -441,6 +441,63 @@ fn a_sandboxed_apps_exec_is_denied_a_write_outside_its_paths_and_may_write_its_t
     assert!(!outside.join("file").exists());
 }
 
+/// A sandboxed `git status` runs in a checkout while the home directory
+/// holds a `.gitconfig` that the sandbox protects. git stops with "unable
+/// to access" when its global configuration exists but cannot be read, so
+/// the command succeeds only because exec gives it the keeper's
+/// `GIT_CONFIG_GLOBAL=/dev/null`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_apps_exec_runs_git_status_in_its_checkout_while_the_git_configuration_is_protected()
+{
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+    let (phase, plan, root) = workspace(true);
+    let base = root.path().canonicalize().unwrap();
+    let checkout = base.join("data/workspaces/reading-list/api");
+    let home = base.join("state/mxv/phase");
+    std::fs::create_dir_all(&home).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test writes the fixture files outside the sandbox"
+    )]
+    {
+        std::fs::write(home.join(".gitconfig"), "[user]\n\tname = Someone\n").unwrap();
+        std::fs::write(checkout.join("README"), "hello\n").unwrap();
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test makes the checkout a git repository outside the sandbox"
+    )]
+    let init = Command::new("/usr/bin/git")
+        .args(["init", "--quiet"])
+        .current_dir(&checkout)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .unwrap();
+    assert!(init.success());
+
+    let ran = exec_script(
+        &phase,
+        &plan,
+        &greeting(),
+        "echo \"git=$GIT_CONFIG_GLOBAL\"; git status --short",
+        &base,
+    );
+
+    assert!(ran.result.unwrap().success(), "{}", ran.output);
+    // The output also holds what libtest prints when this test binary
+    // starts as the launcher, and xcrun's warning that it cannot write its
+    // cache to the per-user temporary directory, which the sandbox denies.
+    let lines: Vec<&str> = ran.output.lines().collect();
+    assert!(lines.contains(&"git=/dev/null"), "{}", ran.output);
+    assert!(lines.contains(&"?? README"), "{}", ran.output);
+    assert!(!ran.output.contains("fatal"), "{}", ran.output);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_unsandboxed_apps_exec_may_write_outside_its_checkout() {

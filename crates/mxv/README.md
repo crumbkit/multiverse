@@ -284,9 +284,9 @@ with `mxv::manifest::invalid`.
 
 Another tool may keep its own tables in the same file. mxv checks that the
 whole file is valid TOML, reads only its own top-level keys (`version`,
-`ports`, `disposable`, `clone_on_new`, `processes` and `containers`), and
-leaves every other top-level table alone, such as `[app]`,
-`[service.web]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
+`ports`, `disposable`, `clone_on_new`, `processes`, `containers` and
+`service`), and leaves every other top-level table alone, such as
+`[app]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
 top-level key that is not a table, such as `port = ["api"]`, fails with
 `mxv::manifest::unknown_key`. A table named like one of mxv's own, such as
 `[process.api]`, belongs to another tool and is left alone, so a
@@ -441,10 +441,12 @@ permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"]
 ```
 
 The `sandbox` column of `up`, `down`, `restart` and `status` shows how
-phase runs each host process: `seatbelt (partial: ...)` on macOS, where
-Seatbelt lets the process's listening ports accept connections from other
-machines on the network, or `unsandboxed (<reason>)`, such as
-`unsandboxed (its app declares no permissions)`. It is null for a
+phase runs each host process: `seatbelt (partial: <reason>)` on macOS, or
+`unsandboxed (<reason>)`, such as `unsandboxed (its app declares no
+permissions)`. On macOS the reason is that the sandbox cannot limit the
+process's listening ports to the loopback interface. Seatbelt limits which
+ports a process may listen on but not which addresses, so the process can
+listen on each of its ports on every address of the machine. It is null for a
 container. A process that phase started is shown as its run record
 recorded it.
 
@@ -677,6 +679,102 @@ same port. A command that finds a lock held tries again for 5 seconds,
 then fails with `mxv::workspace::busy`. The operating system releases a
 lock when its command ends, so a crashed mxv leaves no lock behind.
 
+### Local AWS services
+
+A manifest may declare local stand-ins for DynamoDB, S3, SQS and KMS as
+`[service.<name>]` tables. A process that lists a service in `needs`
+starts once the service's backend answers and its resources exist, and it
+receives the variables that the AWS SDKs and CLI read, so it reaches the
+local backend with no change to its code.
+
+```toml
+[service.store]
+kind = "dynamodb"
+tables.inbox = { hash = "pk:S", range = "sk:S", ttl = "expires", indexes.by-owner = { hash = "owner:S", range = "at:N" } }
+env = { INBOX_TABLE = "{table.inbox}" }
+
+[service.mail]
+kind = "s3"
+buckets = ["inbox-mail"]
+env = { MAIL_BUCKET = "{bucket.inbox-mail}", MAIL_S3_HOST = "{host_port}" }
+
+[service.jobs]
+kind = "sqs"
+queues.jobs = { visibility_timeout_seconds = 120 }
+env = { JOBS_QUEUE_URL = "{queue_url.jobs}" }
+
+[service.keys]
+kind = "kms"
+keys = ["inbox-mail"]
+env = { MAIL_KEY = "{key.inbox-mail}" }
+
+[processes.worker]
+argv = ["cargo", "run", "--bin", "worker"]
+needs = ["store", "mail", "jobs", "keys"]
+```
+
+| Key | Meaning |
+| --- | --- |
+| `service.<name>.kind` | `dynamodb`, `s3`, `sqs` or `kms`. It is required. |
+| `service.<name>.tables` | DynamoDB tables, only for `dynamodb`. Each key names a table of 3 to 255 letters, digits, `_`, `-` and `.`. `hash` is required and `range` is optional; each is `<attribute>:<type>`, where the type is `S`, `N` or `B`. `ttl` names the attribute that holds each item's expiry time. `indexes.<name>` declares a global secondary index with its own `hash` and optional `range`. Every table is on-demand and every index projects all attributes. |
+| `service.<name>.buckets` | S3 bucket names, only for `s3`: 3 to 63 lowercase letters, digits, `-` and `.`. |
+| `service.<name>.queues` | SQS queues, only for `sqs`. Each key names a queue of 1 to 80 letters, digits, `-` and `_`, and `visibility_timeout_seconds` is optional, from 0 to 43200. |
+| `service.<name>.keys` | KMS keys, only for `kms`. Each name becomes the alias `alias/<name>` of a symmetric key. |
+| `service.<name>.env` | Variables that each process that needs the service receives. A value is text with placeholders. |
+| `processes.<name>.needs` | The services that the process uses, by name. |
+
+The placeholders of a service's `env` are these.
+
+| Placeholder | Value |
+| --- | --- |
+| `{endpoint}` | `http://127.0.0.1:<port>`, the backend's endpoint. |
+| `{port}` | The backend's host port. |
+| `{host_port}` | `127.0.0.1:<port>`, for a client that takes a host and a port with no scheme. |
+| `{table.<name>}`, `{bucket.<name>}`, `{queue.<name>}` | The resource's name. |
+| `{queue_url.<name>}` | `http://127.0.0.1:<port>/queue/us-east-1/000000000000/<name>`. |
+| `{key.<name>}` | `alias/<name>`. |
+
+A placeholder must name a resource that its own service declares. `{{`
+and `}}` write a literal brace.
+
+Each process that needs a service receives these variables, and its
+services' `env`.
+
+| Variable | Value |
+| --- | --- |
+| `AWS_ENDPOINT_URL_DYNAMODB`, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL_SQS`, `AWS_ENDPOINT_URL_KMS` | `http://127.0.0.1:<port>` of the backend, one for each kind that the process needs. |
+| `AWS_REGION` | `us-east-1`. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `test`. |
+| `AWS_EC2_METADATA_DISABLED` | `true`, so an SDK never asks an instance metadata service for credentials. |
+| `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` | `/dev/null`, so an SDK reads no profile of the person's own AWS configuration. |
+
+A host process never inherits a variable of mxv's own environment other
+than `PATH`, `HOME` and the few that [the environment of a host
+process](#the-environment-of-a-host-process) lists, none of which starts
+with `AWS_`. A process that needs a service therefore receives no
+`AWS_PROFILE`, no real access key and no session token, even when the
+shell that ran `mxv up` holds them. A process or a service that sets an
+`AWS_` variable itself fails with `mxv::manifest::invalid` and its line.
+
+DuckDB's `httpfs` extension does not read `AWS_ENDPOINT_URL_S3`. A
+process that queries S3 through DuckDB passes the endpoint itself:
+
+```sql
+SET s3_endpoint = '127.0.0.1:<port>';   -- the value of {host_port}
+SET s3_url_style = 'path';
+SET s3_use_ssl = false;
+```
+
+The prefix `mxv-` belongs to mxv. A port, process or container whose name
+starts with `mxv-` fails with `mxv::manifest::invalid` and its line, and a
+checkout whose prefixed names would start with `mxv-` needs `--as`.
+
+mxv does not run services yet. `mxv up` refuses a manifest that declares
+a service with `mxv::manifest::unrunnable`, so no process starts without
+the services it needs. `mxv show` lists each service's variables in
+`services`, with `<port>` in place of each backend's host port. No value
+is a secret, because the access keys are the literal `test`.
+
 ## The workspace manifest
 
 A workspace can hold a manifest of its own, the workspace manifest, at
@@ -721,8 +819,8 @@ tool that owns it. A table whose name is close to one of mxv's own, such as
 would declare nothing, so mxv warns about it: `up` and `restart` print the
 warning on standard error, `status` puts it in the summary's `warnings`,
 and `show` and `new` put it in the row's `warnings`. phase's own tables,
-`[app]`, `[release]`, `[build]`, `[needs.*]` and `[service.*]`, get no
-warning. phase's `[process.*]` gets a warning that mxv runs only
+`[app]`, `[release]`, `[build]` and `[needs.*]`, get no warning. mxv reads
+`[service.*]` as its own services. phase's `[process.*]` gets a warning that mxv runs only
 `[processes.*]`. A top-level `[permissions]` table would sandbox nothing,
 because mxv sandboxes each process on its own, so it fails with
 `mxv::manifest::invalid` and a hint to move its keys to
@@ -785,6 +883,16 @@ reports `merged`, with every file it read in `manifest_paths`.
 - The `listen` ports and `connect` units of a checkout's `permissions`
   follow the new names too, and its write paths stay relative to its own
   checkout.
+- Services keep their names, because two checkouts that use the same
+  table expect the same name. A service that two files declare
+  identically is one service, which processes of both files may need. A
+  service that two files declare differently fails with
+  `mxv::manifest::name_clash`, which names both files. Two services of
+  different names that declare the same table, bucket, queue or key
+  differently fail with `mxv::manifest::name_clash` too, because the
+  workspace has one backend of each kind. Only a process of the
+  workspace manifest may need a service that another file declares; a
+  checkout's process may need only its own file's services.
 - Two names that are the same once prefixed, such as the process `b-c` of
   the checkout `a` and the process `c` of the checkout `a-b`, or two
   volumes of the same name in two files, fail with
@@ -1325,3 +1433,7 @@ waiting.
 
 `mxv archive` and `mxv restore` are declared and fail with
 `mxv::command::unbuilt` until the pull request that builds each one.
+
+mxv has no verb yet that runs one command with a workspace's service
+variables, such as a test runner or a script. A process that needs the
+services is the only way to receive them.
