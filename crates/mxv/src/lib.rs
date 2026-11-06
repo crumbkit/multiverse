@@ -225,6 +225,78 @@ pub fn is_keeper(args: &[OsString]) -> bool {
     })
 }
 
+/// The words that follow the program on the command line of the app
+/// `mxv-provision`, which creates the resources of a workspace's services:
+/// `mxv phase provision <spec>`. The command is hidden from help, because
+/// only phase starts it, as a oneshot of the workspace's plan.
+#[doc(hidden)]
+pub const PROVISION_WORDS: [&str; 2] = ["phase", "provision"];
+
+/// How long the provisioning retries a backend that is still starting.
+/// phase stops the oneshot at its own timeout first.
+const PROVISION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(110);
+
+/// Reports whether `args`, the whole command line, starts the
+/// provisioning of a workspace's services.
+#[doc(hidden)]
+#[must_use]
+pub fn is_provisioner(args: &[OsString]) -> bool {
+    args.get(1..3).is_some_and(|words| {
+        words
+            .iter()
+            .zip(PROVISION_WORDS)
+            .all(|(word, provision)| word == provision)
+    })
+}
+
+/// Creates the resources of the spec that follows `mxv phase provision`,
+/// writes one line for each resource to standard output, which phase
+/// keeps in the app's log, and returns 0 once every resource exists. It
+/// writes the failure to standard error and returns 1 otherwise. It reads
+/// no environment variable.
+#[doc(hidden)]
+#[must_use]
+pub fn provision(args: &[OsString]) -> ExitCode {
+    use std::io::Write as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and the provisioning writes its log there"
+    )]
+    let mut stdout = std::io::stdout().lock();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and the provisioning writes its failure there"
+    )]
+    let mut stderr = std::io::stderr();
+    let words = args.get(1 + PROVISION_WORDS.len()..).unwrap_or_default();
+    let result = match words {
+        [spec] => multiverse::ProvisionSpec::parse(&spec.to_string_lossy()).and_then(|spec| {
+            multiverse::provision(
+                &spec,
+                std::time::Instant::now() + PROVISION_DEADLINE,
+                &mut |line| drop(writeln!(stdout, "mxv-provision: {line}")),
+            )
+        }),
+        _ => {
+            drop(writeln!(
+                stderr,
+                "mxv-provision: the command takes one argument, the spec of the resources"
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
+        Ok(()) => {
+            drop(writeln!(stdout, "mxv-provision: every resource exists"));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            drop(writeln!(stderr, "mxv-provision: {error}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// The environment source of a keeper, which mxv's plans never ask for:
 /// each process of an mxv plan is never restarted, so its keeper never
 /// resolves a fresh environment.

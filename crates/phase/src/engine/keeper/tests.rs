@@ -711,23 +711,12 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
     });
 }
 
+/// Returns a sandbox that reads the system's directories and writes only
+/// `tmp`, its temporary directory, which must be canonical, because the
+/// launcher checks that each path is canonical before it applies it.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specification() {
-    let fixture = Fixture::new();
-    let tmp = fixture.dir.join("tmp");
-    let outside = fixture.dir.join("outside");
-    std::fs::create_dir_all(&tmp).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
-    // The launcher checks that each path is canonical before it applies the
-    // sandbox.
-    let tmp = tmp.canonicalize().unwrap();
-    let script = format!(
-        "if echo x > '{}/file' 2>/dev/null; then echo wrote; else echo denied; fi; mkdir \"$TMPDIR/run.$$\"; exit 3",
-        outside.display()
-    );
-    let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(50), Resolve::Never));
-    let sandbox = crate::sandbox::SandboxSpec {
+fn system_sandbox(tmp: &std::path::Path) -> crate::sandbox::SandboxSpec {
+    crate::sandbox::SandboxSpec {
         read: [
             "/usr",
             "/bin",
@@ -740,14 +729,15 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
         .into_iter()
         .map(PathBuf::from)
         .collect(),
-        write: BTreeSet::from([tmp.clone()]),
+        write: BTreeSet::from([tmp.to_path_buf()]),
         path_dirs: Vec::new(),
         protected: Vec::new(),
         read_only: BTreeSet::new(),
         deny: BTreeSet::new(),
+        metadata: BTreeSet::new(),
         listen: BTreeSet::new(),
         connect: BTreeSet::new(),
-        tmp: tmp.clone(),
+        tmp: tmp.to_path_buf(),
         launcher: crate::sandbox::Launcher {
             program: std::env::current_exe().unwrap(),
             words: ["--exact", "--nocapture", "--", ENTRY, "keep"]
@@ -755,10 +745,26 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
                 .map(str::to_owned)
                 .collect(),
         },
-    };
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specification() {
+    let fixture = Fixture::new();
+    let tmp = fixture.dir.join("tmp");
+    let outside = fixture.dir.join("outside");
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let tmp = tmp.canonicalize().unwrap();
+    let script = format!(
+        "if echo x > '{}/file' 2>/dev/null; then echo wrote; else echo denied; fi; echo \"git=${{GIT_CONFIG_GLOBAL-unset}}\"; mkdir \"$TMPDIR/run.$$\"; exit 3",
+        outside.display()
+    );
+    let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(50), Resolve::Never));
     let spec = fixture
         .spec(&script, restart, Stop::default())
-        .sandboxed(sandbox);
+        .sandboxed(system_sandbox(&tmp));
     let mut running = fixture.start(&spec).unwrap();
 
     let code = running.exit_code();
@@ -773,9 +779,52 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
         "{log}"
     );
     assert!(!log.lines().any(|line| line == "wrote"), "{log}");
+    assert_eq!(
+        log.lines().filter(|line| *line == "git=/dev/null").count(),
+        2,
+        "{log}"
+    );
     assert!(log.contains("Operation not permitted"), "{log}");
     assert!(!outside.join("file").exists());
     assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_app_keeps_the_git_configuration_that_its_environment_names_at_each_start() {
+    let fixture = Fixture::new();
+    let tmp = fixture.dir.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = tmp.canonicalize().unwrap();
+    let restart = Restart::on_failure(limits(Some(1), Duration::from_millis(50), Resolve::Never));
+    let spec = fixture
+        .spec(
+            "echo \"git=${GIT_CONFIG_GLOBAL-unset}\"; exit 3",
+            restart,
+            Stop::default(),
+        )
+        .sandboxed(system_sandbox(&tmp));
+    let mut running = fixture
+        .start_with(
+            &spec,
+            &Fixed(vec![
+                ("GREETING", "hello"),
+                ("GIT_CONFIG_GLOBAL", "/plan/gitconfig"),
+            ]),
+        )
+        .unwrap();
+
+    running.exit_code();
+
+    let log = fixture.log_text();
+    assert_eq!(
+        log.lines()
+            .filter(|line| *line == "git=/plan/gitconfig")
+            .count(),
+        2,
+        "{log}"
+    );
+    assert!(!log.contains("git=/dev/null"), "{log}");
 }
 
 #[test]
@@ -1029,7 +1078,7 @@ fn a_keeper_survives_a_hangup_sent_to_the_group_that_started_it() {
 fn an_app_receives_only_path_home_and_its_resolved_environment() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
-        "echo \"path=$PATH tmp=${TMPDIR-unset} manifest=${CARGO_MANIFEST_DIR-unset} greeting=$GREETING\"",
+        "echo \"path=$PATH tmp=${TMPDIR-unset} git=${GIT_CONFIG_GLOBAL-unset} manifest=${CARGO_MANIFEST_DIR-unset} greeting=$GREETING\"",
         Restart::No,
         Stop::default(),
     );
@@ -1039,7 +1088,7 @@ fn an_app_receives_only_path_home_and_its_resolved_environment() {
 
     assert_eq!(
         fixture.log_text(),
-        "path=/usr/bin:/bin tmp=unset manifest=unset greeting=hello\n"
+        "path=/usr/bin:/bin tmp=unset git=unset manifest=unset greeting=hello\n"
     );
 }
 

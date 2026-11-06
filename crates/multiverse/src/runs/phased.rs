@@ -38,6 +38,7 @@ use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Inputs, MAIN};
 use crate::record::Workspace;
 use crate::run_files::RunHost;
+use crate::service::PROVISION_APP;
 use crate::store::{self, Lock, Store};
 
 /// How long `up` gives phase to build each selected checkout. mxv's apps
@@ -430,6 +431,7 @@ impl Runs {
             ports: &workspace.ports,
             grace: self.grace,
             caller: &self.caller,
+            provisioner: self.provisioner.clone(),
         }
     }
 
@@ -491,6 +493,18 @@ impl Runs {
             (Some(Unit::Container(_)), _) => Kind::Container,
             (Some(Unit::Process(_)), _) => Kind::Process,
             (None, Some(row)) if row.runner == RunnerKind::Container => Kind::Container,
+            // A backend of the services runs in a container whether or not
+            // phase still has its row, as after `down`.
+            (None, _)
+                if manifest.is_some_and(|manifest| {
+                    manifest
+                        .backends()
+                        .iter()
+                        .any(|backend| backend.app() == name)
+                }) =>
+            {
+                Kind::Container
+            }
             (None, _) => Kind::Process,
         };
         ProcessStatus {
@@ -508,12 +522,16 @@ impl Runs {
         }
     }
 
-    /// Returns the units that `status` reports: the manifest's in start
-    /// order, then those that only phase's rows name, in name order.
+    /// Returns the units that `status` reports: the apps of the manifest's
+    /// services, then the manifest's units in start order, then those that
+    /// only phase's rows name, in name order.
     fn phase_known(manifest: Option<&Manifest>, rows: &BTreeMap<String, StatusRow>) -> Vec<String> {
-        let mut names = manifest
-            .and_then(|manifest| manifest.start_order(&[]).ok())
-            .unwrap_or_default();
+        let mut names = manifest.map(Manifest::service_apps).unwrap_or_default();
+        names.extend(
+            manifest
+                .and_then(|manifest| manifest.start_order(&[]).ok())
+                .unwrap_or_default(),
+        );
         for name in rows.keys() {
             if !names.contains(name) {
                 names.push(name.clone());
@@ -709,6 +727,14 @@ impl Runs {
             .filter_map(|name| manifest.unit(name).and_then(Unit::ready))
             .map(|ready| ready.timeout)
             .sum();
+        let backends = u32::try_from(manifest.backends().len()).unwrap_or(u32::MAX);
+        let ready_wait = if backends == 0 {
+            ready_wait
+        } else {
+            ready_wait
+                + phase_plan::BACKEND_READY_TIMEOUT * backends
+                + phase_plan::PROVISION_TIMEOUT
+        };
         let now = Instant::now();
         let deadlines = UpDeadlines::new(now + BUILD_WAIT, now + ready_wait + START_MARGIN);
         let report = self
@@ -751,8 +777,16 @@ impl Runs {
                 notes.entry(unit.to_owned()).or_default().push(note);
             }
         }
+        // The apps of the services come first, when this `up` reached them.
+        let reached: BTreeSet<&str> = report.apps.iter().map(|app| app.app.as_str()).collect();
+        let mut shown: Vec<String> = manifest
+            .service_apps()
+            .into_iter()
+            .filter(|name| reached.contains(name.as_str()))
+            .collect();
+        shown.extend(order);
         Ok(UpOutcome::Up(
-            order
+            shown
                 .iter()
                 .map(|name| {
                     let mut status =
@@ -913,8 +947,11 @@ impl Runs {
         problem: &StartProblem,
     ) -> Result<UpOutcome, Error> {
         let log = self.phase_log(id, manifest, unit);
+        // The provisioning's failure points to its log and quotes none of
+        // it.
         let log_tail = || {
             log.as_deref()
+                .filter(|_| unit != PROVISION_APP)
                 .map(|log| tail(log, TAIL_LINES))
                 .unwrap_or_default()
         };
@@ -984,10 +1021,14 @@ impl Runs {
     }
 
     /// Returns the log file that phase's keeper gives the host process
-    /// `unit`, or `None` for a container, whose log comes from `docker
-    /// logs`.
+    /// `unit`, which is a process of `manifest` or [`PROVISION_APP`] when
+    /// the manifest declares services, or `None` for a container, whose
+    /// log comes from `docker logs`.
     fn phase_log(&self, id: &WorkspaceId, manifest: &Manifest, unit: &str) -> Option<PathBuf> {
-        manifest.processes.get(unit)?;
+        let provisions = unit == PROVISION_APP && !manifest.services.is_empty();
+        if !provisions && !manifest.processes.contains_key(unit) {
+            return None;
+        }
         Some(
             self.phase
                 .state_dir()
@@ -1338,6 +1379,9 @@ fn phase_code(code: &str) -> &'static str {
         "phase::process::unstartable",
         "phase::app::not_runnable",
         "phase::select::unknown",
+        "phase::exec::not_running",
+        "phase::exec::unstartable",
+        "phase::exec::sandboxed_terminal",
         "phase::record::unplanned",
     ];
     CODES

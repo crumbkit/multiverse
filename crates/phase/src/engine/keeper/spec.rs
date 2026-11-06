@@ -95,7 +95,7 @@ impl std::fmt::Display for NotInherited {
 }
 
 /// Returns the first name of `inherited` other than `PATH` and `HOME`.
-fn check_inherited(inherited: &BTreeMap<String, String>) -> Result<(), NotInherited> {
+pub(crate) fn check_inherited(inherited: &BTreeMap<String, String>) -> Result<(), NotInherited> {
     match inherited
         .keys()
         .find(|name| !INHERITED.contains(&name.as_str()))
@@ -213,7 +213,7 @@ impl KeeperSpec {
 /// Returns why `resolved` holds a name that is not a variable the keeper
 /// may pass on: an empty name, a name that holds `=` or NUL, or `PATH` or
 /// `HOME`, which the specification sets itself.
-fn check_resolved(resolved: &BTreeSet<String>) -> Result<(), String> {
+pub(crate) fn check_resolved(resolved: &BTreeSet<String>) -> Result<(), String> {
     for name in resolved {
         if name.is_empty() || name.contains(['=', '\0']) {
             return Err(format!("the resolved name {name:?} is not a variable name"));

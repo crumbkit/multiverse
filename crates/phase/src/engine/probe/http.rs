@@ -1,9 +1,10 @@
-//! The `http` and `tcp` checks, which connect to 127.0.0.1 with std's
-//! `TcpStream`. An HTTP check writes one minimal HTTP/1.1 request and reads
-//! only the response's status line, so phase needs no HTTP client.
+//! The `http` and `tcp` checks, which connect to 127.0.0.1, or to ::1
+//! when 127.0.0.1 does not accept, with std's `TcpStream`. An HTTP check
+//! writes one minimal HTTP/1.1 request and reads only the response's
+//! status line, so phase needs no HTTP client.
 
 use std::io::{self, Read, Write as _};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use super::{Attempt, Failure, MOST_RESPONSE_BYTES};
@@ -15,25 +16,58 @@ use crate::plan::probe::is_sendable_path;
 /// cancel or its deadline in good time.
 const READ_SLICE: Duration = Duration::from_millis(50);
 
-/// Connects to 127.0.0.1 at `port` within `timeout`. The connection blocks
-/// in `connect_timeout`, so a cancel that comes meanwhile takes effect only
-/// once the connection succeeds or fails, at most `timeout` later.
+/// Connects to `port` on the loopback address within `timeout`. It tries
+/// 127.0.0.1 first, and then ::1 with the time that is left when 127.0.0.1
+/// refuses or fails, because a dev server such as Vite may listen only on
+/// ::1. Each connection blocks in `connect_timeout`, so a cancel that comes
+/// meanwhile takes effect only once the connections succeed or fail, at
+/// most `timeout` later.
+///
+/// When both fail, it returns the failure of ::1 if that connection timed
+/// out or failed for another reason than a refusal or a missing address,
+/// and the failure of 127.0.0.1 otherwise.
 pub(super) fn connect(port: u16, timeout: Duration) -> Result<TcpStream, Failure> {
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let deadline = now() + timeout;
+    let first = match connect_to(SocketAddr::from((Ipv4Addr::LOCALHOST, port)), timeout) {
+        Ok(stream) => return Ok(stream),
+        Err(failure) => failure,
+    };
+    let Ok(rest) = left(deadline) else {
+        return Err(first);
+    };
+    connect_to(SocketAddr::from((Ipv6Addr::LOCALHOST, port)), rest).map_err(|second| {
+        let nothing_there = matches!(
+            second,
+            Failure::Connect(
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::HostUnreachable
+            )
+        );
+        if nothing_there { first } else { second }
+    })
+}
+
+/// Connects to `address` within `timeout`.
+fn connect_to(address: SocketAddr, timeout: Duration) -> Result<TcpStream, Failure> {
     TcpStream::connect_timeout(&address, timeout).map_err(|error| match error.kind() {
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Failure::TimedOut,
         kind => Failure::Connect(kind),
     })
 }
 
-/// Returns the request that an HTTP check sends for `path` to `port`.
+/// Returns the request that an HTTP check sends for `path` to `port`. Its
+/// `Host` header names `localhost`, which a dev server that checks the
+/// header accepts whichever loopback address the connection reached.
 pub(super) fn request(port: u16, path: &str) -> String {
     format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     )
 }
 
-/// Sends `GET path` to 127.0.0.1 at `port` and passes on a 2xx status,
+/// Sends `GET path` to `port` on the loopback address that [`connect`]
+/// reaches, and passes on a 2xx status,
 /// all within `timeout` and until `cancel` is set. The connect step does not
 /// see `cancel` until `connect_timeout` returns, which is at most `timeout`
 /// later, and the read of the response sees it within [`READ_SLICE`].

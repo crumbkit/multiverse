@@ -33,10 +33,12 @@ mod name;
 mod phase_plan;
 mod ports;
 mod process;
+mod provision;
 mod record;
 mod redacted;
 mod run_files;
 mod runs;
+mod service;
 mod store;
 mod template;
 mod workspaces;
@@ -59,6 +61,7 @@ pub use crate::manifest::{
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
+pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
     MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, WORKTREE_RECORD_VERSION, Workspace,
@@ -69,6 +72,12 @@ pub use crate::runs::{
     DownOutcome, ExitReason, Follower, KILL_WAIT, Kind, LogOutput, MOST_FOLLOW_BYTES,
     MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus, RenamedVolume, Runs,
     START_GRACE, STOP_GRACE, TAIL_LINES, Unstoppable, UpOutcome, Volumes, Waited, tail,
+};
+pub use crate::service::{
+    ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,
+    DYNAMODB_IMAGE, HOST, Index, KeyAttribute, LOCALSTACK_IMAGE, MOST_VISIBILITY_SECONDS,
+    PROVISION_APP, Placeholder, Queue, REGION, RESERVED_PREFIX, Service, ServiceKind, ServiceValue,
+    Table,
 };
 pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
 pub use crate::template::{

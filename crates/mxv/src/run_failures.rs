@@ -350,6 +350,22 @@ fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// Returns the recovery of the process `process` of `workspace`, which
+/// exited or was not ready. mxv starts its own apps, such as
+/// mxv-provision, with the workspace, and `up` takes no name of one, so
+/// their hint runs `up` for the whole workspace.
+fn start_failed(workspace: &str, process: &str) -> Recovery {
+    if process.starts_with(multiverse::RESERVED_PREFIX) {
+        hint(format!(
+            "run `mxv logs -w {workspace} {process}` to read what failed, fix it, and run `mxv up -w {workspace}` again"
+        ))
+    } else {
+        hint(format!(
+            "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
+        ))
+    }
+}
+
 /// Returns the hint `text` as a recovery.
 fn hint(text: impl Into<String>) -> Recovery {
     Recovery::Hint(text.into())
@@ -373,7 +389,9 @@ impl Failure for RunFailure {
                 ManifestProblem::Unreadable { .. } => &MANIFEST_UNREADABLE,
                 ManifestProblem::UnitName { .. } => &MANIFEST_UNIT_NAME,
                 ManifestProblem::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
-                ManifestProblem::NameClash { .. } => &MANIFEST_NAME_CLASH,
+                ManifestProblem::NameClash { .. } | ManifestProblem::ServiceClash { .. } => {
+                    &MANIFEST_NAME_CLASH
+                }
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
@@ -462,6 +480,10 @@ impl Failure for RunFailure {
                     shown(&error.path),
                     shown(other)
                 )),
+                ManifestProblem::ServiceClash { name, .. } => hint(format!(
+                    "declare `{name}` the same way in every service of the workspace, or rename it in one of them, in {}",
+                    shown(&error.path)
+                )),
                 _ if error.line.is_some() => hint(format!(
                     "fix the line of {} that the message names",
                     shown(&error.path)
@@ -479,9 +501,7 @@ impl Failure for RunFailure {
             }
             | Self::NotReady {
                 workspace, process, ..
-            } => hint(format!(
-                "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
-            )),
+            } => start_failed(workspace, process),
             Self::ForeignListener {
                 workspace,
                 process,
@@ -695,6 +715,10 @@ fn manifest_fields(error: &ManifestError) -> Vec<Field<'_>> {
         ManifestProblem::NameClash { name, other } => {
             fields.push(Field::new("name", name));
             fields.push(Field::new("other", shown(other)));
+        }
+        ManifestProblem::ServiceClash { name, message } => {
+            fields.push(Field::new("name", name));
+            fields.push(Field::new("message", message));
         }
         _ => {}
     }

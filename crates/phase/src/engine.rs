@@ -7,6 +7,7 @@
 
 pub mod container;
 pub(crate) mod containers;
+pub(crate) mod exec;
 pub mod host;
 pub mod keeper;
 pub(crate) mod probe;

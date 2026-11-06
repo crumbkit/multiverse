@@ -1406,7 +1406,9 @@ fn up_warns_about_a_misspelt_table_and_a_manifest_that_declares_nothing() {
         "{errors}"
     );
     assert!(
-        errors.contains("declares no processes and no containers, so mxv started nothing"),
+        errors.contains(
+            "declares no processes, no containers and no services, so mxv started nothing"
+        ),
         "{errors}"
     );
     let (exit, status) = setup.json(&["status", "-w", "triage"]);
