@@ -398,7 +398,7 @@ fn the_system_runner_stops_a_real_process_group_and_reports_it_gone() {
         .unwrap();
 
     assert_eq!(stopped, HostStopped::Stopped);
-    assert!(!sleeper.running());
+    assert!(sleeper.ends_soon());
     assert_eq!(System.identity(&app).unwrap(), Identity::Gone);
 }
 
@@ -701,7 +701,7 @@ fn the_system_runner_returns_as_soon_as_a_process_ends_on_its_stop_signal() {
 
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(now() - started < Duration::from_secs(5));
-    assert!(!sleeper.running());
+    assert!(sleeper.ends_soon());
 }
 
 #[test]
@@ -720,7 +720,7 @@ fn the_system_runner_kills_a_process_that_ignores_its_stop_signal_after_the_grac
 
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(now() - started >= grace + kill_wait);
-    assert!(!stubborn.running());
+    assert!(stubborn.ends_soon());
     assert!(!System.group_exists(app.group));
 }
 
@@ -749,7 +749,7 @@ fn the_system_runner_cuts_the_grace_short_at_the_deadline_and_returns_within_the
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(took >= to_deadline, "{took:?}");
     assert!(took < to_deadline + kill_wait + slack, "{took:?}");
-    assert!(!stubborn.running());
+    assert!(stubborn.ends_soon());
 }
 
 /// A shell loop that waits in short sleeps until a signal's trap ends it.
@@ -798,8 +798,8 @@ fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
         graceful.exists(),
         "the app was killed before its grace ended"
     );
-    assert!(!keeper.running());
-    assert!(!app.running());
+    assert!(keeper.ends_soon());
+    assert!(app.ends_soon());
 }
 
 // A member of the app's group that has ended and that its parent, this

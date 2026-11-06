@@ -103,7 +103,7 @@ fn sweep_stops_a_recorded_host_process_and_removes_the_record() {
 
     let swept = run(&store, false, &Unreachable);
 
-    assert!(!sleeper.running());
+    assert!(sleeper.ends_soon());
     assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
     assert_eq!(outcome_of(&swept, Role::Keeper), SweepOutcome::Gone);
     let item = swept
@@ -147,7 +147,7 @@ fn sweep_kills_a_process_that_ignores_term_once_the_kill_wait_passes() {
 
     let swept = sweep(&store, &workspace(), false, real(&Unreachable), waits).unwrap();
 
-    assert!(!stubborn.running());
+    assert!(stubborn.ends_soon());
     assert_eq!(outcome_of(&swept, Role::Process), SweepOutcome::Stopped);
 }
 
