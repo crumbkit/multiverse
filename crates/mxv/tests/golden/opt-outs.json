@@ -33,6 +33,25 @@
     },
     {
       "rule": "examples/run",
+      "applies_to": "mxv exec",
+      "reason": "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "effects/yes",
+      "applies_to": "mxv exec",
+      "reason": "The person writes the command after `--`, and mxv cannot tell what it changes, so a question from mxv would ask about every command, harmless or not.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
       "applies_to": "mxv add",
       "reason": "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
       "costs": [
@@ -205,7 +224,7 @@
   "customisations": [
     {
       "declaration": "root-verbs",
-      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove, mxv clean",
+      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv archive, mxv restore, mxv remove, mxv clean",
       "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
       "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
     },
@@ -233,6 +252,11 @@
       "declaration": "text-line",
       "applies_to": "mxv logs",
       "declares": "The text prints each row as the line <LINE> in place of a table row."
+    },
+    {
+      "declaration": "passes-on-exit",
+      "applies_to": "mxv exec",
+      "declares": "The command exits with the exit code of the command."
     }
   ]
 }

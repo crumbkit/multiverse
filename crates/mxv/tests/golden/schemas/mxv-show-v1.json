@@ -502,6 +502,16 @@
             "string",
             "null"
           ]
+        },
+        "services": {
+          "description": "Each local AWS service of the workspace's manifest, by name, with\nthe variables that a process that needs it receives, such as\n`AWS_ENDPOINT_URL_DYNAMODB` and the service's own `env`. A value\nholds `<port>` until the first `mxv up` gives the service's backend\na host port. No value is a secret: the access keys are the literal\n`test`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       },
       "required": [

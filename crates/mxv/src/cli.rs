@@ -134,7 +134,7 @@ pub const GUIDE: Guide = Guide::new()
                 &["-w", "reading-list", "web", "--", "env"],
                 "Print the variables that a command receives in the context of web",
             )])
-            .effects(Effects::destructive().open_world())
+            .effects(Effects::destructive().open_world().all_or_none())
             .passes_on_exit("the command"),
         Leaf::new(&["ports", "reset"])
             .examples(&[Example::new(

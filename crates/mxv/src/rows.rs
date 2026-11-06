@@ -371,6 +371,13 @@ pub(crate) struct ShowRow {
     /// wait for a confirmation, and each table of the manifest that mxv
     /// ignores although its name is close to one of mxv's own, or null.
     warnings: Option<String>,
+    /// Each local AWS service of the workspace's manifest, by name, with
+    /// the variables that a process that needs it receives, such as
+    /// `AWS_ENDPOINT_URL_DYNAMODB` and the service's own `env`. A value
+    /// holds `<port>` until the first `mxv up` gives the service's backend
+    /// a host port. No value is a secret: the access keys are the literal
+    /// `test`.
+    services: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// A disposable path of a checkout and the bytes it takes, as `show
@@ -436,12 +443,20 @@ impl Row for ShowRow {
         "repositories",
         "disposable_paths",
         "kept_paths",
+        "services",
     ];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 impl ShowRow {
+    /// Returns the row with the variables of each service of `manifest`,
+    /// rendered with the workspace's host ports.
+    pub(crate) fn with_services(mut self, workspace: &Workspace, manifest: &Manifest) -> Self {
+        self.services = manifest.service_listing(&workspace.ports);
+        self
+    }
+
     /// Returns the row of `workspace` with `root`, the root that the run
     /// used, and the sizes of `usage`.
     pub(crate) fn new(workspace: &Workspace, root: &Root, usage: &DiskUsage) -> Self {
@@ -465,6 +480,7 @@ impl ShowRow {
                 .map(|kept| format!("{}: {}, because {}", kept.checkout, kept.path, kept.reason))
                 .collect(),
             warnings: joined(&usage.warnings),
+            services: BTreeMap::new(),
         }
     }
 

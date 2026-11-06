@@ -373,7 +373,9 @@ impl Failure for RunFailure {
                 ManifestProblem::Unreadable { .. } => &MANIFEST_UNREADABLE,
                 ManifestProblem::UnitName { .. } => &MANIFEST_UNIT_NAME,
                 ManifestProblem::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
-                ManifestProblem::NameClash { .. } => &MANIFEST_NAME_CLASH,
+                ManifestProblem::NameClash { .. } | ManifestProblem::ServiceClash { .. } => {
+                    &MANIFEST_NAME_CLASH
+                }
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
@@ -461,6 +463,10 @@ impl Failure for RunFailure {
                     "rename `{name}` in {} or in {}, or give one of the checkouts another folder, whose name prefixes its names, with `--as`",
                     shown(&error.path),
                     shown(other)
+                )),
+                ManifestProblem::ServiceClash { name, .. } => hint(format!(
+                    "declare `{name}` the same way in every service of the workspace, or rename it in one of them, in {}",
+                    shown(&error.path)
                 )),
                 _ if error.line.is_some() => hint(format!(
                     "fix the line of {} that the message names",
@@ -695,6 +701,10 @@ fn manifest_fields(error: &ManifestError) -> Vec<Field<'_>> {
         ManifestProblem::NameClash { name, other } => {
             fields.push(Field::new("name", name));
             fields.push(Field::new("other", shown(other)));
+        }
+        ManifestProblem::ServiceClash { name, message } => {
+            fields.push(Field::new("name", name));
+            fields.push(Field::new("message", message));
         }
         _ => {}
     }

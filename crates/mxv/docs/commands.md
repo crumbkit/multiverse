@@ -18,6 +18,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv restart`](#mxv-restart): Stop a workspace's processes and start them again
 - [`mxv status`](#mxv-status): Report whether each process of a workspace is running, exited or stopped
 - [`mxv logs`](#mxv-logs): Print the last lines of a process's log, and follow it with --follow
+- [`mxv exec`](#mxv-exec): Run a one-off command in the context of a running process or container, and exit with its exit code
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
@@ -206,6 +207,7 @@ mxv show reading-list
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 - `disposable_paths`: Each disposable path with its checkout and the bytes it takes.
 - `kept_paths`: Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.
+- `services`: Each local AWS service of the workspace's manifest, by name, with the variables that a process that needs it receives, such as `AWS_ENDPOINT_URL_DYNAMODB` and the service's own `env`. A value holds `<port>` until the first `mxv up` gives the service's backend a host port. No value is a secret: the access keys are the literal `test`.
 
 Effects: read-only, closed-world.
 
@@ -417,6 +419,30 @@ Effects: read-only, closed-world.
 Output: one row per line as each arrives, and --json prints one JSON document per line.
 
 Text: one line per row, `<LINE>`; --fields prints a table.
+
+## `mxv exec`
+
+Run a one-off command in the context of a running process or container, and exit with its exit code.
+
+A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input is a terminal. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PROCESS>`: The running process or container in whose context the command runs. Required.
+- `<COMMAND>`: The command's program and its arguments, after `--`. Required. Takes more than one value.
+
+### Examples
+
+Print the variables that a command receives in the context of web.
+
+```sh
+mxv exec -w reading-list web -- env
+```
+
+Effects: destructive, not idempotent, open-world.
+
+Writes: applies all items or none.
 
 ## `mxv archive`
 

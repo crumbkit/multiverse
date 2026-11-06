@@ -317,3 +317,36 @@ fn up_warns_that_a_running_process_whose_manifest_gained_permissions_needs_a_res
     );
     assert_eq!(writer["notes"], serde_json::json!([]), "{third}");
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_in_a_sandboxed_process_runs_the_command_under_the_processs_sandbox() {
+    let sandboxed = Sandboxed::new(
+        "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\npermissions = { write = [\"out\"] }\n",
+    );
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+
+    let output = sandboxed
+        .command(&[
+            "exec",
+            "-w",
+            "triage",
+            "writer",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo granted > out/file && echo granted=written; \
+             if echo denied > denied 2>/dev/null; then echo denied=written; else echo denied=refused; fi",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "granted=written\ndenied=refused\n"
+    );
+    assert!(sandboxed.checkout().join("out/file").exists());
+    assert!(!sandboxed.checkout().join("denied").exists());
+}
