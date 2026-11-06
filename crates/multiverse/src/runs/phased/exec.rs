@@ -141,20 +141,34 @@ impl Runs {
                 return Ok(ExecTarget::LegacyRunning { processes });
             }
         }
-        let rows = self.phase_rows(workspace, Some(manifest))?;
-        let known = manifest.unit(unit).is_some() || rows.contains_key(unit);
-        if !known {
+        let declared = manifest.unit(unit).is_some();
+        // A workspace without a stable id has never run under phase.
+        let Some(id) = workspace.id.clone() else {
+            return Ok(if declared {
+                ExecTarget::NotRunning
+            } else {
+                ExecTarget::UnknownProcess
+            });
+        };
+        // `exec` builds the plan once, and phase's status and the command
+        // both use it.
+        let built = phase_plan::build(&self.inputs(workspace, &id, manifest));
+        let row = self
+            .phase
+            .status(&id, built.as_ref().ok().map(|built| &built.plan))
+            .map_err(|error| self.phase_error(&id, error))?
+            .rows
+            .into_iter()
+            .find(|row| row.app.as_str() == unit);
+        if !declared && row.is_none() {
             return Ok(ExecTarget::UnknownProcess);
         }
-        let (Some(id), Some(app), Some(process), Some(true)) = (
-            workspace.id.clone(),
-            app(unit),
-            main_process(),
-            rows.get(unit).map(running),
-        ) else {
+        let (Some(app), Some(process), Some(true)) =
+            (app(unit), main_process(), row.as_ref().map(running))
+        else {
             return Ok(ExecTarget::NotRunning);
         };
-        let built = match phase_plan::build(&self.inputs(workspace, &id, manifest)) {
+        let built = match built {
             Ok(built) => built,
             Err(unrunnable) => return Ok(ExecTarget::Unrunnable(unrunnable)),
         };
