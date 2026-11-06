@@ -571,7 +571,9 @@ answer, `up`, `down` and `remove --force` fail with
 `mxv::docker::unavailable`, so they never report a workspace as stopped
 while its containers may still run. A docker command that fails, such as a
 pull of an image that does not exist, fails with `mxv::docker::failed`,
-whose fields name the operation, the container, and docker's message. A
+whose fields name the operation and the container. Its message is
+docker's own error line when docker printed one, and otherwise the
+sentence of phase or mxv that says what failed. A
 failure of phase that mxv has no code for fails with `mxv::phase::failed`,
 whose `phase_code` field holds phase's code.
 
@@ -591,12 +593,14 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   is left of the group when the process ends. Before it starts a listener,
   phase checks that the listen port is free; when it is taken, `up` fails
   with `mxv::port::taken`. When a process exits before it is ready, `up`
-  fails with `mxv::process::exited` and the log's last lines; when it
-  misses its timeout, `up` stops it and fails with
-  `mxv::process::not_ready`. When the readiness port answers and a process
-  outside the process's group holds it, `up` stops the process and fails
-  with `mxv::process::foreign_listener` and that program's process id. A
-  failed `up` stops the processes it started before the failure. `up` also
+  fails with `mxv::process::exited`; when it misses its timeout, `up`
+  stops it and fails with `mxv::process::not_ready`. When the readiness
+  port answers and a process outside the process's group holds it, `up`
+  stops the process and fails with `mxv::process::foreign_listener` and
+  that program's process id. A failed `up` names the process's log and
+  quotes none of it, because a process may print a secret; `mxv logs`
+  prints it. A failed `up` stops the processes it started before the
+  failure. `up` also
   drops the ports of names that the manifest no longer declares, once no
   process of the workspace runs, so a port that the manifest renames stays
   with its old listener until `down`.

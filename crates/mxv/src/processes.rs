@@ -21,7 +21,7 @@ use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
-use crate::run_failures::{LogTail, NotMoved, RunFailure};
+use crate::run_failures::{NotMoved, RunFailure};
 use crate::verbs;
 
 /// The document that `mxv up` prints.
@@ -316,14 +316,12 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             code,
             signal,
             log,
-            tail,
         } => Err(RunFailure::Exited {
             workspace,
             process,
             code,
             signal,
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::ForeignListener {
@@ -332,7 +330,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log,
-            tail,
         } => Err(RunFailure::ForeignListener {
             workspace,
             process,
@@ -340,7 +337,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::DetachedListener {
@@ -349,7 +345,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log,
-            tail,
         } => Err(RunFailure::DetachedListener {
             workspace,
             process,
@@ -357,7 +352,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::NotReady {
@@ -365,14 +359,12 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             waited,
             timeout,
             log,
-            tail,
         } => Err(RunFailure::NotReady {
             workspace,
             process,
             waited: Box::new(waited),
             seconds: timeout.as_secs(),
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
     }

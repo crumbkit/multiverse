@@ -492,7 +492,6 @@ fn a_table_whose_keys_change_fails_up_with_the_provisioning_log_until_down_reset
         .as_str()
         .unwrap_or_else(|| panic!("{document}"));
     assert!(log.ends_with("mxv-provision.main.log"), "{log}");
-    assert_eq!(document["fields"]["tail"], serde_json::json!([]));
     let hint = document["recovery"]["text"].as_str().unwrap_or_default();
     assert!(
         hint.contains(&format!("mxv logs -w {name} mxv-provision"))

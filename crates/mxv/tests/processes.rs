@@ -352,7 +352,8 @@ fn up_again_leaves_running_processes_as_they_are() {
 }
 
 #[test]
-fn a_process_that_exits_before_it_is_ready_fails_up_with_its_code_and_log_tail() {
+fn a_process_that_exits_before_it_is_ready_fails_up_with_its_code_and_points_to_its_log_without_quoting_it()
+ {
     let setup = Setup::new();
     setup.workspace(
         "triage",
@@ -363,7 +364,15 @@ fn a_process_that_exits_before_it_is_ready_fails_up_with_its_code_and_log_tail()
     assert_eq!(document["code"], "mxv::process::exited");
     assert_eq!(document["fields"]["process"], "server");
     assert_eq!(document["fields"]["code"], 4);
-    assert_eq!(document["fields"]["tail"][0], "cannot bind");
+    assert!(
+        document["fields"]["log"]
+            .as_str()
+            .is_some_and(|log| log.ends_with(".log")),
+        "{document}"
+    );
+    let hint = document["recovery"]["text"].as_str().unwrap_or_default();
+    assert!(hint.contains("mxv logs -w triage server"), "{hint}");
+    assert!(!document.to_string().contains("cannot bind"), "{document}");
 }
 
 #[test]
@@ -396,7 +405,6 @@ fn a_process_that_misses_its_readiness_timeout_fails_up_and_is_stopped() {
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::process::not_ready");
-    assert_eq!(document["fields"]["tail"][0], "starting");
     assert_eq!(
         setup.states("triage"),
         [("server".to_owned(), "stopped".to_owned())]
@@ -1242,21 +1250,21 @@ fn group_alive_is_null_for_a_process_that_phase_runs() {
 }
 
 #[test]
-fn up_in_text_prints_the_last_lines_of_the_log_of_a_process_that_exited_before_it_was_ready() {
+fn up_in_text_names_the_log_of_a_process_that_exited_before_it_was_ready_and_quotes_none_of_it() {
     let setup = Setup::new();
     setup.workspace(
         "triage",
-        "[processes.build]\nargv = [\"sh\", \"-c\", \"echo compiling; echo 'error: cannot find value x'; exit 101\"]\n",
+        "[processes.build]\nargv = [\"sh\", \"-c\", \"echo compiling; echo 'secret=hunter2'; exit 101\"]\n",
     );
     let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
     assert_eq!(exit, 1, "{errors}");
-    let compiling = errors
-        .find("compiling")
-        .unwrap_or_else(|| panic!("{errors}"));
-    let error = errors
-        .find("error: cannot find value x")
-        .unwrap_or_else(|| panic!("{errors}"));
-    assert!(compiling < error, "{errors}");
+    assert!(
+        errors.contains("the process build exited with code 101 before it was ready"),
+        "{errors}"
+    );
+    assert!(errors.contains("mxv logs -w triage build"), "{errors}");
+    assert!(!errors.contains("compiling"), "{errors}");
+    assert!(!errors.contains("hunter2"), "{errors}");
 }
 
 #[test]
@@ -1308,7 +1316,6 @@ fn a_worker_that_writes_no_matching_log_line_fails_up_as_not_ready_with_the_patt
     assert_eq!(document["code"], "mxv::process::not_ready");
     assert_eq!(document["fields"]["pattern"], "^worker ready");
     assert_eq!(document["fields"]["port"], Value::Null);
-    assert_eq!(document["fields"]["tail"][0], "starting");
     assert_eq!(
         setup.states("triage"),
         [("worker".to_owned(), "stopped".to_owned())]
