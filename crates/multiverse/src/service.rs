@@ -73,14 +73,17 @@ pub const HOST: &str = "127.0.0.1";
 
 /// The variables that every process that needs a service receives, on top
 /// of the endpoint of each kind it needs and the services' own `env`. The
-/// access keys are placeholders that the backends accept. The last three
-/// variables stop the SDKs from reading a real profile or the instance
-/// metadata service.
+/// access keys are placeholders that the backends accept. The metadata and
+/// file variables stop the SDKs from reading a real profile or the instance
+/// metadata service. `AWS_ENDPOINT_URL` sends a client of a kind that the
+/// process does not need to the discard port on 127.0.0.1, where it fails
+/// locally instead of reaching AWS.
 pub const COMMON_VARIABLES: &[(&str, &str)] = &[
     ("AWS_REGION", REGION),
     ("AWS_ACCESS_KEY_ID", "test"),
     ("AWS_SECRET_ACCESS_KEY", "test"),
     ("AWS_EC2_METADATA_DISABLED", "true"),
+    ("AWS_ENDPOINT_URL", "http://127.0.0.1:9"),
     ("AWS_CONFIG_FILE", "/dev/null"),
     ("AWS_SHARED_CREDENTIALS_FILE", "/dev/null"),
 ];
@@ -541,6 +544,21 @@ pub(crate) fn backends<'a>(services: impl IntoIterator<Item = &'a Service>) -> B
         .into_iter()
         .map(|service| service.kind.backend())
         .collect()
+}
+
+/// Returns LocalStack's `SERVICES`, the kinds of `services` that it
+/// serves, joined with commas in the order of [`ServiceKind::ALL`].
+pub(crate) fn localstack_services<'a>(services: impl IntoIterator<Item = &'a Service>) -> String {
+    let kinds: BTreeSet<ServiceKind> = services
+        .into_iter()
+        .map(|service| service.kind)
+        .filter(|kind| kind.backend() == Backend::Aws)
+        .collect();
+    kinds
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Two services that declare one resource differently, or bind one

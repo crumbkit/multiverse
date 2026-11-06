@@ -183,16 +183,19 @@ fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<Manifes
 /// Returns the warnings that `up` and `restart` print for `manifest`, the
 /// manifest of `workspace`: each table that mxv ignores although its name
 /// is close to one of its own, and a manifest that declares nothing to
-/// start.
+/// start. A manifest of services alone starts their backends.
 fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
     let mut warnings = manifest.warnings.clone();
-    if manifest.processes.is_empty() && manifest.containers.is_empty() {
+    if manifest.processes.is_empty()
+        && manifest.containers.is_empty()
+        && manifest.services.is_empty()
+    {
         let path = workspace
             .manifest_inputs()
             .chosen()
             .map_or_else(|| workspace.manifest_file(), Path::to_path_buf);
         warnings.push(format!(
-            "the manifest {} declares no processes and no containers, so mxv started nothing",
+            "the manifest {} declares no processes, no containers and no services, so mxv started nothing",
             path.display()
         ));
     }

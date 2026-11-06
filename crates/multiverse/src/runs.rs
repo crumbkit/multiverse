@@ -498,6 +498,9 @@ pub struct Runs {
     /// The environment that mxv's `main` read, which phase's keepers and
     /// host processes receive part of.
     caller: CallerEnvironment,
+    /// The command that provisions a workspace's services, or `None`
+    /// until [`Runs::with_provisioner`] names it.
+    provisioner: Option<Vec<String>>,
 }
 
 impl Runs {
@@ -515,7 +518,22 @@ impl Runs {
             port_range: DEFAULT_PORT_RANGE,
             lock_wait: LOCK_WAIT,
             caller: CallerEnvironment::default(),
+            provisioner: None,
         }
+    }
+
+    /// Returns these run files with `program`, followed by the words of
+    /// `leading`, as the command of the app `mxv-provision`, which creates
+    /// the resources of a workspace's services, such as mxv itself and
+    /// `phase provision`. The command receives the resources as one more
+    /// argument. `up` cannot start a manifest with services until the
+    /// command is named.
+    #[must_use]
+    pub fn with_provisioner(mut self, program: &Path, leading: &[&str]) -> Self {
+        let mut command = vec![program.to_string_lossy().into_owned()];
+        command.extend(leading.iter().map(|word| (*word).to_owned()));
+        self.provisioner = Some(command);
+        self
     }
 
     /// Returns these run files with `program`, followed by the words of
@@ -1349,6 +1367,9 @@ impl Runs {
         avoid: &BTreeSet<u16>,
         held: bool,
     ) -> Result<(), Error> {
+        // The ledger holds the manifest's ports and the port of each
+        // backend of its services.
+        let ledger = manifest.ledger_ports();
         // A port that the manifest no longer names stays while a process
         // that received it still runs, so the old listener keeps its port
         // until `down`.
@@ -1366,13 +1387,9 @@ impl Runs {
         let before = workspace.ports.len();
         workspace
             .ports
-            .retain(|port, number| manifest.ports.contains(port) || live.contains(number));
+            .retain(|port, number| ledger.contains(port) || live.contains(number));
         let dropped = workspace.ports.len() != before;
-        if manifest
-            .ports
-            .iter()
-            .all(|port| workspace.ports.contains_key(port))
-        {
+        if ledger.iter().all(|port| workspace.ports.contains_key(port)) {
             return if dropped {
                 store.update(workspace)
             } else {
@@ -1389,7 +1406,7 @@ impl Runs {
             .collect();
         reserved.extend(workspace.ports.values().copied());
         reserved.extend(avoid);
-        for port in &manifest.ports {
+        for port in &ledger {
             if !workspace.ports.contains_key(port) {
                 let number = ports::allocate(&self.port_range, &reserved)?;
                 reserved.insert(number);
@@ -1417,11 +1434,12 @@ impl Runs {
         manifest: &Manifest,
         names: &[String],
     ) -> Result<Result<(), String>, Error> {
-        if let Some(unknown) = names.iter().find(|name| !manifest.ports.contains(name)) {
+        let ledger = manifest.ledger_ports();
+        if let Some(unknown) = names.iter().find(|name| !ledger.contains(name)) {
             return Ok(Err(unknown.clone()));
         }
         let mut old = BTreeSet::new();
-        for port in &manifest.ports {
+        for port in &ledger {
             if (names.is_empty() || names.contains(port))
                 && let Some(number) = workspace.ports.remove(port)
             {

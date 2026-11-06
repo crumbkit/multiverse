@@ -943,31 +943,6 @@ fn an_unknown_key_in_the_manifest_fails_with_the_key_and_its_line() {
 }
 
 #[test]
-fn up_refuses_a_manifest_that_declares_a_service_and_show_lists_its_variables() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[service.mail]\nkind = \"s3\"\nbuckets = [\"inbox-mail\"]\nenv = { MAIL_BUCKET = \"{bucket.inbox-mail}\" }\n\n[processes.a]\nargv = [\"true\"]\nneeds = [\"mail\"]\n",
-    );
-    let (exit, document) = setup.json(&["up", "-w", "triage"]);
-    assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::manifest::unrunnable");
-    let message = document["message"].as_str().unwrap();
-    assert!(
-        message.contains(
-            "the manifest declares the service `mail`, and this mxv cannot run services yet"
-        ),
-        "{message}"
-    );
-    let (exit, shown) = setup.json(&["show", "triage", "--long"]);
-    assert_eq!(exit, 0, "{shown}");
-    let mail = &shown["data"][0]["services"]["mail"];
-    assert_eq!(mail["MAIL_BUCKET"], "inbox-mail");
-    assert_eq!(mail["AWS_ENDPOINT_URL_S3"], "http://127.0.0.1:<port>");
-    assert_eq!(mail["AWS_ACCESS_KEY_ID"], "test");
-}
-
-#[test]
 fn a_reserved_section_in_the_manifest_fails_with_the_reserved_code() {
     let setup = Setup::new();
     setup.workspace("triage", "[secrets.db]\nsource = \"file\"\n");
@@ -1431,7 +1406,9 @@ fn up_warns_about_a_misspelt_table_and_a_manifest_that_declares_nothing() {
         "{errors}"
     );
     assert!(
-        errors.contains("declares no processes and no containers, so mxv started nothing"),
+        errors.contains(
+            "declares no processes, no containers and no services, so mxv started nothing"
+        ),
         "{errors}"
     );
     let (exit, status) = setup.json(&["status", "-w", "triage"]);
