@@ -219,7 +219,7 @@ impl Host for RunHost<'_> {
         };
         let store = self
             .records
-            .ok_or_else(|| no_id("mxv has no store of workspace records here"))?;
+            .ok_or_else(|| no_id("it has no store of workspace records here"))?;
         let mut record = store
             .read(workspace)?
             .ok_or_else(|| no_id("the workspace has no record"))?;

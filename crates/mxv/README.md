@@ -597,10 +597,10 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   stops it and fails with `mxv::process::not_ready`. When the readiness
   port answers and a process outside the process's group holds it, `up`
   stops the process and fails with `mxv::process::foreign_listener` and
-  that program's process id. A failed `up` names the process's log and
-  quotes none of it, because a process may print a secret; `mxv logs`
-  prints it. A failed `up` stops the processes it started before the
-  failure. `up` also
+  that program's process id. A failed `up` quotes none of the process's
+  log, because a process may print a secret. The failure's `log` field
+  holds the log's path, and `mxv logs` prints the log. A failed `up` stops
+  the processes it started before the failure. `up` also
   drops the ports of names that the manifest no longer declares, once no
   process of the workspace runs, so a port that the manifest renames stays
   with its old listener until `down`.

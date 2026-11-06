@@ -405,6 +405,7 @@ fn a_process_that_misses_its_readiness_timeout_fails_up_and_is_stopped() {
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::process::not_ready");
+    assert!(!document.to_string().contains("starting"), "{document}");
     assert_eq!(
         setup.states("triage"),
         [("server".to_owned(), "stopped".to_owned())]
@@ -1316,6 +1317,7 @@ fn a_worker_that_writes_no_matching_log_line_fails_up_as_not_ready_with_the_patt
     assert_eq!(document["code"], "mxv::process::not_ready");
     assert_eq!(document["fields"]["pattern"], "^worker ready");
     assert_eq!(document["fields"]["port"], Value::Null);
+    assert!(!document.to_string().contains("starting"), "{document}");
     assert_eq!(
         setup.states("triage"),
         [("worker".to_owned(), "stopped".to_owned())]
