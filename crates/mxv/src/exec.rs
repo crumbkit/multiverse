@@ -96,7 +96,7 @@ impl Failure for ExecFailure {
                     .value("processes", process),
             ),
             Self::Unstartable { process, .. } => Recovery::Hint(format!(
-                "check that the command's program exists where {process} runs, such as on its PATH or in its container's image, and run the command again"
+                "check that the command's program exists on the PATH of {process}, or give its full path, and run the command again"
             )),
             Self::SandboxedTerminal { workspace, process } => Recovery::Hint(format!(
                 "run the command with no terminal on its standard input, output and error, such as `mxv exec -w {workspace} {process} -- COMMAND </dev/null 2>&1 | cat`, or run it in the context of a process whose manifest gives it no permissions table"
@@ -182,13 +182,6 @@ pub(crate) fn ended(
             reason,
         }),
         ExecEnd::NeedsTerminal => Err(ExecFailure::SandboxedTerminal { workspace, process }),
-        // The library marks the outcome non-exhaustive, so an outcome that a
-        // later version adds reads as a command that could not start.
-        _ => Err(ExecFailure::Unstartable {
-            workspace,
-            process,
-            reason: "phase reported an outcome that this mxv does not know".to_owned(),
-        }),
     }
 }
 
@@ -230,7 +223,12 @@ fn fail<O: std::io::Write, W: std::io::Write>(
 /// context, and returns the command's exit status and whether mxv caught
 /// `SIGINT`, `SIGHUP` or `SIGQUIT` while it ran.
 fn run(environment: &Environment, args: &ExecArgs) -> Result<(ExitStatus, bool), crumbkit::Error> {
-    let context = processes::context(environment, args.workspace.as_ref(), &[])?;
+    let mut context = processes::context(environment, args.workspace.as_ref(), &[])?;
+    // `up`, `down` and `restart` hold mxv's lock for their whole run. exec
+    // takes it and lets it go at once, so it waits for them here, where
+    // Ctrl-C still ends mxv, and builds the plan from the ports that they
+    // stored.
+    drop(context.lock()?);
     let manifest = processes::required_manifest(&context.workspace)?;
     let workspace = context.workspace.name.to_string();
     let target = context
@@ -286,9 +284,10 @@ fn run(environment: &Environment, args: &ExecArgs) -> Result<(ExitStatus, bool),
 /// not reach, so mxv sets the cancel flag and phase stops the command's
 /// process group.
 ///
-/// The usage log's thread still ends mxv on `SIGTERM`, so a sandboxed
-/// command outlives an mxv that something sent `SIGTERM`. A `SIGTERM`
-/// rule in crumbkit's usage log like its `SIGINT` rule would close this.
+/// The usage log's thread still ends mxv on `SIGTERM`, and nothing passes
+/// that signal on, so the command outlives an mxv that something sent
+/// `SIGTERM` alone. A `SIGTERM` rule in crumbkit's usage log like its
+/// `SIGINT` rule would close this.
 ///
 /// A container's command gets a terminal only when mxv's standard input
 /// and output are both terminals, so piped output carries no terminal
@@ -298,8 +297,10 @@ fn run(environment: &Environment, args: &ExecArgs) -> Result<(ExitStatus, bool),
 /// signals while it ran.
 fn hand_over(exec: Exec<'_>, command: Vec<String>) -> Result<(ExecEnd, bool), multiverse::Error> {
     let cancel = Cancel::new();
-    crumbkit::events::handed_over();
+    // mxv's handlers go in before crumbkit stops ending mxv on `SIGINT`,
+    // so no signal falls between the two.
     let caught = catch_interrupts(exec.sandboxed().then(|| cancel.clone()));
+    crumbkit::events::handed_over();
     let terminal = crate::stdin_is_terminal() && crate::stdout_is_terminal();
     let end = exec.run(command, terminal, &cancel)?;
     Ok((end, caught.load(Ordering::SeqCst)))
@@ -315,12 +316,15 @@ fn catch_interrupts(cancel: Option<Cancel>) -> Arc<AtomicBool> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
     use signal_hook::iterator::Signals;
     let caught = Arc::new(AtomicBool::new(false));
+    // The cancelling handler goes in first, so a signal that sets the flag
+    // also cancels a sandboxed command.
+    let signals = Signals::new([SIGINT, SIGHUP, SIGQUIT]);
     for signal in [SIGINT, SIGHUP, SIGQUIT] {
         // A flag that cannot be registered leaves the run counted as
         // uninterrupted in the usage log, and changes nothing else.
         drop(signal_hook::flag::register(signal, Arc::clone(&caught)));
     }
-    let Ok(mut signals) = Signals::new([SIGINT, SIGHUP, SIGQUIT]) else {
+    let Ok(mut signals) = signals else {
         return caught;
     };
     // The thread ends with mxv, which ends once the command has.

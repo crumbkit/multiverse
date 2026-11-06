@@ -83,7 +83,6 @@ impl fmt::Debug for Exec<'_> {
 
 /// How a command that [`Exec::run`] ran, or tried to run, ended.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum ExecEnd {
     /// The command ran and ended with this status: its exit code, or the
     /// signal that ended it.
@@ -135,11 +134,9 @@ impl Runs {
         manifest: &Manifest,
         unit: &str,
     ) -> Result<ExecTarget<'a>, Error> {
-        if self.has_legacy(&workspace.name)? {
-            let processes = self.legacy_running(workspace)?;
-            if !processes.is_empty() {
-                return Ok(ExecTarget::LegacyRunning { processes });
-            }
+        let processes = self.legacy_live(workspace)?;
+        if !processes.is_empty() {
+            return Ok(ExecTarget::LegacyRunning { processes });
         }
         let declared = manifest.unit(unit).is_some();
         // A workspace without a stable id has never run under phase.

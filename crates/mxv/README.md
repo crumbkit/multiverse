@@ -657,13 +657,15 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   - A sandboxed command runs in a session of its own and cannot have the
     terminal. mxv refuses it with `mxv::exec::sandboxed_terminal` while
     its standard input, output or error is a terminal. On Ctrl-C, and when
-    the terminal closes, mxv stops the command's process group. An mxv
-    that something sends `SIGTERM` ends at once, and the sandboxed command
-    keeps running until it ends by itself. It exits with 78 when its
-    sandbox cannot be applied.
+    the terminal closes, mxv stops the command's process group. It exits
+    with 78 when its sandbox cannot be applied.
+  - An mxv that something sends `SIGTERM` alone ends at once, and the
+    command, of any kind, keeps running until it ends by itself.
   - A process that is not running fails with `mxv::process::not_running`,
-    whose recovery starts it with `mxv up`. A program that cannot start
-    fails with `mxv::exec::unstartable`. `--json` fails with
+    whose recovery starts it with `mxv up`. A host program that cannot
+    start fails with `mxv::exec::unstartable` and exit code 1. A
+    container's program that does not exist exits with docker's 127, which
+    mxv passes on. `--json` fails with
     `mxv::cli::usage`, because the output is the command's own.
 - `mxv ports reset [-w WORKSPACE] [PORT]...` gives the named ports, or
   every port, new host ports that differ from the old ones. It refuses with

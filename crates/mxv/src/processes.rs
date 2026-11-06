@@ -77,13 +77,13 @@ pub(crate) const PORTS_RESET: Document<Vec<PortRow>> = Document::new(
 /// record and the run files of its processes.
 pub(crate) struct Context {
     /// The store of the workspace records.
-    pub(crate) store: Store,
+    store: Store,
     /// The run files of every workspace's processes.
     pub(crate) runs: Runs,
     /// The workspace.
     pub(crate) workspace: Workspace,
     /// The processes that the command line names after the workspace.
-    pub(crate) processes: Vec<String>,
+    processes: Vec<String>,
 }
 
 impl Context {
@@ -91,7 +91,7 @@ impl Context {
     /// while they start or stop its processes, then reads the workspace's
     /// record again, so the ports are the ones that a command which held
     /// the lock before stored.
-    fn lock(&mut self) -> Result<Lock, MxvFailure> {
+    pub(crate) fn lock(&mut self) -> Result<Lock, MxvFailure> {
         let lock = self.runs.lock(&self.workspace.name)?;
         if let Some(fresh) = self.store.read(&self.workspace.name)? {
             self.workspace = fresh;
