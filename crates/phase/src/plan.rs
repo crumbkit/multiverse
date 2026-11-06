@@ -524,8 +524,10 @@ impl ProcessPlan {
 /// whose permissions grew.
 ///
 /// Until phase runs the allowlist proxy that reaches external hosts, an app
-/// may connect only to the apps it depends on, over loopback, and a plan
-/// whose `connect` names anything else is refused.
+/// may connect over loopback only to the ports of the apps its `connect`
+/// names. Each of those must be an app it depends on, and a plan whose
+/// `connect` names anything else is refused. A dependency that `connect`
+/// leaves out stays unreachable.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -541,6 +543,7 @@ pub struct Permissions {
     #[serde(default)]
     pub listen: BTreeSet<PortName>,
     /// The apps, by name, and the external hosts the app may connect to.
+    /// The sandbox opens the loopback ports of these apps and of no other.
     #[serde(default)]
     pub connect: BTreeSet<String>,
     /// The names of the app's environment variables that are secrets.
