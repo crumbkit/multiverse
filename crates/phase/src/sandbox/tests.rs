@@ -1279,31 +1279,30 @@ fn a_sandboxed_command_gets_the_sandbox_temporary_directory_and_reads_no_global_
 
 #[cfg(target_os = "macos")]
 #[test]
-fn a_sandboxed_command_on_macos_reads_the_systems_root_certificates_unless_its_environment_names_a_bundle()
+fn a_sandboxed_command_on_macos_gets_the_system_root_bundle_unless_its_environment_names_its_own_roots()
  {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test reads the environment it sets and never starts the command"
-    )]
-    let mut given = std::process::Command::new("true");
-    given.env("SSL_CERT_FILE", "/checkout/roots.pem");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test reads the environment it sets and never starts the command"
-    )]
-    let mut plain = std::process::Command::new("true");
-
-    super::sandboxed_environment(&mut given, std::path::Path::new("/sandbox/tmp"));
-    super::sandboxed_environment(&mut plain, std::path::Path::new("/sandbox/tmp"));
-
-    let roots = |command: &std::process::Command| {
-        environment(command)
+    let roots_of = |given: Option<(&str, &str)>| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test reads the environment it sets and never starts the command"
+        )]
+        let mut command = std::process::Command::new("true");
+        if let Some((name, value)) = given {
+            command.env(name, value);
+        }
+        super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+        environment(&command)
             .into_iter()
             .find(|(name, _)| name == "SSL_CERT_FILE")
             .and_then(|(_, value)| value)
     };
-    assert_eq!(roots(&given).as_deref(), Some("/checkout/roots.pem"));
-    assert_eq!(roots(&plain).as_deref(), Some("/etc/ssl/cert.pem"));
+
+    assert_eq!(roots_of(None).as_deref(), Some("/etc/ssl/cert.pem"));
+    assert_eq!(
+        roots_of(Some(("SSL_CERT_FILE", "/checkout/roots.pem"))).as_deref(),
+        Some("/checkout/roots.pem")
+    );
+    assert_eq!(roots_of(Some(("SSL_CERT_DIR", "/checkout/roots"))), None);
 }
 
 #[test]
@@ -1857,7 +1856,9 @@ mod seatbelt {
         command
     }
 
-    /// The variable that makes [`native_roots_probe`] load the trusted
+    /// The variable that makes
+    /// [`the_native_roots_probe_prints_the_roots_it_loads_only_when_a_test_starts_it`]
+    /// load the trusted
     /// roots, which it does only when a test starts it under the sandbox.
     const NATIVE_ROOTS_PROBE: &str = "PHASE_TEST_NATIVE_ROOTS_PROBE";
 
@@ -1867,7 +1868,7 @@ mod seatbelt {
     /// starts this test binary under the sandbox. Otherwise it does
     /// nothing.
     #[test]
-    fn native_roots_probe() {
+    fn the_native_roots_probe_prints_the_roots_it_loads_only_when_a_test_starts_it() {
         #[expect(
             clippy::disallowed_methods,
             reason = "the probe runs only when the test that starts it sets the variable"
@@ -1889,7 +1890,7 @@ mod seatbelt {
                 .into_owned(),
             "--exact".to_owned(),
             "--nocapture".to_owned(),
-            "sandbox::tests::seatbelt::native_roots_probe".to_owned(),
+            "sandbox::tests::seatbelt::the_native_roots_probe_prints_the_roots_it_loads_only_when_a_test_starts_it".to_owned(),
         ];
         let mut command = real_toolchains_command(&fixture, &probe);
         command.env(NATIVE_ROOTS_PROBE, "1");

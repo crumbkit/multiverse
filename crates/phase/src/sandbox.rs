@@ -136,11 +136,21 @@ impl fmt::Display for Sandboxing {
 /// denies, and OpenSSL reads it as its default bundle. Without it
 /// rustls-native-certs found no roots under the sandbox, and the AWS SDK
 /// panicked at startup. The file is a system file that the sandbox may
-/// already read, so the variable grants nothing.
+/// already read, so the variable grants nothing. An app that sets
+/// `SSL_CERT_DIR` gets no `SSL_CERT_FILE`, because both readers trust the
+/// roots of the two together, and the app's directory would then no
+/// longer limit what it trusts.
+///
+/// Each entry is the variable, its value, and the variables any of which
+/// the app's environment sets to keep phase from setting it.
 #[cfg(target_os = "macos")]
-pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
-    ("SSL_CERT_FILE", "/etc/ssl/cert.pem"),
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"]),
+    (
+        "SSL_CERT_FILE",
+        "/etc/ssl/cert.pem",
+        &["SSL_CERT_FILE", "SSL_CERT_DIR"],
+    ),
 ];
 
 /// The variables that every sandboxed process receives on Linux unless
@@ -148,21 +158,25 @@ pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[
 /// reads its trusted roots from `/etc`, which the sandbox may read, so it
 /// needs no `SSL_CERT_FILE`.
 #[cfg(not(target_os = "macos"))]
-pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[("GIT_CONFIG_GLOBAL", "/dev/null")];
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] =
+    &[("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"])];
 
 /// Sets on `command` the environment of a process that runs under a
 /// sandbox whose temporary directory is `tmp`. `TMPDIR` names `tmp` and
 /// replaces any other value, because the sandbox lets the process write no
 /// other temporary directory. Each variable of [`SANDBOX_ENVIRONMENT`] is
-/// set only when `command` does not set it already, so a value from the
-/// app's own environment wins. Call it after the command's environment is
-/// set.
+/// set only when `command` sets none of the variables that its entry
+/// names, so a value from the app's own environment wins. Call it after
+/// the command's environment is set.
 pub(crate) fn sandboxed_environment(command: &mut Command, tmp: &Path) {
     command.env("TMPDIR", tmp);
-    for (name, value) in SANDBOX_ENVIRONMENT {
-        let set = command
-            .get_envs()
-            .any(|(key, given)| key == std::ffi::OsStr::new(name) && given.is_some());
+    for (name, value, unless) in SANDBOX_ENVIRONMENT {
+        let set = command.get_envs().any(|(key, given)| {
+            given.is_some()
+                && unless
+                    .iter()
+                    .any(|other| key == std::ffi::OsStr::new(other))
+        });
         if !set {
             command.env(name, value);
         }

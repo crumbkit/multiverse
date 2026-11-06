@@ -1442,9 +1442,14 @@ other roots sets `SSL_CERT_FILE` in the app's environment to a bundle
 that the app may read, such as one in its checkout. OpenSSL and the
 programs that link it, such as Python's `ssl` module and Ruby, also read
 `SSL_CERT_FILE` as their default bundle, so under the sandbox they trust
-the same system roots in place of the bundle they were built with. A
-Homebrew OpenSSL's own `cert.pem` already holds the system's roots, so
-this changes little for them. Linux keeps its roots in `/etc`, which the
+the same system roots in place of the bundle they were built with.
+Homebrew builds its OpenSSL's `cert.pem` from the system's roots and the
+roots an administrator trusted in `/Library/Keychains/System.keychain`,
+so a Homebrew Python or Ruby under the sandbox also loses those
+administrator roots, and the same remedy applies. An app that sets
+`SSL_CERT_DIR` gets no `SSL_CERT_FILE`, because rustls-native-certs and
+OpenSSL trust the roots of both together, and the system bundle would
+widen what the app's directory allows. Linux keeps its roots in `/etc`, which the
 sandbox may read, and phase sets no `SSL_CERT_FILE` there.
 
 The sandbox lets an app read, but never write, the launcher program, each
