@@ -223,6 +223,11 @@ pub struct Container {
     /// volume, which belongs to the workspace, and each value is the
     /// absolute path it mounts at inside the container.
     pub volumes: BTreeMap<String, String>,
+    /// The owner that the root directory of each named volume gets, as
+    /// phase's numeric `uid` or `uid:gid`, or `keep` to leave each volume
+    /// as it is. `None` leaves the choice to phase, which gives the
+    /// volumes to the user that the container runs as.
+    pub owner: Option<String>,
     /// The check that tells `mxv up` the container is ready, or `None`
     /// when it counts as started once it has run for a short grace period.
     /// A container that publishes one port and has no `ready` table is
@@ -725,6 +730,8 @@ struct RawContainer {
     /// The volumes, from volume name to mount path.
     #[serde(default)]
     volumes: BTreeMap<Spanned<String>, Spanned<String>>,
+    /// The owner of the volumes' root directories.
+    owner: Option<Spanned<String>>,
     /// The readiness check.
     ready: Option<RawReady>,
     /// The dependencies.
@@ -1949,7 +1956,7 @@ fn check_permissions(
             return Err(errors.invalid(
                 &unit.span(),
                 format!(
-                    "the permissions of `{process}` let it connect to `{name}`, which the manifest does not declare as a process or a container; a sandboxed process cannot reach an external host until phase's allowlist proxy is built"
+                    "the permissions of `{process}` let it connect to `{name}`, which the manifest does not declare as a unit; a sandboxed process cannot reach an external host until phase's allowlist proxy is built"
                 ),
             ));
         }
@@ -2281,6 +2288,37 @@ fn is_image(image: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "._-/:@".contains(character))
 }
 
+/// Returns the `owner` key of the container `container`, which phase must
+/// accept and which needs a volume to apply to.
+fn container_owner(
+    errors: &Errors<'_>,
+    container: &str,
+    owner: Option<&Spanned<String>>,
+    volumes: &BTreeMap<String, String>,
+) -> Result<Option<String>, ManifestError> {
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    if volumes.is_empty() {
+        return Err(errors.invalid(
+            &owner.span(),
+            format!(
+                "the container `{container}` sets `owner` and mounts no volume, and `owner` sets only the owner of a container's volumes"
+            ),
+        ));
+    }
+    if !phase::is_volume_owner(owner.get_ref()) {
+        return Err(errors.invalid(
+            &owner.span(),
+            format!(
+                "the owner `{}` of `{container}` is not `keep` or a numeric uid or uid:gid such as 999:999, whose ids are below 4294967295",
+                owner.get_ref()
+            ),
+        ));
+    }
+    Ok(Some(owner.get_ref().clone()))
+}
+
 /// Checks one raw container against the declared `ports` and the `names`
 /// of processes and containers, and returns it.
 fn check_container(
@@ -2371,6 +2409,7 @@ fn check_container(
         }
         volumes.insert(volume.get_ref().clone(), mount.clone());
     }
+    let owner = container_owner(errors, container, raw.owner.as_ref(), &volumes)?;
     let only = match published.as_slice() {
         [one] => Some(one.port.clone()),
         _ => None,
@@ -2433,6 +2472,7 @@ fn check_container(
         env,
         ports: published,
         volumes,
+        owner,
         ready,
         depends_on,
     })

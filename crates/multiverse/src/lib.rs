@@ -36,7 +36,6 @@ mod process;
 mod provision;
 mod record;
 mod redacted;
-mod run_files;
 mod runs;
 mod service;
 mod store;
@@ -44,7 +43,6 @@ mod template;
 mod workspaces;
 
 pub use crate::backend::{Backend, Changes, Head, INITIALIZING, Listed, Repository};
-pub use crate::clock::FOLLOW_INTERVAL;
 pub use crate::clone::{Cloned, UNSUPPORTED};
 pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};
 pub use crate::disposable::{
@@ -70,10 +68,9 @@ pub use crate::record::{
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
-    DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Follower, Footprint, KILL_WAIT, Kind,
-    LogOutput, MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState,
-    ProcessStatus, RenamedVolume, Runs, STOP_GRACE, Toucher, Unstoppable, UpOutcome, Volumes,
-    Waited, tail,
+    DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Footprint, Kind, LogOutput, ProcessNote,
+    ProcessState, ProcessStatus, RenamedVolume, Runs, STOP_GRACE, Toucher, Unstoppable, UpOutcome,
+    Volumes, Waited,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,
@@ -90,6 +87,5 @@ pub use crate::workspaces::{
     NewOutcome, Removal, RemovalOutcome, RemovalPlan, Repo, Workspaces, folder_name,
 };
 pub use phase;
-pub use phase::container::RUN_VERSION;
 #[cfg(test)]
 mod testing;

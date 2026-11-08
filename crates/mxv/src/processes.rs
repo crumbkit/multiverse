@@ -22,7 +22,7 @@ use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
-use crate::run_failures::{NotMoved, RunFailure};
+use crate::run_failures::RunFailure;
 use crate::verbs;
 
 /// The document that `mxv up` prints.
@@ -54,9 +54,9 @@ pub(crate) const STATUS: Document<Listing<ProcessRow, StatusSummary>> = Document
     "mxv",
     "status",
     1,
-    "Each unit of the workspace's manifest in start order, then each other unit that has run files, with its state, and the manifest's error when it does not parse.",
+    "Each unit of the workspace's manifest in start order, then each other unit that its run record holds, with its state, and the manifest's error when it does not parse.",
 )
-.when_empty("the workspace has no manifest that declares units, and no unit has run files");
+.when_empty("the workspace has no manifest that declares units, and its run record holds no unit");
 
 /// The document that `mxv logs` prints.
 pub(crate) const LOGS: Document<Stream<LogLine>> = Document::new(
@@ -334,28 +334,6 @@ fn start(
             not_started,
         }
         .into()),
-        UpOutcome::LegacyRunning { processes } => Err(RunFailure::LegacyRunning {
-            workspace,
-            processes,
-        }
-        .into()),
-        UpOutcome::VolumeNotMoved {
-            container,
-            volume,
-            legacy,
-            phase,
-            labels,
-        } => Err(RunFailure::VolumeNotMoved {
-            workspace,
-            moved: Box::new(NotMoved {
-                container,
-                volume,
-                legacy,
-                phase,
-                labels,
-            }),
-        }
-        .into()),
         UpOutcome::Unrunnable(unrunnable) => Err(RunFailure::Unrunnable {
             workspace,
             unit: unrunnable.unit,
@@ -528,20 +506,6 @@ pub(crate) fn restart(
         .into());
     }
     let lock = context.lock()?;
-    // A process that mxv started before phase ran the workspace's apps
-    // keeps running until `mxv down` stops it, so `restart` stops nothing
-    // and starts nothing meanwhile.
-    let legacy = context
-        .runs
-        .legacy_live(&context.workspace)
-        .map_err(MxvFailure::from)?;
-    if !legacy.is_empty() {
-        return Err(RunFailure::LegacyRunning {
-            workspace: context.workspace.name.to_string(),
-            processes: legacy,
-        }
-        .into());
-    }
     stop_every(&context, &lock, Some(&manifest))?;
     start(&mut context, &lock, &args.processes)
 }
@@ -590,21 +554,9 @@ pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -
             .runs
             .keep_touched(&context.workspace.name, TOUCH_EVERY)
     });
-    // A workspace that an earlier mxv started reads its logs from its run
-    // files, so a manifest that this mxv refuses, and that the earlier one
-    // accepted, does not keep them from being read, as for `down` and
-    // `status`.
-    let legacy = match context.runs.has_legacy(&context.workspace.name) {
-        Ok(legacy) => legacy,
-        Err(error) => return streaming.end(Err(MxvFailure::from(error))),
-    };
-    let manifest = if legacy {
-        lenient_manifest(&context.workspace)
-    } else {
-        match manifest(&context.workspace) {
-            Ok(manifest) => manifest,
-            Err(error) => return streaming.end(Err(crumbkit::Error::from(error))),
-        }
+    let manifest = match manifest(&context.workspace) {
+        Ok(manifest) => manifest,
+        Err(error) => return streaming.end(Err(crumbkit::Error::from(error))),
     };
     let mut pass = |line: String| {
         if streaming.item(&LogLine::new(line)).is_break() {

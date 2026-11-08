@@ -263,7 +263,7 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.ports` | Variables that receive a host port, each naming a port of `ports`. |
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
-| `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
+| `processes.<name>.depends_on` | Units that start, and are ready, before this one. A cycle fails. |
 | `processes.<name>.permissions` | Runs the process under phase's sandbox, with the grants of `write`, `listen` and `connect`. An empty table runs it sandboxed with no grants, and a process without the table runs unsandboxed. [Sandboxed processes](#sandboxed-processes) describes it. |
 | `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself, a path inside `.git` in any case, and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
 | `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. A port that another process listens on or a container publishes fails with `mxv::manifest::invalid` and its line. |
@@ -334,23 +334,21 @@ depends_on = ["dynamodb", "localstack"]
 | `containers.<name>.env` | Variables that the container receives. |
 | `containers.<name>.ports` | The TCP ports that mxv publishes: each key is a container port from 1 to 65535, and each value names a port of `ports`. A container that publishes a port is that port's listener, and a port has at most one listener, process or container. |
 | `containers.<name>.volumes` | Named volumes: each key names a volume, and each value is the absolute path it mounts at inside the container. mxv mounts no directory of the host. |
+| `containers.<name>.owner` | The owner that `mxv up` gives the root directory of each of the container's volumes: a numeric `uid` or `uid:gid`, such as `"999:999"`, or `"keep"` to leave each volume as it is. It is optional. Without it, mxv gives the volumes to the user that the container runs as, and leaves them alone when that user is root. Use it for an image that names a `USER` and has no `id` program, or with `"keep"` on a machine that cannot pull the helper image. A name, the id 4294967295 and an `owner` on a container with no `volumes` are invalid. A changed `owner` replaces the container on the next `up`. |
 | `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. A container's readiness check waits only for a port, so `log` is invalid here, and a container's `env` values hold no port placeholders. |
-| `containers.<name>.depends_on` | Processes or containers that start, and are ready, before this one. |
+| `containers.<name>.depends_on` | Units that start, and are ready, before this one. |
 
 A container takes no `permissions`, because Docker runs it and phase's
 sandbox holds only host processes. `permissions` under `[containers.*]`
 fails with `mxv::manifest::invalid` and its line.
 
-Units share one set of names, and either may depend on
-the other. A process receives a container's host port through its own
+Units share one set of names, and any unit may depend on
+any other. A process receives a container's host port through its own
 `ports`, as `api` receives `DYNAMODB_PORT` above.
 
 mxv runs a workspace's app with phase, the library in `crates/phase`.
-Each process and each container of the manifest is one phase app, named
-after the unit, and each app has one process, named `main`. A unit's
-`depends_on` becomes its app's dependencies. A unit name must therefore be
-a name phase accepts: 1 to 64 lowercase letters, digits, `-` and `_`,
-starting with a letter or a digit. A manifest with any other unit name fails
+A unit name must be a name phase accepts: 1 to 64 lowercase letters,
+digits, `-` and `_`, starting with a letter or a digit. A manifest with any other unit name fails
 with `mxv::manifest::unit_name`, and one that breaks another of phase's plan
 rules fails with `mxv::manifest::unrunnable`, in both cases before anything
 starts.
@@ -459,28 +457,6 @@ ports a process may listen on but not which addresses, so the process can
 listen on each of its ports on every address of the machine. It is null for a
 container. A process that phase started is shown as its run record
 recorded it.
-
-#### Workspaces that an earlier mxv started
-
-An earlier mxv ran processes and containers itself and kept run files under
-`$XDG_STATE_HOME/mxv/runs/<workspace>`. mxv still reads those files, so
-that a workspace started before the change keeps working until it is
-stopped:
-
-- `mxv status` and `mxv logs` report the processes and containers that the
-  run files name, as the earlier mxv did.
-- `mxv down` stops them under the earlier mxv's rules, and deletes the run
-  files once nothing they name runs.
-- `mxv up` and `mxv restart` refuse with `mxv::workspace::legacy_running`
-  while anything that the run files name may still run, and the recovery
-  runs `mxv down -w <workspace>`. When everything they name has ended,
-  `up` deletes the run files and starts the workspace under phase.
-- A named volume that the earlier mxv created, `mxv-<id8>-<workspace>.<volume>`,
-  is not taken over. When it exists and phase's volume of that name does
-  not, `up` starts nothing and fails with `mxv::volume::not_moved`. Its
-  hint gives the commands that create phase's volume with the labels phase
-  gives it and copy the data into it, or that delete the old volume when
-  its data is not needed.
 
 #### The environment of a host process
 
@@ -647,7 +623,7 @@ words name units: `mxv up [-w WORKSPACE] [UNIT]...`, `mxv down`,
   running, as after something killed the keeper or the machine
   restarted, both are null and `reason` says why. An exited process
   whose `code` is anything but 0, including null, makes `status` exit with
-  code 1. `group_alive` is null for every process that phase runs.
+  code 1.
   `ready` is true for a running process once its readiness check has
   passed since it last started, or once a process without one has outlasted
   its start grace, and false while it runs and has not, such as after its
@@ -706,31 +682,7 @@ record, `$XDG_STATE_HOME/mxv/phase/runs/<workspace id>.json`, and its logs in
 `$XDG_STATE_HOME/mxv/phase/logs/<workspace id>/<app>.<process>.log`. mxv
 runs each manifest process as a phase app with one process named `main`, so
 the log of a manifest process is `<process>.main.log` in that directory. A
-container has no such file, and `mxv logs` reads its log from Docker. The
-next two paragraphs describe how mxv handles a workspace that an older
-version started. That version kept the run files of each workspace's
-processes in `$XDG_STATE_HOME/mxv/runs/<name>/`, and mxv still reads them to
-report and stop what that version started: `<process>.json` with the process id
-and its start time, `<process>.log`, `<process>.log.1`, and
-`<process>.exit`, which holds the exit code once the process ends. Each
-process runs under `/bin/sh`, which waits for it and writes that code, so a
-crash is reported without a long-running mxv. The shell's redirection
-creates the exit file empty before `printf` writes the code, so mxv counts
-the file as written only once it ends in a line feed. The shell writes the
-file before it exits, so `status` reads the file once more after it finds
-the shell gone. A shell that something such as SIGKILL ended writes no
-file, and `status` then reports the process as exited with a null code and
-signal and a `reason` that says the shell ended without writing its code.
-
-For a workspace that an older mxv started, that version moved the previous
-log of a process to `<process>.log.1` at each `up`, which replaced the log
-before it, so a process kept at most two logs. No mxv process runs between
-commands, so mxv checks the size of those logs only when a command runs:
-`down`, `status` and `logs` copy a log that holds more than 32 MiB to
-`<process>.log.1` and empty it. The process keeps writing to the emptied
-log, and lines that it writes between the copy and the emptying are lost.
-Between two of those commands a log has no bound, so a process that writes
-a lot while nobody runs mxv can fill the disk.
+container has no such file, and `mxv logs` reads its log from Docker.
 
 `mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
 while processes run, hold an exclusive lock on
@@ -883,7 +835,7 @@ value is a secret, because the access keys are the literal `test`. A
 manifest that declares services and no process is valid, and `up` starts
 the backends and provisions the resources.
 
-The prefix `mxv-` belongs to mxv. A port, process or container whose name
+The prefix `mxv-` belongs to mxv. A port or unit whose name
 starts with `mxv-` fails with `mxv::manifest::invalid` and its line, and a
 checkout whose prefixed names would start with `mxv-` needs `--as`.
 
@@ -1168,8 +1120,7 @@ is never followed. It refuses, and changes nothing, in these cases:
 - The workspace's units run. The refusal is
   `mxv::workspace::running`, and `--force` stops them before it removes
   the workspace.
-- The workspace has docker volumes: named volumes, or anonymous volumes
-  of its containers' images. A volume may hold the only copy of a
+- The workspace has named docker volumes. A volume may hold the only copy of a
   database, and docker cannot tell cheaply whether a volume holds data, so
   mxv treats every volume as holding data. The refusal is
   `mxv::workspace::volumes`, which lists the volumes, and its hint repeats
@@ -1534,7 +1485,7 @@ A running workspace is idle when all of these hold:
 The idle age is `--idle`, or else the config file's `stop_idle`, or else 2
 hours. `--idle` refuses an age under 10 minutes, so a workspace that a
 person left for a few minutes is never stopped; `stop_idle` can set a
-shorter age, for tests. A workspace whose processes and containers all
+shorter age, for tests. A workspace whose units all
 stopped is not considered. mxv reads `.touched` first, and skips reading
 the checkouts' files of a workspace that an mxv command named within the
 idle age.

@@ -14,6 +14,69 @@ workspace may need to act on.
   In such a build an app that declares permissions runs unsandboxed, `exec`
   runs its command unsandboxed, the launcher refuses `--sandboxed`, and
   `status` gives the reason "phase was built without its sandbox feature".
+- `[containers.<name>] owner` in `mxv.toml` sets the owner of the
+  container's named volumes. Its value is a numeric `uid` or `uid:gid`, such
+  as `"999:999"`, or `"keep"`. mxv refuses a name, a malformed value, the id
+  4294967295 and an `owner` on a container that mounts no volume when it
+  reads the manifest. mxv-phase has a public `is_volume_owner` function that
+  says which values a plan accepts.
+
+### Removed
+
+- mxv no longer reads, stops or reports what a version from before phase
+  started. On each workspace that such a version started, run
+  `mxv down -w <WORKSPACE>` with that earlier mxv before you upgrade. After
+  the upgrade mxv ignores the run files under
+  `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/` and `mxv remove` deletes them, but
+  a process or container that still runs is no longer stopped or reported.
+  A process left running keeps its ports. When it holds the port that a
+  process declares as its `listen` port, `mxv up` fails with
+  `mxv::port::taken`. When it holds a port that the process only receives,
+  the new copy cannot bind it, and `mxv up` reports `mxv::process::exited`
+  or a readiness failure. A container left running keeps its published
+  ports, and `mxv up` fails with `mxv::port::taken`. Stop what is left by
+  hand.
+- A container whose data sits in a volume named
+  `mxv-<id8>-<WORKSPACE>.<volume>` starts on an empty volume, because
+  `mxv up` no longer checks for that name, and `mxv remove --delete-volumes`
+  no longer deletes it. To keep the data, follow these steps in order. Do
+  not create the new volume yourself, because `mxv up` refuses a volume
+  without the workspace's labels.
+  1. Run `mxv up -w <WORKSPACE>` and then `mxv down -w <WORKSPACE>`, which
+     create the new volume with its labels and leave no container using it.
+  2. Find the new volume's name, `phase-<hash>.<volume>`, with
+     `docker volume ls --filter label=mxv.workspace-id=<ID> --filter label=mxv.volume=<volume> --format '{{.Name}}'`.
+     `<ID>` is the `id` field of
+     `$XDG_STATE_HOME/mxv/workspaces/<WORKSPACE>.json`.
+  3. Empty the new volume, because the container may have initialised it:
+     `docker run --rm -v <NEW>:/to busybox:1.37.0 find /to -mindepth 1 -delete`.
+  4. Copy the old data:
+     `docker run --rm -v <OLD>:/from -v <NEW>:/to busybox:1.37.0 cp -a /from/. /to/`.
+  5. Run `mxv up -w <WORKSPACE>`. Delete the old volume with
+     `docker volume rm <OLD>` when you no longer need it.
+- An anonymous volume of a container's image that an earlier `mxv down`
+  kept stays in docker, and nothing names its workspace any more, because
+  `mxv remove` no longer lists it, refuses for it or deletes it, and it
+  deletes the `.volumes` file that held its name. If you are removing the
+  workspace and its data before you upgrade, run
+  `mxv remove --delete-volumes` with the earlier mxv. Otherwise, before
+  `mxv remove` deletes the file, and only when you no longer need its data,
+  run `docker volume rm` on each name in
+  `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/.volumes` that does not start with
+  `mxv-`. An image with a `VOLUME` path keeps its only copy of that data in
+  such a volume. That file also lists the workspace's named volumes, and a name
+  that starts with `mxv-` is one of them, so deleting it destroys the data
+  that the previous item keeps. This command prints only the anonymous
+  volumes' names:
+  `jq -r '.volumes[] | select(startswith("mxv-") | not)' <FILE>`. After
+  `mxv remove` has deleted the file,
+  `docker volume ls --filter label=com.docker.volume.anonymous --filter dangling=true`
+  lists every anonymous volume that no container uses, across all of
+  docker, so check each one before you delete it.
+- The failure codes `mxv::workspace::legacy_running` and
+  `mxv::volume::not_moved` and the `group_alive` field of the documents of
+  the unit verbs are gone. The field was null for every unit that phase
+  runs.
 
 ### Changed
 
@@ -21,8 +84,9 @@ workspace may need to act on.
   volume now gives the root directory of each such volume to that user,
   through a helper container. The helper runs busybox pinned by digest, so
   the machine needs that image or access to Docker Hub to pull it. Without
-  them `up` fails for that app before it removes any container. Set the
-  app's `container.owner` to `keep` to leave its volumes alone and run no
+  them `up` fails for that app before it removes any container. Set
+  `owner = "keep"` in the container's table of `mxv.toml`, or the app's
+  `container.owner` in a phase plan, to leave its volumes alone and run no
   helper.
 - A sandboxed process can connect over loopback only to the units that its
   `permissions.connect` names. Before this change the sandbox opened the

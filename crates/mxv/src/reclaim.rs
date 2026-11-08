@@ -144,9 +144,9 @@ pub(crate) fn parse_need(text: &str) -> Result<Need, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReclaimState {
-    /// The run stopped the workspace's processes and containers.
+    /// The run stopped the workspace's units.
     Stopped,
-    /// A dry run would stop the workspace's processes and containers.
+    /// A dry run would stop the workspace's units.
     WouldStop,
     /// The run deleted the workspace's disposable directories.
     Cleaned,

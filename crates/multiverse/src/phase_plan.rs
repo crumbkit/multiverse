@@ -619,6 +619,7 @@ fn container_app(
             .map(|published| published.port.as_str()),
     )?;
     plan.depends = depends(&container.depends_on)?;
+    plan.container.owner.clone_from(&container.owner);
     let mut main = ProcessPlan::new(
         main_process()?,
         container.command.clone().unwrap_or_default(),

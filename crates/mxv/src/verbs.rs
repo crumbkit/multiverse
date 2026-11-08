@@ -378,7 +378,7 @@ fn clone_into(
 
 /// Adds the checkout that `args` names to a workspace, or plans it on a
 /// dry run. It holds the workspace's lock, which `up` and `down` take, and
-/// refuses while the workspace's processes or containers run, because
+/// refuses while the workspace's units run, because
 /// adding a second checkout renames the first checkout's units and ports.
 pub(crate) fn add(
     output: &Output,
@@ -681,7 +681,7 @@ pub(crate) fn remove(
         if !found.is_empty() && !args.delete_volumes {
             return Err(RunFailure::Volumes {
                 workspace: name.to_string(),
-                volumes: found.names().to_vec(),
+                volumes: found.names(),
                 allow,
             }
             .into());
@@ -691,7 +691,7 @@ pub(crate) fn remove(
     }
     let names: Vec<String> = volumes
         .as_ref()
-        .map(|volumes| volumes.names().to_vec())
+        .map(|volumes| volumes.names())
         .unwrap_or_default();
     let plan = workspaces
         .plan_removal(&name, allow)

@@ -13,7 +13,6 @@ fn row(notes: &[ProcessNote]) -> ProcessRow {
         code: None,
         signal: None,
         reason: None,
-        group_alive: None,
         ports: Vec::new(),
         log: None,
         sandbox: None,

@@ -8,7 +8,7 @@ mxv/cd/v1                 output  document  The directory of the workspace or of
 mxv/up/v1                 output  document  The selected units and their dependencies, in the order they started, each running.
 mxv/down/v1               output  document  The units that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.
 mxv/restart/v1            output  document  The restarted units and their dependencies, in the order they started, each running.
-mxv/status/v1             output  document  Each unit of the workspace's manifest in start order, then each other unit that has run files, with its state, and the manifest's error when it does not parse.
+mxv/status/v1             output  document  Each unit of the workspace's manifest in start order, then each other unit that its run record holds, with its state, and the manifest's error when it does not parse.
 mxv/logs/v1               output  stream    The last lines of a unit's log, then with --follow each line that the unit writes.
 mxv/ports-reset/v1        output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
 mxv/remove/v1             output  document  What the run removed, deleted and kept, or would on a dry run.

@@ -393,39 +393,6 @@ pub(crate) fn touch_file(path: &Path) -> Result<(), Error> {
         .map_err(unwritable)
 }
 
-/// Copies the log at `log` to `older` and empties it when it holds more
-/// than `most` bytes. The process keeps writing to `log`, because it opened
-/// the file to append, so each later write lands at the new end. Lines that
-/// the process writes between the copy and the emptying are lost.
-///
-/// # Errors
-///
-/// Returns [`Error::Unwritable`] when the copy or the emptying fails.
-pub(crate) fn cap_log(log: &Path, older: &Path, most: u64) -> Result<(), Error> {
-    let unwritable = |source| Error::Unwritable {
-        path: log.to_path_buf(),
-        source,
-    };
-    let Ok(metadata) = fs::metadata(log) else {
-        return Ok(());
-    };
-    if metadata.len() <= most {
-        return Ok(());
-    }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
-    )]
-    let copied = fs::copy(log, older);
-    copied.map_err(unwritable)?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
-    )]
-    let opened = OpenOptions::new().write(true).open(log);
-    opened.map_err(unwritable)?.set_len(0).map_err(unwritable)
-}
-
 /// How long a command waits for a lock that another command holds before
 /// it fails with [`Error::Busy`].
 pub const LOCK_WAIT: Duration = Duration::from_secs(5);

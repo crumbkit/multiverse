@@ -587,7 +587,10 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
             DockerCause::Cancelled,
         ),
         (
-            ContainerError::foreign("container", "phase-db"),
+            ContainerError::Foreign {
+                kind: "container",
+                name: "phase-db".to_owned(),
+            },
             false,
             DockerCause::Foreign,
         ),
@@ -647,10 +650,10 @@ fn a_docker_error_names_the_operation_the_container_and_the_foreign_object() {
     assert_eq!(pull.operation(), Some("pull"));
     assert_eq!(pull.service(), None);
 
-    let volume = docker(&ContainerError::foreign(
-        "volume",
-        "phase-0123456789abcdef.data",
-    ));
+    let volume = docker(&ContainerError::Foreign {
+        kind: "volume",
+        name: "phase-0123456789abcdef.data".to_owned(),
+    });
     let object = volume.foreign().unwrap();
     assert_eq!(object.kind(), DockerKind::Volume);
     assert_eq!(object.name(), "phase-0123456789abcdef.data");

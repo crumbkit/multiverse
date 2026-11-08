@@ -1,11 +1,8 @@
 //! The Docker of phase's `sweep`, which runs the `docker` program.
 //!
 //! It matches an object by phase's workspace label, `mxv.workspace-id`.
-//! An object that mxv created before it wrote that label carries only
-//! `mxv.store` and `mxv.workspace`, and matches when a scope of those
-//! labels is given with [`DockerCli::with_legacy`]. An object that carries
-//! no mxv label never matches, even by a recorded id, so `sweep` never
-//! removes it. Labels are read as JSON and compared exactly.
+//! An object without that label never matches, even by a recorded id, so
+//! `sweep` never removes it. Labels are read as JSON and compared exactly.
 //!
 //! An object is gone only when Docker's daemon answered that it does not
 //! have it. Every other failure, such as an unknown context, a daemon that
@@ -22,8 +19,8 @@ use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, Finished, check_with, message, quick_with, run_program,
 };
 use crate::engine::container::compose::ComposeEnv;
-use crate::engine::container::names::{STORE_LABEL, Scope, WORKSPACE_ID_LABEL, WORKSPACE_LABEL};
-use crate::engine::container::objects::{AnonymousVolumes, rm_args, stop_seconds};
+use crate::engine::container::names::WORKSPACE_ID_LABEL;
+use crate::engine::container::objects::{rm_args, stop_seconds};
 use crate::engine::container::volume_owner;
 use crate::engine::container::{ContainerError, ContainerState};
 use crate::name::WorkspaceId;
@@ -37,9 +34,6 @@ mod tests;
 pub(crate) struct DockerCli {
     /// The `docker` program.
     program: OsString,
-    /// The scope whose older labels an object without phase's workspace
-    /// label must carry, or `None` to match such objects never.
-    legacy: Option<Scope>,
 }
 
 impl DockerCli {
@@ -50,25 +44,7 @@ impl DockerCli {
 
     /// Returns the Docker that runs `program` as the `docker` program.
     pub(crate) const fn with_program(program: OsString) -> Self {
-        Self {
-            program,
-            legacy: None,
-        }
-    }
-
-    /// Returns the Docker that also matches an object without phase's
-    /// workspace label when its `mxv.store` and `mxv.workspace` labels name
-    /// `scope`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "mxv passes the scope of its older labels when its commands move to phase"
-        )
-    )]
-    pub(crate) fn with_legacy(mut self, scope: Scope) -> Self {
-        self.legacy = Some(scope);
-        self
+        Self { program }
     }
 
     /// Returns the `docker` program.
@@ -77,21 +53,12 @@ impl DockerCli {
     }
 
     /// Reports whether an object with `labels` belongs to the workspace
-    /// `workspace`. Its `mxv.workspace-id` label decides when it has one.
-    /// Otherwise its `mxv.store` and `mxv.workspace` labels must name the
-    /// legacy scope, when one is given. Each value must equal the expected
-    /// one exactly, with nothing trimmed.
-    fn ours(&self, workspace: &str, labels: &BTreeMap<String, String>) -> bool {
-        if let Some(workspace_id) = labels.get(WORKSPACE_ID_LABEL) {
-            return workspace_id == workspace;
-        }
-        let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        self.legacy
-            .as_ref()
-            .and_then(Scope::legacy)
-            .is_some_and(|(store, workspace)| {
-                is(STORE_LABEL, store.as_str()) && is(WORKSPACE_LABEL, workspace.as_str())
-            })
+    /// `workspace`: its `mxv.workspace-id` label must equal it exactly, with
+    /// nothing trimmed.
+    fn ours(workspace: &str, labels: &BTreeMap<String, String>) -> bool {
+        labels
+            .get(WORKSPACE_ID_LABEL)
+            .is_some_and(|found| found == workspace)
     }
 
     /// Inspects `object` with the Go template `format`, whose first line is
@@ -125,7 +92,7 @@ impl DockerCli {
         let mut lines = finished.stdout.lines();
         let id = lines.next().unwrap_or_default();
         let labels = labels(lines.next().unwrap_or_default()).unwrap_or_default();
-        if id.is_empty() || !self.ours(object.workspace.as_str(), &labels) {
+        if id.is_empty() || !Self::ours(object.workspace.as_str(), &labels) {
             return Ok(None);
         }
         let rest: Vec<&str> = lines.collect();
@@ -195,8 +162,8 @@ impl DockerCli {
                 return Err(self.failure(&stopped, "stop", Some(id)));
             }
         }
-        let removed = quick_with(self.program(), rm_args(id, AnonymousVolumes::Remove), "rm")
-            .map_err(|error| unavailable(&error))?;
+        let removed =
+            quick_with(self.program(), rm_args(id), "rm").map_err(|error| unavailable(&error))?;
         if removed.status.success() || removed.missing() {
             Ok(())
         } else {

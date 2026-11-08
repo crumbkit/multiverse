@@ -117,7 +117,7 @@ pub const PROCESS_UNSUPPORTED_OS: Code = Code::new("mxv", "process", "unsupporte
 /// The code of a port range whose every port is held by a workspace or taken.
 pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
-/// `mxv up` that still waits for a process to be ready.
+/// `mxv up` that still waits for a unit to be ready.
 pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
 /// The code of a manifest that declares containers on a machine without a
 /// `docker` program on `PATH`.
@@ -966,7 +966,7 @@ fn library_recovery(error: &Error) -> Recovery {
             shown(checkout)
         )),
         Error::Busy { .. } => hint(
-            "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a process to be ready, and run the command again",
+            "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
         ),
         Error::DockerMissing { .. } => hint(
             "install docker and put it on PATH, and run the command again; a workspace that has run containers needs docker until `mxv remove` removes it",

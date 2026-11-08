@@ -1383,3 +1383,33 @@ fn a_process_digest_changes_with_its_command_and_not_with_another_process() {
     sandboxed.permissions = Some(super::Permissions::default());
     assert_ne!(sandboxed.process_digest(&sandboxed.processes[1]), before);
 }
+
+#[test]
+fn is_volume_owner_accepts_exactly_the_owners_that_a_plan_accepts() {
+    for owner in [
+        "keep",
+        "0",
+        "0:0",
+        "999",
+        "999:999",
+        "4294967294:4294967294",
+    ] {
+        assert!(crate::is_volume_owner(owner), "{owner}");
+    }
+    for owner in [
+        "",
+        "postgres",
+        "999:staff",
+        "999:",
+        ":999",
+        "+999",
+        "-1",
+        "1:2:3",
+        "KEEP",
+        "4294967295",
+        "0:4294967295",
+        "4294967296",
+    ] {
+        assert!(!crate::is_volume_owner(owner), "{owner:?}");
+    }
+}

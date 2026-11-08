@@ -67,10 +67,10 @@ use mxv::{
     PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT,
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
     REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES,
-    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, VOLUME_NOT_MOVED, VOLUME_RENAMED,
+    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, VOLUME_RENAMED,
     WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
-    WORKSPACE_IGNORED_FILES, WORKSPACE_LEGACY_RUNNING, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND,
-    WORKSPACE_RUNNING, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
+    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
+    WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
 
@@ -86,7 +86,7 @@ const DOCKER: &str = "Only a live checkout whose mxv.toml declares containers, w
 const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.";
 
 /// The reason that `down` and `restart` ask no question.
-const NO_QUESTION: &str = "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";
+const NO_QUESTION: &str = "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";
 
 /// The reason that an unbuilt write verb declares no document.
 const NO_DOCUMENT: &str = "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.";
@@ -127,12 +127,12 @@ const ALLOW: &[Allow] = &[
     Allow::new(
         Rule::Yes,
         "reclaim",
-        "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
+        "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the units that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
     ),
     Allow::new(
         Rule::Yes,
         "ports reset",
-        "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
+        "The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.",
     ),
     Allow::new(Rule::Examples, "ports reset", NO_LIVE_CHECKOUT),
     Allow::untwinned(
@@ -600,14 +600,6 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(&MANIFEST_NOT_FOUND, LIVE),
     Unprovoked::new(&MANIFEST_UNIT_NAME, LIVE),
     Unprovoked::new(&MANIFEST_UNRUNNABLE, LIVE),
-    Unprovoked::new(
-        &WORKSPACE_LEGACY_RUNNING,
-        "Only processes that an earlier version of mxv started in a live checkout provoke it; tests/processes.rs starts them with that runner.",
-    ),
-    Unprovoked::new(
-        &VOLUME_NOT_MOVED,
-        "Only a data volume that an earlier version of mxv created for a container provokes it, with a docker daemon that answers.",
-    ),
     Unprovoked::new(
         &VOLUME_RENAMED,
         "Only `mxv add` to a workspace of one clone whose container has run and left a docker volume provokes it, with a docker daemon that answers.",

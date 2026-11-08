@@ -149,9 +149,8 @@ that file in place of the checkout's, its names keep no prefix, and its
 volumes keep their names after the `add`, so mxv does not check. The failure lists each old and new docker volume.
 Its hint gives, for each volume, the `docker volume create` with phase's
 labels, the `docker run` that copies the data, and the
-`docker volume rm` of the old volume, as the hint of
-`mxv::volume::not_moved` does, and says that deleting the old volumes
-alone drops their data. Once no old volume exists, `mxv add` goes ahead.
+`docker volume rm` of the old volume, and says that deleting the old
+volumes alone drops their data. Once no old volume exists, `mxv add` goes ahead.
 
 `mxv add` keeps the number of each host port whose name the merged
 manifest declares. A port of the first checkout's `mxv.toml`, such as
@@ -228,8 +227,8 @@ holds.
 
 ### Phase plans
 
-Each unit of the merged manifest is one phase app, named by its merged
-name, and each port is one phase port, named by its merged name. Because
+The plan names each unit's phase app and each phase port by the merged
+name, and `phase_plan.rs` describes how a unit becomes an app. Because
 the merge refuses equal names, no two apps and no two ports of the plan
 share a name. The merge makes each process's `cwd` absolute, and the
 plan turns it back into a source and a relative `cwd`: the source is the

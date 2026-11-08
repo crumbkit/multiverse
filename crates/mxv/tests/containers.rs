@@ -922,6 +922,133 @@ fn a_container_that_exits_with_137_reports_code_137_and_no_signal() {
 }
 
 /// Returns the id of the container `app` that docker has.
+/// Builds an image whose `USER` is the name `app`, uid 999, and which has
+/// no `id` program, so phase cannot resolve the name, and returns its tag.
+fn image_without_id(test: &str) -> String {
+    let tag = format!("mxvtest-{test}:{}", std::process::id());
+    let built = Command::new("docker")
+        .args(["build", "--quiet", "--tag", &tag, "-"])
+        .env("PATH", PATH)
+        .stdin(format!(
+            "FROM {IMAGE}\nRUN adduser -D -u 999 app && rm /bin/id\nUSER app\n"
+        ))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{built:?}");
+    tag
+}
+
+/// A manifest whose container `store` mounts the volume `data` at `/data`
+/// from `image`, runs `script` and then waits, with `key` as its last line.
+fn store(image: &str, script: &str, key: &str) -> String {
+    format!(
+        r#"[containers.store]
+image = "{image}"
+command = ["sh", "-c", "{script} trap 'exit 0' TERM; sleep 600 & wait"]
+volumes = {{ data = "/data" }}
+{key}
+"#
+    )
+}
+
+/// Returns the `uid:gid` of the root directory of the docker volume
+/// `volume`.
+fn volume_owner(volume: &str) -> String {
+    let mount = format!("{volume}:/data");
+    let (ran, owner) = docker(&[
+        "run", "--rm", "-v", &mount, IMAGE, "stat", "-c", "%u:%g", "/data",
+    ]);
+    assert!(ran, "docker could not read the owner of {volume}");
+    owner
+}
+
+#[test]
+fn a_numeric_owner_lets_a_non_root_container_without_id_write_its_volume() {
+    if !docker_runs("a_numeric_owner_lets_a_non_root_container") {
+        return;
+    }
+    let tag = image_without_id("owner-numeric");
+    let write = "touch /data/written || exit 1;";
+
+    // Without the key phase cannot resolve the image's user, so `up` fails.
+    let refused = Setup::new("mxvtest-no-owner", &store(&tag, write, ""));
+    let (exit, document) = refused.json(&["up", "-w", "mxvtest-no-owner"]);
+    assert_ne!(exit, 0, "{document}");
+    assert!(document.to_string().contains("volume owner"), "{document}");
+    drop(refused);
+
+    let setup = Setup::new("mxvtest-owner", &store(&tag, write, "owner = \"999:999\""));
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-owner"]);
+    assert_eq!(exit, 0, "{document}");
+    let volume = setup.volume_name("data");
+    assert_eq!(volume_owner(&volume), "999:999");
+    let mount = format!("{volume}:/data");
+    let (written, _) = docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &mount,
+        IMAGE,
+        "test",
+        "-f",
+        "/data/written",
+    ]);
+    assert!(written, "the container did not write its volume");
+
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-owner",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let _ = docker(&["image", "rm", &tag]);
+}
+
+#[test]
+fn keep_leaves_a_volume_alone_and_a_changed_owner_replaces_the_container() {
+    if !docker_runs("keep_leaves_a_volume_alone") {
+        return;
+    }
+    let tag = image_without_id("owner-keep");
+    let setup = Setup::new("mxvtest-keep", &store(&tag, "", "owner = \"keep\""));
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-keep"]);
+    assert_eq!(exit, 0, "{document}");
+    let volume = setup.volume_name("data");
+    assert_eq!(volume_owner(&volume), "0:0");
+    let kept = container_id(&setup, "store");
+
+    write(
+        &setup.checkout().join("mxv.toml"),
+        &store(&tag, "", "owner = \"999:999\""),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-keep"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(volume_owner(&volume), "999:999");
+    let numeric = container_id(&setup, "store");
+    assert_ne!(numeric, kept, "a new owner did not replace the container");
+
+    write(
+        &setup.checkout().join("mxv.toml"),
+        &store(&tag, "", "owner = \"keep\""),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-keep"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(volume_owner(&volume), "999:999");
+    assert_ne!(container_id(&setup, "store"), numeric);
+
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-keep",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let _ = docker(&["image", "rm", &tag]);
+}
+
 fn container_id(setup: &Setup, app: &str) -> String {
     let (found, id) = docker(&[
         "container",
@@ -1221,91 +1348,7 @@ fn up_labels_containers_and_volumes_with_the_stable_id_that_the_record_holds() {
     assert_eq!(exit, 0, "{document}");
 }
 
-impl Setup {
-    /// Leaves the volume `volume` under the name and the labels that an
-    /// older mxv gave it, and the store id that names them in the state
-    /// directory, as a workspace has after that mxv's `down`. The store id
-    /// comes from this setup's temporary directory, so another test's
-    /// volume never has the name. The returned value removes the volume.
-    fn older_volume(&self, volume: &str) -> Foreign {
-        let root = self.root().display().to_string();
-        let hash = root.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-        let store = format!("{hash:016x}{hash:016x}");
-        let runs = self.root().join("state/mxv/runs");
-        fs::create_dir_all(&runs).unwrap();
-        write(
-            &runs.join(".store-id"),
-            &serde_json::json!({"version": 1, "id": store}).to_string(),
-        );
-        let name = format!("mxv-{}-{}.{volume}", &store[..8], self.name);
-        let labels = [
-            format!("mxv.store={store}"),
-            format!("mxv.workspace={}", self.name),
-            format!("mxv.volume={volume}"),
-        ];
-        let mut args = vec!["volume", "create"];
-        for label in &labels {
-            args.extend(["--label", label]);
-        }
-        args.push(&name);
-        let (created, _) = docker(&args);
-        assert!(created, "docker did not create the volume {name}");
-        Foreign {
-            kind: "volume",
-            name,
-        }
-    }
-}
-
-#[test]
-fn the_commands_of_the_volume_not_moved_hint_move_the_data_so_that_up_starts_on_it() {
-    if !docker_runs("the_commands_of_the_volume_not_moved_hint") {
-        return;
-    }
-    let setup = Setup::new("mxvtest-moved", &web());
-    let older = setup.older_volume("srv");
-
-    let (exit, document) = setup.json(&["up", "-w", "mxvtest-moved"]);
-    assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::volume::not_moved", "{document}");
-    let legacy = document["fields"]["legacy_volume"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(legacy, older.name);
-    assert_eq!(document["fields"]["phase_volume"], setup.volume_name("srv"));
-    let (wrote, _) = docker(&[
-        "run",
-        "--rm",
-        "-v",
-        &format!("{legacy}:/v"),
-        IMAGE,
-        "sh",
-        "-c",
-        "echo kept > /v/marker",
-    ]);
-    assert!(wrote);
-
-    // The hint names the copy as its first two commands, in backticks.
-    let hint = document["recovery"]["text"].as_str().unwrap();
-    let commands: Vec<&str> = hint.split('`').skip(1).step_by(2).take(2).collect();
-    assert!(commands[0].starts_with("docker volume create"), "{hint}");
-    for command in commands {
-        let output = Command::new("sh")
-            .args(["-c", command])
-            .env("PATH", PATH)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{command}: {output:?}");
-    }
-
-    let (exit, document) = setup.json(&["up", "-w", "mxvtest-moved"]);
-    assert_eq!(exit, 0, "{document}");
-    let (_, marker) = docker(&["exec", &setup.container_name("web"), "cat", "/srv/marker"]);
-    assert_eq!(marker, "kept");
-}
+impl Setup {}
 
 #[test]
 fn add_refuses_while_a_volume_holds_data_under_its_old_name_and_its_hint_moves_the_data() {

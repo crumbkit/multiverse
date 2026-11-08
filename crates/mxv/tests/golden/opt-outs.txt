@@ -60,19 +60,19 @@ guide/document: mxv restore
   Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
 
 effects/yes: mxv down
-  Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
+  Reason: The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 effects/yes: mxv restart
-  Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
+  Reason: The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 effects/yes: mxv reclaim
-  Reason: A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.
+  Reason: A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the units that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 effects/yes: mxv ports reset
-  Reason: The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.
+  Reason: The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 examples/run: mxv ports reset

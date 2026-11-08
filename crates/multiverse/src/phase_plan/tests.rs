@@ -154,6 +154,28 @@ fn a_host_process_receives_its_env_with_ports_rendered_and_its_port_variables_by
 }
 
 #[test]
+fn a_containers_owner_reaches_the_phase_plan_unchanged() {
+    let caller = CallerEnvironment::from_vars(vars(&[]));
+    for owner in ["999:999", "keep"] {
+        let text = APP.replace(
+            "ready = { port = \"db\" }\n",
+            &format!("ready = {{ port = \"db\" }}\nowner = \"{owner}\"\n"),
+        );
+        let built = plan_of(&manifest(&text), &caller);
+        let db = built.plan.app(&app("db")).unwrap();
+        assert_eq!(db.container.owner.as_deref(), Some(owner));
+    }
+}
+
+#[test]
+fn a_container_without_an_owner_key_has_no_owner_in_the_phase_plan() {
+    let caller = CallerEnvironment::from_vars(vars(&[]));
+    let built = plan_of(&manifest(APP), &caller);
+    let db = built.plan.app(&app("db")).unwrap();
+    assert_eq!(db.container.owner, None);
+}
+
+#[test]
 fn a_container_publishes_its_ports_mounts_its_volumes_and_receives_only_its_env() {
     let caller = CallerEnvironment::from_vars(vars(&[("LANG", "C.UTF-8")]));
     let built = plan_of(&manifest(APP), &caller);
