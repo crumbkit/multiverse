@@ -150,11 +150,12 @@ pub trait AppliedEnvironment: Send {
     fn apply_as(&self, command: &mut Command, reference: &dyn Fn(&str) -> Option<String>);
 
     /// Writes the bytes of the value of the variable `name` to `out`, and
-    /// nothing else. phase calls it only to deliver a container's secret
-    /// as a file: it buffers the bytes in memory that it overwrites with
-    /// zeros afterwards, also when the buffer grows, writes them to the
-    /// standard input of `docker exec`, and never logs, formats or stores
-    /// them. The zeroing is best effort: the implementation, the operating
+    /// nothing else. phase calls it to deliver a container's secret as a
+    /// file and, through [`AppliedEnvironment::digest_of`], to read a value
+    /// that is not a secret for its digest. It buffers the bytes in memory
+    /// that it overwrites with zeros afterwards, also when the buffer
+    /// grows, writes a secret's bytes to the standard input of `docker
+    /// exec`, and never logs, formats or stores them. The zeroing is best effort: the implementation, the operating
     /// system's pipe buffers and the `docker` program may keep copies of
     /// their own. An implementation must not log the value either.
     ///
@@ -165,7 +166,8 @@ pub trait AppliedEnvironment: Send {
     /// secret, the error of `out`, and, by default,
     /// [`io::ErrorKind::Unsupported`] for an environment that cannot write
     /// a value, which phase reports as a container secret it cannot
-    /// deliver as a file.
+    /// deliver as a file, and for a value that is not a secret treats as
+    /// a process whose values it cannot compare.
     fn write_value(&self, name: &str, out: &mut dyn io::Write) -> io::Result<()> {
         let _ = (name, out);
         Err(io::ErrorKind::Unsupported.into())

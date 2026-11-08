@@ -30,6 +30,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::io;
 use std::num::NonZeroU16;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -703,6 +704,15 @@ impl AppliedEnvironment for Applied {
                 command.env(reference, value.reveal());
             }
         }
+    }
+
+    fn write_value(&self, name: &str, out: &mut dyn io::Write) -> io::Result<()> {
+        let (_, value) = self
+            .vars
+            .iter()
+            .find(|(known, _)| known == name)
+            .ok_or(io::ErrorKind::NotFound)?;
+        out.write_all(value.reveal().as_bytes())
     }
 }
 

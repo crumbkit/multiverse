@@ -921,6 +921,61 @@ fn a_container_that_exits_with_137_reports_code_137_and_no_signal() {
     assert_eq!(row(&status, "web")["state"], "stopped", "{status}");
 }
 
+/// Returns the id of the container `app` that docker has.
+fn container_id(setup: &Setup, app: &str) -> String {
+    let (found, id) = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        &setup.container_name(app),
+    ]);
+    assert!(found, "docker has no container {app}");
+    id
+}
+
+#[test]
+fn up_replaces_a_container_whose_value_changed_in_the_manifest_and_keeps_it_otherwise() {
+    if !docker_runs("up_replaces_a_container_whose_value_changed") {
+        return;
+    }
+    let with = |services: &str| {
+        web().replace(
+            "ports = { 80 = \"web\" }",
+            &format!("env = {{ SERVICES = \"{services}\" }}\nports = {{ 80 = \"web\" }}"),
+        )
+    };
+    let setup = Setup::new("mxvtest-env-value", &with("s3"));
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-env-value"]);
+    assert_eq!(exit, 0, "{document}");
+    let first = container_id(&setup, "web");
+
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-env-value"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(container_id(&setup, "web"), first);
+
+    write(&setup.checkout().join("mxv.toml"), &with("s3,sqs"));
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-env-value"]);
+
+    assert_eq!(exit, 0, "{document}");
+    let second = container_id(&setup, "web");
+    assert_ne!(second, first);
+    let (_, env) = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{range .Config.Env}}{{println .}}{{end}}",
+        &second,
+    ]);
+    assert!(env.lines().any(|line| line == "SERVICES=s3,sqs"), "{env}");
+
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-env-value"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(container_id(&setup, "web"), second);
+}
+
 #[test]
 fn up_runs_each_container_as_a_compose_project_of_its_own_and_writes_no_value_to_a_file() {
     if !docker_runs("up_runs_each_container_as_a_compose_project") {

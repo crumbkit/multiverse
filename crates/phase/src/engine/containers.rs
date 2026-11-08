@@ -95,16 +95,25 @@ pub(crate) trait ContainerRunner {
     /// It inspects the container first, and resolves the environment only
     /// when a write or a replacement may follow:
     ///
+    /// It compares the recorded plan hash with the hash of the plan and
+    /// the keyed digest of the values of the fresh environment's variables
+    /// that are not secrets, so a secret's value never asks for a
+    /// replacement.
+    ///
     /// - [`Rewritten::NoFiles`] for a process that receives no secret
-    ///   files, and for a container without secret files whose fresh
-    ///   environment has no value for any of its optional secrets.
+    ///   files and whose hash is unchanged, and for a container without
+    ///   secret files whose fresh environment has no value for any of its
+    ///   optional secrets.
     /// - [`Rewritten::Replace`] for a container that is gone, no longer
     ///   runs, or has secret files and was restarted by Docker, as
-    ///   [`ContainerRunner::running`] judges it, and for a container
-    ///   without secret files whose fresh environment has a value for one
-    ///   of its secrets. Such a container started while every one of its
-    ///   secrets was optional and absent, so it has no tmpfs and no
-    ///   wrapper. `up` then replaces the container.
+    ///   [`ContainerRunner::running`] judges it, for a container whose hash
+    ///   differs, for a process without secret files whose environment
+    ///   cannot be resolved, so that the start reports the failure and
+    ///   leaves the container running, and for a container without secret
+    ///   files whose fresh environment has a value for one of its secrets.
+    ///   Such a container started while every one of its secrets was
+    ///   optional and absent, so it has no tmpfs and no wrapper. `up` then
+    ///   replaces the container.
     /// - [`Rewritten::Kept`] when the environment cannot be resolved, a
     ///   value cannot be read, or Docker refuses the inspection or the
     ///   write while the container still runs. The container keeps its
@@ -117,9 +126,10 @@ pub(crate) trait ContainerRunner {
     /// Returns [`PhaseError::Docker`] when the caller cancels, with the
     /// cancelled cause, and when Docker itself cannot be reached or does
     /// not answer in time: no `docker` program, a daemon that does not
-    /// answer, or a command that missed its deadline. `up` then reports
-    /// the app as errored, because phase cannot tell what the container
-    /// holds.
+    /// answer, or a command that missed its deadline.
+    /// Returns [`PhaseError::StateUnwritable`] when phase cannot create or
+    /// use the key of the digest. `up` then reports the app as errored,
+    /// because phase cannot tell what the container holds.
     fn rewrite(&self, rewrite: &ContainerRewrite<'_>) -> Result<Rewritten, PhaseError>;
 
     /// Stops and removes the containers of `stop.containers`, in reverse

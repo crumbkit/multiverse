@@ -369,6 +369,29 @@ fn the_environment_returns_every_variable_that_each_process_of_the_plan_names() 
     assert!(!api.contains("TZ"));
 }
 
+#[test]
+fn the_environment_of_a_process_writes_each_value_and_reports_a_name_it_lacks() {
+    let caller = CallerEnvironment::from_vars(vars(&[("LANG", "C.UTF-8")]));
+    let built = plan_of(&manifest(APP), &caller);
+    let applied = built
+        .environment
+        .resolve(
+            &app("api"),
+            &ProcessName::try_from(MAIN.to_owned()).unwrap(),
+            Instant::now(),
+        )
+        .unwrap();
+
+    let mut written = Vec::new();
+    applied.write_value("LANG", &mut written).unwrap();
+
+    assert_eq!(written, b"C.UTF-8");
+    let missing = applied
+        .write_value("NOT_A_VARIABLE", &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+}
+
 /// The manifest of a checkout whose process `server` runs in `server/` and
 /// listens on its port `http`.
 const SERVER: &str = r#"ports = ["http"]
