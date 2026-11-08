@@ -163,11 +163,9 @@ fn the_process_table_reports_no_group_at_0_or_1_and_reaps_neither() {
 }
 
 #[test]
-fn a_signal_to_a_pid_that_names_no_process_fails_and_no_such_group_exists() {
-    use super::process::{ProcessGroup, ProcessId, group_exists, signal_pid};
-    use rustix::process::Signal;
+fn a_group_that_names_no_process_does_not_exist() {
+    use super::process::{ProcessGroup, group_exists};
     let unused = 0x7fff_fff0;
-    assert!(signal_pid(ProcessId::new(unused).unwrap(), Signal::TERM).is_err());
     assert!(!group_exists(ProcessGroup::new(unused).unwrap()));
     let own = u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap();
     assert!(group_exists(ProcessGroup::new(own).unwrap()));

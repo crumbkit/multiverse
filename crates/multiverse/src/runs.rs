@@ -1,47 +1,23 @@
-//! The processes of a workspace's app: starting them from the manifest,
-//! stopping them, reporting their state, and reading their logs.
+//! The units of a workspace's app: the adapter between a manifest and the
+//! phase plan that starts them, stops them, reports their state and reads
+//! their logs.
 //!
-//! [`Runs`] runs a workspace's apps through phase. The files described below
-//! are what an older mxv left, which mxv still reads to report and stop what
-//! that version started.
-//!
-//! No long-running mxv watches those processes. Each process leaves files in
-//! `<runs>/<workspace>/`: `<process>.json`, the run record with the process
-//! id and its start time; `<process>.log`, its standard output and standard
-//! error; `<process>.log.1`, the log of its previous start or the part of
-//! its log that a cap moved aside; and `<process>.exit`, which the process
-//! writes when it ends. [`Runs::status`] reads them: a process without a
-//! run record is stopped, a process with an exit file has exited with that
-//! code, and a process whose id the process table lists with the recorded
-//! start time is running. A process whose id is gone, or now names a
-//! process that started at another time, has exited without a code.
-//! `mxv down` deletes the run record and the exit file and keeps both
-//! logs; `mxv remove` deletes the whole directory.
-//!
-//! A container that an older mxv started has the record
-//! `<container>.container`, which that version wrote and which holds the id
-//! of the container it started; docker holds its state. Its log is
-//! `<container>.log` too, which a detached `docker logs --follow` appended
-//! to while the container ran, so the log outlived the container that
-//! `mxv down` removed. `<container>.follower` records the follower's process
-//! id, so `Lifecycle::status` and `Lifecycle::writing`, which `status` and
-//! `logs --follow` reach, start a new follower when the old one has ended
-//! and the container runs, such as after a restart outside mxv.
+//! phase keeps each workspace's run record and logs under its own state
+//! directory, `<state>/phase`. mxv's run directory `<runs>/<workspace>/`
+//! holds the lock that `up` and `down` take, the mark that a reclaim
+//! stopped the workspace, and the file that says when an mxv command last
+//! named it. `mxv remove` deletes the whole directory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use rustix::process::Signal;
-
-use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
+use crate::clock::{FOLLOW_INTERVAL, pause};
 use phase::Phase;
-use phase::container::{ContainerState, Lifecycle, ServiceName, WorkspaceVolumes};
 use phase::host::LogFollower;
 
 use crate::error::Error;
@@ -49,11 +25,7 @@ use crate::manifest::{Manifest, Process};
 use crate::name::WorkspaceName;
 use crate::phase_plan::CallerEnvironment;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
-use crate::process;
 use crate::record::Workspace;
-use crate::run_files::{
-    Ownership, RunDir, RunHost, RunRecord, ownership, read_json, remove_if_present,
-};
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
 mod phased;
@@ -65,15 +37,6 @@ pub use phased::{Exec, ExecEnd, ExecTarget, LogOutput, Volumes};
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
 
-/// How long `mxv down` waits after SIGKILL before it reports the process
-/// as unstoppable.
-pub const KILL_WAIT: Duration = Duration::from_secs(5);
-
-/// The most bytes that a process's log holds before an mxv command that
-/// reads the workspace's state moves it to `<process>.log.1` and empties
-/// it.
-pub const MOST_LOG_BYTES: u64 = 32 * 1024 * 1024;
-
 pub use phase::{MOST_TAIL_BYTES, tail};
 
 /// The most bytes that one read of a followed log takes. The rest waits
@@ -84,11 +47,6 @@ pub use phase::host::MOST_FOLLOW_BYTES;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExitReason {
-    /// The shell that ran the process has ended and wrote no exit file.
-    /// Something, such as SIGKILL or a restart of the machine, ended the
-    /// shell before it could write the file. Members of the process group
-    /// may still run.
-    NoExitFile,
     /// phase recorded no end for the process. Its keeper ended before it
     /// recorded how the process ended, as when something killed the keeper
     /// or the machine restarted.
@@ -100,9 +58,6 @@ impl ExitReason {
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
-            Self::NoExitFile => {
-                "the shell that ran the process ended without writing its exit code, so something such as SIGKILL ended the shell"
-            }
             Self::Unrecorded => {
                 "the process ended while phase was not watching it, so nothing recorded its exit code"
             }
@@ -205,17 +160,11 @@ pub struct ProcessStatus {
     /// Its log file, or `None` for a container that phase runs, whose log
     /// comes from `docker logs`.
     pub log: Option<PathBuf>,
-    /// Whether its process group still has a member although the process
-    /// itself has exited, such as a child it started in the background,
-    /// which `mxv down` stops. It is `None` while the process runs, because
-    /// the process itself is then a member.
-    pub group_alive: Option<bool>,
     /// Whether phase has seen the process ready since it last started:
     /// `Some(true)` once its readiness check passed, or once a process
     /// without one outlasted its start grace, and `Some(false)` while it
     /// runs and phase has not seen it ready, such as after its keeper or
-    /// docker restarted it. It is `None` when it does not run, and for a
-    /// process that mxv started before phase ran its apps.
+    /// docker restarted it. It is `None` when it does not run.
     pub ready: Option<bool>,
     /// Whether phase runs a host process under its sandbox, as phase
     /// describes it, such as `unsandboxed (its app declares no
@@ -390,29 +339,6 @@ pub enum UpOutcome {
         /// log comes from `docker logs`.
         log: Option<PathBuf>,
     },
-    /// A process or container that mxv started before phase ran its apps
-    /// may still run, so `up` started nothing. `mxv down` stops it.
-    LegacyRunning {
-        /// The processes and containers that may still run, in name order.
-        processes: Vec<String>,
-    },
-    /// A container mounts a volume that holds data under the name that mxv
-    /// gave it before phase ran its apps, and phase's volume of that name
-    /// does not exist, so `up` started nothing. phase does not take over
-    /// the older volume.
-    VolumeNotMoved {
-        /// The container.
-        container: String,
-        /// The volume's name in the manifest.
-        volume: String,
-        /// The older volume's docker name.
-        legacy: String,
-        /// The docker name of phase's volume.
-        phase: String,
-        /// The labels, as `name=value`, that phase's volume needs, so that
-        /// a volume created with them is the one phase mounts.
-        labels: Vec<String>,
-    },
     /// phase cannot run the manifest.
     Unrunnable(crate::phase_plan::Unrunnable),
     /// phase found a process group of a unit that an earlier stop left,
@@ -455,7 +381,7 @@ pub enum DownOutcome {
     UnknownProcess(String),
 }
 
-/// A process whose group outlived SIGKILL and [`KILL_WAIT`], or whose
+/// A process whose group outlived SIGKILL and phase's kill wait, or whose
 /// group `down` left alone because it could not prove the group its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -624,7 +550,7 @@ impl Runs {
     /// longer than the lock wait, which is [`LOCK_WAIT`] by default, and
     /// [`Error::Unwritable`] when the lock file cannot be opened.
     pub fn lock(&self, name: &WorkspaceName) -> Result<Lock, Error> {
-        store::lock(&self.run_dir(name).lock(), self.lock_wait)
+        store::lock(&self.workspace_dir(name).join(".lock"), self.lock_wait)
     }
 
     /// Records that an mxv command named the workspace `name` now, as the
@@ -690,365 +616,10 @@ impl Runs {
         self
     }
 
-    /// Returns the run directory of the workspace `name`.
-    fn run_dir(&self, name: &WorkspaceName) -> RunDir {
-        RunDir::new(&self.dir, name)
-    }
-
     /// Returns the directory of the workspace `name`'s run files.
     #[must_use]
     pub fn workspace_dir(&self, name: &WorkspaceName) -> PathBuf {
-        self.run_dir(name).path().to_path_buf()
-    }
-
-    /// Returns the log file of `process` in the workspace `name`.
-    #[must_use]
-    pub fn log(&self, name: &WorkspaceName, process: &str) -> PathBuf {
-        self.run_dir(name).log(process)
-    }
-
-    /// Returns the path of a file of `process` with `extension`.
-    fn file(&self, name: &WorkspaceName, process: &str, extension: &str) -> PathBuf {
-        self.run_dir(name).file(process, extension)
-    }
-
-    /// Returns the names of the processes that have a run record, in name
-    /// order.
-    fn recorded(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
-        let dir = self.workspace_dir(name);
-        let unreadable = |source| Error::StateUnreadable {
-            path: dir.clone(),
-            source,
-        };
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(unreadable(error)),
-        };
-        let mut names = Vec::new();
-        for entry in entries {
-            let path = entry.map_err(unreadable)?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                && !stem.starts_with('.')
-            {
-                names.push(stem.to_owned());
-            }
-        }
-        names.sort();
-        Ok(names)
-    }
-
-    /// Returns the run record of `process`, or `None`.
-    fn record(&self, name: &WorkspaceName, process: &str) -> Result<Option<RunRecord>, Error> {
-        read_json(&self.file(name, process, "json"))
-    }
-
-    /// Returns the state of `process` from its run files.
-    fn state(&self, name: &WorkspaceName, process: &str) -> Result<ProcessState, Error> {
-        let Some(record) = self.record(name, process)? else {
-            return Ok(ProcessState::Stopped);
-        };
-        let exit_file = self.file(name, process, "exit");
-        if let Some(code) = process::exit_code(&exit_file) {
-            return Ok(exited(code));
-        }
-        if process::started_at(record.pid, &record.started)? == Some(true) {
-            return Ok(ProcessState::Running {
-                pid: Some(record.pid),
-            });
-        }
-        // The shell writes the exit file before it exits, so a process that
-        // ended between the two reads above has its code by now.
-        Ok(match process::exit_code(&exit_file) {
-            Some(code) => exited(code),
-            None => ProcessState::Exited {
-                code: None,
-                signal: None,
-                reason: Some(ExitReason::NoExitFile),
-            },
-        })
-    }
-
-    /// Returns the processes of `workspace` and their states: the
-    /// manifest's processes in start order, then any other process that a
-    /// run record names, in name order. Without a manifest it reports only
-    /// the processes that a run record names.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StateUnreadable`], [`Error::CorruptRecord`] or
-    /// [`Error::NewerRecord`] for a run record that cannot be read, and
-    /// [`Error::ProcessTable`] when `ps` fails.
-    fn legacy_status(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-    ) -> Result<Vec<ProcessStatus>, Error> {
-        let containers = self.containers(workspace, manifest)?;
-        let names = self.known(workspace, manifest, &containers)?;
-        self.cap_logs(&workspace.name, &names)?;
-        names
-            .iter()
-            .map(|process| self.unit_status(workspace, manifest, &containers, process))
-            .collect()
-    }
-
-    /// Moves each log of `names` that holds more than [`MOST_LOG_BYTES`] to
-    /// `<process>.log.1` and empties it. `status`, `logs`, `up` and `down`
-    /// call it, because no mxv process runs between commands to watch the
-    /// logs.
-    fn cap_logs(&self, name: &WorkspaceName, names: &[String]) -> Result<(), Error> {
-        for process in names {
-            store::cap_log(
-                &self.log(name, process),
-                &self.run_dir(name).older_log(process),
-                MOST_LOG_BYTES,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Returns the status of the process or container `name`.
-    fn unit_status(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        containers: &BTreeSet<String>,
-        name: &str,
-    ) -> Result<ProcessStatus, Error> {
-        if containers.contains(name) {
-            self.container_status(workspace, manifest, name)
-        } else {
-            self.process_status(workspace, manifest, name)
-        }
-    }
-
-    /// Reports whether `process` of the workspace `name` runs, or has left
-    /// a process group with members behind, so its log may still grow.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Runs::status`].
-    fn legacy_writing(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
-        if self.record(name, process)?.is_none() {
-            return self.container_writing(name, process);
-        }
-        Ok(
-            matches!(self.state(name, process)?, ProcessState::Running { .. })
-                || self.group_lives(name, process)?,
-        )
-    }
-
-    /// Returns the names of the processes and containers of `workspace`
-    /// that run: the processes in name order, then the containers in name
-    /// order.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Runs::status`].
-    fn legacy_running(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
-        let mut running = Vec::new();
-        for process in self.recorded(&workspace.name)? {
-            if matches!(
-                self.state(&workspace.name, &process)?,
-                ProcessState::Running { .. }
-            ) || self.group_lives(&workspace.name, &process)?
-            {
-                running.push(process);
-            }
-        }
-        running.extend(self.running_containers(&workspace.name)?);
-        Ok(running)
-    }
-
-    /// Returns whether the process group that the run record of `process`
-    /// names is the one that `up` started, as [`ownership`] decides, or
-    /// `None` when no record names it.
-    fn group_ownership(
-        &self,
-        name: &WorkspaceName,
-        process: &str,
-    ) -> Result<Option<Ownership>, Error> {
-        match self.record(name, process)? {
-            Some(record) => Ok(Some(ownership(&record, &self.file(name, process, "exit"))?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Reports whether the process group that the run record of `process`
-    /// names may still be the one that `up` started, so that mxv starts
-    /// nothing in its place.
-    fn group_lives(&self, name: &WorkspaceName, process: &str) -> Result<bool, Error> {
-        Ok(self
-            .group_ownership(name, process)?
-            .is_some_and(Ownership::may_live))
-    }
-
-    /// Returns the manifest's processes and containers in start order,
-    /// then the other processes that run records name and the other
-    /// `containers`.
-    fn known(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        containers: &BTreeSet<String>,
-    ) -> Result<Vec<String>, Error> {
-        let mut names = manifest
-            .and_then(|manifest| manifest.start_order(&[]).ok())
-            .unwrap_or_default();
-        for name in self
-            .recorded(&workspace.name)?
-            .into_iter()
-            .chain(containers.iter().cloned())
-        {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-        Ok(names)
-    }
-
-    /// Returns the status of one process.
-    fn process_status(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        process: &str,
-    ) -> Result<ProcessStatus, Error> {
-        let ports = match manifest.and_then(|manifest| manifest.processes.get(process)) {
-            Some(declared) => received(workspace, declared),
-            None => self
-                .record(&workspace.name, process)?
-                .map(|record| record.ports)
-                .unwrap_or_default(),
-        };
-        let state = self.state(&workspace.name, process)?;
-        let group_alive = match state {
-            ProcessState::Exited { .. } => Some(self.group_lives(&workspace.name, process)?),
-            ProcessState::Stopped | ProcessState::Created => Some(false),
-            // A run file gives only the three states above and running.
-            ProcessState::Running { .. }
-            | ProcessState::Starting { .. }
-            | ProcessState::Stopping { .. }
-            | ProcessState::Restarting
-            | ProcessState::Unknown { .. } => None,
-        };
-        Ok(ProcessStatus {
-            name: process.to_owned(),
-            kind: Kind::Process,
-            state,
-            ports,
-            log: Some(self.log(&workspace.name, process)),
-            group_alive,
-            ready: None,
-            sandbox: None,
-            notes: Vec::new(),
-        })
-    }
-
-    /// Stops the processes `names` of `workspace`, or every process that a
-    /// run record names when `names` is empty, in the reverse of their
-    /// start order. The process group that a run record names gets SIGTERM
-    /// whenever it still has a member, even when the process itself has
-    /// exited and left children behind, then SIGKILL when it outlives the
-    /// grace. Each stopped process's run record and
-    /// exit file are deleted, and its log stays. A process group that
-    /// outlives SIGKILL does not stop the others, and its result says so.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Runs::status`], and [`Error::Unwritable`]
-    /// when a run file cannot be deleted.
-    fn legacy_down(
-        &self,
-        _lock: &Lock,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        names: &[String],
-    ) -> Result<DownOutcome, Error> {
-        let containers = self.existing_containers(&workspace.name)?;
-        let known = self.known(workspace, manifest, &containers)?;
-        self.cap_logs(&workspace.name, &known)?;
-        let recorded = self.recorded(&workspace.name)?;
-        let targets: Vec<&String> = if names.is_empty() {
-            known
-                .iter()
-                .filter(|process| recorded.contains(process) || containers.contains(*process))
-                .collect()
-        } else {
-            if let Some(unknown) = names.iter().find(|name| !known.contains(name)) {
-                return Ok(DownOutcome::UnknownProcess(unknown.clone()));
-            }
-            known
-                .iter()
-                .filter(|process| names.contains(process))
-                .collect()
-        };
-        let mut results = Vec::new();
-        for process in targets.into_iter().rev() {
-            // A record whose pid now names another process's group is
-            // stale: its group is gone, so `down` drops the record and
-            // signals nothing.
-            let is_container = manifest
-                .is_some_and(|manifest| manifest.containers.contains_key(process))
-                || (!recorded.contains(process) && containers.contains(process));
-            if is_container {
-                if containers.contains(process)
-                    && let Some(service) = service(process)
-                {
-                    let lifecycle = self.lifecycle(&workspace.name);
-                    if let Some(prepared) = lifecycle.existing()? {
-                        lifecycle.stop(&prepared, &service)?;
-                    }
-                }
-                results.push(Ok(self.container_status_of(
-                    workspace,
-                    manifest,
-                    process,
-                    ProcessState::Stopped,
-                )));
-                continue;
-            }
-            if let Some(record) = self.record(&workspace.name, process)? {
-                let exit_file = self.file(&workspace.name, process, "exit");
-                let owned = ownership(&record, &exit_file)?;
-                let stopped = match owned {
-                    Ownership::Ours => self.stop_group(record.pid),
-                    // `down` keeps the record of a group it cannot prove
-                    // its own and reports the group, which it never
-                    // signals.
-                    Ownership::Unverified => false,
-                    Ownership::Gone => true,
-                };
-                if !stopped {
-                    results.push(Err(Unstoppable {
-                        process: process.clone(),
-                        pid: record.pid,
-                        unverified: owned == Ownership::Unverified,
-                    }));
-                    continue;
-                }
-            }
-            remove_if_present(&self.file(&workspace.name, process, "json"))?;
-            remove_if_present(&self.file(&workspace.name, process, "exit"))?;
-            results.push(Ok(self.process_status(workspace, manifest, process)?));
-        }
-        Ok(DownOutcome::Down(results))
-    }
-
-    /// Sends SIGTERM to the group `pid`, waits up to the grace, then sends
-    /// SIGKILL and waits up to [`KILL_WAIT`]. It reports whether the group
-    /// is gone.
-    fn stop_group(&self, pid: u32) -> bool {
-        let _ = process::signal(pid, Signal::TERM);
-        if wait_gone(pid, self.grace) {
-            return true;
-        }
-        let _ = process::signal(pid, Signal::KILL);
-        wait_gone(pid, KILL_WAIT)
+        self.dir.join(name.as_str())
     }
 
     /// Allocates a host port of the port range for each port of `manifest`
@@ -1077,13 +648,6 @@ impl Runs {
         let mut live = BTreeSet::new();
         if held {
             live.extend(workspace.ports.values().copied());
-        }
-        for process in self.recorded(&workspace.name)? {
-            if let Some(record) = self.record(&workspace.name, &process)?
-                && ownership(&record, &self.file(&workspace.name, &process, "exit"))?.may_live()
-            {
-                live.extend(record.ports.values().copied());
-            }
         }
         let before = workspace.ports.len();
         workspace
@@ -1150,238 +714,6 @@ impl Runs {
         self.assign_ports(store, workspace, manifest, &old, false)?;
         Ok(Ok(()))
     }
-
-    /// Removes the stopped containers of the workspace `name`, and deletes
-    /// every run file and log of it. Deleting files that do not exist
-    /// succeeds. The workspace's volumes stay; [`Runs::delete_volumes`]
-    /// deletes them.
-    ///
-    /// # Errors
-    ///
-    /// Returns the docker errors of [`Runs::down`], and
-    /// [`Error::Unwritable`] when the directory cannot be deleted.
-    fn legacy_forget(&self, name: &WorkspaceName) -> Result<(), Error> {
-        let lifecycle = self.lifecycle(name);
-        if !lifecycle.recorded()?.is_empty()
-            && let Some(prepared) = lifecycle.existing()?
-        {
-            lifecycle.stop_all(&prepared)?;
-        }
-        let dir = self.workspace_dir(name);
-        match fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(Error::Unwritable { path: dir, source }),
-        }
-    }
-}
-
-/// The containers of a workspace's app that an older mxv started, which
-/// `Lifecycle` in phase's container engine reports and stops. These methods
-/// put them among the workspace's processes.
-impl Runs {
-    /// Returns the containers of the workspace `name`.
-    fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle<'static, RunHost<'static>> {
-        self.lifecycle_with(&RunHost::WITHOUT_RECORDS, name)
-    }
-
-    /// Returns the containers of the workspace `name`, kept through `host`.
-    fn lifecycle_with<'h, 's>(
-        &self,
-        host: &'h RunHost<'s>,
-        name: &WorkspaceName,
-    ) -> Lifecycle<'h, RunHost<'s>> {
-        Lifecycle::new(host, &self.dir, name, self.grace)
-    }
-
-    /// Returns the names of the containers that `manifest` declares, and
-    /// the containers of the workspace that the run records name.
-    fn containers(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-    ) -> Result<BTreeSet<String>, Error> {
-        let mut names: BTreeSet<String> = manifest
-            .map(|manifest| manifest.containers.keys().cloned().collect())
-            .unwrap_or_default();
-        names.extend(self.existing_containers(&workspace.name)?);
-        Ok(names)
-    }
-
-    /// Returns the containers of the workspace `name` that have a record,
-    /// which `up` writes when it starts one and `down` deletes when it
-    /// removes it.
-    fn existing_containers(&self, name: &WorkspaceName) -> Result<BTreeSet<String>, Error> {
-        Ok(self
-            .lifecycle(name)
-            .recorded()?
-            .into_iter()
-            .map(|service| service.as_str().to_owned())
-            .collect())
-    }
-
-    /// Returns the containers of the workspace `name` that have a record,
-    /// in name order. It runs no docker command.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StateUnreadable`] when the run directory cannot be
-    /// read.
-    fn legacy_docker_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
-        Ok(self.existing_containers(name)?.into_iter().collect())
-    }
-
-    /// Returns the containers of the workspace `name` that run, in name
-    /// order.
-    fn running_containers(&self, name: &WorkspaceName) -> Result<Vec<String>, Error> {
-        let lifecycle = self.lifecycle(name);
-        let recorded = lifecycle.recorded()?;
-        if recorded.is_empty() {
-            return Ok(Vec::new());
-        }
-        let Some(prepared) = lifecycle.existing()? else {
-            return Ok(Vec::new());
-        };
-        let mut running = Vec::new();
-        for service in recorded {
-            if lifecycle
-                .state(&prepared, &service)?
-                .is_some_and(ContainerState::is_up)
-            {
-                running.push(service.as_str().to_owned());
-            }
-        }
-        Ok(running)
-    }
-
-    /// Returns the status of the container `container`, which docker
-    /// reports, as `Lifecycle::status` describes.
-    fn container_status(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        container: &str,
-    ) -> Result<ProcessStatus, Error> {
-        let lifecycle = self.lifecycle(&workspace.name);
-        let state = match (service(container), lifecycle.existing()?) {
-            (Some(service), Some(prepared)) => lifecycle.status(&prepared, &service)?,
-            _ => None,
-        };
-        let state = state.map_or(ProcessState::Stopped, container_state);
-        Ok(self.container_status_of(workspace, manifest, container, state))
-    }
-
-    /// Returns the status of the container `container` in `state`.
-    fn container_status_of(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        container: &str,
-        state: ProcessState,
-    ) -> ProcessStatus {
-        let ports: BTreeMap<String, u16> = manifest
-            .and_then(|manifest| manifest.containers.get(container))
-            .map(|declared| {
-                declared
-                    .ports
-                    .iter()
-                    .filter_map(|published| {
-                        workspace
-                            .ports
-                            .get(&published.port)
-                            .map(|number| (published.port.clone(), *number))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        ProcessStatus {
-            name: container.to_owned(),
-            kind: Kind::Container,
-            state,
-            ports,
-            log: Some(self.run_dir(&workspace.name).log(container)),
-            group_alive: None,
-            ready: None,
-            sandbox: None,
-            notes: Vec::new(),
-        }
-    }
-
-    /// Reports whether the log of the container `container` may still
-    /// grow, as `Lifecycle::writing` describes.
-    fn container_writing(&self, name: &WorkspaceName, container: &str) -> Result<bool, Error> {
-        let lifecycle = self.lifecycle(name);
-        match (service(container), lifecycle.existing()?) {
-            (Some(service), Some(prepared)) => lifecycle.writing(&prepared, &service),
-            _ => Ok(false),
-        }
-    }
-
-    /// Returns the volumes of the workspace `name` that a removal deletes:
-    /// the recorded volumes that docker still has and whose labels name
-    /// the workspace, and the anonymous volumes of its recorded
-    /// containers. It runs no docker command for a workspace without
-    /// records of containers or volumes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
-    /// [`Error::DockerFailed`].
-    fn legacy_volumes(&self, name: &WorkspaceName) -> Result<WorkspaceVolumes, Error> {
-        let lifecycle = self.lifecycle(name);
-        Ok(match lifecycle.existing()? {
-            Some(prepared) => lifecycle.volumes(&prepared)?,
-            None => WorkspaceVolumes::default(),
-        })
-    }
-
-    /// Deletes `volumes`, which [`Runs::legacy_volumes`] returned for the
-    /// workspace `name`, after it checked each one again.
-    fn legacy_delete_volumes(
-        &self,
-        name: &WorkspaceName,
-        volumes: WorkspaceVolumes,
-    ) -> Result<(), Error> {
-        if volumes.names().is_empty() {
-            return Ok(());
-        }
-        let lifecycle = self.lifecycle(name);
-        match lifecycle.existing()? {
-            Some(prepared) => lifecycle.delete_volumes(&prepared, volumes),
-            None => Ok(()),
-        }
-    }
-}
-
-/// Returns the service name of the container `name`, or `None` for a name
-/// that no manifest container has.
-fn service(name: &str) -> Option<ServiceName> {
-    ServiceName::new(name).ok()
-}
-
-/// Returns the state that mxv reports for a container in `state`. The
-/// exit code is docker's, which mxv does not read as a signal.
-const fn container_state(state: ContainerState) -> ProcessState {
-    match state {
-        // mxv reports a paused container, and one that docker is
-        // restarting, as running, as it did before phase told them apart.
-        ContainerState::Running | ContainerState::Paused | ContainerState::Restarting => {
-            ProcessState::Running { pid: None }
-        }
-        ContainerState::Created => ProcessState::Created,
-        ContainerState::Exited(code) => ProcessState::Exited {
-            code: Some(code),
-            signal: None,
-            reason: None,
-        },
-        // A status that docker printed and phase does not know, such as
-        // `removing`, gives no exit code.
-        ContainerState::Unknown => ProcessState::Exited {
-            code: None,
-            signal: None,
-            reason: None,
-        },
-    }
 }
 
 /// Returns the host ports that `declared` receives in `workspace`: those
@@ -1402,44 +734,6 @@ fn received(workspace: &Workspace, declared: &Process) -> BTreeMap<String, u16> 
         .chain(placeholders)
         .filter_map(|(key, port)| workspace.ports.get(port).map(|number| (key, *number)))
         .collect()
-}
-
-/// Waits until the process group `pid` is gone or `timeout` passes, and
-/// reports whether it is gone. The group gives no event to wait on, so the
-/// wait polls it every [`POLL_INTERVAL`].
-fn wait_gone(pid: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if !process::group_exists(pid) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        pause(POLL_INTERVAL);
-    }
-}
-
-/// Returns the state of a process whose shell recorded `code`, the exit
-/// status of its program, which is 128 plus the signal's number when a
-/// signal ended the program.
-fn exited(code: Option<i32>) -> ProcessState {
-    let (code, signal) = code_and_signal(code);
-    ProcessState::Exited {
-        code,
-        signal,
-        reason: None,
-    }
-}
-
-/// Returns the exit code and the signal of a program whose shell recorded
-/// `code`: a code from 129 to 192 is 128 plus the number of the signal that
-/// ended the program.
-fn code_and_signal(code: Option<i32>) -> (Option<i32>, Option<i32>) {
-    match code {
-        Some(code) if (129..=192).contains(&code) => (None, Some(code - 128)),
-        code => (code, None),
-    }
 }
 
 /// A log file that `mxv logs -f` reads as it grows, through phase's

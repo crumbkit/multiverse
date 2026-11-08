@@ -455,16 +455,6 @@ pub fn signal_group(group: ProcessGroup, signal: Signal) -> io::Result<()> {
     rustix::process::kill_process_group(group.0, signal).map_err(io::Error::from)
 }
 
-/// Sends `signal` to the process `pid` alone.
-///
-/// # Errors
-///
-/// Returns the failure of `kill(2)`, such as ESRCH when no process has the
-/// id.
-pub fn signal_pid(pid: ProcessId, signal: Signal) -> io::Result<()> {
-    rustix::process::kill_process(pid.0, signal).map_err(io::Error::from)
-}
-
 /// Reports whether the process group `group` still has a member that has
 /// not ended. A group that the caller may not signal still exists. A
 /// member that has ended and that its parent has not reaped yet, a zombie,

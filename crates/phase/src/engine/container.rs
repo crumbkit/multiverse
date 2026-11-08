@@ -1,39 +1,22 @@
 //! The container runner, which runs the containers of a workspace with
 //! the `docker` program found on `PATH` and its `compose` plugin.
-//! multiverse's docker backend moved here, and mxv's `up`, `down`,
-//! `status`, `logs` and `remove` reach the containers of an older mxv
-//! through [`Lifecycle`]. This module owns the `Command`s of `docker`
-//! (PROC-1).
+//! This module owns the `Command`s of `docker` (PROC-1).
 //!
-//! One docker daemon can serve several mxv state directories, such as two
-//! people's or two test runs', and each of them may have a workspace with
-//! the same name. Each state directory therefore has a store id, a random
-//! 32-digit hex number that [`Lifecycle`] keeps in it, and a scope names
-//! one workspace of one store.
+//! Each container app of a plan is one Docker Compose project of its own,
+//! named `phase-<hash>-<app>`, where `<hash>` is 16 hex digits of a hash of
+//! the workspace's stable id. The container of the process `<name>` is
+//! `<project>.<name>`, and the named volume `<volume>` is
+//! `phase-<hash>.<volume>`, which every app of the workspace shares.
+//! Neither the project nor a manifest name holds a `.`, so the part after
+//! the `.` is always the container or volume. Every container and named
+//! volume carries the labels `mxv.workspace-id=<id>`, the workspace's
+//! stable id, `mxv.run-record=<path>`, the absolute path of its run record,
+//! and `mxv.container=<name>` or `mxv.volume=<name>`, and a container also
+//! carries `mxv.app=<name>`. Compose adds labels of its own.
 //!
-//! The containers of one workspace form one Docker Compose project, named
-//! `mxv-<id8>-<workspace>`, where `<id8>` is the first 8 digits of the store
-//! id. A compose project name allows only lowercase letters, digits, `-`
-//! and `_`, so the workspace's `_` is written `__` and its `.` is written
-//! `_d`, which keeps two workspace names from sharing a project. Each
-//! manifest container is one service of the project, which an older mxv
-//! started.
-//!
-//! The container of the service `<name>` is named `<project>.<name>`, and
-//! its named volume `<volume>` is `<project>.<volume>`. Neither the project
-//! nor a manifest name holds a `.`, so the part after the `.` is always the
-//! container or volume. Every container and named volume carries three
-//! labels: `mxv.store=<id>`, `mxv.workspace=<name>`, and
-//! `mxv.container=<name>` or `mxv.volume=<name>`. Those that an older mxv
-//! created after it gained stable ids also carry `mxv.workspace-id=<id>`, the
-//! workspace's stable id, `mxv.run-record=<path>`, the absolute path of
-//! the workspace's run record, and `mxv.app=<name>`, which is the
-//! workspace's name until mxv names apps. Compose adds labels of its own.
-//!
-//! `DockerCli` gives phase's `sweep` the objects of a workspace: it
-//! matches an object by `mxv.workspace-id`, and an object that carries only
-//! the older labels by `mxv.store` and `mxv.workspace`. It never matches or
-//! removes an object without an mxv label.
+//! `DockerCli` gives phase's `sweep` the objects of a workspace, and
+//! matches an object by `mxv.workspace-id`. It never matches or removes an
+//! object without an mxv label.
 //!
 //! Every container runs on docker's default bridge network, with
 //! `network_mode: bridge`, so Compose creates no network for the project.
@@ -45,12 +28,10 @@
 //! mxv records the id of each container it started and the name of each
 //! volume. Before it stops, removes, adopts or reuses a container or
 //! volume, it reads the object's labels, and it fails with
-//! [`ContainerError::Foreign`] when they do not name this store, workspace
-//! and object. mxv never touches such an object. The labels' check is the
+//! [`ContainerError::Foreign`] when they do not name this workspace and
+//! object. mxv never touches such an object. The labels' check is the
 //! only way to get an [`OwnedContainer`] or an owned volume, and the
-//! functions that stop, remove, delete or follow an object take one. An
-//! anonymous volume carries no such labels, so an anonymous volume's
-//! handle comes from the inspection of the owned container that mounts it.
+//! functions that stop, remove, delete or follow an object take one.
 //!
 //! Each docker command runs with a deadline, after which mxv kills it and
 //! fails with [`ContainerError::Failed`].
@@ -66,13 +47,11 @@
 //! builds that command for [`Phase::exec`](crate::Phase::exec) and which
 //! the engine's exec module runs with the caller's streams. `objects` inspects containers and volumes,
 //! mints their handles, and stops, removes and deletes them. `compose`
-//! runs `docker compose up` for an app's project. `lifecycle`
-//! keeps the run records of a workspace's containers through the host
-//! program's [`Host`], and [`Lifecycle`] is what mxv's runs call.
+//! runs `docker compose up` for an app's project. `volumes`
+//! finds and deletes the data volumes of a workspace's apps.
 //! `secrets` holds the wrapper and the writer that deliver a container's
 //! secrets as files in a tmpfs (decision P3). `cli` is
-//! the `DockerCli` of phase's `sweep`. A [`Prepared`] from
-//! [`Lifecycle::existing`] is the only way to name the workspace's scope.
+//! the `DockerCli` of phase's `sweep`.
 
 mod app;
 mod cli;
@@ -80,29 +59,23 @@ mod command;
 mod compose;
 mod error;
 pub(crate) mod exec;
-mod host;
-mod lifecycle;
 mod names;
 mod objects;
-mod run_dir;
 mod runner;
 mod secrets;
 mod volume_owner;
+mod volumes;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use crate::engine::container::cli::DockerCli;
 pub use crate::engine::container::error::ContainerError;
-pub use crate::engine::container::host::{Follow, Host, Versioned};
-pub use crate::engine::container::lifecycle::{
-    Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, WorkspaceVolumes, app_volume_labels,
-    app_volume_name, app_volumes, container_memory, delete_app_volumes, volume_exists,
-};
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
 pub(crate) use crate::engine::container::objects::answers_within;
-pub use crate::engine::container::objects::{
-    ContainerState, Inspected, OwnedContainer, answers, reinspect,
-};
-pub use crate::engine::container::run_dir::RunDir;
+pub use crate::engine::container::objects::{ContainerState, Inspected, OwnedContainer, reinspect};
 pub(crate) use crate::engine::container::runner::{ComposeRunner, recorded_logs};
+pub use crate::engine::container::volumes::{
+    WorkspaceVolumes, app_volume_labels, app_volume_name, app_volumes, container_memory,
+    delete_app_volumes, volume_exists,
+};

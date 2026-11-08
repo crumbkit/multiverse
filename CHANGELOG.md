@@ -15,6 +15,28 @@ workspace may need to act on.
   runs its command unsandboxed, the launcher refuses `--sandboxed`, and
   `status` gives the reason "phase was built without its sandbox feature".
 
+### Removed
+
+- mxv no longer reads, stops or reports what a version from before phase
+  started. On each workspace that such a version started, run
+  `mxv down -w <WORKSPACE>` with that earlier mxv before you upgrade. After
+  the upgrade mxv ignores the run files under
+  `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/` and `mxv remove` deletes them, but
+  a process or container that still runs is no longer stopped or reported.
+  A process left running keeps its port, so `mxv up` fails with
+  `mxv::port::taken` until you stop it by hand.
+- A container whose data sits in a volume named
+  `mxv-<id8>-<WORKSPACE>.<volume>` starts on an empty volume, because
+  `mxv up` no longer checks for that name, and `mxv remove --delete-volumes`
+  no longer deletes it. To keep the data, copy it into phase's volume with
+  `docker run --rm -v <OLD>:/from -v <NEW>:/to busybox:1.37.0 cp -a /from/. /to/`,
+  and delete the old volume with `docker volume rm <OLD>` when you no longer
+  need it.
+- The failure codes `mxv::workspace::legacy_running` and
+  `mxv::volume::not_moved` and the `group_alive` field of the documents of
+  the unit verbs are gone. The field was null for every unit that phase
+  runs.
+
 ### Changed
 
 - `up` of a container app that runs as another user than root and mounts a

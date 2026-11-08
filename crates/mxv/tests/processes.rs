@@ -113,20 +113,6 @@ impl Setup {
         self.dir.path().canonicalize().unwrap()
     }
 
-    /// Starts the processes of the workspace `name` as mxv did before
-    /// phase, which leaves the run files that a workspace started by an
-    /// earlier version of mxv has. The start runs in a process of its own,
-    /// as [`LEGACY_UP_TEST`] says.
-    fn legacy_up(&self, name: &str) {
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([LEGACY_UP_TEST, "--exact", "--nocapture"])
-            .env(LEGACY_ROOT, self.root())
-            .env(LEGACY_NAME, name)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
-    }
-
     /// Reports whether phase has started the unit `unit` of some workspace,
     /// which it shows by creating the log of the unit's process.
     fn started(&self, unit: &str) -> bool {
@@ -752,115 +738,11 @@ fn up_checks_a_listeners_port_even_while_another_process_of_the_workspace_receiv
     assert_eq!(document["fields"]["workspace"], "triage");
 }
 
-#[test]
-fn down_stops_the_children_that_an_exited_legacy_process_left_in_its_group() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[processes.wrapper]\nargv = [\"sh\", \"-c\", \"sleep 60 & sleep 1; exit 0\"]\n",
-    );
-    setup.legacy_up("triage");
-    let (_, document) = setup.json(&["status", "-w", "triage"]);
-    let pid = row(&document, "wrapper")["pid"].as_u64().unwrap();
-    for () in waiting() {
-        if row(&setup.json(&["status", "-w", "triage"]).1, "wrapper")["state"] == "exited" {
-            break;
-        }
-    }
-    assert!(group_exists(pid), "the child should outlive its wrapper");
-    let (_, status) = setup.json(&["status", "-w", "triage"]);
-    assert_eq!(row(&status, "wrapper")["group_alive"], true, "{status}");
-    let (exit, document) = setup.json(&["down", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
-    assert!(
-        !group_exists(pid),
-        "down left the child of the exited wrapper"
-    );
-}
-
-/// Returns the pids of the members of the process group `group` that have
-/// not ended, as `ps` lists them.
-fn live_members(group: u64) -> Vec<u64> {
-    let output = Command::new("ps")
-        .args(["-A", "-o", "pid=,pgid=,stat="])
-        .env("PATH", PATH)
-        .output()
-        .unwrap();
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let pgid: u64 = fields.next()?.parse().ok()?;
-            let stat = fields.next()?;
-            (pgid == group && !stat.starts_with('Z')).then_some(pid)
-        })
-        .collect()
-}
-
 // The wrapper exits, and later a child it left starts the only member that
 // the group keeps. That member started after the wrapper's exit file was
 // written, so nothing proves that the group is the one `up` started:
 // another program's group could have taken the id. `down` must signal
 // nothing, keep the record and report the group.
-#[test]
-fn down_leaves_a_legacy_group_whose_members_all_started_after_its_process_exited_and_reports_it() {
-    let setup = Setup::new();
-    let late = setup.dir.path().join("late.pid");
-    setup.workspace(
-        "triage",
-        &format!(
-            "[processes.wrapper]\nargv = [\"sh\", \"-c\", \"(sleep 2; sleep 60 & echo $! > \\\"$0.tmp\\\"; mv \\\"$0.tmp\\\" \\\"$0\\\") & sleep 1; exit 0\", \"{}\"]\n",
-            late.display()
-        ),
-    );
-    setup.legacy_up("triage");
-    let (_, document) = setup.json(&["status", "-w", "triage"]);
-    let pid = row(&document, "wrapper")["pid"].as_u64().unwrap();
-    let mut member = None;
-    for () in waiting() {
-        if let Ok(text) = fs::read_to_string(&late) {
-            let late: u64 = text.trim().parse().unwrap();
-            if live_members(pid) == [late] {
-                member = Some(late);
-                break;
-            }
-        }
-    }
-    let member = member.expect("the late member should be the group's only member");
-
-    let (exit, document) = setup.json(&["down", "-w", "triage"]);
-
-    assert_eq!(exit, 1, "{document}");
-    let failure = &document["failures"][0];
-    assert_eq!(failure["code"], "mxv::process::unstoppable", "{document}");
-    assert_eq!(failure["fields"]["pid"], pid, "{document}");
-    assert!(
-        failure["message"]
-            .as_str()
-            .unwrap()
-            .contains("cannot prove"),
-        "{document}"
-    );
-    assert_eq!(live_members(pid), [member], "down signalled the group");
-    let (_, status) = setup.json(&["status", "-w", "triage"]);
-    assert_eq!(row(&status, "wrapper")["group_alive"], true, "{status}");
-
-    let killed = Command::new("kill")
-        .args(["-KILL", &member.to_string()])
-        .env("PATH", PATH)
-        .output()
-        .unwrap();
-    assert!(killed.status.success());
-    for () in waiting() {
-        if !group_exists(pid) {
-            break;
-        }
-    }
-    let (exit, document) = setup.json(&["down", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
-}
 
 #[test]
 fn a_listener_that_a_process_left_in_its_group_ends_with_it_so_the_next_up_starts_again() {
@@ -1080,89 +962,51 @@ fn run_is_no_longer_a_command() {
     assert_eq!(exit, 2);
 }
 
-/// Rewrites the pid of the run record of `process` in the workspace `name`
-/// to `pid`, as a record left behind looks once another process took its
-/// id.
-fn rewrite_pid(setup: &Setup, name: &str, process: &str, pid: u64) {
-    let path = setup
-        .root()
-        .join(format!("state/mxv/runs/{name}/{process}.json"));
-    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    record["pid"] = pid.into();
-    write(&path, &record.to_string());
-}
-
+/// A workspace that an older mxv started keeps run files that phase never
+/// reads: a run record, an exit file, a container record and the record of
+/// its volumes. `up` starts the workspace under phase beside them, and
+/// `remove` deletes them with the rest of the run directory.
 #[test]
-fn down_leaves_alone_a_group_whose_leader_took_the_pid_of_a_stale_legacy_record() {
+fn a_workspace_with_an_older_mxvs_run_files_starts_under_phase_and_remove_deletes_them() {
     let setup = Setup::new();
     setup.workspace(
         "triage",
-        "[processes.short]\nargv = [\"sh\", \"-c\", \"sleep 1\"]\n",
-    );
-    setup.workspace(
-        "reading-list",
         "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
     );
-    let (exit, document) = setup.json(&["up", "-w", "reading-list"]);
-    assert_eq!(exit, 0, "{document}");
-    let other = row(&document, "api")["pid"].as_u64().unwrap();
-    setup.legacy_up("triage");
-    for () in waiting() {
-        if row(&setup.json(&["status", "-w", "triage"]).1, "short")["state"] == "exited" {
-            break;
-        }
-    }
-    rewrite_pid(&setup, "triage", "short", other);
+    let runs = setup.root().join("state/mxv/runs/triage");
+    fs::create_dir_all(&runs).unwrap();
+    write(
+        &runs.join("api.json"),
+        r#"{"version":1,"pid":4242,"started":"0.0","ports":{}}"#,
+    );
+    write(&runs.join("api.exit"), "0\n");
+    write(
+        &runs.join("db.container"),
+        r#"{"version":1,"id":"0123456789abcdef"}"#,
+    );
+    write(
+        &runs.join(".volumes"),
+        r#"{"version":1,"volumes":["0123456789abcdef"]}"#,
+    );
 
-    let (_, status) = setup.json(&["status", "-w", "triage"]);
-    assert_eq!(row(&status, "short")["state"], "exited", "{status}");
-    assert_eq!(row(&status, "short")["group_alive"], false, "{status}");
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(setup.started("api"));
+    assert_eq!(row(&document, "api")["state"], "running", "{document}");
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    let names: Vec<&str> = status["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["api"], "{status}");
     let (exit, document) = setup.json(&["down", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
-    assert!(
-        group_exists(other),
-        "down killed another workspace's process"
-    );
-    assert!(
-        !setup
-            .root()
-            .join("state/mxv/runs/triage/short.json")
-            .exists(),
-        "down keeps the stale record"
-    );
-    let (_, status) = setup.json(&["status", "-w", "reading-list"]);
-    assert_eq!(row(&status, "api")["state"], "running", "{status}");
-}
-
-#[test]
-fn a_stale_legacy_record_does_not_count_as_running_for_remove_or_logs_follow() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[processes.short]\nargv = [\"sh\", \"-c\", \"echo done; sleep 1\"]\n",
-    );
-    setup.workspace(
-        "reading-list",
-        "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
-    );
-    let (_, document) = setup.json(&["up", "-w", "reading-list"]);
-    let other = row(&document, "api")["pid"].as_u64().unwrap();
-    setup.legacy_up("triage");
-    for () in waiting() {
-        if row(&setup.json(&["status", "-w", "triage"]).1, "short")["state"] == "exited" {
-            break;
-        }
-    }
-    rewrite_pid(&setup, "triage", "short", other);
-    let (exit, text) = setup.text(&["logs", "-w", "triage", "short", "-f"]);
-    assert_eq!(exit, 0, "logs -f must end: {text}");
-    assert!(text.contains("done"), "{text}");
-    let (exit, document) = setup.json(&["ports", "reset", "-w", "triage", "--yes"]);
-    assert_ne!(
-        document["code"], "mxv::workspace::running",
-        "{exit} {document}"
-    );
-    assert!(group_exists(other));
+    let (exit, document) = setup.json(&["remove", "triage", "--yes", "--force"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!runs.exists(), "remove kept the run directory");
 }
 
 #[test]
@@ -1258,29 +1102,6 @@ fn a_port_that_the_manifest_renames_stays_with_the_workspace_until_its_listener_
     assert_eq!(exit, 0, "{document}");
     let (_, shown) = setup.json(&["show", "triage"]);
     assert!(shown["data"][0]["ports"].get("api").is_none(), "{shown}");
-}
-
-#[test]
-fn group_alive_is_null_for_a_process_that_phase_runs() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
-    );
-    let (exit, document) = setup.json(&["up", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
-    assert_eq!(
-        row(&document, "api")["group_alive"],
-        Value::Null,
-        "{document}"
-    );
-    let (exit, document) = setup.json(&["down", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
-    assert_eq!(
-        row(&document, "api")["group_alive"],
-        Value::Null,
-        "{document}"
-    );
 }
 
 #[test]
@@ -1506,196 +1327,6 @@ fn a_dangling_link_at_the_workspace_manifest_is_unreadable_and_named() {
     );
 }
 
-#[test]
-fn a_workspace_that_an_earlier_mxv_started_shows_its_processes_and_refuses_up_until_down() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[processes.api]\nargv = [\"sh\", \"-c\", \"echo legacy; exec sleep 60\"]\n",
-    );
-    setup.legacy_up("triage");
-    let runs = setup.root().join("state/mxv/runs/triage");
-    assert!(runs.join("api.json").exists());
-
-    let (exit, status) = setup.json(&["status", "-w", "triage"]);
-    assert_eq!(exit, 0, "{status}");
-    let api = row(&status, "api");
-    assert_eq!(api["state"], "running", "{status}");
-    let pid = api["pid"].as_u64().unwrap();
-    for () in waiting() {
-        if setup
-            .text(&["logs", "-w", "triage", "api"])
-            .1
-            .contains("legacy")
-        {
-            break;
-        }
-    }
-    assert!(
-        setup
-            .text(&["logs", "-w", "triage", "api"])
-            .1
-            .contains("legacy")
-    );
-
-    for verb in ["up", "restart"] {
-        let (exit, document) = setup.json(&[verb, "-w", "triage"]);
-        assert_eq!(exit, 1, "{verb}: {document}");
-        assert_eq!(
-            document["code"], "mxv::workspace::legacy_running",
-            "{verb}: {document}"
-        );
-        assert_eq!(document["fields"]["processes"], serde_json::json!(["api"]));
-        assert_eq!(document["recovery"]["call"], "mxv down --workspace triage");
-    }
-    assert!(process_exists(pid), "a refused up stopped the process");
-
-    let (exit, document) = setup.json(&["down", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
-    assert_eq!(row(&document, "api")["state"], "stopped", "{document}");
-    assert!(!group_exists(pid), "down left the legacy process");
-    assert!(!runs.join("api.json").exists(), "down kept the run file");
-    assert!(!runs.join("api.log").exists(), "down kept the log");
-
-    let (exit, document) = setup.json(&["up", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
-    assert!(setup.started("api"), "phase did not start the process");
-    assert_ne!(row(&document, "api")["pid"].as_u64(), Some(pid));
-}
-
-#[test]
-fn up_drops_the_run_files_of_legacy_processes_that_have_ended_and_starts_under_phase() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[processes.short]\nargv = [\"sh\", \"-c\", \"sleep 1\"]\n",
-    );
-    setup.legacy_up("triage");
-    for () in waiting() {
-        if row(&setup.json(&["status", "-w", "triage"]).1, "short")["state"] == "exited" {
-            break;
-        }
-    }
-    let runs = setup.root().join("state/mxv/runs/triage");
-    assert!(runs.join("short.json").exists());
-    setup.workspace_manifest(
-        "triage",
-        "[processes.short]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n",
-    );
-    // `status` reports the process as exited once its exit file is written,
-    // and its shell ends a moment later. `up` waits for the whole group to
-    // be gone, so on a loaded machine it may still refuse once or twice.
-    let (mut exit, mut document) = setup.json(&["up", "-w", "triage"]);
-    for () in waiting() {
-        if document["code"] != "mxv::workspace::legacy_running" {
-            break;
-        }
-        (exit, document) = setup.json(&["up", "-w", "triage"]);
-    }
-    assert_eq!(exit, 0, "{document}");
-    assert!(!runs.join("short.json").exists(), "up kept the run file");
-    assert!(setup.started("short"));
-    assert_eq!(row(&document, "short")["state"], "running", "{document}");
-}
-
-/// The test that [`Setup::legacy_up`] runs in a process of its own.
-const LEGACY_UP_TEST: &str = "an_earlier_mxv_starts_the_workspace_that_the_environment_names";
-/// The variable that names the test root of the workspace that
-/// [`LEGACY_UP_TEST`] starts.
-const LEGACY_ROOT: &str = "MXV_TEST_LEGACY_ROOT";
-/// The variable that names the workspace that [`LEGACY_UP_TEST`] starts.
-const LEGACY_NAME: &str = "MXV_TEST_LEGACY_NAME";
-
-/// The script that an earlier mxv ran in a shell of a process group of its
-/// own. Its `$1` is the exit file, and the rest are the process's `argv`.
-const LEGACY_SCRIPT: &str = r#"exit_file=$1; shift; "$@"; printf '%s\n' "$?" > "$exit_file""#;
-
-/// Returns the start of the process `pid` in the form that run records hold.
-fn recorded_start(pid: u32) -> String {
-    use multiverse::phase::host::{RawStart, raw_start};
-    match raw_start(pid).unwrap() {
-        RawStart::Ticks(ticks) => ticks.to_string(),
-        RawStart::Since {
-            seconds,
-            microseconds,
-        } => format!("{seconds}.{microseconds:06}"),
-        other => panic!("process {pid} has no readable start: {other:?}"),
-    }
-}
-
-/// Starts the workspace that [`LEGACY_ROOT`] and [`LEGACY_NAME`] name as an
-/// earlier mxv did, and does nothing when they are unset. Each process is a
-/// shell that leads a process group of its own and runs [`LEGACY_SCRIPT`],
-/// and it has a log and a run record. [`Setup::legacy_up`] runs this test
-/// in a process of its own, which then exits, so the processes that it
-/// starts lose their parent as they did when an earlier `mxv up` exited.
-/// The operating system then reaps each one that ends, and none of them
-/// stays a zombie child of the test.
-#[test]
-fn an_earlier_mxv_starts_the_workspace_that_the_environment_names() {
-    use std::os::unix::process::CommandExt as _;
-    use std::process::Stdio;
-
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the helper test reads the workspace that its parent test names"
-    )]
-    let (Some(root), Some(name)) = (std::env::var_os(LEGACY_ROOT), std::env::var_os(LEGACY_NAME))
-    else {
-        return;
-    };
-    let state = Path::new(&root).join("state/mxv");
-    let store = multiverse::Store::new(state.join("workspaces"));
-    let name: multiverse::WorkspaceName = name.to_str().unwrap().parse().unwrap();
-    let workspace = store.read(&name).unwrap().unwrap();
-    let checkout = workspace.checkouts[0].path.clone();
-    let text = fs::read_to_string(checkout.join("mxv.toml")).unwrap();
-    let manifest = multiverse::Manifest::parse(&text, &checkout.join("mxv.toml")).unwrap();
-    let dir = state.join("runs").join(name.as_str());
-    fs::create_dir_all(&dir).unwrap();
-    for (process, declared) in &manifest.processes {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the helper test opens the log that an earlier mxv appended to"
-        )]
-        let log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(format!("{process}.log")))
-            .unwrap();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the helper test starts a process as an earlier mxv did"
-        )]
-        let mut shell = std::process::Command::new("/bin/sh");
-        shell
-            .arg("-c")
-            .arg(LEGACY_SCRIPT)
-            .arg("mxv-process")
-            .arg(dir.join(format!("{process}.exit")))
-            .args(&declared.argv)
-            .current_dir(checkout.join(&declared.cwd))
-            .stdin(Stdio::null())
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .process_group(0);
-        #[expect(
-            clippy::disallowed_methods,
-            clippy::zombie_processes,
-            reason = "the helper test starts a process that outlives it, so the operating system reaps it"
-        )]
-        let child = shell.spawn().unwrap();
-        let pid = child.id();
-        let record = serde_json::json!({
-            "version": 1,
-            "pid": pid,
-            "started": recorded_start(pid),
-            "ports": {},
-        });
-        write(&dir.join(format!("{process}.json")), &record.to_string());
-    }
-}
-
 // A readiness port that nothing in the process's group has to hold counts
 // as ready as soon as anything accepts on it.
 #[test]
@@ -1782,33 +1413,6 @@ fn up_fails_as_unstoppable_and_starts_nothing_more_when_phase_leaves_a_group_it_
         .output()
         .unwrap();
     assert!(killed.status.success(), "{killed:?}");
-}
-
-#[test]
-fn logs_of_a_workspace_that_an_earlier_mxv_started_read_its_run_files_under_a_manifest_this_mxv_refuses()
- {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[processes.api]\nargv = [\"sh\", \"-c\", \"echo legacy line; exec sleep 300\"]\n",
-    );
-    setup.legacy_up("triage");
-    // An earlier mxv accepted a manifest that sets PATH, and this one
-    // refuses it.
-    setup.workspace_manifest(
-        "triage",
-        "[processes.api]\nargv = [\"sh\", \"-c\", \"echo legacy line; exec sleep 300\"]\nenv = { PATH = \"/bin\" }\n",
-    );
-    let mut printed = String::new();
-    for () in waiting() {
-        printed = setup.text(&["logs", "-w", "triage", "api"]).1;
-        if printed.contains("legacy line") {
-            break;
-        }
-    }
-    assert!(printed.contains("legacy line"), "{printed}");
-    let (exit, document) = setup.json(&["down", "-w", "triage"]);
-    assert_eq!(exit, 0, "{document}");
 }
 
 #[test]

@@ -1,14 +1,5 @@
 //! `up`, `down`, `restart`, `status` and `logs` of a workspace's app, which
 //! phase runs from the plan that `phase_plan` builds.
-//!
-//! A workspace whose processes or containers mxv started before phase ran
-//! its apps keeps its run files in `<runs>/<workspace>/`. While such a
-//! file exists, `status`, `down` and `logs` read it as mxv did before, and
-//! `up` refuses to start anything while one of those processes or
-//! containers may still run, with [`UpOutcome::LegacyRunning`]. Once
-//! nothing of them runs, `up` removes their containers and their files,
-//! apart from the lock and the record of their volumes, and phase runs the
-//! app from then on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -28,15 +19,14 @@ use phase::{
 };
 
 use super::{
-    DownOutcome, ExitReason, Follower, Footprint, Kind, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, Unstoppable, UpOutcome, Waited, code_and_signal, received, tail,
+    DownOutcome, ExitReason, Footprint, Kind, ProcessNote, ProcessState, ProcessStatus,
+    RenamedVolume, Runs, Unstoppable, UpOutcome, Waited, received,
 };
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Inputs, MAIN};
 use crate::record::Workspace;
-use crate::run_files::RunHost;
 use crate::service::PROVISION_APP;
 use crate::store::{self, Lock, Store};
 
@@ -57,12 +47,6 @@ const STOP_MARGIN: Duration = Duration::from_secs(30);
 /// its containers, so its data volumes may exist. mxv runs no docker
 /// command for the volumes of a workspace without it.
 const CONTAINERS_RAN: &str = ".containers";
-
-/// The files of a workspace's run directory that stay once nothing that
-/// mxv started before phase ran its apps runs: the lock that `up` and
-/// `down` take, the record of the older containers' volumes, which
-/// `mxv remove --delete-volumes` reads, and [`CONTAINERS_RAN`].
-const KEPT_FILES: &[&str] = &[".lock", ".volumes", CONTAINERS_RAN];
 
 mod exec;
 #[cfg(test)]
@@ -205,12 +189,45 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
     notes
 }
 
+/// Returns the stable id that the record of the workspace `name` holds on
+/// disk. When the record holds none, `store` mints one and saves the record
+/// with it first.
+pub(super) fn saved_workspace_id(
+    store: &Store,
+    name: &WorkspaceName,
+) -> Result<WorkspaceId, Error> {
+    let no_id = |reason: &str| Error::DockerFailed {
+        operation: "workspace id".to_owned(),
+        container: None,
+        message: format!("mxv cannot name the workspace's containers, because {reason}"),
+        docker_line: None,
+    };
+    let mut record = store
+        .read(name)?
+        .ok_or_else(|| no_id("the workspace has no record"))?;
+    if record.id.is_none() {
+        store.update(&mut record)?;
+    }
+    record
+        .id
+        .ok_or_else(|| no_id("the workspace's record holds no stable id"))
+}
+
+/// Returns the exit code and the signal that a shell's `code` means: a code
+/// from 129 to 192 is 128 plus the number of the signal that ended the
+/// program.
+fn code_and_signal(code: Option<i32>) -> (Option<i32>, Option<i32>) {
+    match code {
+        Some(code) if (129..=192).contains(&code) => (None, Some(code - 128)),
+        code => (code, None),
+    }
+}
+
 /// Returns the exit code and the signal that mxv reports for a process
 /// that phase saw end with `code` or `signal`, which is a host process
 /// when `host`. A host process that runs a shell, such as `sh -c`, may end
 /// with a code from 129 to 192, which mxv reads as 128 plus the number of
-/// the signal that ended the shell's program, as it did before phase ran
-/// its processes. A container's code stays the one docker reports.
+/// the signal that ended the shell's program. A container's code stays the one docker reports.
 fn ended(host: bool, code: Option<i32>, signal: Option<i32>) -> (Option<i32>, Option<i32>) {
     match signal {
         Some(signal) => (None, Some(signal)),
@@ -294,13 +311,8 @@ impl LineSink for LogOutput<'_> {
 /// alone.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Volumes {
-    /// The workspace that the volumes belong to.
-    workspace: WorkspaceName,
     /// The volumes' docker names, in name order.
     names: Vec<String>,
-    /// The volumes of the containers that mxv started before phase ran
-    /// the workspace's apps.
-    legacy: WorkspaceVolumes,
     /// The volumes of the workspace's container apps.
     apps: WorkspaceVolumes,
 }
@@ -324,75 +336,6 @@ impl Runs {
     /// workspace whose stable id is `id`.
     fn phase_error(&self, id: &WorkspaceId, error: PhaseError) -> Error {
         Error::of_phase(error, self.phase.run_record(id))
-    }
-
-    /// Reports whether the workspace `name` has run files of processes or
-    /// containers that mxv started before phase ran its apps.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StateUnreadable`] when the run files cannot be
-    /// read, and the errors of reading docker's containers.
-    pub fn has_legacy(&self, name: &WorkspaceName) -> Result<bool, Error> {
-        Ok(!self.recorded(name)?.is_empty() || !self.existing_containers(name)?.is_empty())
-    }
-
-    /// Returns the processes and containers of `workspace` that mxv
-    /// started before phase ran its apps and that may still run, in the
-    /// order [`Runs::running`] gives. `up` and `restart` start nothing
-    /// while one is listed.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Runs::status`].
-    pub fn legacy_live(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
-        if !self.has_legacy(&workspace.name)? {
-            return Ok(Vec::new());
-        }
-        self.legacy_running(workspace)
-    }
-
-    /// Removes the containers and the run files of the workspace `name`
-    /// that mxv started before phase ran its apps, once none of them runs.
-    /// The lock and the record of the older containers' volumes stay.
-    fn drop_legacy(&self, name: &WorkspaceName) -> Result<(), Error> {
-        let lifecycle = self.lifecycle(name);
-        if !lifecycle.recorded()?.is_empty()
-            && let Some(prepared) = lifecycle.existing()?
-        {
-            lifecycle.stop_all(&prepared)?;
-        }
-        let dir = self.workspace_dir(name);
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => return Err(Error::StateUnreadable { path: dir, source }),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| Error::StateUnreadable {
-                path: dir.clone(),
-                source,
-            })?;
-            let kept = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|file| KEPT_FILES.contains(&file));
-            if kept {
-                continue;
-            }
-            let path = entry.path();
-            let removed = if path.is_dir() {
-                fs::remove_dir_all(&path)
-            } else {
-                fs::remove_file(&path)
-            };
-            match removed {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(Error::Unwritable { path, source }),
-            }
-        }
-        Ok(())
     }
 
     /// Returns the plan of `workspace`'s `manifest`, or `None` when the
@@ -502,7 +445,6 @@ impl Runs {
             state: row.map_or(ProcessState::Stopped, state_of),
             ports: Self::unit_ports(workspace, manifest, name),
             log: row.and_then(|row| row.log.clone()),
-            group_alive: None,
             ready: row.and_then(ready_of),
             sandbox: row
                 .and_then(|row| row.sandbox.as_ref())
@@ -531,10 +473,8 @@ impl Runs {
 
     /// Returns the processes and containers of `workspace` and their
     /// states: the manifest's in start order, then any other that phase's
-    /// run record or an older run file names. Without a manifest it
-    /// reports only those that a record names. A workspace with run files
-    /// of processes that mxv started before phase ran its apps reports
-    /// those files, as mxv did before.
+    /// run record names. Without a manifest it reports only those that a
+    /// record names.
     ///
     /// # Errors
     ///
@@ -546,9 +486,6 @@ impl Runs {
         workspace: &Workspace,
         manifest: Option<&Manifest>,
     ) -> Result<Vec<ProcessStatus>, Error> {
-        if self.has_legacy(&workspace.name)? {
-            return self.legacy_status(workspace, manifest);
-        }
         let rows = self.phase_rows(workspace, manifest)?;
         Ok(Self::phase_known(manifest, &rows)
             .iter()
@@ -621,9 +558,7 @@ impl Runs {
     }
 
     /// Returns the host processes and containers of `workspace` that
-    /// phase runs and that may run. A process or container that mxv
-    /// started before phase ran its apps is left out, so a reclaim counts
-    /// no memory for it.
+    /// phase runs and that may run.
     ///
     /// # Errors
     ///
@@ -667,7 +602,7 @@ impl Runs {
     ///
     /// Returns the errors of [`Runs::status`].
     pub fn running(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
-        let mut running = self.legacy_live(workspace)?;
+        let mut running = Vec::new();
         let manifest = workspace.manifest().ok().flatten();
         for (name, row) in self.phase_rows(workspace, manifest.as_ref())? {
             if row.state.may_run() && !running.contains(&name) {
@@ -690,11 +625,6 @@ impl Runs {
     /// When a unit fails, `up` stops the units that it started before it,
     /// so either every selected unit runs or this run leaves none of its
     /// own running.
-    ///
-    /// `up` starts nothing while a process or container that mxv started
-    /// before phase ran its apps may still run, and nothing when a
-    /// container's volume holds data under the older name and phase's
-    /// volume of that name does not exist.
     ///
     /// # Errors
     ///
@@ -720,22 +650,8 @@ impl Runs {
             Ok(order) => order,
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
         };
-        if self.has_legacy(&workspace.name)? {
-            let live = self.legacy_running(workspace)?;
-            if !live.is_empty() {
-                return Ok(UpOutcome::LegacyRunning { processes: live });
-            }
-            self.drop_legacy(&workspace.name)?;
-        }
-        let host = RunHost {
-            records: Some(store),
-        };
-        let saved = self.lifecycle_with(&host, &workspace.name).saved_id()?;
-        workspace.id = Some(saved.id().clone());
-        let id = saved.id().clone();
-        if let Some(outcome) = self.unmoved_volume(&workspace.name, &id, manifest, &order)? {
-            return Ok(outcome);
-        }
+        let id = saved_workspace_id(store, &workspace.name)?;
+        workspace.id = Some(id.clone());
         let held = self
             .phase_rows(workspace, None)?
             .values()
@@ -815,53 +731,6 @@ impl Runs {
                 })
                 .collect(),
         ))
-    }
-
-    /// Returns the refusal of a selected container whose volume holds data
-    /// under the name that mxv gave it before phase ran its apps, when
-    /// phase's volume of that name does not exist, or `None`.
-    fn unmoved_volume(
-        &self,
-        name: &WorkspaceName,
-        id: &WorkspaceId,
-        manifest: &Manifest,
-        order: &[String],
-    ) -> Result<Option<UpOutcome>, Error> {
-        let mounted: Vec<(&String, &String)> = order
-            .iter()
-            .filter_map(|unit| manifest.containers.get(unit).map(|found| (unit, found)))
-            .flat_map(|(unit, container)| {
-                container.volumes.keys().map(move |volume| (unit, volume))
-            })
-            .collect();
-        if mounted.is_empty() {
-            return Ok(None);
-        }
-        let lifecycle = self.lifecycle(name);
-        let Some(prepared) = lifecycle.existing()? else {
-            return Ok(None);
-        };
-        for (container, volume) in mounted {
-            let Ok(key) = VolumeKey::new(volume) else {
-                continue;
-            };
-            let Some(legacy) = lifecycle.legacy_volume(&prepared, &key)? else {
-                continue;
-            };
-            let Some(phase) = app_volume_name(&self.phase, id, &key) else {
-                continue;
-            };
-            if !volume_exists(&phase)? {
-                return Ok(Some(UpOutcome::VolumeNotMoved {
-                    container: container.clone(),
-                    volume: volume.clone(),
-                    legacy,
-                    phase,
-                    labels: app_volume_labels(&self.phase, id, &key),
-                }));
-            }
-        }
-        Ok(None)
     }
 
     /// Stops the apps that a failed `up` started from nothing, as its
@@ -1044,11 +913,7 @@ impl Runs {
     /// reverse of their start order. phase sends each process group its
     /// stop signal, then `KILL` when it outlives the grace, and never
     /// signals a group that it cannot prove its own. A process that phase
-    /// left running does not stop the others, and its result says so. A
-    /// workspace with run files of processes that mxv started before phase
-    /// ran its apps stops those as mxv did before, and once none of them
-    /// is left, deletes their files apart from the lock and the volumes'
-    /// record.
+    /// left running does not stop the others, and its result says so.
     ///
     /// # Errors
     ///
@@ -1057,18 +922,11 @@ impl Runs {
     /// for another failure of phase.
     pub fn down(
         &self,
-        lock: &Lock,
+        _lock: &Lock,
         workspace: &Workspace,
         manifest: Option<&Manifest>,
         names: &[String],
     ) -> Result<DownOutcome, Error> {
-        if self.has_legacy(&workspace.name)? {
-            let outcome = self.legacy_down(lock, workspace, manifest, names)?;
-            if !self.has_legacy(&workspace.name)? {
-                self.drop_legacy(&workspace.name)?;
-            }
-            return Ok(outcome);
-        }
         let rows = self.phase_rows(workspace, manifest)?;
         let known = Self::phase_known(manifest, &rows);
         if let Some(unknown) = names.iter().find(|name| !known.contains(name)) {
@@ -1076,8 +934,7 @@ impl Runs {
         }
         let Some(id) = &workspace.id else {
             // A workspace without a stable id has never run under phase, so
-            // each unit that `down` names is stopped already, as it was for
-            // the runner before phase.
+            // each unit that `down` names is stopped already.
             return Ok(DownOutcome::Down(
                 known
                     .iter()
@@ -1183,9 +1040,6 @@ impl Runs {
         follow: bool,
         output: &mut LogOutput<'_>,
     ) -> Result<bool, Error> {
-        if self.has_legacy(&workspace.name)? {
-            return self.legacy_logs(workspace, manifest, process, lines, follow, output.pass);
-        }
         let known = self.status(workspace, manifest)?;
         if !known.iter().any(|status| status.name == process) {
             return Ok(false);
@@ -1204,56 +1058,9 @@ impl Runs {
         }
     }
 
-    /// Passes the log of `process` that mxv wrote before phase ran the
-    /// workspace's apps to `pass`, as [`Runs::logs`] describes.
-    fn legacy_logs(
-        &self,
-        workspace: &Workspace,
-        manifest: Option<&Manifest>,
-        process: &str,
-        lines: usize,
-        follow: bool,
-        pass: &mut dyn FnMut(String) -> ControlFlow<()>,
-    ) -> Result<bool, Error> {
-        let known = self.legacy_status(workspace, manifest)?;
-        if !known.iter().any(|status| status.name == process) {
-            return Ok(false);
-        }
-        let log = self.log(&workspace.name, process);
-        let mut follower = Follower::at_end(&log)?;
-        for line in tail(&log, lines) {
-            if pass(line).is_break() {
-                return Ok(true);
-            }
-        }
-        if !follow {
-            return Ok(true);
-        }
-        while let Some(reader) = follower.as_mut() {
-            let read = reader.lines()?;
-            let quiet = read.is_empty();
-            for line in read {
-                if pass(line).is_break() {
-                    return Ok(true);
-                }
-            }
-            if quiet {
-                // The follow ends once the log is gone or nothing can write
-                // to it any more. A read that returned lines is followed by
-                // another, so the last lines before the end are passed.
-                if !(self.legacy_writing(&workspace.name, process)? && log.exists()) {
-                    break;
-                }
-                reader.wait();
-            }
-        }
-        Ok(true)
-    }
-
     /// Stops what phase's run record of the workspace `name`, whose stable
-    /// id is `id`, names and phase no longer supervises, removes the stopped containers that mxv started
-    /// before phase ran its apps, and deletes every run file and log of
-    /// the workspace. The workspace's volumes stay; [`Runs::delete_volumes`]
+    /// id is `id`, names and phase no longer supervises, and deletes every run file and
+    /// log of the workspace, whatever other files it holds. The workspace's volumes stay; [`Runs::delete_volumes`]
     /// deletes them.
     ///
     /// # Errors
@@ -1272,7 +1079,12 @@ impl Runs {
                 Err(source) => return Err(Error::Unwritable { path: logs, source }),
             }
         }
-        self.legacy_forget(name)
+        let dir = self.workspace_dir(name);
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(Error::Unwritable { path: dir, source }),
+        }
     }
 
     /// Returns the docker containers of `workspace`, running or stopped,
@@ -1284,10 +1096,7 @@ impl Runs {
     /// Returns [`Error::StateUnreadable`] when a run directory cannot be
     /// read, and the errors of [`Runs::status`].
     pub fn docker_containers(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
-        let mut containers: BTreeSet<String> = self
-            .legacy_docker_containers(&workspace.name)?
-            .into_iter()
-            .collect();
+        let mut containers = BTreeSet::new();
         let manifest = workspace.manifest().ok().flatten();
         for (name, row) in self.phase_rows(workspace, manifest.as_ref())? {
             if row.runner == RunnerKind::Container && row.handle.is_some() {
@@ -1299,16 +1108,13 @@ impl Runs {
 
     /// Returns the volumes of `workspace` that a removal deletes: the data
     /// volumes of its container apps, which docker labels with its stable
-    /// id, and the volumes of the containers that mxv started before phase
-    /// ran its apps. It runs no docker command for a workspace without a
-    /// stable id or records of older containers or volumes.
+    /// id. It runs no docker command for a workspace without a stable id.
     ///
     /// # Errors
     ///
     /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
     /// [`Error::DockerFailed`].
     pub fn volumes(&self, workspace: &Workspace) -> Result<Volumes, Error> {
-        let legacy = self.legacy_volumes(&workspace.name)?;
         let ran = self
             .workspace_dir(&workspace.name)
             .join(CONTAINERS_RAN)
@@ -1317,15 +1123,8 @@ impl Runs {
             Some(id) if ran => app_volumes(&self.phase, id)?,
             _ => WorkspaceVolumes::default(),
         };
-        let mut names = legacy.names();
-        names.extend(apps.names());
-        names.sort();
-        Ok(Volumes {
-            workspace: workspace.name.clone(),
-            names,
-            legacy,
-            apps,
-        })
+        let names = apps.names();
+        Ok(Volumes { names, apps })
     }
 
     /// Deletes `volumes`, which [`Runs::volumes`] returned for one
@@ -1340,7 +1139,7 @@ impl Runs {
             return Ok(());
         }
         delete_app_volumes(volumes.apps)?;
-        self.legacy_delete_volumes(&volumes.workspace, volumes.legacy)
+        Ok(())
     }
 }
 

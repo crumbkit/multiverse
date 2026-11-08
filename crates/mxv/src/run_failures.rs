@@ -15,12 +15,6 @@ use crate::failures::remove_volumes_line;
 pub const WORKSPACE_NOT_CURRENT: Code = Code::new("mxv", "workspace", "not_current");
 /// The code of a removal that running processes stop.
 pub const WORKSPACE_RUNNING: Code = Code::new("mxv", "workspace", "running");
-/// The code of an `up` or `restart` that processes started before phase ran
-/// the workspace's apps stop, until `mxv down` stops them.
-pub const WORKSPACE_LEGACY_RUNNING: Code = Code::new("mxv", "workspace", "legacy_running");
-/// The code of a container whose data volume from before phase ran the
-/// workspace's apps holds data that its new volume does not.
-pub const VOLUME_NOT_MOVED: Code = Code::new("mxv", "volume", "not_moved");
 /// The code of `mxv add` to a workspace of one checkout whose containers'
 /// volumes hold data under the names that adding a checkout prefixes.
 pub const VOLUME_RENAMED: Code = Code::new("mxv", "volume", "renamed");
@@ -70,8 +64,6 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_NOT_CURRENT,
     &WORKSPACE_RUNNING,
     &WORKSPACE_VOLUMES,
-    &WORKSPACE_LEGACY_RUNNING,
-    &VOLUME_NOT_MOVED,
     &VOLUME_RENAMED,
     &MANIFEST_UNIT_NAME,
     &MANIFEST_UNRUNNABLE,
@@ -218,23 +210,6 @@ pub(crate) enum RunFailure {
         /// The running processes.
         processes: Vec<String>,
     },
-    /// Processes that mxv started before phase ran the workspace's apps
-    /// still run, so `up` and `restart` refuse until `mxv down` stops them.
-    LegacyRunning {
-        /// The workspace's name.
-        workspace: String,
-        /// The processes that still run.
-        processes: Vec<String>,
-    },
-    /// A container's data volume from before phase ran the workspace's
-    /// apps exists and its new volume does not, so `up` refuses rather
-    /// than start the container on an empty volume.
-    VolumeNotMoved {
-        /// The workspace's name.
-        workspace: String,
-        /// The volume and the container that mounts it.
-        moved: Box<NotMoved>,
-    },
     /// `mxv add` would prefix the names of volumes that hold the data of
     /// the workspace's one checkout, so its containers would start on
     /// empty volumes and the old ones would sit unused.
@@ -264,22 +239,6 @@ pub(crate) enum RunFailure {
         /// keeps.
         allow: Allow,
     },
-}
-
-/// A container's data volume from before phase that `up` did not move,
-/// which [`RunFailure::VolumeNotMoved`] names.
-#[derive(Debug)]
-pub(crate) struct NotMoved {
-    /// The container.
-    pub(crate) container: String,
-    /// The volume's name in the manifest.
-    pub(crate) volume: String,
-    /// The docker volume from before phase.
-    pub(crate) legacy: String,
-    /// The docker volume that phase mounts.
-    pub(crate) phase: String,
-    /// The labels, as `name=value`, that the volume phase mounts needs.
-    pub(crate) labels: Vec<String>,
 }
 
 /// The image whose `cp` copies a volume's data into another, pinned by tag.
@@ -369,8 +328,6 @@ impl Failure for RunFailure {
             Self::NotCurrent => &WORKSPACE_NOT_CURRENT,
             Self::Running { .. } => &WORKSPACE_RUNNING,
             Self::Volumes { .. } => &WORKSPACE_VOLUMES,
-            Self::LegacyRunning { .. } => &WORKSPACE_LEGACY_RUNNING,
-            Self::VolumeNotMoved { .. } => &VOLUME_NOT_MOVED,
             Self::VolumeRenamed { .. } => &VOLUME_RENAMED,
             Self::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
             Self::ManifestMissing { .. } => &MANIFEST_NOT_FOUND,
@@ -403,19 +360,9 @@ impl Failure for RunFailure {
     fn recovery(&self) -> Recovery {
         match self {
             Self::NotCurrent => Recovery::Run(Call::new(&["list"])),
-            Self::Running { workspace, .. } | Self::LegacyRunning { workspace, .. } => {
+            Self::Running { workspace, .. } => {
                 Recovery::Run(Call::new(&["down"]).value("workspace", workspace))
             }
-            Self::VolumeNotMoved { moved, .. } => hint(format!(
-                "copy the data into the new volume with `docker volume create{} -- {phase}` and `docker run --rm -v {legacy}:/from -v {phase}:/to {COPY_IMAGE} cp -a /from/. /to/`, or delete the old volume with `docker volume rm {legacy}` if its data is not needed, and run `mxv up` again",
-                moved
-                    .labels
-                    .iter()
-                    .map(|label| format!(" --label {}", shell_quoted(label)))
-                    .collect::<String>(),
-                phase = moved.phase,
-                legacy = moved.legacy,
-            )),
             Self::VolumeRenamed { volumes, .. } => hint(format!(
                 "copy each volume's data into the volume that the container mounts after the add, {}, then delete each old volume, and run `mxv add` again; to drop the data instead, only delete the old volumes",
                 volumes
@@ -561,10 +508,7 @@ impl Failure for RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
-            Self::LegacyRunning { .. }
-            | Self::VolumeNotMoved { .. }
-            | Self::VolumeRenamed { .. }
-            | Self::Unrunnable { .. } => self.transition_fields(),
+            Self::VolumeRenamed { .. } | Self::Unrunnable { .. } => self.transition_fields(),
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -730,10 +674,7 @@ impl fmt::Display for RunFailure {
                 "the workspace {workspace} has docker volumes, which may hold data: {}",
                 volumes.join(", ")
             ),
-            Self::LegacyRunning { .. }
-            | Self::VolumeNotMoved { .. }
-            | Self::VolumeRenamed { .. }
-            | Self::Unrunnable { .. } => self.fmt_transition(formatter),
+            Self::VolumeRenamed { .. } | Self::Unrunnable { .. } => self.fmt_transition(formatter),
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -856,13 +797,6 @@ impl RunFailure {
     /// workspace's apps added.
     fn transition_fields(&self) -> Vec<Field<'_>> {
         match self {
-            Self::LegacyRunning {
-                workspace,
-                processes,
-            } => vec![
-                Field::new("workspace", workspace),
-                Field::new("processes", FieldValue::list(processes.iter())),
-            ],
             Self::VolumeRenamed { workspace, volumes } => vec![
                 Field::new("workspace", workspace),
                 Field::new(
@@ -877,13 +811,6 @@ impl RunFailure {
                     "new_volumes",
                     FieldValue::list(volumes.iter().map(|volume| &volume.new)),
                 ),
-            ],
-            Self::VolumeNotMoved { workspace, moved } => vec![
-                Field::new("workspace", workspace),
-                Field::new("container", &moved.container),
-                Field::new("volume", &moved.volume),
-                Field::new("legacy_volume", &moved.legacy),
-                Field::new("phase_volume", &moved.phase),
             ],
             Self::Unrunnable {
                 workspace,
@@ -902,14 +829,6 @@ impl RunFailure {
     /// workspace's apps added.
     fn fmt_transition(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LegacyRunning {
-                workspace,
-                processes,
-            } => write!(
-                formatter,
-                "the workspace {workspace} has processes that an earlier version of mxv started, which still run: {}; `mxv down` stops them, and the next `mxv up` starts the workspace under phase",
-                processes.join(", ")
-            ),
             Self::VolumeRenamed { workspace, volumes } => write!(
                 formatter,
                 "adding a checkout to the workspace {workspace} prefixes the names of its containers' volumes, and these hold data under the old names: {}; the containers would start on empty volumes",
@@ -921,14 +840,6 @@ impl RunFailure {
                     ))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
-            Self::VolumeNotMoved { moved, .. } => write!(
-                formatter,
-                "the volume {volume} of the container {container} exists as {legacy}, which an earlier version of mxv created, and phase mounts {phase}, which does not exist yet, so mxv did not start {container} on an empty volume",
-                volume = moved.volume,
-                container = moved.container,
-                legacy = moved.legacy,
-                phase = moved.phase,
             ),
             Self::Unrunnable {
                 unit: Some(unit),

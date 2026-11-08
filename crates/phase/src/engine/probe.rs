@@ -95,7 +95,7 @@ pub(crate) enum Check<'a> {
     /// `port`. Docker's port proxy accepts a connection to a published port
     /// before anything in the container listens, so a TCP probe of a
     /// container process uses this check, which
-    /// [`answers`](crate::engine::container::answers) describes.
+    /// [`answers_within`](crate::engine::container::answers_within) describes.
     Published {
         /// The published host port that the probe's port name stands for.
         port: u16,

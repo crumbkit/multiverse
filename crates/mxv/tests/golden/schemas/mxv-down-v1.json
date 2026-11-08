@@ -417,7 +417,7 @@
           "$ref": "#/$defs/StateName"
         },
         "ready": {
-          "description": "Whether the process has been ready since it last started: true\nonce its readiness check passed, or once a process without one\noutlasted its start grace, and false while it runs and has not,\nsuch as after its keeper or docker restarted it. It is null when it\ndoes not run, and for a process that mxv started before phase ran\nits processes.",
+          "description": "Whether the process has been ready since it last started: true\nonce its readiness check passed, or once a process without one\noutlasted its start grace, and false while it runs and has not,\nsuch as after its keeper or docker restarted it. It is null when it\ndoes not run.",
           "type": [
             "boolean",
             "null"
@@ -449,16 +449,9 @@
           "format": "int32"
         },
         "reason": {
-          "description": "Why mxv cannot tell the state of an `unknown` process, or why it\ndoes not know the exit code of an exited process that an earlier\nversion of mxv started, such as one whose group SIGKILL ended\nbefore its shell wrote the exit file, or null when it knows.",
+          "description": "Why mxv cannot tell the state of an `unknown` process, or why it\ndoes not know the exit code of an exited process, or null when it\nknows.",
           "type": [
             "string",
-            "null"
-          ]
-        },
-        "group_alive": {
-          "description": "Whether the process group of an exited process that an earlier\nversion of mxv started still has a member, such as a child it\nstarted in the background, which `mxv down` stops. It is null while\nthe process runs, and for every process that phase runs, because\nphase stops what is left of a process's group when the process\nends.",
-          "type": [
-            "boolean",
             "null"
           ]
         },
@@ -500,7 +493,6 @@
         "code",
         "signal",
         "reason",
-        "group_alive",
         "ports",
         "sandbox",
         "notes"

@@ -67,10 +67,10 @@ use mxv::{
     PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT,
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
     REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES,
-    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, VOLUME_NOT_MOVED, VOLUME_RENAMED,
+    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, VOLUME_RENAMED,
     WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
-    WORKSPACE_IGNORED_FILES, WORKSPACE_LEGACY_RUNNING, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND,
-    WORKSPACE_RUNNING, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
+    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
+    WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
 
@@ -600,14 +600,6 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(&MANIFEST_NOT_FOUND, LIVE),
     Unprovoked::new(&MANIFEST_UNIT_NAME, LIVE),
     Unprovoked::new(&MANIFEST_UNRUNNABLE, LIVE),
-    Unprovoked::new(
-        &WORKSPACE_LEGACY_RUNNING,
-        "Only processes that an earlier version of mxv started in a live checkout provoke it; tests/processes.rs starts them with that runner.",
-    ),
-    Unprovoked::new(
-        &VOLUME_NOT_MOVED,
-        "Only a data volume that an earlier version of mxv created for a container provokes it, with a docker daemon that answers.",
-    ),
     Unprovoked::new(
         &VOLUME_RENAMED,
         "Only `mxv add` to a workspace of one clone whose container has run and left a docker volume provokes it, with a docker daemon that answers.",

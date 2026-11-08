@@ -975,8 +975,7 @@ pub(crate) struct ProcessRow {
     /// once its readiness check passed, or once a process without one
     /// outlasted its start grace, and false while it runs and has not,
     /// such as after its keeper or docker restarted it. It is null when it
-    /// does not run, and for a process that mxv started before phase ran
-    /// its processes.
+    /// does not run.
     ready: Option<bool>,
     /// The process id, which is also its process group's id, while a
     /// process runs, and null for a container.
@@ -989,17 +988,9 @@ pub(crate) struct ProcessRow {
     /// for SIGTERM, or null.
     signal: Option<i32>,
     /// Why mxv cannot tell the state of an `unknown` process, or why it
-    /// does not know the exit code of an exited process that an earlier
-    /// version of mxv started, such as one whose group SIGKILL ended
-    /// before its shell wrote the exit file, or null when it knows.
+    /// does not know the exit code of an exited process, or null when it
+    /// knows.
     reason: Option<String>,
-    /// Whether the process group of an exited process that an earlier
-    /// version of mxv started still has a member, such as a child it
-    /// started in the background, which `mxv down` stops. It is null while
-    /// the process runs, and for every process that phase runs, because
-    /// phase stops what is left of a process's group when the process
-    /// ends.
-    group_alive: Option<bool>,
     /// The ports that a process receives, as `VARIABLE=port`, or that a
     /// container publishes, as `port-name=port`.
     ports: Vec<String>,
@@ -1091,17 +1082,7 @@ pub(crate) enum StateName {
 
 impl Row for ProcessRow {
     const COLUMNS: &'static [&'static str] = &[
-        "name",
-        "kind",
-        "state",
-        "ready",
-        "pid",
-        "code",
-        "signal",
-        "reason",
-        "group_alive",
-        "ports",
-        "sandbox",
+        "name", "kind", "state", "ready", "pid", "code", "signal", "reason", "ports", "sandbox",
     ];
     const LONG_COLUMNS: &'static [&'static str] = &["log"];
     const CHILDREN: Option<&'static str> = Some("notes");
@@ -1163,7 +1144,6 @@ impl From<&ProcessStatus> for ProcessRow {
             code,
             signal,
             reason: reason.map(str::to_owned),
-            group_alive: status.group_alive,
             ports: status
                 .ports
                 .iter()

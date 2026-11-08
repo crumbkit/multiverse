@@ -251,13 +251,6 @@ fn run(environment: &Environment, args: &ExecArgs) -> Result<(ExitStatus, bool),
             }
             .into());
         }
-        ExecTarget::LegacyRunning { processes } => {
-            return Err(RunFailure::LegacyRunning {
-                workspace,
-                processes,
-            }
-            .into());
-        }
         ExecTarget::Unrunnable(unrunnable) => {
             return Err(RunFailure::Unrunnable {
                 workspace,
