@@ -568,6 +568,101 @@ fn a_volume_name_with_a_slash_fails_as_invalid() {
     assert!(message.contains("volume"), "{message}");
 }
 
+/// Returns the line and the problem of a container with one volume and
+/// `owner = <value>`, whose key is on line 6 of the manifest.
+fn owner_problem(value: &str) -> (Option<usize>, ManifestProblem) {
+    container_problem(&format!(
+        "image = \"busybox:1.37.0\"\nvolumes = {{ data = \"/data\" }}\nowner = {value}\n"
+    ))
+}
+
+#[test]
+fn a_container_owner_that_is_a_numeric_uid_a_uid_gid_or_keep_is_read_unchanged() {
+    for owner in ["999", "999:999", "0", "0:0", "4294967294:1", "keep"] {
+        let manifest = parse(&format!(
+            "[containers.db]\nimage = \"busybox:1.37.0\"\nvolumes = {{ data = \"/data\" }}\nowner = \"{owner}\"\n"
+        ))
+        .unwrap();
+        assert_eq!(manifest.containers["db"].owner.as_deref(), Some(owner));
+    }
+}
+
+#[test]
+fn a_container_without_an_owner_key_has_no_owner() {
+    let manifest =
+        parse("[containers.db]\nimage = \"busybox:1.37.0\"\nvolumes = { data = \"/data\" }\n")
+            .unwrap();
+    assert_eq!(manifest.containers["db"].owner, None);
+}
+
+#[test]
+fn a_container_owner_that_names_a_user_or_a_group_fails_as_invalid_on_its_line() {
+    for owner in ["postgres", "postgres:postgres", "999:staff", "app:999"] {
+        let (line, problem) = owner_problem(&format!("\"{owner}\""));
+        assert_eq!(line, Some(6), "{owner}");
+        let ManifestProblem::Invalid { message } = problem else {
+            panic!("{owner}: expected an invalid manifest, got {problem:?}");
+        };
+        assert!(message.contains(owner), "{message}");
+        assert!(message.contains("`db`"), "{message}");
+        assert!(message.contains("keep"), "{message}");
+    }
+}
+
+#[test]
+fn a_malformed_container_owner_fails_as_invalid_on_its_line() {
+    for owner in [
+        "",
+        "999:",
+        ":999",
+        "+999",
+        "-1",
+        " 999",
+        "999:999:999",
+        "KEEP",
+        "4294967296",
+    ] {
+        let (line, problem) = owner_problem(&format!("\"{owner}\""));
+        assert_eq!(line, Some(6), "{owner:?}");
+        assert!(
+            matches!(problem, ManifestProblem::Invalid { .. }),
+            "{owner:?}: {problem:?}"
+        );
+    }
+}
+
+#[test]
+fn a_container_owner_with_the_id_that_chown_reads_as_unchanged_fails_as_invalid_on_its_line() {
+    for owner in ["4294967295", "4294967295:0", "0:4294967295"] {
+        let (line, problem) = owner_problem(&format!("\"{owner}\""));
+        assert_eq!(line, Some(6), "{owner}");
+        assert!(
+            matches!(problem, ManifestProblem::Invalid { .. }),
+            "{owner}: {problem:?}"
+        );
+    }
+}
+
+#[test]
+fn a_container_owner_that_is_not_a_string_fails_on_its_line() {
+    let (line, _) = owner_problem("999");
+    assert_eq!(line, Some(6));
+}
+
+#[test]
+fn a_container_owner_on_a_container_that_mounts_no_volume_fails_as_invalid_on_its_line() {
+    for owner in ["999:999", "keep"] {
+        let (line, problem) = container_problem(&format!(
+            "image = \"busybox:1.37.0\"\nowner = \"{owner}\"\n"
+        ));
+        assert_eq!(line, Some(5), "{owner}");
+        let ManifestProblem::Invalid { message } = problem else {
+            panic!("{owner}: expected an invalid manifest, got {problem:?}");
+        };
+        assert!(message.contains("no volume"), "{message}");
+    }
+}
+
 #[test]
 fn a_ready_table_of_a_container_that_publishes_two_ports_must_name_one() {
     let message = invalid_message(

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::name::VolumeName;
+use crate::record::run::VolumeOwner;
 
 /// The bind mounts, cache volumes and run-as user of a container app. They
 /// apply to every process of the app.
@@ -44,6 +45,16 @@ pub struct ContainerOptions {
 /// The value of [`ContainerOptions::owner`] that leaves the owner of each
 /// volume as it is.
 pub const KEEP_OWNER: &str = "keep";
+
+/// Reports whether a plan accepts `owner` as [`ContainerOptions::owner`]:
+/// [`KEEP_OWNER`], or a numeric `uid` or `uid:gid` that holds only digits,
+/// fits in 32 bits and is not 4294967295, which `chown` reads as "leave
+/// unchanged". A user's or a group's name is refused, because an image's
+/// own `/etc/passwd` could map it to root.
+#[must_use]
+pub fn is_volume_owner(owner: &str) -> bool {
+    owner == KEEP_OWNER || owner.parse::<VolumeOwner>().is_ok()
+}
 
 /// A host directory mounted into a container.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
