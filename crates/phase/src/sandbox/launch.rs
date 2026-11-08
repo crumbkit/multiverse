@@ -5,6 +5,25 @@
 //! applies the sandbox it checks the spec again on the paths as they
 //! resolve then, and refuses to start the app when a path moved or reaches
 //! a protected one.
+//!
+//! The launcher first leaves the caller's controlling terminal. A process
+//! whose controlling terminal is the user's could push input into the
+//! user's shell with `TIOCSTI`, which the shell would then run outside the
+//! sandbox once the app ends, and Seatbelt allows `ioctl` on terminal
+//! devices. The launcher therefore starts a session of its own with
+//! `setsid`, which leaves it with no controlling terminal. A launcher that
+//! already leads its process group cannot start a session, as when a keeper
+//! starts its app in a group of its own. The keeper's own session has no
+//! controlling terminal, and the launcher goes on only when opening
+//! `/dev/tty` fails with `ENXIO`, which says that the session has none.
+//!
+//! On macOS the launcher also lets the app read the metadata of each
+//! regular file that its standard input, output or error already has open,
+//! such as the log in phase's state directory that a keeper gives it.
+//! Seatbelt checks `fstat` on a descriptor against the file's path, so
+//! without the grant `fstat` of a log the app may not read failed with
+//! `EPERM`, and node, which checks its standard streams with `fstat` when
+//! it starts, aborted with signal 6.
 
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -78,12 +97,14 @@ fn run(args: &[OsString]) -> Result<Infallible, String> {
     let spec = spec
         .to_str()
         .ok_or_else(|| "the launcher's sandbox is not UTF-8".to_owned())?;
-    let spec: SandboxSpec = serde_json::from_str(spec)
+    let mut spec: SandboxSpec = serde_json::from_str(spec)
         .map_err(|error| format!("the launcher's sandbox cannot be read: {error}"))?;
+    leave_terminal()?;
     // The checkout or an app's directory may have changed since the engine
     // built the sandbox, for example by a restart after the app replaced a
     // directory with a symbolic link, so the launcher checks it again.
     super::verify(&spec).map_err(|error| error.to_string())?;
+    spec.metadata.extend(standard_files());
     apply(&spec)?;
     #[expect(
         clippy::disallowed_methods,
@@ -102,8 +123,71 @@ fn run(args: &[OsString]) -> Result<Infallible, String> {
     ))
 }
 
-/// Applies the sandbox of `spec` to this process.
+/// Leaves the controlling terminal of the process that started the
+/// launcher, as the module docs say, or returns why it cannot.
+fn leave_terminal() -> Result<(), String> {
+    if rustix::process::setsid().is_ok() {
+        return Ok(());
+    }
+    // The launcher leads its group, so it stays in its session. It may go
+    // on only when that session has no controlling terminal, which
+    // opening `/dev/tty` reports with `ENXIO`. Any other answer, such as
+    // a descriptor or a refusal to open the file, leaves the question open,
+    // so the launcher refuses.
+    let opened = rustix::fs::open(
+        "/dev/tty",
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    );
+    match opened {
+        Err(rustix::io::Errno::NXIO) => Ok(()),
+        Ok(_) => Err(
+            "the launcher cannot leave the controlling terminal, so it does not start the app under the sandbox"
+                .to_owned(),
+        ),
+        Err(error) => Err(format!(
+            "the launcher cannot tell whether it has a controlling terminal ({error}), so it does not start the app under the sandbox"
+        )),
+    }
+}
+
+/// Returns the path of each regular file that the standard input, output
+/// or error of this process has open, as the module docs say. A stream
+/// that is a pipe, a socket or a device, or whose path the profile cannot
+/// hold, adds nothing.
 #[cfg(target_os = "macos")]
+fn standard_files() -> Vec<std::path::PathBuf> {
+    use std::os::fd::AsFd as _;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/sandbox/launch.rs reads the paths of the standard streams that the app inherits, and writes nothing to them"
+    )]
+    let (stdin, stdout, stderr) = (std::io::stdin(), std::io::stdout(), std::io::stderr());
+    [stdin.as_fd(), stdout.as_fd(), stderr.as_fd()]
+        .into_iter()
+        .filter(|fd| {
+            rustix::fs::fstat(fd).is_ok_and(|stat| {
+                rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    == rustix::fs::FileType::RegularFile
+            })
+        })
+        .filter_map(|fd| rustix::fs::getpath(fd).ok())
+        .map(|path| std::path::PathBuf::from(OsString::from_vec(path.into_bytes())))
+        .filter(|path| super::is_profile_path(path))
+        .collect()
+}
+
+/// Returns nothing, because Landlock does not restrict metadata, so a
+/// process can `fstat` its standard streams there.
+#[cfg(not(target_os = "macos"))]
+fn standard_files() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+/// Applies the sandbox of `spec` to this process.
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 fn apply(spec: &SandboxSpec) -> Result<(), String> {
     let caps = super::capabilities(spec)?;
     nono::Sandbox::apply_auto(&caps)
@@ -113,7 +197,7 @@ fn apply(spec: &SandboxSpec) -> Result<(), String> {
 /// Applies the sandbox of `spec` to this process with Landlock alone, which
 /// fails rather than fall back to seccomp when the kernel cannot restrict
 /// TCP ports.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 fn apply(spec: &SandboxSpec) -> Result<(), String> {
     let caps = super::capabilities(spec)?;
     nono::Sandbox::apply_landlock(&caps)
@@ -122,8 +206,19 @@ fn apply(spec: &SandboxSpec) -> Result<(), String> {
 
 /// Refuses to start the app, because this platform has no sandbox. The
 /// engine never asks for one here.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "sandbox",
+    not(any(target_os = "macos", target_os = "linux"))
+))]
 fn apply(spec: &SandboxSpec) -> Result<(), String> {
     let _ = spec;
     Err(format!("phase has no sandbox for {}", std::env::consts::OS))
+}
+
+/// Refuses to start the app, because phase was built without its `sandbox`
+/// feature. The engine never asks for one in such a build.
+#[cfg(not(feature = "sandbox"))]
+fn apply(spec: &SandboxSpec) -> Result<(), String> {
+    let _ = spec;
+    Err(super::UNBUILT.to_owned())
 }

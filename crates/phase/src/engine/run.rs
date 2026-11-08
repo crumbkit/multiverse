@@ -909,30 +909,17 @@ impl Op<'_, '_> {
         process: &ProcessPlan,
         command: &KeeperCommand,
     ) -> Result<Option<SandboxSpec>, SandboxError> {
-        let Some(permissions) = &app.permissions else {
-            return Ok(None);
-        };
-        if !matches!(sandbox::platform(), Platform::Available(_)) {
-            return Ok(None);
-        }
-        let settings = &self.engine.settings;
-        let context = Context {
-            state_dir: settings.state_dir,
-            workspace: &self.workspace,
-            workspace_paths: &self.workspace_paths,
-            path: settings.inherited.get("PATH").map(String::as_str),
-            home: settings.inherited.get("HOME").map(Path::new),
-            protected: settings.protected,
-            connect: app
-                .depends
-                .iter()
-                .filter_map(|depends| self.ports.get(depends))
-                .flatten()
-                .copied()
-                .collect(),
-            launcher: sandbox::launcher(command.program(), command.leading())?,
-        };
-        sandbox::spec(app, process, permissions, &context).map(Some)
+        process_sandbox(
+            &self.engine.settings,
+            &SandboxScope {
+                workspace: &self.workspace,
+                workspace_paths: &self.workspace_paths,
+                ports: &self.ports,
+            },
+            app,
+            process,
+            command,
+        )
     }
 
     /// Waits until the started `target` is ready, as `process` says. When
@@ -1424,22 +1411,83 @@ fn denial_hint(app: &AppPlan, code: Option<i32>) -> Option<String> {
     })
 }
 
-/// Returns the loopback ports of each app of `plan`.
-fn app_ports(plan: &Plan) -> BTreeMap<AppName, BTreeSet<u16>> {
+/// Returns the loopback ports that each app of `plan` serves: the port each
+/// host process listens on, the ports a sandboxed app's `listen` names and
+/// the ports each container process publishes.
+/// An app's `ports` also hold the ports its processes receive from other
+/// apps, and those belong to the apps that serve them, so naming an app in
+/// `connect` opens only the ports it serves. A host process that listens on
+/// a port without naming it as its `port` serves nothing here.
+pub(crate) fn app_ports(plan: &Plan) -> BTreeMap<AppName, BTreeSet<u16>> {
     plan.apps()
         .iter()
         .map(|app| {
-            (
-                app.name.clone(),
-                app.ports.values().map(|port| port.get()).collect(),
-            )
+            let served = app
+                .processes
+                .iter()
+                .flat_map(|process| process.port.iter().chain(process.publish.keys()))
+                .chain(app.permissions.iter().flat_map(|granted| &granted.listen))
+                .filter_map(|name| app.ports.get(name))
+                .map(|port| port.get())
+                .collect();
+            (app.name.clone(), served)
         })
         .collect()
 }
 
+/// The workspace that a process's sandbox is built for.
+pub(crate) struct SandboxScope<'a> {
+    /// The workspace's stable id.
+    pub(crate) workspace: &'a WorkspaceId,
+    /// The workspace's own directory and protected paths.
+    pub(crate) workspace_paths: &'a WorkspacePaths,
+    /// The loopback ports that each app of the plan serves.
+    pub(crate) ports: &'a BTreeMap<AppName, BTreeSet<u16>>,
+}
+
+/// Returns the sandbox of `process` of `app` in `scope`, launched through
+/// `command`, or `None` when it runs unsandboxed: its app declares no
+/// permissions, or this machine offers no sandbox. A keeper's start of the
+/// process and `exec` in the process's context both build it here, so
+/// both run under the same sandbox.
+pub(crate) fn process_sandbox(
+    settings: &Settings<'_>,
+    scope: &SandboxScope<'_>,
+    app: &AppPlan,
+    process: &ProcessPlan,
+    command: &KeeperCommand,
+) -> Result<Option<SandboxSpec>, SandboxError> {
+    let Some(permissions) = &app.permissions else {
+        return Ok(None);
+    };
+    if !matches!(sandbox::platform(), Platform::Available(_)) {
+        return Ok(None);
+    }
+    let context = Context {
+        state_dir: settings.state_dir,
+        workspace: scope.workspace,
+        workspace_paths: scope.workspace_paths,
+        path: settings.inherited.get("PATH").map(String::as_str),
+        home: settings.inherited.get("HOME").map(Path::new),
+        protected: settings.protected,
+        // The plan refuses a `connect` that names anything but an app the
+        // app depends on, so each name here parses as such an app.
+        connect: permissions
+            .connect
+            .iter()
+            .filter_map(|name| name.parse::<AppName>().ok())
+            .filter_map(|name| scope.ports.get(&name))
+            .flatten()
+            .copied()
+            .collect(),
+        launcher: sandbox::launcher(command.program(), command.leading())?,
+    };
+    sandbox::spec(app, process, permissions, &context).map(Some)
+}
+
 /// Returns the directory that `process` of `app` starts in: the app's
 /// checkout, or the process's directory within it.
-fn process_dir(app: &AppPlan, process: &ProcessPlan) -> PathBuf {
+pub(crate) fn process_dir(app: &AppPlan, process: &ProcessPlan) -> PathBuf {
     let base = match &app.source {
         Source::Checkout { dir, .. } => dir.clone(),
         Source::Release { .. } | Source::Image { .. } => PathBuf::from("/"),

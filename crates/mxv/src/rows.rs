@@ -371,6 +371,13 @@ pub(crate) struct ShowRow {
     /// wait for a confirmation, and each table of the manifest that mxv
     /// ignores although its name is close to one of mxv's own, or null.
     warnings: Option<String>,
+    /// Each local AWS service of the workspace's manifest, by name, with
+    /// the variables that a process that needs it receives, such as
+    /// `AWS_ENDPOINT_URL_DYNAMODB` and the service's own `env`. A value
+    /// holds `<port>` until the first `mxv up` gives the service's backend
+    /// a host port. No value is a secret: the access keys are the literal
+    /// `test`.
+    services: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// A disposable path of a checkout and the bytes it takes, as `show
@@ -436,12 +443,20 @@ impl Row for ShowRow {
         "repositories",
         "disposable_paths",
         "kept_paths",
+        "services",
     ];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 impl ShowRow {
+    /// Returns the row with the variables of each service of `manifest`,
+    /// rendered with the workspace's host ports.
+    pub(crate) fn with_services(mut self, workspace: &Workspace, manifest: &Manifest) -> Self {
+        self.services = manifest.service_listing(&workspace.ports);
+        self
+    }
+
     /// Returns the row of `workspace` with `root`, the root that the run
     /// used, and the sizes of `usage`.
     pub(crate) fn new(workspace: &Workspace, root: &Root, usage: &DiskUsage) -> Self {
@@ -465,6 +480,7 @@ impl ShowRow {
                 .map(|kept| format!("{}: {}, because {}", kept.checkout, kept.path, kept.reason))
                 .collect(),
             warnings: joined(&usage.warnings),
+            services: BTreeMap::new(),
         }
     }
 
@@ -1248,6 +1264,19 @@ pub(crate) struct StatusSummary {
     /// checked out and how many of its entries are uncommitted or
     /// untracked.
     checkouts: Vec<CheckoutStateRow>,
+    /// Whether `mxv pin` keeps `mxv reclaim` from stopping the workspace.
+    pinned: bool,
+    /// What `mxv reclaim` stopped, which `mxv up` starts again, or null
+    /// when reclaim has not stopped the workspace since the last `up` or
+    /// `down`.
+    reclaimed: Option<ReclaimedRow>,
+}
+
+/// What `mxv reclaim` stopped in a workspace, as `mxv status` reports it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ReclaimedRow {
+    /// The processes and containers that ran when reclaim stopped them.
+    processes: Vec<String>,
 }
 
 /// One checkout of a workspace, as `mxv status` reports it.
@@ -1375,6 +1404,10 @@ impl StatusSummary {
                 .map(|manifest| manifest.warnings.clone())
                 .unwrap_or_default(),
             checkouts,
+            pinned: workspace.pinned,
+            reclaimed: workspace.reclaimed.as_ref().map(|reclaimed| ReclaimedRow {
+                processes: reclaimed.processes.clone(),
+            }),
         }
     }
 }
@@ -1408,6 +1441,16 @@ impl fmt::Display for StatusSummary {
         }
         for warning in &self.warnings {
             write!(formatter, "\nWarning: {warning}.")?;
+        }
+        if let Some(reclaimed) = &self.reclaimed {
+            write!(
+                formatter,
+                "\nmxv reclaim stopped {} to free memory, and mxv up starts them again.",
+                reclaimed.processes.join(", ")
+            )?;
+        }
+        if self.pinned {
+            formatter.write_str("\nThe workspace is pinned, so mxv reclaim never stops it.")?;
         }
         for checkout in &self.checkouts {
             write!(formatter, "\n{checkout}")?;

@@ -15,6 +15,7 @@ Run a workspace's app
   restart   Stop a workspace's processes and start them again
   status    Report whether each process of a workspace is running, exited or stopped
   logs      Print the last lines of a process's log, and follow it with --follow
+  exec      Run a one-off command in the context of a running process or container, and exit with its exit code
   ports     Manage the host ports that a workspace holds
 
 Put a workspace away
@@ -24,6 +25,11 @@ Put a workspace away
 
 Free disk space
   clean     Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+
+Free memory
+  reclaim   Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+  pin       Keep mxv reclaim from stopping a workspace
+  unpin     Let mxv reclaim stop a workspace again while it is idle
 
 Explore the commands
   commands  Explore mxv's commands

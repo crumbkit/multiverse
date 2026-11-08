@@ -135,6 +135,21 @@ impl Spawned {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Reports whether the process ends within two seconds, and reaps it
+    /// when it does. A test asks this after phase found the process gone,
+    /// because macOS stops listing a process that a signal ended a moment
+    /// before its parent can reap it.
+    pub(crate) fn ends_soon(&mut self) -> bool {
+        let deadline = crate::clock::deadline_in(std::time::Duration::from_secs(2));
+        while self.running() {
+            if crate::clock::now() >= deadline {
+                return false;
+            }
+            crate::clock::pause(crate::clock::POLL_INTERVAL);
+        }
+        true
+    }
+
     /// Waits up to five seconds for the process, a member of `group`, to
     /// end, and leaves it unreaped, so that it stays in the group as a
     /// zombie.

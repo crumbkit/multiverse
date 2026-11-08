@@ -1,0 +1,2 @@
+mxv would stop 0 workspaces and would free 0 B of resident memory, of 2.0 GiB needed. No other idle workspace frees more.
+This was a dry run, so nothing changed.

@@ -151,6 +151,7 @@ disposable = ["coverage/"]          # more disposable globs for every repository
 clone_on_new = ["node_modules/"]    # the ignored directories that `mxv new` clones
 clean_idle = "7d"                   # the idle age that `mxv clean` waits for
 max_disposable = "50GiB"            # the limit that `mxv clean --over-limit` cleans down to
+stop_idle = "2h"                    # the idle age that `mxv reclaim` waits for before it stops a workspace
 ```
 
 `root` is a string that holds an absolute path, or a path that starts with
@@ -166,7 +167,8 @@ every port of the range is held by a workspace or taken, `mxv up` fails
 with `mxv::port::exhausted`; a wider range fixes it.
 
 [Disk space](#disk-space) describes `disposable`, `clone_on_new`,
-`clean_idle` and `max_disposable`.
+`clean_idle` and `max_disposable`, and
+[Freeing memory](#freeing-memory) describes `stop_idle`.
 
 mxv reads the file strictly. Any other key, a value of another type, a
 relative path or text that is not TOML fails with `mxv::config::invalid`,
@@ -284,9 +286,9 @@ with `mxv::manifest::invalid`.
 
 Another tool may keep its own tables in the same file. mxv checks that the
 whole file is valid TOML, reads only its own top-level keys (`version`,
-`ports`, `disposable`, `clone_on_new`, `processes` and `containers`), and
-leaves every other top-level table alone, such as `[app]`,
-`[service.web]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
+`ports`, `disposable`, `clone_on_new`, `processes`, `containers` and
+`service`), and leaves every other top-level table alone, such as
+`[app]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
 top-level key that is not a table, such as `port = ["api"]`, fails with
 `mxv::manifest::unknown_key`. A table named like one of mxv's own, such as
 `[process.api]`, belongs to another tool and is left alone, so a
@@ -377,15 +379,20 @@ write its own state and temporary directories. `permissions` adds:
 - `connect`: the processes and containers that the process may connect to
   over the loopback address.
 
-phase's sandbox opens the ports of every unit that a process depends on,
-and no other. A unit of `connect` must therefore be one of the process's
-`depends_on`, and the manifest fails with `mxv::manifest::invalid` and a
-hint to add it to `depends_on` otherwise. A sandboxed process can also
-reach each unit of its `depends_on` that `connect` leaves out. A sandboxed
-process cannot reach any host off the machine until phase runs its
-allowlist proxy, so a name in `connect` that is not a unit of the manifest
-fails. `permissions` has no `secrets` key, because mxv has no secrets yet,
-and that key fails with `mxv::manifest::unknown_key`.
+phase's sandbox opens the ports that the units of `connect` serve, and no
+other: the `listen` port of a process, the ports that a sandboxed
+process's `permissions.listen` names and the ports that a container
+publishes. A port that a unit only receives through `ports` or an `env`
+placeholder stays closed unless the unit that serves it is in `connect`. A
+unit of `connect` must be one of the process's `depends_on`, and the
+manifest fails with `mxv::manifest::invalid` and a hint to add it to
+`depends_on` otherwise. A sandboxed process cannot reach a unit of its
+`depends_on` that `connect` leaves out, so a process that talks to a
+dependency must name it in `connect`. A sandboxed process cannot reach any
+host off the machine until phase runs its allowlist proxy, so a name in
+`connect` that is not a unit of the manifest fails. `permissions` has no
+`secrets` key, because mxv has no secrets yet, and that key fails with
+`mxv::manifest::unknown_key`.
 
 A write grant is only as safe as whatever later runs the directory's
 contents outside the sandbox. For example, a sandboxed process that may
@@ -439,14 +446,16 @@ cwd = "web"
 ports = { PORT = "web", API_PORT = "api", AUTH_PORT = "auth" }
 listen = "web"
 depends_on = ["server", "auth"]
-permissions = { write = ["web/node_modules/.vite", "web/dist"], listen = ["web"], connect = ["server", "auth"] }
+permissions = { write = ["web/node_modules/.vite"], listen = ["web"], connect = ["server", "auth"] }
 ```
 
 The `sandbox` column of `up`, `down`, `restart` and `status` shows how
-phase runs each host process: `seatbelt (partial: ...)` on macOS, where
-Seatbelt lets the process's listening ports accept connections from other
-machines on the network, or `unsandboxed (<reason>)`, such as
-`unsandboxed (its app declares no permissions)`. It is null for a
+phase runs each host process: `seatbelt (partial: <reason>)` on macOS, or
+`unsandboxed (<reason>)`, such as `unsandboxed (its app declares no
+permissions)`. On macOS the reason is that the sandbox cannot limit the
+process's listening ports to the loopback interface. Seatbelt limits which
+ports a process may listen on but not which addresses, so the process can
+listen on each of its ports on every address of the machine. It is null for a
 container. A process that phase started is shown as its run record
 recorded it.
 
@@ -569,7 +578,9 @@ answer, `up`, `down` and `remove --force` fail with
 `mxv::docker::unavailable`, so they never report a workspace as stopped
 while its containers may still run. A docker command that fails, such as a
 pull of an image that does not exist, fails with `mxv::docker::failed`,
-whose fields name the operation, the container, and docker's message. A
+whose fields name the operation and the container. Its message is
+docker's own error line when docker printed one, and otherwise the
+sentence of phase or mxv that says what failed. A
 failure of phase that mxv has no code for fails with `mxv::phase::failed`,
 whose `phase_code` field holds phase's code.
 
@@ -578,8 +589,9 @@ whose `phase_code` field holds phase's code.
 Each process verb works on the workspace that `-w/--workspace` names, or on
 the one that holds the current directory when it names none. Its positional
 words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
-`mxv restart`, `mxv status [-w WORKSPACE]` and
-`mxv logs [-w WORKSPACE] PROCESS`.
+`mxv restart`, `mxv status [-w WORKSPACE]`,
+`mxv logs [-w WORKSPACE] PROCESS` and
+`mxv exec [-w WORKSPACE] PROCESS -- COMMAND [ARGS]...`.
 
 - `mxv up` starts the named processes, or every process, with their
   dependencies first. It skips a process that already runs. phase starts
@@ -589,12 +601,14 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   is left of the group when the process ends. Before it starts a listener,
   phase checks that the listen port is free; when it is taken, `up` fails
   with `mxv::port::taken`. When a process exits before it is ready, `up`
-  fails with `mxv::process::exited` and the log's last lines; when it
-  misses its timeout, `up` stops it and fails with
-  `mxv::process::not_ready`. When the readiness port answers and a process
-  outside the process's group holds it, `up` stops the process and fails
-  with `mxv::process::foreign_listener` and that program's process id. A
-  failed `up` stops the processes it started before the failure. `up` also
+  fails with `mxv::process::exited`; when it misses its timeout, `up`
+  stops it and fails with `mxv::process::not_ready`. When the readiness
+  port answers and a process outside the process's group holds it, `up`
+  stops the process and fails with `mxv::process::foreign_listener` and
+  that program's process id. A failed `up` quotes none of the process's
+  log, because a process may print a secret. The failure's `log` field
+  holds the log's path, and `mxv logs` prints the log. A failed `up` stops
+  the processes it started before the failure. `up` also
   drops the ports of names that the manifest no longer declares, once no
   process of the workspace runs, so a port that the manifest renames stays
   with its old listener until `down`.
@@ -640,6 +654,30 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   lines, and `-f` prints it once it is finished, also with `--lines 0`. An
   unfinished last line longer than 64 KiB loses its start, so `-f`, even
   with `--lines 0`, starts in the middle of it.
+- `mxv exec` runs a one-off command in the context of a running process
+  or container, and exits with the command's exit code, or with 128 plus
+  the number of the signal that ended it. The command is the words after
+  `--`, which no shell reads, so `mxv exec api -- env` prints the
+  variables that `api` receives.
+  - A host process's command runs in the process's directory, with the
+    variables that the process receives, under its sandbox. It is not one
+    of the workspace's processes, so `mxv down` does not stop it.
+  - A container's command runs inside the container through `docker
+    exec`, with a terminal of its own when mxv's standard input and output
+    are both terminals.
+  - A sandboxed command runs in a session of its own and cannot have the
+    terminal. mxv refuses it with `mxv::exec::sandboxed_terminal` while
+    its standard input, output or error is a terminal. On Ctrl-C, and when
+    the terminal closes, mxv stops the command's process group. It exits
+    with 78 when its sandbox cannot be applied.
+  - An mxv that something sends `SIGTERM` alone ends at once, and the
+    command, of any kind, keeps running until it ends by itself.
+  - A process that is not running fails with `mxv::process::not_running`,
+    whose recovery starts it with `mxv up`. A host program that cannot
+    start fails with `mxv::exec::unstartable` and exit code 1. A
+    container's program that does not exist exits with docker's 127, which
+    mxv passes on. `--json` fails with
+    `mxv::cli::usage`, because the output is the command's own.
 - `mxv ports reset [-w WORKSPACE] [PORT]...` gives the named ports, or
   every port, new host ports that differ from the old ones. It refuses with
   `mxv::workspace::running` while the workspace's processes run, and it is
@@ -678,6 +716,159 @@ holds the lock, so it uses the ports that a command before it stored. Allocating
 same port. A command that finds a lock held tries again for 5 seconds,
 then fails with `mxv::workspace::busy`. The operating system releases a
 lock when its command ends, so a crashed mxv leaves no lock behind.
+
+### Local AWS services
+
+A manifest may declare local stand-ins for DynamoDB, S3, SQS and KMS as
+`[service.<name>]` tables. A process that lists a service in `needs`
+starts once the service's backend answers and its resources exist, and it
+receives the variables that the AWS SDKs and CLI read, so it reaches the
+local backend with no change to its code.
+
+```toml
+[service.store]
+kind = "dynamodb"
+tables.inbox = { hash = "pk:S", range = "sk:S", ttl = "expires", indexes.by-owner = { hash = "owner:S", range = "at:N" } }
+env = { INBOX_TABLE = "{table.inbox}" }
+
+[service.mail]
+kind = "s3"
+buckets = ["inbox-mail"]
+env = { MAIL_BUCKET = "{bucket.inbox-mail}", MAIL_S3_HOST = "{host_port}" }
+
+[service.jobs]
+kind = "sqs"
+queues.jobs = { visibility_timeout_seconds = 120 }
+env = { JOBS_QUEUE_URL = "{queue_url.jobs}" }
+
+[service.keys]
+kind = "kms"
+keys = ["inbox-mail"]
+env = { MAIL_KEY = "{key.inbox-mail}" }
+
+[processes.worker]
+argv = ["cargo", "run", "--bin", "worker"]
+needs = ["store", "mail", "jobs", "keys"]
+```
+
+| Key | Meaning |
+| --- | --- |
+| `service.<name>.kind` | `dynamodb`, `s3`, `sqs` or `kms`. It is required. |
+| `service.<name>.tables` | DynamoDB tables, only for `dynamodb`. Each key names a table of 3 to 255 letters, digits, `_`, `-` and `.`. `hash` is required and `range` is optional; each is `<attribute>:<type>`, where the type is `S`, `N` or `B`. `ttl` names the attribute that holds each item's expiry time. `indexes.<name>` declares a global secondary index with its own `hash` and optional `range`. Every table is on-demand and every index projects all attributes. |
+| `service.<name>.buckets` | S3 bucket names, only for `s3`: 3 to 63 lowercase letters, digits, `-` and `.`. |
+| `service.<name>.queues` | SQS queues, only for `sqs`. Each key names a queue of 1 to 80 letters, digits, `-` and `_`, and `visibility_timeout_seconds` is optional, from 0 to 43200. |
+| `service.<name>.keys` | KMS keys, only for `kms`. Each name becomes the alias `alias/<name>` of a symmetric key. |
+| `service.<name>.env` | Variables that each process that needs the service receives. A value is text with placeholders. |
+| `processes.<name>.needs` | The services that the process uses, by name. |
+
+The placeholders of a service's `env` are these.
+
+| Placeholder | Value |
+| --- | --- |
+| `{endpoint}` | `http://127.0.0.1:<port>`, the backend's endpoint. |
+| `{port}` | The backend's host port. |
+| `{host_port}` | `127.0.0.1:<port>`, for a client that takes a host and a port with no scheme. |
+| `{table.<name>}`, `{bucket.<name>}`, `{queue.<name>}` | The resource's name. |
+| `{queue_url.<name>}` | `http://127.0.0.1:<port>/queue/us-east-1/000000000000/<name>`. |
+| `{key.<name>}` | `alias/<name>`. |
+
+A placeholder must name a resource that its own service declares. `{{`
+and `}}` write a literal brace.
+
+Each process that needs a service receives these variables, and its
+services' `env`.
+
+| Variable | Value |
+| --- | --- |
+| `AWS_ENDPOINT_URL_DYNAMODB`, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL_SQS`, `AWS_ENDPOINT_URL_KMS` | `http://127.0.0.1:<port>` of the backend, one for each kind that the process needs. |
+| `AWS_REGION` | `us-east-1`. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `test`. |
+| `AWS_EC2_METADATA_DISABLED` | `true`, so an SDK never asks an instance metadata service for credentials. |
+| `AWS_ENDPOINT_URL` | `http://127.0.0.1:9`, so a client of a kind that the process does not need fails with a refused connection instead of reaching AWS. |
+| `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE` | `/dev/null`, so an SDK reads no profile of the person's own AWS configuration. |
+
+A host process never inherits a variable of mxv's own environment other
+than `PATH`, `HOME` and the few that [the environment of a host
+process](#the-environment-of-a-host-process) lists, none of which starts
+with `AWS_`. A process that needs a service therefore receives no
+`AWS_PROFILE`, no real access key and no session token, even when the
+shell that ran `mxv up` holds them. A process or a service that sets an
+`AWS_` variable itself fails with `mxv::manifest::invalid` and its line.
+
+An SDK that reads no endpoint variable, such as boto3 before 1.28 or the
+AWS SDK for Go v1, sends its requests to AWS, which refuses the `test`
+keys. mxv supports only SDKs that read the endpoint variables.
+
+DuckDB's `httpfs` extension does not read `AWS_ENDPOINT_URL_S3`. A
+process that queries S3 through DuckDB passes the endpoint itself:
+
+```sql
+SET s3_endpoint = '127.0.0.1:<port>';   -- the value of {host_port}
+SET s3_url_style = 'path';
+SET s3_use_ssl = false;
+```
+
+#### The backends
+
+mxv adds up to three apps to the workspace when its manifest declares
+services, and starts them before any process that needs them.
+
+| App | What it runs |
+| --- | --- |
+| `mxv-dynamodb` | DynamoDB Local, `amazon/dynamodb-local:3.3.1` pinned by digest, with `-sharedDb -inMemory`, for the `dynamodb` services. |
+| `mxv-aws` | LocalStack, `localstack/localstack:4.14.0` pinned by digest, for the `s3`, `sqs` and `kms` services. Its `SERVICES` lists only the kinds that the manifest declares, and its queue URLs use the path form. A kind added to the manifest replaces the container on the next `up`, which loses LocalStack's in-memory data, and `mxv-provision` then creates every resource again. |
+| `mxv-provision` | A host process that runs mxv itself and creates each declared table, bucket, queue and key. It runs once and exits. |
+
+A workspace runs one DynamoDB Local and one LocalStack, which every
+service of its kind shares. Each backend's host port is a port of the
+workspace's port ledger, named after its app, so `mxv show` lists it in
+`ports` and the backend keeps it across runs. `mxv up` waits up to 180
+seconds for each backend to answer, and up to 120 seconds for
+`mxv-provision`; a backend or provisioning that takes longer fails `up`.
+
+`mxv-provision` sends plain HTTP requests to `127.0.0.1` with no
+signature. It treats a resource that exists already as provisioned, and
+gives an existing queue the declared visibility timeout. It runs again on
+the next `up` after a backend restarts or the manifest's resources
+change, and it leaves resources that the manifest no longer declares in
+place until the backend stops. Its log lists each resource it created or
+found. Each request waits at most until the provisioning's deadline of
+110 seconds, after which the provisioning fails.
+
+DynamoDB Local cannot change a table's keys, attribute types, indexes or
+expiry attribute in place. When a table exists with any of them other than
+the manifest declares, `mxv-provision` fails, and its log says to run
+`mxv down`, which drops the backends' in-memory data, and then `mxv up`,
+which creates the table as declared.
+
+When the provisioning fails, `up` fails with `mxv::process::exited`, whose
+`log` field names the provisioning's log. The hint says to read it with
+`mxv logs -w <workspace> mxv-provision`, fix what it names, and run
+`mxv up -w <workspace>` again. A backend that refuses a resource fails the
+provisioning, and the log names the resource and the backend's error.
+
+The backends keep their data in memory. `mxv down` stops them, and the
+next `up` starts them empty and provisions every resource again.
+
+`mxv show` lists each service's variables in `services`, with the host
+ports that the workspace holds, or `<port>` before the first `up`. No
+value is a secret, because the access keys are the literal `test`. A
+manifest that declares services and no process is valid, and `up` starts
+the backends and provisions the resources.
+
+The prefix `mxv-` belongs to mxv. A port, process or container whose name
+starts with `mxv-` fails with `mxv::manifest::invalid` and its line, and a
+checkout whose prefixed names would start with `mxv-` needs `--as`.
+
+#### Services and the sandbox
+
+`needs` makes the process depend on each backend it uses and on
+`mxv-provision`, so a process never lists them in `depends_on`. A process
+with `permissions` runs under phase's sandbox, which lets it connect only
+to the apps in its `connect` list. mxv adds the backend of each service in
+`needs` to that list, so a sandboxed process reaches its services with no
+further grant. The manifest cannot name `mxv-dynamodb` or `mxv-aws` in
+`connect` itself, because `connect` names units of the manifest.
 
 ## The workspace manifest
 
@@ -723,13 +914,13 @@ tool that owns it. A table whose name is close to one of mxv's own, such as
 would declare nothing, so mxv warns about it: `up` and `restart` print the
 warning on standard error, `status` puts it in the summary's `warnings`,
 and `show` and `new` put it in the row's `warnings`. phase's own tables,
-`[app]`, `[release]`, `[build]`, `[needs.*]` and `[service.*]`, get no
-warning. phase's `[process.*]` gets a warning that mxv runs only
+`[app]`, `[release]`, `[build]` and `[needs.*]`, get no warning. mxv reads
+`[service.*]` as its own services. phase's `[process.*]` gets a warning that mxv runs only
 `[processes.*]`. A top-level `[permissions]` table would sandbox nothing,
 because mxv sandboxes each process on its own, so it fails with
 `mxv::manifest::invalid` and a hint to move its keys to
 `[processes.<name>.permissions]`. `up` also warns when the manifest declares
-no processes and no containers, and starts nothing.
+no processes, no containers and no services, and starts nothing.
 
 A workspace manifest that is a symbolic link leading nowhere cannot be
 read. `up` fails with `mxv::manifest::unreadable`, which names the link and
@@ -787,6 +978,16 @@ reports `merged`, with every file it read in `manifest_paths`.
 - The `listen` ports and `connect` units of a checkout's `permissions`
   follow the new names too, and its write paths stay relative to its own
   checkout.
+- Services keep their names, because two checkouts that use the same
+  table expect the same name. A service that two files declare
+  identically is one service, which processes of both files may need. A
+  service that two files declare differently fails with
+  `mxv::manifest::name_clash`, which names both files. Two services of
+  different names that declare the same table, bucket, queue or key
+  differently fail with `mxv::manifest::name_clash` too, because the
+  workspace has one backend of each kind. Only a process of the
+  workspace manifest may need a service that another file declares; a
+  checkout's process may need only its own file's services.
 - Two names that are the same once prefixed, such as the process `b-c` of
   the checkout `a` and the process `c` of the checkout `a-b`, or two
   volumes of the same name in two files, fail with
@@ -1273,6 +1474,87 @@ hook, such as this daily crontab line:
 `clean` measures every workspace it considers, and each workspace it cleans
 twice, so a run takes as long as `show` takes for each of them.
 
+### Freeing memory
+
+`mxv reclaim --need memory=<SIZE>` stops idle workspaces until the memory
+they held covers the need. A load manager runs it when the machine runs
+short of memory; nothing runs it in the background. A size takes the units
+of `max_disposable`, and also `K`, `M`, `G` and `T`, which count in powers
+of 1024, such as `memory=512M`.
+
+A running workspace is idle when all of these hold:
+
+- `mxv pin` has not pinned it.
+- No process outside phase has its working directory inside the
+  workspace's directory. A shell, an editor or an agent that works in the
+  workspace keeps it running. The processes that phase runs for the
+  workspace, their keepers and their descendants do not count, and neither
+  does the `mxv reclaim` process itself.
+- No file, commit or staged change of its checkouts changed within the idle
+  age, as `mxv clean` measures it.
+- No mxv command named the workspace within the idle age. `up`, `down`,
+  `restart`, `status`, `logs`, `exec`, `ports reset`, `show`, `cd`, `add`,
+  `pin` and `unpin` record the time in the file `.touched` of the
+  workspace's run directory. `exec` and `logs --follow` record it again
+  every 5 minutes while they run. `clean` and `reclaim` do not record it.
+
+The idle age is `--idle`, or else the config file's `stop_idle`, or else 2
+hours. `--idle` refuses an age under 10 minutes, so a workspace that a
+person left for a few minutes is never stopped; `stop_idle` can set a
+shorter age, for tests. A workspace whose processes and containers all
+stopped is not considered. mxv reads `.touched` first, and skips reading
+the checkouts' files of a workspace that an mxv command named within the
+idle age.
+
+mxv measures idle time on the wall clock. Time that the machine spends
+asleep counts as idle time, so a workspace can be idle as soon as the
+machine wakes. When the clock moves back, a workspace whose recorded
+times now lie ahead of the clock counts as in use until the clock passes
+them.
+
+mxv measures the resident memory of each idle workspace: the resident
+bytes of the processes that phase runs for it, from the process table, and
+of its containers, from `docker stats`. On Linux both count towards the
+need. On macOS containers run in Docker Desktop's virtual machine, which
+keeps the memory that stopped containers free for a while, so mxv reports
+their memory in the `containers` column and leaves it out of `freed`. It stops the idle workspaces that
+were active least recently first, one by one, until the bytes of those it
+stopped cover the need, or until none is left. A workspace whose memory
+mxv cannot measure frees nothing and is never stopped. Each stop is the
+stop of `mxv down`, made while mxv holds the workspace's lock. Under the
+lock, just before it stops a workspace, mxv checks again: it reads the
+record, the process table and the checkouts' last change again, and keeps
+the workspace when it became pinned, an mxv command named it, a process
+outside phase started working in it, its checkouts changed, or its
+processes stopped since mxv measured it.
+
+mxv marks each workspace that it stopped with the processes and containers
+that ran. `mxv status` reports the mark in `reclaimed`, and `mxv up` without
+names starts those processes and containers again and removes the mark.
+`mxv up` with names, `mxv restart` and `mxv down` remove only the names
+that they start or stop, or the whole mark when they name none.
+`mxv down` removes it too. `--dry-run` reports the choice and stops
+nothing.
+
+`reclaim` prints a row for each workspace: `stopped`, or `would_stop` on a
+dry run, with the bytes in `freed` and why the workspace counts as idle in
+`reason`, or `kept` with the reason it kept the workspace. The note after
+the rows gives the total freed and the need. `--json` prints the rows in
+the document `mxv/reclaim/v1`. A workspace that mxv cannot read or measure
+fails alone, the other workspaces are still considered, and `reclaim`
+exits with 1.
+
+`mxv reclaim --need disk=<SIZE>` deletes the disposable paths of idle
+workspaces as `mxv clean --over-limit --yes` does, the workspace unchanged
+longest first, until the bytes it frees cover the need. It uses `clean`'s
+idle rule and idle age, and keeps each path that only a repository's own
+`mxv.toml` declares disposable. Its rows read `cleaned` or `would_clean`.
+
+`mxv pin -w <workspace>` keeps `reclaim` from stopping a workspace, and
+`mxv unpin -w <workspace>` lets it stop the workspace again. The pin and the
+reclaim mark are the keys `pinned` and `reclaimed` of the workspace's
+record. An older mxv that rewrites the record drops both keys.
+
 ### Cloning `node_modules/`
 
 `mxv new` clones each ignored directory of the repository that a
@@ -1327,3 +1609,7 @@ waiting.
 
 `mxv archive` and `mxv restore` are declared and fail with
 `mxv::command::unbuilt` until the pull request that builds each one.
+
+mxv has no verb yet that runs one command with a workspace's service
+variables, such as a test runner or a script. A process that needs the
+services is the only way to receive them.

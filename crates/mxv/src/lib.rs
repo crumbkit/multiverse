@@ -7,8 +7,9 @@
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
 //!
-//! `new`, `add`, `list`, `show`, `cd`, `remove`, `clean` and the process verbs `up`,
-//! `down`, `restart`, `status` and `logs` are built. `archive` and
+//! `new`, `add`, `list`, `show`, `cd`, `remove`, `clean`, `reclaim`, `pin`,
+//! `unpin` and the process verbs `up`, `down`, `restart`, `status`, `logs`
+//! and `exec` are built. `archive` and
 //! `restore` are declared and fail with `mxv::command::unbuilt` until the
 //! pull request that builds each one.
 
@@ -16,8 +17,10 @@ mod clean;
 mod cli;
 mod config;
 mod environment;
+mod exec;
 mod failures;
 mod processes;
+mod reclaim;
 mod rows;
 mod run_failures;
 #[cfg(test)]
@@ -39,6 +42,8 @@ use crate::cli::{
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
+#[doc(hidden)]
+pub use crate::exec::{EXEC_SANDBOXED_TERMINAL, EXEC_UNSTARTABLE, PROCESS_NOT_RUNNING};
 #[doc(hidden)]
 pub use crate::failures::{
     BRANCH_EXISTS, CHECKOUT_INCOMPLETE, CHECKOUT_INVALID_NAME, CHECKOUT_LOCKED,
@@ -85,6 +90,12 @@ pub const CODES: &[&Code] = failures::CODES;
 /// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
 #[doc(hidden)]
 pub const RUN_CODES: &[&Code] = run_failures::CODES;
+
+/// Every failure code of `mxv exec` that the other process verbs do not
+/// have, which the tests pass to crumbkit-test's codes, recovery and twin
+/// checks beside [`RUN_CODES`].
+#[doc(hidden)]
+pub const EXEC_CODES: &[&Code] = exec::CODES;
 
 /// Parses `args`, runs the command with the variables of `environment` and
 /// returns the process's exit code. The first argument is the program's
@@ -134,6 +145,20 @@ where
             let result = clean::clean(&mut output, environment, &args);
             return crumbkit::finish(output, clean::CLEAN, result);
         }
+        // `reclaim` reads `--dry-run` through `&mut output`, so it runs
+        // before `finish`.
+        Verb::Reclaim(args) => {
+            let result = reclaim::reclaim(&mut output, environment, &args);
+            return crumbkit::finish(output, reclaim::RECLAIM, result);
+        }
+        Verb::Pin(args) => {
+            let result = reclaim::pin(environment, &args, true);
+            return crumbkit::finish(output, reclaim::PIN, result);
+        }
+        Verb::Unpin(args) => {
+            let result = reclaim::pin(environment, &args, false);
+            return crumbkit::finish(output, reclaim::UNPIN, result);
+        }
         Verb::Up(args) => {
             return crumbkit::finish(output, processes::UP, processes::up(environment, &args));
         }
@@ -151,6 +176,9 @@ where
         // `logs` prints a stream, so it opens the stream from `output`
         // itself.
         Verb::Logs(args) => return processes::logs(output, environment, &args),
+        // `exec` hands the terminal to the command and exits with its exit
+        // code, so it prints no document.
+        Verb::Exec(args) => return exec::exec(output, environment, &args),
         Verb::Ports {
             command: PortsCommand::Reset(args),
         } => {
@@ -225,6 +253,78 @@ pub fn is_keeper(args: &[OsString]) -> bool {
     })
 }
 
+/// The words that follow the program on the command line of the app
+/// `mxv-provision`, which creates the resources of a workspace's services:
+/// `mxv phase provision <spec>`. The command is hidden from help, because
+/// only phase starts it, as a oneshot of the workspace's plan.
+#[doc(hidden)]
+pub const PROVISION_WORDS: [&str; 2] = ["phase", "provision"];
+
+/// How long the provisioning retries a backend that is still starting.
+/// phase stops the oneshot at its own timeout first.
+const PROVISION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(110);
+
+/// Reports whether `args`, the whole command line, starts the
+/// provisioning of a workspace's services.
+#[doc(hidden)]
+#[must_use]
+pub fn is_provisioner(args: &[OsString]) -> bool {
+    args.get(1..3).is_some_and(|words| {
+        words
+            .iter()
+            .zip(PROVISION_WORDS)
+            .all(|(word, provision)| word == provision)
+    })
+}
+
+/// Creates the resources of the spec that follows `mxv phase provision`,
+/// writes one line for each resource to standard output, which phase
+/// keeps in the app's log, and returns 0 once every resource exists. It
+/// writes the failure to standard error and returns 1 otherwise. It reads
+/// no environment variable.
+#[doc(hidden)]
+#[must_use]
+pub fn provision(args: &[OsString]) -> ExitCode {
+    use std::io::Write as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and the provisioning writes its log there"
+    )]
+    let mut stdout = std::io::stdout().lock();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and the provisioning writes its failure there"
+    )]
+    let mut stderr = std::io::stderr();
+    let words = args.get(1 + PROVISION_WORDS.len()..).unwrap_or_default();
+    let result = match words {
+        [spec] => multiverse::ProvisionSpec::parse(&spec.to_string_lossy()).and_then(|spec| {
+            multiverse::provision(
+                &spec,
+                std::time::Instant::now() + PROVISION_DEADLINE,
+                &mut |line| drop(writeln!(stdout, "mxv-provision: {line}")),
+            )
+        }),
+        _ => {
+            drop(writeln!(
+                stderr,
+                "mxv-provision: the command takes one argument, the spec of the resources"
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
+        Ok(()) => {
+            drop(writeln!(stdout, "mxv-provision: every resource exists"));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            drop(writeln!(stderr, "mxv-provision: {error}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// The environment source of a keeper, which mxv's plans never ask for:
 /// each process of an mxv plan is never restarted, so its keeper never
 /// resolves a fresh environment.
@@ -277,6 +377,31 @@ pub fn keep(args: Vec<OsString>, vars: Vec<(OsString, OsString)>) -> ExitCode {
     )]
     let output = std::io::stdout().lock();
     run(&parsed, environment, &NoFreshEnvironment, input, output).into()
+}
+
+/// Reports whether mxv's standard input is a terminal, which `mxv exec`
+/// passes to phase so a container's command gets a terminal of its own.
+pub(crate) fn stdin_is_terminal() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard input, and `mxv exec` asks only whether it is a terminal"
+    )]
+    let stdin = std::io::stdin();
+    stdin.is_terminal()
+}
+
+/// Reports whether mxv's standard output is a terminal, which `mxv exec`
+/// checks with standard input before it gives a container's command a
+/// terminal.
+pub(crate) fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and `mxv exec` asks only whether it is a terminal"
+    )]
+    let stdout = std::io::stdout();
+    stdout.is_terminal()
 }
 
 pub(crate) fn warn(warnings: &[String]) {

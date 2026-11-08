@@ -38,13 +38,6 @@ impl LineSink for Unused {
     }
 }
 
-fn not_built<T: std::fmt::Debug>(result: Result<T, PhaseError>) -> Operation {
-    match result {
-        Err(PhaseError::NotBuilt { operation }) => operation,
-        other => panic!("expected not built, got {other:?}"),
-    }
-}
-
 fn id() -> WorkspaceId {
     "0b9f3c8e".parse().unwrap()
 }
@@ -87,17 +80,6 @@ fn a_phase_takes_other_waits_from_its_builder() {
     assert_eq!(phase.lock_wait(), Duration::from_millis(1));
     assert_eq!(phase.start_grace(), Duration::from_millis(2));
     assert_eq!(phase.kill_wait(), Duration::from_millis(3));
-}
-
-#[test]
-fn exec_reports_that_it_is_not_built_yet() {
-    let phase = Phase::new(PathBuf::from("/state/phase"));
-    let soon = Instant::now() + Duration::from_secs(1);
-    let cancel = Cancel::new();
-    let api: AppName = "api".parse().unwrap();
-
-    let exec = phase.exec(&plan(), &api, &["true".into()], &Unused, soon, &cancel);
-    assert_eq!(not_built(exec), Operation::Exec);
 }
 
 #[test]

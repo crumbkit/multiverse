@@ -1,4 +1,4 @@
-mxv has 21 opt-outs from the conventions.
+mxv has 24 opt-outs from the conventions.
 
 examples/run: mxv up
   Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
@@ -14,6 +14,15 @@ examples/run: mxv logs
   Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+examples/run: mxv exec
+  Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+effects/yes: mxv exec
+  Reason: The person writes the command after `--`, and mxv cannot tell what it changes, so a question from mxv would ask about every command, harmless or not.
+  Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 examples/run: mxv add
   Reason: The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.
@@ -58,6 +67,10 @@ effects/yes: mxv restart
   Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
+effects/yes: mxv reclaim
+  Reason: A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.
+  Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
+
 effects/yes: mxv ports reset
   Reason: The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
@@ -95,9 +108,9 @@ twins/no-twin: mxv new triage --repo app --dry-run
   Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
-mxv declares 6 customisations.
+mxv declares 7 customisations.
 
-root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv archive, mxv restore, mxv remove, mxv clean
+root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv archive, mxv restore, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin
   Declares: Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
 
@@ -115,3 +128,6 @@ children: mxv status
 
 text-line: mxv logs
   Declares: The text prints each row as the line <LINE> in place of a table row.
+
+passes-on-exit: mxv exec
+  Declares: The command exits with the exit code of the command.

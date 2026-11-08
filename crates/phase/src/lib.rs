@@ -11,9 +11,6 @@
 //!
 //! The library reads no environment variable and writes to no standard
 //! stream. The `mxv` command links it.
-//!
-//! [`Phase::status`], [`Phase::logs`] and [`Phase::exec`] return
-//! [`PhaseError::NotBuilt`] until their code lands.
 
 mod cancel;
 mod clock;
@@ -35,6 +32,7 @@ mod status;
 
 pub use crate::cancel::Cancel;
 pub use crate::engine::container;
+pub use crate::engine::exec::{ExecIo, ExecRequest};
 pub use crate::engine::host;
 pub use crate::engine::keeper;
 pub use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};

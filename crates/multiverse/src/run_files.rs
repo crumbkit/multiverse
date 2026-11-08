@@ -211,15 +211,15 @@ impl Host for RunHost<'_> {
     }
 
     fn saved_workspace_id(&self, workspace: &WorkspaceName) -> Result<WorkspaceId, Error> {
-        let no_id = |message: &str| Error::DockerFailed {
+        let no_id = |reason: &str| Error::DockerFailed {
             operation: "workspace id".to_owned(),
             container: None,
-            message: message.to_owned(),
+            message: format!("mxv cannot name the workspace's containers, because {reason}"),
             docker_line: None,
         };
         let store = self
             .records
-            .ok_or_else(|| no_id("mxv has no store of workspace records here"))?;
+            .ok_or_else(|| no_id("it has no store of workspace records here"))?;
         let mut record = store
             .read(workspace)?
             .ok_or_else(|| no_id("the workspace has no record"))?;

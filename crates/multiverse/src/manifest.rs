@@ -44,6 +44,11 @@
 //!
 //! An `env` value may name a host port as `{port.<name>}`, and writes a
 //! literal brace as `{{` or `}}`. Any other brace fails the manifest.
+//!
+//! `[service.<name>]` tables declare local AWS services, which a process
+//! lists in `needs`, as [`crate::service`] describes. A process, container
+//! or port may not have a name that starts with `mxv-`, which mxv keeps
+//! for the apps and ports of the services' backends.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -61,7 +66,9 @@ use toml::Spanned;
 use crate::disposable::{BadGlob, PathGlob};
 use crate::name::{WorkspaceName, is_unit_name};
 use crate::redacted::Redacted;
+use crate::service::{Backend, PROVISION_APP, RESERVED_PREFIX, Service};
 
+mod services;
 #[cfg(test)]
 mod tests;
 
@@ -109,6 +116,10 @@ pub struct Manifest {
     /// `mxv new` clones from the repository into a new checkout, on top of
     /// the ones that the config file names.
     pub clone_on_new: Vec<PathGlob>,
+    /// The local AWS services, by name, which processes list in `needs`.
+    /// A workspace with several checkouts shares one set of service names,
+    /// and merges equal declarations of one name.
+    pub services: BTreeMap<String, Service>,
     /// One sentence for each top-level table that mxv ignores although
     /// its name is close to one of mxv's own, such as `[proceses.web]`,
     /// or is phase's `[process.*]`, with the file and line in front.
@@ -131,12 +142,21 @@ pub struct Joined {
     /// paths are then relative to the workspace's directory, and each
     /// must lie inside one of these folders.
     pub checkouts: Vec<String>,
+    /// The services of the other manifests, by name. Services keep their
+    /// names when manifests merge.
+    pub services: BTreeMap<String, Service>,
 }
 
 impl Joined {
-    /// Adds the ports and units of `manifest`, and the ports that its
-    /// units listen on or publish.
+    /// Adds the ports, units and services of `manifest`, and the ports
+    /// that its units listen on or publish.
     pub fn add(&mut self, manifest: &Manifest) {
+        self.services.extend(
+            manifest
+                .services
+                .iter()
+                .map(|(name, service)| (name.clone(), service.clone())),
+        );
         self.ports.extend(manifest.ports.iter().cloned());
         self.units.extend(
             manifest
@@ -255,17 +275,20 @@ pub struct Process {
     /// runs unsandboxed. An empty [`Permissions`] runs it sandboxed with no
     /// grants beyond phase's own.
     pub permissions: Option<Permissions>,
+    /// The services that the process uses, by name. The process starts
+    /// after their backends are ready and their resources exist, and
+    /// receives their variables.
+    pub needs: Vec<String>,
 }
 
 /// What a sandboxed process may do beyond what phase's sandbox always
 /// allows, which is to read its checkout and the system's directories and
 /// to write its own state and temporary directories.
 ///
-/// phase's first-stage sandbox lets a process connect over loopback to the
-/// ports of every unit it depends on, so a sandboxed process can reach a
-/// unit only when its `depends_on` names it, and it can reach each unit
-/// that `depends_on` names. `connect` must name only units of
-/// `depends_on`, and the manifest fails otherwise. A sandboxed process
+/// phase's first-stage sandbox lets a process connect over loopback only to
+/// the ports of the units that `connect` names. `connect` must name only
+/// units of `depends_on`, and the manifest fails otherwise. A unit of
+/// `depends_on` that `connect` leaves out is unreachable. A sandboxed process
 /// cannot reach any external host until phase runs its allowlist proxy.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -538,6 +561,16 @@ pub enum ManifestProblem {
         /// The other manifest that declares the name.
         other: PathBuf,
     },
+    /// Two services declare one table or queue differently, or bind one
+    /// variable of a process that needs both to different values. Every
+    /// service of a workspace shares the backend of its kind, so a
+    /// resource name means one resource.
+    ServiceClash {
+        /// The resource's or the variable's name.
+        name: String,
+        /// What clashes, in a sentence.
+        message: String,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -562,7 +595,9 @@ impl fmt::Display for ManifestError {
                 formatter,
                 "{place}: the section `{section}` is reserved for a later version of mxv"
             ),
-            ManifestProblem::Invalid { message } | ManifestProblem::Unrunnable { message } => {
+            ManifestProblem::Invalid { message }
+            | ManifestProblem::Unrunnable { message }
+            | ManifestProblem::ServiceClash { message, .. } => {
                 write!(formatter, "{place}: {message}")
             }
             ManifestProblem::UnitName { name } => write!(
@@ -592,6 +627,7 @@ const OWN_KEYS: &[&str] = &[
     "containers",
     "disposable",
     "clone_on_new",
+    "service",
     "secrets",
     "actions",
 ];
@@ -619,6 +655,9 @@ struct RawManifest {
     /// The globs of the ignored directories that a new workspace clones.
     #[serde(default)]
     clone_on_new: Vec<Spanned<String>>,
+    /// The local AWS services.
+    #[serde(default)]
+    service: BTreeMap<Spanned<String>, services::RawService>,
     /// Reserved for secrets.
     secrets: Option<Spanned<IgnoredAny>>,
     /// Reserved for actions.
@@ -646,6 +685,9 @@ struct RawProcess {
     /// The dependencies.
     #[serde(default)]
     depends_on: Vec<Spanned<String>>,
+    /// The services the process uses.
+    #[serde(default)]
+    needs: Vec<Spanned<String>>,
     /// The sandbox's permissions.
     permissions: Option<Spanned<RawPermissions>>,
 }
@@ -756,7 +798,7 @@ impl Errors<'_> {
 /// mxv calls `processes`. phase's top-level `permissions` is not among
 /// them: mxv refuses it, because mxv sandboxes each process by its own
 /// `[processes.<name>.permissions]`.
-const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs", "service"];
+const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs"];
 
 /// Checks that `raw`'s `version` is 1 or greater and no greater than
 /// [`MANIFEST_VERSION`], and that it holds none of the reserved tables
@@ -907,6 +949,14 @@ fn is_variable(name: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
+/// Returns the sentence of a process, container or port named `name`,
+/// which starts with the prefix that mxv keeps for its own names.
+pub(crate) fn reserved_message(name: &str) -> String {
+    format!(
+        "`{name}` starts with `{RESERVED_PREFIX}`, which mxv keeps for the apps and ports of the services' backends"
+    )
+}
+
 /// Checks that no unit of `manifest` depends on itself through a cycle.
 fn check_cycle(
     errors: &Errors<'_>,
@@ -974,6 +1024,9 @@ fn check_runnable(
                 .connect
                 .retain(|name| !joined.units.contains(name));
         }
+        process
+            .needs
+            .retain(|service| manifest.services.contains_key(service));
     }
     for container in checked.containers.values_mut() {
         own(&mut container.depends_on);
@@ -995,7 +1048,7 @@ fn check_runnable(
         }
     }
     let ports: BTreeMap<String, u16> = manifest
-        .ports
+        .ledger_ports()
         .iter()
         .chain(&joined.ports)
         .zip(1_u16..)
@@ -1027,6 +1080,7 @@ fn check_runnable(
         workspace_dir: None,
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
+        provisioner: Some(crate::phase_plan::checking_provisioner()),
     };
     match crate::phase_plan::build(&inputs) {
         Ok(_) => Ok(()),
@@ -1277,6 +1331,16 @@ impl Manifest {
             }
             ports.push(port.get_ref().clone());
         }
+        if let Some(name) = raw
+            .ports
+            .iter()
+            .chain(raw.processes.keys())
+            .chain(raw.containers.keys())
+            .find(|name| name.get_ref().starts_with(RESERVED_PREFIX))
+        {
+            return Err(errors.invalid(&name.span(), reserved_message(name.get_ref())));
+        }
+        let services = services::check_services(&errors, &raw.service)?;
         let names: BTreeSet<&str> = raw
             .processes
             .keys()
@@ -1305,13 +1369,26 @@ impl Manifest {
         let mut processes = BTreeMap::new();
         let mut listeners: BTreeMap<String, String> = BTreeMap::new();
         for (name, raw_process) in &raw.processes {
-            let process = check_process(
+            let mut process = check_process(
                 &errors,
                 name,
                 raw_process,
                 &known,
                 &names,
                 &joined.checkouts,
+            )?;
+            let own: Vec<&Spanned<String>> = raw_process
+                .env
+                .keys()
+                .chain(raw_process.ports.keys())
+                .collect();
+            process.needs = services::check_needs(
+                &errors,
+                name.get_ref(),
+                &raw_process.needs,
+                &own,
+                &services,
+                &joined.services,
             )?;
             if let (Some(port), Some(listen)) = (&process.listen, &raw_process.listen) {
                 if let Some(other) = listeners.get(port) {
@@ -1378,6 +1455,7 @@ impl Manifest {
             containers,
             disposable: globs(&raw.disposable, PathGlob::parse_directory, "disposable")?,
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
+            services,
             warnings,
         };
         check_cycle(&errors, &raw, &manifest)?;
@@ -1443,6 +1521,7 @@ impl Manifest {
                             .map(|unit| rename(unit))
                             .collect(),
                     }),
+                    needs: process.needs.clone(),
                 };
                 (rename(name), renamed)
             })
@@ -1474,6 +1553,7 @@ impl Manifest {
             containers,
             disposable: self.disposable.clone(),
             clone_on_new: self.clone_on_new.clone(),
+            services: self.services.clone(),
             warnings: self.warnings.clone(),
         }
     }
@@ -1496,6 +1576,89 @@ impl Manifest {
                     .map(|published| (published.port.clone(), name.clone()))
             }))
             .collect()
+    }
+
+    /// Returns the backends that the manifest's services run on, in order.
+    #[must_use]
+    pub fn backends(&self) -> BTreeSet<Backend> {
+        crate::service::backends(self.services.values())
+    }
+
+    /// Returns the ports that the workspace's port ledger holds for the
+    /// manifest: its own ports, then the port of each backend, which is
+    /// named after the backend's app.
+    #[must_use]
+    pub fn ledger_ports(&self) -> Vec<String> {
+        self.ports
+            .iter()
+            .cloned()
+            .chain(
+                self.backends()
+                    .into_iter()
+                    .map(|backend| backend.app().to_owned()),
+            )
+            .collect()
+    }
+
+    /// Returns the names of the apps that mxv adds for the manifest's
+    /// services, in the order they start: each backend, then
+    /// [`PROVISION_APP`]. A manifest without services adds none.
+    #[must_use]
+    pub fn service_apps(&self) -> Vec<String> {
+        let mut apps: Vec<String> = self
+            .backends()
+            .into_iter()
+            .map(|backend| backend.app().to_owned())
+            .collect();
+        if !apps.is_empty() {
+            apps.push(PROVISION_APP.to_owned());
+        }
+        apps
+    }
+
+    /// Returns the services that `process` needs, by name, in the order it
+    /// lists them, leaving out a name that the manifest does not declare.
+    pub fn needed<'a>(
+        &'a self,
+        process: &'a Process,
+    ) -> impl Iterator<Item = (&'a String, &'a Service)> {
+        process
+            .needs
+            .iter()
+            .filter_map(|name| self.services.get_key_value(name))
+    }
+
+    /// Returns the variables of each service, by service name, that a
+    /// process that needs only that service receives, with the backends'
+    /// host ports of `ports`. A backend whose port `ports` lacks renders
+    /// as `<port>`.
+    #[must_use]
+    pub fn service_listing(
+        &self,
+        ports: &BTreeMap<String, u16>,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        self.services
+            .iter()
+            .map(|(name, service)| (name.clone(), crate::service::variables([service], ports)))
+            .collect()
+    }
+
+    /// Returns the variables that `process` receives from the services it
+    /// needs, with the backends' host ports of `ports`: the
+    /// [`COMMON_VARIABLES`](crate::COMMON_VARIABLES), the endpoint variable
+    /// of each kind it needs, and each needed service's own `env`. A
+    /// backend whose port `ports` lacks renders as `<port>`. A process that
+    /// needs no service receives none.
+    #[must_use]
+    pub fn service_variables(
+        &self,
+        process: &Process,
+        ports: &BTreeMap<String, u16>,
+    ) -> BTreeMap<String, String> {
+        if process.needs.is_empty() {
+            return BTreeMap::new();
+        }
+        crate::service::variables(self.needed(process).map(|(_, service)| service), ports)
     }
 
     /// Returns the names of every process and container, in name order.
@@ -1696,6 +1859,7 @@ fn check_process(
         ready,
         depends_on,
         permissions,
+        needs: Vec::new(),
     })
 }
 
@@ -1793,7 +1957,7 @@ fn check_permissions(
             return Err(errors.invalid(
                 &unit.span(),
                 format!(
-                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because the sandbox opens only the ports of the units that a process depends on"
+                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because a sandboxed process may connect only to units it depends on"
                 ),
             ));
         }

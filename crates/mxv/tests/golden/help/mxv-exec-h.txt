@@ -1,0 +1,19 @@
+Run a one-off command in the context of a running process or container, and exit with its exit code
+
+Usage: mxv exec [OPTIONS] <PROCESS> -- <COMMAND>...
+
+Arguments:
+  <PROCESS>     The running process or container in whose context the command runs
+  <COMMAND>...  The command's program and its arguments, after `--`
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv exec -w reading-list web -- env
+
+Effects: destructive, not idempotent, open-world.
+Writes: applies all items or none.
+Exit code: the command passes on the exit code of the command.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv exec --help` describes them.

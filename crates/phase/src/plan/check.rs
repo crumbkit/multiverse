@@ -136,11 +136,11 @@ pub enum PlanError {
 pub enum PermissionProblem {
     /// `connect` names a host that is not an app of the plan. phase reaches
     /// external hosts only through an allowlist proxy, which is not built
-    /// yet, so a sandboxed app may connect only to the apps it depends on.
+    /// yet, so a sandboxed app may connect only to apps it depends on.
     ExternalHost(String),
     /// `connect` names an app of the plan that the app does not depend on.
-    /// A sandboxed app may connect only to the ports of the apps it
-    /// depends on.
+    /// A sandboxed app may connect only to the ports of the apps its
+    /// `connect` names, and each of those must be an app it depends on.
     NotADependency(AppName),
     /// A process listens on a port that the app's `listen` does not name,
     /// so the sandbox would refuse it.

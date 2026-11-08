@@ -93,7 +93,7 @@ fn a_running_process_that_started_without_permissions_it_now_has_gets_a_warning_
 fn a_running_sandboxed_process_whose_permissions_were_removed_gets_a_warning_naming_the_restart() {
     let row = sandboxed_row(serde_json::json!({
         "kind": "seatbelt",
-        "partial": "its listening ports accept connections from other machines on the network",
+        "partial": "the sandbox cannot limit its listening ports to the loopback interface",
     }));
     let note = stale_sandbox("triage", "api", false, &row).unwrap();
     assert!(note.is_warning());
@@ -113,7 +113,7 @@ fn a_running_process_whose_sandbox_state_matches_its_manifest_gets_no_warning() 
     }));
     let seatbelt = sandboxed_row(serde_json::json!({
         "kind": "seatbelt",
-        "partial": "its listening ports accept connections from other machines on the network",
+        "partial": "the sandbox cannot limit its listening ports to the loopback interface",
     }));
     // A platform without a sandbox runs a process that declares
     // permissions unsandboxed, for another reason.

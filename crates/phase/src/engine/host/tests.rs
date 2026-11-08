@@ -208,6 +208,23 @@ fn this_process_holds_its_own_listening_socket_as_a_member_of_its_group() {
     drop(listener);
 }
 
+#[test]
+fn this_process_holds_its_own_socket_that_listens_only_on_ipv6_loopback() {
+    let Ok(listener) = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)) else {
+        eprintln!("skipped: this machine has no IPv6 loopback address");
+        return;
+    };
+    let port = listener.local_addr().unwrap().port();
+    let own = u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap();
+    let held = listen_holder(own, port).unwrap();
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert_eq!(held, Some(Holder::Group));
+    } else {
+        assert_eq!(held, None);
+    }
+    drop(listener);
+}
+
 fn stop<'a>(
     keeper: Option<&'a crate::record::run::HostProcess>,
     app: Option<&'a crate::record::run::HostProcess>,
@@ -398,7 +415,7 @@ fn the_system_runner_stops_a_real_process_group_and_reports_it_gone() {
         .unwrap();
 
     assert_eq!(stopped, HostStopped::Stopped);
-    assert!(!sleeper.running());
+    assert!(sleeper.ends_soon());
     assert_eq!(System.identity(&app).unwrap(), Identity::Gone);
 }
 
@@ -442,6 +459,18 @@ fn the_system_runner_finds_a_port_in_use_on_the_wildcard_address() {
 fn the_system_runner_finds_a_port_in_use_on_the_ipv6_wildcard_address() {
     // A machine without IPv6 cannot hold the port this way.
     let Ok(held) = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)) else {
+        return;
+    };
+    let port = held.local_addr().unwrap().port();
+
+    assert!(System.port_in_use(port).unwrap());
+    drop(held);
+}
+
+#[test]
+fn the_system_runner_finds_a_port_in_use_only_on_the_ipv6_loopback_address() {
+    let Ok(held) = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)) else {
+        eprintln!("skipped: this machine has no IPv6 loopback address");
         return;
     };
     let port = held.local_addr().unwrap().port();
@@ -546,6 +575,10 @@ impl crate::record::process::Processes for NoSignals {
 fn stop_unsignalled(stop: &HostStop<'_>) -> HostStopped {
     crate::record::process::stop_host(&NoSignals, stop, now() + Duration::from_secs(5)).unwrap()
 }
+
+/// A shell loop that waits in short sleeps until a signal's trap ends it.
+/// `IGNORES_TERM` ends in the same loop.
+const NAPS: &str = "while :; do sleep 0.05; done";
 
 /// A shell that ignores `TERM`, as do the commands it runs, and prints a
 /// line once it is ready.
@@ -701,7 +734,8 @@ fn the_system_runner_returns_as_soon_as_a_process_ends_on_its_stop_signal() {
 
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(now() - started < Duration::from_secs(5));
-    assert!(!sleeper.running());
+    assert!(!System.group_exists(app.group));
+    assert!(sleeper.ends_soon());
 }
 
 #[test]
@@ -720,7 +754,7 @@ fn the_system_runner_kills_a_process_that_ignores_its_stop_signal_after_the_grac
 
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(now() - started >= grace + kill_wait);
-    assert!(!stubborn.running());
+    assert!(stubborn.ends_soon());
     assert!(!System.group_exists(app.group));
 }
 
@@ -749,7 +783,7 @@ fn the_system_runner_cuts_the_grace_short_at_the_deadline_and_returns_within_the
     assert_eq!(stopped, HostStopped::Stopped);
     assert!(took >= to_deadline, "{took:?}");
     assert!(took < to_deadline + kill_wait + slack, "{took:?}");
-    assert!(!stubborn.running());
+    assert!(stubborn.ends_soon());
 }
 
 #[test]
@@ -763,9 +797,18 @@ fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
     // would be killed. Counted from the app's own signal, its grace of 3
     // seconds leaves 1.2 seconds to spare, and the keeper's end leaves 1
     // second of its grace to spare.
-    let mut keeper = Spawned::shell("trap 'sleep 2; exit 0' TERM; echo ready; sleep 30 & wait");
+    //
+    // Each script waits in a loop of short sleeps rather than on one long
+    // background sleep. A shell that forks a child as TERM arrives can leave
+    // the child without the signal, because the child runs the shell's
+    // handler until it calls exec. A long sleep that missed TERM would keep
+    // the keeper's group alive after the keeper's shell ended, so the stop
+    // would wait for the keeper until the grace ran out and kill the app
+    // without signalling it. A short sleep that missed TERM ends within
+    // 50 milliseconds, and the shell then runs its trap.
+    let mut keeper = Spawned::shell(&format!("trap 'sleep 2; exit 0' TERM; echo ready; {NAPS}"));
     let mut app = Spawned::shell(&format!(
-        "trap 'sleep 1.8; echo done > {}; exit 0' TERM; echo ready; sleep 30 & wait",
+        "trap 'sleep 1.8; echo done > {}; exit 0' TERM; echo ready; {NAPS}",
         graceful.display()
     ));
     let (keeper_host, app_host) = (keeper.host(), app.host());
@@ -786,8 +829,8 @@ fn the_system_runner_gives_an_app_its_whole_grace_when_its_keeper_ends_late() {
         graceful.exists(),
         "the app was killed before its grace ended"
     );
-    assert!(!keeper.running());
-    assert!(!app.running());
+    assert!(keeper.ends_soon());
+    assert!(app.ends_soon());
 }
 
 // A member of the app's group that has ended and that its parent, this
