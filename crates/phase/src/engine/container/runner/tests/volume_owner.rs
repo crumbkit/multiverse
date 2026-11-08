@@ -565,11 +565,158 @@ fn assert_unresolved(world: &World, report: &Report) {
             assert!(message.contains("the image's USER"), "{message}");
             assert!(message.contains("numeric uid:gid"), "{message}");
             assert!(message.contains("keep"), "{message}");
+            assert!(message.contains("refused to create or start"), "{message}");
+            assert!(!message.contains("no id program"), "{message}");
         }
         other => panic!("{other:?}"),
     }
     assert!(!world.has_containers());
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+}
+
+/// Returns an app `db` whose image has the `USER` line `user` and which
+/// mounts the volume `data`, with `owner` as its volume owner, or `None`
+/// when the image did not build.
+fn with_image_user(user: &str, owner: &str) -> Option<(BuiltImage, AppPlan)> {
+    let image = BuiltImage::build(&format!("FROM {IMAGE}\nUSER {user}\n"))?;
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    db.container.owner = Some(owner.to_owned());
+    Some((image, db))
+}
+
+/// Asserts that `report` holds an error for `db` with no text from an
+/// image `USER` that holds `MARK` and an escape sequence, and with no
+/// failure class chosen by that text.
+fn assert_image_user_hidden(report: &Report) {
+    let json = serde_json::to_string(report).unwrap();
+    assert!(!json.contains("MARK"), "{json}");
+    assert!(!json.contains("[31m"), "{json}");
+    assert!(!json.contains("\\u001b"), "{json}");
+    assert!(!json.contains("no_address_pool"), "{json}");
+    assert!(!json.contains("fully subnetted"), "{json}");
+    assert!(!json.contains("already allocated"), "{json}");
+    match outcome(report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(message.contains("the image's USER"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_images_group_absent_from_its_group_file_never_reaches_the_report() {
+    if !ready() {
+        return;
+    }
+    for owner in ["keep", "1000:1000"] {
+        let Some((_image, db)) = with_image_user("1000:MARK\u{1b}[31mgroup", owner) else {
+            return;
+        };
+        let world = World::new();
+
+        let report = world.up(&world.plan(vec![db]));
+
+        assert_image_user_hidden(&report);
+    }
+}
+
+#[test]
+fn an_images_group_absent_from_its_group_file_never_reaches_the_report_without_a_volume() {
+    if !ready() {
+        return;
+    }
+    let Some((_image, mut db)) = with_image_user("1000:MARK\u{1b}[31mgroup", "keep") else {
+        return;
+    };
+    db.processes[0].volumes.clear();
+    let world = World::new();
+
+    let report = world.up(&world.plan(vec![db]));
+
+    assert_image_user_hidden(&report);
+}
+
+#[test]
+fn an_images_user_that_holds_a_compose_failure_phrase_chooses_no_failure_class() {
+    if !ready() {
+        return;
+    }
+    for phrase in [
+        "all predefined address pools have been fully subnetted",
+        "port is already allocated",
+    ] {
+        let Some((_image, db)) = with_image_user(&format!("MARK\u{1b}[31m {phrase}"), "keep")
+        else {
+            return;
+        };
+        let world = World::new();
+
+        let report = world.up(&world.plan(vec![db]));
+
+        assert_image_user_hidden(&report);
+    }
+}
+
+#[test]
+fn a_plans_run_as_user_docker_cannot_find_fails_as_unresolved_and_keeps_dockers_line() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.container.user = Some("no-such-plan-user".to_owned());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { code, message, .. } => {
+            assert_eq!(
+                code, "phase::container::volume_owner_unresolved",
+                "{message}"
+            );
+            assert!(
+                message.contains("unable to find user no-such-plan-user"),
+                "{message}"
+            );
+            assert!(message.contains("keep"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+}
+
+#[test]
+fn an_up_that_starts_one_process_and_cannot_check_the_volume_of_a_running_one_starts_it_with_a_note()
+ {
+    if !ready() {
+        return;
+    }
+    let mut world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let mut worker = db.processes[0].clone();
+    worker.name = "worker".parse().unwrap();
+    worker.volumes.clear();
+    db.processes.push(worker);
+    let plan = world.plan(vec![db]);
+    assert_eq!(outcome(&world.up(&plan), "db"), &AppOutcome::Started);
+    let server = world.container("db", "server").unwrap();
+    let worker = world.container("db", "worker").unwrap();
+    docker(&["rm", "--force", "--", &worker]).unwrap();
+    world.lose_helper_image();
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert!(
+        matches!(notes(&report, "db"), [Note::VolumeOwnerUnchecked { .. }]),
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), server);
+    assert_ne!(world.container("db", "worker").unwrap(), worker);
+    world.down();
 }
 
 #[test]

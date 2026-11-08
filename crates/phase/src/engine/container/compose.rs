@@ -18,7 +18,8 @@ use crate::engine::container::command::{
 use crate::engine::container::names::{
     CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey,
 };
-use crate::engine::container::objects::inspect_named;
+use crate::engine::container::objects::{image_config, inspect_named};
+use crate::engine::container::secrets::ImageConfig;
 
 /// The value of a container's variable, which may be a secret. Its
 /// `Debug` prints `<redacted>`, it implements neither `Display` nor
@@ -247,6 +248,61 @@ pub(crate) enum UpFailure {
     Other,
 }
 
+/// What stands in Compose's standard error for text of an image's `USER`.
+const HIDDEN_USER: &str = "<the image's USER>";
+
+/// What stands for Compose's whole standard error when phase could not
+/// read the image's `USER`, so it cannot tell which of Docker's lines
+/// quote it.
+const USER_UNREADABLE: &str =
+    "phase could not read the image's USER, so it keeps none of Docker's text for this failure";
+
+/// Returns `stderr` with the literal text of the image's `USER`, of its
+/// user part and of its group part replaced. Docker quotes those parts
+/// when it cannot find them, and the image's author controls them. When
+/// phase could not read the `USER`, `user` is `None` and nothing of
+/// `stderr` remains.
+///
+/// A part that is only digits stays, because digits can hold no escape
+/// sequence or failure phrase, and removing them would change a port
+/// number in Docker's line. A part counts only where the characters on
+/// both sides of it cannot belong to a longer name, because Docker quotes
+/// it between a space and a colon, and a short `USER` such as `e` must not
+/// change the words of Docker's line.
+pub(crate) fn without_image_user(stderr: &str, user: Option<&str>) -> String {
+    let Some(user) = user else {
+        return USER_UNREADABLE.to_owned();
+    };
+    let (name, group) = user.split_once(':').unwrap_or((user, ""));
+    let mut parts: Vec<&str> = [user, name, group]
+        .into_iter()
+        .filter(|part| !part.is_empty() && !part.bytes().all(|byte| byte.is_ascii_digit()))
+        .collect();
+    parts.sort_by_key(|part| std::cmp::Reverse(part.len()));
+    let in_name = |found: Option<char>| {
+        found.is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    let matched = |at: usize| {
+        parts.iter().find(|part| {
+            stderr[at..].starts_with(**part)
+                && !in_name(stderr[..at].chars().next_back())
+                && !in_name(stderr[at + part.len()..].chars().next())
+        })
+    };
+    let mut cleaned = String::with_capacity(stderr.len());
+    let mut at = 0;
+    while let Some(next) = stderr[at..].chars().next() {
+        if let Some(part) = matched(at) {
+            cleaned.push_str(HIDDEN_USER);
+            at += part.len();
+        } else {
+            cleaned.push(next);
+            at += next.len_utf8();
+        }
+    }
+    cleaned
+}
+
 /// Returns why the `docker compose up` whose standard error is `stderr`
 /// failed.
 pub(crate) fn up_failure(stderr: &str) -> UpFailure {
@@ -332,30 +388,42 @@ pub(crate) enum AppStep {
     Start,
 }
 
-/// Runs `docker compose up` with `step` for the service `service` of
-/// phase's app project in `scope`, reading the compose file `file` from
-/// standard input, with the variables `env`. The project directory is
-/// `dir`, which holds no file that Compose reads, and Compose reads no
-/// `.env` file. `until` holds the time the command may take and the flag
-/// that stops it.
+/// One `docker compose up` of a service of phase's app project.
+pub(crate) struct AppUp<'a> {
+    /// The scope of the app.
+    pub(crate) scope: &'a Scope,
+    /// The project directory, which holds no file that Compose reads.
+    pub(crate) dir: &'a Path,
+    /// The compose file, which Compose reads from standard input.
+    pub(crate) file: &'a Value,
+    /// The service.
+    pub(crate) service: &'a ServiceName,
+    /// What the command does.
+    pub(crate) step: AppStep,
+    /// The image whose `USER` the container runs as, or `None` when the
+    /// plan names the user.
+    pub(crate) runs_as_image_of: Option<&'a str>,
+}
+
+/// Runs `up`, with the variables `env`. Compose reads no `.env` file.
+/// `until` holds the time the command may take and the flag that stops it.
 ///
 /// The caller has checked the compose plugin with `docker compose version`,
-/// and has pulled the image, so Compose pulls nothing.
+/// and has pulled the image, so Compose pulls nothing. When the command
+/// fails and the container runs as its image's `USER`, phase reads that
+/// `USER` and removes its text from Compose's standard error before it
+/// classifies or quotes any of it, as [`without_image_user`] says.
 ///
 /// # Errors
 ///
 /// Returns the errors of [`compose_up`].
 pub(crate) fn app_up(
-    scope: &Scope,
-    dir: &Path,
-    file: &Value,
-    service: &ServiceName,
+    up: &AppUp<'_>,
     env: impl ChildEnv,
-    step: AppStep,
     until: (Duration, &Cancel),
 ) -> Result<Up, Error> {
-    let project = scope.project();
-    let step_args: [&OsStr; 2] = match step {
+    let project = up.scope.project();
+    let step_args: [&OsStr; 2] = match up.step {
         AppStep::Create => ["--no-start".as_ref(), "--no-recreate".as_ref()],
         AppStep::Start => ["--detach".as_ref(), "--no-recreate".as_ref()],
     };
@@ -364,7 +432,7 @@ pub(crate) fn app_up(
         "--project-name".as_ref(),
         project.as_str().as_ref(),
         "--project-directory".as_ref(),
-        dir.as_os_str(),
+        up.dir.as_os_str(),
         "--env-file".as_ref(),
         "/dev/null".as_ref(),
         "--file".as_ref(),
@@ -376,18 +444,25 @@ pub(crate) fn app_up(
         "--pull".as_ref(),
         "never".as_ref(),
         "--".as_ref(),
-        service.as_ref(),
+        up.service.as_ref(),
     ];
     let (deadline, cancel) = until;
-    let finished = run_input(
+    let mut finished = run_input(
         args,
         env,
-        file.to_string().into_bytes(),
+        up.file.to_string().into_bytes(),
         "compose up",
         deadline,
         cancel,
     )?;
-    up_result(scope, service, &finished)
+    if !finished.status.success()
+        && let Some(image) = up.runs_as_image_of
+    {
+        let config = image_config(image).ok();
+        finished.stderr =
+            without_image_user(&finished.stderr, config.as_ref().map(ImageConfig::user));
+    }
+    up_result(up.scope, up.service, &finished)
 }
 
 /// Returns what the `docker compose up` of `service` in `scope` that

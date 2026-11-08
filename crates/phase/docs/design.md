@@ -838,13 +838,23 @@ A name that resolves to uid 0 fails the app with
 can give a volume to root. An `id` that exits with another status than 0,
 or prints anything else than one number, fails the app with
 `phase::container::volume_owner_unresolved`, which gives the status. The
-same error covers a helper that Docker refuses to create or start, as for
-an image with no `id` program or with a `USER` that its `/etc/passwd`
-lacks. Docker's line for that case can quote the `USER`, so phase keeps
-none of Docker's text there. Each of these errors says that a numeric
-`owner` or `keep` fixes it. When no `id` helper runs, as under `keep`, a
-`docker compose up` that cannot find the image's `USER` fails with phase's
-own sentence for the same reason. Each
+same error covers a helper that Docker refuses to create or start. An
+image with no `id` program or with a `USER` that its `/etc/passwd` lacks
+is one reason, and a full disk is another, so the message says only that
+Docker refused. Docker's line for that case can quote the `USER`, so phase
+keeps none of Docker's text there when the user came from the image, and
+keeps Docker's line when the plan named the user. Each of these errors
+says that a numeric `owner` or `keep` fixes it.
+
+When any `docker compose up` of a container that runs as its image's
+`USER` fails, phase reads that `USER` from the image and replaces its
+literal text, and the text of its user and group parts, in Compose's
+standard error, before it classifies the failure or quotes a line. Text in
+a `USER` therefore cannot reach a report or choose a failure class such as
+an allocated port. A part that is only digits stays, because digits can
+hold neither an escape sequence nor a failure phrase and may be a port
+number in Docker's line. When phase cannot read the `USER`, it keeps none
+of Docker's lines for that failure. Each
 start of an app whose user is a name runs `id` twice. A numeric `owner`
 or run-as user avoids that.
 
@@ -866,7 +876,10 @@ helper does not keep `DAC_OVERRIDE`.
 phase runs each helper, and each `id`, as four Docker commands: `docker
 create`, `docker start`, `docker wait` and `docker rm --force`. Each of
 them prints only Docker's own text, so a failure carries Docker's line as
-phase's other Docker commands do. phase never reads what a helper writes,
+phase's other Docker commands do. The exception is a refused `docker
+create` or `docker start` of an `id` helper whose user came from the
+image's `USER`, which keeps none of Docker's text, as above. phase never
+reads what a helper writes,
 apart from the standard output of `id`, which it reads with `docker logs`
 and uses only when it is one decimal number on one line. No error, note
 or record holds what `id` or `chown` printed. A helper that exits with

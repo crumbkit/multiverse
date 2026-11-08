@@ -22,13 +22,14 @@
 //! an error about the plan's run-as user prints it quoted. Docker's own
 //! line can quote the user too, when `docker start` cannot find it in the
 //! image's `/etc/passwd`, so a refused creation or start of the `id`
-//! helper keeps none of Docker's text.
+//! helper keeps none of Docker's text when the user came from the image.
 //!
 //! Each helper is a container that phase creates, starts, waits for and
 //! removes: `docker create`, `docker start`, `docker wait` and `docker
 //! rm`. Each of those prints only Docker's own text, so a failure carries
 //! Docker's line as the other container commands do, apart from the `id`
-//! helper's creation and start, as above. phase never reads
+//! helper's creation and start for a user from the image, as above. phase
+//! never reads
 //! what a helper writes, apart from the standard output of `id`, which
 //! counts only when it is one number, and which no error repeats. A
 //! helper runs with no network, every capability dropped (the chown
@@ -257,18 +258,18 @@ pub(crate) fn helper_of(workspace: &WorkspaceId, app: Option<&AppName>, labels: 
         && app.is_none_or(|app| is(APP_LABEL, app.as_str()))
 }
 
-/// Reports whether `error` says that Docker refused to create or start a
-/// helper, so that its text, which can quote the helper's user, must not
-/// be kept.
-fn never_ran(error: &ContainerError) -> bool {
-    matches!(
-        error,
+/// Returns Docker's line when `error` says that Docker refused to create
+/// or start a helper.
+fn refused_line(error: &ContainerError) -> Option<&str> {
+    match error {
         ContainerError::Failed {
             operation: "volume owner create" | "volume owner start",
             cause: DockerCause::Refused,
+            message,
             ..
-        }
-    )
+        } => Some(message),
+        _ => None,
+    }
 }
 
 /// How a helper ended.
@@ -413,7 +414,7 @@ pub(crate) fn set_owner(
 }
 
 /// Resolves `user`, which names a user or group, to a numeric owner by
-/// running `id -u` and `id -g` in `image` as `user`, for an app of
+/// running `id -u` and `id -g` in `image` as that user, for an app of
 /// `scope`. The outer result holds a Docker failure, and the inner one the
 /// reason the user could not be an owner, which holds nothing that `id`
 /// printed.
@@ -424,15 +425,26 @@ pub(crate) fn set_owner(
 pub(crate) fn resolve(
     scope: &Scope,
     image: &str,
-    user: &str,
+    user: &RunAs,
     deadline: Instant,
     cancel: &Cancel,
 ) -> Result<Result<VolumeOwner, VolumeOwnerProblem>, ContainerError> {
     let id = |flag: &str| -> Result<Result<u32, VolumeOwnerProblem>, ContainerError> {
-        let ran = match run_helper(&id_args(scope, image, user, flag), true, deadline, cancel) {
+        let ran = match run_helper(
+            &id_args(scope, image, &user.user, flag),
+            true,
+            deadline,
+            cancel,
+        ) {
             Ok(ran) => ran,
-            Err(error) if never_ran(&error) => return Ok(Err(VolumeOwnerProblem::IdNotRun)),
-            Err(error) => return Err(error),
+            Err(error) => {
+                let Some(line) = refused_line(&error) else {
+                    return Err(error);
+                };
+                return Ok(Err(VolumeOwnerProblem::IdNotRun {
+                    docker_line: (!user.from_image).then(|| line.to_owned()),
+                }));
+            }
         };
         if ran.status != 0 {
             return Ok(Err(VolumeOwnerProblem::IdFailed { status: ran.status }));

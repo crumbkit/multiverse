@@ -120,7 +120,7 @@ use crate::engine::container::command::{
     DOCKER_DEADLINE, DockerExec, MOST_OUTPUT_BYTES, Referenced, check, check_compose, message,
     quick, secret_exec, write_secret,
 };
-use crate::engine::container::compose::{AppStep, Up, app_up};
+use crate::engine::container::compose::{AppStep, AppUp, Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope, VolumeKey};
 use crate::engine::container::objects::{
     self, AnonymousVolumes, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id,
@@ -536,13 +536,21 @@ impl Launch<'_> {
         step: AppStep,
         remaining: Duration,
     ) -> Result<Up, ContainerError> {
+        let app = self.start.app;
+        let runs_as_image_of = match &app.source {
+            Source::Image { image } if app.container.user.is_none() => Some(image.as_str()),
+            _ => None,
+        };
         app_up(
-            self.scope,
-            self.dir,
-            self.file,
-            self.service,
+            &AppUp {
+                scope: self.scope,
+                dir: self.dir,
+                file: self.file,
+                service: self.service,
+                step,
+                runs_as_image_of,
+            },
             env,
-            step,
             (remaining, self.start.cancel),
         )
     }
@@ -593,14 +601,7 @@ impl Launch<'_> {
                 started.uncertain = Some(self.name.clone());
                 Ok(false)
             }
-            Err(error) => {
-                let error = if self.start.app.container.user.is_none() {
-                    without_image_user(error)
-                } else {
-                    error
-                };
-                Err(halt(&no_shell_hint(error, self.secret_files)))
-            }
+            Err(error) => Err(halt(&no_shell_hint(error, self.secret_files))),
         }
     }
 
@@ -922,14 +923,9 @@ impl ComposeRunner {
             volume_owner::Wanted::Owner(owner) => return Ok(Some(owner)),
             volume_owner::Wanted::Resolve(run_as) => run_as,
         };
-        let resolved = volume_owner::resolve(
-            scope,
-            image.as_str(),
-            &run_as.user,
-            start.deadline,
-            start.cancel,
-        )
-        .map_err(|error| halt(&error))?;
+        let resolved =
+            volume_owner::resolve(scope, image.as_str(), &run_as, start.deadline, start.cancel)
+                .map_err(|error| halt(&error))?;
         resolved
             .map(Some)
             .map_err(|problem| Halt::Failed(run_as.error(app.name.clone(), problem)))
@@ -1050,26 +1046,6 @@ pub(crate) fn watch_grace(
             };
         }
         pause(POLL_INTERVAL.min(deadline - at));
-    }
-}
-
-/// Returns `error`, the failure of `docker compose up` of a container that
-/// runs as its image's `USER`, without Docker's text when Docker could not
-/// find that user. Docker's line quotes the user, and the image's author
-/// controls that text, so phase says what happened in its own words.
-fn without_image_user(error: ContainerError) -> ContainerError {
-    match error {
-        ContainerError::Failed {
-            operation,
-            service,
-            message,
-            ..
-        } if message.contains("unable to find user") => ContainerError::failed(
-            operation,
-            service.as_deref(),
-            "the user named by the image's USER is not in the image's /etc/passwd",
-        ),
-        other => other,
     }
 }
 

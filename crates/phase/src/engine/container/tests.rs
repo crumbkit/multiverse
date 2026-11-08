@@ -8,11 +8,11 @@ use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::command::{
-    ChildEnv as _, Referenced, message, run_program_until, says_missing,
+    ChildEnv as _, Referenced, compose_docker_line, message, run_program_until, says_missing,
 };
 use crate::engine::container::compose::{
     ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort, UpFailure, compose_env,
-    compose_file, up_failure,
+    compose_file, up_failure, without_image_user,
 };
 use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
@@ -1089,4 +1089,57 @@ fn a_port_answers_only_when_its_connection_stays_open_for_the_full_hold_and_not_
         &cancel
     ));
     drop(listener);
+}
+
+#[test]
+fn the_literal_text_of_an_images_user_and_its_parts_is_replaced_in_composes_output() {
+    let stderr = "Error response from daemon: unable to find group my \u{1b}[31mgroup: no matching entries in group file\n";
+
+    let cleaned = without_image_user(stderr, Some("app:my \u{1b}[31mgroup"));
+
+    assert_eq!(
+        cleaned,
+        "Error response from daemon: unable to find group <the image's USER>: no matching entries in group file\n"
+    );
+}
+
+#[test]
+fn a_compose_failure_phrase_in_an_images_user_chooses_no_failure_class() {
+    for phrase in [
+        "all predefined address pools have been fully subnetted",
+        "port is already allocated",
+    ] {
+        let user = format!("x {phrase}");
+        let stderr = format!(
+            "Error response from daemon: unable to find user {user}: no matching entries in passwd file\n"
+        );
+
+        assert_eq!(
+            up_failure(&without_image_user(&stderr, Some(&user))),
+            UpFailure::Other
+        );
+    }
+}
+
+#[test]
+fn a_numeric_user_or_a_user_inside_a_longer_word_leaves_composes_output_alone() {
+    let stderr = "Bind for 127.0.0.1:1000 failed: port is already allocated\n";
+
+    let numeric = without_image_user(stderr, Some("1000:1000"));
+    let letter = without_image_user(stderr, Some("e"));
+
+    assert_eq!(numeric, stderr);
+    assert_eq!(letter, stderr);
+    assert_eq!(up_failure(&numeric), UpFailure::PortAllocated(Some(1000)));
+}
+
+#[test]
+fn a_user_that_phase_could_not_read_keeps_none_of_dockers_lines() {
+    let stderr = "Error response from daemon: unable to find user secret: no matching entries in passwd file\n";
+
+    let cleaned = without_image_user(stderr, None);
+
+    assert!(!cleaned.contains("secret"), "{cleaned}");
+    assert_eq!(compose_docker_line(&cleaned), None);
+    assert_eq!(up_failure(&cleaned), UpFailure::Other);
 }

@@ -239,7 +239,7 @@ impl PhaseError {
 }
 
 /// Why phase could not choose a numeric owner for an app's volumes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VolumeOwnerProblem {
     /// The user's name resolves to uid 0 in the app's image. A name that
@@ -247,10 +247,14 @@ pub enum VolumeOwnerProblem {
     /// volume to root only when the plan's volume owner says `0:0`.
     ResolvesToRoot,
     /// Docker refused to create or start the helper that runs `id` in the
-    /// app's image, as when the image has no `id` program or no such user.
-    /// phase keeps none of Docker's text, because Docker's line can quote
-    /// the image's `USER`.
-    IdNotRun,
+    /// app's image. An image with no `id` program or no such user is one
+    /// reason, and a full disk or a missing image is another.
+    #[non_exhaustive]
+    IdNotRun {
+        /// Docker's line, or `None` when the user came from the image's
+        /// `USER`, because that line can quote it.
+        docker_line: Option<String>,
+    },
     /// `id` in the app's image exited with this status, so the name could
     /// not be resolved.
     #[non_exhaustive]
@@ -418,10 +422,15 @@ impl fmt::Display for PhaseError {
                         formatter,
                         "{user} is uid 0 in its image, so phase does not give the app's volumes to it"
                     )?,
-                    VolumeOwnerProblem::IdNotRun => write!(
-                        formatter,
-                        "phase could not resolve {user} to a numeric uid and gid: Docker could not run id in the app's image, as when the image has no id program or no such user"
-                    )?,
+                    VolumeOwnerProblem::IdNotRun { docker_line } => {
+                        write!(
+                            formatter,
+                            "phase could not resolve {user} to a numeric uid and gid: Docker refused to create or start the helper that runs id in the app's image"
+                        )?;
+                        if let Some(line) = docker_line {
+                            write!(formatter, ": {line}")?;
+                        }
+                    }
                     VolumeOwnerProblem::IdFailed { status } => write!(
                         formatter,
                         "phase could not resolve {user} to a numeric uid and gid: id in the app's image exited with status {status}"
