@@ -38,7 +38,17 @@ workspace may need to act on.
   port that the unit received through `ports` or an `env` placeholder. An
   unsandboxed process that serves a port without declaring it as its
   `listen` port must declare it, or sandboxed processes cannot reach it.
-- A sandboxed process that was running before the upgrade keeps the
-  sandbox it started with, because `mxv up` leaves a running process as
-  it is. Run `mxv restart -w <workspace> <process>` to apply the new rules
-  to it. `mxv exec` builds its sandbox afresh and applies them at once.
+- `mxv up` restarts a running host process whose part of the plan changed,
+  such as its `argv`, its ports, its `permissions` or its sandbox, and
+  prints an `info:` line under it that says so. A changed variable value
+  alone does not restart it; `mxv restart` applies that. The first `up`
+  after this upgrade restarts every running host process once, because
+  their run records do not say which part of the plan each one started
+  from. That restart also applies the sandbox rules above. `mxv exec` builds
+  its sandbox afresh and applies them at once.
+  An `up` that fails later leaves each process it restarted running and
+  prints a `warning:` line for it.
+- The run record moves to `phase/run/v6`, which records the hash of each
+  host process's part of the plan. phase reads every earlier version and
+  writes v6. An older mxv or phase refuses a v6 record with
+  `phase::record::newer` and asks for an upgrade.

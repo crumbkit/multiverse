@@ -305,17 +305,21 @@ fn start(
     let manifest = required_manifest(&context.workspace)?;
     crate::warn(&start_warnings(&context.workspace, &manifest));
     let workspace = context.workspace.name.to_string();
-    let outcome = context
-        .runs
-        .up(
-            lock,
-            &context.store,
-            &mut context.workspace,
-            &manifest,
-            &context.processes,
-        )
-        .map_err(MxvFailure::from)?;
-    match outcome {
+    let mut earlier = Vec::new();
+    let outcome = context.runs.up(
+        lock,
+        &context.store,
+        &mut context.workspace,
+        &manifest,
+        &context.processes,
+        &mut earlier,
+    );
+    let messages: Vec<String> = earlier
+        .iter()
+        .map(|note| note.message().to_owned())
+        .collect();
+    crate::warn(&messages);
+    match outcome.map_err(MxvFailure::from)? {
         UpOutcome::Up(statuses) => {
             context.forget_reclaim(named)?;
             Ok(statuses.iter().map(ProcessRow::from).collect())

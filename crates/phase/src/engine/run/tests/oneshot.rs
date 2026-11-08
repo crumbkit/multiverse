@@ -25,7 +25,7 @@ fn migrating_app(app: &str, once: bool, depends: &[&str]) -> AppPlan {
 
 /// Returns a host app named `app` with the single oneshot `provision`,
 /// which depends on the apps `depends`.
-fn provisioning_app(app: &str, once: bool, depends: &[&str]) -> AppPlan {
+pub(super) fn provisioning_app(app: &str, once: bool, depends: &[&str]) -> AppPlan {
     let mut plan = AppPlan::new(
         name(app),
         RunnerKind::Host,

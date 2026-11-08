@@ -23,8 +23,8 @@ use phase::container::{
 };
 use phase::{
     AppName, AppOutcome, Cancel, Handle, LineSink, LogLine, LogNote, LogRequest, Note, PhaseError,
-    ProcessName, Report, RunnerKind, Sandboxing, Selection, StartProblem, StatusRow, Target,
-    UnknownReason, UpDeadlines, WorkspaceId,
+    ProcessName, Report, RunnerKind, Selection, StartProblem, StatusRow, Target, UnknownReason,
+    UpDeadlines, WorkspaceId,
 };
 
 use super::{
@@ -161,8 +161,22 @@ fn ready_of(row: &StatusRow) -> Option<bool> {
     }
 }
 
+/// Returns the apps of `report` that a failed `up` rolls back.
+fn started_from_nothing(report: &Report) -> Vec<Target> {
+    report
+        .apps
+        .iter()
+        .filter(|app| matches!(app.outcome, AppOutcome::Started))
+        .map(|app| Target {
+            app: app.app.clone(),
+            process: None,
+        })
+        .collect()
+}
+
 /// Returns the notes of `report` that mxv shows, by unit: the secret files
-/// that `up` rewrote or kept for each app.
+/// that `up` rewrote or kept for each app, and the host processes that
+/// `up` restarted because their part of the plan changed.
 fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
     let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
     for app in &report.apps {
@@ -172,6 +186,9 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
                     message: message.clone(),
                 },
                 Note::SecretsKept { message, .. } => ProcessNote::SecretsKept {
+                    message: message.clone(),
+                },
+                Note::PlanChanged { message, .. } => ProcessNote::PlanChanged {
                     message: message.clone(),
                 },
                 Note::VolumeOwnerUnchecked { message, .. } => ProcessNote::VolumeOwnerUnchecked {
@@ -186,39 +203,6 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
         }
     }
     notes
-}
-
-/// The reason that phase gives for a host process whose app declares no
-/// permissions. The end-to-end tests of `status` hold the same sentence,
-/// so they fail if phase changes it.
-const UNDECLARED: &str = "its app declares no permissions";
-
-/// Returns the warning for the host process `unit` of the workspace
-/// `workspace`, which `up` found already running, when phase recorded it
-/// as started with or without permissions and its manifest now asks for
-/// the other: `wants` is true when the manifest gives it a `permissions`
-/// table. It returns `None` when the two agree, or when `row` records no
-/// sandbox state. A process recorded as unsandboxed for another reason,
-/// such as a platform without a sandbox, declared its permissions.
-fn stale_sandbox(workspace: &str, unit: &str, wants: bool, row: &StatusRow) -> Option<ProcessNote> {
-    let declared = !matches!(
-        row.sandbox.as_ref()?,
-        Sandboxing::Unsandboxed { reason, .. } if reason == UNDECLARED
-    );
-    let restart = format!("mxv restart -w {workspace} {unit}");
-    match (wants, declared) {
-        (true, false) => Some(ProcessNote::SandboxStale {
-            message: format!(
-                "{unit} still runs unsandboxed, because it was running before its manifest gave it permissions; run `{restart}` to run it under the sandbox"
-            ),
-        }),
-        (false, true) => Some(ProcessNote::SandboxStale {
-            message: format!(
-                "{unit} still runs as its earlier permissions allowed, because it was running before its manifest dropped them; run `{restart}` to run it unsandboxed"
-            ),
-        }),
-        _ => None,
-    }
 }
 
 /// Returns the exit code and the signal that mxv reports for a process
@@ -719,6 +703,10 @@ impl Runs {
     /// [`Runs::status`], the docker errors, [`Error::ProcessUnstartable`]
     /// for a process that cannot start, and [`Error::Phase`] for another
     /// failure of phase.
+    ///
+    /// When `up` fails after phase ran, `earlier` receives the notes of the
+    /// apps it reached, such as the processes it restarted, which keep
+    /// running. An `up` that succeeds puts its notes on each status.
     pub fn up(
         &self,
         _lock: &Lock,
@@ -726,6 +714,7 @@ impl Runs {
         workspace: &mut Workspace,
         manifest: &Manifest,
         names: &[String],
+        earlier: &mut Vec<ProcessNote>,
     ) -> Result<UpOutcome, Error> {
         let order = match manifest.start_order(names) {
             Ok(order) => order,
@@ -795,33 +784,18 @@ impl Runs {
         match self.failure(workspace, manifest, &id, &report) {
             Ok(None) => {}
             Ok(Some(outcome)) => {
+                earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Ok(outcome);
             }
             Err(error) => {
+                earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Err(error);
             }
         }
         let rows = self.phase_rows(workspace, Some(manifest))?;
         let mut notes = notes_of(&report);
-        for app in &report.apps {
-            let unit = app.app.as_str();
-            if app.outcome != AppOutcome::AlreadyRunning {
-                continue;
-            }
-            let (Some(process), Some(row)) = (manifest.processes.get(unit), rows.get(unit)) else {
-                continue;
-            };
-            if let Some(note) = stale_sandbox(
-                workspace.name.as_str(),
-                unit,
-                process.permissions.is_some(),
-                row,
-            ) {
-                notes.entry(unit.to_owned()).or_default().push(note);
-            }
-        }
         // The apps of the services come first, when this `up` reached them.
         let reached: BTreeSet<&str> = report.apps.iter().map(|app| app.app.as_str()).collect();
         let mut shown: Vec<String> = manifest
@@ -890,19 +864,12 @@ impl Runs {
         Ok(None)
     }
 
-    /// Stops the apps that a failed `up` started, as its `report` names
-    /// them. Each step is best effort, because the caller reports the
+    /// Stops the apps that a failed `up` started from nothing, as its
+    /// `report` names them. An app that it restarted ran before it, so that
+    /// app keeps running. Each step is best effort, because the caller reports the
     /// failure that stopped `up`.
     fn roll_back_phase(&self, id: &WorkspaceId, report: &Report) {
-        let started: Vec<Target> = report
-            .apps
-            .iter()
-            .filter(|app| matches!(app.outcome, AppOutcome::Started))
-            .map(|app| Target {
-                app: app.app.clone(),
-                process: None,
-            })
-            .collect();
+        let started = started_from_nothing(report);
         if started.is_empty() {
             return;
         }

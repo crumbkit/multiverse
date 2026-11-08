@@ -206,6 +206,37 @@ fn sh(script: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_launch_digest_ignores_the_order_of_a_specs_lists() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let built = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+    let mut reordered = built.clone();
+    reordered.path_dirs.reverse();
+    reordered.protected.reverse();
+    assert!(built.protected.len() > 1, "{built:?}");
+
+    assert_eq!(built.launch_digest(), reordered.launch_digest());
+}
+
+#[test]
+fn a_launch_digest_changes_with_a_metadata_path_and_with_a_connect_port() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let built = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+    let mut metadata = built.clone();
+    metadata.metadata.insert(PathBuf::from("/private/etc/link"));
+    let mut connect = built.clone();
+    connect.connect.insert(5432);
+
+    assert_ne!(built.launch_digest(), metadata.launch_digest());
+    assert_ne!(built.launch_digest(), connect.launch_digest());
+}
+
+#[test]
 fn an_app_without_permissions_runs_unsandboxed_and_says_why() {
     let fixture = Fixture::new();
     let mut api = fixture.app(sh("true"), 41_000);
