@@ -244,11 +244,8 @@ pub(crate) fn idle(facts: &Facts, now: SystemTime, stop_idle: Duration) -> Verdi
     if facts.pinned {
         return Verdict::InUse("it is pinned; mxv unpin lets reclaim stop it".to_owned());
     }
-    if let Some((pid, dir)) = facts.users.first() {
-        return Verdict::InUse(format!(
-            "process {pid} outside phase works in it, in {}",
-            dir.display()
-        ));
+    if let Some(reason) = user_reason(&facts.users) {
+        return Verdict::InUse(reason);
     }
     let changed = match elapsed(facts.modified, now, "a file of its checkouts changed") {
         Ok(changed) => changed,
@@ -397,15 +394,16 @@ pub(crate) fn owned<'t>(
 }
 
 /// Returns each process of `table` whose working directory is inside
-/// `dir`, a workspace's directory, and that neither phase runs for the
-/// workspace's host processes `apps` nor is mxv itself, `own`, with that
-/// directory.
+/// `dir`, a workspace's directory, which it canonicalizes when it can, and
+/// that neither phase runs for the workspace's host processes `apps` nor is
+/// mxv itself, `own`, with that directory.
 pub(crate) fn users(
     table: &[TableEntry],
     dir: &Path,
     apps: &[u32],
     own: u32,
 ) -> Vec<(u32, PathBuf)> {
+    let dir = &dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let phase: BTreeSet<u32> = owned(table, apps).map(|entry| entry.pid).collect();
     table
         .iter()
@@ -415,6 +413,17 @@ pub(crate) fn users(
             Some((entry.pid, inside.clone()))
         })
         .collect()
+}
+
+/// Returns the sentence that names the first of `users`, the processes
+/// outside phase that work in a workspace, or `None` when there are none.
+pub(crate) fn user_reason(users: &[(u32, PathBuf)]) -> Option<String> {
+    users.first().map(|(pid, dir)| {
+        format!(
+            "process {pid} outside phase works in it, in {}",
+            dir.display()
+        )
+    })
 }
 
 /// Returns the bytes that the processes of `table` that phase runs for the
@@ -489,15 +498,11 @@ impl Machine {
         table: &[TableEntry],
         now: SystemTime,
     ) -> Result<Facts, MxvFailure> {
-        let dir = workspace
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| workspace.path.clone());
         let mut facts = Facts {
             pinned: workspace.pinned,
             modified: None,
             touched: self.runs.touched(&workspace.name),
-            users: users(table, &dir, &footprint.pids, std::process::id()),
+            users: users(table, &workspace.path, &footprint.pids, std::process::id()),
         };
         if walks(&facts, now, self.stop_idle) {
             facts.modified = self.workspaces.disk_usage(workspace)?.modified;
@@ -775,7 +780,7 @@ fn disk(
                 active: row.modified,
                 reason: row.reason.or_else(|| {
                     (state != ReclaimState::Kept).then(|| {
-                        "none of its processes or containers runs, and its checkouts are unchanged for the idle age of mxv clean".to_owned()
+                        "none of its processes or containers runs, no other process works in it, and its checkouts are unchanged for the idle age of mxv clean".to_owned()
                     })
                 }),
             }

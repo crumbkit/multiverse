@@ -48,6 +48,23 @@ workspace may need to act on.
   its sandbox afresh and applies them at once.
   An `up` that fails later leaves each process it restarted running and
   prints a `warning:` line for it.
+- `up` replaces a running container when the value of one of its variables
+  that is not a secret changes, such as LocalStack's `SERVICES` going from
+  `s3` to `s3,sqs`. Before this change the new value waited for
+  `mxv restart`. A renewed secret never replaces a container. phase compares
+  an HMAC-SHA-256 digest of the values, keyed by 32 random bytes that it
+  creates in `env-digest.key` in its state directory with mode 0600. phase
+  refuses a key file that others can read and fails `up` for the app,
+  leaving its containers running. Remove the file to make a new key.
+- The first `up` after this upgrade replaces every running container once,
+  because their recorded hashes hold no digest. A replaced container loses
+  everything outside its named volumes, so LocalStack loses its in-memory
+  data and `mxv-provision` creates its resources again. Later `up`s keep
+  each container, and the run record stays at `phase/run/v6`.
+- `up` now resolves the environment of each running container on every run.
+  An `EnvironmentSource` that cannot resolve a container without secret
+  files makes `up` report the app as errored, and leaves the container
+  running.
 - The run record moves to `phase/run/v6`, which records the hash of each
   host process's part of the plan. phase reads every earlier version and
   writes v6. An older mxv or phase refuses a v6 record with

@@ -420,12 +420,67 @@ log, which the host program's `logs` command shows, such as
 `mxv logs <app>`.
 
 The run record keeps, for each container, a hash of the process's service
-in the compose file, which holds no value of a variable. `up` leaves a
-container alone and reports it as already running when Docker still has
-the recorded id, the container's labels name the workspace, app and
-process, Docker's status is exactly `running`, and the recorded hash is
-the hash of the process's service in the new plan. `up` replaces every
-other container.
+in the compose file, which holds no value of a variable, folded with a
+keyed digest of the values of the process's variables that are not
+secrets. `up` leaves a container alone and reports it as already running
+when Docker still has the recorded id, the container's labels name the
+workspace, app and process, Docker's status is exactly `running`, and the
+recorded hash is the hash of the process's service in the new plan folded
+with the digest of its freshly resolved values. `up` replaces every other
+container and reports its app as restarted.
+
+The plan holds the names of a process's variables and no value, and the
+host program's `EnvironmentSource` supplies every value, including the
+ones that a manifest states literally, such as LocalStack's `SERVICES`.
+`up` therefore resolves the environment of each running container on each
+run and compares the digest of its values. When a manifest changes
+`SERVICES` from `s3` to `s3,sqs`, the hash changes and the next `up`
+replaces the container. Each of these points follows from that digest:
+
+- The digest is HMAC-SHA-256 over a canonical encoding: a versioned
+  domain, the number of variables, and for each variable in name order
+  its length-prefixed name and either a byte that marks it absent or a
+  byte that marks it present and its length-prefixed value. An absent
+  optional variable therefore differs from an empty one, and no two lists
+  of names and values share an encoding.
+- A variable that the app's permissions name as a secret stays out of the
+  digest, whatever its delivery. A renewed secret never replaces a
+  container. A secret that a process receives as a file is rewritten in
+  the running container, as [Container secrets](#container-secrets) says, and a secret that a
+  process receives with `secret_delivery = "env"` keeps the value that the
+  container started with until something else replaces the container.
+- The key is 32 random bytes in `env-digest.key` in phase's state
+  directory, which holds one key for every workspace. phase creates the
+  file with mode 0600, without following a symbolic link, and only phase
+  reads or writes it. The sandbox denies a sandboxed process phase's state
+  directory, and with it the key. The key stays out of the run record,
+  because a digest beside its key would let anyone who reads the record
+  test a guessed value. Without the key the digest reveals nothing about a
+  value.
+- phase refuses a key file that is a symbolic link, is not a regular file,
+  belongs to another user, can be read or written by its group or by
+  others, or does not hold exactly 32 bytes, and never repairs it. `up`
+  then fails the app with `phase::state::unwritable` and leaves its
+  containers running. Removing the key file makes phase create a new key,
+  and the next `up` replaces every running container once.
+- An `EnvironmentSource` whose values cannot be written, because its
+  `AppliedEnvironment` does not implement `write_value`, gives no digest
+  for a process with variables, and phase compares only that process's
+  plan.
+- When the environment of a running container cannot be resolved, phase
+  cannot compare its values. A container without secret files goes to the
+  start, which reports the resolver's error and leaves the container
+  running. A container with secret files keeps them, and `up` adds a note
+  that gives the reason, as it did before this digest existed.
+- The digest lives inside each container's plan hash, so the run record
+  keeps its version and its fields. A hash that an earlier phase recorded
+  holds no digest and differs from the new hash, so the first `up` after
+  the upgrade replaces every running container once, and later `up`s keep
+  each container.
+
+The host-process side has no digest yet: a changed value alone does not
+restart a host process, as [Plan changes of a running host
+process](#plan-changes-of-a-running-host-process) says.
 
 `up` pulls the app's image before it removes any container, within the
 build deadline, and resolves each process's environment before it removes
@@ -1870,11 +1925,12 @@ and redesigns are the evidence for each one.
   plan hash, the program's digest, and a keyed hash of its environment
   values, never the values) with the new ones. It restarts a process whose
   inputs changed and leaves the rest alone without probing them again.
-  Built so far: a container's plan hash, as [Containers](#containers)
-  says, and a host process's part of the plan, as [Plan changes of a
-  running host process](#plan-changes-of-a-running-host-process) says.
-  No program digest is recorded yet, because phase runs no release or
-  build yet, and no keyed hash of environment values is recorded yet.
+  Built so far: a container's plan hash, folded with a keyed digest of
+  the values that are not secrets, as [Containers](#containers) says, and
+  a host process's part of the plan, as [Plan changes of a running host
+  process](#plan-changes-of-a-running-host-process) says. No program
+  digest is recorded yet, because phase runs no release or build yet, and
+  no keyed hash of a host process's environment values is recorded yet.
 - `up` has separate deadlines for building and for readiness. When a
   deadline cuts off a start or stop, phase reports the outcome as
   uncertain and does not retry it.
@@ -1963,10 +2019,10 @@ Built 5 November 2026.
   is compared by its completion, as [Oneshot
   processes](#oneshot-processes) says.
 - The hash covers no environment value, so a changed value alone does
-  not restart a host process. `AppliedEnvironment::digest` gives a keyed
-  hash of the values, but phase has no key of its own to give it yet, and
-  would have to resolve every running process's environment on each `up`
-  to compare it. A dependency's port that a process receives is part of
+  not restart a host process. `AppliedEnvironment::digest_of` gives a
+  keyed digest of the values, which `up` compares for containers. A later
+  change does the same for host processes, and it will resolve every
+  running host process's environment on each `up` to compare it. A dependency's port that a process receives is part of
   the process's own part of the plan, because the host program lists it
   in the app's `ports`, so a process that receives a port that moved
   restarts whether or not it runs sandboxed.

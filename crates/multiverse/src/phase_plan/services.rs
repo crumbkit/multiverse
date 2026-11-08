@@ -140,10 +140,10 @@ fn backend_app(inputs: &Inputs<'_>, backend: Backend) -> Result<Planned, Unrunna
                     Redacted::new(format!("{HOST}:{host_port}")),
                 ),
             ];
-            // phase's plan hash of a container covers its command and the
-            // names of its variables, not their values, so the kinds go in
-            // the command too: a change of kinds then replaces the
-            // container. LocalStack's entrypoint ignores its arguments.
+            // The kinds also go in the command, which phase's plan hash
+            // covers, so a change of kinds replaces the container. phase
+            // now compares the values too, and this is no longer needed.
+            // LocalStack's entrypoint ignores its arguments.
             let mut main = ProcessPlan::new(main_process()?, vec![format!("mxv-services={kinds}")]);
             main.port = Some(port.clone());
             main.ready = Some(Probe::new(ProbeCheck::http(LOCALSTACK_HEALTH.to_owned())));
