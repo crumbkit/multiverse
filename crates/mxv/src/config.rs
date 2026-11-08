@@ -19,6 +19,8 @@
 //!   `mxv clean` treats it as idle, such as `"7d"`.
 //! - `max_disposable` is the size that `mxv clean --over-limit` keeps the
 //!   disposable directories of every workspace under, such as `"50GiB"`.
+//! - `stop_idle` is how long a running workspace must go unused before
+//!   `mxv reclaim` may stop it, such as `"2h"`.
 //!
 //! mxv parses the file strictly: any other key, a value of another type, a
 //! relative path, a glob that is absolute or holds `..`, a `clone_on_new`
@@ -141,6 +143,10 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
                     unit(name, value.get_ref(), parse_size).map_err(|reason| bad(at, reason))?,
                 );
             }
+            "stop_idle" => {
+                config.stop_idle =
+                    Some(unit(name, value.get_ref(), parse_age).map_err(|reason| bad(at, reason))?);
+            }
             _ => {
                 return Err(bad(
                     at,
@@ -163,6 +169,7 @@ pub(crate) const SETTINGS: &[&str] = &[
     "`clone_on_new`",
     "`clean_idle`",
     "`max_disposable`",
+    "`stop_idle`",
 ];
 
 /// Returns the globs of the array `value` of the key `key`, each read with

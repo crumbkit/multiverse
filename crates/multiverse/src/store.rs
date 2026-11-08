@@ -366,6 +366,33 @@ pub(crate) fn append_file(path: &Path) -> Result<File, Error> {
     opened.map_err(unwritable)
 }
 
+/// Sets the modification time of the file at `path` to now, and creates
+/// it and its directory when they do not exist. The file holds no bytes,
+/// and nothing syncs it, because a time that a power loss takes back only
+/// makes the time older.
+///
+/// # Errors
+///
+/// Returns [`Error::Unwritable`] when the directory or the file cannot be
+/// created, or its time cannot be set.
+pub(crate) fn touch_file(path: &Path) -> Result<(), Error> {
+    let unwritable = |source| Error::Unwritable {
+        path: path.to_path_buf(),
+        source,
+    };
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(unwritable)?;
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let opened = OpenOptions::new().create(true).append(true).open(path);
+    opened
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .map_err(unwritable)
+}
+
 /// Moves the log at `log` to `older`, replacing an older log there, so the
 /// next start of the process begins an empty log. A missing log succeeds.
 ///

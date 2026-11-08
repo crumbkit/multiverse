@@ -37,14 +37,20 @@ fn a_workspace_unchanged_and_untouched_for_the_idle_age_is_idle_since_its_last_a
     assert_eq!(active, ago(now, 3));
     assert!(why.contains("unchanged for 5h"), "{why}");
     assert!(why.contains("no mxv command named it for 3h"), "{why}");
-    assert!(why.contains("no process outside phase works in it"), "{why}");
+    assert!(
+        why.contains("no process outside phase works in it"),
+        "{why}"
+    );
 }
 
 #[test]
 fn a_workspace_that_never_changed_and_no_command_touched_is_idle() {
     let now = SystemTime::now();
     let verdict = idle(&facts(None, None), now, 2 * HOUR);
-    assert!(matches!(verdict, Verdict::Idle { active: None, .. }), "{verdict:?}");
+    assert!(
+        matches!(verdict, Verdict::Idle { active: None, .. }),
+        "{verdict:?}"
+    );
 }
 
 #[test]
@@ -59,7 +65,10 @@ fn a_change_within_the_idle_age_keeps_a_workspace_in_use() {
 fn an_mxv_command_within_the_idle_age_keeps_a_workspace_in_use() {
     let now = SystemTime::now();
     let reason = reason(idle(&facts(ago(now, 5), ago(now, 1)), now, 2 * HOUR));
-    assert!(reason.contains("an mxv command named it 1h ago"), "{reason}");
+    assert!(
+        reason.contains("an mxv command named it 1h ago"),
+        "{reason}"
+    );
 }
 
 #[test]

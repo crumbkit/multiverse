@@ -23,6 +23,12 @@ pub(crate) const BSDINFO_BYTES: usize = 136;
 /// The size of `struct socket_fdinfo`.
 pub(crate) const SOCKET_FDINFO_BYTES: usize = 792;
 
+/// The size of `struct proc_vnodepathinfo`.
+pub(crate) const VNODEPATHINFO_BYTES: usize = 2352;
+
+/// The size of `struct proc_taskinfo`.
+pub(crate) const TASKINFO_BYTES: usize = 96;
+
 /// Why a libproc call gave no struct.
 #[derive(Debug)]
 pub(crate) enum Failure {
@@ -77,6 +83,50 @@ pub(crate) fn bsd_info(pid: i32) -> Result<[u8; BSDINFO_BYTES], Failure> {
         )
     };
     whole("proc_pidinfo(PROC_PIDTBSDINFO)", written, BSDINFO_BYTES)?;
+    Ok(info)
+}
+
+/// Returns `struct proc_vnodepathinfo` of `pid` as bytes, which holds its
+/// working directory, from `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
+pub(crate) fn vnode_path_info(pid: i32) -> Result<Vec<u8>, Failure> {
+    let mut info = vec![0_u8; VNODEPATHINFO_BYTES];
+    clear_errno();
+    // SAFETY: `info` is a live, writable buffer of `VNODEPATHINFO_BYTES`
+    // bytes, and the kernel writes at most the size it is given.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            c_int(VNODEPATHINFO_BYTES),
+        )
+    };
+    whole(
+        "proc_pidinfo(PROC_PIDVNODEPATHINFO)",
+        written,
+        VNODEPATHINFO_BYTES,
+    )?;
+    Ok(info)
+}
+
+/// Returns `struct proc_taskinfo` of `pid` as bytes, which holds its
+/// resident memory, from `proc_pidinfo(PROC_PIDTASKINFO)`.
+pub(crate) fn task_info(pid: i32) -> Result<[u8; TASKINFO_BYTES], Failure> {
+    let mut info = [0_u8; TASKINFO_BYTES];
+    clear_errno();
+    // SAFETY: `info` is a live, writable buffer of `TASKINFO_BYTES` bytes,
+    // and the kernel writes at most the size it is given.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast::<c_void>(),
+            c_int(TASKINFO_BYTES),
+        )
+    };
+    whole("proc_pidinfo(PROC_PIDTASKINFO)", written, TASKINFO_BYTES)?;
     Ok(info)
 }
 

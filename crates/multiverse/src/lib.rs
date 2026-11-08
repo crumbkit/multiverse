@@ -61,6 +61,7 @@ pub use crate::manifest::{
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
+pub use crate::process::process_table;
 pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
@@ -70,9 +71,9 @@ pub use crate::record::{
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
     DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Follower, Footprint, KILL_WAIT, Kind,
-    LogOutput,
-    MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, START_GRACE, STOP_GRACE, Unstoppable, UpOutcome, Volumes, Waited, tail,
+    LogOutput, MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState,
+    ProcessStatus, RenamedVolume, Runs, START_GRACE, STOP_GRACE, Unstoppable, UpOutcome, Volumes,
+    Waited, tail,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,

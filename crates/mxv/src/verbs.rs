@@ -408,6 +408,9 @@ pub(crate) fn add(
         }
     };
     let name = workspace.name.clone();
+    if mode == Mode::Change {
+        processes::touch_named(environment, &name);
+    }
     let repo = repo_of(&args.repo, args.folder.as_deref())?;
     let manifest = match &args.manifest {
         Some(file) => {
@@ -579,6 +582,7 @@ pub(crate) fn show(
             let workspace = workspaces.find(&name)?.ok_or(MxvFailure::NotFound {
                 name: name.to_string(),
             })?;
+            processes::touch_named(environment, &workspace.name);
             let usage = workspaces.disk_usage(&workspace)?;
             // The disk usage already warns about a manifest file that
             // cannot be read, so only a manifest that parses adds its own
@@ -620,6 +624,7 @@ pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<Strin
         .ok_or(MxvFailure::NotFound {
             name: name.to_string(),
         })?;
+    processes::touch_named(environment, &workspace.name);
     let Some(folder) = &args.checkout else {
         return Ok(Prose::new(workspace.path.display().to_string()));
     };

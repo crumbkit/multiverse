@@ -368,16 +368,55 @@ pub fn volume_exists(name: &str) -> Result<bool, ContainerError> {
 ///
 /// Returns the errors of `docker version` and [`ContainerError::Failed`].
 pub fn container_memory(ids: &[String]) -> Result<BTreeMap<String, u64>, ContainerError> {
-    let _ = ids;
-    Ok(BTreeMap::new())
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut args = vec![
+        "stats",
+        "--no-stream",
+        "--no-trunc",
+        "--format",
+        "{{.ID}}\t{{.MemUsage}}",
+    ];
+    args.extend(ids.iter().map(String::as_str));
+    let listed = quick(args, "stats")?.checked("stats", None)?;
+    Ok(listed.lines().filter_map(stats_line).collect())
 }
 
 /// Returns the container id and the resident bytes of one line of
 /// `docker stats --format '{{.ID}}\t{{.MemUsage}}'`, such as
 /// `0123abcd\t12.5MiB / 7.6GiB`, or `None` when docker reports no usage.
 pub(crate) fn stats_line(line: &str) -> Option<(String, u64)> {
-    let _ = line;
-    None
+    let (id, usage) = line.split_once('\t')?;
+    let used = usage.split('/').next()?.trim();
+    let split = used.find(|char: char| !(char.is_ascii_digit() || char == '.'))?;
+    let (number, unit) = used.split_at(split);
+    let scale: u64 = match unit.trim() {
+        "B" => 1,
+        "KiB" => 1 << 10,
+        "MiB" => 1 << 20,
+        "GiB" => 1 << 30,
+        "TiB" => 1 << 40,
+        "kB" | "KB" => 1_000,
+        "MB" => 1_000_000,
+        "GB" => 1_000_000_000,
+        "TB" => 1_000_000_000_000,
+        _ => return None,
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let whole: u64 = whole.parse().ok()?;
+    // Docker prints at most a few decimal places, so the fraction is read
+    // as a whole number of its own and scaled, without floating point.
+    let digits = u32::try_from(fraction.len()).ok()?;
+    let fraction: u64 = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse().ok()?
+    };
+    let bytes = whole
+        .checked_mul(scale)?
+        .checked_add(fraction.checked_mul(scale)? / 10_u64.checked_pow(digits)?)?;
+    Some((id.trim().to_owned(), bytes))
 }
 
 /// The containers of one workspace and their run records, kept through the

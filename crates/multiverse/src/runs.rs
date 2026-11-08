@@ -477,6 +477,11 @@ enum Readiness {
 /// each workspace's processes.
 const RUNS_DIR: &str = "runs";
 
+/// The file in a workspace's run directory whose modification time is when
+/// an mxv command last named the workspace. Its name starts with `.`, so it
+/// is never read as a run record.
+const TOUCHED_FILE: &str = ".touched";
+
 /// The directory under mxv's state directory that phase keeps its own state
 /// in. Phase keeps each workspace's run record at
 /// `<PHASE_DIR>/runs/<workspace-id>.json`, apart from mxv's records.
@@ -614,8 +619,7 @@ impl Runs {
     ///
     /// Returns [`Error::Unwritable`] when the file cannot be written.
     pub fn touch(&self, name: &WorkspaceName) -> Result<(), Error> {
-        let _ = name;
-        Ok(())
+        store::touch_file(&self.workspace_dir(name).join(TOUCHED_FILE))
     }
 
     /// Returns when an mxv command last named the workspace `name`, as
@@ -623,8 +627,9 @@ impl Runs {
     /// workspace's run files were deleted.
     #[must_use]
     pub fn touched(&self, name: &WorkspaceName) -> Option<SystemTime> {
-        let _ = name;
-        None
+        fs::metadata(self.workspace_dir(name).join(TOUCHED_FILE))
+            .and_then(|metadata| metadata.modified())
+            .ok()
     }
 
     /// Returns these run files with `range` as the host ports that

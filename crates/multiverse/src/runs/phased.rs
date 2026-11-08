@@ -642,8 +642,35 @@ impl Runs {
     ///
     /// Returns the errors of [`Runs::status`].
     pub fn footprint(&self, workspace: &Workspace) -> Result<Footprint, Error> {
-        let _ = workspace;
-        Ok(Footprint::default())
+        let manifest = workspace.manifest().ok().flatten();
+        let mut footprint = Footprint::default();
+        for row in self.phase_rows(workspace, manifest.as_ref())?.values() {
+            if !row.state.may_run() {
+                continue;
+            }
+            match &row.handle {
+                Some(Handle::Pid { pid, .. }) => footprint.pids.push(*pid),
+                Some(Handle::Container { id, .. }) => {
+                    footprint.containers.push(id.as_str().to_owned());
+                }
+                _ => {}
+            }
+        }
+        Ok(footprint)
+    }
+
+    /// Returns the resident memory of the containers of `footprint`, as
+    /// docker measures it. It runs no docker command for a footprint
+    /// without containers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
+    /// [`Error::DockerFailed`].
+    pub fn container_memory(&self, footprint: &Footprint) -> Result<u64, Error> {
+        Ok(phase::container::container_memory(&footprint.containers)?
+            .values()
+            .fold(0_u64, |sum, bytes| sum.saturating_add(*bytes)))
     }
 
     /// Returns the names of the processes and containers of `workspace`

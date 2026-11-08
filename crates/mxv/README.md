@@ -151,6 +151,7 @@ disposable = ["coverage/"]          # more disposable globs for every repository
 clone_on_new = ["node_modules/"]    # the ignored directories that `mxv new` clones
 clean_idle = "7d"                   # the idle age that `mxv clean` waits for
 max_disposable = "50GiB"            # the limit that `mxv clean --over-limit` cleans down to
+stop_idle = "2h"                    # the idle age that `mxv reclaim` waits for before it stops a workspace
 ```
 
 `root` is a string that holds an absolute path, or a path that starts with
@@ -166,7 +167,8 @@ every port of the range is held by a workspace or taken, `mxv up` fails
 with `mxv::port::exhausted`; a wider range fixes it.
 
 [Disk space](#disk-space) describes `disposable`, `clone_on_new`,
-`clean_idle` and `max_disposable`.
+`clean_idle` and `max_disposable`, and
+[Freeing memory](#freeing-memory) describes `stop_idle`.
 
 mxv reads the file strictly. Any other key, a value of another type, a
 relative path or text that is not TOML fails with `mxv::config::invalid`,
@@ -1471,6 +1473,68 @@ hook, such as this daily crontab line:
 
 `clean` measures every workspace it considers, and each workspace it cleans
 twice, so a run takes as long as `show` takes for each of them.
+
+### Freeing memory
+
+`mxv reclaim --need memory=<SIZE>` stops idle workspaces until the memory
+they held covers the need. A load manager runs it when the machine runs
+short of memory; nothing runs it in the background. A size takes the units
+of `max_disposable`, and also `K`, `M`, `G` and `T`, which count in powers
+of 1024, such as `memory=512M`.
+
+A running workspace is idle when all of these hold:
+
+- `mxv pin` has not pinned it.
+- No process outside phase has its working directory inside the
+  workspace's directory. A shell, an editor or an agent that works in the
+  workspace keeps it running. The processes that phase runs for the
+  workspace, their keepers and their descendants do not count, and neither
+  does the `mxv reclaim` process itself.
+- No file, commit or staged change of its checkouts changed within the idle
+  age, as `mxv clean` measures it.
+- No mxv command named the workspace within the idle age. `up`, `down`,
+  `restart`, `status`, `logs`, `exec`, `ports reset`, `show`, `cd`, `add`,
+  `pin` and `unpin` record the time in the file `.touched` of the
+  workspace's run directory. `clean` and `reclaim` do not.
+
+The idle age is `--idle`, or else the config file's `stop_idle`, or else 2
+hours. A workspace whose processes and containers all stopped is not
+considered.
+
+mxv measures the resident memory of each idle workspace: the resident
+bytes of the processes that phase runs for it, from the process table, and
+of its containers, from `docker stats`. It stops the idle workspaces that
+were active least recently first, one by one, until the bytes of those it
+stopped cover the need, or until none is left. A workspace whose memory
+mxv cannot measure frees nothing and is never stopped. Each stop is the
+stop of `mxv down`, made while mxv holds the workspace's lock. Just before
+it stops a workspace, mxv reads the record again, and keeps the workspace
+when it became pinned or an mxv command named it since mxv measured it.
+
+mxv marks each workspace that it stopped with the processes and containers
+that ran. `mxv status` reports the mark in `reclaimed`, and `mxv up` without
+names starts those processes and containers again and removes the mark.
+`mxv down` removes it too. `--dry-run` reports the choice and stops
+nothing.
+
+`reclaim` prints a row for each workspace: `stopped`, or `would_stop` on a
+dry run, with the bytes in `freed` and why the workspace counts as idle in
+`reason`, or `kept` with the reason it kept the workspace. The note after
+the rows gives the total freed and the need. `--json` prints the rows in
+the document `mxv/reclaim/v1`. A workspace that mxv cannot read or measure
+fails alone, the other workspaces are still considered, and `reclaim`
+exits with 1.
+
+`mxv reclaim --need disk=<SIZE>` deletes the disposable paths of idle
+workspaces as `mxv clean --over-limit --yes` does, the workspace unchanged
+longest first, until the bytes it frees cover the need. It uses `clean`'s
+idle rule and idle age, and keeps each path that only a repository's own
+`mxv.toml` declares disposable. Its rows read `cleaned` or `would_clean`.
+
+`mxv pin -w <workspace>` keeps `reclaim` from stopping a workspace, and
+`mxv unpin -w <workspace>` lets it stop the workspace again. The pin and the
+reclaim mark are the keys `pinned` and `reclaimed` of the workspace's
+record. An older mxv that rewrites the record drops both keys.
 
 ### Cloning `node_modules/`
 

@@ -78,3 +78,15 @@ fn a_list_that_fills_every_buffer_is_an_error_after_the_last_try() {
     }
     assert_eq!(sizes.borrow().len(), MOST_LISTING_TRIES);
 }
+
+#[test]
+fn the_struct_sizes_that_phase_reads_are_those_of_this_macos() {
+    assert_eq!(
+        super::VNODEPATHINFO_BYTES,
+        std::mem::size_of::<libc::proc_vnodepathinfo>()
+    );
+    assert_eq!(
+        super::TASKINFO_BYTES,
+        std::mem::size_of::<libc::proc_taskinfo>()
+    );
+}
