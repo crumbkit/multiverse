@@ -28,7 +28,8 @@ workspace may need to act on.
   `mxv::port::taken`. When it holds a port that the process only receives,
   the new copy cannot bind it, and `mxv up` reports `mxv::process::exited`
   or a readiness failure. A container left running keeps its published
-  ports, and `mxv up` fails with a docker error. Stop what is left by hand.
+  ports, and `mxv up` fails with `mxv::port::taken`. Stop what is left by
+  hand.
 - A container whose data sits in a volume named
   `mxv-<id8>-<WORKSPACE>.<volume>` starts on an empty volume, because
   `mxv up` no longer checks for that name, and `mxv remove --delete-volumes`
@@ -50,11 +51,17 @@ workspace may need to act on.
 - An anonymous volume of a container's image that an earlier `mxv down`
   kept stays in docker, and nothing names its workspace any more, because
   `mxv remove` no longer lists it, refuses for it or deletes it, and it
-  deletes the `.volumes` file that held its name. Run
-  `mxv remove --delete-volumes` with the earlier mxv if you are removing the
-  workspace before you upgrade. Otherwise run `docker volume rm` on each
-  name in `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/.volumes` before
-  `mxv remove` deletes that file. After that,
+  deletes the `.volumes` file that held its name. If you are removing the
+  workspace and its data before you upgrade, run
+  `mxv remove --delete-volumes` with the earlier mxv. Otherwise, before
+  `mxv remove` deletes the file, run `docker volume rm` on each name in
+  `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/.volumes` that does not start with
+  `mxv-`. That file also lists the workspace's named volumes, and a name
+  that starts with `mxv-` is one of them, so deleting it destroys the data
+  that the previous item keeps. This command prints only the anonymous
+  volumes' names:
+  `jq -r '.volumes[] | select(startswith("mxv-") | not)' <FILE>`. After
+  `mxv remove` has deleted the file,
   `docker volume ls --filter label=com.docker.volume.anonymous --filter dangling=true`
   lists every anonymous volume that no container uses, across all of
   docker, so check each one before you delete it.

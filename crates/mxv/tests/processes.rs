@@ -986,7 +986,7 @@ fn a_workspace_with_an_older_mxvs_run_files_starts_under_phase_and_remove_delete
     );
     write(
         &runs.join(".volumes"),
-        r#"{"version":1,"volumes":["0123456789abcdef"]}"#,
+        r#"{"version":1,"volumes":["mxv-0b9f3c8e-triage.data","0123456789abcdef"]}"#,
     );
 
     let (exit, document) = setup.json(&["up", "-w", "triage"]);

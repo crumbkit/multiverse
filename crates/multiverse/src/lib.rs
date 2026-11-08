@@ -43,7 +43,6 @@ mod template;
 mod workspaces;
 
 pub use crate::backend::{Backend, Changes, Head, INITIALIZING, Listed, Repository};
-pub use crate::clock::FOLLOW_INTERVAL;
 pub use crate::clone::{Cloned, UNSUPPORTED};
 pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};
 pub use crate::disposable::{
