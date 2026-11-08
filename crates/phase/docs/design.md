@@ -1,15 +1,20 @@
 # phase design
 
-Status: draft, 4 November 2026. Nothing here is built yet. The table at
-the end lists each decision, and says which are decided and what this
-draft assumes for the rest.
+Status: phase is built in part. This document is the record of its design.
+It was drafted on 4 November 2026, and the table at the end still lists each
+decision, and says which are decided and what the draft assumes for the
+rest. phase runs an app from a checkout that has no build step or from an
+image. `up` refuses an app from a release, and a checkout with a build step,
+with `PhaseError::NotRunnable`. `logs` with `since` and the trust grants are
+not built.
 
 ## What phase does
 
 phase runs the apps of one workspace on the local machine. For each app it:
 
 1. gets the app's program, either by downloading and verifying a published
-   release or by building the checkout you are editing;
+   release or by building the checkout you are editing (not built: `up`
+   refuses a release and a checkout with a build step);
 2. resolves the environment variables the app's manifest declares, including
    secrets, and gives them to that app's process alone;
 3. starts the process under the operating system's sandbox, with access only
@@ -210,27 +215,35 @@ the same access, and phase provisions nothing.
 
 ### Lifecycle and data
 
-- `mxv phase up api` starts the services api needs before it starts api.
-- `mxv phase down api` leaves a service running while another running app
-  needs it. `mxv phase down` with no app stops every app and then the
-  services.
+- `mxv up` starts the services an app needs before it starts the app.
+- `mxv down` with process names stops the apps that they name, and
+  `mxv down` with no names stops every app and then the services. `down`
+  does not look at which running apps need a service, so it stops a service
+  that a running app needs. The designed behaviour, which is not built, is
+  that `down` leaves a service running while another running app needs it.
 - A service's data lives in a Docker volume labelled with the workspace and
-  service. It survives `down` and restarts. `mxv phase reset SERVICE`
-  removes it after asking, and removing the workspace removes it too.
+  service. It survives `down` and restarts. The designed verb
+  `reset SERVICE`, which does not exist yet, would remove it after asking,
+  and removing the workspace removes it too.
 - Schema migrations are each app's job. An app runs them as a process that
   must finish before its server starts.
 
 ## Starting a workspace
 
 1. multiverse builds the plan and calls `Phase::up` with it.
-2. For each app, phase settles its source. For a release, it downloads the
-   asset for the pinned version, verifies it, and stores the program in a
-   content-addressed cache. For a checkout, it runs the build command in the
+2. For each app, phase settles its source. This step is not built: `up`
+   refuses an app from a release (`NotRunnable::Release`) and a checkout
+   with a build step (`NotRunnable::CheckoutBuild`), and runs a checkout
+   without a build step or an image. The design is that phase downloads
+   the asset for a pinned release, verifies it, and stores the program in
+   a content-addressed cache, and that it runs the build command in a
    checkout. If a release is pinned but has no asset for this machine,
    phase stops with an error that names the app and the missing asset.
-3. phase checks each app's permissions against what you have granted (see
-   [Trust](#trust)). Apps whose permissions grew wait for your answer; the
-   rest continue.
+3. The design is that phase checks each app's permissions against what you
+   have granted (see [Trust](#trust)), and that apps whose permissions grew
+   wait for your answer while the rest continue. This check is not built.
+   `up` compares no permissions, and an app whose manifest widens its
+   permissions starts with the wider permissions.
 4. phase starts the apps in dependency order. For each process it resolves
    the app's environment, generates the sandbox profile, starts a keeper,
    and waits for the readiness probe.
@@ -1487,11 +1500,12 @@ that phase has not launched it shows how phase would launch it now.
 The keeper applies the sandbox in the child before the app runs, so each
 restart is sandboxed too. Its specification names the sandbox: the paths
 and ports below, and never an environment value. The keeper starts the
-program that links phase as the launcher, `mxv phase keep --sandboxed
-<sandbox> -- <command>`. The launcher checks the sandbox again, applies it
-to itself and replaces itself with the app, which keeps the launcher's pid,
-environment and log. A launcher that cannot check or apply the sandbox, or
-start the program, writes why to the app's log and exits with status 78.
+program that links phase as the launcher, the hidden internal entry point
+`mxv phase keep --sandboxed <sandbox> -- <command>`. The launcher checks
+the sandbox again, applies it to itself and replaces itself with the app,
+which keeps the launcher's pid, environment and log. A launcher that cannot
+check or apply the sandbox, or start the program, writes why to the app's
+log and exits with status 78.
 
 The sandbox allows (decision P18):
 
@@ -1798,6 +1812,10 @@ the denials show: as "Operation not permitted" in its log, and on macOS in
 
 ## Trust
 
+The trust check is not built. `up` compares no granted permissions, an app
+whose manifest widens its permissions starts with the wider permissions,
+and phase checks no publisher. This section is the design.
+
 phase asks you two questions, and only when the answer could change what
 runs.
 
@@ -1827,22 +1845,31 @@ that prompts are rare enough to be read.
 
 ## Commands
 
-```sh
-mxv phase up [APP[/PROCESS]]...      # start the selection and what it depends on
-mxv phase down [APP]...              # stop in reverse dependency order
-mxv phase restart APP[/PROCESS]...   # resolve the environment again, then restart
-mxv phase status [--json]
-mxv phase logs APP/PROCESS [--follow] [--since 5m] [--json]
-mxv phase sweep [--dry-run]          # stop what a crashed run left behind
-mxv phase reset SERVICE              # remove a shared service's data, after asking
-mxv phase plan check FILE            # validate a plan without running it
-mxv phase grants [APP]               # show and revoke granted permissions
-mxv phase grants approve APP         # grant an app's pending permission growth
-mxv phase exec APP -- COMMAND...     # run a command with the app's environment and sandbox
-```
+phase has no command of its own, and no person runs `mxv phase ...`. `mxv`
+links the library and calls it for each process verb:
 
-Every command takes `--workspace DIR` and defaults to the workspace that
-contains the current directory.
+| `mxv` command | Library operation |
+| --- | --- |
+| `mxv up [-w WORKSPACE] [PROCESS]...` | `Phase::up` |
+| `mxv down [-w WORKSPACE] [PROCESS]...` | `Phase::down` |
+| `mxv restart [-w WORKSPACE] [PROCESS]...` | `Phase::restart` |
+| `mxv status [-w WORKSPACE]` | `Phase::status` |
+| `mxv logs [-w WORKSPACE] [-f] [--lines N] PROCESS` | `Phase::logs` |
+| `mxv exec [-w WORKSPACE] PROCESS -- COMMAND...` | `Phase::exec` and `Phase::exec_sandboxed` |
+| `mxv remove` | `Phase::sweep`, through `Runs::forget` |
+
+`mxv` commands take process names. `Phase::logs` with `since` returns
+`PhaseError::NotBuilt`, and `mxv logs` has no `--since`.
+
+These designed verbs do not exist yet: `reset SERVICE`, which removes a
+shared service's data after asking, `plan check FILE`, which validates a
+plan without running it, `grants [APP]`, which shows and revokes granted
+permissions, and `grants approve APP`, which grants an app's pending
+permission growth.
+
+`mxv` has two hidden entry points that only phase starts: `mxv phase keep`,
+which is the keeper and, with `--sandboxed`, the launcher, and
+`mxv phase provision`, which creates a plan's provisioned resources.
 
 ## Library
 
@@ -2144,19 +2171,23 @@ still refused with `NotRunnable::Oneshot`.
 
 ### Unattended runs
 
-- When an app's permissions grew and nobody is at a terminal, `up` refuses
-  that app with a stable error code and the permission difference.
-  `mxv phase grants approve APP` grants it.
-- `up --env KEY=VALUE` sets a value that is not a secret for one run. It
-  needs no grant, and the plan records the name only.
+- The design is that `up` refuses an app whose permissions grew, when
+  nobody is at a terminal, with a stable error code and the permission
+  difference, and that `grants approve APP` grants them. None of this is
+  built: `up` does not compare permissions, and the verb does not exist.
+- The design is that `up --env KEY=VALUE` sets a value that is not a secret
+  for one run, needs no grant, and is recorded in the plan by name only.
+  This is not built: `mxv up` takes only `-w` and process names, and
+  `Phase::up` has no such option.
 
 ## Releases
 
 The first release replaces mxv's process commands (decision P7), so it must
 run everything they run today. It contains:
 
-- the library crate and `mxv phase up`, `down`, `restart`, `status`, `logs`
-  and `sweep`;
+- the library crate and the operations `up`, `down`, `restart`, `status`,
+  `logs` and `sweep`, which `mxv up`, `down`, `restart`, `status`, `logs`
+  and `remove` call;
 - host processes from a checkout, each with a keeper, probes, restart
   policies and stop handling;
 - container apps through Docker Compose, lifted from multiverse's container

@@ -9,8 +9,8 @@ The repository holds three crates:
 
 - [`multiverse`](crates/multiverse), the library.
 - [`mxv`](crates/mxv), the command built on the library.
-- [`phase`](crates/phase), published as `mxv-phase`, the library that will
-  run a workspace's apps for `mxv`.
+- [`phase`](crates/phase), published as `mxv-phase`, the library that runs a
+  workspace's apps for `mxv`.
 
 ## Quick start
 

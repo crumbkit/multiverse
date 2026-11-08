@@ -699,8 +699,16 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   the port.
 - `mxv show` lists the host port that the workspace holds for each port.
 
-mxv keeps the run files of each workspace's processes in
-`$XDG_STATE_HOME/mxv/runs/<name>/`: `<process>.json` with the process id
+A workspace that the current mxv starts has its records in phase's run
+record, `$XDG_STATE_HOME/mxv/phase/runs/<workspace id>.json`, and its logs in
+`$XDG_STATE_HOME/mxv/phase/logs/<workspace id>/<app>.<process>.log`. mxv
+runs each manifest process as a phase app with one process named `main`, so
+the log of a manifest process is `<process>.main.log` in that directory. A
+container has no such file, and `mxv logs` reads its log from Docker. The
+next two paragraphs describe how mxv handles a workspace that an older
+version started. That version kept the run files of each workspace's
+processes in `$XDG_STATE_HOME/mxv/runs/<name>/`, and mxv still reads them to
+report and stop what that version started: `<process>.json` with the process id
 and its start time, `<process>.log`, `<process>.log.1`, and
 `<process>.exit`, which holds the exit code once the process ends. Each
 process runs under `/bin/sh`, which waits for it and writes that code, so a
@@ -712,24 +720,27 @@ the shell gone. A shell that something such as SIGKILL ended writes no
 file, and `status` then reports the process as exited with a null code and
 signal and a `reason` that says the shell ended without writing its code.
 
-Each `up` of a process moves its previous log to `<process>.log.1`, which
-replaces the log before it, so a process keeps at most two logs. No mxv
-process runs between commands, so mxv checks the size of the logs only
-when a command runs: `up`, `down`, `status` and `logs` copy a log that
-holds more than 32 MiB to `<process>.log.1` and empty it. The process keeps
-writing to the emptied log, and lines that it writes between the copy and
-the emptying are lost. Between two of those commands a log has no bound,
-so a process that writes a lot while nobody runs mxv can fill the disk.
+For a workspace that an older mxv started, that version moved the previous
+log of a process to `<process>.log.1` at each `up`, which replaced the log
+before it, so a process kept at most two logs. No mxv process runs between
+commands, so mxv checks the size of those logs only when a command runs:
+`down`, `status` and `logs` copy a log that holds more than 32 MiB to
+`<process>.log.1` and empty it. The process keeps writing to the emptied
+log, and lines that it writes between the copy and the emptying are lost.
+Between two of those commands a log has no bound, so a process that writes
+a lot while nobody runs mxv can fill the disk.
 
 `mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
 while processes run, hold an exclusive lock on
 `$XDG_STATE_HOME/mxv/runs/<name>/.lock` while they start or stop the
 workspace's processes. Each reads the workspace's record again once it
-holds the lock, so it uses the ports that a command before it stored. Allocating ports holds a second lock,
-`$XDG_STATE_HOME/mxv/runs/.ports.lock`, so two workspaces never take the
-same port. A command that finds a lock held tries again for 5 seconds,
-then fails with `mxv::workspace::busy`. The operating system releases a
-lock when its command ends, so a crashed mxv leaves no lock behind.
+holds the lock, so it uses the ports that a command before it stored.
+Allocating ports holds a second lock, `$XDG_STATE_HOME/mxv/runs/.ports.lock`,
+so two workspaces never take the same port. A command that finds a lock
+held tries again for 5 seconds, then fails with `mxv::workspace::busy`. The
+operating system releases a lock when its command ends, so a crashed mxv
+leaves no lock behind. These locks apply to every workspace, whichever mxv
+started it.
 
 ### Local AWS services
 

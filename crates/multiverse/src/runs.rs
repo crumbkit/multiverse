@@ -1,7 +1,11 @@
 //! The processes of a workspace's app: starting them from the manifest,
 //! stopping them, reporting their state, and reading their logs.
 //!
-//! No long-running mxv watches the processes. Each process leaves files in
+//! [`Runs`] runs a workspace's apps through phase. The files described below
+//! are what an older mxv left, which mxv still reads to report and stop what
+//! that version started.
+//!
+//! No long-running mxv watches those processes. Each process leaves files in
 //! `<runs>/<workspace>/`: `<process>.json`, the run record with the process
 //! id and its start time; `<process>.log`, its standard output and standard
 //! error; `<process>.log.1`, the log of its previous start or the part of
@@ -14,15 +18,15 @@
 //! `mxv down` deletes the run record and the exit file and keeps both
 //! logs; `mxv remove` deletes the whole directory.
 //!
-//! A container of the manifest has the record `<container>.container`,
-//! which holds the id of the container that `up` started; docker holds its
-//! state. phase's container engine keeps that record, describes the
-//! compose project and checks the labels before it acts on a recorded id. Its
-//! log is `<container>.log` too, which a detached `docker logs --follow`
-//! appends to while the container runs, so the log outlives the container
-//! that `mxv down` removes. `<container>.follower` records the follower's
-//! process id, so `up` and `status` start a new follower when the old one
-//! has ended and the container runs, such as after a restart outside mxv.
+//! A container that an older mxv started has the record
+//! `<container>.container`, which that version wrote and which holds the id
+//! of the container it started; docker holds its state. Its log is
+//! `<container>.log` too, which a detached `docker logs --follow` appended
+//! to while the container ran, so the log outlived the container that
+//! `mxv down` removed. `<container>.follower` records the follower's process
+//! id, so `Lifecycle::status` and `Lifecycle::writing`, which `status` and
+//! `logs --follow` reach, start a new follower when the old one has ended
+//! and the container runs, such as after a restart outside mxv.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

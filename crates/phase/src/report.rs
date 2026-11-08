@@ -326,8 +326,7 @@ pub enum AppOutcome {
     /// start, or because another app failed to start.
     NotStarted,
     /// phase did not start the app because its permissions grew beyond what
-    /// was granted. `mxv phase grants approve APP` grants them, and the next
-    /// `up` starts it.
+    /// was granted. Trust grants are not built, so no `up` returns this yet.
     #[non_exhaustive]
     AwaitingGrant {
         /// The permissions the app asks for beyond its grant.
