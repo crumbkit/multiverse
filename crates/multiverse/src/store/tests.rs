@@ -404,3 +404,42 @@ fn a_record_of_version_five_is_refused_as_newer() {
         Err(Error::NewerRecord { version: 5, .. })
     ));
 }
+
+#[test]
+fn a_pin_and_a_reclaim_mark_read_back_and_an_older_record_has_neither() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut written = workspace("app");
+    store.create(&mut written).unwrap();
+    let plain = fs::read_to_string(store.path(&written.name)).unwrap();
+    assert!(!plain.contains("pinned"), "{plain}");
+    assert!(!plain.contains("reclaimed"), "{plain}");
+    let read = store.read(&written.name).unwrap().unwrap();
+    assert!(!read.pinned);
+    assert_eq!(read.reclaimed, None);
+    written.pinned = true;
+    written.reclaimed = Some(crate::record::Reclaimed {
+        processes: vec!["server".to_owned(), "worker".to_owned()],
+    });
+    store.update(&mut written).unwrap();
+    let read = store.read(&written.name).unwrap().unwrap();
+    assert!(read.pinned);
+    assert_eq!(
+        read.reclaimed.map(|reclaimed| reclaimed.processes),
+        Some(vec!["server".to_owned(), "worker".to_owned()])
+    );
+}
+
+#[test]
+fn a_start_of_named_processes_leaves_the_rest_of_a_reclaim_mark() {
+    let mark = crate::record::Reclaimed::new(vec!["server".to_owned(), "worker".to_owned()]);
+    assert_eq!(
+        mark.without(&["server".to_owned()]),
+        Some(crate::record::Reclaimed::new(vec!["worker".to_owned()]))
+    );
+    assert_eq!(
+        mark.without(&["server".to_owned(), "worker".to_owned()]),
+        None
+    );
+    assert_eq!(mark.without(&[]), None);
+}

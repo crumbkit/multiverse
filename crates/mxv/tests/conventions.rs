@@ -126,6 +126,11 @@ const ALLOW: &[Allow] = &[
     Allow::new(Rule::Yes, "restart", NO_QUESTION),
     Allow::new(
         Rule::Yes,
+        "reclaim",
+        "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
+    ),
+    Allow::new(
+        Rule::Yes,
         "ports reset",
         "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
     ),

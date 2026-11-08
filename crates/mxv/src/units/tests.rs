@@ -69,3 +69,11 @@ fn a_size_is_its_number_of_bytes_in_json() {
 fn a_size_just_under_a_unit_rounds_up_into_that_unit() {
     assert_eq!(Size(1024 * 1024 - 1).to_string(), "1.0 MiB");
 }
+
+#[test]
+fn the_short_units_k_m_g_and_t_count_in_powers_of_1024() {
+    assert_eq!(parse_size("1K"), Ok(1024));
+    assert_eq!(parse_size("3M"), Ok(3 << 20));
+    assert_eq!(parse_size("2G"), Ok(2 << 30));
+    assert_eq!(parse_size("1T"), Ok(1 << 40));
+}

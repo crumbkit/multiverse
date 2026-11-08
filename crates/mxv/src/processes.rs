@@ -13,9 +13,10 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    DownOutcome, Git, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable,
-    UpOutcome, Volumes, Workspace, WorkspaceName,
+    DownOutcome, Error, Git, Lock, Manifest, ManifestError, ProcessStatus, Reclaimed, Runs, Store,
+    Unstoppable, UpOutcome, Volumes, Workspace, WorkspaceName,
 };
+use std::time::Duration;
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
@@ -87,6 +88,23 @@ pub(crate) struct Context {
 }
 
 impl Context {
+    /// Narrows the mark that `mxv reclaim` left on the workspace once
+    /// `up`, `restart` or `down` has started or stopped the processes
+    /// `names`, or every process when `names` is empty, while the command
+    /// holds the workspace's lock. The mark keeps the processes that are
+    /// still to start.
+    fn forget_reclaim(&mut self, names: &[String]) -> Result<(), MxvFailure> {
+        let Some(mark) = &self.workspace.reclaimed else {
+            return Ok(());
+        };
+        let left = mark.without(names);
+        if left.as_ref() != Some(mark) {
+            self.workspace.reclaimed = left;
+            self.store.update(&mut self.workspace)?;
+        }
+        Ok(())
+    }
+
     /// Takes the workspace's lock, which `up`, `down` and `restart` hold
     /// while they start or stop its processes, then reads the workspace's
     /// record again, so the ports are the ones that a command which held
@@ -121,12 +139,35 @@ pub(crate) fn context(
         }
         None => current(&store, environment)?.ok_or(RunFailure::NotCurrent)?,
     };
+    touch(&runs, &workspace.name);
     Ok(Context {
         store,
         runs,
         workspace,
         processes: processes.to_vec(),
     })
+}
+
+/// How often `mxv exec` and `mxv logs --follow` touch the workspace again
+/// while they run, well inside the shortest idle age that `mxv reclaim`
+/// accepts.
+pub(crate) const TOUCH_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Records that an mxv command named the workspace `name` now, which
+/// `mxv reclaim` reads as activity. A touch that cannot be written changes
+/// nothing the command does, so its failure is ignored, and the workspace
+/// then reads as last named earlier.
+fn touch(runs: &Runs, name: &WorkspaceName) {
+    let _ = runs.touch(name);
+}
+
+/// Records that an mxv command named the workspace `name` now, as
+/// [`touch`] does, for the verbs that read a workspace without a process
+/// context, such as `show` and `cd`.
+pub(crate) fn touch_named(environment: &Environment, name: &WorkspaceName) {
+    if let Ok(runs) = environment.runs() {
+        touch(&runs, name);
+    }
 }
 
 /// Returns the workspace whose directory holds the current directory, or
@@ -236,12 +277,31 @@ pub(crate) fn up(
 ) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
-    start(&mut context, &lock)
+    if context.processes.is_empty()
+        && let Some(reclaimed) = &context.workspace.reclaimed
+        && let Ok(Some(manifest)) = context.workspace.manifest()
+    {
+        // `mxv reclaim` recorded what ran, so `up` starts the same
+        // processes again. A name that the manifest no longer declares is
+        // left out.
+        context.processes = reclaimed
+            .processes
+            .iter()
+            .filter(|name| manifest.unit(name).is_some())
+            .cloned()
+            .collect();
+    }
+    start(&mut context, &lock, &args.processes)
 }
 
 /// Starts the context's processes, and returns their rows or the failure
-/// of the first one that does not start.
-fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+/// of the first one that does not start. `named` is what the command line
+/// named, which narrows the reclaim mark once they start.
+fn start(
+    context: &mut Context,
+    lock: &Lock,
+    named: &[String],
+) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let manifest = required_manifest(&context.workspace)?;
     crate::warn(&start_warnings(&context.workspace, &manifest));
     let workspace = context.workspace.name.to_string();
@@ -256,7 +316,10 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
         )
         .map_err(MxvFailure::from)?;
     match outcome {
-        UpOutcome::Up(statuses) => Ok(statuses.iter().map(ProcessRow::from).collect()),
+        UpOutcome::Up(statuses) => {
+            context.forget_reclaim(named)?;
+            Ok(statuses.iter().map(ProcessRow::from).collect())
+        }
         UpOutcome::Left {
             unstoppable,
             not_started,
@@ -422,6 +485,7 @@ pub(crate) fn down(
     let lock = context.lock()?;
     let manifest = lenient_manifest(&context.workspace);
     let results = stop(&context, &lock, manifest.as_ref())?;
+    context.forget_reclaim(&args.processes)?;
     let keys: Vec<&str> = results
         .iter()
         .map(|result| match result {
@@ -475,7 +539,7 @@ pub(crate) fn restart(
         .into());
     }
     stop_every(&context, &lock, Some(&manifest))?;
-    start(&mut context, &lock)
+    start(&mut context, &lock, &args.processes)
 }
 
 /// Returns each process of the workspace that `args` names and its state.
@@ -515,6 +579,13 @@ pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -
         Ok(context) => context,
         Err(error) => return streaming.end(Err(error)),
     };
+    // A person who follows a log is using the workspace, so mxv touches it
+    // while it follows.
+    let _toucher = args.follow.then(|| {
+        context
+            .runs
+            .keep_touched(&context.workspace.name, TOUCH_EVERY)
+    });
     // A workspace that an earlier mxv started reads its logs from its run
     // files, so a manifest that this mxv refuses, and that the earlier one
     // accepted, does not keep them from being read, as for `down` and
@@ -680,4 +751,68 @@ pub(crate) fn delete_volumes(
     volumes: Volumes,
 ) -> Result<(), MxvFailure> {
     Ok(environment.runs()?.delete_volumes(volumes)?)
+}
+
+/// Stops every process and container of `workspace` through the stop of
+/// `mxv down`, for `mxv reclaim`, and marks the workspace with what ran.
+/// It holds the workspace's lock, reads the record again and the names of
+/// what still runs, and passes both to `check`, which returns why the
+/// workspace is no longer idle, or `None`. When `check` gives a reason,
+/// or another mxv command holds the lock, it stops nothing and returns the
+/// reason.
+pub(crate) fn reclaim_stop(
+    environment: &Environment,
+    workspace: &Workspace,
+    check: impl FnOnce(&Workspace, &[String]) -> Result<Option<String>, crumbkit::Error>,
+) -> Result<Result<(), String>, crumbkit::Error> {
+    let mut context = Context {
+        store: Store::new(environment.records()?),
+        runs: environment.runs()?,
+        workspace: workspace.clone(),
+        processes: Vec::new(),
+    };
+    let lock = match context.lock() {
+        Ok(lock) => lock,
+        Err(MxvFailure::Library(Error::Busy { .. })) => {
+            return Ok(Err(
+                "another mxv command holds the workspace's lock".to_owned()
+            ));
+        }
+        Err(failure) => return Err(failure.into()),
+    };
+    let running = context
+        .runs
+        .running(&context.workspace)
+        .map_err(MxvFailure::from)?;
+    if let Some(reason) = check(&context.workspace, &running)? {
+        return Ok(Err(reason));
+    }
+    let manifest = lenient_manifest(&context.workspace);
+    stop_every(&context, &lock, manifest.as_ref())?;
+    context.workspace.reclaimed = Some(Reclaimed::new(running));
+    context
+        .store
+        .update(&mut context.workspace)
+        .map_err(MxvFailure::from)?;
+    Ok(Ok(()))
+}
+
+/// Pins or unpins, as `pinned` says, the workspace that `workspace` names,
+/// or else the one that holds the current directory, while it holds the
+/// workspace's lock, and returns its record.
+pub(crate) fn set_pinned(
+    environment: &Environment,
+    workspace: Option<&String>,
+    pinned: bool,
+) -> Result<Workspace, crumbkit::Error> {
+    let mut context = context(environment, workspace, &[])?;
+    let _lock = context.lock()?;
+    if context.workspace.pinned != pinned {
+        context.workspace.pinned = pinned;
+        context
+            .store
+            .update(&mut context.workspace)
+            .map_err(MxvFailure::from)?;
+    }
+    Ok(context.workspace)
 }

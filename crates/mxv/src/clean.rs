@@ -57,25 +57,25 @@ pub(crate) enum CleanState {
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct CleanRow {
     /// The workspace's name.
-    name: String,
+    pub(crate) name: String,
     /// `cleaned` when the run deleted the workspace's disposable
     /// directories, `would_clean` on a dry run, or `kept`.
-    state: CleanState,
+    pub(crate) state: CleanState,
     /// The bytes that the run freed, measured before and after each
     /// deletion, or the bytes that the disposable directories take on a dry
     /// run, which is 0 for a workspace that the run kept. A file with a
     /// hard link outside the deleted directory frees nothing.
-    freed: Size,
+    pub(crate) freed: Size,
     /// The bytes that the workspace's disposable directories took on disk
     /// before the run.
     disposable: Size,
     /// When a file or directory of the workspace's checkouts outside the
     /// disposable directories, or a commit or staged change, last changed,
     /// or null when none exists.
-    modified: Option<Age>,
+    pub(crate) modified: Option<Age>,
     /// Why the run kept the workspace's disposable directories, or some of
     /// them, or null.
-    reason: Option<String>,
+    pub(crate) reason: Option<String>,
     /// Why a checkout's disposable set holds fewer globs than its
     /// `mxv.toml` declares, such as an invalid manifest, or null.
     warnings: Option<String>,
@@ -358,11 +358,11 @@ pub(crate) fn within_limit_reason(total: u64, limit: u64) -> String {
 /// read it.
 type Selected = (String, Result<Workspace, MxvFailure>);
 
-/// Returns the key of each workspace that `args` selects, with the
+/// Returns the key of each workspace that `names` selects, with the
 /// workspace or the failure to find or read it: the named ones, in the
 /// order given, or every workspace and every record that mxv cannot read.
-fn selected(workspaces: &Workspaces<Git>, args: &CleanArgs) -> Result<Vec<Selected>, MxvFailure> {
-    if args.names.is_empty() {
+fn selected(workspaces: &Workspaces<Git>, names: &[String]) -> Result<Vec<Selected>, MxvFailure> {
+    if names.is_empty() {
         let records = workspaces.list()?;
         let mut found: Vec<Selected> = records
             .workspaces
@@ -375,8 +375,7 @@ fn selected(workspaces: &Workspaces<Git>, args: &CleanArgs) -> Result<Vec<Select
         }));
         return Ok(found);
     }
-    Ok(args
-        .names
+    Ok(names
         .iter()
         .map(|text| {
             let found = parse_name(text).and_then(|name| {
@@ -503,6 +502,50 @@ fn clean_one(
     (Ok(row), freed)
 }
 
+/// How much of the disposable directories a run of [`run`] deletes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Limit {
+    /// Every idle workspace's.
+    Every,
+    /// Those of idle workspaces, oldest first, until the disposable
+    /// directories of every workspace take no more than these bytes, as
+    /// `--over-limit` cleans down to the config file's `max_disposable`.
+    Total(u64),
+    /// Those of idle workspaces, oldest first, until they free these bytes,
+    /// as `mxv reclaim --need disk=<SIZE>` asks.
+    Free(u64),
+}
+
+/// What a run of [`run`] cleans, and how it asks.
+pub(crate) struct Run<'a> {
+    /// The names of the workspaces to clean, or none for every workspace.
+    pub(crate) names: &'a [String],
+    /// How much it deletes.
+    pub(crate) limit: Limit,
+    /// The idle age, or `None` for the config file's `clean_idle`, or else
+    /// [`DEFAULT_IDLE`].
+    pub(crate) idle: Option<Duration>,
+    /// Whether it keeps each path that only a repository's own `mxv.toml`
+    /// declares disposable, because no person confirms it.
+    pub(crate) hold: bool,
+    /// The `--yes` that answers the question before it deletes, or `None`
+    /// when it asks no question.
+    pub(crate) ask: Option<crumbkit::Yes>,
+}
+
+/// What a run of [`run`] did with each workspace it considered.
+pub(crate) struct Cleaned {
+    /// The key of each workspace, in the order that the run considered
+    /// them.
+    pub(crate) keys: Vec<String>,
+    /// The row or the failure of each workspace, in the same order.
+    pub(crate) results: Vec<Result<CleanRow, MxvFailure>>,
+    /// The bytes that the run freed, or would free on a dry run.
+    pub(crate) freed: u64,
+    /// What the run prints after its rows.
+    summary: CleanSummary,
+}
+
 /// Deletes the disposable directories of the idle workspaces that `args`
 /// selects, after the person confirms, or reports what it would delete on
 /// a dry run. A workspace that mxv cannot find, read or clean becomes a
@@ -512,26 +555,54 @@ pub(crate) fn clean(
     environment: &Environment,
     args: &CleanArgs,
 ) -> Result<Batch<CleanRow, MxvFailure>, crumbkit::Error> {
-    let config = environment.config()?;
     let limit = if args.over_limit {
-        Some(config.max_disposable.ok_or(MxvFailure::NoLimit {
+        let config = environment.config()?;
+        Limit::Total(config.max_disposable.ok_or(MxvFailure::NoLimit {
             path: environment.config_file()?,
         })?)
     } else {
-        None
+        Limit::Every
     };
-    let idle = args.idle.or(config.clean_idle).unwrap_or(DEFAULT_IDLE);
+    let cleaned = run(
+        output,
+        environment,
+        &Run {
+            names: &args.names,
+            limit,
+            idle: args.idle,
+            // `Yes` hides its flag, and only its default holds no `--yes`.
+            hold: args.yes != crumbkit::Yes::default() && !args.force,
+            ask: Some(args.yes),
+        },
+    )?;
+    let mut batch = Batch::new(&["clean"], "names", &cleaned.keys);
+    for result in cleaned.results {
+        batch.push(result);
+    }
+    Ok(batch.note(cleaned.summary.to_string()))
+}
+
+/// Deletes the disposable directories of the idle workspaces that `plan`
+/// selects, or reports what it would delete on a dry run, and returns what
+/// it did with each workspace it considered.
+pub(crate) fn run(
+    output: &mut Output,
+    environment: &Environment,
+    plan: &Run<'_>,
+) -> Result<Cleaned, crumbkit::Error> {
+    let config = environment.config()?;
+    let idle = plan.idle.or(config.clean_idle).unwrap_or(DEFAULT_IDLE);
     let workspaces = configured(environment)?;
     let now = SystemTime::now();
     let mut keys = Vec::new();
     let mut entries = Vec::new();
-    // `Yes` hides its flag, and only its default holds no `--yes`.
-    let hold = args.yes != crumbkit::Yes::default() && !args.force;
-    for (key, found) in selected(&workspaces, args)? {
+    for (key, found) in selected(&workspaces, plan.names)? {
         keys.push(key);
         let mut entry =
             found.and_then(|workspace| measure(environment, &workspaces, workspace, now, idle));
-        if hold && let Ok(candidate) = &mut entry {
+        if plan.hold
+            && let Ok(candidate) = &mut entry
+        {
             candidate.hold_manifest_paths();
         }
         entries.push(entry);
@@ -539,36 +610,17 @@ pub(crate) fn clean(
     let total = entries.iter().flatten().fold(0_u64, |sum, candidate| {
         sum.saturating_add(candidate.disposable)
     });
-    let picked: Vec<usize> = match limit {
-        Some(limit) => {
-            let measured: Vec<usize> = (0..entries.len())
-                .filter(|index| matches!(entries.get(*index), Some(Ok(_))))
-                .collect();
-            let shapes: Vec<_> = measured
-                .iter()
-                .filter_map(|index| match entries.get(*index) {
-                    Some(Ok(candidate)) => Some((
-                        candidate.modified,
-                        candidate.disposable,
-                        candidate.busy.is_none(),
-                    )),
-                    _ => None,
-                })
-                .collect();
-            over_limit(&shapes, total, limit)
-                .into_iter()
-                .filter_map(|at| measured.get(at).copied())
-                .collect()
-        }
-        None => (0..entries.len())
-            .filter(|index| match entries.get(*index) {
-                Some(Ok(candidate)) => candidate.busy.is_none() && !candidate.paths.is_empty(),
-                _ => false,
-            })
-            .collect(),
+    let limit = match plan.limit {
+        Limit::Every => None,
+        Limit::Total(limit) => Some(limit),
+        Limit::Free(need) => Some(total.saturating_sub(need)),
     };
+    let picked = picked(&entries, total, limit);
     let planned = output.is_dry_run();
-    if !planned && !picked.is_empty() {
+    if !planned
+        && !picked.is_empty()
+        && let Some(yes) = plan.ask
+    {
         let chosen: Vec<&Candidate> = picked
             .iter()
             .filter_map(|index| match entries.get(*index) {
@@ -576,15 +628,15 @@ pub(crate) fn clean(
                 _ => None,
             })
             .collect();
-        output.confirm(args.yes, &question(&chosen))?;
+        output.confirm(yes, &question(&chosen))?;
     }
-    let mut batch = Batch::new(&["clean"], "names", &keys);
+    let mut results = Vec::new();
     let mut freed: u64 = 0;
     for (index, entry) in entries.into_iter().enumerate() {
         let candidate = match entry {
             Ok(candidate) => candidate,
             Err(failure) => {
-                batch.push(Err(failure));
+                results.push(Err(failure));
                 continue;
             }
         };
@@ -597,17 +649,17 @@ pub(crate) fn clean(
                     within_limit_reason(total, limit.unwrap_or(u64::MAX))
                 }
             });
-            batch.push(Ok(candidate.row(CleanState::Kept, Some(reason), now)));
+            results.push(Ok(candidate.row(CleanState::Kept, Some(reason), now)));
             continue;
         }
         if planned {
             freed = freed.saturating_add(candidate.disposable);
-            batch.push(Ok(candidate.row(CleanState::WouldClean, None, now)));
+            results.push(Ok(candidate.row(CleanState::WouldClean, None, now)));
             continue;
         }
         let (result, bytes) = clean_one(environment, &workspaces, &candidate, idle, now);
         freed = freed.saturating_add(bytes);
-        batch.push(result);
+        results.push(result);
     }
     let summary = CleanSummary {
         freed: Size(freed),
@@ -615,5 +667,42 @@ pub(crate) fn clean(
         limit: limit.map(Size),
         planned,
     };
-    Ok(batch.note(summary.to_string()))
+    Ok(Cleaned {
+        keys,
+        results,
+        freed,
+        summary,
+    })
+}
+
+/// Returns the indexes of the measured `entries` that a run deletes from:
+/// with a `limit`, the idle ones that [`over_limit`] picks, and without
+/// one, every idle one with a disposable directory.
+fn picked(entries: &[Result<Candidate, MxvFailure>], total: u64, limit: Option<u64>) -> Vec<usize> {
+    let Some(limit) = limit else {
+        return (0..entries.len())
+            .filter(|index| match entries.get(*index) {
+                Some(Ok(candidate)) => candidate.busy.is_none() && !candidate.paths.is_empty(),
+                _ => false,
+            })
+            .collect();
+    };
+    let measured: Vec<usize> = (0..entries.len())
+        .filter(|index| matches!(entries.get(*index), Some(Ok(_))))
+        .collect();
+    let shapes: Vec<_> = measured
+        .iter()
+        .filter_map(|index| match entries.get(*index) {
+            Some(Ok(candidate)) => Some((
+                candidate.modified,
+                candidate.disposable,
+                candidate.busy.is_none(),
+            )),
+            _ => None,
+        })
+        .collect();
+    over_limit(&shapes, total, limit)
+        .into_iter()
+        .filter_map(|at| measured.get(at).copied())
+        .collect()
 }

@@ -1,0 +1,1 @@
+The workspace reading-list is not pinned, so mxv reclaim may stop it while it is idle.

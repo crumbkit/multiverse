@@ -1,0 +1,13 @@
+Let mxv reclaim stop a workspace again while it is idle
+
+Usage: mxv unpin [OPTIONS]
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv unpin -w reading-list
+
+Effects: additive, idempotent, closed-world.
+Global flags: --json, --no-input. `mxv unpin --help` describes them.

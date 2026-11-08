@@ -7,8 +7,9 @@
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
 //!
-//! `new`, `add`, `list`, `show`, `cd`, `remove`, `clean` and the process verbs `up`,
-//! `down`, `restart`, `status`, `logs` and `exec` are built. `archive` and
+//! `new`, `add`, `list`, `show`, `cd`, `remove`, `clean`, `reclaim`, `pin`,
+//! `unpin` and the process verbs `up`, `down`, `restart`, `status`, `logs`
+//! and `exec` are built. `archive` and
 //! `restore` are declared and fail with `mxv::command::unbuilt` until the
 //! pull request that builds each one.
 
@@ -19,6 +20,7 @@ mod environment;
 mod exec;
 mod failures;
 mod processes;
+mod reclaim;
 mod rows;
 mod run_failures;
 #[cfg(test)]
@@ -142,6 +144,20 @@ where
         Verb::Clean(args) => {
             let result = clean::clean(&mut output, environment, &args);
             return crumbkit::finish(output, clean::CLEAN, result);
+        }
+        // `reclaim` reads `--dry-run` through `&mut output`, so it runs
+        // before `finish`.
+        Verb::Reclaim(args) => {
+            let result = reclaim::reclaim(&mut output, environment, &args);
+            return crumbkit::finish(output, reclaim::RECLAIM, result);
+        }
+        Verb::Pin(args) => {
+            let result = reclaim::pin(environment, &args, true);
+            return crumbkit::finish(output, reclaim::PIN, result);
+        }
+        Verb::Unpin(args) => {
+            let result = reclaim::pin(environment, &args, false);
+            return crumbkit::finish(output, reclaim::UNPIN, result);
         }
         Verb::Up(args) => {
             return crumbkit::finish(output, processes::UP, processes::up(environment, &args));

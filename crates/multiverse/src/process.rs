@@ -262,6 +262,18 @@ pub(crate) fn recorded_start(start: RawStart) -> Option<String> {
     }
 }
 
+/// Returns every process that has not ended, with its parent, its group,
+/// its working directory and its resident memory, as phase reads them.
+///
+/// # Errors
+///
+/// Returns [`Error::ProcessTable`] when the process table cannot be read,
+/// and [`Error::UnsupportedOs`] when this system's structs differ from
+/// those phase reads.
+pub fn process_table() -> Result<Vec<phase::host::TableEntry>, Error> {
+    phase::host::process_table().map_err(process_error)
+}
+
 /// Returns mxv's error for `error`, a failure of phase's process table.
 pub(crate) fn process_error(error: ProcessError) -> Error {
     match error {
