@@ -211,13 +211,14 @@ the same access, and phase provisions nothing.
 
 ### Lifecycle and data
 
-- `mxv up api` starts the services api needs before it starts api.
-- `mxv down api` leaves a service running while another running app
-  needs it. `mxv down` with no app stops every app and then the
-  services.
+- `mxv up` starts the services an app needs before it starts the app.
+- `mxv down` with process names leaves a service running while another
+  running app needs it. `mxv down` with no names stops every app and then
+  the services.
 - A service's data lives in a Docker volume labelled with the workspace and
-  service. It survives `down` and restarts. The designed
-  verb `reset SERVICE`, which does not exist yet, would remove it after asking, and removing the workspace removes it too.
+  service. It survives `down` and restarts. The designed verb
+  `reset SERVICE`, which does not exist yet, would remove it after asking,
+  and removing the workspace removes it too.
 - Schema migrations are each app's job. An app runs them as a process that
   must finish before its server starts.
 
@@ -1434,10 +1435,11 @@ The keeper applies the sandbox in the child before the app runs, so each
 restart is sandboxed too. Its specification names the sandbox: the paths
 and ports below, and never an environment value. The keeper starts the
 program that links phase as the launcher, the hidden internal entry point
-`mxv phase keep --sandboxed <sandbox> -- <command>`. The launcher checks the sandbox again, applies it
-to itself and replaces itself with the app, which keeps the launcher's pid,
-environment and log. A launcher that cannot check or apply the sandbox, or
-start the program, writes why to the app's log and exits with status 78.
+`mxv phase keep --sandboxed <sandbox> -- <command>`. The launcher checks
+the sandbox again, applies it to itself and replaces itself with the app,
+which keeps the launcher's pid, environment and log. A launcher that cannot
+check or apply the sandbox, or start the program, writes why to the app's
+log and exits with status 78.
 
 The sandbox allows (decision P18):
 
@@ -1778,16 +1780,16 @@ links the library and calls it for each process verb:
 
 | `mxv` command | Library operation |
 | --- | --- |
-| `mxv up [APP[/PROCESS]]...` | `Phase::up` |
-| `mxv down [APP]...` | `Phase::down` |
-| `mxv restart APP[/PROCESS]...` | `Phase::restart` |
-| `mxv status [--json]` | `Phase::status` |
-| `mxv logs APP/PROCESS [--follow] [--json]` | `Phase::logs` |
-| `mxv exec APP -- COMMAND...` | `Phase::exec` and `Phase::exec_sandboxed` |
+| `mxv up [-w WORKSPACE] [PROCESS]...` | `Phase::up` |
+| `mxv down [-w WORKSPACE] [PROCESS]...` | `Phase::down` |
+| `mxv restart [-w WORKSPACE] [PROCESS]...` | `Phase::restart` |
+| `mxv status [-w WORKSPACE]` | `Phase::status` |
+| `mxv logs [-w WORKSPACE] [-f] [--lines N] PROCESS` | `Phase::logs` |
+| `mxv exec [-w WORKSPACE] PROCESS -- COMMAND...` | `Phase::exec` and `Phase::exec_sandboxed` |
 | `mxv remove` | `Phase::sweep`, through `Runs::forget` |
 
-`Phase::logs` with `since` returns `PhaseError::NotBuilt`, so `mxv logs` has
-no `--since`.
+`mxv` names processes, not apps. `Phase::logs` with `since` returns
+`PhaseError::NotBuilt`, and `mxv logs` has no `--since`.
 
 These designed verbs do not exist yet: `reset SERVICE`, which removes a
 shared service's data after asking, `plan check FILE`, which validates a

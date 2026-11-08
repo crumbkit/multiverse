@@ -712,14 +712,15 @@ the shell gone. A shell that something such as SIGKILL ended writes no
 file, and `status` then reports the process as exited with a null code and
 signal and a `reason` that says the shell ended without writing its code.
 
-For a workspace that an older mxv started, each `up` of a process moves its previous log to `<process>.log.1`, which
-replaces the log before it, so a process keeps at most two logs. No mxv
-process runs between commands, so mxv checks the size of the logs only
-when a command runs: `up`, `down`, `status` and `logs` copy a log that
-holds more than 32 MiB to `<process>.log.1` and empty it. The process keeps
-writing to the emptied log, and lines that it writes between the copy and
-the emptying are lost. Between two of those commands a log has no bound,
-so a process that writes a lot while nobody runs mxv can fill the disk.
+For a workspace that an older mxv started, that version moved the previous
+log of a process to `<process>.log.1` at each `up`, which replaced the log
+before it, so a process kept at most two logs. No mxv process runs between
+commands, so mxv checks the size of those logs only when a command runs:
+`down`, `status` and `logs` copy a log that holds more than 32 MiB to
+`<process>.log.1` and empty it. The process keeps writing to the emptied
+log, and lines that it writes between the copy and the emptying are lost.
+Between two of those commands a log has no bound, so a process that writes
+a lot while nobody runs mxv can fill the disk.
 
 `mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
 while processes run, hold an exclusive lock on
