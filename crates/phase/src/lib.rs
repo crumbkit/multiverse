@@ -11,9 +11,6 @@
 //!
 //! The library reads no environment variable and writes to no standard
 //! stream. The `mxv` command links it.
-//!
-//! [`Phase::status`], [`Phase::logs`] and [`Phase::exec`] return
-//! [`PhaseError::NotBuilt`] until their code lands.
 
 mod cancel;
 mod clock;
@@ -35,12 +32,13 @@ mod status;
 
 pub use crate::cancel::Cancel;
 pub use crate::engine::container;
+pub use crate::engine::exec::{ExecIo, ExecRequest};
 pub use crate::engine::host;
 pub use crate::engine::keeper;
 pub use crate::env::{
     AppliedEnvironment, DigestKey, EnvDigest, EnvironmentError, EnvironmentSource,
 };
-pub use crate::error::{NotRunnable, Operation, PhaseError};
+pub use crate::error::{NotRunnable, Operation, PhaseError, VolumeOwnerProblem};
 pub use crate::logs::{LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
@@ -49,7 +47,7 @@ pub use crate::name::{
 pub use crate::phase::{
     DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines,
 };
-pub use crate::plan::container::{BindMount, ContainerOptions};
+pub use crate::plan::container::{BindMount, ContainerOptions, KEEP_OWNER};
 pub use crate::plan::probe::{
     DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT,
     LEAST_PUBLISHED_PROBE_TIMEOUT, Probe, ProbeCheck,

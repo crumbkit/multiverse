@@ -190,3 +190,12 @@ fn a_docker_error_without_dockers_own_line_keeps_its_whole_message() {
         "{error:?}"
     );
 }
+
+#[test]
+fn a_container_engine_failure_without_its_own_kind_opens_with_what_failed() {
+    let error = Error::engine_failed(&"docker pull was cancelled");
+    assert_eq!(
+        error.to_string(),
+        "phase's container engine failed: docker pull was cancelled"
+    );
+}

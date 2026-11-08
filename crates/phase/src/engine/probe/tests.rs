@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Read as _, Write as _};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::process::Command;
@@ -29,6 +29,14 @@ fn listener() -> (TcpListener, u16) {
     (listener, port)
 }
 
+/// Binds a listener only on ::1 at a port the system picks, or returns
+/// `None` when this machine has no IPv6 loopback address.
+fn ipv6_listener() -> Option<(TcpListener, u16)> {
+    let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    Some((listener, port))
+}
+
 /// Returns a port on 127.0.0.1 on which nothing listens.
 fn closed_port() -> u16 {
     let (listener, port) = listener();
@@ -36,10 +44,20 @@ fn closed_port() -> u16 {
     port
 }
 
-/// Serves each connection to a fresh listener with `response`, after
-/// reading the request's head, and returns the port and the requests read.
-fn serve(response: &'static [u8]) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+/// The requests that a test server has read, each as its head.
+type Requests = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Serves each connection to a fresh listener on 127.0.0.1 with
+/// `response`, after reading the request's head, and returns the port and
+/// the requests read.
+fn serve(response: &'static [u8]) -> (u16, Requests) {
     let (listener, port) = listener();
+    serve_on(listener, port, response)
+}
+
+/// Serves each connection to `listener`, which listens on `port`, as
+/// [`serve`] does.
+fn serve_on(listener: TcpListener, port: u16, response: &'static [u8]) -> (u16, Requests) {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = Arc::clone(&requests);
     thread::spawn(move || {
@@ -86,7 +104,7 @@ fn an_http_check_passes_on_a_2xx_status() {
     assert_eq!(
         requests[0],
         format!(
-            "GET /health?deep=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+            "GET /health?deep=1 HTTP/1.1\r\nHost: localhost:{port}\r\nUser-Agent: phase-probe\r\nAccept: */*\r\nConnection: close\r\n\r\n"
         )
     );
 }
@@ -144,6 +162,77 @@ fn an_http_check_fails_when_nothing_listens() {
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Connect(_))
     ));
+}
+
+#[test]
+fn an_http_check_passes_on_a_server_that_listens_only_on_ipv6_loopback() {
+    let Some((listener, port)) = ipv6_listener() else {
+        eprintln!("skipped: this machine has no IPv6 loopback address");
+        return;
+    };
+    let (port, requests) = serve_on(listener, port, b"HTTP/1.1 200 OK\r\n\r\n");
+    let mut check = Check::Http { port, path: "/" };
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].contains(&format!("\r\nHost: localhost:{port}\r\n")),
+        "{}",
+        requests[0]
+    );
+}
+
+#[test]
+fn a_tcp_check_passes_on_a_server_that_listens_only_on_ipv6_loopback() {
+    let Some((listener, port)) = ipv6_listener() else {
+        eprintln!("skipped: this machine has no IPv6 loopback address");
+        return;
+    };
+    let mut check = Check::Tcp { port };
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
+    drop(listener);
+}
+
+#[test]
+fn a_tcp_check_reaches_ipv4_loopback_without_trying_ipv6() {
+    let (listener, port) = listener();
+    let mut check = Check::Tcp { port };
+    assert_eq!(
+        check.attempt(Duration::from_secs(2), &Cancel::new()),
+        Attempt::Passed
+    );
+    let (accepted, peer) = listener.accept().unwrap();
+    assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    drop(accepted);
+}
+
+#[test]
+fn a_check_that_finds_nothing_on_either_loopback_address_fails_within_its_timeout() {
+    // A port that is free on 127.0.0.1 may still be held on ::1, so the test
+    // takes a port that is free on both.
+    let port = loop {
+        let port = closed_port();
+        if TcpListener::bind((Ipv6Addr::LOCALHOST, port)).is_ok()
+            || TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_err()
+        {
+            break port;
+        }
+    };
+    let started = Instant::now();
+    for mut check in [Check::Tcp { port }, Check::Http { port, path: "/" }] {
+        assert_eq!(
+            check.attempt(Duration::from_secs(2), &Cancel::new()),
+            Attempt::Failed(Failure::Connect(io::ErrorKind::ConnectionRefused)),
+            "{check:?}"
+        );
+    }
+    assert!(started.elapsed() < SLACK);
 }
 
 #[test]
@@ -795,28 +884,55 @@ fn a_bounded_command_ends_when_it_is_cancelled() {
 
 #[test]
 fn a_bounded_command_whose_wait_fails_reports_the_failure() {
-    // nextest runs each test in a process of its own, so the only child
-    // this test reaps is the command.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test prepares a command for the probe's bounded runner"
-    )]
-    let mut command = Command::new("sleep");
-    command.arg("0.3");
-    let runner = thread::spawn(move || run_bounded(command, SLACK, &Cancel::new()).unwrap());
-    let deadline = Instant::now() + SLACK;
-    let reaped = loop {
-        match rustix::process::wait(rustix::process::WaitOptions::empty()) {
-            Ok(reaped) => break reaped,
-            Err(_) if Instant::now() < deadline => pause(Duration::from_millis(5)),
-            Err(error) => panic!("no child to reap: {error}"),
-        }
+    // With SIGCHLD ignored, the system reaps each child of this process as
+    // it ends, so the runner's wait for the command fails with ECHILD. A
+    // test that reaped the command itself would race the runner, which
+    // reaps it too once it sees it end. nextest runs each test in a
+    // process of its own, so no other test's child is reaped this way.
+    let end = {
+        let _ignored = ChildSignalIgnored::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test prepares a command for the probe's bounded runner"
+        )]
+        let mut command = Command::new("sleep");
+        command.arg("0.1");
+        run_bounded(command, SLACK, &Cancel::new()).unwrap()
     };
-    assert!(reaped.is_some());
-    assert!(matches!(
-        runner.join().unwrap(),
-        CommandEnd::WaitFailed { .. }
-    ));
+
+    assert!(matches!(end, CommandEnd::WaitFailed { .. }), "{end:?}");
+}
+
+/// Ignores `SIGCHLD` in this process until it is dropped, when the default
+/// disposition returns, also when the test panics.
+struct ChildSignalIgnored;
+
+impl ChildSignalIgnored {
+    fn new() -> Self {
+        set_child_signal(libc::SIG_IGN);
+        Self
+    }
+}
+
+impl Drop for ChildSignalIgnored {
+    fn drop(&mut self) {
+        set_child_signal(libc::SIG_DFL);
+    }
+}
+
+/// Sets this process's disposition of `SIGCHLD` to `disposition`.
+fn set_child_signal(disposition: libc::sighandler_t) {
+    #[expect(
+        unsafe_code,
+        reason = "the test sets the SIGCHLD disposition, which only libc can set"
+    )]
+    // SAFETY: `signal` only changes the process's disposition of `SIGCHLD`
+    // to `SIG_IGN` or `SIG_DFL`, which are valid dispositions for it, and
+    // touches no memory of this program. The disposition applies to every
+    // thread of the process; nextest runs this test in a process of its
+    // own, so no other test waits on a child meanwhile.
+    let previous = unsafe { libc::signal(libc::SIGCHLD, disposition) };
+    assert_ne!(previous, libc::SIG_ERR, "SIGCHLD's disposition was not set");
 }
 
 /// A probe command that fails until its `passes_from`th run.

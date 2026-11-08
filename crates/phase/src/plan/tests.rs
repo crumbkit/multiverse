@@ -542,6 +542,71 @@ fn a_plan_refuses_an_empty_run_as_user() {
     );
 }
 
+#[test]
+fn a_plan_accepts_a_volume_owner_that_is_a_number_a_pair_of_numbers_or_keep() {
+    for owner in ["1000", "1000:1000", "0:0", "keep"] {
+        let mut db = container_app("db");
+        db.container.owner = Some(owner.to_owned());
+
+        assert!(plan(vec![db]).is_ok(), "{owner}");
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_volume_owner_that_names_a_user() {
+    for owner in [
+        "postgres",
+        "1000:staff",
+        "app:1000",
+        "",
+        ":",
+        "1000:",
+        "-1",
+        "+1000",
+        "4294967296",
+        "4294967295",
+        "1000:4294967295",
+        "4294967295:1000",
+        "1000:1000:1",
+    ] {
+        let mut db = container_app("db");
+        db.container.owner = Some(owner.to_owned());
+
+        assert_eq!(
+            plan(vec![db]),
+            Err(PlanError::BadContainer {
+                app: "db".parse().unwrap(),
+                problem: ContainerProblem::BadOwner(owner.to_owned()),
+            }),
+            "{owner}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_volume_owner_on_a_host_app() {
+    let mut api = host_app("api");
+    api.container.owner = Some("1000".into());
+
+    assert_eq!(
+        plan(vec![api]),
+        Err(PlanError::BadContainer {
+            app: "api".parse().unwrap(),
+            problem: ContainerProblem::OnHostApp,
+        })
+    );
+}
+
+#[test]
+fn a_plan_without_a_volume_owner_writes_no_owner_field() {
+    let db = container_app("db");
+    let plan = plan(vec![db]).unwrap();
+
+    let json = serde_json::to_string(&plan).unwrap();
+
+    assert!(!json.contains("\"owner\""), "{json}");
+}
+
 fn release(spec: ReleaseSpec) -> Source {
     Source::Release {
         version: "v1.2.0".parse().unwrap(),

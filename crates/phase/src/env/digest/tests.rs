@@ -231,11 +231,7 @@ fn a_key_file_that_is_a_symbolic_link_is_refused() {
     let state = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
     load_key(elsewhere.path()).unwrap();
-    symlink(
-        elsewhere.path().join(KEY_FILE),
-        state.path().join(KEY_FILE),
-    )
-    .unwrap();
+    symlink(elsewhere.path().join(KEY_FILE), state.path().join(KEY_FILE)).unwrap();
 
     let error = load_key(state.path()).unwrap_err();
 

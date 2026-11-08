@@ -152,6 +152,30 @@ pub enum Note {
         /// TOKEN`.
         message: String,
     },
+    /// `up` stopped the running process and started it again from the
+    /// current plan, because its part of the plan changed since phase
+    /// started it, or because the run record does not say which part phase
+    /// started it from, as in a record that an older phase wrote. The part
+    /// covers the app's runner, source, ports, permissions and override
+    /// names, and the process's own plan. It covers no environment value.
+    #[non_exhaustive]
+    PlanChanged {
+        /// The process.
+        process: ProcessName,
+        /// What happened and why, as a sentence that names the app and the
+        /// process, such as `restarted api/server because its part of the
+        /// plan changed`.
+        message: String,
+    },
+    /// `up` found the app's containers running and could not check the
+    /// owner of a volume that they mount, so it left the volume as it was.
+    /// The next `up` checks it again.
+    #[non_exhaustive]
+    VolumeOwnerUnchecked {
+        /// What happened and why, as a sentence that names the app and
+        /// holds no text from an image's `USER`.
+        message: String,
+    },
     /// The process ran under the sandbox and ended before it was ready, so
     /// the sandbox may have denied it something. The message says where
     /// the denials show.
@@ -243,6 +267,36 @@ impl Note {
             files,
             removed,
             message,
+        }
+    }
+
+    /// Returns the note that `up` restarted `process` of `app` because its
+    /// part of the plan changed.
+    #[must_use]
+    pub fn plan_changed(app: &AppName, process: ProcessName) -> Self {
+        let message = format!("restarted {app}/{process} because its part of the plan changed");
+        Self::PlanChanged { process, message }
+    }
+
+    /// Returns the note that `up` restarted `process` of `app` because the
+    /// run record does not say which part of the plan phase started it
+    /// from.
+    #[must_use]
+    pub fn plan_unrecorded(app: &AppName, process: ProcessName) -> Self {
+        let message = format!(
+            "restarted {app}/{process} because the run record does not say which part of the plan it started from"
+        );
+        Self::PlanChanged { process, message }
+    }
+
+    /// Returns the note that `up` could not check the owner of a volume of
+    /// the running containers of `app`, because of `reason`.
+    #[must_use]
+    pub fn volume_owner_unchecked(app: &AppName, reason: &str) -> Self {
+        Self::VolumeOwnerUnchecked {
+            message: format!(
+                "{app} is running and phase did not check the owner of its volumes: {reason}"
+            ),
         }
     }
 

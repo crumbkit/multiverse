@@ -198,3 +198,23 @@ fn an_exit_names_its_status_or_signal_and_points_to_the_log() {
             .starts_with("signal 9 ended it;")
     );
 }
+
+#[test]
+fn a_plan_change_note_names_the_app_and_process_and_why_up_restarted_it() {
+    let app = "api".parse().unwrap();
+    let changed = super::Note::plan_changed(&app, "server".parse().unwrap());
+    let unrecorded = super::Note::plan_unrecorded(&app, "server".parse().unwrap());
+
+    assert_eq!(
+        serde_json::to_value(&changed).unwrap(),
+        json!({
+            "note": "plan-changed",
+            "process": "server",
+            "message": "restarted api/server because its part of the plan changed",
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&unrecorded).unwrap()["message"],
+        "restarted api/server because the run record does not say which part of the plan it started from"
+    );
+}

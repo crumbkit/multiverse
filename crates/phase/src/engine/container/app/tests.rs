@@ -319,8 +319,46 @@ fn a_new_secret_owner_changes_the_plan_hash_of_its_process_alone() {
         file["services"]["server"]["x-phase-secret-owner"],
         "999:999"
     );
-    assert_ne!(plan_hash(&scope, &app, &name("server"), None).unwrap(), before);
-    assert_eq!(plan_hash(&scope, &app, &name("worker"), None).unwrap(), worker);
+    assert_ne!(
+        plan_hash(&scope, &app, &name("server"), None).unwrap(),
+        before
+    );
+    assert_eq!(
+        plan_hash(&scope, &app, &name("worker"), None).unwrap(),
+        worker
+    );
+}
+
+#[test]
+fn a_new_volume_owner_changes_the_plan_hash_of_each_process_that_mounts_a_volume() {
+    let mut app = db();
+    app.container.caches.clear();
+    let scope = scope("db");
+    let server = plan_hash(&scope, &app, &name("server"), None).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker"), None).unwrap();
+    let file = compose_file(&scope, &app, None).unwrap();
+    assert!(
+        file["services"]["server"]
+            .get("x-phase-volume-owner")
+            .is_none(),
+        "{file}"
+    );
+
+    app.container.owner = Some("999:999".to_owned());
+
+    let file = compose_file(&scope, &app, None).unwrap();
+    assert_eq!(
+        file["services"]["server"]["x-phase-volume-owner"],
+        "999:999"
+    );
+    assert_ne!(
+        plan_hash(&scope, &app, &name("server"), None).unwrap(),
+        server
+    );
+    assert_eq!(
+        plan_hash(&scope, &app, &name("worker"), None).unwrap(),
+        worker
+    );
 }
 
 #[test]
@@ -412,7 +450,10 @@ fn a_processs_plan_hash_changes_only_with_its_own_part_of_the_app() {
     let server = plan_hash(&scope, &app, &name("server"), None).unwrap();
     let worker = plan_hash(&scope, &app, &name("worker"), None).unwrap();
     assert_ne!(server, worker);
-    assert_eq!(plan_hash(&scope, &db(), &name("server"), None).unwrap(), server);
+    assert_eq!(
+        plan_hash(&scope, &db(), &name("server"), None).unwrap(),
+        server
+    );
 
     let mut changed = db();
     changed.processes[1].run.push("again".to_owned());
@@ -427,7 +468,10 @@ fn a_processs_plan_hash_changes_only_with_its_own_part_of_the_app() {
 
     let mut image = db();
     image.source = Source::image(name("postgres:18"));
-    assert_ne!(plan_hash(&scope, &image, &name("server"), None).unwrap(), server);
+    assert_ne!(
+        plan_hash(&scope, &image, &name("server"), None).unwrap(),
+        server
+    );
 }
 
 #[test]

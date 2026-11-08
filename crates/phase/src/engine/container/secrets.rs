@@ -317,6 +317,12 @@ fn or_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Str
 pub(crate) const IMAGE_CONFIG_FORMAT: &str = r#"{"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"user":{{json .Config.User}}}"#;
 
 impl ImageConfig {
+    /// Returns the image's user, in Docker's `USER[:GROUP]` form, which is
+    /// empty for root.
+    pub(crate) fn user(&self) -> &str {
+        &self.user
+    }
+
     /// Returns the image config that `docker image inspect` printed with
     /// [`IMAGE_CONFIG_FORMAT`], or `None` when it printed something else.
     pub(crate) fn parse(printed: &str) -> Option<Self> {
@@ -346,9 +352,28 @@ impl ImageConfig {
 
 /// Reports whether `user`, in Docker's `USER[:GROUP]` form, names root:
 /// an empty user, `0` or `root`.
-fn is_root(user: &str) -> bool {
+pub(crate) fn is_root(user: &str) -> bool {
     let name = user.split(':').next().unwrap_or_default().trim();
     name.is_empty() || name == "0" || name == "root"
+}
+
+/// Returns the user that the containers of `app` run as, in Docker's
+/// `USER[:GROUP]` form: the app's run-as user, or else `image_user`, the
+/// image's own `USER`, which is empty for root.
+pub(crate) fn run_as<'a>(app: &'a AppPlan, image_user: &'a str) -> &'a str {
+    app.container.user.as_deref().unwrap_or(image_user)
+}
+
+/// Returns the owner that phase gives what it writes for a container that
+/// runs as `user`: `explicit`, the owner that the plan names, or else
+/// `user`. It returns `None` when the owner would be root and the plan did
+/// not name it. The secret files and the workspace volumes both take
+/// their owner this way.
+pub(crate) fn chosen_owner(explicit: Option<&str>, user: &str) -> Option<String> {
+    if let Some(owner) = explicit {
+        return Some(owner.to_owned());
+    }
+    (!is_root(user)).then(|| user.to_owned())
 }
 
 /// Returns the owner of the secret files of `process` of `app`, in the
@@ -357,10 +382,7 @@ fn is_root(user: &str) -> bool {
 /// none. It returns `None` when the files would belong to
 /// root and the plan did not say so with `secret_owner`.
 pub(crate) fn owner(app: &AppPlan, process: &ProcessPlan, image: &ImageConfig) -> Option<String> {
-    container_owner(
-        process,
-        app.container.user.as_deref().unwrap_or(&image.user),
-    )
+    container_owner(process, run_as(app, &image.user))
 }
 
 /// Returns the owner of the secret files of `process` in a container that
@@ -372,8 +394,5 @@ pub(crate) fn owner(app: &AppPlan, process: &ProcessPlan, image: &ImageConfig) -
 /// with, so the files keep the owner that the start gave them, even when
 /// the image's tag has since moved to an image with another user.
 pub(crate) fn container_owner(process: &ProcessPlan, user: &str) -> Option<String> {
-    if let Some(owner) = &process.secret_owner {
-        return Some(owner.clone());
-    }
-    (!is_root(user)).then(|| user.to_owned())
+    chosen_owner(process.secret_owner.as_deref(), user)
 }

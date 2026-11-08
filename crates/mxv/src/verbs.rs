@@ -408,6 +408,9 @@ pub(crate) fn add(
         }
     };
     let name = workspace.name.clone();
+    if mode == Mode::Change {
+        processes::touch_named(environment, &name);
+    }
     let repo = repo_of(&args.repo, args.folder.as_deref())?;
     let manifest = match &args.manifest {
         Some(file) => {
@@ -579,24 +582,33 @@ pub(crate) fn show(
             let workspace = workspaces.find(&name)?.ok_or(MxvFailure::NotFound {
                 name: name.to_string(),
             })?;
+            processes::touch_named(environment, &workspace.name);
             let usage = workspaces.disk_usage(&workspace)?;
             // The disk usage already warns about a manifest file that
             // cannot be read, so only a manifest that parses adds its own
             // warnings. Two files of a merged manifest whose names clash
             // each parse, so the disk usage cannot see the clash, and the
             // merge's error is added here.
-            let warnings = match workspace.manifest() {
-                Ok(manifest) => manifest
-                    .map(|manifest| manifest.warnings)
-                    .unwrap_or_default(),
-                Err(error) if matches!(error.problem, ManifestProblem::NameClash { .. }) => {
-                    vec![format!(
-                        "the merged manifest cannot be used, and `mxv up` fails with mxv::manifest::name_clash: {error}"
-                    )]
+            let row = ShowRow::new(&workspace, &root, &usage);
+            let (row, warnings) = match workspace.manifest() {
+                Ok(Some(manifest)) => {
+                    let warnings = manifest.warnings.clone();
+                    (row.with_services(&workspace, &manifest), warnings)
                 }
-                Err(_) => Vec::new(),
+                Ok(None) => (row, Vec::new()),
+                Err(error)
+                    if matches!(error.problem, ManifestProblem::NameClash { .. })
+                        || (workspace.has_several_checkouts()
+                            && matches!(error.problem, ManifestProblem::ServiceClash { .. })) =>
+                {
+                    let warning = format!(
+                        "the merged manifest cannot be used, and `mxv up` fails with mxv::manifest::name_clash: {error}"
+                    );
+                    (row, vec![warning])
+                }
+                Err(_) => (row, Vec::new()),
             };
-            Ok(ShowRow::new(&workspace, &root, &usage).with_warnings(&warnings))
+            Ok(row.with_warnings(&warnings))
         });
         batch.push(found);
     }
@@ -612,6 +624,7 @@ pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<Strin
         .ok_or(MxvFailure::NotFound {
             name: name.to_string(),
         })?;
+    processes::touch_named(environment, &workspace.name);
     let Some(folder) = &args.checkout else {
         return Ok(Prose::new(workspace.path.display().to_string()));
     };

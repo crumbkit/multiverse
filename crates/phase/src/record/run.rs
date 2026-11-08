@@ -1,4 +1,4 @@
-//! The run record `phase/run/v5`: what one workspace's run planned and
+//! The run record `phase/run/v6`: what one workspace's run planned and
 //! started, and the state of each object. It names processes by pid, start
 //! time and process group, and Docker objects by id or name. It holds no
 //! environment value.
@@ -39,14 +39,18 @@ pub(crate) enum RunSchema {
     V4,
     /// `phase/run/v5`, which adds `oneshot` and `completed` to host process
     /// entries. A phase that reads only v4 refuses it as written by a newer
-    /// phase.
+    /// phase. It reads as v6 with no part of the plan recorded.
     #[serde(rename = "phase/run/v5")]
     V5,
+    /// `phase/run/v6`, which adds `part_hash` to host process entries. A
+    /// phase that reads only v5 refuses it as written by a newer phase.
+    #[serde(rename = "phase/run/v6")]
+    V6,
 }
 
 impl RunSchema {
     /// The version that phase writes.
-    pub(crate) const CURRENT: Self = Self::V5;
+    pub(crate) const CURRENT: Self = Self::V6;
 }
 
 /// The newest version of the run record that this phase reads, and the one
@@ -57,7 +61,7 @@ impl RunSchema {
 /// keeper refuses it as written by a newer phase, notes each refused write
 /// in its diagnostic log, and records nothing more, until phase starts its
 /// process again with a keeper of its own.
-pub(crate) const RUN_VERSION: u32 = 5;
+pub(crate) const RUN_VERSION: u32 = 6;
 
 /// The run record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +158,16 @@ pub(crate) struct HostEntry {
     /// yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) plan_hash: Option<PlanHash>,
+    /// The hash of what phase last launched the process from: its own
+    /// part of the plan, which `AppPlan::process_digest` gives, and for a
+    /// sandboxed process the sandbox that phase built for it, apart from
+    /// the grants that come from the inherited `PATH`. A later `up`
+    /// restarts a running process whose hash changed. It holds no
+    /// environment value. It is `None` for a keeper, for a process that
+    /// phase has not started yet, and in a record before `phase/run/v6`,
+    /// which a later `up` reads as a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) part_hash: Option<PlanHash>,
     /// How the process last ended, or `None` when it has not ended since
     /// phase last started it. A keeper's restart keeps it, so `status`
     /// shows the last crash of a process that restarts, and phase's own
@@ -401,6 +415,8 @@ impl Exit {
 pub(crate) struct Launching {
     /// The hash of the plan.
     pub(crate) plan_hash: PlanHash,
+    /// The hash of the process's own part of the plan.
+    pub(crate) part_hash: PlanHash,
     /// How the process stops.
     pub(crate) stop: Stop,
     /// The port that the process listens on, or `None`.
@@ -523,6 +539,103 @@ pub(crate) struct VolumeEntry {
     pub(crate) lifetime: VolumeLifetime,
     /// Where the volume is in its life.
     pub(crate) state: EntryState,
+    /// The owner that phase last gave the volume's root directory, or
+    /// `None` when phase did not set it, as for a volume whose app keeps
+    /// its owner or runs as root. It says which owner phase wanted and
+    /// proves nothing about the owner the volume has now, so `up` checks
+    /// the volume whatever it says. A record that a phase before this
+    /// field wrote has no owner, and reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) owner: Option<VolumeOwner>,
+}
+
+/// The numeric owner of a volume's root directory: a uid, and a gid when
+/// phase sets the group too. In JSON it is `"1000"` or `"1000:1000"`,
+/// the form that `chown` reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct VolumeOwner {
+    /// The user id.
+    pub(crate) uid: u32,
+    /// The group id, or `None` to leave the group as it is.
+    pub(crate) gid: Option<u32>,
+}
+
+impl VolumeOwner {
+    /// Reports whether the owner is root: uid 0, with group 0 or no group.
+    pub(crate) fn is_root(&self) -> bool {
+        self.uid == 0 && self.gid.is_none_or(|gid| gid == 0)
+    }
+}
+
+/// The id that the kernel's `chown` reads as -1, which leaves the owner
+/// as it is, so a volume given to it would keep its old owner.
+pub(crate) const UNCHANGED_ID: u32 = u32::MAX;
+
+/// Returns `part` as a number when it is only ASCII digits that fit in 32
+/// bits and it is not [`UNCHANGED_ID`]. Rust's own parse also takes a
+/// leading `+`, which `chown` and a plan do not.
+fn numeric_id(part: &str) -> Option<u32> {
+    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    part.parse().ok().filter(|id| *id != UNCHANGED_ID)
+}
+
+/// The text of an owner that is not a numeric `uid` or `uid:gid`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BadOwner(pub(crate) String);
+
+impl fmt::Display for BadOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:?} is not a numeric uid or uid:gid such as 999:999",
+            self.0
+        )
+    }
+}
+
+impl std::str::FromStr for VolumeOwner {
+    type Err = BadOwner;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bad = || BadOwner(text.to_owned());
+        match text.split_once(':') {
+            Some((uid, gid)) => Ok(Self {
+                uid: numeric_id(uid).ok_or_else(bad)?,
+                gid: Some(numeric_id(gid).ok_or_else(bad)?),
+            }),
+            None => Ok(Self {
+                uid: numeric_id(text).ok_or_else(bad)?,
+                gid: None,
+            }),
+        }
+    }
+}
+
+impl TryFrom<String> for VolumeOwner {
+    type Error = BadOwner;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        text.parse()
+    }
+}
+
+impl From<VolumeOwner> for String {
+    fn from(owner: VolumeOwner) -> Self {
+        owner.to_string()
+    }
+}
+
+impl fmt::Display for VolumeOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.uid)?;
+        if let Some(gid) = self.gid {
+            write!(formatter, ":{gid}")?;
+        }
+        Ok(())
+    }
 }
 
 /// How long a volume lives.
@@ -625,8 +738,9 @@ pub(crate) enum Started {
     Container(ContainerId, PlanHash),
     /// A network, by its id.
     Network(NetworkId),
-    /// A volume, which its name identifies.
-    Volume,
+    /// A volume, which its name identifies, with the owner that phase
+    /// gave its root directory, or `None` when phase did not set it.
+    Volume(Option<VolumeOwner>),
 }
 
 /// The record has no object with the key, or `Started` describes another
@@ -677,6 +791,7 @@ impl RunRecord {
             stop,
             listen,
             plan_hash: None,
+            part_hash: None,
             ended: None,
             restart: None,
             ready: None,
@@ -737,6 +852,7 @@ impl RunRecord {
             name,
             lifetime,
             state: EntryState::Planned,
+            owner: None,
         });
         self
     }
@@ -891,13 +1007,14 @@ impl RunRecord {
                 entry.id = Some(id);
                 entry.state = EntryState::Running;
             }
-            (ObjectKey::Volume(name), Started::Volume) => {
+            (ObjectKey::Volume(name), Started::Volume(owner)) => {
                 let entry = self
                     .volumes
                     .iter_mut()
                     .find(|entry| &entry.name == name)
                     .ok_or_else(unplanned)?;
                 entry.state = EntryState::Running;
+                entry.owner = owner;
             }
             _ => return Err(unplanned()),
         }
@@ -982,6 +1099,7 @@ impl RunRecord {
         entry.stop = Some(launching.stop);
         entry.listen.clone_from(&launching.listen);
         entry.plan_hash = Some(launching.plan_hash.clone());
+        entry.part_hash = Some(launching.part_hash.clone());
         entry.sandbox.clone_from(&launching.sandbox);
         entry.oneshot.clone_from(&launching.oneshot);
         entry.completed = None;

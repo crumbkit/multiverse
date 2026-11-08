@@ -33,6 +33,8 @@ use crate::select::Selection;
 use crate::source::Source;
 use crate::status::ProcessState;
 
+mod volume_owner;
+
 /// The image of the tests.
 const IMAGE: &str = "busybox:1.37.0";
 
@@ -510,7 +512,7 @@ fn up_leaves_a_running_container_of_the_same_plan_alone_and_replaces_a_stopped_o
     docker(&["stop", "--time", "0", "--", &first]).unwrap();
     let report = world.up(&plan);
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
     let second = world.container("db", "server").unwrap();
     assert_ne!(first, second);
     assert!(docker(&["container", "inspect", &first]).is_none());
@@ -518,7 +520,7 @@ fn up_leaves_a_running_container_of_the_same_plan_alone_and_replaces_a_stopped_o
     let changed = world.plan(vec![app("db", "exec sleep 61")]);
     let report = world.up(&changed);
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
     let third = world.container("db", "server").unwrap();
     assert_ne!(second, third);
     assert!(docker(&["container", "inspect", &second]).is_none());
@@ -2460,7 +2462,7 @@ fn up_replaces_a_container_that_started_without_secret_files_once_a_secret_has_a
     });
     let report = world.up_with(&plan, &env);
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
     let second = world.container("db", "server").unwrap();
     assert_ne!(first, second);
     assert!(docker(&["container", "inspect", &first]).is_none());

@@ -112,6 +112,11 @@ tempfile = { version = "3.27.0", default-features = false }
 # the workspace entry turns off its default features.
 nono = { version = "=0.81.0", default-features = false }
 
+# rustls-native-certs loads the system's trusted roots as the AWS SDK's
+# native-roots TLS does. Only a macOS sandbox test of phase uses it, to
+# show that a sandboxed process can load them. It has no features.
+rustls-native-certs = { version = "0.8.5", default-features = false }
+
 # The lint table is lints/base.toml and lints/library.toml of the Rust
 # standards (BASE-1, LIB-2, LIB-3). A build with CARGO_BUILD_WARNINGS=deny
 # fails on any warning, and every package inherits the table through

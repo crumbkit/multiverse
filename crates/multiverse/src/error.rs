@@ -206,30 +206,33 @@ pub enum Error {
     /// The `docker` program runs, and its `compose` plugin, which starts
     /// the containers, is not installed.
     DockerComposeMissing {
-        /// The line of docker's standard error that says what failed.
+        /// docker's own line when docker printed one, and otherwise the whole
+        /// sentence of phase or mxv that says what failed.
         message: String,
         /// The line that docker printed for its own error, which
         /// `message` then also holds, or `None`. Without it, `message` is
-        /// phase's whole sentence, which the error prints alone.
+        /// the whole sentence of phase or mxv, which the error prints alone.
         docker_line: Option<String>,
     },
     /// docker has no free address pool for a network, so it cannot
     /// connect a container.
     DockerNoAddressPool {
-        /// The line of docker's standard error that says what failed.
+        /// docker's own line when docker printed one, and otherwise the whole
+        /// sentence of phase or mxv that says what failed.
         message: String,
         /// The line that docker printed for its own error, which
         /// `message` then also holds, or `None`. Without it, `message` is
-        /// phase's whole sentence, which the error prints alone.
+        /// the whole sentence of phase or mxv, which the error prints alone.
         docker_line: Option<String>,
     },
     /// The `docker` program runs, and its daemon does not answer.
     DockerUnavailable {
-        /// The line of docker's standard error that says what failed.
+        /// docker's own line when docker printed one, and otherwise the whole
+        /// sentence of phase or mxv that says what failed.
         message: String,
         /// The line that docker printed for its own error, which
         /// `message` then also holds, or `None`. Without it, `message` is
-        /// phase's whole sentence, which the error prints alone.
+        /// the whole sentence of phase or mxv, which the error prints alone.
         docker_line: Option<String>,
     },
     /// A docker command failed or missed its deadline.
@@ -241,11 +244,12 @@ pub enum Error {
         /// `server`, when it worked on one. It is never a container's id
         /// or Docker name.
         container: Option<String>,
-        /// The line of docker's standard error that says what failed.
+        /// docker's own line when docker printed one, and otherwise the whole
+        /// sentence of phase or mxv that says what failed.
         message: String,
         /// The line that docker printed for its own error, which
         /// `message` then also holds, or `None`. Without it, `message` is
-        /// phase's whole sentence, which the error prints alone.
+        /// the whole sentence of phase or mxv, which the error prints alone.
         docker_line: Option<String>,
     },
     /// A docker container or volume has a name of mxv's, or is one that
@@ -556,12 +560,21 @@ impl From<phase::container::ContainerError> for Error {
             },
             Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },
             Container::Unreadable { path, source, .. } => Self::StateUnreadable { path, source },
-            other => Self::DockerFailed {
-                operation: "container engine".to_owned(),
-                container: None,
-                message: other.to_string(),
-                docker_line: None,
-            },
+            other => Self::engine_failed(&other),
+        }
+    }
+}
+
+impl Error {
+    /// Returns the failure of phase's container engine that has no docker
+    /// failure of its own kind, such as a cancelled command, which
+    /// `failure` describes. Its message opens by saying what failed.
+    fn engine_failed(failure: &dyn fmt::Display) -> Self {
+        Self::DockerFailed {
+            operation: "container engine".to_owned(),
+            container: None,
+            message: format!("phase's container engine failed: {failure}"),
+            docker_line: None,
         }
     }
 }

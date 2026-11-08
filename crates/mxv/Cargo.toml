@@ -57,6 +57,10 @@ serde = { workspace = true }
 # config file, so a failure names the line. mxv reads the parsed values
 # directly and needs no other toml feature.
 toml = { workspace = true, features = ["parse"] }
+# signal-hook catches SIGINT while `mxv exec` runs a command, so Ctrl-C
+# leaves mxv running until the command ends, and stops a sandboxed command
+# that Ctrl-C does not reach. phase and crumbkit-usage already depend on it.
+signal-hook = { workspace = true }
 
 [dev-dependencies]
 crumbkit-test = { workspace = true }

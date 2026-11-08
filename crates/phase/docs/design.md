@@ -364,6 +364,17 @@ that writes its ready line and then exits counts as ready.
 A liveness wait in a keeper attempts the probe once each period, and ends
 when the failures in a row reach the failure threshold.
 
+An `http` or `tcp` probe of a host process connects to 127.0.0.1, and to
+::1 when 127.0.0.1 refuses or fails, as mxv's port probe did. A dev server
+such as Vite may listen only on ::1, and a probe of 127.0.0.1 alone never
+saw it ready. The connection to ::1 gets the part of the probe's timeout
+that is left, so one attempt still ends within the timeout. An `http`
+probe sends its request to the address that accepted, with the `Host`
+header `localhost:<port>`. The port checks before a launch and after
+readiness find a listener on ::1 too: the check whether a port is in use
+connects to both loopback addresses, and the lookup of the process that
+holds a port reads IPv6 sockets as well as IPv4 ones.
+
 A command probe of a host process runs in its own process group, and phase
 kills that group however the command ends. A command probe of a container
 process runs inside its container through `docker exec`. When it times
@@ -829,9 +840,185 @@ copy the value onto the virtual machine's disk, readable by every user in
 the container. A file bind-mounted from the Mac breaks when it is replaced.
 The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
+### Volume owners
+
+Decided 5 November 2026 (P20): Docker creates a named volume owned by
+root, so a container that runs as another user cannot write its own
+volume, such as a cache or a database's data directory. phase gives the
+root directory of each workspace volume that an app mounts to the user
+that the app runs as, after the app's container is created and before it
+starts, on every `up`.
+
+The owner comes from the same rule as the owner of the secret files, and
+the code shares it:
+
+1. the app's `owner`, a numeric `uid` or `uid:gid`, such as `999:999`;
+2. otherwise the app's run-as user;
+3. otherwise the image's own `USER`.
+
+`owner = "keep"` leaves every volume of the app as it is. An `owner` of
+`0:0` or `0` gives the volumes to root, as the plan asks. When the plan
+names no `owner` and the app runs as root, by its run-as user or its
+image's `USER`, phase leaves the volumes alone, because a container that
+runs as root can write a volume as Docker made it. The plan refuses an `owner` that names a user or a group, with
+`ContainerProblem::BadOwner`, because a name can mean uid 0 inside an
+image. It also refuses the id 4294967295, which the kernel's `chown` reads
+as -1, meaning that the owner stays as it is. An `id` in an image that
+prints that number fails as one that prints no number.
+
+A run-as user or an image `USER` that is a name, such as `postgres` or
+`1000:staff`, is resolved to numbers in the app's image. phase runs
+`id -u` and then `id -g` there, as that user, with `--entrypoint id`,
+under the helper's restrictions below, with no volume and no capability.
+A name that resolves to uid 0 fails the app with
+`phase::container::volume_owner_root`, and only a plan's numeric `owner`
+can give a volume to root. An `id` that exits with another status than 0,
+or prints anything else than one number, fails the app with
+`phase::container::volume_owner_unresolved`, which gives the status. The
+same error covers a helper that Docker refuses to create or start. An
+image with no `id` program or with a `USER` that its `/etc/passwd` lacks
+is one reason, and a full disk is another, so the message says only that
+Docker refused. Docker's line for that case can quote the `USER`, so phase
+keeps none of Docker's text there when the user came from the image, and
+keeps Docker's line when the plan named the user. Each of these errors
+says that a numeric `owner` or `keep` fixes it.
+
+When any `docker compose up` of a container that runs as its image's
+`USER` fails, phase reads that `USER` from the image and cleans Compose's
+standard error before it classifies the failure or quotes a line. It
+replaces the field that Docker quotes after `unable to find user ` or
+`unable to find group `, up to the next colon. Docker splits a `USER` on
+every colon, so that field holds no colon. Text in the field therefore
+cannot reach a report or choose a failure class such as an allocated port.
+phase also replaces the whole `USER` wherever it appears when it holds a
+character outside letters, digits, `-`, `_`, `.` and `:`. It leaves a plain
+`USER` alone everywhere else, because a word such as `daemon` or `port` is
+part of Docker's own sentences and of the failure phrases, and a plain
+`USER` holds no escape sequence. A sentence of Docker's that quoted one
+field of a `USER` somewhere else would not be cleaned, and phase knows of
+no such sentence. When phase cannot read the `USER`, it keeps none of Docker's lines
+for that failure. Each
+start of an app whose user is a name runs `id` twice. A numeric `owner`
+or run-as user avoids that.
+
+The image's author controls the text of its `USER`, which may hold a
+newline, a terminal escape sequence or a sentence that looks like one of
+phase's messages. So an error about a user that came from the image says
+"the user named by the image's USER" and leaves the text out. An error
+about the plan's run-as user prints it quoted, as Rust's `{:?}` does.
+
+The helper that sets the owner runs busybox pinned by digest. The digest
+is `HELPER_IMAGE` in `src/engine/container/volume_owner.rs`, whose comment
+says how to update it, and CI pulls the same digest. The helper runs as
+`0:0` with `--network none`, `--cap-drop ALL --cap-add CHOWN`,
+`--security-opt no-new-privileges` and `--read-only`, and mounts only its
+volume, at `/volume`. `CHOWN` alone is enough: on Docker 29.8 it changed
+the owner of a volume root that another uid owned with mode 0700, so the
+helper does not keep `DAC_OVERRIDE`.
+
+phase runs each helper, and each `id`, as four Docker commands: `docker
+create`, `docker start`, `docker wait` and `docker rm --force`. Each of
+them prints only Docker's own text, so a failure carries Docker's line as
+phase's other Docker commands do. The exception is a refused `docker
+create` or `docker start` of an `id` helper whose user came from the
+image's `USER`, which keeps none of Docker's text, as above. phase never
+reads what a helper writes,
+apart from the standard output of `id`, which it reads with `docker logs`
+and uses only when it is one decimal number on one line. No error, note
+or record holds what `id` or `chown` printed. A helper that exits with
+another status than 0 fails the app with that status.
+
+The helper changes the owner of the volume's root directory alone, and
+never runs `chown -R`. A new volume is empty, so its root is everything
+it holds and a recursive change would add nothing. An existing volume may
+hold files that its app gave other owners on purpose, such as the files
+of a database's data directory, and a large cache would make a recursive
+change slow on every change of owner. When an app's owner changes, the
+files that the old owner created keep their owner. An app that cannot
+use them needs its volume reset.
+
+The order of the steps follows from when Docker gives a volume its owner,
+measured on Docker 29.8 with Compose. Docker copies the image's directory at the mount
+path into an empty named volume, and gives the volume's root the
+directory's owner, when it creates the container: after `docker create`
+or `docker compose up --no-start` the root is already the image's, and a
+`docker start` of that container copies nothing and changes no owner. An
+owner that phase set before the creation is therefore lost, and an owner
+that phase sets after the creation stays. An image directory that is empty
+still gives the volume its owner, and that happens at every creation for
+as long as the volume stays empty. A volume that holds files keeps its
+owner, because Docker copies only into an empty volume.
+
+So phase creates a process's container with `docker compose up --no-start`,
+then runs one helper for each volume that the process mounts, then starts
+the container with `docker compose up --detach --no-recreate`. The app's
+main process never runs before the owner is right, and a helper that fails
+ends the start and removes the created container. phase pulls the helper's
+image before it removes any old container, so a pull that fails leaves the
+old container running. The two `compose up`
+commands read the same compose file and environment. An app with no owner
+to set, such as one under `keep`, runs one `compose up --detach` and no
+helper.
+
+phase runs a helper on every `up` and reads nothing from it. The helper
+runs `chown`, which leaves a volume that already has the owner as it was
+apart from its change time, so one helper checks the owner and corrects it,
+and no output is read to tell the two apart. This costs one helper per
+volume on each `up`, and nothing caches the result. A volume that several
+processes of an app mount gets one helper for each process that gets a new
+container, because each creation can copy an owner onto a volume that is
+still empty, as above. A running container's volumes are checked too, when
+`up` reports the app as already running. A volume of a process that `up`
+leaves running gets the owner that the run record names, because that is
+the owner its container started with: a tag that has moved to an image
+with another `USER` must not take a running container's volume away from
+it. When the record names none, the volume gets the owner from the plan.
+When that check cannot run, because the app's image is gone, the helper's
+image cannot be pulled or a helper fails, the container keeps running. An
+app whose every container runs is still reported as already running, and a
+note says that the owner was not checked. The next `up` checks it again.
+Under `keep`, and for an app that runs as root when the plan names no
+owner, no helper runs and nothing is checked.
+
+The run record keeps the owner that phase gave each volume, as `owner`
+on the volume's entry, such as `"1000:1000"`. Before a helper starts,
+phase records the volume with no owner, and after the helper exits with
+status 0 it records the owner. The record says which owner phase wanted,
+and it does not prove that the volume has that owner. A volume that phase
+leaves alone, for `keep` or for an app that runs as root, is recorded with
+no owner. The plan's `owner` is also in the compose file of each service
+that mounts a volume, as `x-phase-volume-owner`, so a new owner changes
+the service's plan hash and `up` replaces the container and sets the new
+owner. A tag that moves to an image with another `USER` changes no plan
+hash, so the volumes keep their owner until the container is replaced for
+another reason.
+
+Every helper carries the workspace's labels, its app's `mxv.app` and
+`mxv.role=volume-owner`, and a chown helper names its volume with
+`mxv.volume`. A helper carries no `mxv.container` label and the run record
+does not name it, so nothing that finds a process's container by its
+name, its labels or the record ever takes a helper for that container or
+refuses it as foreign. A run of phase that ends while a helper exists
+leaves it behind, and it keeps its volume in use:
+
+- `up` removes the app's leftover helpers before it sets any owner;
+- `down` removes the leftover helpers of each app that it stops, and a
+  failure to remove one is no container's failure;
+- a sweep removes every leftover helper of the workspace when some
+  container or volume in the record has not stopped, and a dry run
+  removes none. A sweep treats a Docker that does not answer as having
+  no helpers to remove, because a helper cannot hold a volume while
+  Docker is down and the next `up` removes it, so a record whose
+  containers have stopped sweeps without Docker;
+- the removal of a workspace's volumes removes the workspace's leftover
+  helpers first, because Docker refuses to delete a volume in use.
+
+Two apps that mount one workspace volume with different owners each set
+their own owner when they start, and the last start wins.
+
 ### Run record and sweep
 
-phase writes a run record (`phase/run/v5`) for each workspace. It names every
+phase writes a run record (`phase/run/v6`) for each workspace. It names every
 keeper and app process by pid, process start time and process group, every
 container by id, and the hash of the plan that started them. It holds no
 environment values.
@@ -871,28 +1058,39 @@ with it those ends, unless the `down` did not select a process that holds
 such an end. mxv's `down` of the apps that a failed `up` started is such a
 `down`, so `status` still shows the process that failed.
 
-The record is `phase/run/v5`. Version 2 added `ended` and `restart` to
+The record is `phase/run/v6`. Version 2 added `ended` and `restart` to
 host entries, version 3 added `ready` to host process and container
 entries, as the next section says, version 4 added `sandbox` to host
 process entries, which records how phase launched the process, as [The
-sandbox as built](#the-sandbox-as-built) says, and version 5 adds
-`oneshot` and `completed` to host process entries. `oneshot` records what
-phase launched a oneshot from: the hash of its part of the plan and, for
-a `once = false` oneshot, the run of each process and container that it
-depends on. `completed` records the oneshot's completion. [Oneshot
-processes](#oneshot-processes) says how phase uses both. phase reads a
-`phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
-with the fields it lacks at their defaults, and writes it back as v5: a
-v1 record reads with no ends, no restart policies, no readiness, no
-sandbox and no oneshot launches or completions, a v2 record reads with
-no readiness, no sandbox and no oneshot launches or completions, a v3
-record reads with no sandbox and no oneshot launches or completions, and
-a v4 record reads with no oneshot launches or completions. A
-phase that reads only an older version refuses a newer record as written
-by a newer phase and asks for an upgrade. Each version only adds fields
-that read as their defaults when they are missing, so the next version,
-v6, which records P15's watcher, adds a schema name and needs
-no other read path.
+sandbox as built](#the-sandbox-as-built) says, version 5 added `oneshot`
+and `completed` to host process entries, and version 6 adds `part_hash`
+to host process entries. `oneshot` records what phase launched a oneshot
+from: the hash of its part of the plan and, for a `once = false`
+oneshot, the run of each process and container that it depends on.
+`completed` records the oneshot's completion. [Oneshot
+processes](#oneshot-processes) says how phase uses both. `part_hash`
+records the hash of what phase last launched the process from, as [Plan
+changes of a running host
+process](#plan-changes-of-a-running-host-process) says. A volume entry
+may also hold `owner`, the owner that phase gave the volume's root
+directory, as [Volume owners](#volume-owners) says. phase added the field
+during version 5 without a new version, because it reads as no owner when
+it is missing, and phase writes it only for a volume that has one. A phase
+built before the field reads a record that holds one as unreadable, and
+not as written by a newer phase. phase reads a
+`phase/run/v1` to `phase/run/v5` record with the fields it lacks at
+their defaults, and writes it back as v6: a v1 record reads with no
+ends, no restart policies, no readiness, no sandbox, no oneshot launches
+or completions and no part hashes, a v2 record reads with no readiness,
+no sandbox, no oneshot launches or completions and no part hashes, a v3
+record reads with no sandbox, no oneshot launches or completions and no
+part hashes, a v4 record reads with no oneshot launches or completions
+and no part hashes, and a v5 record reads with no part hashes. A phase
+that reads only an older version refuses a newer record as written by a
+newer phase and asks for an upgrade. Each version only adds fields that
+read as their defaults when they are missing, so the next version, v7,
+which records P15's watcher, adds a schema name and needs no other read
+path.
 
 ### Readiness in the run record
 
@@ -993,6 +1191,114 @@ that the plan lacks still show. Without a plan, as when the manifest is
 invalid, the rows are the record's live entries and leave the plan's
 fields empty.
 
+### Exec
+
+`Phase::exec` runs a one-off command, such as a delivery script or a test
+run, in the context of one process of an app, and returns the command's
+exit status: its code, or the signal that ended it. The command's words
+are separate values that no shell reads.
+
+For a host process, the command runs in the process's directory with the
+inherited `PATH` and `HOME` and the process's environment. phase resolves
+the environment through the `EnvironmentSource` and refuses one that lacks
+a required variable, as a start does, and leaves an optional variable
+without a value unset. When the app is sandboxed, the command runs through
+the launcher that the process's keeper uses, under the sandbox that phase
+builds for the process itself, with the always-protected paths, the
+process's ports and its `TMPDIR`. An app that is not sandboxed runs its
+command unsandboxed. A sandboxed app whose host program gave no keeper
+program has no launcher, so phase refuses its command rather than run it
+unsandboxed. The process need not be running.
+
+For a container process, the command runs in the process's container
+through `docker exec --interactive`, with `--tty` when the host program
+says its standard input is a terminal. phase first reads the container's
+id from the run record and inspects the container with the app's labels,
+as `logs` does. It refuses a container that is not running, and fails
+with Docker's foreign cause for one whose labels name another workspace or
+app. The command receives the variables and secret files that the
+container already holds, and phase passes no value on the command line.
+`exec` never starts a container, and a one-off `docker compose run` is out
+of scope.
+
+A sandboxed command runs in a session of its own. The launcher calls
+`setsid` before it applies the sandbox, so the command has no controlling
+terminal. A command whose controlling terminal is the user's could push
+input into the user's shell with `TIOCSTI`, which the shell would run
+outside the sandbox once the command ends, and Seatbelt allows `ioctl` on
+terminal devices. Without a controlling terminal, `TIOCSTI` fails even
+when the command's standard input is the terminal. A keeper's app already
+leads its own process group and cannot start a session, so the launcher
+goes on only when opening `/dev/tty` fails with `ENXIO`, which says that
+the keeper's own session has no controlling terminal, and refuses on any
+other answer. The sandbox also denies the terminal devices of other
+sessions, so a sandboxed command cannot open the user's terminal by its
+`/dev/ttys*` path and read what the user types, as [The sandbox as
+built](#the-sandbox-as-built) says.
+
+A command with `ExecIo::Inherit` shares the host program's standard
+streams. An unsandboxed command, and the `docker exec` of a container
+command, also share the host program's process group, so when the host
+program runs in the foreground of a terminal, the terminal sends Ctrl-C to
+the command directly. The host program then catches `SIGINT` rather than
+ignore it, because a command inherits an ignored signal, and leaves the
+cancel flag alone. A cancel reaches only that command's own process, so
+processes it started may survive it. A sandboxed command does not receive
+the terminal's Ctrl-C, so the host program sets the cancel flag on
+`SIGINT`, and phase ends the command's whole process group.
+`Phase::exec_sandboxed` tells the host program which case applies. phase
+refuses a sandboxed command with `phase::exec::sandboxed_terminal` when
+the host program says its standard input is a terminal, or when any of
+the host program's standard input, output and error is a terminal, which
+phase checks itself rather than trust the flag. A command that inherited
+the terminal could read what the user types, and one that runs without it
+would not get the terminal it expects.
+
+A command with `ExecIo::Streams` reads and writes the streams the host
+program gives and runs in a process group of its own. When the caller
+sets the cancel flag, phase sends the command's group `TERM`, and `KILL`
+after the kill wait. A command that the cancel kills may leave the
+terminal in raw mode.
+
+`docker exec` exits 125 when it fails itself, 126 when the command cannot
+be run, and 127 when the command is not found. After one of those, phase
+inspects the container again and reports `phase::exec::not_running` when
+the container stopped or went in the meantime, and the status otherwise.
+
+`exec` is not a lifecycle operation. It writes nothing to the run record,
+and starts and stops no app. It takes the workspace's lifecycle lock,
+waiting up to its deadline, and releases it at once, so it runs after an
+`up`, `down`, `restart` or `sweep` in progress and sees what that
+operation left. It does not hold the lock while the command runs, because
+a held lock, exclusive or shared, would block every `up` and `down` of the
+workspace and every keeper's record of a restart for as long as a test run
+or a shell lasts. The run record does not name the command, so a host
+command outlives a `down` of its app.
+
+The engine builds the command in the process's context separately from
+running it, and running it knows nothing of apps or terminals. A later
+init step that `up` runs once a process's dependencies are ready can build
+the same command and run it with `ExecIo::Streams` and its output in the
+process's log.
+
+These follow-ups remain:
+
+- A pty relay owned by phase, which gives a sandboxed command a terminal of
+  its own and relays bytes and window size between it and the user's
+  terminal, as `docker exec --tty` does. Until it exists, a sandboxed
+  command cannot have the terminal.
+- A record of the host commands that `exec` started, so that `down` can
+  end them.
+- A refusal of an exec whose plan differs from the plan that the running
+  process started from, so that the command cannot run under a different
+  sandbox than the process. The run record holds the hash of the whole
+  plan, so this needs a hash of the process's own part first.
+- A Seatbelt rule that denies `TIOCSTI` as a second defence, such as
+  `(deny file-ioctl (ioctl-command 2147578994))`. The profile language
+  accepts the filter, and nono writes phase's own rules after its
+  `file-ioctl` allowances, but phase's rules are written for the network
+  only today.
+
 ## Environment and secrets
 
 phase resolves an app's environment through starmap. starmap's resolution
@@ -1076,7 +1382,8 @@ app's `[permissions]` and allows:
   checkout or cached release;
 - writing only the app's own state directory and temporary directory;
 - listening only on the app's own ports;
-- connecting only to the localhost ports of the apps it depends on, and to
+- connecting only to the localhost ports of the apps its `connect` names,
+  each an app it depends on, and to
   external hosts through an allowlist proxy that phase runs outside the
   sandbox.
 
@@ -1173,9 +1480,18 @@ The sandbox allows (decision P18):
 - reading the system's directories, the toolchain directories that `PATH`
   names and the app's checkout. On macOS the system directories include
   only `/Library/Developer`, `/Library/Frameworks` and `/Library/Apple` of
-  `/Library`. For Cargo the toolchain directories are its `bin`,
-  `registry` and `git` directories and rustup's home, never Cargo's
-  credentials. For mise they are its data directory. For Homebrew they are
+  `/Library`. Of `/dev` they include only `null`, `zero`, `random` and
+  `urandom`, and on macOS also `fd` and `dtracehelper`, which dyld and
+  some runtimes open at startup. On Linux `/dev/fd` links into `/proc`,
+  which is readable. `/dev/null`, `/dev/zero` and `/dev/tty` are also
+  writable. No terminal device of another session is readable, so a
+  sandboxed process cannot read what the user types into a terminal. On
+  macOS the profile also denies reading, writing and `ioctl` on every
+  `/dev/ttys*` and BSD pseudo-terminal device, because nono's base profile
+  allows `ioctl` on them. `/dev/tty` opens only the process's own
+  controlling terminal, and the launcher leaves the caller's first. For
+  Cargo the toolchain directories are its `bin`, `registry` and `git`
+  directories and rustup's home, never Cargo's credentials. For mise they are its data directory. For Homebrew they are
   the prefix's `bin`, `sbin`, `Cellar`, `opt`, `lib`, `libexec`, `share`,
   `include` and `Frameworks`, never its `var` or `etc`, with one exception
   inside `etc`. A sandboxed process may read the prefix's `etc/openssl`
@@ -1183,7 +1499,11 @@ The sandbox allows (decision P18):
   the CA bundle that Homebrew copies from the system keychain. Neither is
   secret, and every TLS client that links Homebrew's OpenSSL opens them
   when it starts: Homebrew's node exits with "OpenSSL configuration error"
-  when it cannot read `openssl.cnf`. Each OpenSSL directory also holds
+  when it cannot read `openssl.cnf`. A sandboxed process may also read
+  the prefix's `etc/gitconfig`, the system configuration of Homebrew's
+  git, which git reads when it starts and stops on when it cannot. Homebrew
+  or an administrator installs it, and it holds no secret. Each OpenSSL
+  directory also holds
   `private`, OpenSSL's conventional directory for private keys, which a
   user may fill, so no sandboxed process may read it. phase therefore
   grants only the directory's `openssl.cnf`, `cert.pem` and `certs`, on
@@ -1210,7 +1530,12 @@ The sandbox allows (decision P18):
   checks the metadata of every name of a path as the kernel resolves it, so
   reading
   the link through `/var` also needs the metadata of the `/var` link
-  itself, and the profile allows that one literal path. nono allows a
+  itself, and the profile allows that one literal path. It allows the
+  `/etc` link's metadata for the same reason: git stats `/etc/gitconfig`,
+  and when the stat of a missing file through `/etc` fails with "Operation
+  not permitted" in place of "No such file", git stops with "unable to
+  access". An exec test of a sandboxed `git status` with `PATH` set to
+  `/usr/bin:/bin` found this. nono allows a
   link's metadata only when a granted path or a `PATH` entry is spelt
   through it. Without the rule, `xcode-select` failed with "unable to read
   data link" on a machine whose `PATH` names no directory under `/var`,
@@ -1247,7 +1572,8 @@ The sandbox allows (decision P18):
   directories carry the workspace's id because app names are unique only
   within a workspace;
 - listening on the loopback ports that `listen` names, and connecting over
-  loopback to the ports of the apps it depends on (decision P16).
+  loopback to the ports of the apps that `connect` names (decision P16).
+  A dependency that `connect` leaves out is unreachable.
 
 The sandbox always denies these paths, which a sandboxed app may neither
 read nor write:
@@ -1271,6 +1597,86 @@ read nor write:
   every other checkout, and the workspace's manifest and `AGENTS.md`, which
   mxv names. phase refuses to sandbox an app whose checkout is the
   workspace's own directory, because its checkout would hold all of them.
+
+On macOS a sandboxed process may read the metadata of git's global
+configuration, `~/.gitconfig`, `~/.config/git` and `~/.config/git/config`,
+and of no other protected path. It may `stat` them, so it can learn that
+each exists, and its size, mode and times, but it may not read their
+contents or list the directory. libgit2, which cargo uses for git
+dependencies, stats `~/.gitconfig` before it opens a repository. When the
+stat failed, cargo treated a git dependency that it had fetched outside the
+sandbox as unusable, tried to delete it, and exited with status 101 when
+the sandbox refused the delete. The other protected paths keep their
+metadata denied, because cargo stops with "could not load Cargo
+configuration" when it can stat `~/.cargo/config.toml` but cannot read it.
+On Linux, Landlock does not restrict reading metadata, so a process can
+stat every protected path there and learn the same facts about each.
+
+On macOS a sandboxed process may also read the metadata of each regular
+file that its standard input, output or error has open when the launcher
+starts it, such as the log in phase's state directory that its keeper
+gives it, or a file that the caller of `exec` redirects its output to.
+The launcher finds each file's path with `fcntl(F_GETPATH)` before it
+applies the sandbox, and the profile allows `file-read-metadata` of that
+one literal path. Seatbelt checks `fstat` on an open descriptor against
+the file's path, and node checks its standard streams with `fstat` when
+it starts and aborts with signal 6, writing no message, when `fstat`
+fails with anything but `EBADF`. Without the grant every node aborted
+under `up`, because its log lies in phase's state directory, which the
+sandbox denies. The grant reveals only the file's size, mode, owner and
+times, which the process could mostly learn from the descriptor it
+already holds, for example its size with `lseek`. It reveals nothing
+about any other file in the same directory, and it lets the process
+neither read the file's contents through a new descriptor nor list the
+directory. A stream that is a pipe, a socket or a terminal adds no
+grant, and the profile still denies every terminal device of
+[the list above](#the-sandbox-as-built).
+
+Every sandboxed app runs with `GIT_CONFIG_GLOBAL=/dev/null` unless the
+app's environment sets `GIT_CONFIG_GLOBAL`, so git reads no global
+configuration. The keeper sets it after the app's environment and keeps a
+value that the plan gave, so a plan can still name a configuration file
+that the app may read. git stops with "unable
+to access" when `~/.gitconfig` or `~/.config/git/config` exists but cannot
+be read, so without it a sandboxed git ran no command on a machine that
+has either.
+
+On macOS every sandboxed app also runs with
+`SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app's environment sets
+`SSL_CERT_FILE`, in the same way. rustls-native-certs, which the AWS
+SDK's native-roots TLS uses, reads its trusted roots from the file that
+`SSL_CERT_FILE` names when the variable is set, and otherwise asks the
+macOS trust settings, which go through the keychain's
+`com.apple.SecurityServer` Mach service. nono's profile denies that
+service, so a sandboxed process found no roots, and the AWS SDK panicked
+at startup with "no valid root certificates parsed". `/etc/ssl/cert.pem`
+is the bundle of trusted roots that macOS ships and updates, and the
+sandbox already lets every process read `/private/etc`, so the variable
+grants nothing new. A trace of the sandbox's denials while
+rustls-native-certs ran showed the lookup of `com.apple.SecurityServer`
+and the metadata of `/Library/Keychains` and `~/Library/Keychains`
+denied. phase considered granting those and chose not to. Allowing
+`com.apple.SecurityServer` would let a sandboxed process ask securityd
+for keychain items, which the sandbox's deny of the Keychains exists to
+stop, and a grant of the keychain files alone leaves the trust settings
+API without the service it calls. The variable has two costs. A process trusts only
+the roots that macOS ships: a root that an administrator or the user
+added to a keychain, such as a company's TLS-inspecting proxy or a local
+development authority, is not trusted, and the roots that a person
+marked as distrusted in Keychain Access stay trusted. A plan that needs
+other roots sets `SSL_CERT_FILE` in the app's environment to a bundle
+that the app may read, such as one in its checkout. OpenSSL and the
+programs that link it, such as Python's `ssl` module and Ruby, also read
+`SSL_CERT_FILE` as their default bundle, so under the sandbox they trust
+the same system roots in place of the bundle they were built with.
+Homebrew builds its OpenSSL's `cert.pem` from the system's roots and the
+roots an administrator trusted in `/Library/Keychains/System.keychain`,
+so a Homebrew Python or Ruby under the sandbox also loses those
+administrator roots, and the same remedy applies. An app that sets
+`SSL_CERT_DIR` gets no `SSL_CERT_FILE`, because rustls-native-certs and
+OpenSSL trust the roots of both together, and the system bundle would
+widen what the app's directory allows. Linux keeps its roots in `/etc`, which the
+sandbox may read, and phase sets no `SSL_CERT_FILE` there.
 
 The sandbox lets an app read, but never write, the launcher program, each
 link of its chain of symbolic links and each one's directory, the
@@ -1334,8 +1740,8 @@ would fail the macOS test, and the exact pin means only a pull request
 that moves the pin can bring one in.
 
 On macOS the sandbox is partial, and `status` shows it as `seatbelt
-(partial: its listening ports accept connections from other machines on
-the network)`.
+(partial: the sandbox cannot limit its listening ports to the loopback
+interface)`.
 Seatbelt restricts a bind by port and never by address, and its
 `localhost` matches every address of the machine. An inbound rule that
 also names the remote side refuses the `listen` itself, because `listen`
@@ -1343,6 +1749,11 @@ is checked with no remote address. A process that may listen on a port can
 therefore listen on it on every address, and a macOS test shows that a
 peer on the machine's `en0` address reaches it. A peer on another machine
 was not tested. A connection out to another host stays refused.
+Seatbelt's `localhost` covers ::1 as well as 127.0.0.1, so an app may
+listen on its own port on ::1 and connect to a dependency that listens
+only on ::1. The macOS test checks both on a machine with an IPv6
+loopback address. On Linux, Landlock restricts TCP ports with no address,
+so the same holds there.
 
 On Linux `status` shows a process under Landlock as `unsandboxed
 (Landlock cannot restrict Unix sockets (nono does not yet enforce
@@ -1440,6 +1851,7 @@ impl Phase {
     pub fn status(&self, workspace: &WorkspaceId, plan: Option<&Plan>) -> Result<Status, PhaseError>;
     pub fn logs(&self, workspace: &Path, request: &LogRequest, sink: &mut dyn LineSink) -> Result<(), PhaseError>;
     pub fn sweep(&self, workspace: &Path, dry_run: bool) -> Result<Swept, PhaseError>;
+    pub fn exec(&self, plan: &Plan, request: ExecRequest, env: &dyn EnvironmentSource, deadline: Instant, cancel: &Cancel) -> Result<ExitStatus, PhaseError>;
 }
 ```
 
@@ -1471,7 +1883,9 @@ and redesigns are the evidence for each one.
 - A run record that phase cannot read blocks only its own workspace. A
   record written by a newer phase asks you to upgrade. `sweep --unreadable
   [--dry-run]` removes the rest. A phase upgrade leaves running workspaces
-  running, and the next `up` adopts them.
+  running, and the next `up` adopts them. It restarts once each host
+  process whose entry records no part of the plan, as [Plan changes of a
+  running host process](#plan-changes-of-a-running-host-process) says.
 
 ### Starting and stopping
 
@@ -1481,6 +1895,11 @@ and redesigns are the evidence for each one.
   plan hash, the program's digest, and a keyed hash of its environment
   values, never the values) with the new ones. It restarts a process whose
   inputs changed and leaves the rest alone without probing them again.
+  Built so far: a container's plan hash, as [Containers](#containers)
+  says, and a host process's part of the plan, as [Plan changes of a
+  running host process](#plan-changes-of-a-running-host-process) says.
+  No program digest is recorded yet, because phase runs no release or
+  build yet, and no keyed hash of environment values is recorded yet.
 - `up` has separate deadlines for building and for readiness. When a
   deadline cuts off a start or stop, phase reports the outcome as
   uncertain and does not retry it.
@@ -1497,6 +1916,93 @@ and redesigns are the evidence for each one.
 - Ctrl-C during a foreground `up` stops what that `up` started. Status
   shows each workspace as starting, running, partly running, stopped, or
   unknown when processes phase cannot read decide which of those it is.
+
+### Plan changes of a running host process
+
+Built 5 November 2026.
+
+- When phase launches a host process, it records in the process's run
+  record entry, as `part_hash`, the hash of what it launches the process
+  from. The hash covers the process's own part of the plan: the app's
+  runner, source, ports, permissions and override names, and the
+  process's own plan, such as its command, variable names, working
+  directory, port, probes and restart policy. An unsandboxed process's
+  hash is that part's hash alone, the same hash that a oneshot's
+  `oneshot` records.
+- For a process that runs under the sandbox, the hash also covers the
+  sandbox that phase would build for it now, with its lists sorted. That
+  sandbox covers the ports the process may listen on and connect to, so a
+  dependency that moves to another port restarts each sandboxed dependent
+  whose `connect` names it. It also covers the paths that phase and the
+  host program protect, `HOME`, the workspace's paths, phase's state
+  directory and the launcher, so a host program that protects one more
+  path restarts every sandboxed process at the next `up`. A sandbox that
+  phase cannot build counts by its error, and `up` reports the error with
+  the running process left alone.
+- The hash leaves out the grants that come only from the inherited
+  `PATH`: the `PATH` directories, the toolchain directories and links
+  that they lead to, and the Homebrew denials of a Homebrew prefix on
+  `PATH`. Otherwise an `up` from a shell with another `PATH` would
+  restart every sandboxed process. A running process therefore keeps the
+  read grants of the `PATH` it started with until its next start, even
+  when a later `up` runs with a narrower `PATH`. `restart` builds the
+  sandbox from the current `PATH`.
+- A oneshot's completion keeps the hash of its part alone, whether or not
+  it runs sandboxed.
+- The hash holds no environment value. `restart` records it too.
+- A later `up` that finds the process's keeper running compares the
+  recorded hash with the hash of the process's part of the new plan. When
+  they are equal, `up` leaves the process alone and reports it as already
+  running, as before.
+- When they differ, or the entry records no hash, as an entry that an
+  earlier phase wrote does not, `up` restarts the process. It resolves
+  the process's environment first, so a resolver that fails leaves the
+  running process alone, as it leaves a container that `up` would
+  replace. It then builds the new sandbox and checks that nothing but the
+  running process holds the new port, so a sandbox that cannot be built
+  or a port that another process holds also leaves it running. It then
+  stops the keeper and the process through the stop
+  that `down` and `restart` use, within the readiness deadline of `up`,
+  and launches the process again from the new plan, as a first start
+  does: it checks the port, writes the entry back to planned, starts a
+  new keeper, and waits for readiness. The first `up` after an upgrade
+  therefore brings every running host process under its current plan
+  once, which puts a process whose app declares permissions under the
+  sandbox, and later `up`s leave it alone. An upgrade that changes what
+  phase's sandbox protects restarts each sandboxed process once in the
+  same way.
+- Once the new process is ready, the app's report reads `restarted`, as
+  for a replaced container, and carries a `plan-changed` note, such as `restarted api/server because
+  its part of the plan changed`, or `restarted api/server because the run
+  record does not say which part of the plan it started from`. A stop
+  that leaves something behind reports the app as `left`, or as
+  uncertain once the deadline has passed, and starts nothing in its
+  place.
+- The restart of one process restarts no other process. The processes
+  and apps that depend on the restarted process keep running when their
+  own hashes are unchanged, as the apps that depend on a replaced
+  container do. A sandboxed dependent's hash changes when a dependency
+  moves to another port, so `up` restarts it for its own change. A `once = false` oneshot that depends on it runs again, because its
+  dependency's run changed.
+- A oneshot that still runs is left, as before, and a completed oneshot
+  is compared by its completion, as [Oneshot
+  processes](#oneshot-processes) says.
+- The hash covers no environment value, so a changed value alone does
+  not restart a host process. `AppliedEnvironment::digest` gives a keyed
+  hash of the values, but phase has no key of its own to give it yet, and
+  would have to resolve every running process's environment on each `up`
+  to compare it. A dependency's port that a process receives is part of
+  the process's own part of the plan, because the host program lists it
+  in the app's `ports`, so a process that receives a port that moved
+  restarts whether or not it runs sandboxed.
+- A failed `up` leaves every process that was running before it running,
+  apart from the one that failed. phase stops what this `up` started from
+  nothing, and the process or container whose start was in progress when
+  the failure or a cancel came. Something this `up` restarted and found
+  ready stays running, and its app reads `restarted`, so a host program
+  that rolls back the apps reported as `started` leaves it too. A
+  container whose entry reads running counts as restarted even when it
+  had crashed, because the record cannot tell the two apart.
 
 ### Oneshot processes
 
@@ -1599,7 +2105,9 @@ still refused with `NotRunnable::Oneshot`.
   and `logs` open records read-only, take no lock, and never hold one while
   they stream, so they also work inside an agent's sandbox.
 - `exec` and the host program's tests wait for an `up` in progress to
-  finish, up to a deadline, before they run.
+  finish, up to a deadline, before they run. `exec` takes the lifecycle
+  lock and releases it at once, and holds no lock while its command runs.
+  See [Exec](#exec).
 
 ### Logs
 
@@ -1663,8 +2171,9 @@ Each decision states what this draft assumes until it is decided.
 | P12 | The command verbs. | Decided 4 November 2026: `up` and `down`. |
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
-| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v6, since v4 records the sandbox and v5 records oneshot completions), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
-| P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
-| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt lets an app's listening ports accept connections from other machines on the network, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
-| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the refusal of an app that runs at the workspace's top, and the launcher's second check. |
+| P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v7, since v4 records the sandbox, v5 records oneshot completions and v6 records each host process's part hash), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
+| P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps its `connect` names, each an app it depends on; on 6 November 2026 a dependency that `connect` leaves out became unreachable. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
+| P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt cannot limit an app's listening ports to the loopback interface, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
+| P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. On 6 November 2026 macOS gained the metadata of the regular files that a process's standard streams have open, so node starts, and `SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app sets it, so rustls-native-certs and the AWS SDK find the system's trusted roots. See [The sandbox as built](#the-sandbox-as-built). |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |
+| P20 | How a container app that runs as another user than root writes a workspace volume. | Decided 5 November 2026: after the app's container is created and before it starts, a busybox helper pinned by digest gives the root directory of each volume, and only the root, to the app's `owner`, or else its run-as user, or else its image's `USER`, as the secret files take their owner. `keep` leaves the volumes alone, and so does an app that runs as root when the plan names no `owner`; an `owner` of `0:0` gives them to root. A name is resolved with `id` in the app's image, and one that resolves to uid 0 is refused. A helper runs after Docker creates the container and on every `up`, because Docker copies an image directory's owner onto an empty volume at creation and the run record cannot prove the owner still holds. The run record keeps the owner phase wanted in a v5 field. See [Volume owners](#volume-owners). |

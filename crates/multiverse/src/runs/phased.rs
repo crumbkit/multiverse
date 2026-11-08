@@ -23,14 +23,13 @@ use phase::container::{
 };
 use phase::{
     AppName, AppOutcome, Cancel, Handle, LineSink, LogLine, LogNote, LogRequest, Note, PhaseError,
-    ProcessName, Report, RunnerKind, Sandboxing, Selection, StartProblem, StatusRow, Target,
-    UnknownReason, UpDeadlines, WorkspaceId,
+    ProcessName, Report, RunnerKind, Selection, StartProblem, StatusRow, Target, UnknownReason,
+    UpDeadlines, WorkspaceId,
 };
 
 use super::{
-    DownOutcome, ExitReason, Follower, Kind, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, TAIL_LINES, Unstoppable, UpOutcome, Waited, code_and_signal, received,
-    tail,
+    DownOutcome, ExitReason, Follower, Footprint, Kind, ProcessNote, ProcessState, ProcessStatus,
+    RenamedVolume, Runs, Unstoppable, UpOutcome, Waited, code_and_signal, received, tail,
 };
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
@@ -38,6 +37,7 @@ use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Inputs, MAIN};
 use crate::record::Workspace;
 use crate::run_files::RunHost;
+use crate::service::PROVISION_APP;
 use crate::store::{self, Lock, Store};
 
 /// How long `up` gives phase to build each selected checkout. mxv's apps
@@ -64,8 +64,11 @@ const CONTAINERS_RAN: &str = ".containers";
 /// `mxv remove --delete-volumes` reads, and [`CONTAINERS_RAN`].
 const KEPT_FILES: &[&str] = &[".lock", ".volumes", CONTAINERS_RAN];
 
+mod exec;
 #[cfg(test)]
 mod tests;
+
+pub use exec::{Exec, ExecEnd, ExecTarget};
 
 /// Returns the checkout that holds `workspace`'s manifest. A workspace
 /// holds one checkout for now.
@@ -158,8 +161,22 @@ fn ready_of(row: &StatusRow) -> Option<bool> {
     }
 }
 
+/// Returns the apps of `report` that a failed `up` rolls back.
+fn started_from_nothing(report: &Report) -> Vec<Target> {
+    report
+        .apps
+        .iter()
+        .filter(|app| matches!(app.outcome, AppOutcome::Started))
+        .map(|app| Target {
+            app: app.app.clone(),
+            process: None,
+        })
+        .collect()
+}
+
 /// Returns the notes of `report` that mxv shows, by unit: the secret files
-/// that `up` rewrote or kept for each app.
+/// that `up` rewrote or kept for each app, and the host processes that
+/// `up` restarted because their part of the plan changed.
 fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
     let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
     for app in &report.apps {
@@ -171,6 +188,12 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
                 Note::SecretsKept { message, .. } => ProcessNote::SecretsKept {
                     message: message.clone(),
                 },
+                Note::PlanChanged { message, .. } => ProcessNote::PlanChanged {
+                    message: message.clone(),
+                },
+                Note::VolumeOwnerUnchecked { message, .. } => ProcessNote::VolumeOwnerUnchecked {
+                    message: message.clone(),
+                },
                 _ => continue,
             };
             notes
@@ -180,39 +203,6 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
         }
     }
     notes
-}
-
-/// The reason that phase gives for a host process whose app declares no
-/// permissions. The end-to-end tests of `status` hold the same sentence,
-/// so they fail if phase changes it.
-const UNDECLARED: &str = "its app declares no permissions";
-
-/// Returns the warning for the host process `unit` of the workspace
-/// `workspace`, which `up` found already running, when phase recorded it
-/// as started with or without permissions and its manifest now asks for
-/// the other: `wants` is true when the manifest gives it a `permissions`
-/// table. It returns `None` when the two agree, or when `row` records no
-/// sandbox state. A process recorded as unsandboxed for another reason,
-/// such as a platform without a sandbox, declared its permissions.
-fn stale_sandbox(workspace: &str, unit: &str, wants: bool, row: &StatusRow) -> Option<ProcessNote> {
-    let declared = !matches!(
-        row.sandbox.as_ref()?,
-        Sandboxing::Unsandboxed { reason, .. } if reason == UNDECLARED
-    );
-    let restart = format!("mxv restart -w {workspace} {unit}");
-    match (wants, declared) {
-        (true, false) => Some(ProcessNote::SandboxStale {
-            message: format!(
-                "{unit} still runs unsandboxed, because it was running before its manifest gave it permissions; run `{restart}` to run it under the sandbox"
-            ),
-        }),
-        (false, true) => Some(ProcessNote::SandboxStale {
-            message: format!(
-                "{unit} still runs as its earlier permissions allowed, because it was running before its manifest dropped them; run `{restart}` to run it unsandboxed"
-            ),
-        }),
-        _ => None,
-    }
 }
 
 /// Returns the exit code and the signal that mxv reports for a process
@@ -430,6 +420,7 @@ impl Runs {
             ports: &workspace.ports,
             grace: self.grace,
             caller: &self.caller,
+            provisioner: self.provisioner.clone(),
         }
     }
 
@@ -491,6 +482,18 @@ impl Runs {
             (Some(Unit::Container(_)), _) => Kind::Container,
             (Some(Unit::Process(_)), _) => Kind::Process,
             (None, Some(row)) if row.runner == RunnerKind::Container => Kind::Container,
+            // A backend of the services runs in a container whether or not
+            // phase still has its row, as after `down`.
+            (None, _)
+                if manifest.is_some_and(|manifest| {
+                    manifest
+                        .backends()
+                        .iter()
+                        .any(|backend| backend.app() == name)
+                }) =>
+            {
+                Kind::Container
+            }
             (None, _) => Kind::Process,
         };
         ProcessStatus {
@@ -508,12 +511,16 @@ impl Runs {
         }
     }
 
-    /// Returns the units that `status` reports: the manifest's in start
-    /// order, then those that only phase's rows name, in name order.
+    /// Returns the units that `status` reports: the apps of the manifest's
+    /// services, then the manifest's units in start order, then those that
+    /// only phase's rows name, in name order.
     fn phase_known(manifest: Option<&Manifest>, rows: &BTreeMap<String, StatusRow>) -> Vec<String> {
-        let mut names = manifest
-            .and_then(|manifest| manifest.start_order(&[]).ok())
-            .unwrap_or_default();
+        let mut names = manifest.map(Manifest::service_apps).unwrap_or_default();
+        names.extend(
+            manifest
+                .and_then(|manifest| manifest.start_order(&[]).ok())
+                .unwrap_or_default(),
+        );
         for name in rows.keys() {
             if !names.contains(name) {
                 names.push(name.clone());
@@ -613,6 +620,46 @@ impl Runs {
         Ok(renamed)
     }
 
+    /// Returns the host processes and containers of `workspace` that
+    /// phase runs and that may run. A process or container that mxv
+    /// started before phase ran its apps is left out, so a reclaim counts
+    /// no memory for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Runs::status`].
+    pub fn footprint(&self, workspace: &Workspace) -> Result<Footprint, Error> {
+        let manifest = workspace.manifest().ok().flatten();
+        let mut footprint = Footprint::default();
+        for row in self.phase_rows(workspace, manifest.as_ref())?.values() {
+            if !row.state.may_run() {
+                continue;
+            }
+            match &row.handle {
+                Some(Handle::Pid { pid, .. }) => footprint.pids.push(*pid),
+                Some(Handle::Container { id, .. }) => {
+                    footprint.containers.push(id.as_str().to_owned());
+                }
+                _ => {}
+            }
+        }
+        Ok(footprint)
+    }
+
+    /// Returns the resident memory of the containers of `footprint`, as
+    /// docker measures it. It runs no docker command for a footprint
+    /// without containers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
+    /// [`Error::DockerFailed`].
+    pub fn container_memory(&self, footprint: &Footprint) -> Result<u64, Error> {
+        Ok(phase::container::container_memory(&footprint.containers)?
+            .values()
+            .fold(0_u64, |sum, bytes| sum.saturating_add(*bytes)))
+    }
+
     /// Returns the names of the processes and containers of `workspace`
     /// that may run, in start order.
     ///
@@ -656,6 +703,10 @@ impl Runs {
     /// [`Runs::status`], the docker errors, [`Error::ProcessUnstartable`]
     /// for a process that cannot start, and [`Error::Phase`] for another
     /// failure of phase.
+    ///
+    /// When `up` fails after phase ran, `earlier` receives the notes of the
+    /// apps it reached, such as the processes it restarted, which keep
+    /// running. An `up` that succeeds puts its notes on each status.
     pub fn up(
         &self,
         _lock: &Lock,
@@ -663,6 +714,7 @@ impl Runs {
         workspace: &mut Workspace,
         manifest: &Manifest,
         names: &[String],
+        earlier: &mut Vec<ProcessNote>,
     ) -> Result<UpOutcome, Error> {
         let order = match manifest.start_order(names) {
             Ok(order) => order,
@@ -709,6 +761,14 @@ impl Runs {
             .filter_map(|name| manifest.unit(name).and_then(Unit::ready))
             .map(|ready| ready.timeout)
             .sum();
+        let backends = u32::try_from(manifest.backends().len()).unwrap_or(u32::MAX);
+        let ready_wait = if backends == 0 {
+            ready_wait
+        } else {
+            ready_wait
+                + phase_plan::BACKEND_READY_TIMEOUT * backends
+                + phase_plan::PROVISION_TIMEOUT
+        };
         let now = Instant::now();
         let deadlines = UpDeadlines::new(now + BUILD_WAIT, now + ready_wait + START_MARGIN);
         let report = self
@@ -724,35 +784,28 @@ impl Runs {
         match self.failure(workspace, manifest, &id, &report) {
             Ok(None) => {}
             Ok(Some(outcome)) => {
+                earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Ok(outcome);
             }
             Err(error) => {
+                earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Err(error);
             }
         }
         let rows = self.phase_rows(workspace, Some(manifest))?;
         let mut notes = notes_of(&report);
-        for app in &report.apps {
-            let unit = app.app.as_str();
-            if app.outcome != AppOutcome::AlreadyRunning {
-                continue;
-            }
-            let (Some(process), Some(row)) = (manifest.processes.get(unit), rows.get(unit)) else {
-                continue;
-            };
-            if let Some(note) = stale_sandbox(
-                workspace.name.as_str(),
-                unit,
-                process.permissions.is_some(),
-                row,
-            ) {
-                notes.entry(unit.to_owned()).or_default().push(note);
-            }
-        }
+        // The apps of the services come first, when this `up` reached them.
+        let reached: BTreeSet<&str> = report.apps.iter().map(|app| app.app.as_str()).collect();
+        let mut shown: Vec<String> = manifest
+            .service_apps()
+            .into_iter()
+            .filter(|name| reached.contains(name.as_str()))
+            .collect();
+        shown.extend(order);
         Ok(UpOutcome::Up(
-            order
+            shown
                 .iter()
                 .map(|name| {
                     let mut status =
@@ -811,19 +864,12 @@ impl Runs {
         Ok(None)
     }
 
-    /// Stops the apps that a failed `up` started, as its `report` names
-    /// them. Each step is best effort, because the caller reports the
+    /// Stops the apps that a failed `up` started from nothing, as its
+    /// `report` names them. An app that it restarted ran before it, so that
+    /// app keeps running. Each step is best effort, because the caller reports the
     /// failure that stopped `up`.
     fn roll_back_phase(&self, id: &WorkspaceId, report: &Report) {
-        let started: Vec<Target> = report
-            .apps
-            .iter()
-            .filter(|app| matches!(app.outcome, AppOutcome::Started))
-            .map(|app| Target {
-                app: app.app.clone(),
-                process: None,
-            })
-            .collect();
+        let started = started_from_nothing(report);
         if started.is_empty() {
             return;
         }
@@ -913,11 +959,6 @@ impl Runs {
         problem: &StartProblem,
     ) -> Result<UpOutcome, Error> {
         let log = self.phase_log(id, manifest, unit);
-        let log_tail = || {
-            log.as_deref()
-                .map(|log| tail(log, TAIL_LINES))
-                .unwrap_or_default()
-        };
         let number = |port: &str| workspace.ports.get(port).copied().unwrap_or_default();
         Ok(match problem {
             StartProblem::PortTaken { port, holders, .. } => {
@@ -939,7 +980,6 @@ impl Runs {
                     process: unit.to_owned(),
                     code,
                     signal,
-                    tail: log_tail(),
                     log,
                 }
             }
@@ -948,7 +988,6 @@ impl Runs {
                 port: port.to_string(),
                 number: number(port.as_str()),
                 pid: holders.first().copied(),
-                tail: log_tail(),
                 log,
             },
             StartProblem::NotReady { waited, .. } => {
@@ -970,7 +1009,6 @@ impl Runs {
                     process: unit.to_owned(),
                     waited: waited_for,
                     timeout: ready.map_or(*waited, |ready| ready.timeout),
-                    tail: log_tail(),
                     log,
                 }
             }
@@ -984,10 +1022,14 @@ impl Runs {
     }
 
     /// Returns the log file that phase's keeper gives the host process
-    /// `unit`, or `None` for a container, whose log comes from `docker
-    /// logs`.
+    /// `unit`, which is a process of `manifest` or [`PROVISION_APP`] when
+    /// the manifest declares services, or `None` for a container, whose
+    /// log comes from `docker logs`.
     fn phase_log(&self, id: &WorkspaceId, manifest: &Manifest, unit: &str) -> Option<PathBuf> {
-        manifest.processes.get(unit)?;
+        let provisions = unit == PROVISION_APP && !manifest.services.is_empty();
+        if !provisions && !manifest.processes.contains_key(unit) {
+            return None;
+        }
         Some(
             self.phase
                 .state_dir()
@@ -1338,6 +1380,9 @@ fn phase_code(code: &str) -> &'static str {
         "phase::process::unstartable",
         "phase::app::not_runnable",
         "phase::select::unknown",
+        "phase::exec::not_running",
+        "phase::exec::unstartable",
+        "phase::exec::sandboxed_terminal",
         "phase::record::unplanned",
     ];
     CODES

@@ -102,6 +102,18 @@ pub(crate) trait Docker {
     /// including when its context is unknown or its program is missing,
     /// and [`DockerError::Refused`] when it answers and refuses.
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError>;
+
+    /// Removes every volume-owner helper of the workspace `workspace`: a
+    /// short-lived container that phase labels with the workspace and the
+    /// `volume-owner` role, which a run that ended early left behind. The
+    /// run record does not name such a helper, so `sweep` finds it by its
+    /// labels, and never by its name alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DockerError::Unavailable`] when Docker does not answer,
+    /// and [`DockerError::Refused`] when it answers and refuses.
+    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError>;
 }
 
 /// What Docker reports of a container: its state, how many times Docker

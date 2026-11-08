@@ -13,15 +13,16 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    DownOutcome, Git, Lock, Manifest, ManifestError, ProcessStatus, Runs, Store, Unstoppable,
-    UpOutcome, Volumes, Workspace, WorkspaceName,
+    DownOutcome, Error, Git, Lock, Manifest, ManifestError, ProcessStatus, Reclaimed, Runs, Store,
+    Unstoppable, UpOutcome, Volumes, Workspace, WorkspaceName,
 };
+use std::time::Duration;
 
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
-use crate::run_failures::{LogTail, NotMoved, RunFailure};
+use crate::run_failures::{NotMoved, RunFailure};
 use crate::verbs;
 
 /// The document that `mxv up` prints.
@@ -75,23 +76,40 @@ pub(crate) const PORTS_RESET: Document<Vec<PortRow>> = Document::new(
 
 /// A workspace that a process verb works on, with the store that holds its
 /// record and the run files of its processes.
-struct Context {
+pub(crate) struct Context {
     /// The store of the workspace records.
     store: Store,
     /// The run files of every workspace's processes.
-    runs: Runs,
+    pub(crate) runs: Runs,
     /// The workspace.
-    workspace: Workspace,
+    pub(crate) workspace: Workspace,
     /// The processes that the command line names after the workspace.
     processes: Vec<String>,
 }
 
 impl Context {
+    /// Narrows the mark that `mxv reclaim` left on the workspace once
+    /// `up`, `restart` or `down` has started or stopped the processes
+    /// `names`, or every process when `names` is empty, while the command
+    /// holds the workspace's lock. The mark keeps the processes that are
+    /// still to start.
+    fn forget_reclaim(&mut self, names: &[String]) -> Result<(), MxvFailure> {
+        let Some(mark) = &self.workspace.reclaimed else {
+            return Ok(());
+        };
+        let left = mark.without(names);
+        if left.as_ref() != Some(mark) {
+            self.workspace.reclaimed = left;
+            self.store.update(&mut self.workspace)?;
+        }
+        Ok(())
+    }
+
     /// Takes the workspace's lock, which `up`, `down` and `restart` hold
     /// while they start or stop its processes, then reads the workspace's
     /// record again, so the ports are the ones that a command which held
     /// the lock before stored.
-    fn lock(&mut self) -> Result<Lock, MxvFailure> {
+    pub(crate) fn lock(&mut self) -> Result<Lock, MxvFailure> {
         let lock = self.runs.lock(&self.workspace.name)?;
         if let Some(fresh) = self.store.read(&self.workspace.name)? {
             self.workspace = fresh;
@@ -102,7 +120,7 @@ impl Context {
 
 /// Returns the context of the workspace that `-w` names, or else of the
 /// one that holds the current directory, and the processes `processes`.
-fn context(
+pub(crate) fn context(
     environment: &Environment,
     workspace: Option<&String>,
     processes: &[String],
@@ -121,12 +139,35 @@ fn context(
         }
         None => current(&store, environment)?.ok_or(RunFailure::NotCurrent)?,
     };
+    touch(&runs, &workspace.name);
     Ok(Context {
         store,
         runs,
         workspace,
         processes: processes.to_vec(),
     })
+}
+
+/// How often `mxv exec` and `mxv logs --follow` touch the workspace again
+/// while they run, well inside the shortest idle age that `mxv reclaim`
+/// accepts.
+pub(crate) const TOUCH_EVERY: Duration = Duration::from_secs(5 * 60);
+
+/// Records that an mxv command named the workspace `name` now, which
+/// `mxv reclaim` reads as activity. A touch that cannot be written changes
+/// nothing the command does, so its failure is ignored, and the workspace
+/// then reads as last named earlier.
+fn touch(runs: &Runs, name: &WorkspaceName) {
+    let _ = runs.touch(name);
+}
+
+/// Records that an mxv command named the workspace `name` now, as
+/// [`touch`] does, for the verbs that read a workspace without a process
+/// context, such as `show` and `cd`.
+pub(crate) fn touch_named(environment: &Environment, name: &WorkspaceName) {
+    if let Ok(runs) = environment.runs() {
+        touch(&runs, name);
+    }
 }
 
 /// Returns the workspace whose directory holds the current directory, or
@@ -183,16 +224,19 @@ fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<Manifes
 /// Returns the warnings that `up` and `restart` print for `manifest`, the
 /// manifest of `workspace`: each table that mxv ignores although its name
 /// is close to one of its own, and a manifest that declares nothing to
-/// start.
+/// start. A manifest of services alone starts their backends.
 fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
     let mut warnings = manifest.warnings.clone();
-    if manifest.processes.is_empty() && manifest.containers.is_empty() {
+    if manifest.processes.is_empty()
+        && manifest.containers.is_empty()
+        && manifest.services.is_empty()
+    {
         let path = workspace
             .manifest_inputs()
             .chosen()
             .map_or_else(|| workspace.manifest_file(), Path::to_path_buf);
         warnings.push(format!(
-            "the manifest {} declares no processes and no containers, so mxv started nothing",
+            "the manifest {} declares no processes, no containers and no services, so mxv started nothing",
             path.display()
         ));
     }
@@ -216,7 +260,7 @@ pub(crate) fn refuse_unfinished(workspace: &Workspace) -> Result<(), MxvFailure>
 
 /// Returns the workspace's manifest, or the failure of a workspace with an
 /// unfinished checkout or of a checkout without a manifest.
-fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumbkit::Error> {
+pub(crate) fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumbkit::Error> {
     refuse_unfinished(workspace)?;
     Ok(
         manifest(workspace)?.ok_or_else(|| RunFailure::ManifestMissing {
@@ -233,27 +277,53 @@ pub(crate) fn up(
 ) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
-    start(&mut context, &lock)
+    if context.processes.is_empty()
+        && let Some(reclaimed) = &context.workspace.reclaimed
+        && let Ok(Some(manifest)) = context.workspace.manifest()
+    {
+        // `mxv reclaim` recorded what ran, so `up` starts the same
+        // processes again. A name that the manifest no longer declares is
+        // left out.
+        context.processes = reclaimed
+            .processes
+            .iter()
+            .filter(|name| manifest.unit(name).is_some())
+            .cloned()
+            .collect();
+    }
+    start(&mut context, &lock, &args.processes)
 }
 
 /// Starts the context's processes, and returns their rows or the failure
-/// of the first one that does not start.
-fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+/// of the first one that does not start. `named` is what the command line
+/// named, which narrows the reclaim mark once they start.
+fn start(
+    context: &mut Context,
+    lock: &Lock,
+    named: &[String],
+) -> Result<Vec<ProcessRow>, crumbkit::Error> {
     let manifest = required_manifest(&context.workspace)?;
     crate::warn(&start_warnings(&context.workspace, &manifest));
     let workspace = context.workspace.name.to_string();
-    let outcome = context
-        .runs
-        .up(
-            lock,
-            &context.store,
-            &mut context.workspace,
-            &manifest,
-            &context.processes,
-        )
-        .map_err(MxvFailure::from)?;
-    match outcome {
-        UpOutcome::Up(statuses) => Ok(statuses.iter().map(ProcessRow::from).collect()),
+    let mut earlier = Vec::new();
+    let outcome = context.runs.up(
+        lock,
+        &context.store,
+        &mut context.workspace,
+        &manifest,
+        &context.processes,
+        &mut earlier,
+    );
+    let messages: Vec<String> = earlier
+        .iter()
+        .map(|note| note.message().to_owned())
+        .collect();
+    crate::warn(&messages);
+    match outcome.map_err(MxvFailure::from)? {
+        UpOutcome::Up(statuses) => {
+            context.forget_reclaim(named)?;
+            Ok(statuses.iter().map(ProcessRow::from).collect())
+        }
         UpOutcome::Left {
             unstoppable,
             not_started,
@@ -313,14 +383,12 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             code,
             signal,
             log,
-            tail,
         } => Err(RunFailure::Exited {
             workspace,
             process,
             code,
             signal,
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::ForeignListener {
@@ -329,7 +397,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log,
-            tail,
         } => Err(RunFailure::ForeignListener {
             workspace,
             process,
@@ -337,7 +404,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::DetachedListener {
@@ -346,7 +412,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log,
-            tail,
         } => Err(RunFailure::DetachedListener {
             workspace,
             process,
@@ -354,7 +419,6 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             number,
             pid,
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
         UpOutcome::NotReady {
@@ -362,14 +426,12 @@ fn start(context: &mut Context, lock: &Lock) -> Result<Vec<ProcessRow>, crumbkit
             waited,
             timeout,
             log,
-            tail,
         } => Err(RunFailure::NotReady {
             workspace,
             process,
             waited: Box::new(waited),
             seconds: timeout.as_secs(),
             log: log.map(PathBuf::into_boxed_path),
-            tail: LogTail::new(tail),
         }
         .into()),
     }
@@ -427,6 +489,7 @@ pub(crate) fn down(
     let lock = context.lock()?;
     let manifest = lenient_manifest(&context.workspace);
     let results = stop(&context, &lock, manifest.as_ref())?;
+    context.forget_reclaim(&args.processes)?;
     let keys: Vec<&str> = results
         .iter()
         .map(|result| match result {
@@ -480,7 +543,7 @@ pub(crate) fn restart(
         .into());
     }
     stop_every(&context, &lock, Some(&manifest))?;
-    start(&mut context, &lock)
+    start(&mut context, &lock, &args.processes)
 }
 
 /// Returns each process of the workspace that `args` names and its state.
@@ -520,6 +583,13 @@ pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -
         Ok(context) => context,
         Err(error) => return streaming.end(Err(error)),
     };
+    // A person who follows a log is using the workspace, so mxv touches it
+    // while it follows.
+    let _toucher = args.follow.then(|| {
+        context
+            .runs
+            .keep_touched(&context.workspace.name, TOUCH_EVERY)
+    });
     // A workspace that an earlier mxv started reads its logs from its run
     // files, so a manifest that this mxv refuses, and that the earlier one
     // accepted, does not keep them from being read, as for `down` and
@@ -685,4 +755,68 @@ pub(crate) fn delete_volumes(
     volumes: Volumes,
 ) -> Result<(), MxvFailure> {
     Ok(environment.runs()?.delete_volumes(volumes)?)
+}
+
+/// Stops every process and container of `workspace` through the stop of
+/// `mxv down`, for `mxv reclaim`, and marks the workspace with what ran.
+/// It holds the workspace's lock, reads the record again and the names of
+/// what still runs, and passes both to `check`, which returns why the
+/// workspace is no longer idle, or `None`. When `check` gives a reason,
+/// or another mxv command holds the lock, it stops nothing and returns the
+/// reason.
+pub(crate) fn reclaim_stop(
+    environment: &Environment,
+    workspace: &Workspace,
+    check: impl FnOnce(&Workspace, &[String]) -> Result<Option<String>, crumbkit::Error>,
+) -> Result<Result<(), String>, crumbkit::Error> {
+    let mut context = Context {
+        store: Store::new(environment.records()?),
+        runs: environment.runs()?,
+        workspace: workspace.clone(),
+        processes: Vec::new(),
+    };
+    let lock = match context.lock() {
+        Ok(lock) => lock,
+        Err(MxvFailure::Library(Error::Busy { .. })) => {
+            return Ok(Err(
+                "another mxv command holds the workspace's lock".to_owned()
+            ));
+        }
+        Err(failure) => return Err(failure.into()),
+    };
+    let running = context
+        .runs
+        .running(&context.workspace)
+        .map_err(MxvFailure::from)?;
+    if let Some(reason) = check(&context.workspace, &running)? {
+        return Ok(Err(reason));
+    }
+    let manifest = lenient_manifest(&context.workspace);
+    stop_every(&context, &lock, manifest.as_ref())?;
+    context.workspace.reclaimed = Some(Reclaimed::new(running));
+    context
+        .store
+        .update(&mut context.workspace)
+        .map_err(MxvFailure::from)?;
+    Ok(Ok(()))
+}
+
+/// Pins or unpins, as `pinned` says, the workspace that `workspace` names,
+/// or else the one that holds the current directory, while it holds the
+/// workspace's lock, and returns its record.
+pub(crate) fn set_pinned(
+    environment: &Environment,
+    workspace: Option<&String>,
+    pinned: bool,
+) -> Result<Workspace, crumbkit::Error> {
+    let mut context = context(environment, workspace, &[])?;
+    let _lock = context.lock()?;
+    if context.workspace.pinned != pinned {
+        context.workspace.pinned = pinned;
+        context
+            .store
+            .update(&mut context.workspace)
+            .map_err(MxvFailure::from)?;
+    }
+    Ok(context.workspace)
 }

@@ -134,6 +134,50 @@ pub struct Workspace {
     /// record that an earlier version wrote reads as holding none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ports: BTreeMap<String, u16>,
+    /// Whether `mxv pin` keeps `mxv reclaim` from stopping the workspace.
+    /// An unpinned record leaves the key out. An older mxv that rewrites
+    /// the record drops the key, which unpins the workspace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// What `mxv reclaim` stopped, until the next `mxv up` or `mxv down`,
+    /// or `None`. A record without the mark leaves the key out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reclaimed: Option<Reclaimed>,
+}
+
+/// The mark that `mxv reclaim` leaves on a workspace that it stopped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Reclaimed {
+    /// The processes and containers that ran when reclaim stopped them,
+    /// which `mxv up` without names starts again.
+    pub processes: Vec<String>,
+}
+
+impl Reclaimed {
+    /// Returns the mark of a reclaim that stopped `processes`.
+    #[must_use]
+    pub const fn new(processes: Vec<String>) -> Self {
+        Self { processes }
+    }
+
+    /// Returns the mark that is left once `mxv up`, `restart` or `down`
+    /// has started or stopped the processes `names`, or every process when
+    /// `names` is empty: the processes that are still to start, or `None`
+    /// when none is.
+    #[must_use]
+    pub fn without(&self, names: &[String]) -> Option<Self> {
+        if names.is_empty() {
+            return None;
+        }
+        let processes: Vec<String> = self
+            .processes
+            .iter()
+            .filter(|process| !names.contains(process))
+            .cloned()
+            .collect();
+        (!processes.is_empty()).then_some(Self { processes })
+    }
 }
 
 impl Workspace {
@@ -149,6 +193,8 @@ impl Workspace {
             path,
             checkouts,
             ports: BTreeMap::new(),
+            pinned: false,
+            reclaimed: None,
         }
     }
 

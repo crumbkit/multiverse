@@ -441,7 +441,8 @@ fn the_run_host_saves_a_stable_id_in_a_record_without_one_and_then_returns_the_s
 }
 
 #[test]
-fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id() {
+fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id_and_says_what_it_cannot_do()
+ {
     let setup = Setup::new();
     let store = setup.store();
     let name: WorkspaceName = "triage".parse().unwrap();
@@ -459,5 +460,45 @@ fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id() {
             ),
             "{saved:?}"
         );
+        let text = saved.unwrap_err().to_string();
+        assert!(
+            text.starts_with("mxv cannot name the workspace's containers, because "),
+            "{text}"
+        );
     }
+}
+
+#[test]
+fn a_touch_records_when_an_mxv_command_last_named_the_workspace() {
+    let setup = Setup::new();
+    let runs = setup.runs();
+    let name: WorkspaceName = "triage".parse().unwrap();
+    assert_eq!(runs.touched(&name), None);
+    let before = std::time::SystemTime::now() - Duration::from_secs(1);
+    runs.touch(&name).unwrap();
+    let touched = runs.touched(&name).unwrap();
+    assert!(touched >= before, "{touched:?}");
+    assert!(runs.recorded(&name).unwrap().is_empty());
+}
+
+#[test]
+fn a_keeper_touches_the_workspace_again_until_it_is_dropped() {
+    let setup = Setup::new();
+    let runs = setup.runs();
+    let name: WorkspaceName = "triage".parse().unwrap();
+    let keeper = runs.keep_touched(&name, Duration::from_millis(20));
+    let first = runs.touched(&name).unwrap();
+    let later = (0..250).find_map(|_| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test lets real time pass, because the keeper touches on a real clock"
+        )]
+        std::thread::sleep(Duration::from_millis(20));
+        runs.touched(&name).filter(|touched| *touched > first)
+    });
+    assert!(
+        later.is_some(),
+        "the keeper did not touch the workspace again"
+    );
+    drop(keeper);
 }

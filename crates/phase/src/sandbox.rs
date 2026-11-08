@@ -38,9 +38,10 @@
 //!
 //! The network is loopback only until phase runs its allowlist proxy: the
 //! app may listen on the ports its permissions name and connect to the
-//! ports of the apps it depends on. The plan refuses a `connect` that
-//! names an external host. On macOS phase writes its own Seatbelt rules for
-//! those ports, because nono's port rules allow binding any port. Seatbelt
+//! ports that the apps its `connect` names serve. The plan refuses a
+//! `connect` that names an external host or an app the app does not depend
+//! on. On macOS phase writes its own Seatbelt rules for those ports,
+//! because nono's port rules allow binding any port. Seatbelt
 //! applies the last rule that matches, so the rules work only because nono
 //! writes them after its `(deny network*)`, which it does for every rule
 //! that starts with `(allow network`. The exact pin of nono in Cargo.toml,
@@ -51,6 +52,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -58,16 +60,16 @@ use crate::name::{AppName, WorkspaceId};
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind, STATE};
 use crate::source::Source;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
 mod capabilities;
 mod launch;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(all(feature = "sandbox", target_os = "macos"), test))]
 mod seatbelt;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
 pub(crate) use capabilities::capabilities;
 pub(crate) use launch::launcher_command;
 pub use launch::{SANDBOX_REFUSED, launch};
@@ -78,7 +80,7 @@ pub use launch::{SANDBOX_REFUSED, launch};
 #[non_exhaustive]
 pub enum Sandboxing {
     /// The process runs under macOS's Seatbelt, which confines it only in
-    /// part: [`SEATBELT_PARTIAL`] says what Seatbelt leaves open.
+    /// part: [`SEATBELT_PARTIAL`] says what the sandbox cannot enforce.
     #[non_exhaustive]
     Seatbelt {
         /// What Seatbelt leaves unrestricted.
@@ -121,12 +123,73 @@ impl fmt::Display for Sandboxing {
     }
 }
 
-/// What Seatbelt leaves open on macOS. Seatbelt restricts a bind by port
+/// The variables that every sandboxed process receives unless its own
+/// environment sets them. `GIT_CONFIG_GLOBAL=/dev/null` makes git read no
+/// global configuration. The sandbox protects `~/.gitconfig` and
+/// `~/.config/git`, and git stops with "unable to access" when its global
+/// configuration exists but cannot be read, so without it a sandboxed git
+/// ran no command at all.
+///
+/// On macOS `SSL_CERT_FILE=/etc/ssl/cert.pem` names the bundle of the
+/// trusted roots that macOS ships. rustls-native-certs, which the AWS
+/// SDK's TLS uses, reads the roots from that file instead of asking the
+/// keychain's `com.apple.SecurityServer` service, which nono's profile
+/// denies, and OpenSSL reads it as its default bundle. Without it
+/// rustls-native-certs found no roots under the sandbox, and the AWS SDK
+/// panicked at startup. The file is a system file that the sandbox may
+/// already read, so the variable grants nothing. An app that sets
+/// `SSL_CERT_DIR` gets no `SSL_CERT_FILE`, because both readers trust the
+/// roots of the two together, and the app's directory would then no
+/// longer limit what it trusts.
+///
+/// Each entry is the variable, its value, and the variables any of which
+/// the app's environment sets to keep phase from setting it.
+#[cfg(target_os = "macos")]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"]),
+    (
+        "SSL_CERT_FILE",
+        "/etc/ssl/cert.pem",
+        &["SSL_CERT_FILE", "SSL_CERT_DIR"],
+    ),
+];
+
+/// The variables that every sandboxed process receives on Linux unless
+/// its own environment sets them, as the macOS list describes. Linux
+/// reads its trusted roots from `/etc`, which the sandbox may read, so it
+/// needs no `SSL_CERT_FILE`.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] =
+    &[("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"])];
+
+/// Sets on `command` the environment of a process that runs under a
+/// sandbox whose temporary directory is `tmp`. `TMPDIR` names `tmp` and
+/// replaces any other value, because the sandbox lets the process write no
+/// other temporary directory. Each variable of [`SANDBOX_ENVIRONMENT`] is
+/// set only when `command` sets none of the variables that its entry
+/// names, so a value from the app's own environment wins. Call it after
+/// the command's environment is set.
+pub(crate) fn sandboxed_environment(command: &mut Command, tmp: &Path) {
+    command.env("TMPDIR", tmp);
+    for (name, value, unless) in SANDBOX_ENVIRONMENT {
+        let set = command.get_envs().any(|(key, given)| {
+            given.is_some()
+                && unless
+                    .iter()
+                    .any(|other| key == std::ffi::OsStr::new(other))
+        });
+        if !set {
+            command.env(name, value);
+        }
+    }
+}
+
+/// What the sandbox cannot enforce on macOS. Seatbelt restricts a bind by port
 /// and never by address, and its `localhost` matches every address of the
 /// machine, so a process that may listen on a port can listen on it on
 /// every address and accept a peer on any of them.
 pub const SEATBELT_PARTIAL: &str =
-    "its listening ports accept connections from other machines on the network";
+    "the sandbox cannot limit its listening ports to the loopback interface";
 
 /// Why Linux reports a process under Landlock as unsandboxed (Luke's
 /// choice, 5 November 2026). Before its ABI 9 Landlock cannot restrict
@@ -147,13 +210,20 @@ pub(crate) enum Platform {
     /// reports a process under it as this value: [`Sandboxing::Seatbelt`]
     /// on macOS, and [`Sandboxing::Unsandboxed`] on Linux, because
     /// Landlock leaves Unix sockets open.
+    #[cfg_attr(
+        all(not(feature = "sandbox"), not(test)),
+        expect(
+            dead_code,
+            reason = "a build without the sandbox feature offers no sandbox"
+        )
+    )]
     Available(Sandboxing),
     /// This machine has no sandbox that phase supports, for this reason.
     Unavailable(String),
 }
 
 /// Returns the sandbox that this machine offers.
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 pub(crate) fn platform() -> Platform {
     if nono::Sandbox::is_supported() {
         Platform::Available(Sandboxing::seatbelt())
@@ -165,7 +235,7 @@ pub(crate) fn platform() -> Platform {
 /// Returns the sandbox that this machine offers. Landlock counts only when
 /// it can restrict TCP ports, which needs its ABI 4. phase applies it, and
 /// reports each process under it as unsandboxed ([`LANDLOCK_UNSANDBOXED`]).
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 pub(crate) fn platform() -> Platform {
     match nono::Sandbox::detect_abi() {
         Ok(abi) if abi.has_network() => Platform::Available(Sandboxing::landlock()),
@@ -178,10 +248,25 @@ pub(crate) fn platform() -> Platform {
 }
 
 /// Returns the sandbox that this machine offers, which is none.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "sandbox",
+    not(any(target_os = "macos", target_os = "linux"))
+))]
 pub(crate) fn platform() -> Platform {
     Platform::Unavailable(format!("phase has no sandbox for {}", std::env::consts::OS))
 }
+
+/// Returns the sandbox that this machine offers, which is none, because
+/// phase was built without its `sandbox` feature.
+#[cfg(not(feature = "sandbox"))]
+pub(crate) fn platform() -> Platform {
+    Platform::Unavailable(UNBUILT.to_owned())
+}
+
+/// Why an app with permissions runs unsandboxed when phase was built
+/// without its `sandbox` feature.
+#[cfg(not(feature = "sandbox"))]
+pub(crate) const UNBUILT: &str = "phase was built without its sandbox feature";
 
 /// Returns how the processes of the host `app` run on a machine that offers
 /// `platform`, or `None` for a container app, which runs in Docker.
@@ -233,11 +318,13 @@ pub(crate) struct SandboxSpec {
     /// program and its directory, the `PATH` directories, the toolchain
     /// directories and the checkout's `.git`.
     pub(crate) read_only: BTreeSet<PathBuf>,
-    /// The symbolic links whose own metadata the process may read, so it
-    /// can follow each to the path that `read` grants. Landlock does not
-    /// check a link's metadata, so only the macOS profile names them.
+    /// The paths whose own metadata the process may read, and nothing
+    /// more: the symbolic links it follows to a path that `read` grants,
+    /// and the git configuration files of [`HOME_METADATA`], which libgit2
+    /// stats. Landlock does not restrict metadata, so only the macOS
+    /// profile names them.
     #[serde(default)]
-    pub(crate) links: BTreeSet<PathBuf>,
+    pub(crate) metadata: BTreeSet<PathBuf>,
     /// The paths that the process is always denied, which the macOS
     /// profile names explicitly: the protected paths, and on macOS the
     /// directories inside a system directory or a Homebrew prefix's grants
@@ -251,6 +338,38 @@ pub(crate) struct SandboxSpec {
     pub(crate) tmp: PathBuf,
     /// The program that applies the sandbox and then starts the app.
     pub(crate) launcher: Launcher,
+}
+
+impl SandboxSpec {
+    /// Returns a 32-byte digest of the spec, with its lists sorted, so two
+    /// specs that grant the same paths and ports give the same digest
+    /// whatever order the host program named its protected paths in. It
+    /// holds paths and ports, never an environment value. It covers every
+    /// field, which the pattern below names, so a new field fails to
+    /// compile until it is sorted here or shown to need no sorting.
+    pub(crate) fn launch_digest(&self) -> [u8; 32] {
+        let mut spec = self.clone();
+        let Self {
+            read: _,
+            write: _,
+            path_dirs,
+            protected,
+            read_only: _,
+            metadata: _,
+            deny: _,
+            listen: _,
+            connect: _,
+            tmp: _,
+            launcher: _,
+        } = &mut spec;
+        for found in protected.iter_mut() {
+            found.except.sort();
+        }
+        protected.sort();
+        path_dirs.sort();
+        // The spec is plain data, so it always serializes.
+        crate::plan::digest(&serde_json::to_vec(&spec).unwrap_or_default())
+    }
 }
 
 /// Why phase cannot build a process's sandbox. It names paths, never an
@@ -383,7 +502,7 @@ impl std::error::Error for SandboxError {}
 
 /// A path that the sandbox always denies, apart from the directories inside
 /// it that the app may use.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Protected {
     /// The path, canonical.
@@ -474,7 +593,7 @@ pub(crate) struct Context<'a> {
     /// The paths that the host program protects, such as its own state and
     /// data directories.
     pub(crate) protected: &'a [PathBuf],
-    /// The loopback ports of the apps that the app depends on.
+    /// The loopback ports that the apps of the app's `connect` serve.
     pub(crate) connect: BTreeSet<u16>,
     /// The program that runs the launcher.
     pub(crate) launcher: Launcher,
@@ -532,7 +651,13 @@ impl AppDirs {
 /// Xcode license was accepted, which `xcodebuild` reads before `xcrun`
 /// runs a tool. `/etc`, `/var` and `/tmp` are symbolic links into `/private`, and the
 /// profile allows the resolved paths and the metadata of the `/var` link. Of `/Library` it allows only what
-/// toolchains read.
+/// toolchains read. Of `/dev` it allows only the nodes that toolchains
+/// use, and no terminal device, so a sandboxed process cannot open a
+/// user's terminal and read what is typed into it. `/dev/null`, `/dev/zero`
+/// and `/dev/tty` are also writable, which the capabilities add. `/dev/tty`
+/// opens only the process's controlling terminal, and the launcher leaves
+/// the caller's before it applies the sandbox. `dtracehelper` is the node
+/// that dyld and the runtimes of Swift and Node.js open at startup.
 #[cfg(target_os = "macos")]
 const SYSTEM_READ: &[&str] = &[
     "/usr",
@@ -546,13 +671,32 @@ const SYSTEM_READ: &[&str] = &[
     "/private/var/db/timezone",
     "/private/var/select",
     "/Library/Preferences/com.apple.dt.Xcode.plist",
-    "/dev",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/fd",
+    "/dev/dtracehelper",
 ];
 
 /// The system directories that every sandboxed process may read on Linux.
+/// Of `/dev` it allows only the nodes that toolchains use, and no terminal
+/// device such as `/dev/pts/*`. `/dev/fd` is a symbolic link into `/proc`,
+/// which is allowed, so it needs no entry.
 #[cfg(not(target_os = "macos"))]
 const SYSTEM_READ: &[&str] = &[
-    "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/dev", "/proc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/etc",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/proc",
 ];
 
 /// The link that `xcode-select --switch` sets to the active developer
@@ -626,6 +770,16 @@ const HOME_PROTECTED: &[&str] = &[
     "Library/LaunchAgents",
 ];
 
+/// The protected paths in the home directory whose own metadata a
+/// sandboxed process may read: git's global configuration file and its
+/// XDG directory and file. libgit2, which cargo uses for git dependencies,
+/// stats `~/.gitconfig`, and when the stat fails it treats a git
+/// dependency that cargo fetched outside the sandbox as unusable and tries
+/// to delete it, so cargo exits with status 101. No other protected path
+/// keeps its metadata, because cargo stops when it can stat
+/// `~/.cargo/config.toml` but cannot read it.
+const HOME_METADATA: &[&str] = &[".gitconfig", ".config/git", ".config/git/config"];
+
 /// Returns the protected paths that every sandbox has on this platform:
 /// [`HOME_PROTECTED`], the system Keychains, and the directory of the
 /// agent's socket.
@@ -672,6 +826,12 @@ const HOMEBREW_READ: &[&str] = &[
     "Frameworks",
 ];
 
+/// The files of a Homebrew prefix's `etc` that a sandboxed process may
+/// read: `gitconfig`, the system configuration of Homebrew's git, which
+/// git reads when it starts and stops on when it cannot. Homebrew or an
+/// administrator installs it, and it holds no secret.
+const HOMEBREW_ETC_READ: &[&str] = &["gitconfig"];
+
 /// The Homebrew prefixes that phase knows.
 const HOMEBREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
 
@@ -707,9 +867,9 @@ fn openssl_dirs(prefix: &Path) -> Vec<PathBuf> {
 }
 
 /// Returns the paths of the Homebrew prefix `prefix` that a sandboxed
-/// process may read: [`HOMEBREW_READ`], and the entries of each OpenSSL
-/// directory that [`OPENSSL_READ`] names. No other entry of `etc` is
-/// returned.
+/// process may read: [`HOMEBREW_READ`], [`HOMEBREW_ETC_READ`] and the
+/// entries of each OpenSSL directory that [`OPENSSL_READ`] names. No other
+/// entry of `etc` is returned.
 fn homebrew_read(prefix: &Path) -> Vec<PathBuf> {
     let openssl = openssl_dirs(prefix)
         .into_iter()
@@ -717,6 +877,11 @@ fn homebrew_read(prefix: &Path) -> Vec<PathBuf> {
     HOMEBREW_READ
         .iter()
         .map(|name| prefix.join(name))
+        .chain(
+            HOMEBREW_ETC_READ
+                .iter()
+                .map(|name| prefix.join("etc").join(name)),
+        )
         .chain(openssl)
         .collect()
 }
@@ -769,13 +934,13 @@ fn toolchain(entry: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 /// `read_only` resolved, and into `read` when it exists and `reaches`
 /// says it reaches no protected path. A path that is itself a symbolic
 /// link, such as the `cert.pem` of a Homebrew OpenSSL directory, also goes
-/// into `links` with its directory resolved, so the macOS profile lets the
+/// into `metadata` with its directory resolved, so the macOS profile lets the
 /// app read the link's own metadata and follow it to the file that `read`
 /// grants.
 fn add_toolchain(
     read: &mut BTreeSet<PathBuf>,
     read_only: &mut BTreeSet<PathBuf>,
-    links: &mut BTreeSet<PathBuf>,
+    metadata: &mut BTreeSet<PathBuf>,
     paths: &[PathBuf],
     reaches: &dyn Fn(&Path) -> bool,
 ) {
@@ -788,7 +953,7 @@ fn add_toolchain(
         if path.is_symlink()
             && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
         {
-            links.insert(canonical(parent).join(name));
+            metadata.insert(canonical(parent).join(name));
         }
         read.insert(resolved);
     }
@@ -880,7 +1045,13 @@ pub(crate) fn spec(
     }
     read_only.insert(checkout.join(".git"));
     let mut path_dirs = Vec::new();
-    let mut links: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut metadata: BTreeSet<PathBuf> = BTreeSet::new();
+    if let Some(home) = context.home {
+        for name in HOME_METADATA {
+            metadata.insert(canonical(home).join(name));
+            metadata.insert(canonical(&home.join(name)));
+        }
+    }
     let mut deny: BTreeSet<PathBuf> = BTreeSet::new();
     for entry in context.path.unwrap_or_default().split(':') {
         let entry = Path::new(entry);
@@ -901,7 +1072,7 @@ pub(crate) fn spec(
         add_toolchain(
             &mut read,
             &mut read_only,
-            &mut links,
+            &mut metadata,
             &toolchain(entry, context.home),
             &reaches,
         );
@@ -921,7 +1092,7 @@ pub(crate) fn spec(
         protected,
         read_only,
         deny,
-        links,
+        metadata,
         listen,
         connect: context.connect.clone(),
         tmp: canonical(&dirs.tmp),
@@ -954,7 +1125,7 @@ pub(crate) fn spec(
         .chain(&spec.deny)
         .chain(&spec.read_only)
         .chain(&spec.path_dirs)
-        .chain(&spec.links)
+        .chain(&spec.metadata)
     {
         if !is_profile_path(path) {
             return Err(SandboxError::Unwritable(path.clone()));

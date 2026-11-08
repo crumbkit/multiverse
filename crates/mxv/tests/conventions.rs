@@ -97,6 +97,12 @@ const ALLOW: &[Allow] = &[
     Allow::new(Rule::Examples, "up", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "restart", NO_LIVE_CHECKOUT),
     Allow::new(Rule::Examples, "logs", NO_LIVE_CHECKOUT),
+    Allow::new(Rule::Examples, "exec", NO_LIVE_CHECKOUT),
+    Allow::new(
+        Rule::Yes,
+        "exec",
+        "The person writes the command after `--`, and mxv cannot tell what it changes, so a question from mxv would ask about every command, harmless or not.",
+    ),
     Allow::new(
         Rule::Examples,
         "add",
@@ -118,6 +124,11 @@ const ALLOW: &[Allow] = &[
     Allow::new(Rule::GuideDocument, "restore", NO_DOCUMENT),
     Allow::new(Rule::Yes, "down", NO_QUESTION),
     Allow::new(Rule::Yes, "restart", NO_QUESTION),
+    Allow::new(
+        Rule::Yes,
+        "reclaim",
+        "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
+    ),
     Allow::new(
         Rule::Yes,
         "ports reset",

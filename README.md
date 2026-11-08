@@ -28,6 +28,7 @@ mxv status -w reading-list              # report each process as running, exited
 mxv logs -w reading-list web --follow   # print a process's log and follow it
 mxv down -w reading-list                # stop the processes
 mxv clean --all --dry-run               # list the build output that idle workspaces would free
+mxv reclaim --need memory=2GiB --dry-run # list the idle workspaces whose stop frees 2 GiB of memory
 mxv remove reading-list                 # remove it, and its branch when merged
 ```
 

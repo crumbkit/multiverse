@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use crate::manifest::{Joined, MANIFEST_FILE, Manifest, ManifestError, ManifestProblem};
 use crate::name::MOST_NAME_BYTES;
 use crate::record::{Checkout, Workspace};
+use crate::service::{RESERVED_PREFIX, Service};
 
 #[cfg(test)]
 mod tests;
@@ -173,6 +174,9 @@ struct Declared {
     /// The volumes, which phase names after the workspace alone, so two
     /// files that mount one name would share the volume's data.
     volumes: BTreeMap<String, PathBuf>,
+    /// The services, which keep their names in a merged manifest, with
+    /// the first file that declares each.
+    services: BTreeMap<String, (Service, PathBuf)>,
 }
 
 impl Declared {
@@ -188,7 +192,52 @@ impl Declared {
             .values()
             .flat_map(|container| container.volumes.keys())
             .collect();
-        declare(&mut self.volumes, volumes.into_iter(), path)
+        declare(&mut self.volumes, volumes.into_iter(), path)?;
+        self.add_services(manifest, path)
+    }
+
+    /// Adds the services of `manifest`, read from `path`. A service that
+    /// another file declares the same way is the same service, and one
+    /// that another file declares differently fails with a name clash, as
+    /// does a table or queue that two services declare differently.
+    fn add_services(&mut self, manifest: &Manifest, path: &Path) -> Result<(), ManifestError> {
+        let failure = |problem| ManifestError {
+            path: path.to_path_buf(),
+            line: None,
+            problem,
+        };
+        for (name, service) in &manifest.services {
+            match self.services.get(name) {
+                Some((other, other_path)) if other != service => {
+                    return Err(failure(ManifestProblem::NameClash {
+                        name: name.clone(),
+                        other: other_path.clone(),
+                    }));
+                }
+                Some(_) => {}
+                None => {
+                    self.services
+                        .insert(name.clone(), (service.clone(), path.to_path_buf()));
+                }
+            }
+        }
+        let services: BTreeMap<String, Service> = self
+            .services
+            .iter()
+            .map(|(name, (service, _))| (name.clone(), service.clone()))
+            .collect();
+        crate::service::check_resources(&services).map_err(|clash| {
+            failure(ManifestProblem::ServiceClash {
+                name: clash.name.clone(),
+                message: format!(
+                    "the services `{}` and `{}` of the workspace's manifests declare the {what} `{}` differently, and the workspace's backend holds one {what} of each name",
+                    clash.first,
+                    clash.second,
+                    clash.name,
+                    what = clash.what
+                ),
+            })
+        })
     }
 }
 
@@ -210,6 +259,15 @@ fn declare<'a>(
             return Err(failure(ManifestProblem::Invalid {
                 message: format!(
                     "the merged name `{name}` is longer than {MOST_NAME_BYTES} bytes, so give its checkout a shorter folder name with `--as`"
+                ),
+            }));
+        }
+        // A checkout folder named `mxv` would prefix its names `mxv-`.
+        if name.starts_with(RESERVED_PREFIX) {
+            return Err(failure(ManifestProblem::Invalid {
+                message: format!(
+                    "the merged name {}, so give its checkout another folder name with `--as`",
+                    crate::manifest::reserved_message(name)
                 ),
             }));
         }
@@ -251,6 +309,11 @@ fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
     }
     into.containers.extend(from.containers);
     into.ports.extend(from.ports);
+    // `Declared::add` has checked that a service of one name is declared
+    // the same way in every file.
+    for (name, service) in from.services {
+        into.services.entry(name).or_insert(service);
+    }
     into.warnings.extend(from.warnings);
 }
 
@@ -510,6 +573,7 @@ fn emptied(manifest: &Manifest) -> Manifest {
     empty.processes.clear();
     empty.containers.clear();
     empty.ports.clear();
+    empty.services.clear();
     empty.warnings.clear();
     empty.disposable.clear();
     empty.clone_on_new.clear();

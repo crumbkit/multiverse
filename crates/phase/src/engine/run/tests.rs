@@ -10,11 +10,12 @@ use tempfile::TempDir;
 
 use super::{Engine, Settings};
 
+mod drift;
 mod oneshot;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::containers::{
-    ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
+    Before, ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
     ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
@@ -251,6 +252,9 @@ impl HostRunner for FakeHost {
         let mut any = false;
         for host in [stop.keeper, stop.app].into_iter().flatten() {
             any |= state.alive.remove(&host.pid);
+            state
+                .listeners
+                .retain(|_, holder| !matches!(holder, Listener::Held(pid) if *pid == host.pid));
         }
         Ok(if any {
             HostStopped::Stopped
@@ -438,7 +442,7 @@ impl ContainerRunner for FakeContainers {
     fn start(
         &self,
         start: &ContainerStart<'_>,
-        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+        before: &mut dyn FnMut(Before<'_>) -> Result<(), PhaseError>,
     ) -> ContainersStarted {
         assert_eq!(start.workspace, &workspace());
         assert!(start.deadline > now());
@@ -457,7 +461,7 @@ impl ContainerRunner for FakeContainers {
             }
         }
         for process in start.processes {
-            if let Err(error) = launching(process) {
+            if let Err(error) = before(Before::Container(process)) {
                 return ContainersStarted {
                     failure: Some(error),
                     ..ContainersStarted::default()
@@ -702,7 +706,30 @@ struct World {
 
 impl World {
     fn new() -> Self {
-        let state = tempfile::tempdir().unwrap();
+        Self::in_state(tempfile::tempdir().unwrap())
+    }
+
+    /// Returns a world whose state directory lies in the build's target
+    /// directory, outside the per-user temporary directory, which the
+    /// sandbox always denies, so a sandboxed app's spec can be built.
+    fn outside_temp() -> Self {
+        let target = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("sandbox-fixtures");
+        std::fs::create_dir_all(&target).unwrap();
+        Self::in_state(
+            tempfile::Builder::new()
+                .prefix("phase-run-")
+                .tempdir_in(target)
+                .unwrap(),
+        )
+    }
+
+    fn in_state(state: TempDir) -> Self {
         let host = FakeHost::default();
         host.state.borrow_mut().state_dir = Some(state.path().to_path_buf());
         let containers = FakeContainers::default();
@@ -743,6 +770,12 @@ impl World {
 
     fn record(&self) -> Option<RunRecord> {
         RunStore::new(self.state.path()).read(&workspace()).unwrap()
+    }
+
+    /// Gives the owner back the write permission on the directory of run
+    /// records, which [`FakeHost::breaks_record_at_launch`] took away.
+    fn restore_runs_directory(&self) {
+        set_mode(&self.state.path().join("runs"), 0o700);
     }
 
     /// Changes the run record as `change` says, under the lifecycle lock.
@@ -1499,7 +1532,7 @@ fn up_leaves_a_container_that_still_runs_alone_and_starts_only_the_others() {
     world.containers.running.borrow_mut().remove("db/worker");
     let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted);
     assert_eq!(
         world.containers.starts.borrow().last().unwrap(),
         &vec!["db/worker".to_owned()]
@@ -1613,7 +1646,7 @@ fn up_replaces_a_running_container_that_cannot_receive_its_secret_files() {
 
     let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted);
     assert_eq!(
         world.containers.starts.borrow().last().unwrap(),
         &vec!["db/server".to_owned()]
@@ -2495,7 +2528,7 @@ fn up_replaces_a_running_container_that_phase_started_from_another_plan_of_its_p
 
     let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted);
     assert_eq!(world.containers.starts.borrow().len(), 2);
 }
 

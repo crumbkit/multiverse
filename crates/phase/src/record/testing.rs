@@ -135,6 +135,21 @@ impl Spawned {
         matches!(self.child.try_wait(), Ok(None))
     }
 
+    /// Reports whether the process ends within two seconds, and reaps it
+    /// when it does. A test asks this after phase found the process gone,
+    /// because macOS stops listing a process that a signal ended a moment
+    /// before its parent can reap it.
+    pub(crate) fn ends_soon(&mut self) -> bool {
+        let deadline = crate::clock::deadline_in(std::time::Duration::from_secs(2));
+        while self.running() {
+            if crate::clock::now() >= deadline {
+                return false;
+            }
+            crate::clock::pause(crate::clock::POLL_INTERVAL);
+        }
+        true
+    }
+
     /// Waits up to five seconds for the process, a member of `group`, to
     /// end, and leaves it unreaped, so that it stays in the group as a
     /// zombie.
@@ -366,6 +381,9 @@ pub(crate) struct FakeDocker {
     pub(crate) refuses: bool,
     /// The ids that `remove` was called with.
     pub(crate) removed: RefCell<Vec<String>>,
+    /// The workspaces whose volume-owner helpers `remove_volume_helpers`
+    /// was asked to remove.
+    pub(crate) helpers_removed: RefCell<Vec<String>>,
 }
 
 impl FakeDocker {
@@ -474,6 +492,16 @@ impl Docker for FakeDocker {
         }
         Ok(())
     }
+
+    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
+        if self.down {
+            return Err(Self::failure());
+        }
+        self.helpers_removed
+            .borrow_mut()
+            .push(workspace.as_str().to_owned());
+        Ok(())
+    }
 }
 
 /// A Docker whose every call fails, so a record that names a Docker object
@@ -501,6 +529,10 @@ impl Docker for Unreachable {
     }
 
     fn remove(&self, _kind: DockerKind, _id: &str, _wait: Duration) -> Result<(), DockerError> {
+        Err(Self::failure())
+    }
+
+    fn remove_volume_helpers(&self, _workspace: &WorkspaceId) -> Result<(), DockerError> {
         Err(Self::failure())
     }
 }

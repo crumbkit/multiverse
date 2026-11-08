@@ -134,7 +134,9 @@ pub(crate) fn walk<E: AppliedEnvironment + ?Sized>(
         environment.write_value(name, &mut value).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("the environment could not write the value of {name} for its digest: {error}"),
+                format!(
+                    "the environment could not write the value of {name} for its digest: {error}"
+                ),
             )
         })?;
         framed(&mut mac, value.bytes());

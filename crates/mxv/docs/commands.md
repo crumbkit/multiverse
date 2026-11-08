@@ -18,10 +18,14 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv restart`](#mxv-restart): Stop a workspace's processes and start them again
 - [`mxv status`](#mxv-status): Report whether each process of a workspace is running, exited or stopped
 - [`mxv logs`](#mxv-logs): Print the last lines of a process's log, and follow it with --follow
+- [`mxv exec`](#mxv-exec): Run a one-off command in the context of a running process or container, and exit with its exit code
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
 - [`mxv clean`](#mxv-clean): Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces
+- [`mxv reclaim`](#mxv-reclaim): Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+- [`mxv pin`](#mxv-pin): Keep mxv reclaim from stopping a workspace
+- [`mxv unpin`](#mxv-unpin): Let mxv reclaim stop a workspace again while it is idle
 - [`mxv ports`](#mxv-ports): Manage the host ports that a workspace holds
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
@@ -206,6 +210,7 @@ mxv show reading-list
 - `repositories`: The top-level directory of each repository that the workspace checks out.
 - `disposable_paths`: Each disposable path with its checkout and the bytes it takes.
 - `kept_paths`: Each path that the disposable set matches and that mxv keeps, with the reason, such as a directory that holds a `.git` entry.
+- `services`: Each local AWS service of the workspace's manifest, by name, with the variables that a process that needs it receives, such as `AWS_ENDPOINT_URL_DYNAMODB` and the service's own `env`. A value holds `<port>` until the first `mxv up` gives the service's backend a host port. No value is a secret: the access keys are the literal `test`.
 
 Effects: read-only, closed-world.
 
@@ -418,6 +423,30 @@ Output: one row per line as each arrives, and --json prints one JSON document pe
 
 Text: one line per row, `<LINE>`; --fields prints a table.
 
+## `mxv exec`
+
+Run a one-off command in the context of a running process or container, and exit with its exit code.
+
+A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `<PROCESS>`: The running process or container in whose context the command runs. Required.
+- `<COMMAND>`: The command's program and its arguments, after `--`. Required. Takes more than one value.
+
+### Examples
+
+Print the variables that a command receives in the context of web.
+
+```sh
+mxv exec -w reading-list web -- env
+```
+
+Effects: destructive, not idempotent, open-world.
+
+Writes: applies all items or none.
+
 ## `mxv archive`
 
 Archive a workspace, so restore can rebuild it at the same commits
@@ -524,6 +553,75 @@ mxv clean --all --dry-run
 Effects: destructive, idempotent, closed-world.
 
 Writes: reports each item and exits 1 when any item fails.
+
+## `mxv reclaim`
+
+Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
+
+With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+
+### Arguments
+
+- `--need <NEED>`: What to free: memory=SIZE or disk=SIZE, such as memory=2GiB. Required.
+- `--idle <AGE>`: How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop\_idle, or else 2h, for memory, and to clean\_idle, or else 7d, for disk
+- `--dry-run`: Report what the command would change, and change nothing
+
+### Examples
+
+Print which idle workspaces stopping would free 2 GiB of memory.
+
+```sh
+mxv reclaim --need memory=2GiB --dry-run
+```
+
+### Columns
+
+- `name`: The workspace's name.
+- `state`: `stopped`, `would_stop`, `cleaned`, `would_clean` or `kept`.
+- `freed`: The bytes that the run freed, or would free on a dry run, which is 0 for a workspace that it kept. For memory it is the resident memory of the workspace's processes, measured before the stop, and on Linux of its containers too.
+- `containers`: For memory, the resident memory of the workspace's containers, measured before the stop, and 0 for a workspace that the run kept or a disk need. On macOS Docker Desktop's virtual machine keeps the memory that stopped containers free for a while, so freed leaves it out there.
+- `active`: How long ago the workspace was last active: its checkouts changed or an mxv command named it. It is null when neither happened, and for a workspace that the run kept without measuring.
+- `reason`: Why the workspace counts as idle, for one that the run stopped or cleaned, or why the run kept it.
+
+Effects: destructive, idempotent, closed-world.
+
+Writes: reports each item and exits 1 when any item fails.
+
+## `mxv pin`
+
+Keep mxv reclaim from stopping a workspace
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+
+### Examples
+
+Keep mxv reclaim from stopping the workspace reading-list.
+
+```sh
+mxv pin -w reading-list
+```
+
+Effects: additive, idempotent, closed-world.
+
+## `mxv unpin`
+
+Let mxv reclaim stop a workspace again while it is idle
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+
+### Examples
+
+Let mxv reclaim stop the workspace reading-list while it is idle.
+
+```sh
+mxv unpin -w reading-list
+```
+
+Effects: additive, idempotent, closed-world.
 
 ## `mxv ports`
 

@@ -173,10 +173,12 @@ impl Environment {
             .with_caller(self.caller.clone())
             .with_protected(vec![self.state()?, self.mirrors()?]);
         if let Some(program) = &self.program {
-            runs = runs.with_keeper(
-                program.clone(),
-                crate::KEEPER_WORDS.iter().map(OsString::from).collect(),
-            );
+            runs = runs
+                .with_keeper(
+                    program.clone(),
+                    crate::KEEPER_WORDS.iter().map(OsString::from).collect(),
+                )
+                .with_provisioner(program, &crate::PROVISION_WORDS);
         }
         Ok(runs)
     }
