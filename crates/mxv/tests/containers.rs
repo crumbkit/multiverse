@@ -922,6 +922,133 @@ fn a_container_that_exits_with_137_reports_code_137_and_no_signal() {
 }
 
 /// Returns the id of the container `app` that docker has.
+/// Builds an image whose `USER` is the name `app`, uid 999, and which has
+/// no `id` program, so phase cannot resolve the name, and returns its tag.
+fn image_without_id(test: &str) -> String {
+    let tag = format!("mxvtest-{test}:{}", std::process::id());
+    let built = Command::new("docker")
+        .args(["build", "--quiet", "--tag", &tag, "-"])
+        .env("PATH", PATH)
+        .stdin(format!(
+            "FROM {IMAGE}\nRUN adduser -D -u 999 app && rm /bin/id\nUSER app\n"
+        ))
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{built:?}");
+    tag
+}
+
+/// A manifest whose container `store` mounts the volume `data` at `/data`
+/// from `image`, runs `script` and then waits, with `key` as its last line.
+fn store(image: &str, script: &str, key: &str) -> String {
+    format!(
+        r#"[containers.store]
+image = "{image}"
+command = ["sh", "-c", "{script} trap 'exit 0' TERM; sleep 600 & wait"]
+volumes = {{ data = "/data" }}
+{key}
+"#
+    )
+}
+
+/// Returns the `uid:gid` of the root directory of the docker volume
+/// `volume`.
+fn volume_owner(volume: &str) -> String {
+    let mount = format!("{volume}:/data");
+    let (ran, owner) = docker(&[
+        "run", "--rm", "-v", &mount, IMAGE, "stat", "-c", "%u:%g", "/data",
+    ]);
+    assert!(ran, "docker could not read the owner of {volume}");
+    owner
+}
+
+#[test]
+fn a_numeric_owner_lets_a_non_root_container_without_id_write_its_volume() {
+    if !docker_runs("a_numeric_owner_lets_a_non_root_container") {
+        return;
+    }
+    let tag = image_without_id("owner-numeric");
+    let write = "touch /data/written || exit 1;";
+
+    // Without the key phase cannot resolve the image's user, so `up` fails.
+    let refused = Setup::new("mxvtest-no-owner", &store(&tag, write, ""));
+    let (exit, document) = refused.json(&["up", "-w", "mxvtest-no-owner"]);
+    assert_ne!(exit, 0, "{document}");
+    assert!(document.to_string().contains("volume owner"), "{document}");
+    drop(refused);
+
+    let setup = Setup::new("mxvtest-owner", &store(&tag, write, "owner = \"999:999\""));
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-owner"]);
+    assert_eq!(exit, 0, "{document}");
+    let volume = setup.volume_name("data");
+    assert_eq!(volume_owner(&volume), "999:999");
+    let mount = format!("{volume}:/data");
+    let (written, _) = docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &mount,
+        IMAGE,
+        "test",
+        "-f",
+        "/data/written",
+    ]);
+    assert!(written, "the container did not write its volume");
+
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-owner",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let _ = docker(&["image", "rm", &tag]);
+}
+
+#[test]
+fn keep_leaves_a_volume_alone_and_a_changed_owner_replaces_the_container() {
+    if !docker_runs("keep_leaves_a_volume_alone") {
+        return;
+    }
+    let tag = image_without_id("owner-keep");
+    let setup = Setup::new("mxvtest-keep", &store(&tag, "", "owner = \"keep\""));
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-keep"]);
+    assert_eq!(exit, 0, "{document}");
+    let volume = setup.volume_name("data");
+    assert_eq!(volume_owner(&volume), "0:0");
+    let kept = container_id(&setup, "store");
+
+    write(
+        &setup.checkout().join("mxv.toml"),
+        &store(&tag, "", "owner = \"999:999\""),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-keep"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(volume_owner(&volume), "999:999");
+    let numeric = container_id(&setup, "store");
+    assert_ne!(numeric, kept, "a new owner did not replace the container");
+
+    write(
+        &setup.checkout().join("mxv.toml"),
+        &store(&tag, "", "owner = \"keep\""),
+    );
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-keep"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(volume_owner(&volume), "999:999");
+    assert_ne!(container_id(&setup, "store"), numeric);
+
+    let (exit, document) = setup.json(&[
+        "remove",
+        "mxvtest-keep",
+        "--yes",
+        "--force",
+        "--delete-volumes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let _ = docker(&["image", "rm", &tag]);
+}
+
 fn container_id(setup: &Setup, app: &str) -> String {
     let (found, id) = docker(&[
         "container",

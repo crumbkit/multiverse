@@ -14,6 +14,12 @@ workspace may need to act on.
   In such a build an app that declares permissions runs unsandboxed, `exec`
   runs its command unsandboxed, the launcher refuses `--sandboxed`, and
   `status` gives the reason "phase was built without its sandbox feature".
+- `[containers.<name>] owner` in `mxv.toml` sets the owner of the
+  container's named volumes. Its value is a numeric `uid` or `uid:gid`, such
+  as `"999:999"`, or `"keep"`. mxv refuses a name, a malformed value, the id
+  4294967295 and an `owner` on a container that mounts no volume when it
+  reads the manifest. mxv-phase has a public `is_volume_owner` function that
+  says which values a plan accepts.
 
 ### Changed
 
@@ -21,8 +27,9 @@ workspace may need to act on.
   volume now gives the root directory of each such volume to that user,
   through a helper container. The helper runs busybox pinned by digest, so
   the machine needs that image or access to Docker Hub to pull it. Without
-  them `up` fails for that app before it removes any container. Set the
-  app's `container.owner` to `keep` to leave its volumes alone and run no
+  them `up` fails for that app before it removes any container. Set
+  `owner = "keep"` in the container's table of `mxv.toml`, or the app's
+  `container.owner` in a phase plan, to leave its volumes alone and run no
   helper.
 - A sandboxed process can connect over loopback only to the units that its
   `permissions.connect` names. Before this change the sandbox opened the
