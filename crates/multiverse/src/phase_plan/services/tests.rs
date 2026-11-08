@@ -185,6 +185,24 @@ fn localstack_serves_the_declared_kinds_with_path_queue_urls_on_its_published_ad
 }
 
 #[test]
+fn localstacks_environment_writes_the_value_of_services_for_phases_digest() {
+    let built = plan(APP);
+    let applied = built
+        .environment
+        .resolve(
+            &app("mxv-aws"),
+            &ProcessName::try_from(MAIN.to_owned()).unwrap(),
+            Instant::now(),
+        )
+        .unwrap();
+
+    let mut written = Vec::new();
+    applied.write_value("SERVICES", &mut written).unwrap();
+
+    assert_eq!(written, b"s3,kms");
+}
+
+#[test]
 fn the_provisioning_is_a_host_oneshot_that_reruns_and_depends_on_the_backends() {
     let built = plan(APP);
     let provision = built.plan.app(&app("mxv-provision")).unwrap();

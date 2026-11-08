@@ -41,6 +41,10 @@ signal-hook = { workspace = true }
 # each new line of a process's log against it, with the same compiler and
 # features as mxv's own log readiness check.
 regex = { workspace = true }
+# phase compares a keyed digest of the values of a process's variables that
+# are not secrets, HMAC-SHA-256, to notice a changed value without keeping it.
+sha2 = { workspace = true }
+hmac = { workspace = true }
 # The container engine gives each `docker` command a deadline (BASE-34): it
 # waits for the child with a timeout, and kills it when the deadline passes,
 # without polling with a sleep (BASE-11).

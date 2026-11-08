@@ -25,7 +25,7 @@ use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::phase::{Phase, UpDeadlines};
 use crate::plan::probe::{Probe, ProbeCheck};
 use crate::plan::restart::{Restart, RestartLimits};
-use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
+use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind, SecretDelivery};
 use crate::record::run::{EntryState, Ready};
 use crate::record::store::RunStore;
 use crate::report::{AppOutcome, Report, StartProblem};
@@ -921,9 +921,12 @@ impl AppliedEnvironment for SecretValues {
     }
 
     fn write_value(&self, name: &str, out: &mut dyn std::io::Write) -> std::io::Result<()> {
-        let value = self
-            .secret(name)
-            .ok_or(std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        let value = if name == "MODE" {
+            Some(MODE)
+        } else {
+            self.secret(name)
+        };
+        let value = value.ok_or(std::io::Error::from(std::io::ErrorKind::NotFound))?;
         out.write_all(value.as_bytes())
     }
 }
@@ -2131,7 +2134,7 @@ fn an_absent_optional_variable_is_unset_in_the_container_and_the_start_succeeds(
 }
 
 #[test]
-fn a_container_records_one_plan_hash_whether_or_not_the_shell_sets_an_optional_variable() {
+fn a_container_records_another_plan_hash_once_the_shell_sets_an_optional_variable() {
     if !docker_ready() {
         return;
     }
@@ -2144,6 +2147,12 @@ fn a_container_records_one_plan_hash_whether_or_not_the_shell_sets_an_optional_v
     world.down();
 
     let report = world.up_with(&plan, &Listed::of(&[("MODE", MODE)]));
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_ne!(world.plan_hash("db", "server"), with_lang);
+    world.down();
+
+    let report = world.up_with(&plan, &Listed::of(&[("MODE", MODE), ("LANG", LANG)]));
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     assert_eq!(world.plan_hash("db", "server"), with_lang);
@@ -2530,6 +2539,215 @@ fn a_rewrite_of_a_container_stopped_by_hand_asks_for_its_replacement_and_resolve
     let rewritten = world.rewrite(&db, &Unasked).unwrap();
 
     assert_eq!(rewritten, crate::engine::containers::Rewritten::Replace);
+    world.down();
+}
+
+/// Returns the app of [`app`] whose `server` also receives `SERVICES`, a
+/// literal that is not a secret.
+fn services_app(name: &str) -> AppPlan {
+    let mut app = app(name, "exec sleep 60");
+    app.processes[0].env.insert("SERVICES".to_owned());
+    app
+}
+
+impl World {
+    /// Replaces the recorded plan hash of the container of the first
+    /// process of `app` with `hash`, as a run of an earlier phase left it.
+    fn set_plan_hash(&self, app: &AppPlan, hash: crate::record::run::PlanHash) {
+        let store = RunStore::new(self.state.path());
+        let lock = store.lock(&self.id, Duration::from_secs(5)).unwrap();
+        let mut record = store.read(&self.id).unwrap().unwrap();
+        record
+            .containers
+            .iter_mut()
+            .find(|entry| entry.app == app.name && entry.process == app.processes[0].name)
+            .unwrap()
+            .plan_hash = Some(hash);
+        store.write(&record, &lock).unwrap();
+    }
+}
+
+#[test]
+fn up_replaces_a_running_container_when_a_value_that_is_not_a_secret_changes() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![services_app("db")]);
+    let s3 = Listed::of(&[("MODE", MODE), ("SERVICES", "s3")]);
+    let report = world.up_with(&plan, &s3);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    let key = std::fs::metadata(world.state.path().join("env-digest.key")).unwrap();
+    assert_eq!(key.permissions().mode() & 0o777, 0o600);
+    assert_eq!(key.len(), 32);
+
+    let report = world.up_with(&plan, &s3);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), first);
+
+    let more = Listed::of(&[("MODE", MODE), ("SERVICES", "s3,sqs")]);
+    let report = world.up_with(&plan, &more);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
+    let second = world.container("db", "server").unwrap();
+    assert_ne!(second, first);
+    assert!(
+        world
+            .container_env("db", "server")
+            .contains("SERVICES=s3,sqs")
+    );
+
+    let report = world.up_with(&plan, &more);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), second);
+    assert!(!world.state_text().contains("s3,sqs"));
+    world.down();
+}
+
+#[test]
+fn a_renewed_secret_keeps_the_running_container_whatever_its_delivery() {
+    for delivery in [SecretDelivery::File, SecretDelivery::Env] {
+        if !docker_ready() {
+            return;
+        }
+        let world = World::new();
+        let mut db = secret_app_running("db", "touch /tmp/ready; exec sleep 60");
+        db.container.user = Some("1000:1000".to_owned());
+        db.processes[0].secret_delivery = delivery;
+        let plan = world.plan(vec![db]);
+        let secrets = Secrets::new(Some(TOKEN));
+        let report = world.up_with(&plan, &secrets);
+        assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+        let first = world.container("db", "server").unwrap();
+        let hash = world.plan_hash("db", "server");
+
+        secrets.set(SecretValues {
+            token: Some("renewed-token-40b2"),
+            key: Some("renewed-key-77ac"),
+        });
+        let report = world.up_with(&plan, &secrets);
+
+        assert_eq!(
+            outcome(&report, "db"),
+            &AppOutcome::AlreadyRunning,
+            "{delivery:?} {report:?}"
+        );
+        assert_eq!(world.container("db", "server").unwrap(), first);
+        assert_eq!(world.plan_hash("db", "server"), hash);
+        world.down();
+    }
+}
+
+#[test]
+fn the_first_up_after_the_upgrade_replaces_a_running_container_once_and_later_ups_keep_it() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let db = services_app("db");
+    let plan = world.plan(vec![db.clone()]);
+    let values = Listed::of(&[("MODE", MODE), ("SERVICES", "s3")]);
+    let report = world.up_with(&plan, &values);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    // An earlier phase recorded the hash of the service alone.
+    let scope = world.runner().scope(&world.id, &db.name);
+    let earlier = super::app::plan_hash(&scope, &db, &db.processes[0].name, None).unwrap();
+    world.set_plan_hash(&db, earlier);
+
+    let report = world.up_with(&plan, &values);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
+    let second = world.container("db", "server").unwrap();
+    assert_ne!(second, first);
+
+    for _ in 0..2 {
+        let report = world.up_with(&plan, &values);
+
+        assert_eq!(
+            outcome(&report, "db"),
+            &AppOutcome::AlreadyRunning,
+            "{report:?}"
+        );
+        assert_eq!(world.container("db", "server").unwrap(), second);
+    }
+    world.down();
+}
+
+#[test]
+fn up_reports_a_failed_environment_of_a_container_without_secret_files_and_leaves_it_running() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![services_app("db")]);
+    let values = Listed::of(&[("MODE", MODE), ("SERVICES", "s3")]);
+    let report = world.up_with(&plan, &values);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    let mut locked = values.clone();
+    locked.refused = Some("MODE");
+
+    let report = world.up_with(&plan, &locked);
+
+    assert!(
+        matches!(outcome(&report, "db"), AppOutcome::Errored { code, .. } if code == "phase::environment"),
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), first);
+    assert_eq!(
+        docker(&[
+            "container",
+            "inspect",
+            "--format",
+            "{{.State.Status}}",
+            &first
+        ])
+        .unwrap()
+        .trim(),
+        "running"
+    );
+    world.down();
+}
+
+#[test]
+fn up_fails_and_leaves_the_container_running_when_it_refuses_the_key_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![services_app("db")]);
+    let values = Listed::of(&[("MODE", MODE), ("SERVICES", "s3")]);
+    let report = world.up_with(&plan, &values);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let first = world.container("db", "server").unwrap();
+    let key = world.state.path().join("env-digest.key");
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let report = world.up_with(&plan, &values);
+
+    assert!(
+        matches!(outcome(&report, "db"), AppOutcome::Errored { .. }),
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), first);
+    assert_eq!(
+        std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
     world.down();
 }
 

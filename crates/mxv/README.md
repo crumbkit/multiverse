@@ -552,7 +552,12 @@ workspace that has never run a container.
   `mxv::process::not_ready`. Either way, and after any other failure, `up`
   removes the containers and stops the processes it started. phase replaces
   a running container whose image, command, ports or variable names
-  changed. A change to a variable's value alone waits for `mxv restart`.
+  changed, or whose variable value changed, such as LocalStack's
+  `SERVICES`. A replaced container loses everything outside its named
+  volumes. phase compares a keyed digest of the values and keeps neither
+  the values nor the digest's key in the run record. The first `up` after
+  an upgrade of mxv from a version without this digest replaces every
+  running container once, and later `up`s keep each container.
 - `mxv down` stops each container, which sends SIGTERM and then SIGKILL
   after the grace, and removes it. Its named volumes stay, with their data,
   until `mxv remove --delete-volumes` deletes them.
