@@ -115,16 +115,16 @@ root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv 
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
 
 children: mxv up
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 children: mxv down
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 children: mxv restart
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 children: mxv status
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 text-line: mxv logs
   Declares: The text prints each row as the line <LINE> in place of a table row.

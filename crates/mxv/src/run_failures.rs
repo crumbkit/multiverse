@@ -444,7 +444,7 @@ impl Failure for RunFailure {
                 checkout,
                 workspace,
             } => hint(format!(
-                "write a workspace manifest at {} or an {MANIFEST_FILE} at the root of {} that declares the app's processes",
+                "write a workspace manifest at {} or an {MANIFEST_FILE} at the root of {} that declares the app's units",
                 shown(workspace),
                 shown(checkout)
             )),
@@ -720,7 +720,7 @@ impl fmt::Display for RunFailure {
                 processes,
             } => write!(
                 formatter,
-                "the workspace {workspace} has running processes: {}",
+                "the workspace {workspace} has running units: {}",
                 processes.join(", ")
             ),
             Self::Volumes {
@@ -746,7 +746,7 @@ impl fmt::Display for RunFailure {
             Self::Manifest(error) => error.fmt(formatter),
             Self::UnknownProcess { workspace, process } => write!(
                 formatter,
-                "the workspace {workspace} has no process named {process}"
+                "the workspace {workspace} has no unit named {process}"
             ),
             Self::Exited {
                 process,
@@ -756,15 +756,15 @@ impl fmt::Display for RunFailure {
             } => match (code, signal) {
                 (Some(code), _) => write!(
                     formatter,
-                    "the process {process} exited with code {code} before it was ready"
+                    "the unit {process} exited with code {code} before it was ready"
                 ),
                 (None, Some(signal)) => write!(
                     formatter,
-                    "signal {signal} ended the process {process} before it was ready"
+                    "signal {signal} ended the unit {process} before it was ready"
                 ),
                 (None, None) => write!(
                     formatter,
-                    "a signal ended the process {process} before it was ready"
+                    "a signal ended the unit {process} before it was ready"
                 ),
             },
             Self::NotReady {
@@ -775,15 +775,15 @@ impl fmt::Display for RunFailure {
             } => match &**waited {
                 Waited::Log { pattern } => write!(
                     formatter,
-                    "the process {process} wrote no log line that matches `{pattern}` within {seconds} seconds, so mxv stopped it"
+                    "the unit {process} wrote no log line that matches `{pattern}` within {seconds} seconds, so mxv stopped it"
                 ),
                 Waited::Port { port, number } => write!(
                     formatter,
-                    "the process {process} did not accept a connection on {port} (port {number}) within {seconds} seconds, so mxv stopped it"
+                    "the unit {process} did not accept a connection on {port} (port {number}) within {seconds} seconds, so mxv stopped it"
                 ),
                 _ => write!(
                     formatter,
-                    "the process {process} was not ready within {seconds} seconds, so mxv stopped it"
+                    "the unit {process} was not ready within {seconds} seconds, so mxv stopped it"
                 ),
             },
             Self::ForeignListener {
@@ -840,7 +840,7 @@ impl fmt::Display for RunFailure {
                 holders,
             } => write!(
                 formatter,
-                "port {number}, which the workspace {workspace} holds for {port}, is taken, and the process groups of its own processes {} still run and may hold it, so {process} did not start",
+                "port {number}, which the workspace {workspace} holds for {port}, is taken, and the process groups of its own units {} still run and may hold it, so {process} did not start",
                 holders.join(", ")
             ),
             Self::UnknownPort { workspace, port } => write!(
@@ -907,7 +907,7 @@ impl RunFailure {
                 processes,
             } => write!(
                 formatter,
-                "the workspace {workspace} has processes that an earlier version of mxv started, which still run: {}; `mxv down` stops them, and the next `mxv up` starts the workspace under phase",
+                "the workspace {workspace} has units that an earlier version of mxv started, which still run: {}; `mxv down` stops them, and the next `mxv up` starts the workspace under phase",
                 processes.join(", ")
             ),
             Self::VolumeRenamed { workspace, volumes } => write!(

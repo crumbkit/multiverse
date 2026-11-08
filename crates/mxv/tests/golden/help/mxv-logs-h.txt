@@ -1,13 +1,13 @@
-Print the last lines of a process's log, and follow it with --follow
+Print the last lines of a unit's log, and follow it with --follow
 
-Usage: mxv logs [OPTIONS] <PROCESS>
+Usage: mxv logs [OPTIONS] <UNIT>
 
 Arguments:
-  <PROCESS>  The process whose log to print
+  <UNIT>  The unit whose log to print
 
 Options:
   -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
-  -f, --follow                 Keep printing each line that the process writes, until interrupted
+  -f, --follow                 Keep printing each line that the unit writes, until interrupted
       --lines <N>              How many of the log's last lines to print first [default: 50]
   -h, --help                   Print help (see more with '--help')
 

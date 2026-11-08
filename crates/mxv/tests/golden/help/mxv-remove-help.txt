@@ -8,7 +8,7 @@ Arguments:
 
 Options:
       --force
-          Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+          Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running units; an unmerged branch and the workspace's volumes are still kept
 
       --delete-volumes
           Delete the workspace's docker volumes and the data in them

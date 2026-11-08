@@ -240,22 +240,22 @@
     {
       "declaration": "children",
       "applies_to": "mxv up",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "children",
       "applies_to": "mxv down",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "children",
       "applies_to": "mxv restart",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "children",
       "applies_to": "mxv status",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "text-line",

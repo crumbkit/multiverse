@@ -2,12 +2,13 @@
 //! workspace's manifest, its record's stable id and its ports in the port
 //! ledger, and the environment source that gives each process its values.
 //!
-//! Each process and container of the manifest is one app of the plan,
-//! named after the unit. Each app has one process, named [`MAIN`]. A
-//! unit's `depends_on` becomes its app's `depends`. phase names a container
-//! app's compose project `phase-<hash>-<unit>`, where `<hash>` is 16 hex
-//! digits of a hash of the workspace's stable id, and its container
-//! `phase-<hash>-<unit>.main`.
+//! A unit is one entry of the manifest's `[processes.*]` or
+//! `[containers.*]` tables, and that is the word mxv shows its users.
+//! Each unit is one phase app, named after the unit, and each app has one
+//! phase process, named [`MAIN`]. A unit's `depends_on` becomes its app's
+//! `depends`. phase names a container app's compose project
+//! `phase-<hash>-<unit>`, where `<hash>` is 16 hex digits of a hash of the
+//! workspace's stable id, and its container `phase-<hash>-<unit>.main`.
 //!
 //! phase starts a host process with only `PATH` and `HOME` of the caller's
 //! environment, so the plan declares by name every other variable that a

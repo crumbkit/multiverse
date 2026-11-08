@@ -312,7 +312,7 @@ pub(crate) fn recheck(
     stop_idle: Duration,
 ) -> Option<String> {
     let Some(facts) = facts else {
-        return Some("its processes and containers stopped before mxv reached it".to_owned());
+        return Some("its units stopped before mxv reached it".to_owned());
     };
     if facts.pinned {
         return Some("it was pinned after mxv measured it".to_owned());
@@ -682,7 +682,7 @@ fn memory(
             None => Ok(measured.row(
                 ReclaimState::Kept,
                 0,
-                "none of its processes or containers runs".to_owned(),
+                "none of its units runs".to_owned(),
                 now,
             )),
             Some(Verdict::InUse(reason)) => {
@@ -703,7 +703,7 @@ fn memory(
                 if measured.bytes == 0 && measured.containers > 0 {
                     "it is idle, and only its containers hold resident memory, which Docker Desktop's virtual machine does not return to macOS at once".to_owned()
                 } else if measured.bytes == 0 {
-                    "it is idle, and its processes and containers hold no resident memory that mxv can measure".to_owned()
+                    "it is idle, and its units hold no resident memory that mxv can measure".to_owned()
                 } else {
                     "it is idle, and stopping workspaces that were idle longer covers the need"
                         .to_owned()
@@ -780,7 +780,7 @@ fn disk(
                 active: row.modified,
                 reason: row.reason.or_else(|| {
                     (state != ReclaimState::Kept).then(|| {
-                        "none of its processes or containers runs, no other process works in it, and its checkouts are unchanged for the idle age of mxv clean".to_owned()
+                        "none of its units runs, no other process works in it, and its checkouts are unchanged for the idle age of mxv clean".to_owned()
                     })
                 }),
             }

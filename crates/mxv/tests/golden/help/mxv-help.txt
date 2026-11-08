@@ -10,12 +10,12 @@ Work in a workspace
   cd        Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
 
 Run a workspace's app
-  up        Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
-  down      Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
-  restart   Stop a workspace's processes and start them again
-  status    Report whether each process of a workspace is running, exited or stopped
-  logs      Print the last lines of a process's log, and follow it with --follow
-  exec      Run a one-off command in the context of a running process or container, and exit with its exit code
+  up        Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+  down      Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
+  restart   Stop a workspace's units and start them again
+  status    Report whether each unit of a workspace is running, exited or stopped
+  logs      Print the last lines of a unit's log, and follow it with --follow
+  exec      Run a one-off command in the context of a running unit, and exit with its exit code
   ports     Manage the host ports that a workspace holds
 
 Put a workspace away

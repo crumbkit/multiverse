@@ -1186,7 +1186,7 @@ fn down_and_status_work_from_the_run_records_when_the_manifest_does_not_parse() 
     let (exit, text) = setup.text(&["status", "-w", "triage"]);
     assert_eq!(exit, 0, "{text}");
     assert!(
-        text.contains("the processes come from the run records"),
+        text.contains("the units come from the run records"),
         "{text}"
     );
     let (exit, document) = setup.json(&["down", "-w", "triage"]);
@@ -1293,7 +1293,7 @@ fn up_in_text_names_the_log_of_a_process_that_exited_before_it_was_ready_and_quo
     let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
     assert_eq!(exit, 1, "{errors}");
     assert!(
-        errors.contains("the process build exited with code 101 before it was ready"),
+        errors.contains("the unit build exited with code 101 before it was ready"),
         "{errors}"
     );
     assert!(errors.contains("mxv logs -w triage build"), "{errors}");
@@ -1448,9 +1448,7 @@ fn up_warns_about_a_misspelt_table_and_a_manifest_that_declares_nothing() {
         "{errors}"
     );
     assert!(
-        errors.contains(
-            "declares no processes, no containers and no services, so mxv started nothing"
-        ),
+        errors.contains("declares no units and no services, so mxv started nothing"),
         "{errors}"
     );
     let (exit, status) = setup.json(&["status", "-w", "triage"]);

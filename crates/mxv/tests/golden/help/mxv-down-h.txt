@@ -1,9 +1,9 @@
-Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
 
-Usage: mxv down [OPTIONS] [PROCESS]...
+Usage: mxv down [OPTIONS] [UNIT]...
 
 Arguments:
-  [PROCESS]...  The processes, which default to every process
+  [UNIT]...  The units, which default to every unit
 
 Options:
   -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
@@ -14,6 +14,6 @@ Examples:
 
 Effects: destructive, idempotent, closed-world.
 Writes: reports each item and exits 1 when any item fails.
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv down --help` describes them.
 Next: mxv down --help explains each column.

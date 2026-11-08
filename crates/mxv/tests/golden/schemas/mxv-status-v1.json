@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/status/v1",
-  "description": "Each process of the workspace's manifest in start order, then each other process that has run files, with its state, and the manifest's error when it does not parse.",
+  "description": "Each unit of the workspace's manifest in start order, then each other unit that has run files, with its state, and the manifest's error when it does not parse.",
   "type": "object",
   "properties": {
     "schema": {
@@ -60,11 +60,11 @@
   ],
   "$defs": {
     "ProcessRow": {
-      "description": "One process or container of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
+      "description": "One unit of a workspace, as `up`, `down`, `restart`\nand `status` print it.",
       "type": "object",
       "properties": {
         "name": {
-          "description": "The process's or container's name in the manifest.",
+          "description": "The unit's name in the manifest.",
           "type": "string"
         },
         "kind": {
@@ -76,7 +76,7 @@
           "$ref": "#/$defs/StateName"
         },
         "ready": {
-          "description": "Whether the process has been ready since it last started: true\nonce its readiness check passed, or once a process without one\noutlasted its start grace, and false while it runs and has not,\nsuch as after its keeper or docker restarted it. It is null when it\ndoes not run, and for a process that mxv started before phase ran\nits processes.",
+          "description": "Whether the unit has been ready since it last started: true\nonce its readiness check passed, or once a unit without one\noutlasted its start grace, and false while it runs and has not,\nsuch as after its keeper or docker restarted it. It is null when it\ndoes not run, and for a unit that mxv started before phase ran\nits units.",
           "type": [
             "boolean",
             "null"
@@ -92,7 +92,7 @@
           "minimum": 0
         },
         "code": {
-          "description": "The exit code of an exited process, or null when a signal ended it\nor it has not exited. A container's code is the one docker reports,\nsuch as 137 for a container that SIGKILL ended.",
+          "description": "The exit code of an exited unit, or null when a signal ended it\nor it has not exited. A container's code is the one docker reports,\nsuch as 137 for a container that SIGKILL ended.",
           "type": [
             "integer",
             "null"
@@ -100,7 +100,7 @@
           "format": "int32"
         },
         "signal": {
-          "description": "The number of the signal that ended an exited process, such as 15\nfor SIGTERM, or null.",
+          "description": "The number of the signal that ended an exited unit, such as 15\nfor SIGTERM, or null.",
           "type": [
             "integer",
             "null"
@@ -108,7 +108,7 @@
           "format": "int32"
         },
         "reason": {
-          "description": "Why mxv cannot tell the state of an `unknown` process, or why it\ndoes not know the exit code of an exited process that an earlier\nversion of mxv started, such as one whose group SIGKILL ended\nbefore its shell wrote the exit file, or null when it knows.",
+          "description": "Why mxv cannot tell the state of an `unknown` unit, or why it\ndoes not know the exit code of an exited unit that an earlier\nversion of mxv started, such as one whose group SIGKILL ended\nbefore its shell wrote the exit file, or null when it knows.",
           "type": [
             "string",
             "null"
@@ -129,7 +129,7 @@
           }
         },
         "log": {
-          "description": "The process's log file, which `mxv logs` prints, or null for a\ncontainer, whose output docker keeps and `mxv logs` also prints.",
+          "description": "The unit's log file, which `mxv logs` prints, or null for a\ncontainer, whose output docker keeps and `mxv logs` also prints.",
           "type": [
             "string",
             "null"
@@ -143,7 +143,7 @@
           ]
         },
         "notes": {
-          "description": "What `up` and `restart` found about the process beside its state:\na warning when the process's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and an info line when `up` restarted a\nrunning host process because its part of the plan changed. Every\nother command prints none.",
+          "description": "What `up` and `restart` found about the unit beside its state:\na warning when the unit's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and an info line when `up` restarted a\nrunning host process because its part of the plan changed. Every\nother command prints none.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/NoteRow"
@@ -181,15 +181,15 @@
       ]
     },
     "StateName": {
-      "description": "The state of a process, as a row prints it.",
+      "description": "The state of a unit, as a row prints it.",
       "oneOf": [
         {
-          "description": "The process runs.",
+          "description": "The unit runs.",
           "type": "string",
           "const": "running"
         },
         {
-          "description": "The process ended.",
+          "description": "The unit ended.",
           "type": "string",
           "const": "exited"
         },
@@ -199,17 +199,17 @@
           "const": "created"
         },
         {
-          "description": "The process is not started.",
+          "description": "The unit is not started.",
           "type": "string",
           "const": "stopped"
         },
         {
-          "description": "The process started and is not ready yet.",
+          "description": "The unit started and is not ready yet.",
           "type": "string",
           "const": "starting"
         },
         {
-          "description": "The process is stopping.",
+          "description": "The unit is stopping.",
           "type": "string",
           "const": "stopping"
         },
@@ -219,14 +219,14 @@
           "const": "restarting"
         },
         {
-          "description": "mxv cannot tell the process's state.",
+          "description": "mxv cannot tell the unit's state.",
           "type": "string",
           "const": "unknown"
         }
       ]
     },
     "NoteRow": {
-      "description": "Something that `up` or `restart` found about a process, as its row\nprints it.",
+      "description": "Something that `up` or `restart` found about a unit, as its row\nprints it.",
       "type": "object",
       "properties": {
         "level": {
@@ -234,7 +234,7 @@
           "$ref": "#/$defs/NoteLevel"
         },
         "message": {
-          "description": "phase's sentence, which names the process and holds no value.",
+          "description": "phase's sentence, which names the unit and holds no value.",
           "type": "string"
         }
       },
@@ -418,7 +418,7 @@
       "type": "object",
       "properties": {
         "processes": {
-          "description": "The processes and containers that ran when reclaim stopped them.",
+          "description": "The units that ran when reclaim stopped them.",
           "type": "array",
           "items": {
             "type": "string"

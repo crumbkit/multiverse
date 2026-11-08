@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/logs/v1",
-  "description": "The last lines of a process's log, then with --follow each line that the process writes.",
+  "description": "The last lines of a unit's log, then with --follow each line that the unit writes.",
   "type": "object",
   "properties": {
     "schema": {
@@ -22,7 +22,7 @@
   ],
   "$defs": {
     "LogLine": {
-      "description": "One line of a process's log, as `mxv logs` prints it.",
+      "description": "One line of a unit's log, as `mxv logs` prints it.",
       "type": "object",
       "properties": {
         "line": {

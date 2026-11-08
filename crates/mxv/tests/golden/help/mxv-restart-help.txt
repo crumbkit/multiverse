@@ -1,10 +1,10 @@
-Stop a workspace's processes and start them again
+Stop a workspace's units and start them again
 
-Usage: mxv restart [OPTIONS] [PROCESS]...
+Usage: mxv restart [OPTIONS] [UNIT]...
 
 Arguments:
-  [PROCESS]...
-          The processes, which default to every process
+  [UNIT]...
+          The units, which default to every unit
 
 Options:
   -w, --workspace <WORKSPACE>
@@ -30,24 +30,24 @@ Options:
 
 Examples:
   mxv restart -w reading-list web
-          Stop the process web of the workspace reading-list and start it again
+          Stop the unit web of the workspace reading-list and start it again
 
 Columns:
-  name         The process's or container's name in the manifest.
+  name         The unit's name in the manifest.
   kind         `process` or `container`.
   state        `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
-  ready        Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
+  ready        Whether the unit has been ready since it last started: true once its readiness check passed, or once a unit without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a unit that mxv started before phase ran its units.
   pid          The process id, which is also its process group's id, while a process runs, and null for a container.
-  code         The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
-  signal       The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-  reason       Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
+  code         The exit code of an exited unit, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
+  signal       The number of the signal that ended an exited unit, such as 15 for SIGTERM, or null.
+  reason       Why mxv cannot tell the state of an `unknown` unit, or why it does not know the exit code of an exited unit that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
   group_alive  Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
   ports        The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
   sandbox      Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 Columns that --long adds:
-  log  The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+  log  The unit's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
 
 Effects: destructive, not idempotent, open-world.
 Writes: applies all items or none.
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.

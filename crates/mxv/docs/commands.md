@@ -13,12 +13,12 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv list`](#mxv-list): List the workspaces
 - [`mxv show`](#mxv-show): Show workspaces by name, in the order given
 - [`mxv cd`](#mxv-cd): Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
-- [`mxv up`](#mxv-up): Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
-- [`mxv down`](#mxv-down): Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
-- [`mxv restart`](#mxv-restart): Stop a workspace's processes and start them again
-- [`mxv status`](#mxv-status): Report whether each process of a workspace is running, exited or stopped
-- [`mxv logs`](#mxv-logs): Print the last lines of a process's log, and follow it with --follow
-- [`mxv exec`](#mxv-exec): Run a one-off command in the context of a running process or container, and exit with its exit code
+- [`mxv up`](#mxv-up): Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+- [`mxv down`](#mxv-down): Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
+- [`mxv restart`](#mxv-restart): Stop a workspace's units and start them again
+- [`mxv status`](#mxv-status): Report whether each unit of a workspace is running, exited or stopped
+- [`mxv logs`](#mxv-logs): Print the last lines of a unit's log, and follow it with --follow
+- [`mxv exec`](#mxv-exec): Run a one-off command in the context of a running unit, and exit with its exit code
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
@@ -96,7 +96,7 @@ Effects: additive, not idempotent, open-world.
 
 Add a clone of a repository to a workspace, on the workspace's branch.
 
-The clone lives in \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's processes, containers and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's processes or containers run, and moves the host ports that the workspace holds to the new names.
+The clone lives in \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
 
 ### Arguments
 
@@ -235,16 +235,16 @@ Effects: read-only, closed-world.
 
 ## `mxv up`
 
-Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready
+Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
 
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `<PROCESS>`: The processes, which default to every process. Takes more than one value.
+- `<UNIT>`: The units, which default to every unit. Takes more than one value.
 
 ### Examples
 
-Start the process web of the workspace reading-list and the processes it depends on.
+Start the unit web of the workspace reading-list and the units it depends on.
 
 ```sh
 mxv up -w reading-list web
@@ -252,40 +252,40 @@ mxv up -w reading-list web
 
 ### Columns
 
-- `name`: The process's or container's name in the manifest.
+- `name`: The unit's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
-- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
+- `ready`: Whether the unit has been ready since it last started: true once its readiness check passed, or once a unit without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a unit that mxv started before phase ran its units.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
-- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
-- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
+- `code`: The exit code of an exited unit, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
+- `signal`: The number of the signal that ended an exited unit, such as 15 for SIGTERM, or null.
+- `reason`: Why mxv cannot tell the state of an `unknown` unit, or why it does not know the exit code of an exited unit that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 - `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
-- `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `log`: The unit's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
 
 Effects: additive, idempotent, open-world.
 
 Writes: applies all items or none.
 
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv down`
 
-Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds
+Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
 
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `<PROCESS>`: The processes, which default to every process. Takes more than one value.
+- `<UNIT>`: The units, which default to every unit. Takes more than one value.
 
 ### Examples
 
-Stop every process of the workspace reading-list.
+Stop every unit of the workspace reading-list.
 
 ```sh
 mxv down -w reading-list
@@ -293,40 +293,40 @@ mxv down -w reading-list
 
 ### Columns
 
-- `name`: The process's or container's name in the manifest.
+- `name`: The unit's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
-- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
+- `ready`: Whether the unit has been ready since it last started: true once its readiness check passed, or once a unit without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a unit that mxv started before phase ran its units.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
-- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
-- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
+- `code`: The exit code of an exited unit, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
+- `signal`: The number of the signal that ended an exited unit, such as 15 for SIGTERM, or null.
+- `reason`: Why mxv cannot tell the state of an `unknown` unit, or why it does not know the exit code of an exited unit that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 - `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
-- `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `log`: The unit's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
 
 Effects: destructive, idempotent, closed-world.
 
 Writes: reports each item and exits 1 when any item fails.
 
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv restart`
 
-Stop a workspace's processes and start them again
+Stop a workspace's units and start them again
 
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `<PROCESS>`: The processes, which default to every process. Takes more than one value.
+- `<UNIT>`: The units, which default to every unit. Takes more than one value.
 
 ### Examples
 
-Stop the process web of the workspace reading-list and start it again.
+Stop the unit web of the workspace reading-list and start it again.
 
 ```sh
 mxv restart -w reading-list web
@@ -334,31 +334,31 @@ mxv restart -w reading-list web
 
 ### Columns
 
-- `name`: The process's or container's name in the manifest.
+- `name`: The unit's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
-- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
+- `ready`: Whether the unit has been ready since it last started: true once its readiness check passed, or once a unit without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a unit that mxv started before phase ran its units.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
-- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
-- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
+- `code`: The exit code of an exited unit, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
+- `signal`: The number of the signal that ended an exited unit, such as 15 for SIGTERM, or null.
+- `reason`: Why mxv cannot tell the state of an `unknown` unit, or why it does not know the exit code of an exited unit that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 - `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
-- `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `log`: The unit's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
 
 Effects: destructive, not idempotent, open-world.
 
 Writes: applies all items or none.
 
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv status`
 
-Report whether each process of a workspace is running, exited or stopped
+Report whether each unit of a workspace is running, exited or stopped
 
 ### Arguments
 
@@ -366,7 +366,7 @@ Report whether each process of a workspace is running, exited or stopped
 
 ### Examples
 
-Report the state of each process of the workspace reading-list.
+Report the state of each unit of the workspace reading-list.
 
 ```sh
 mxv status -w reading-list
@@ -374,35 +374,35 @@ mxv status -w reading-list
 
 ### Columns
 
-- `name`: The process's or container's name in the manifest.
+- `name`: The unit's name in the manifest.
 - `kind`: `process` or `container`.
 - `state`: `running`, `exited` when it ended on its own or something other than `mxv down` stopped it, `created` for a container that docker created and did not start, `stopped`, `starting` while it is not ready yet, `stopping`, `restarting` while docker restarts a container, or `unknown` when mxv cannot tell.
-- `ready`: Whether the process has been ready since it last started: true once its readiness check passed, or once a process without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a process that mxv started before phase ran its processes.
+- `ready`: Whether the unit has been ready since it last started: true once its readiness check passed, or once a unit without one outlasted its start grace, and false while it runs and has not, such as after its keeper or docker restarted it. It is null when it does not run, and for a unit that mxv started before phase ran its units.
 - `pid`: The process id, which is also its process group's id, while a process runs, and null for a container.
-- `code`: The exit code of an exited process, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
-- `signal`: The number of the signal that ended an exited process, such as 15 for SIGTERM, or null.
-- `reason`: Why mxv cannot tell the state of an `unknown` process, or why it does not know the exit code of an exited process that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
+- `code`: The exit code of an exited unit, or null when a signal ended it or it has not exited. A container's code is the one docker reports, such as 137 for a container that SIGKILL ended.
+- `signal`: The number of the signal that ended an exited unit, such as 15 for SIGTERM, or null.
+- `reason`: Why mxv cannot tell the state of an `unknown` unit, or why it does not know the exit code of an exited unit that an earlier version of mxv started, such as one whose group SIGKILL ended before its shell wrote the exit file, or null when it knows.
 - `group_alive`: Whether the process group of an exited process that an earlier version of mxv started still has a member, such as a child it started in the background, which `mxv down` stops. It is null while the process runs, and for every process that phase runs, because phase stops what is left of a process's group when the process ends.
 - `ports`: The ports that a process receives, as `VARIABLE=port`, or that a container publishes, as `port-name=port`.
 - `sandbox`: Whether phase runs a host process under its sandbox, as phase describes it: `seatbelt (partial: <what it leaves open>)` on macOS, or `unsandboxed (<reason>)`, such as `unsandboxed (its app declares no permissions)` for a process whose manifest has no `permissions` table. It is null for a container and for a process that phase does not run.
 
 ### Columns that `--long` adds
 
-- `log`: The process's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
+- `log`: The unit's log file, which `mxv logs` prints, or null for a container, whose output docker keeps and `mxv logs` also prints.
 
 Effects: read-only, closed-world.
 
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 ## `mxv logs`
 
-Print the last lines of a process's log, and follow it with --follow
+Print the last lines of a unit's log, and follow it with --follow
 
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `<PROCESS>`: The process whose log to print. Required.
-- `-f`, `--follow`: Keep printing each line that the process writes, until interrupted
+- `<UNIT>`: The unit whose log to print. Required.
+- `-f`, `--follow`: Keep printing each line that the unit writes, until interrupted
 - `--lines <N>`: How many of the log's last lines to print first. Default: `50`.
 
 ### Examples
@@ -425,14 +425,14 @@ Text: one line per row, `<LINE>`; --fields prints a table.
 
 ## `mxv exec`
 
-Run a one-off command in the context of a running process or container, and exit with its exit code.
+Run a one-off command in the context of a running unit, and exit with its exit code.
 
 A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
 
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `<PROCESS>`: The running process or container in whose context the command runs. Required.
+- `<UNIT>`: The running unit in whose context the command runs. Required.
 - `<COMMAND>`: The command's program and its arguments, after `--`. Required. Takes more than one value.
 
 ### Examples
@@ -492,7 +492,7 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 ### Arguments
 
 - `<NAME>`: The name of the workspace to remove. Required.
-- `--force`: Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+- `--force`: Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running units; an unmerged branch and the workspace's volumes are still kept
 - `--delete-volumes`: Delete the workspace's docker volumes and the data in them
 - `--delete-unmerged`: Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold
 - `--dry-run`: Report what the command would change, and change nothing
@@ -512,7 +512,7 @@ Effects: destructive, not idempotent, closed-world.
 
 Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces.
 
-A workspace is idle when none of its processes or containers run, no other process, such as a cargo build, a shell or an editor, has its working directory inside the workspace, and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node\_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
+A workspace is idle when none of its units run, no other process, such as a cargo build, a shell or an editor, has its working directory inside the workspace, and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node\_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
 
 ### Arguments
 
@@ -558,7 +558,7 @@ Writes: reports each item and exits 1 when any item fails.
 
 Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
 
-With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same units again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
 
 ### Arguments
 
