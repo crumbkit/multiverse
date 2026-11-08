@@ -304,6 +304,22 @@ fn a_disk_need_cleans_the_build_output_of_idle_workspaces_and_reports_what_it_fr
 }
 
 #[test]
+fn a_disk_need_keeps_the_build_output_of_a_workspace_that_a_process_works_in() {
+    let mut setup = Setup::new();
+    setup.idle_age("0s");
+    let checkout = setup.workspace("building");
+    write(&checkout.join("target/debug/app"), &"x".repeat(64 * 1024));
+    let pid = setup.shell_in(&checkout);
+    let (exit, document) = setup.json(&["reclaim", "--need", "disk=1K"]);
+    assert_eq!(exit, 0, "{document}");
+    let building = row(&document, "building");
+    assert_eq!(building["state"], "kept", "{document}");
+    let reason = building["reason"].as_str().unwrap();
+    assert!(reason.contains(&pid.to_string()), "{reason}");
+    assert!(checkout.join("target/debug/app").exists());
+}
+
+#[test]
 fn a_need_without_a_resource_or_a_size_is_refused() {
     let setup = Setup::new();
     let output = setup

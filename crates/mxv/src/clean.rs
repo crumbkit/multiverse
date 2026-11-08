@@ -1,8 +1,10 @@
 //! The verb `clean`, which deletes the disposable directories of idle
 //! workspaces, and the document it prints.
 //!
-//! A workspace is idle when none of its processes or containers run and
-//! its checkouts have not changed for the idle age, as
+//! A workspace is idle when none of its processes or containers run, no
+//! other process, such as a `cargo build`, a shell or an editor, has its
+//! working directory inside the workspace, and its checkouts have not
+//! changed for the idle age, as
 //! [`multiverse::DiskUsage::modified`] measures it. The idle age is
 //! `--idle`, or else the config file's `clean_idle`, or else
 //! [`DEFAULT_IDLE`]. `clean` measures every workspace it considers, which
@@ -10,9 +12,11 @@
 //! as from a cron job. Nothing runs in the background.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use crumbkit::{Age, Batch, Document, Output, Row};
+use multiverse::phase::host::TableEntry;
 use multiverse::{DisposablePath, DisposableSource, Error, Git, KeptPath, Workspace, Workspaces};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -21,6 +25,7 @@ use crate::cli::CleanArgs;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
+use crate::reclaim::{user_reason, users};
 use crate::rows::joined;
 use crate::units::Size;
 use crate::verbs::{configured, parse_name};
@@ -276,11 +281,13 @@ fn workspaces_text(count: usize) -> String {
     }
 }
 
-/// Returns why the workspace whose processes `running` names and whose
-/// checkouts last changed at `modified` is not idle at `now` for the idle
-/// age `idle`, or `None` when it is idle.
+/// Returns why the workspace whose processes `running` names, in which the
+/// processes outside phase `users` work, and whose checkouts last changed at
+/// `modified` is not idle at `now` for the idle age `idle`, or `None` when it
+/// is idle.
 pub(crate) fn busy(
     running: &[String],
+    users: &[(u32, PathBuf)],
     modified: Option<SystemTime>,
     now: SystemTime,
     idle: Duration,
@@ -290,6 +297,9 @@ pub(crate) fn busy(
             "its processes or containers run: {}",
             running.join(", ")
         ));
+    }
+    if let Some(reason) = user_reason(users) {
+        return Some(reason);
     }
     let Ok(elapsed) = now.duration_since(modified?) else {
         return Some(
@@ -407,14 +417,18 @@ fn measure(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     workspace: Workspace,
+    table: &[TableEntry],
     now: SystemTime,
     idle: Duration,
 ) -> Result<Candidate, MxvFailure> {
     processes::refuse_unfinished(&workspace)?;
     let usage = workspaces.disk_usage(&workspace)?;
     let running = processes::running(environment, &workspace)?;
+    // No phase pids: `busy` checks `running` first, so a workspace with
+    // running phase processes never reaches the outside-process reason.
+    let outside = users(table, &workspace.path, &[], std::process::id());
     Ok(Candidate {
-        busy: busy(&running, usage.modified, now, idle),
+        busy: busy(&running, &outside, usage.modified, now, idle),
         disposable: usage.disposable_bytes,
         modified: usage.modified,
         paths: usage.disposable,
@@ -445,7 +459,15 @@ fn clean_one(
     };
     let result = workspaces.clean(&candidate.workspace, &candidate.paths, |fresh| {
         let running = processes::running(environment, &candidate.workspace)?;
-        Ok::<_, MxvFailure>(busy(&running, fresh.modified, SystemTime::now(), idle))
+        let table = multiverse::process_table().map_err(MxvFailure::from)?;
+        let users = users(&table, &candidate.workspace.path, &[], std::process::id());
+        Ok::<_, MxvFailure>(busy(
+            &running,
+            &users,
+            fresh.modified,
+            SystemTime::now(),
+            idle,
+        ))
     });
     drop(lock);
     let cleaned = match result {
@@ -594,12 +616,13 @@ pub(crate) fn run(
     let idle = plan.idle.or(config.clean_idle).unwrap_or(DEFAULT_IDLE);
     let workspaces = configured(environment)?;
     let now = SystemTime::now();
+    let table = multiverse::process_table().map_err(MxvFailure::from)?;
     let mut keys = Vec::new();
     let mut entries = Vec::new();
     for (key, found) in selected(&workspaces, plan.names)? {
         keys.push(key);
-        let mut entry =
-            found.and_then(|workspace| measure(environment, &workspaces, workspace, now, idle));
+        let mut entry = found
+            .and_then(|workspace| measure(environment, &workspaces, workspace, &table, now, idle));
         if plan.hold
             && let Ok(candidate) = &mut entry
         {
