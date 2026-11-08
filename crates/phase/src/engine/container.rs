@@ -94,6 +94,7 @@ mod objects;
 mod run_dir;
 mod runner;
 mod secrets;
+mod volume_owner;
 
 #[cfg(test)]
 mod tests;

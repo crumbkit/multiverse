@@ -33,6 +33,8 @@ use crate::select::Selection;
 use crate::source::Source;
 use crate::status::ProcessState;
 
+mod volume_owner;
+
 /// The image of the tests.
 const IMAGE: &str = "busybox:1.37.0";
 

@@ -42,6 +42,15 @@ pub(crate) const RUN_RECORD_LABEL: &str = "mxv.run-record";
 /// workspace's app is named after the workspace.
 pub(crate) const APP_LABEL: &str = "mxv.app";
 
+/// The label that names the role of a short-lived container that phase
+/// runs for itself, apart from an app's processes.
+pub(crate) const ROLE_LABEL: &str = "mxv.role";
+
+/// The value of [`ROLE_LABEL`] on a helper of the volume-owner step, which
+/// sets the owner of a workspace volume or reads the numeric ids of an
+/// image's user.
+pub(crate) const VOLUME_OWNER_ROLE: &str = "volume-owner";
+
 /// The number of digits of the store id that project names hold.
 const SHORT_ID: usize = 8;
 
@@ -461,6 +470,40 @@ impl Scope {
             }
         }
         Value::Object(labels)
+    }
+
+    /// Returns the labels of a volume-owner helper of an app scope, as
+    /// `(label, value)` pairs in label order: the workspace's stable id,
+    /// its run record and the app, [`ROLE_LABEL`] set to
+    /// [`VOLUME_OWNER_ROLE`], and the volume that the helper mounts when it
+    /// mounts one. A helper carries no `mxv.container` label, so nothing
+    /// that finds an app's containers by their process finds it.
+    pub(super) fn helper_labels(&self, volume: Option<&VolumeKey>) -> BTreeMap<String, String> {
+        let mut labels = BTreeMap::new();
+        if let Owner::App { app, .. } = &self.owner {
+            labels.insert(APP_LABEL.to_owned(), app.as_str().to_owned());
+        }
+        if let Some(identity) = &self.identity {
+            labels.insert(
+                WORKSPACE_ID_LABEL.to_owned(),
+                identity.id.as_str().to_owned(),
+            );
+            labels.insert(
+                RUN_RECORD_LABEL.to_owned(),
+                identity.run_record.to_string_lossy().into_owned(),
+            );
+        }
+        labels.insert(ROLE_LABEL.to_owned(), VOLUME_OWNER_ROLE.to_owned());
+        if let Some(volume) = volume {
+            labels.insert(VOLUME_LABEL.to_owned(), volume.as_str().to_owned());
+        }
+        labels
+    }
+
+    /// Returns the stable id of the workspace whose objects the scope
+    /// labels, or `None` for a store scope without one.
+    pub(crate) fn workspace_id(&self) -> Option<&WorkspaceId> {
+        self.identity.as_ref().map(|identity| &identity.id)
     }
 
     /// Reports whether `labels`, an object's labels as the JSON that

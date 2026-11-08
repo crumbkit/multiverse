@@ -124,6 +124,22 @@ pub enum PhaseError {
         /// The process.
         process: ProcessName,
     },
+    /// phase could not choose a numeric owner for the workspace volumes
+    /// that a container app mounts, so it started none of the app's
+    /// containers. The user that the app's containers run as is a name,
+    /// and phase resolves a name to numbers by running `id` in the app's
+    /// image. The failure holds nothing that `id` printed.
+    #[non_exhaustive]
+    VolumeOwner {
+        /// The app.
+        app: AppName,
+        /// The plan's run-as user that the app's containers run as, or
+        /// `None` when the user came from the image's `USER`. The image's
+        /// author controls that text, so phase does not repeat it.
+        user: Option<String>,
+        /// What went wrong.
+        problem: VolumeOwnerProblem,
+    },
     /// phase cannot run the app yet, because what it needs is a later
     /// release's work.
     #[non_exhaustive]
@@ -207,6 +223,11 @@ impl PhaseError {
             Self::KeeperUnstartable { .. } => "phase::keeper::unstartable",
             Self::ProcessUnstartable { .. } => "phase::process::unstartable",
             Self::SecretOwnerUnknown { .. } => "phase::container::secret_owner_unknown",
+            Self::VolumeOwner {
+                problem: VolumeOwnerProblem::ResolvesToRoot,
+                ..
+            } => "phase::container::volume_owner_root",
+            Self::VolumeOwner { .. } => "phase::container::volume_owner_unresolved",
             Self::NotRunnable { .. } => "phase::app::not_runnable",
             Self::UnknownTarget { .. } => "phase::select::unknown",
             Self::NotRunning { .. } => "phase::exec::not_running",
@@ -215,6 +236,35 @@ impl PhaseError {
             Self::Unplanned { .. } => "phase::record::unplanned",
         }
     }
+}
+
+/// Why phase could not choose a numeric owner for an app's volumes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VolumeOwnerProblem {
+    /// The user's name resolves to uid 0 in the app's image. A name that
+    /// means root may hide that the app runs as root, so phase gives a
+    /// volume to root only when the plan's volume owner says `0:0`.
+    ResolvesToRoot,
+    /// Docker refused to create or start the helper that runs `id` in the
+    /// app's image. An image with no `id` program or no such user is one
+    /// reason, and a full disk or a missing image is another.
+    #[non_exhaustive]
+    IdNotRun {
+        /// Docker's line, or `None` when the user came from the image's
+        /// `USER`, because that line can quote it.
+        docker_line: Option<String>,
+    },
+    /// `id` in the app's image exited with this status, so the name could
+    /// not be resolved.
+    #[non_exhaustive]
+    IdFailed {
+        /// The exit status of `id`.
+        status: i64,
+    },
+    /// `id` in the app's image exited with status 0 and printed something
+    /// other than one number. phase does not repeat what it printed.
+    IdUnreadable,
 }
 
 /// What an app needs that phase cannot do yet.
@@ -358,6 +408,42 @@ impl fmt::Display for PhaseError {
                 formatter,
                 "the secret files of {app}/{process} would belong to root; set its secret_owner to the uid:gid the app reads them as, such as 999:999 for an image that switches to user 999, or set its secret_delivery = \"env\""
             ),
+            Self::VolumeOwner { app, user, problem } => {
+                let user = match user {
+                    Some(user) => {
+                        format!("the user {user:?} that the containers of {app} run as")
+                    }
+                    None => format!(
+                        "the user named by the image's USER, which the containers of {app} run as,"
+                    ),
+                };
+                match problem {
+                    VolumeOwnerProblem::ResolvesToRoot => write!(
+                        formatter,
+                        "{user} is uid 0 in its image, so phase does not give the app's volumes to it"
+                    )?,
+                    VolumeOwnerProblem::IdNotRun { docker_line } => {
+                        write!(
+                            formatter,
+                            "phase could not resolve {user} to a numeric uid and gid: Docker refused to create or start the helper that runs id in the app's image"
+                        )?;
+                        if let Some(line) = docker_line {
+                            write!(formatter, ": {line}")?;
+                        }
+                    }
+                    VolumeOwnerProblem::IdFailed { status } => write!(
+                        formatter,
+                        "phase could not resolve {user} to a numeric uid and gid: id in the app's image exited with status {status}"
+                    )?,
+                    VolumeOwnerProblem::IdUnreadable => write!(
+                        formatter,
+                        "phase could not resolve {user} to a numeric uid and gid: id in the app's image did not print one number"
+                    )?,
+                }
+                formatter.write_str(
+                    "; set the app's volume owner to a numeric uid:gid such as 999:999, or to keep to leave its volumes as they are",
+                )
+            }
             Self::NotRunnable { app, reason } => {
                 write!(formatter, "phase cannot run {app}: {reason}")
             }
@@ -404,6 +490,7 @@ impl std::error::Error for PhaseError {
             | Self::KeeperUnstartable { .. }
             | Self::ProcessUnstartable { .. }
             | Self::SecretOwnerUnknown { .. }
+            | Self::VolumeOwner { .. }
             | Self::NotRunnable { .. }
             | Self::UnknownTarget { .. }
             | Self::NotRunning { .. }

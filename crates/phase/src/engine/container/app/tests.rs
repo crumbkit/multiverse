@@ -324,6 +324,32 @@ fn a_new_secret_owner_changes_the_plan_hash_of_its_process_alone() {
 }
 
 #[test]
+fn a_new_volume_owner_changes_the_plan_hash_of_each_process_that_mounts_a_volume() {
+    let mut app = db();
+    app.container.caches.clear();
+    let scope = scope("db");
+    let server = plan_hash(&scope, &app, &name("server")).unwrap();
+    let worker = plan_hash(&scope, &app, &name("worker")).unwrap();
+    let file = compose_file(&scope, &app, None).unwrap();
+    assert!(
+        file["services"]["server"]
+            .get("x-phase-volume-owner")
+            .is_none(),
+        "{file}"
+    );
+
+    app.container.owner = Some("999:999".to_owned());
+
+    let file = compose_file(&scope, &app, None).unwrap();
+    assert_eq!(
+        file["services"]["server"]["x-phase-volume-owner"],
+        "999:999"
+    );
+    assert_ne!(plan_hash(&scope, &app, &name("server")).unwrap(), server);
+    assert_eq!(plan_hash(&scope, &app, &name("worker")).unwrap(), worker);
+}
+
+#[test]
 fn a_processs_plan_hash_does_not_depend_on_its_images_command() {
     let app = with_secrets();
     let scope = scope("db");

@@ -381,6 +381,9 @@ pub(crate) struct FakeDocker {
     pub(crate) refuses: bool,
     /// The ids that `remove` was called with.
     pub(crate) removed: RefCell<Vec<String>>,
+    /// The workspaces whose volume-owner helpers `remove_volume_helpers`
+    /// was asked to remove.
+    pub(crate) helpers_removed: RefCell<Vec<String>>,
 }
 
 impl FakeDocker {
@@ -489,6 +492,16 @@ impl Docker for FakeDocker {
         }
         Ok(())
     }
+
+    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
+        if self.down {
+            return Err(Self::failure());
+        }
+        self.helpers_removed
+            .borrow_mut()
+            .push(workspace.as_str().to_owned());
+        Ok(())
+    }
 }
 
 /// A Docker whose every call fails, so a record that names a Docker object
@@ -516,6 +529,10 @@ impl Docker for Unreachable {
     }
 
     fn remove(&self, _kind: DockerKind, _id: &str, _wait: Duration) -> Result<(), DockerError> {
+        Err(Self::failure())
+    }
+
+    fn remove_volume_helpers(&self, _workspace: &WorkspaceId) -> Result<(), DockerError> {
         Err(Self::failure())
     }
 }

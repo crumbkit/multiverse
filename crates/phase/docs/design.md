@@ -803,6 +803,182 @@ copy the value onto the virtual machine's disk, readable by every user in
 the container. A file bind-mounted from the Mac breaks when it is replaced.
 The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
+### Volume owners
+
+Decided 5 November 2026 (P20): Docker creates a named volume owned by
+root, so a container that runs as another user cannot write its own
+volume, such as a cache or a database's data directory. phase gives the
+root directory of each workspace volume that an app mounts to the user
+that the app runs as, after the app's container is created and before it
+starts, on every `up`.
+
+The owner comes from the same rule as the owner of the secret files, and
+the code shares it:
+
+1. the app's `owner`, a numeric `uid` or `uid:gid`, such as `999:999`;
+2. otherwise the app's run-as user;
+3. otherwise the image's own `USER`.
+
+`owner = "keep"` leaves every volume of the app as it is. An `owner` of
+`0:0` or `0` gives the volumes to root, as the plan asks. When the plan
+names no `owner` and the app runs as root, by its run-as user or its
+image's `USER`, phase leaves the volumes alone, because a container that
+runs as root can write a volume as Docker made it. The plan refuses an `owner` that names a user or a group, with
+`ContainerProblem::BadOwner`, because a name can mean uid 0 inside an
+image. It also refuses the id 4294967295, which the kernel's `chown` reads
+as -1, meaning that the owner stays as it is. An `id` in an image that
+prints that number fails as one that prints no number.
+
+A run-as user or an image `USER` that is a name, such as `postgres` or
+`1000:staff`, is resolved to numbers in the app's image. phase runs
+`id -u` and then `id -g` there, as that user, with `--entrypoint id`,
+under the helper's restrictions below, with no volume and no capability.
+A name that resolves to uid 0 fails the app with
+`phase::container::volume_owner_root`, and only a plan's numeric `owner`
+can give a volume to root. An `id` that exits with another status than 0,
+or prints anything else than one number, fails the app with
+`phase::container::volume_owner_unresolved`, which gives the status. The
+same error covers a helper that Docker refuses to create or start. An
+image with no `id` program or with a `USER` that its `/etc/passwd` lacks
+is one reason, and a full disk is another, so the message says only that
+Docker refused. Docker's line for that case can quote the `USER`, so phase
+keeps none of Docker's text there when the user came from the image, and
+keeps Docker's line when the plan named the user. Each of these errors
+says that a numeric `owner` or `keep` fixes it.
+
+When any `docker compose up` of a container that runs as its image's
+`USER` fails, phase reads that `USER` from the image and cleans Compose's
+standard error before it classifies the failure or quotes a line. It
+replaces the field that Docker quotes after `unable to find user ` or
+`unable to find group `, up to the next colon. Docker splits a `USER` on
+every colon, so that field holds no colon. Text in the field therefore
+cannot reach a report or choose a failure class such as an allocated port.
+phase also replaces the whole `USER` wherever it appears when it holds a
+character outside letters, digits, `-`, `_`, `.` and `:`. It leaves a plain
+`USER` alone everywhere else, because a word such as `daemon` or `port` is
+part of Docker's own sentences and of the failure phrases, and a plain
+`USER` holds no escape sequence. A sentence of Docker's that quoted one
+field of a `USER` somewhere else would not be cleaned, and phase knows of
+no such sentence. When phase cannot read the `USER`, it keeps none of Docker's lines
+for that failure. Each
+start of an app whose user is a name runs `id` twice. A numeric `owner`
+or run-as user avoids that.
+
+The image's author controls the text of its `USER`, which may hold a
+newline, a terminal escape sequence or a sentence that looks like one of
+phase's messages. So an error about a user that came from the image says
+"the user named by the image's USER" and leaves the text out. An error
+about the plan's run-as user prints it quoted, as Rust's `{:?}` does.
+
+The helper that sets the owner runs busybox pinned by digest. The digest
+is `HELPER_IMAGE` in `src/engine/container/volume_owner.rs`, whose comment
+says how to update it, and CI pulls the same digest. The helper runs as
+`0:0` with `--network none`, `--cap-drop ALL --cap-add CHOWN`,
+`--security-opt no-new-privileges` and `--read-only`, and mounts only its
+volume, at `/volume`. `CHOWN` alone is enough: on Docker 29.8 it changed
+the owner of a volume root that another uid owned with mode 0700, so the
+helper does not keep `DAC_OVERRIDE`.
+
+phase runs each helper, and each `id`, as four Docker commands: `docker
+create`, `docker start`, `docker wait` and `docker rm --force`. Each of
+them prints only Docker's own text, so a failure carries Docker's line as
+phase's other Docker commands do. The exception is a refused `docker
+create` or `docker start` of an `id` helper whose user came from the
+image's `USER`, which keeps none of Docker's text, as above. phase never
+reads what a helper writes,
+apart from the standard output of `id`, which it reads with `docker logs`
+and uses only when it is one decimal number on one line. No error, note
+or record holds what `id` or `chown` printed. A helper that exits with
+another status than 0 fails the app with that status.
+
+The helper changes the owner of the volume's root directory alone, and
+never runs `chown -R`. A new volume is empty, so its root is everything
+it holds and a recursive change would add nothing. An existing volume may
+hold files that its app gave other owners on purpose, such as the files
+of a database's data directory, and a large cache would make a recursive
+change slow on every change of owner. When an app's owner changes, the
+files that the old owner created keep their owner. An app that cannot
+use them needs its volume reset.
+
+The order of the steps follows from when Docker gives a volume its owner,
+measured on Docker 29.8 with Compose. Docker copies the image's directory at the mount
+path into an empty named volume, and gives the volume's root the
+directory's owner, when it creates the container: after `docker create`
+or `docker compose up --no-start` the root is already the image's, and a
+`docker start` of that container copies nothing and changes no owner. An
+owner that phase set before the creation is therefore lost, and an owner
+that phase sets after the creation stays. An image directory that is empty
+still gives the volume its owner, and that happens at every creation for
+as long as the volume stays empty. A volume that holds files keeps its
+owner, because Docker copies only into an empty volume.
+
+So phase creates a process's container with `docker compose up --no-start`,
+then runs one helper for each volume that the process mounts, then starts
+the container with `docker compose up --detach --no-recreate`. The app's
+main process never runs before the owner is right, and a helper that fails
+ends the start and removes the created container. phase pulls the helper's
+image before it removes any old container, so a pull that fails leaves the
+old container running. The two `compose up`
+commands read the same compose file and environment. An app with no owner
+to set, such as one under `keep`, runs one `compose up --detach` and no
+helper.
+
+phase runs a helper on every `up` and reads nothing from it. The helper
+runs `chown`, which leaves a volume that already has the owner as it was
+apart from its change time, so one helper checks the owner and corrects it,
+and no output is read to tell the two apart. This costs one helper per
+volume on each `up`, and nothing caches the result. A volume that several
+processes of an app mount gets one helper for each process that gets a new
+container, because each creation can copy an owner onto a volume that is
+still empty, as above. A running container's volumes are checked too, when
+`up` reports the app as already running. A volume of a process that `up`
+leaves running gets the owner that the run record names, because that is
+the owner its container started with: a tag that has moved to an image
+with another `USER` must not take a running container's volume away from
+it. When the record names none, the volume gets the owner from the plan.
+When that check cannot run, because the app's image is gone, the helper's
+image cannot be pulled or a helper fails, the container keeps running. An
+app whose every container runs is still reported as already running, and a
+note says that the owner was not checked. The next `up` checks it again.
+Under `keep`, and for an app that runs as root when the plan names no
+owner, no helper runs and nothing is checked.
+
+The run record keeps the owner that phase gave each volume, as `owner`
+on the volume's entry, such as `"1000:1000"`. Before a helper starts,
+phase records the volume with no owner, and after the helper exits with
+status 0 it records the owner. The record says which owner phase wanted,
+and it does not prove that the volume has that owner. A volume that phase
+leaves alone, for `keep` or for an app that runs as root, is recorded with
+no owner. The plan's `owner` is also in the compose file of each service
+that mounts a volume, as `x-phase-volume-owner`, so a new owner changes
+the service's plan hash and `up` replaces the container and sets the new
+owner. A tag that moves to an image with another `USER` changes no plan
+hash, so the volumes keep their owner until the container is replaced for
+another reason.
+
+Every helper carries the workspace's labels, its app's `mxv.app` and
+`mxv.role=volume-owner`, and a chown helper names its volume with
+`mxv.volume`. A helper carries no `mxv.container` label and the run record
+does not name it, so nothing that finds a process's container by its
+name, its labels or the record ever takes a helper for that container or
+refuses it as foreign. A run of phase that ends while a helper exists
+leaves it behind, and it keeps its volume in use:
+
+- `up` removes the app's leftover helpers before it sets any owner;
+- `down` removes the leftover helpers of each app that it stops, and a
+  failure to remove one is no container's failure;
+- a sweep removes every leftover helper of the workspace when some
+  container or volume in the record has not stopped, and a dry run
+  removes none. A sweep treats a Docker that does not answer as having
+  no helpers to remove, because a helper cannot hold a volume while
+  Docker is down and the next `up` removes it, so a record whose
+  containers have stopped sweeps without Docker;
+- the removal of a workspace's volumes removes the workspace's leftover
+  helpers first, because Docker refuses to delete a volume in use.
+
+Two apps that mount one workspace volume with different owners each set
+their own owner when they start, and the last start wins.
+
 ### Run record and sweep
 
 phase writes a run record (`phase/run/v5`) for each workspace. It names every
@@ -854,7 +1030,12 @@ sandbox as built](#the-sandbox-as-built) says, and version 5 adds
 phase launched a oneshot from: the hash of its part of the plan and, for
 a `once = false` oneshot, the run of each process and container that it
 depends on. `completed` records the oneshot's completion. [Oneshot
-processes](#oneshot-processes) says how phase uses both. phase reads a
+processes](#oneshot-processes) says how phase uses both. A volume entry
+of v5 may also hold `owner`, the owner that phase gave the volume's root
+directory, as [Volume owners](#volume-owners) says. The field reads as no
+owner when it is missing, so it needs no new version, and phase writes it
+only for a volume that has one. A phase built before the field reads a
+record that holds one as unreadable, and not as written by a newer phase. phase reads a
 `phase/run/v1`, `phase/run/v2`, `phase/run/v3` or `phase/run/v4` record
 with the fields it lacks at their defaults, and writes it back as v5: a
 v1 record reads with no ends, no restart policies, no readiness, no
@@ -1858,3 +2039,4 @@ Each decision states what this draft assumes until it is decided.
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt cannot limit an app's listening ports to the loopback interface, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. On 6 November 2026 macOS gained the metadata of the regular files that a process's standard streams have open, so node starts, and `SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app sets it, so rustls-native-certs and the AWS SDK find the system's trusted roots. See [The sandbox as built](#the-sandbox-as-built). |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |
+| P20 | How a container app that runs as another user than root writes a workspace volume. | Decided 5 November 2026: after the app's container is created and before it starts, a busybox helper pinned by digest gives the root directory of each volume, and only the root, to the app's `owner`, or else its run-as user, or else its image's `USER`, as the secret files take their owner. `keep` leaves the volumes alone, and so does an app that runs as root when the plan names no `owner`; an `owner` of `0:0` gives them to root. A name is resolved with `id` in the app's image, and one that resolves to uid 0 is refused. A helper runs after Docker creates the container and on every `up`, because Docker copies an image directory's owner onto an empty volume at creation and the run record cannot prove the owner still holds. The run record keeps the owner phase wanted in a v5 field. See [Volume owners](#volume-owners). |

@@ -253,6 +253,13 @@ pub enum ProcessNote {
         /// holds no value.
         message: String,
     },
+    /// `up` found a container running and could not check the owner of a
+    /// volume it mounts, so it left the volume as it was. The next `up`
+    /// checks again.
+    VolumeOwnerUnchecked {
+        /// phase's sentence, which names the app and why.
+        message: String,
+    },
     /// `up` left a host process running that started before its manifest
     /// gained or lost its `permissions` table, so it still runs as it
     /// started, sandboxed or not. `mxv restart` applies the change.
@@ -270,6 +277,7 @@ impl ProcessNote {
         match self {
             Self::SecretsRewritten { message }
             | Self::SecretsKept { message }
+            | Self::VolumeOwnerUnchecked { message }
             | Self::SandboxStale { message } => message,
         }
     }
@@ -278,7 +286,12 @@ impl ProcessNote {
     /// did not happen as asked.
     #[must_use]
     pub const fn is_warning(&self) -> bool {
-        matches!(self, Self::SecretsKept { .. } | Self::SandboxStale { .. })
+        matches!(
+            self,
+            Self::SecretsKept { .. }
+                | Self::VolumeOwnerUnchecked { .. }
+                | Self::SandboxStale { .. }
+        )
     }
 }
 
