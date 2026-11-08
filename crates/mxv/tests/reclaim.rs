@@ -12,7 +12,6 @@ mod test_ports;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Child;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -54,7 +53,7 @@ struct Setup {
     /// The block of ports that the config file names.
     _ports: PortBlock,
     /// The processes outside phase that a test started.
-    children: Vec<Child>,
+    children: Vec<u32>,
 }
 
 impl Setup {
@@ -148,7 +147,7 @@ impl Setup {
             .spawn()
             .unwrap();
         let pid = child.id();
-        self.children.push(child);
+        self.children.push(pid);
         pid
     }
 }
@@ -161,9 +160,11 @@ impl Drop for Setup {
         for row in listed["data"].as_array().cloned().unwrap_or_default() {
             let _ = self.json(&["down", "-w", row["name"].as_str().unwrap_or_default()]);
         }
-        for child in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
+        for pid in &self.children {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .env("PATH", PATH)
+                .output();
         }
     }
 }
