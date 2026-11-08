@@ -383,12 +383,6 @@ impl Scope {
         }
     }
 
-    /// Returns the scope, whose objects are also labelled with `identity`.
-    pub(crate) fn identified(mut self, identity: Identity) -> Self {
-        self.identity = Some(identity);
-        self
-    }
-
     /// Returns the store id and the workspace of a store scope, whose
     /// older labels an object without phase's workspace label carries, or
     /// `None` for an app scope.

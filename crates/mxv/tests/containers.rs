@@ -1167,26 +1167,40 @@ fn up_labels_containers_and_volumes_with_the_stable_id_that_the_record_holds() {
 }
 
 impl Setup {
-    /// Starts the workspace with the runner that mxv used before phase,
-    /// which creates its volumes under the names and labels of an earlier
-    /// mxv.
-    fn legacy_up(&self) {
-        let state = self.root().join("state/mxv");
-        let store = multiverse::Store::new(state.join("workspaces"));
-        let name: multiverse::WorkspaceName = self.name.parse().unwrap();
-        let mut workspace = store.read(&name).unwrap().unwrap();
-        let checkout = self.checkout();
-        let text = fs::read_to_string(checkout.join("mxv.toml")).unwrap();
-        let manifest = multiverse::Manifest::parse(&text, &checkout.join("mxv.toml")).unwrap();
-        let runs = multiverse::Runs::new(&state);
-        let lock = runs.lock(&name).unwrap();
-        let outcome = runs
-            .legacy_up(&lock, &store, &mut workspace, &checkout, &manifest, &[])
-            .unwrap();
-        assert!(
-            matches!(outcome, multiverse::UpOutcome::Up(_)),
-            "{outcome:?}"
+    /// Leaves the volume `volume` under the name and the labels that an
+    /// older mxv gave it, and the store id that names them in the state
+    /// directory, as a workspace has after that mxv's `down`. The store id
+    /// comes from this setup's temporary directory, so another test's
+    /// volume never has the name. The returned value removes the volume.
+    fn older_volume(&self, volume: &str) -> Foreign {
+        let root = self.root().display().to_string();
+        let hash = root.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        let store = format!("{hash:016x}{hash:016x}");
+        let runs = self.root().join("state/mxv/runs");
+        fs::create_dir_all(&runs).unwrap();
+        write(
+            &runs.join(".store-id"),
+            &serde_json::json!({"version": 1, "id": store}).to_string(),
         );
+        let name = format!("mxv-{}-{}.{volume}", &store[..8], self.name);
+        let labels = [
+            format!("mxv.store={store}"),
+            format!("mxv.workspace={}", self.name),
+            format!("mxv.volume={volume}"),
+        ];
+        let mut args = vec!["volume", "create"];
+        for label in &labels {
+            args.extend(["--label", label]);
+        }
+        args.push(&name);
+        let (created, _) = docker(&args);
+        assert!(created, "docker did not create the volume {name}");
+        Foreign {
+            kind: "volume",
+            name,
+        }
     }
 }
 
@@ -1196,9 +1210,7 @@ fn the_commands_of_the_volume_not_moved_hint_move_the_data_so_that_up_starts_on_
         return;
     }
     let setup = Setup::new("mxvtest-moved", &web());
-    setup.legacy_up();
-    let (exit, document) = setup.json(&["down", "-w", "mxvtest-moved"]);
-    assert_eq!(exit, 0, "{document}");
+    let older = setup.older_volume("srv");
 
     let (exit, document) = setup.json(&["up", "-w", "mxvtest-moved"]);
     assert_eq!(exit, 1, "{document}");
@@ -1207,10 +1219,7 @@ fn the_commands_of_the_volume_not_moved_hint_move_the_data_so_that_up_starts_on_
         .as_str()
         .unwrap()
         .to_owned();
-    let _legacy = Foreign {
-        kind: "volume",
-        name: legacy.clone(),
-    };
+    assert_eq!(legacy, older.name);
     assert_eq!(document["fields"]["phase_volume"], setup.volume_name("srv"));
     let (wrote, _) = docker(&[
         "run",

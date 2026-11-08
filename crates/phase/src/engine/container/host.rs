@@ -85,14 +85,6 @@ pub trait Host {
     /// Returns the host's error when the file cannot be deleted.
     fn remove_file(&self, path: &Path) -> Result<(), Self::Error>;
 
-    /// Moves the log at `log` to `older`, replacing an older log there. A
-    /// missing log succeeds.
-    ///
-    /// # Errors
-    ///
-    /// Returns the host's error when the move fails.
-    fn rotate_log(&self, log: &Path, older: &Path) -> Result<(), Self::Error>;
-
     /// Takes the exclusive lock on the file at `path`, waiting up to
     /// `wait` while another holder has it.
     ///
@@ -113,9 +105,6 @@ pub trait Host {
     /// Returns the host's error when the record cannot be read or written,
     /// or the workspace has no record.
     fn saved_workspace_id(&self, workspace: &WorkspaceName) -> Result<WorkspaceId, Self::Error>;
-
-    /// Reports whether something on the host holds the TCP port `port`.
-    fn port_taken(&self, port: u16) -> bool;
 
     /// Reports whether the follower that the file `record` names still
     /// runs. A missing record names no follower.

@@ -396,7 +396,7 @@ pub(crate) fn stop(container: &OwnedContainer, grace: Duration) -> Result<(), Er
     let seconds = stop_seconds(grace);
     let stopped = run(
         stop_args(seconds, container),
-        ComposeEnv::default(),
+        ComposeEnv,
         "stop",
         Duration::from_secs(seconds) + DOCKER_DEADLINE,
     )?;

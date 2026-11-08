@@ -1,8 +1,9 @@
 //! The container runner, which runs the containers of a workspace with
 //! the `docker` program found on `PATH` and its `compose` plugin.
 //! multiverse's docker backend moved here, and mxv's `up`, `down`,
-//! `status`, `logs` and `remove` call it through [`Lifecycle`]. This module
-//! owns the `Command`s of `docker` (PROC-1).
+//! `status`, `logs` and `remove` reach the containers of an older mxv
+//! through [`Lifecycle`]. This module owns the `Command`s of `docker`
+//! (PROC-1).
 //!
 //! One docker daemon can serve several mxv state directories, such as two
 //! people's or two test runs', and each of them may have a workspace with
@@ -15,20 +16,16 @@
 //! id. A compose project name allows only lowercase letters, digits, `-`
 //! and `_`, so the workspace's `_` is written `__` and its `.` is written
 //! `_d`, which keeps two workspace names from sharing a project. Each
-//! manifest container is one service of the project. mxv writes the
-//! project's compose file into the workspace's run directory, and starts
-//! one service at a time with `docker compose up`. The compose file names
-//! each environment variable and refers to its value by a variable of the
-//! `docker compose` process, so the values exist only in that process's
-//! environment and in the container.
+//! manifest container is one service of the project, which an older mxv
+//! started.
 //!
 //! The container of the service `<name>` is named `<project>.<name>`, and
 //! its named volume `<volume>` is `<project>.<volume>`. Neither the project
 //! nor a manifest name holds a `.`, so the part after the `.` is always the
 //! container or volume. Every container and named volume carries three
 //! labels: `mxv.store=<id>`, `mxv.workspace=<name>`, and
-//! `mxv.container=<name>` or `mxv.volume=<name>`. Those that
-//! [`Lifecycle::prepare`] scopes also carry `mxv.workspace-id=<id>`, the
+//! `mxv.container=<name>` or `mxv.volume=<name>`. Those that an older mxv
+//! created after it gained stable ids also carry `mxv.workspace-id=<id>`, the
 //! workspace's stable id, `mxv.run-record=<path>`, the absolute path of
 //! the workspace's run record, and `mxv.app=<name>`, which is the
 //! workspace's name until mxv names apps. Compose adds labels of its own.
@@ -69,17 +66,13 @@
 //! builds that command for [`Phase::exec`](crate::Phase::exec) and which
 //! the engine's exec module runs with the caller's streams. `objects` inspects containers and volumes,
 //! mints their handles, and stops, removes and deletes them. `compose`
-//! writes the compose file, holds the values of the containers' variables
-//! in a [`ComposeValue`] each, and runs `docker compose up`. `lifecycle`
+//! runs `docker compose up` for an app's project. `lifecycle`
 //! keeps the run records of a workspace's containers through the host
 //! program's [`Host`], and [`Lifecycle`] is what mxv's runs call.
 //! `secrets` holds the wrapper and the writer that deliver a container's
 //! secrets as files in a tmpfs (decision P3). `cli` is
 //! the `DockerCli` of phase's `sweep`. A [`Prepared`] from
-//! [`Lifecycle::prepare`] or
-//! [`Lifecycle::existing`] is the only way to name the workspace's scope,
-//! and the caller converts the manifest's containers into
-//! [`ContainerSpecs`], so the module reads no manifest.
+//! [`Lifecycle::existing`] is the only way to name the workspace's scope.
 
 mod app;
 mod cli;
@@ -100,13 +93,10 @@ mod volume_owner;
 mod tests;
 
 pub(crate) use crate::engine::container::cli::DockerCli;
-pub use crate::engine::container::compose::{
-    ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort,
-};
 pub use crate::engine::container::error::ContainerError;
 pub use crate::engine::container::host::{Follow, Host, Versioned};
 pub use crate::engine::container::lifecycle::{
-    Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, Start, WorkspaceVolumes, app_volume_labels,
+    Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, WorkspaceVolumes, app_volume_labels,
     app_volume_name, app_volumes, container_memory, delete_app_volumes, volume_exists,
 };
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};

@@ -186,7 +186,7 @@ impl DockerCli {
             let stopped = run_program(
                 self.program(),
                 ["stop", "--time", &seconds, "--", id],
-                ComposeEnv::default(),
+                ComposeEnv,
                 "stop",
                 wait + DOCKER_DEADLINE,
             )

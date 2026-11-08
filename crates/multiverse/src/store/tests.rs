@@ -7,7 +7,7 @@ use crate::name::WorkspaceName;
 use crate::record::{
     Checkout, ID_RECORD_VERSION, MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceKind,
 };
-use crate::store::{Created, Store, cap_log, lock, rotate_log};
+use crate::store::{Created, Store, cap_log, lock};
 use crate::testing::write;
 
 fn workspace(name: &str) -> Workspace {
@@ -293,19 +293,6 @@ fn a_log_over_its_cap_is_copied_to_the_older_log_and_emptied_while_its_writer_ap
     assert_eq!(fs::read_to_string(&older).unwrap(), "0123456789\n");
     std::io::Write::write_all(&mut writer, b"next\n").unwrap();
     assert_eq!(fs::read_to_string(&log).unwrap(), "next\n");
-}
-
-#[test]
-fn rotating_a_missing_log_succeeds_and_a_present_log_replaces_the_older_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("web.log");
-    let older = dir.path().join("web.log.1");
-    rotate_log(&log, &older).unwrap();
-    write(&older, "oldest\n");
-    write(&log, "previous\n");
-    rotate_log(&log, &older).unwrap();
-    assert_eq!(fs::read_to_string(&older).unwrap(), "previous\n");
-    assert!(!log.exists());
 }
 
 #[test]

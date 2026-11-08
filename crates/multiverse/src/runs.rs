@@ -37,23 +37,18 @@ use rustix::process::Signal;
 
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
 use phase::Phase;
-use phase::container::{
-    self as docker, ComposeValue, ContainerSpec, ContainerSpecs, ContainerState, Lifecycle,
-    OwnedContainer, Prepared, PublishedPort, ServiceName, Start, VolumeKey, WorkspaceVolumes,
-};
+use phase::container::{ContainerState, Lifecycle, ServiceName, WorkspaceVolumes};
 use phase::host::LogFollower;
 
 use crate::error::Error;
-use crate::manifest::{Container, LogPattern, Manifest, Process, ReadyCheck, Unit};
+use crate::manifest::{Manifest, Process};
 use crate::name::WorkspaceName;
 use crate::phase_plan::CallerEnvironment;
 use crate::ports::{self, DEFAULT_PORT_RANGE};
-use crate::process::{self, Holder, Launch, Launched};
+use crate::process;
 use crate::record::Workspace;
-use crate::redacted::Redacted;
 use crate::run_files::{
-    Ownership, RUN_VERSION, RunDir, RunHost, RunRecord, ownership, read_json, remove_if_present,
-    write_json,
+    Ownership, RunDir, RunHost, RunRecord, ownership, read_json, remove_if_present,
 };
 use crate::store::{self, LOCK_WAIT, Lock, Store};
 
@@ -69,11 +64,6 @@ pub const STOP_GRACE: Duration = Duration::from_secs(10);
 /// How long `mxv down` waits after SIGKILL before it reports the process
 /// as unstoppable.
 pub const KILL_WAIT: Duration = Duration::from_secs(5);
-
-/// How long `mxv up` watches a process without a readiness check before it
-/// counts the process as started. A process that exits within it fails
-/// `up`.
-pub const START_GRACE: Duration = Duration::from_millis(500);
 
 /// The most bytes that a process's log holds before an mxv command that
 /// reads the workspace's state moves it to `<process>.log.1` and empties
@@ -474,16 +464,6 @@ pub struct Unstoppable {
     /// process that led it has ended and nothing proves that the members
     /// left in the group are the ones `up` started.
     pub unverified: bool,
-}
-
-/// How a wait for readiness ended.
-enum Readiness {
-    /// The port accepted a connection, or a log line matched.
-    Ready,
-    /// The process ended, with how the shell ended.
-    Ended(process::Ended),
-    /// The timeout passed.
-    TimedOut,
 }
 
 /// The directory under mxv's state directory that holds the run files of
@@ -965,369 +945,6 @@ impl Runs {
         })
     }
 
-    /// Starts the processes `names` of `manifest`, or every process when
-    /// `names` is empty, with their dependencies first, in the checkout at
-    /// `checkout`. It skips a process that already runs. It allocates a
-    /// host port for each named port that `workspace` does not hold yet,
-    /// and writes the record to `store` when it does.
-    ///
-    /// Each process starts after its dependencies are ready. Before it
-    /// starts a listener, `up` checks that the listen port is free. A
-    /// process with a readiness check counts as ready when its port accepts
-    /// a TCP connection, and one without counts as ready once it has run
-    /// for [`START_GRACE`] without exiting. Each start moves the process's
-    /// previous log to `<process>.log.1`.
-    /// When a process fails, `up` stops the processes that it started
-    /// before it, so either every selected process runs or this run leaves
-    /// none of its own running. The failed process keeps its run record
-    /// when it exited, so `mxv status` reports its exit code.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`Store::list`] and [`Store::update`],
-    /// [`Error::Busy`] when another command allocates ports for longer
-    /// than the lock wait, [`Error::NoFreePort`] when no port can be allocated, the errors of
-    /// [`Runs::status`], [`Error::ProcessUnstartable`] for a process that
-    /// cannot start, and [`Error::Unwritable`] when a run file cannot be
-    /// written.
-    #[doc(hidden)]
-    pub fn legacy_up(
-        &self,
-        _lock: &Lock,
-        store: &Store,
-        workspace: &mut Workspace,
-        checkout: &Path,
-        manifest: &Manifest,
-        names: &[String],
-    ) -> Result<UpOutcome, Error> {
-        let order = match manifest.start_order(names) {
-            Ok(order) => order,
-            Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
-        };
-        self.cap_logs(&workspace.name, &order)?;
-        let prepared = if order
-            .iter()
-            .any(|name| manifest.containers.contains_key(name))
-        {
-            // The record on disk holds the workspace's stable id before any
-            // docker object is labelled with it.
-            let host = RunHost {
-                records: Some(store),
-            };
-            let lifecycle = self.lifecycle_with(&host, &workspace.name);
-            let saved = lifecycle.saved_id()?;
-            workspace.id = Some(saved.id().clone());
-            Some(lifecycle.prepare(&self.phase, &saved)?)
-        } else {
-            None
-        };
-        let specs = container_specs(&manifest.containers);
-        self.assign_ports(store, workspace, manifest, &BTreeSet::new(), false)?;
-        let mut started = Vec::new();
-        for process in &order {
-            let started_one = match (manifest.unit(process), &prepared) {
-                (None, _) => return Ok(UpOutcome::UnknownProcess(process.clone())),
-                (Some(Unit::Container(declared)), Some(prepared)) => {
-                    if self.container_runs(prepared, &workspace.name, process)? {
-                        // A container that runs is left as it is, apart
-                        // from a log follower that it may have lost.
-                        self.start_container(workspace, prepared, &specs, process, declared)?;
-                        continue;
-                    }
-                    self.start_container(workspace, prepared, &specs, process, declared)
-                }
-                (Some(Unit::Container(_)), None) => {
-                    return Ok(UpOutcome::UnknownProcess(process.clone()));
-                }
-                (Some(Unit::Process(declared)), _) => {
-                    if matches!(
-                        self.state(&workspace.name, process)?,
-                        ProcessState::Running { .. }
-                    ) {
-                        continue;
-                    }
-                    self.start(workspace, checkout, process, declared)
-                }
-            };
-            match started_one {
-                Ok(None) => started.push(process),
-                Ok(Some(outcome)) => {
-                    self.roll_back(&workspace.name, manifest, prepared.as_ref(), &started);
-                    return Ok(outcome);
-                }
-                Err(error) => {
-                    self.roll_back(&workspace.name, manifest, prepared.as_ref(), &started);
-                    return Err(error);
-                }
-            }
-        }
-        let containers: BTreeSet<String> = manifest.containers.keys().cloned().collect();
-        let mut statuses = Vec::new();
-        for process in &order {
-            statuses.push(self.unit_status(workspace, Some(manifest), &containers, process)?);
-        }
-        Ok(UpOutcome::Up(statuses))
-    }
-
-    /// Stops the processes that a failed `up` started, in the reverse of
-    /// their start order, and deletes their run records, so a failed `up`
-    /// leaves no process of its own running. Each step is best effort,
-    /// because the caller reports the failure that stopped `up`.
-    fn roll_back(
-        &self,
-        name: &WorkspaceName,
-        manifest: &Manifest,
-        prepared: Option<&Prepared>,
-        started: &[&String],
-    ) {
-        for process in started.iter().rev() {
-            if manifest.containers.contains_key(*process) {
-                // `up` prepared the containers' scope before it started
-                // one.
-                if let Some(prepared) = prepared
-                    && let Some(service) = service(process)
-                {
-                    let _ = self.lifecycle(name).stop(prepared, &service);
-                }
-                continue;
-            }
-            if let Ok(Some(record)) = self.record(name, process) {
-                self.stop_group(record.pid);
-            }
-            let _ = fs::remove_file(self.file(name, process, "json"));
-            let _ = fs::remove_file(self.file(name, process, "exit"));
-        }
-    }
-
-    /// Starts one process and waits for its readiness. It returns `None`
-    /// when the process is ready, and the outcome that stops `up`
-    /// otherwise.
-    fn start(
-        &self,
-        workspace: &Workspace,
-        checkout: &Path,
-        process: &str,
-        declared: &Process,
-    ) -> Result<Option<UpOutcome>, Error> {
-        let ports = received(workspace, declared);
-        let name = &workspace.name;
-        if let Some(port) = &declared.listen
-            && let Some(number) = workspace.ports.get(port).copied()
-            && ports::is_taken(number)
-        {
-            return Ok(Some(UpOutcome::PortTaken {
-                process: process.to_owned(),
-                port: port.clone(),
-                number,
-                holders: if self.group_lives(name, process)? {
-                    vec![process.to_owned()]
-                } else {
-                    Vec::new()
-                },
-            }));
-        }
-        let exit_file = self.file(name, process, "exit");
-        remove_if_present(&exit_file)?;
-        let log = self.log(name, process);
-        store::rotate_log(&log, &self.run_dir(name).older_log(process))?;
-        // The log readiness check reads the log from its start, which after
-        // the rotation holds only what this run of the process writes.
-        let mut watch = match declared.ready.as_ref().map(|ready| &ready.check) {
-            Some(ReadyCheck::Log(pattern)) => Some((Follower::new_log(&log)?, pattern)),
-            _ => None,
-        };
-        let env: Vec<(String, Redacted)> = declared
-            .env
-            .iter()
-            .map(|(variable, value)| (variable.clone(), value.render(&workspace.ports)))
-            .chain(declared.ports.iter().filter_map(|(variable, port)| {
-                workspace
-                    .ports
-                    .get(port)
-                    .map(|number| (variable.clone(), Redacted::new(number.to_string())))
-            }))
-            .collect();
-        let mut launched = process::launch(&Launch {
-            name: process,
-            argv: &declared.argv,
-            cwd: &checkout.join(&declared.cwd),
-            env: &env,
-            log: &log,
-            exit_file: &exit_file,
-        })?;
-        if let Err(error) = self.write_record(name, process, &launched, ports) {
-            launched.kill();
-            return Err(error);
-        }
-        let (number, timeout) = match &declared.ready {
-            Some(ready) => (
-                match &ready.check {
-                    ReadyCheck::Port(port) => workspace.ports.get(port).copied(),
-                    ReadyCheck::Log(_) => None,
-                },
-                ready.timeout,
-            ),
-            None => (None, START_GRACE),
-        };
-        let watch = watch
-            .as_mut()
-            .map(|(follower, pattern)| (follower, *pattern));
-        // Dropping `launched` on an error stops the process, and its run
-        // files go with it, so a failed `up` leaves nothing running.
-        let readiness = match wait_ready(&mut launched, number, watch, timeout) {
-            Ok(readiness) => readiness,
-            Err(error) => {
-                launched.kill();
-                self.drop_run_files(name, process);
-                return Err(error);
-            }
-        };
-        match readiness {
-            Readiness::Ready => self.check_listener(name, process, declared, number, launched, log),
-            Readiness::Ended(shell) => {
-                // The shell is reaped. Its group keeps its id only while a
-                // descendant remains, so the signal goes only to a group
-                // that still exists, and reaches only those descendants.
-                if process::group_exists(launched.pid()) {
-                    let _ = process::signal(launched.pid(), Signal::KILL);
-                }
-                // The shell is reaped and its group handled, so dropping the
-                // handle must not signal the group's id again.
-                launched.keep();
-                let (code, signal) = match process::exit_code(&exit_file) {
-                    Some(code) => code_and_signal(code),
-                    None => (shell.code, shell.signal),
-                };
-                Ok(Some(UpOutcome::Exited {
-                    process: process.to_owned(),
-                    code,
-                    signal,
-                    log: Some(log),
-                }))
-            }
-            Readiness::TimedOut => {
-                let Some(ready) = &declared.ready else {
-                    launched.keep();
-                    return Ok(None);
-                };
-                launched.kill();
-                let _ = fs::remove_file(self.file(name, process, "json"));
-                let _ = fs::remove_file(&exit_file);
-                let waited = match &ready.check {
-                    ReadyCheck::Port(port) => Waited::Port {
-                        port: port.clone(),
-                        number: number.unwrap_or_default(),
-                    },
-                    ReadyCheck::Log(pattern) => Waited::Log {
-                        pattern: pattern.as_str().to_owned(),
-                    },
-                };
-                Ok(Some(UpOutcome::NotReady {
-                    process: process.to_owned(),
-                    waited,
-                    timeout: ready.timeout,
-                    log: Some(log),
-                }))
-            }
-        }
-    }
-
-    /// Checks, for a `process` that is ready on its listen port `number`,
-    /// which process holds the port. The port that answered must be the
-    /// process's own, or the process would count as ready while another
-    /// program serves its port. It keeps `launched` running and returns
-    /// `None` when a member of the process's group holds the port, and
-    /// stops it and returns the outcome that stops `up` otherwise.
-    fn check_listener(
-        &self,
-        name: &WorkspaceName,
-        process: &str,
-        declared: &Process,
-        number: Option<u16>,
-        launched: Launched,
-        log: PathBuf,
-    ) -> Result<Option<UpOutcome>, Error> {
-        let (Some(listen), Some(number)) = (&declared.listen, number) else {
-            launched.keep();
-            return Ok(None);
-        };
-        if declared
-            .ready
-            .as_ref()
-            .is_none_or(|ready| ready.check != ReadyCheck::Port(listen.clone()))
-        {
-            launched.keep();
-            return Ok(None);
-        }
-        let holder = match process::listen_holder(launched.pid(), number) {
-            Ok(None | Some(Holder::Group)) => {
-                launched.keep();
-                return Ok(None);
-            }
-            Ok(Some(holder)) => holder,
-            Err(error) => {
-                launched.kill();
-                self.drop_run_files(name, process);
-                return Err(error);
-            }
-        };
-        // The descendant may lead a group of its own, such as after setsid,
-        // and that group goes with it.
-        if let Holder::Descendant(pid) = holder {
-            let _ = process::signal(pid, Signal::KILL);
-            let _ = process::signal_process(pid, Signal::KILL);
-        }
-        launched.kill();
-        self.drop_run_files(name, process);
-        Ok(Some(match holder {
-            Holder::Descendant(pid) => UpOutcome::DetachedListener {
-                process: process.to_owned(),
-                port: listen.clone(),
-                number,
-                pid,
-                log: Some(log),
-            },
-            Holder::Group | Holder::Other(_) => UpOutcome::ForeignListener {
-                process: process.to_owned(),
-                port: listen.clone(),
-                number,
-                pid: match holder {
-                    Holder::Other(pid) => pid,
-                    Holder::Group | Holder::Descendant(_) => None,
-                },
-                log: Some(log),
-            },
-        }))
-    }
-
-    /// Deletes the run record and the exit file of `process`, which `up`
-    /// stopped before it was ready.
-    fn drop_run_files(&self, name: &WorkspaceName, process: &str) {
-        let _ = fs::remove_file(self.file(name, process, "json"));
-        let _ = fs::remove_file(self.file(name, process, "exit"));
-    }
-
-    /// Writes the run record of the process that was just launched.
-    fn write_record(
-        &self,
-        name: &WorkspaceName,
-        process: &str,
-        launched: &Launched,
-        ports: BTreeMap<String, u16>,
-    ) -> Result<(), Error> {
-        let pid = launched.pid();
-        let started = process::start_time(pid)?.ok_or_else(|| Error::ProcessTable {
-            message: format!("ps does not list the process {pid} that mxv just started"),
-        })?;
-        let record = RunRecord {
-            version: RUN_VERSION,
-            pid,
-            started,
-            ports,
-        };
-        write_json(&self.file(name, process, "json"), &record)
-    }
-
     /// Stops the processes `names` of `workspace`, or every process that a
     /// run record names when `names` is empty, in the reverse of their
     /// start order. The process group that a run record names gets SIGTERM
@@ -1555,9 +1172,9 @@ impl Runs {
     }
 }
 
-/// The containers of a workspace's app, which `Lifecycle` in phase's
-/// container engine starts, reports and stops. These methods put them among
-/// the workspace's processes and wait for their readiness.
+/// The containers of a workspace's app that an older mxv started, which
+/// `Lifecycle` in phase's container engine reports and stops. These methods
+/// put them among the workspace's processes.
 impl Runs {
     /// Returns the containers of the workspace `name`.
     fn lifecycle(&self, name: &WorkspaceName) -> Lifecycle<'static, RunHost<'static>> {
@@ -1570,7 +1187,7 @@ impl Runs {
         host: &'h RunHost<'s>,
         name: &WorkspaceName,
     ) -> Lifecycle<'h, RunHost<'s>> {
-        Lifecycle::new(host, &self.dir, name, self.grace, self.lock_wait)
+        Lifecycle::new(host, &self.dir, name, self.grace)
     }
 
     /// Returns the names of the containers that `manifest` declares, and
@@ -1686,23 +1303,6 @@ impl Runs {
         }
     }
 
-    /// Reports whether the container `container` of the workspace `name`
-    /// runs.
-    fn container_runs(
-        &self,
-        prepared: &Prepared,
-        name: &WorkspaceName,
-        container: &str,
-    ) -> Result<bool, Error> {
-        match service(container) {
-            Some(service) => Ok(self
-                .lifecycle(name)
-                .state(prepared, &service)?
-                .is_some_and(ContainerState::is_up)),
-            None => Ok(false),
-        }
-    }
-
     /// Reports whether the log of the container `container` may still
     /// grow, as `Lifecycle::writing` describes.
     fn container_writing(&self, name: &WorkspaceName, container: &str) -> Result<bool, Error> {
@@ -1710,120 +1310,6 @@ impl Runs {
         match (service(container), lifecycle.existing()?) {
             (Some(service), Some(prepared)) => lifecycle.writing(&prepared, &service),
             _ => Ok(false),
-        }
-    }
-
-    /// Starts the container `name` of `specs` and waits for its
-    /// readiness, as [`Runs::up`] describes, or makes sure that a container
-    /// that already runs has a log follower. `declared` is the manifest's
-    /// container, whose readiness check `up` waits for. It returns `None`
-    /// when the container is ready, and the outcome that stops `up`
-    /// otherwise. When a step after `docker compose up` fails, the
-    /// container is removed before the error returns.
-    fn start_container(
-        &self,
-        workspace: &Workspace,
-        prepared: &Prepared,
-        specs: &ContainerSpecs,
-        name: &str,
-        declared: &Container,
-    ) -> Result<Option<UpOutcome>, Error> {
-        let Some(service) = service(name) else {
-            return Ok(Some(UpOutcome::UnknownProcess(name.to_owned())));
-        };
-        let lifecycle = self.lifecycle(&workspace.name);
-        match lifecycle.start(prepared, specs, &service, &workspace.ports)? {
-            Start::Running => Ok(None),
-            Start::PortTaken { port, number } => Ok(Some(UpOutcome::PortTaken {
-                process: name.to_owned(),
-                port,
-                number,
-                holders: Vec::new(),
-            })),
-            Start::Gone => Ok(Some(self.exited(&workspace.name, name, None))),
-            Start::Started(container) => {
-                match self.wait_container(workspace, &lifecycle, prepared, declared, &container) {
-                    Ok(outcome) => Ok(outcome),
-                    Err(error) => {
-                        let _ = lifecycle.stop(prepared, &service);
-                        Err(error)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Returns the outcome of the container `name` that stopped before it
-    /// was ready, with docker's exit code `code`.
-    fn exited(&self, name: &WorkspaceName, container: &str, code: Option<i32>) -> UpOutcome {
-        let log = self.run_dir(name).log(container);
-        // `docker logs` may not have copied the last lines yet.
-        pause(FOLLOW_INTERVAL);
-        UpOutcome::Exited {
-            process: container.to_owned(),
-            code,
-            signal: None,
-            log: Some(log),
-        }
-    }
-
-    /// Waits for the readiness of `container`, which `docker compose up`
-    /// just started for `declared`: its readiness port answers, or it runs
-    /// past the grace of a container without a readiness check. A
-    /// container that stops first, or misses its readiness timeout, ends
-    /// the wait with the outcome that stops `up`, and one that misses the
-    /// timeout is removed.
-    fn wait_container(
-        &self,
-        workspace: &Workspace,
-        lifecycle: &Lifecycle<'_, RunHost>,
-        prepared: &Prepared,
-        declared: &Container,
-        container: &OwnedContainer,
-    ) -> Result<Option<UpOutcome>, Error> {
-        let name = container.service().as_str();
-        let log = self.run_dir(&workspace.name).log(name);
-        let ready_port = declared
-            .ready
-            .as_ref()
-            .and_then(|ready| match &ready.check {
-                ReadyCheck::Port(port) => Some(port),
-                ReadyCheck::Log(_) => None,
-            });
-        let port = ready_port.and_then(|ready_port| workspace.ports.get(ready_port).copied());
-        let timeout = declared
-            .ready
-            .as_ref()
-            .map_or(START_GRACE, |ready| ready.timeout);
-        let deadline = Instant::now() + timeout;
-        loop {
-            let state = docker::reinspect(container)?.map(|inspected| inspected.state);
-            if !state.is_some_and(|state| state.is_up() || state == ContainerState::Created) {
-                let code = match state {
-                    Some(ContainerState::Exited(code)) => Some(code),
-                    _ => None,
-                };
-                return Ok(Some(self.exited(&workspace.name, name, code)));
-            }
-            if port.is_some_and(docker::answers) {
-                return Ok(None);
-            }
-            if Instant::now() >= deadline {
-                let Some(ready) = &declared.ready else {
-                    return Ok(None);
-                };
-                lifecycle.stop(prepared, container.service())?;
-                return Ok(Some(UpOutcome::NotReady {
-                    process: name.to_owned(),
-                    waited: Waited::Port {
-                        port: ready_port.cloned().unwrap_or_default(),
-                        number: port.unwrap_or_default(),
-                    },
-                    timeout: ready.timeout,
-                    log: Some(log),
-                }));
-            }
-            pause(FOLLOW_INTERVAL);
         }
     }
 
@@ -1861,42 +1347,6 @@ impl Runs {
             None => Ok(()),
         }
     }
-}
-
-/// Returns the container engine's specs of the manifest's containers
-/// `containers`. A container or volume whose name no manifest accepts is
-/// left out; the manifest refuses such names when it is read.
-pub(crate) fn container_specs(containers: &BTreeMap<String, Container>) -> ContainerSpecs {
-    containers
-        .iter()
-        .filter_map(|(name, container)| {
-            let mut spec = ContainerSpec::new(container.image.clone());
-            spec.command.clone_from(&container.command);
-            spec.env = container
-                .env
-                .iter()
-                .map(|(variable, value)| {
-                    (
-                        variable.clone(),
-                        ComposeValue::new(value.reveal().to_owned()),
-                    )
-                })
-                .collect();
-            spec.ports = container
-                .ports
-                .iter()
-                .map(|published| PublishedPort::new(published.container, published.port.clone()))
-                .collect();
-            spec.volumes = container
-                .volumes
-                .iter()
-                .filter_map(|(volume, path)| {
-                    VolumeKey::new(volume).ok().map(|key| (key, path.clone()))
-                })
-                .collect();
-            service(name).map(|service| (service, spec))
-        })
-        .collect()
 }
 
 /// Returns the service name of the container `name`, or `None` for a name
@@ -1950,38 +1400,6 @@ fn received(workspace: &Workspace, declared: &Process) -> BTreeMap<String, u16> 
         .collect()
 }
 
-/// Waits until `launched` accepts a connection on `port`, writes a log
-/// line that `watch`'s pattern matches, ends, or runs past `timeout`.
-/// Without a port or a pattern it waits for `timeout` and returns
-/// [`Readiness::TimedOut`] when the process still runs. Neither the process,
-/// the port nor the log gives an event to wait on, so the wait polls them
-/// every [`POLL_INTERVAL`].
-fn wait_ready(
-    launched: &mut Launched,
-    port: Option<u16>,
-    mut watch: Option<(&mut Follower, &LogPattern)>,
-    timeout: Duration,
-) -> Result<Readiness, Error> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some((follower, pattern)) = watch.as_mut()
-            && follower.lines()?.iter().any(|line| pattern.is_match(line))
-        {
-            return Ok(Readiness::Ready);
-        }
-        if let Some(ended) = launched.ended() {
-            return Ok(Readiness::Ended(ended));
-        }
-        if port.is_some_and(ports::accepts) {
-            return Ok(Readiness::Ready);
-        }
-        if Instant::now() >= deadline {
-            return Ok(Readiness::TimedOut);
-        }
-        pause(POLL_INTERVAL);
-    }
-}
-
 /// Waits until the process group `pid` is gone or `timeout` passes, and
 /// reports whether it is gone. The group gives no event to wait on, so the
 /// wait polls it every [`POLL_INTERVAL`].
@@ -2029,22 +1447,6 @@ pub struct Follower {
 }
 
 impl Follower {
-    /// Creates the log at `path` when it does not exist, and opens it at
-    /// its start, for a process that `up` is about to start.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Unwritable`] when the log cannot be created, and
-    /// [`Error::StateUnreadable`] when it cannot be opened.
-    pub(crate) fn new_log(path: &Path) -> Result<Self, Error> {
-        drop(store::append_file(path)?);
-        let log = LogFollower::from_start(path).map_err(|source| Error::StateUnreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(Self { log })
-    }
-
     /// Opens the log at `path` at its end, or returns `None` when it does
     /// not exist.
     ///
