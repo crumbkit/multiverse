@@ -17,6 +17,13 @@ workspace may need to act on.
 
 ### Changed
 
+- `up` of a container app that runs as another user than root and mounts a
+  volume now gives the root directory of each such volume to that user,
+  through a helper container. The helper runs busybox pinned by digest, so
+  the machine needs that image or access to Docker Hub to pull it. Without
+  them `up` fails for that app before it removes any container. Set the
+  app's `container.owner` to `keep` to leave its volumes alone and run no
+  helper.
 - A sandboxed process can connect over loopback only to the units that its
   `permissions.connect` names. Before this change the sandbox opened the
   ports of every unit in the process's `depends_on`, and `connect` was only

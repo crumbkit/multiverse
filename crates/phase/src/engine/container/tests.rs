@@ -1143,3 +1143,55 @@ fn a_user_that_phase_could_not_read_keeps_none_of_dockers_lines() {
     assert_eq!(compose_docker_line(&cleaned), None);
     assert_eq!(up_failure(&cleaned), UpFailure::Other);
 }
+
+#[test]
+fn only_the_field_docker_quotes_is_replaced_for_a_user_with_a_third_field() {
+    let stderr = "Error response from daemon: unable to find group evil: no matching entries in group file\n";
+
+    let cleaned = without_image_user(stderr, Some("1000:evil:tail"));
+
+    assert_eq!(
+        cleaned,
+        "Error response from daemon: unable to find group <the image's USER>: no matching entries in group file\n"
+    );
+}
+
+#[test]
+fn a_user_that_is_a_word_of_dockers_sentence_leaves_the_sentence_and_its_failure_class() {
+    let conflict = "Bind for 127.0.0.1:8080 failed: port is already allocated\n";
+    let group = "Error response from daemon: unable to find group nosuchgroup: no matching entries in group file\n";
+
+    let port = without_image_user(conflict, Some("port"));
+    let daemon = without_image_user(group, Some("daemon:nosuchgroup"));
+
+    assert_eq!(port, conflict);
+    assert_eq!(up_failure(&port), UpFailure::PortAllocated(Some(8080)));
+    assert_eq!(
+        daemon,
+        "Error response from daemon: unable to find group <the image's USER>: no matching entries in group file\n"
+    );
+    assert!(compose_docker_line(&daemon).is_some());
+}
+
+#[test]
+fn a_user_with_text_no_sentence_of_docker_holds_is_replaced_wherever_it_appears() {
+    let user = "ev\u{1b}[31mil";
+    let stderr = format!("something about {user} elsewhere\n");
+
+    assert_eq!(
+        without_image_user(&stderr, Some(user)),
+        "something about <the image's USER> elsewhere\n"
+    );
+}
+
+#[test]
+fn a_quoted_user_with_no_end_hides_the_rest_of_the_output() {
+    assert_eq!(
+        without_image_user("unable to find user evil text", Some("evil text")),
+        "unable to find user <the image's USER>"
+    );
+    assert_eq!(
+        without_image_user("unable to find user other", Some("evil")),
+        "unable to find user <the image's USER>"
+    );
+}

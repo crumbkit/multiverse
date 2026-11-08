@@ -847,14 +847,20 @@ keeps Docker's line when the plan named the user. Each of these errors
 says that a numeric `owner` or `keep` fixes it.
 
 When any `docker compose up` of a container that runs as its image's
-`USER` fails, phase reads that `USER` from the image and replaces its
-literal text, and the text of its user and group parts, in Compose's
-standard error, before it classifies the failure or quotes a line. Text in
-a `USER` therefore cannot reach a report or choose a failure class such as
-an allocated port. A part that is only digits stays, because digits can
-hold neither an escape sequence nor a failure phrase and may be a port
-number in Docker's line. When phase cannot read the `USER`, it keeps none
-of Docker's lines for that failure. Each
+`USER` fails, phase reads that `USER` from the image and cleans Compose's
+standard error before it classifies the failure or quotes a line. It
+replaces the field that Docker quotes after `unable to find user ` or
+`unable to find group `, up to the next colon. Docker splits a `USER` on
+every colon, so that field holds no colon. Text in the field therefore
+cannot reach a report or choose a failure class such as an allocated port.
+phase also replaces the whole `USER` wherever it appears when it holds a
+character outside letters, digits, `-`, `_`, `.` and `:`. It leaves a plain
+`USER` alone everywhere else, because a word such as `daemon` or `port` is
+part of Docker's own sentences and of the failure phrases, and a plain
+`USER` holds no escape sequence. A sentence of Docker's that quoted one
+field of a `USER` somewhere else would not be cleaned, and phase knows of
+no such sentence. When phase cannot read the `USER`, it keeps none of Docker's lines
+for that failure. Each
 start of an app whose user is a name runs `id` twice. A numeric `owner`
 or run-as user avoids that.
 

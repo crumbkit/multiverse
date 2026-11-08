@@ -659,6 +659,55 @@ fn an_images_user_that_holds_a_compose_failure_phrase_chooses_no_failure_class()
 }
 
 #[test]
+fn an_images_user_with_a_third_field_never_reaches_the_report_or_chooses_a_failure_class() {
+    if !ready() {
+        return;
+    }
+    for group in [
+        "MARK\u{1b}[31mgroup",
+        "MARK\u{1b}[31m port is already allocated",
+        "MARK\u{1b}[31m all predefined address pools have been fully subnetted",
+    ] {
+        let Some((_image, db)) = with_image_user(&format!("1000:{group}:tail"), "keep") else {
+            return;
+        };
+        let world = World::new();
+
+        let report = world.up(&world.plan(vec![db]));
+
+        assert_image_user_hidden(&report);
+    }
+}
+
+#[test]
+fn an_images_user_that_is_a_word_of_dockers_sentence_leaves_the_sentence_whole() {
+    if !ready() {
+        return;
+    }
+    let Some((_image, db)) = with_image_user("daemon:nosuchgroup", "keep") else {
+        return;
+    };
+    let world = World::new();
+
+    let report = world.up(&world.plan(vec![db]));
+
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("nosuchgroup"), "{json}");
+    assert!(json.contains("docker_line"), "{json}");
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(
+                message.contains(
+                    "Error response from daemon: unable to find group <the image's USER>:"
+                ),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_plans_run_as_user_docker_cannot_find_fails_as_unresolved_and_keeps_dockers_line() {
     if !ready() {
         return;

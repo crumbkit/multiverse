@@ -257,50 +257,62 @@ const HIDDEN_USER: &str = "<the image's USER>";
 const USER_UNREADABLE: &str =
     "phase could not read the image's USER, so it keeps none of Docker's text for this failure";
 
-/// Returns `stderr` with the literal text of the image's `USER`, of its
-/// user part and of its group part replaced. Docker quotes those parts
-/// when it cannot find them, and the image's author controls them. When
-/// phase could not read the `USER`, `user` is `None` and nothing of
-/// `stderr` remains.
+/// The words after which Docker quotes one field of a `USER` that it
+/// cannot find. Docker splits a `USER` on every colon, so the field holds
+/// no colon, and the first colon after these words ends it.
+const QUOTED_AFTER: [&str; 2] = ["unable to find user ", "unable to find group "];
+
+/// Returns `stderr` with each field that Docker quotes after
+/// [`QUOTED_AFTER`] replaced, up to the end of the field. A field with no
+/// colon after it hides the rest of `stderr`.
+fn without_quoted_fields(stderr: &str) -> String {
+    let mut cleaned = String::with_capacity(stderr.len());
+    let mut rest = stderr;
+    loop {
+        let found = QUOTED_AFTER
+            .iter()
+            .filter_map(|words| rest.find(words).map(|at| at + words.len()))
+            .min();
+        let Some(start) = found else {
+            cleaned.push_str(rest);
+            return cleaned;
+        };
+        cleaned.push_str(&rest[..start]);
+        cleaned.push_str(HIDDEN_USER);
+        rest = &rest[start..];
+        rest = &rest[rest.find(':').unwrap_or(rest.len())..];
+    }
+}
+
+/// Returns `stderr` without text of the image's `USER`, which `user` holds
+/// and whose author may have chosen it to look like one of Docker's
+/// failures. When phase could not read the `USER`, `user` is `None` and
+/// nothing of `stderr` remains.
 ///
-/// A part that is only digits stays, because digits can hold no escape
-/// sequence or failure phrase, and removing them would change a port
-/// number in Docker's line. A part counts only where the characters on
-/// both sides of it cannot belong to a longer name, because Docker quotes
-/// it between a space and a colon, and a short `USER` such as `e` must not
-/// change the words of Docker's line.
+/// It handles the field that Docker quotes when it cannot find a user or
+/// a group, wherever that field comes from, and the whole `USER` wherever
+/// it appears when the `USER` holds a character that a plain name lacks,
+/// such as a space or an escape sequence. It leaves a `USER` of only
+/// letters, digits, `-`, `_`, `.` and `:` alone outside the quoted field,
+/// because a word such as `daemon` or `port`, or a number, is part of
+/// Docker's own sentences and of the failure phrases. Such a `USER` holds
+/// no escape sequence and no phrase, so a sentence of Docker's that quoted
+/// it some other way would show only that plain text. A sentence that
+/// quoted one field of a `USER` with other characters somewhere else would
+/// show that field. phase knows of no such sentence, and a new one would
+/// need its words in [`QUOTED_AFTER`].
 pub(crate) fn without_image_user(stderr: &str, user: Option<&str>) -> String {
     let Some(user) = user else {
         return USER_UNREADABLE.to_owned();
     };
-    let (name, group) = user.split_once(':').unwrap_or((user, ""));
-    let mut parts: Vec<&str> = [user, name, group]
-        .into_iter()
-        .filter(|part| !part.is_empty() && !part.bytes().all(|byte| byte.is_ascii_digit()))
-        .collect();
-    parts.sort_by_key(|part| std::cmp::Reverse(part.len()));
-    let in_name = |found: Option<char>| {
-        found.is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    };
-    let matched = |at: usize| {
-        parts.iter().find(|part| {
-            stderr[at..].starts_with(**part)
-                && !in_name(stderr[..at].chars().next_back())
-                && !in_name(stderr[at + part.len()..].chars().next())
-        })
-    };
-    let mut cleaned = String::with_capacity(stderr.len());
-    let mut at = 0;
-    while let Some(next) = stderr[at..].chars().next() {
-        if let Some(part) = matched(at) {
-            cleaned.push_str(HIDDEN_USER);
-            at += part.len();
-        } else {
-            cleaned.push(next);
-            at += next.len_utf8();
-        }
+    let plain = user
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+    if plain {
+        without_quoted_fields(stderr)
+    } else {
+        without_quoted_fields(&stderr.replace(user, HIDDEN_USER))
     }
-    cleaned
 }
 
 /// Returns why the `docker compose up` whose standard error is `stderr`
