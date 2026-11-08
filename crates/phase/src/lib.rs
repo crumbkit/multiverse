@@ -47,7 +47,7 @@ pub use crate::name::{
 pub use crate::phase::{
     DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines,
 };
-pub use crate::plan::container::{BindMount, ContainerOptions, KEEP_OWNER};
+pub use crate::plan::container::{BindMount, ContainerOptions, KEEP_OWNER, is_volume_owner};
 pub use crate::plan::probe::{
     DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT,
     LEAST_PUBLISHED_PROBE_TIMEOUT, Probe, ProbeCheck,
