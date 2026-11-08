@@ -541,9 +541,14 @@ fn the_process_table_holds_this_process_with_its_working_directory_and_resident_
     let table = super::process::process_table().unwrap();
     let pid = std::process::id();
     let own = table.iter().find(|entry| entry.pid == pid).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test compares the table's working directory of this process with the one the process reports"
+    )]
+    let current = std::env::current_dir().unwrap();
     assert_eq!(
         own.dir.as_deref().map(|dir| dir.canonicalize().unwrap()),
-        Some(std::env::current_dir().unwrap().canonicalize().unwrap())
+        Some(current.canonicalize().unwrap())
     );
     assert!(own.resident.is_some_and(|bytes| bytes > 0), "{own:?}");
     assert!(own.parent > 0, "{own:?}");
