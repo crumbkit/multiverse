@@ -393,28 +393,6 @@ pub(crate) fn touch_file(path: &Path) -> Result<(), Error> {
         .map_err(unwritable)
 }
 
-/// Moves the log at `log` to `older`, replacing an older log there, so the
-/// next start of the process begins an empty log. A missing log succeeds.
-///
-/// # Errors
-///
-/// Returns [`Error::Unwritable`] when the rename fails.
-pub(crate) fn rotate_log(log: &Path, older: &Path) -> Result<(), Error> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
-    )]
-    let renamed = fs::rename(log, older);
-    match renamed {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::Unwritable {
-            path: log.to_path_buf(),
-            source,
-        }),
-    }
-}
-
 /// Copies the log at `log` to `older` and empties it when it holds more
 /// than `most` bytes. The process keeps writing to `log`, because it opened
 /// the file to append, so each later write lands at the new end. Lines that

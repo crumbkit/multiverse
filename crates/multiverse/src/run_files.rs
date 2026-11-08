@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::ports;
 use crate::process::{self, Launch};
 use crate::store::{self, Lock, Store};
 
@@ -202,10 +201,6 @@ impl Host for RunHost<'_> {
         remove_if_present(path)
     }
 
-    fn rotate_log(&self, log: &Path, older: &Path) -> Result<(), Error> {
-        store::rotate_log(log, older)
-    }
-
     fn lock(&self, path: &Path, wait: Duration) -> Result<Lock, Error> {
         store::lock(path, wait)
     }
@@ -231,10 +226,6 @@ impl Host for RunHost<'_> {
             .ok_or_else(|| no_id("the workspace's record holds no stable id"))
     }
 
-    fn port_taken(&self, port: u16) -> bool {
-        ports::is_taken(port)
-    }
-
     fn follower_alive(&self, record_path: &Path) -> Result<bool, Error> {
         let record: Option<RunRecord> = read_json(record_path)?;
         match record {
@@ -252,7 +243,6 @@ impl Host for RunHost<'_> {
             name: follow.name,
             argv: follow.argv,
             cwd: follow.cwd,
-            env: &[],
             log: follow.log,
             exit_file: follow.exit_file,
         })?;

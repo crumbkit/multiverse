@@ -1,127 +1,24 @@
-//! A workspace's compose project: its compose file, the environment of the
-//! `docker compose` process that holds the values of the containers'
-//! variables, and `docker compose up`.
+//! `docker compose up` for the compose projects of phase's container apps,
+//! and how a failed one is read.
 
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::cancel::Cancel;
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::command::{
-    ChildEnv, Finished, PULL_DEADLINE, check, compose_docker_line, message, run, run_input,
+    ChildEnv, Finished, check, compose_docker_line, message, run_input,
 };
-use crate::engine::container::names::{
-    CONTAINER_LABEL, Scope, ServiceName, VOLUME_LABEL, VolumeKey,
-};
+use crate::engine::container::names::{Scope, ServiceName};
 use crate::engine::container::objects::{image_config, inspect_named};
 use crate::engine::container::secrets::ImageConfig;
 
-/// The value of a container's variable, which may be a secret. Its
-/// `Debug` prints `<redacted>`, it implements neither `Display` nor
-/// `Serialize`, so it reaches no log, error or file, and it has no
-/// accessor. Only the environment of the `docker compose` process reads
-/// it.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ComposeValue(String);
-
-impl ComposeValue {
-    /// Returns the value `value` of a container's variable.
-    #[must_use]
-    pub const fn new(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl fmt::Debug for ComposeValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<redacted>")
-    }
-}
-
-/// A container port that a [`ContainerSpec`] publishes as a named port.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct PublishedPort {
-    /// The TCP port inside the container.
-    pub container: u16,
-    /// The name of the port whose host port it is published on.
-    pub port: String,
-}
-
-impl PublishedPort {
-    /// Returns the container port `container`, published on the host port
-    /// of the port named `port`.
-    #[must_use]
-    pub const fn new(container: u16, port: String) -> Self {
-        Self { container, port }
-    }
-}
-
-/// What the compose file declares for one service: the container engine's
-/// own copy of a manifest container, which the caller builds.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct ContainerSpec {
-    /// The image.
-    pub image: String,
-    /// The arguments that replace the image's command, or `None` to keep
-    /// it.
-    pub command: Option<Vec<String>>,
-    /// The variables that the container receives, by name.
-    pub env: BTreeMap<String, ComposeValue>,
-    /// The container ports that are published on the loopback address.
-    pub ports: Vec<PublishedPort>,
-    /// The named volumes that the container mounts, with the path that
-    /// each mounts at.
-    pub volumes: BTreeMap<VolumeKey, String>,
-}
-
-impl ContainerSpec {
-    /// Returns the service that runs `image` with its own command, no
-    /// variables, no published ports and no volumes.
-    #[must_use]
-    pub const fn new(image: String) -> Self {
-        Self {
-            image,
-            command: None,
-            env: BTreeMap::new(),
-            ports: Vec::new(),
-            volumes: BTreeMap::new(),
-        }
-    }
-}
-
-/// The services of a workspace's compose project, in name order.
-pub type ContainerSpecs = BTreeMap<ServiceName, ContainerSpec>;
-
-/// The variables of a `docker compose` process: the values of one
-/// container's variables, under the names that [`compose_file`] refers
-/// to. Like [`ComposeValue`], it implements neither `Debug`, `Display`
-/// nor `Serialize`.
-#[derive(Clone, Default, PartialEq, Eq)]
-pub(crate) struct ComposeEnv(Vec<(String, ComposeValue)>);
-
-impl ComposeEnv {
-    /// Returns the variables as names and values, for the environment of
-    /// the docker process, and consumes them.
-    pub(super) fn into_vars(self) -> impl Iterator<Item = (String, String)> {
-        self.0.into_iter().map(|(name, value)| (name, value.0))
-    }
-
-    /// Returns the names and values, for a test that compares them.
-    #[cfg(test)]
-    pub(super) fn exposed(&self) -> Vec<(&str, &str)> {
-        self.0
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.0.as_str()))
-            .collect()
-    }
-}
+/// The variables of a `docker` process that receives none on top of the
+/// host program's own environment.
+pub(crate) struct ComposeEnv;
 
 /// Writes `$` as `$$`, which Compose reads back as `$`, so it interpolates
 /// nothing in `text`.
@@ -134,106 +31,6 @@ pub(super) fn literal(text: &str) -> String {
 /// order of the manifest's containers and of their variables.
 pub(super) fn variable_of(service: usize, variable: usize) -> String {
     format!("MXV_ENV_{service}_{variable}")
-}
-
-/// Returns the compose file of `scope` for `containers`, the services of
-/// the project, whose ports `ports` holds by port name. A port that `ports`
-/// lacks is not published. The file holds no value of a container's
-/// variables: each variable refers to a variable of the `docker compose`
-/// process, which [`compose_env`] returns.
-pub(crate) fn compose_file(
-    scope: &Scope,
-    containers: &ContainerSpecs,
-    ports: &BTreeMap<String, u16>,
-) -> Value {
-    let mut services = Map::new();
-    let mut volumes = Map::new();
-    for (service, (name, container)) in containers.iter().enumerate() {
-        let environment: Map<String, Value> = container
-            .env
-            .keys()
-            .enumerate()
-            .map(|(variable, key)| {
-                (
-                    key.clone(),
-                    Value::String(format!("${{{}:-}}", variable_of(service, variable))),
-                )
-            })
-            .collect();
-        let published: Vec<Value> = container
-            .ports
-            .iter()
-            .filter_map(|published| {
-                ports.get(&published.port).map(|host| {
-                    Value::String(format!("127.0.0.1:{host}:{}/tcp", published.container))
-                })
-            })
-            .collect();
-        let mounts: Vec<Value> = container
-            .volumes
-            .iter()
-            .map(|(volume, path)| {
-                json!({"type": "volume", "source": volume.as_str(), "target": literal(path)})
-            })
-            .collect();
-        for volume in container.volumes.keys() {
-            volumes.insert(
-                volume.as_str().to_owned(),
-                json!({
-                    "name": scope.volume_name(volume).as_str(),
-                    "labels": scope.labels(VOLUME_LABEL, volume.as_str()),
-                }),
-            );
-        }
-        let mut definition = Map::new();
-        definition.insert("image".to_owned(), Value::String(literal(&container.image)));
-        definition.insert(
-            "container_name".to_owned(),
-            Value::String(scope.container_name(name).as_str().to_owned()),
-        );
-        definition.insert(
-            "network_mode".to_owned(),
-            Value::String("bridge".to_owned()),
-        );
-        definition.insert(
-            "labels".to_owned(),
-            scope.labels(CONTAINER_LABEL, name.as_str()),
-        );
-        if let Some(command) = &container.command {
-            definition.insert(
-                "command".to_owned(),
-                command.iter().map(|argument| literal(argument)).collect(),
-            );
-        }
-        definition.insert("environment".to_owned(), Value::Object(environment));
-        definition.insert("ports".to_owned(), Value::Array(published));
-        definition.insert("volumes".to_owned(), Value::Array(mounts));
-        services.insert(name.as_str().to_owned(), Value::Object(definition));
-    }
-    json!({
-        "services": services,
-        "volumes": volumes,
-    })
-}
-
-/// Returns the variables of the `docker compose` process that starts the
-/// service `name` of `containers`: the values of the container's
-/// variables, under the names that [`compose_file`] refers to.
-pub(crate) fn compose_env(containers: &ContainerSpecs, name: &ServiceName) -> ComposeEnv {
-    ComposeEnv(
-        containers
-            .iter()
-            .enumerate()
-            .filter(|(_, (service, _))| *service == name)
-            .flat_map(|(service, (_, container))| {
-                container
-                    .env
-                    .values()
-                    .enumerate()
-                    .map(move |(variable, value)| (variable_of(service, variable), value.clone()))
-            })
-            .collect(),
-    )
 }
 
 /// Why a `docker compose up` failed, as its standard error tells.
@@ -348,46 +145,6 @@ pub(crate) enum Up {
     },
 }
 
-/// Starts the service `service` of the compose file `file` with `docker
-/// compose up`, with the variables `env` that [`compose_env`] returned.
-/// The project directory is `dir`, which holds no other file that Compose
-/// reads.
-///
-/// The caller has checked the compose plugin with `docker compose version`.
-///
-/// # Errors
-///
-/// Returns [`Error::Foreign`] when a container with the name of the
-/// service lacks the scope's labels, [`Error::NoAddressPool`], the
-/// errors of `docker version`, and [`Error::Failed`] when docker
-/// cannot pull the image or start the container.
-pub(crate) fn compose_up(
-    scope: &Scope,
-    dir: &Path,
-    file: &Path,
-    service: &ServiceName,
-    env: ComposeEnv,
-) -> Result<Up, Error> {
-    let project = scope.project();
-    let args: [&OsStr; 13] = [
-        "compose".as_ref(),
-        "--project-name".as_ref(),
-        project.as_str().as_ref(),
-        "--project-directory".as_ref(),
-        dir.as_os_str(),
-        "--file".as_ref(),
-        file.as_os_str(),
-        "up".as_ref(),
-        "--detach".as_ref(),
-        "--no-deps".as_ref(),
-        "--quiet-pull".as_ref(),
-        "--".as_ref(),
-        service.as_ref(),
-    ];
-    let finished = run(args, env, "compose up", PULL_DEADLINE)?;
-    up_result(scope, service, &finished)
-}
-
 /// What `docker compose up` does with a service of phase's app project.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppStep {
@@ -428,7 +185,10 @@ pub(crate) struct AppUp<'a> {
 ///
 /// # Errors
 ///
-/// Returns the errors of [`compose_up`].
+/// Returns [`Error::Foreign`] when a container with the name of the
+/// service lacks the scope's labels, [`Error::NoAddressPool`], the
+/// errors of `docker version`, and [`Error::Failed`] when docker
+/// cannot start the container.
 pub(crate) fn app_up(
     up: &AppUp<'_>,
     env: impl ChildEnv,

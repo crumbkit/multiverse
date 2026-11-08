@@ -113,10 +113,10 @@ impl Setup {
         self.dir.path().canonicalize().unwrap()
     }
 
-    /// Starts the processes of the workspace `name` with the runner that
-    /// mxv used before phase, which writes the run files that a workspace
-    /// started by an earlier version of mxv has.
-    /// The up runs in a process of its own, as [`LEGACY_UP_TEST`] says.
+    /// Starts the processes of the workspace `name` as mxv did before
+    /// phase, which leaves the run files that a workspace started by an
+    /// earlier version of mxv has. The start runs in a process of its own,
+    /// as [`LEGACY_UP_TEST`] says.
     fn legacy_up(&self, name: &str) {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([LEGACY_UP_TEST, "--exact", "--nocapture"])
@@ -1606,14 +1606,36 @@ const LEGACY_ROOT: &str = "MXV_TEST_LEGACY_ROOT";
 /// The variable that names the workspace that [`LEGACY_UP_TEST`] starts.
 const LEGACY_NAME: &str = "MXV_TEST_LEGACY_NAME";
 
-/// Starts the workspace that [`LEGACY_ROOT`] and [`LEGACY_NAME`] name with
-/// the runner of an earlier mxv, and does nothing when they are unset.
-/// [`Setup::legacy_up`] runs it in a process of its own, which then exits,
-/// so the processes that it starts lose their parent as they did when an
-/// earlier `mxv up` exited. The operating system then reaps each one that
-/// ends, and none of them stays a zombie child of the test.
+/// The script that an earlier mxv ran in a shell of a process group of its
+/// own. Its `$1` is the exit file, and the rest are the process's `argv`.
+const LEGACY_SCRIPT: &str = r#"exit_file=$1; shift; "$@"; printf '%s\n' "$?" > "$exit_file""#;
+
+/// Returns the start of the process `pid` in the form that run records hold.
+fn recorded_start(pid: u32) -> String {
+    use multiverse::phase::host::{RawStart, raw_start};
+    match raw_start(pid).unwrap() {
+        RawStart::Ticks(ticks) => ticks.to_string(),
+        RawStart::Since {
+            seconds,
+            microseconds,
+        } => format!("{seconds}.{microseconds:06}"),
+        other => panic!("process {pid} has no readable start: {other:?}"),
+    }
+}
+
+/// Starts the workspace that [`LEGACY_ROOT`] and [`LEGACY_NAME`] name as an
+/// earlier mxv did, and does nothing when they are unset. Each process is a
+/// shell that leads a process group of its own and runs [`LEGACY_SCRIPT`],
+/// and it has a log and a run record. [`Setup::legacy_up`] runs this test
+/// in a process of its own, which then exits, so the processes that it
+/// starts lose their parent as they did when an earlier `mxv up` exited.
+/// The operating system then reaps each one that ends, and none of them
+/// stays a zombie child of the test.
 #[test]
 fn an_earlier_mxv_starts_the_workspace_that_the_environment_names() {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
     #[expect(
         clippy::disallowed_methods,
         reason = "the helper test reads the workspace that its parent test names"
@@ -1625,19 +1647,77 @@ fn an_earlier_mxv_starts_the_workspace_that_the_environment_names() {
     let state = Path::new(&root).join("state/mxv");
     let store = multiverse::Store::new(state.join("workspaces"));
     let name: multiverse::WorkspaceName = name.to_str().unwrap().parse().unwrap();
-    let mut workspace = store.read(&name).unwrap().unwrap();
+    let workspace = store.read(&name).unwrap().unwrap();
     let checkout = workspace.checkouts[0].path.clone();
     let text = fs::read_to_string(checkout.join("mxv.toml")).unwrap();
     let manifest = multiverse::Manifest::parse(&text, &checkout.join("mxv.toml")).unwrap();
-    let runs = multiverse::Runs::new(&state);
-    let lock = runs.lock(&name).unwrap();
-    let outcome = runs
-        .legacy_up(&lock, &store, &mut workspace, &checkout, &manifest, &[])
-        .unwrap();
-    assert!(
-        matches!(outcome, multiverse::UpOutcome::Up(_)),
-        "{outcome:?}"
+    let dir = state.join("runs").join(name.as_str());
+    fs::create_dir_all(&dir).unwrap();
+    for (process, declared) in &manifest.processes {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the helper test opens the log that an earlier mxv appended to"
+        )]
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(format!("{process}.log")))
+            .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the helper test starts a process as an earlier mxv did"
+        )]
+        let mut shell = std::process::Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg(LEGACY_SCRIPT)
+            .arg("mxv-process")
+            .arg(dir.join(format!("{process}.exit")))
+            .args(&declared.argv)
+            .current_dir(checkout.join(&declared.cwd))
+            .stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .process_group(0);
+        #[expect(
+            clippy::disallowed_methods,
+            clippy::zombie_processes,
+            reason = "the helper test starts a process that outlives it, so the operating system reaps it"
+        )]
+        let child = shell.spawn().unwrap();
+        let pid = child.id();
+        let record = serde_json::json!({
+            "version": 1,
+            "pid": pid,
+            "started": recorded_start(pid),
+            "ports": {},
+        });
+        write(&dir.join(format!("{process}.json")), &record.to_string());
+    }
+}
+
+// A readiness port that nothing in the process's group has to hold counts
+// as ready as soon as anything accepts on it.
+#[test]
+fn a_process_that_only_receives_its_readiness_port_is_ready_when_that_port_accepts() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "ports = [\"api\"]\n[processes.a]\nargv = [\"sleep\", \"30\"]\nports = { PORT = \"api\" }\n",
     );
+    setup.json(&["up", "-w", "triage"]);
+    let port = setup.port("triage", "api");
+    setup.json(&["down", "-w", "triage"]);
+    setup.workspace_manifest(
+        "triage",
+        "ports = [\"api\"]\n[processes.a]\nargv = [\"sleep\", \"30\"]\nports = { PORT = \"api\" }\nready = { port = \"api\", timeout_seconds = 5 }\n",
+    );
+    let _listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(row(&document, "a")["state"], "running", "{document}");
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
 }
 
 #[test]

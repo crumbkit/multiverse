@@ -9,32 +9,33 @@ use crate::clock::{POLL_INTERVAL, pause};
 use phase::host::RawStart;
 
 use crate::process::{
-    Holder, Launch, UNREADABLE, bsd_start, exit_code, group_exists, is_bsd_start, launch,
-    listen_holder, recorded_start, signal, start_time,
+    Launch, UNREADABLE, bsd_start, exit_code, group_exists, is_bsd_start, launch, recorded_start,
+    signal, start_time,
 };
-use crate::redacted::Redacted;
 
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|word| (*word).to_owned()).collect()
 }
 
-fn started(dir: &Path, words: &[&str], env: &[(String, Redacted)]) -> crate::process::Launched {
+fn started(dir: &Path, words: &[&str]) -> crate::process::Launched {
     let argv = argv(words);
     launch(&Launch {
         name: "test",
         argv: &argv,
         cwd: dir,
-        env,
         log: &dir.join("test.log"),
         exit_file: &dir.join("test.exit"),
     })
     .unwrap()
 }
 
-fn wait_for_end(launched: &mut crate::process::Launched) -> Option<i32> {
+/// Waits until the script of the process in `dir` has written its exit
+/// file, and returns the program's exit code.
+fn wait_for_end(dir: &Path) -> Option<i32> {
+    let exit_file = dir.join("test.exit");
     loop {
-        if let Some(ended) = launched.ended() {
-            return ended.code;
+        if let Some(code) = exit_code(&exit_file) {
+            return code;
         }
         pause(POLL_INTERVAL);
     }
@@ -44,26 +45,22 @@ fn wait_for_end(launched: &mut crate::process::Launched) -> Option<i32> {
 fn a_launched_process_appends_its_output_to_its_log_and_records_its_exit_code() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path().join("test.log"), "earlier\n");
-    let env = [(
-        "GREETING".to_owned(),
-        Redacted::new("hello world".to_owned()),
-    )];
-    let mut launched = started(
+    let launched = started(
         dir.path(),
-        &["sh", "-c", "echo \"$GREETING\"; echo oops >&2; exit 3"],
-        &env,
+        &["sh", "-c", "echo hello world; echo oops >&2; exit 3"],
     );
-    assert_eq!(wait_for_end(&mut launched), Some(0));
+    assert_eq!(wait_for_end(dir.path()), Some(3));
+    drop(launched);
     let log = fs::read_to_string(dir.path().join("test.log")).unwrap();
     assert_eq!(log, "earlier\nhello world\noops\n");
-    assert_eq!(exit_code(&dir.path().join("test.exit")), Some(Some(3)));
 }
 
 #[test]
 fn a_launched_process_passes_each_argument_as_one_value() {
     let dir = tempfile::tempdir().unwrap();
-    let mut launched = started(dir.path(), &["printf", "[%s]\\n", "a b", "$HOME", "*"], &[]);
-    wait_for_end(&mut launched);
+    let launched = started(dir.path(), &["printf", "[%s]\\n", "a b", "$HOME", "*"]);
+    wait_for_end(dir.path());
+    drop(launched);
     let log = fs::read_to_string(dir.path().join("test.log")).unwrap();
     assert_eq!(log, "[a b]\n[$HOME]\n[*]\n");
 }
@@ -71,9 +68,9 @@ fn a_launched_process_passes_each_argument_as_one_value() {
 #[test]
 fn a_program_that_does_not_exist_records_exit_code_127() {
     let dir = tempfile::tempdir().unwrap();
-    let mut launched = started(dir.path(), &["mxv-no-such-program"], &[]);
-    wait_for_end(&mut launched);
-    assert_eq!(exit_code(&dir.path().join("test.exit")), Some(Some(127)));
+    let launched = started(dir.path(), &["mxv-no-such-program"]);
+    assert_eq!(wait_for_end(dir.path()), Some(127));
+    drop(launched);
 }
 
 #[test]
@@ -84,7 +81,6 @@ fn a_launch_in_a_directory_that_does_not_exist_fails_as_unstartable() {
         name: "web",
         argv: &argv,
         cwd: &dir.path().join("missing"),
-        env: &[],
         log: &dir.path().join("web.log"),
         exit_file: &dir.path().join("web.exit"),
     })
@@ -95,15 +91,15 @@ fn a_launch_in_a_directory_that_does_not_exist_fails_as_unstartable() {
 #[test]
 fn a_signal_to_the_group_stops_the_process_and_its_children() {
     let dir = tempfile::tempdir().unwrap();
-    let mut launched = started(dir.path(), &["sh", "-c", "sleep 30 & sleep 30; wait"], &[]);
+    let launched = started(dir.path(), &["sh", "-c", "sleep 30 & sleep 30; wait"]);
     let pid = launched.pid();
     assert!(group_exists(pid));
     assert!(start_time(pid).unwrap().is_some());
     signal(pid, Signal::TERM).unwrap();
-    assert_eq!(wait_for_end(&mut launched), None);
     while group_exists(pid) {
         pause(POLL_INTERVAL);
     }
+    launched.keep();
     assert_eq!(exit_code(&dir.path().join("test.exit")), None);
 }
 
@@ -129,17 +125,17 @@ fn the_start_time_of_a_process_id_that_no_process_has_is_none() {
 #[test]
 fn two_processes_started_20_ms_apart_have_different_start_times() {
     let dir = tempfile::tempdir().unwrap();
-    let first = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
+    let first = started(dir.path(), &["sh", "-c", "exec sleep 30"]);
     // Linux counts a start in clock ticks, which are 10 ms at the usual
     // 100 Hz, and macOS counts it in microseconds.
     crate::clock::pause(std::time::Duration::from_millis(20));
-    let second = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
+    let second = started(dir.path(), &["sh", "-c", "exec sleep 30"]);
     let times = (
         start_time(first.pid()).unwrap().unwrap(),
         start_time(second.pid()).unwrap().unwrap(),
     );
-    first.kill();
-    second.kill();
+    drop(first);
+    drop(second);
     assert_ne!(times.0, times.1);
 }
 
@@ -160,34 +156,9 @@ fn a_start_time_of_seconds_and_microseconds_is_libprocs_and_what_ps_prints_is_no
 }
 
 #[test]
-fn the_holder_of_a_listening_socket_is_the_group_or_names_the_other_process() {
-    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let own = u32::try_from(rustix::process::getpgrp().as_raw_nonzero().get()).unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let other = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
-    let answers = (
-        listen_holder(own, port).unwrap(),
-        listen_holder(other.pid(), port).unwrap(),
-    );
-    other.kill();
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
-        assert_eq!(
-            answers,
-            (
-                Some(Holder::Group),
-                Some(Holder::Other(Some(std::process::id())))
-            )
-        );
-    } else {
-        assert_eq!(answers, (None, None));
-    }
-}
-
-#[test]
 fn a_launched_process_that_is_dropped_before_it_is_kept_is_killed_with_its_group() {
     let dir = tempfile::tempdir().unwrap();
-    let launched = started(dir.path(), &["sh", "-c", "sleep 30 & exec sleep 30"], &[]);
+    let launched = started(dir.path(), &["sh", "-c", "sleep 30 & exec sleep 30"]);
     let pid = launched.pid();
     assert!(group_exists(pid));
     drop(launched);
@@ -201,7 +172,7 @@ fn a_launched_process_that_is_dropped_before_it_is_kept_is_killed_with_its_group
 #[test]
 fn a_launched_process_that_is_kept_outlives_its_handle() {
     let dir = tempfile::tempdir().unwrap();
-    let launched = started(dir.path(), &["sh", "-c", "exec sleep 30"], &[]);
+    let launched = started(dir.path(), &["sh", "-c", "exec sleep 30"]);
     let pid = launched.pid();
     launched.keep();
     assert!(group_exists(pid));
@@ -233,7 +204,7 @@ fn a_raw_start_becomes_the_start_that_run_records_hold() {
 
 // A group of 1 would make `kill(2)` signal every process the test may
 // signal, so this test passes 0 and 1 only to `group_exists`, which sends
-// no signal, and checks that the signalling adapters refuse an id past
+// no signal, and checks that the signalling adapter refuses an id past
 // `i32::MAX`, which names no process at all.
 #[test]
 fn mxv_finds_no_group_at_0_or_1_and_refuses_an_id_that_names_no_process() {
@@ -242,12 +213,6 @@ fn mxv_finds_no_group_at_0_or_1_and_refuses_an_id_that_names_no_process() {
     let past = u32::try_from(i32::MAX).unwrap() + 1;
     assert_eq!(
         signal(past, Signal::TERM).unwrap_err().kind(),
-        std::io::ErrorKind::InvalidInput
-    );
-    assert_eq!(
-        crate::process::signal_process(past, Signal::TERM)
-            .unwrap_err()
-            .kind(),
         std::io::ErrorKind::InvalidInput
     );
 }

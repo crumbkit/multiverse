@@ -1,45 +1,35 @@
-//! The module that starts, inspects and signals an app's processes
-//! (PROC-1). [`launch`] starts one process of a manifest, [`start_time`]
-//! reads a process's start time from the process table, and [`signal`]
-//! and [`group_exists`] reach a process's group.
+//! The module that starts, inspects and signals processes outside phase
+//! (PROC-1). [`launch`] starts the log follower of a container that an
+//! older mxv started, [`start_time`] reads a process's start time from the
+//! process table, and [`signal`] and [`group_exists`] reach a process's
+//! group.
 //!
 //! [`launch`] runs one process as follows (PROC-2):
 //!
 //! - Program: `/bin/sh`, the system's shell at a fixed path, runs the fixed
-//!   script [`SCRIPT`]. The script runs the manifest's `argv` as separate
-//!   values through `"$@"`, so no shell parses the manifest's words, and
-//!   writes the program's exit code to the process's exit file when the
-//!   program ends. The shell stays as the process's parent so that the code
-//!   is recorded without a long-running mxv. The program is found on the
-//!   `PATH` that the process receives, and whoever controls the manifest
-//!   and that `PATH` supplies its bytes. The manifest is part of the
-//!   repository, so a person who runs `mxv up` trusts the repository's
-//!   code as they would when they run it by hand.
+//!   script [`SCRIPT`]. The script runs the `argv` as separate values
+//!   through `"$@"`, so no shell parses them, and writes the program's exit
+//!   code to the process's exit file when the program ends. The shell stays
+//!   as the process's parent so that the code is recorded without a
+//!   long-running mxv. The program is found on the caller's `PATH`.
 //! - Arguments: `-c`, the script, `mxv-process`, the exit file and the
-//!   manifest's `argv`, each a separate value.
-//! - Environment: the caller's environment, plus the manifest's `env` and
-//!   one variable for each port the process receives.
+//!   `argv`, each a separate value.
+//! - Environment: the caller's environment.
 //! - Streams and deadline: standard input is empty, and standard output and
 //!   standard error are appended to the process's log file. The process
-//!   has no deadline, because it runs until `mxv down` stops it.
+//!   has no deadline, because it ends when the container that it follows
+//!   stops.
 //! - End: the process runs in a new process group whose id is the shell's
-//!   process id, and it outlives the mxv that started it. `mxv down` sends
-//!   SIGTERM to the group, waits, then sends SIGKILL, so the signals reach
-//!   the program and every descendant that stays in the group. A
-//!   descendant that starts a group of its own is not reached. The process
-//!   leaves its log and its exit file. `mxv down` deletes the exit file and
-//!   keeps the log, and `mxv remove` deletes both. The mxv that started the process reaps it when it ends while
-//!   mxv waits for its readiness; after that mxv exits, the operating
-//!   system reaps it.
+//!   process id, and it outlives the mxv that started it. The process
+//!   leaves its log and its exit file. After the mxv that started it exits,
+//!   the operating system reaps it.
 //!
 //! [`start_time`] gives a process's start in the form that run records
 //! hold, from phase's process table, which reads `/proc/<pid>/stat` on
 //! Linux and calls `proc_pidinfo` on macOS. Elsewhere it runs
-//! `ps -o lstart= -p <pid>`. [`listen_holder`] tells, through phase's host
-//! runner, which process holds the socket that listens on a TCP port, and
-//! [`signal`], [`signal_process`] and [`group_exists`] reach a process and
-//! its group through phase. The calls into libproc are in phase, which
-//! holds the only unsafe code.
+//! `ps -o lstart= -p <pid>`. [`signal`] and [`group_exists`] reach a
+//! process's group through phase. The calls into libproc are in phase,
+//! which holds the only unsafe code.
 //!
 //! On macOS [`started_at`] also runs `ps -o lstart= -p <pid>` for a run
 //! record that an mxv before libproc wrote, which holds what `ps` prints.
@@ -52,17 +42,15 @@
 
 use std::fs::File;
 use std::io::{self, Read as _};
-use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub(crate) use phase::host::Holder;
 use phase::host::{ProcessError, ProcessGroup, ProcessId, RawStart};
 use rustix::process::Signal;
 
 use crate::error::Error;
-use crate::redacted::Redacted;
 use crate::store;
 
 #[cfg(test)]
@@ -71,8 +59,8 @@ mod tests;
 /// The shell that runs [`SCRIPT`].
 const SHELL: &str = "/bin/sh";
 
-/// The script that runs a manifest's `argv` and records its exit code. The
-/// shell's `$1` is the exit file, and the rest are the `argv`.
+/// The script that runs an `argv` and records its exit code. The shell's
+/// `$1` is the exit file, and the rest are the `argv`.
 pub(crate) const SCRIPT: &str = r#"exit_file=$1; shift; "$@"; printf '%s\n' "$?" > "$exit_file""#;
 
 /// The deadline of one `ps` run. Linux reads `/proc` and runs no `ps`.
@@ -89,28 +77,16 @@ const MOST_PS_BYTES: u64 = 16 * 1024 * 1024;
 /// What [`launch`] needs to start one process.
 #[derive(Debug)]
 pub(crate) struct Launch<'a> {
-    /// The process's name in the manifest, for errors.
+    /// The process's name, for errors.
     pub(crate) name: &'a str,
     /// The program and its arguments.
     pub(crate) argv: &'a [String],
     /// The directory the process starts in.
     pub(crate) cwd: &'a Path,
-    /// The variables the process receives on top of the caller's
-    /// environment. Their values are read only to build that environment.
-    pub(crate) env: &'a [(String, Redacted)],
     /// The log file that standard output and standard error append to.
     pub(crate) log: &'a Path,
     /// The file that the script writes the exit code to.
     pub(crate) exit_file: &'a Path,
-}
-
-/// How the shell of a process ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Ended {
-    /// The shell's exit code, or `None` when a signal ended it.
-    pub(crate) code: Option<i32>,
-    /// The signal that ended the shell, or `None`.
-    pub(crate) signal: Option<i32>,
 }
 
 /// A process that [`launch`] started and this mxv has not reaped.
@@ -128,9 +104,9 @@ pub(crate) struct Launched {
 
 impl Drop for Launched {
     /// Sends SIGKILL to the process's group and reaps the shell, unless
-    /// [`Launched::keep`] kept the process. So a process that `up` started
-    /// stops on every path that leaves `up` before the process is ready,
-    /// an error among them.
+    /// [`Launched::keep`] kept the process. So a follower stops on every
+    /// path that leaves its start before its record is written, an error
+    /// among them.
     fn drop(&mut self) {
         if !self.kept {
             let _ = signal(self.pid(), Signal::KILL);
@@ -145,25 +121,7 @@ impl Launched {
         self.child.id()
     }
 
-    /// Reaps the process when it has ended, and returns how the shell
-    /// ended then. It returns `None` while the process runs.
-    pub(crate) fn ended(&mut self) -> Option<Ended> {
-        match self.child.try_wait() {
-            Ok(Some(status)) => Some(Ended {
-                code: status.code(),
-                signal: status.signal(),
-            }),
-            Ok(None) | Err(_) => None,
-        }
-    }
-
-    /// Sends SIGKILL to the process's group and reaps the shell.
-    pub(crate) fn kill(self) {
-        drop(self);
-    }
-
-    /// Leaves the process running once this handle is gone, after it is
-    /// ready, or after its shell was reaped and its group handled.
+    /// Leaves the process running once this handle is gone.
     pub(crate) fn keep(mut self) {
         self.kept = true;
     }
@@ -194,12 +152,6 @@ pub(crate) fn launch(launch: &Launch<'_>) -> Result<Launched, Error> {
         .arg(launch.exit_file)
         .args(launch.argv)
         .current_dir(launch.cwd)
-        .envs(
-            launch
-                .env
-                .iter()
-                .map(|(name, value)| (name, value.reveal())),
-        )
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(errors)
@@ -342,19 +294,6 @@ pub(crate) fn bsd_start(seconds: u64, microseconds: u64) -> String {
     format!("{seconds}.{microseconds:06}")
 }
 
-/// Returns which process holds the socket that listens on the TCP port
-/// `port`, as seen from the process group `group`, through phase's host
-/// runner. It returns `None` when this system gives mxv no way to tell.
-///
-/// # Errors
-///
-/// Returns [`Error::ProcessTable`] when the process table or the socket
-/// table cannot be read, and [`Error::UnsupportedOs`] when the operating
-/// system's structs differ from the ones phase reads.
-pub(crate) fn listen_holder(group: u32, port: u16) -> Result<Option<Holder>, Error> {
-    phase::host::listen_holder(group, port).map_err(process_error)
-}
-
 /// Returns the start time that `ps -o lstart=` prints in UTC, or `None`
 /// when no process has the id.
 #[cfg(not(target_os = "linux"))]
@@ -438,17 +377,6 @@ fn tool(program: &str, args: &[&str]) -> Result<Option<(bool, String)>, Error> {
 /// `i32::MAX`, which mxv never signals.
 pub(crate) fn signal(pid: u32, signal: Signal) -> io::Result<()> {
     phase::host::signal_group(ProcessGroup::new(pid)?, signal)
-}
-
-/// Sends `signal` to the process `pid` alone.
-///
-/// # Errors
-///
-/// Returns the error of `kill`, such as ESRCH when no process has the id,
-/// and [`io::ErrorKind::InvalidInput`] for 0, 1 or an id past `i32::MAX`,
-/// which mxv never signals.
-pub(crate) fn signal_process(pid: u32, signal: Signal) -> io::Result<()> {
-    phase::host::signal_pid(ProcessId::new(pid)?, signal)
 }
 
 /// Reports whether the process group `pid` still has a member. A group

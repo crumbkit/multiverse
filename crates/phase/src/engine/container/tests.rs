@@ -10,10 +10,7 @@ use crate::engine::container::ContainerError as Error;
 use crate::engine::container::command::{
     ChildEnv as _, Referenced, compose_docker_line, message, run_program_until, says_missing,
 };
-use crate::engine::container::compose::{
-    ComposeValue, ContainerSpec, ContainerSpecs, PublishedPort, UpFailure, compose_env,
-    compose_file, up_failure, without_image_user,
-};
+use crate::engine::container::compose::{UpFailure, up_failure, without_image_user};
 use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
 };
@@ -70,69 +67,6 @@ fn scope(workspace: &str) -> Scope {
         &StoreId::new(STORE).unwrap(),
         &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
     )
-}
-
-fn variables(pairs: &[(&str, &str)]) -> BTreeMap<String, ComposeValue> {
-    pairs
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), ComposeValue::new((*value).to_owned())))
-        .collect()
-}
-
-/// Returns the services of the tests: `dynamodb`, which publishes a port
-/// and mounts a volume, and `cache`.
-fn specs() -> ContainerSpecs {
-    let mut dynamodb = ContainerSpec::new("amazon/dynamodb-local:2.5.4".to_owned());
-    dynamodb.command = Some(vec![
-        "sh".to_owned(),
-        "-c".to_owned(),
-        "echo $HOME".to_owned(),
-    ]);
-    dynamodb.env = variables(&[("AWS_REGION", "eu-west-1"), ("TOKEN", "s3cret$x")]);
-    dynamodb.ports = vec![
-        PublishedPort::new(8000, "dynamodb".to_owned()),
-        PublishedPort::new(9000, "unused".to_owned()),
-    ];
-    dynamodb.volumes = BTreeMap::from([(key("data"), "/data".to_owned())]);
-    let mut cache = ContainerSpec::new("busybox:1.37.0".to_owned());
-    cache.env = variables(&[("TOKEN", "other")]);
-    BTreeMap::from([(service("dynamodb"), dynamodb), (service("cache"), cache)])
-}
-
-#[test]
-fn a_scope_with_the_workspaces_identity_adds_its_stable_id_run_record_and_app_to_every_label() {
-    let identity = Identity {
-        id: "fedcba9876543210fedcba9876543210".parse().unwrap(),
-        run_record: PathBuf::from("/state/runs/fedcba9876543210fedcba9876543210.json"),
-    };
-    let scope = scope("reading-list").identified(identity);
-    let file = compose_file(&scope, &specs(), &BTreeMap::new());
-    let expected = |label: &str, object: &str| {
-        json!({
-            "mxv.store": STORE,
-            "mxv.workspace": "reading-list",
-            label: object,
-            "mxv.workspace-id": "fedcba9876543210fedcba9876543210",
-            "mxv.run-record": "/state/runs/fedcba9876543210fedcba9876543210.json",
-            "mxv.app": "reading-list",
-        })
-    };
-    assert_eq!(
-        file["services"]["cache"]["labels"],
-        expected("mxv.container", "cache")
-    );
-    assert_eq!(
-        file["volumes"]["data"]["labels"],
-        expected("mxv.volume", "data")
-    );
-    // The identity labels the objects that the scope creates, and the
-    // scope still owns the objects that carry only the older labels.
-    assert!(scope.owns(
-        &container_labels(STORE, "reading-list", "db"),
-        "mxv.container",
-        "db"
-    ));
-    assert_eq!(scope, self::scope("reading-list"));
 }
 
 #[test]
@@ -208,60 +142,6 @@ fn a_scope_owns_no_object_whose_label_values_differ_by_a_tab_or_a_space() {
     )));
     assert!(!owns(&container_labels(STORE, " reading-list", "db")));
     assert!(!owns(&container_labels(STORE, "reading-list", "db\n")));
-}
-
-#[test]
-fn the_compose_file_publishes_on_the_loopback_address_labels_every_object_and_holds_no_value_of_a_variable()
- {
-    let specs = specs();
-    let scope = scope("reading-list");
-    let ports = BTreeMap::from([("dynamodb".to_owned(), 24001)]);
-    let file = compose_file(&scope, &specs, &ports);
-    let labels = |label: &str, object: &str| json!({"mxv.store": STORE, "mxv.workspace": "reading-list", label: object});
-    assert_eq!(
-        file,
-        json!({
-            "services": {
-                "cache": {
-                    "image": "busybox:1.37.0",
-                    "container_name": "mxv-01234567-reading-list.cache",
-                    "network_mode": "bridge",
-                    "labels": labels("mxv.container", "cache"),
-                    "environment": {"TOKEN": "${MXV_ENV_0_0:-}"},
-                    "ports": [],
-                    "volumes": [],
-                },
-                "dynamodb": {
-                    "image": "amazon/dynamodb-local:2.5.4",
-                    "container_name": "mxv-01234567-reading-list.dynamodb",
-                    "network_mode": "bridge",
-                    "labels": labels("mxv.container", "dynamodb"),
-                    "command": ["sh", "-c", "echo $$HOME"],
-                    "environment": {
-                        "AWS_REGION": "${MXV_ENV_1_0:-}",
-                        "TOKEN": "${MXV_ENV_1_1:-}",
-                    },
-                    "ports": ["127.0.0.1:24001:8000/tcp"],
-                    "volumes": [{"type": "volume", "source": "data", "target": "/data"}],
-                },
-            },
-            "volumes": {
-                "data": {
-                    "name": "mxv-01234567-reading-list.data",
-                    "labels": labels("mxv.volume", "data"),
-                },
-            },
-        })
-    );
-    assert!(!file.to_string().contains("s3cret"));
-    assert_eq!(
-        compose_env(&specs, &service("dynamodb")).exposed(),
-        [("MXV_ENV_1_0", "eu-west-1"), ("MXV_ENV_1_1", "s3cret$x")]
-    );
-    assert_eq!(
-        compose_env(&specs, &service("cache")).exposed(),
-        [("MXV_ENV_0_0", "other")]
-    );
 }
 
 #[test]

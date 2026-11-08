@@ -2,7 +2,6 @@ use std::fs;
 
 use crate::testing::write;
 use std::io::Write as _;
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,7 +10,7 @@ use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, ID_RECORD_VERSION, Workspace};
 use crate::run_files::RunHost;
-use crate::runs::{DownOutcome, ExitReason, Follower, ProcessState, Runs, UpOutcome, tail};
+use crate::runs::{DownOutcome, ExitReason, Follower, ProcessState, Runs, tail};
 use crate::store::{Created, Store};
 use phase::container::Host as _;
 
@@ -59,6 +58,34 @@ fn manifest(text: &str) -> Manifest {
     Manifest::parse(text, &PathBuf::from("mxv.toml")).unwrap()
 }
 
+/// Starts `argv` as the process `name` of `workspace` as an older mxv did,
+/// with a shell that leads a process group of its own, writes its log and
+/// its run record, and returns its process id.
+fn start_as_an_older_mxv(setup: &Setup, workspace: &Workspace, name: &str, argv: &[&str]) -> u32 {
+    let runs = setup.runs();
+    let dir = runs.workspace_dir(&workspace.name);
+    fs::create_dir_all(&dir).unwrap();
+    let argv: Vec<String> = argv.iter().map(|word| (*word).to_owned()).collect();
+    let launched = crate::process::launch(&crate::process::Launch {
+        name,
+        argv: &argv,
+        cwd: &dir,
+        log: &runs.log(&workspace.name, name),
+        exit_file: &dir.join(format!("{name}.exit")),
+    })
+    .unwrap();
+    let pid = launched.pid();
+    launched.keep();
+    let record = serde_json::json!({
+        "version": 1,
+        "pid": pid,
+        "started": crate::process::start_time(pid).unwrap().unwrap(),
+        "ports": {},
+    });
+    write(dir.join(format!("{name}.json")), record.to_string());
+    pid
+}
+
 #[test]
 fn a_workspace_that_never_started_reports_its_manifest_processes_as_stopped() {
     let setup = Setup::new();
@@ -71,95 +98,26 @@ fn a_workspace_that_never_started_reports_its_manifest_processes_as_stopped() {
 }
 
 #[test]
-fn up_allocates_each_port_once_and_writes_it_to_the_record() {
-    let setup = Setup::new();
-    let mut workspace = setup.workspace("triage");
-    let manifest = manifest(
-        "ports = [\"api\"]\n[processes.a]\nargv = [\"sleep\", \"30\"]\nports = { PORT = \"api\" }\n",
-    );
-    let checkout = workspace.checkouts[0].path.clone();
-    let runs = setup.runs();
-    assert!(matches!(
-        runs.legacy_up(
-            &runs.lock(&workspace.name).unwrap(),
-            &setup.store(),
-            &mut workspace,
-            &checkout,
-            &manifest,
-            &[]
-        )
-        .unwrap(),
-        UpOutcome::Up(_)
-    ));
-    let port = workspace.ports["api"];
-    let stored = setup.store().read(&workspace.name).unwrap().unwrap();
-    assert_eq!(stored.ports["api"], port);
-    assert!(matches!(
-        runs.down(
-            &runs.lock(&workspace.name).unwrap(),
-            &workspace,
-            Some(&manifest),
-            &[]
-        )
-        .unwrap(),
-        DownOutcome::Down(_)
-    ));
-}
-
-#[test]
-fn a_process_that_only_receives_its_readiness_port_is_ready_when_that_port_accepts() {
-    let setup = Setup::new();
-    let mut workspace = setup.workspace("triage");
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    workspace
-        .ports
-        .insert("api".to_owned(), listener.local_addr().unwrap().port());
-    let manifest = manifest(
-        "ports = [\"api\"]\n[processes.a]\nargv = [\"sleep\", \"30\"]\nports = { PORT = \"api\" }\nready = { port = \"api\", timeout_seconds = 5 }\n",
-    );
-    let checkout = workspace.checkouts[0].path.clone();
-    let runs = setup.runs();
-    let outcome = runs
-        .legacy_up(
-            &runs.lock(&workspace.name).unwrap(),
-            &setup.store(),
-            &mut workspace,
-            &checkout,
-            &manifest,
-            &[],
-        )
-        .unwrap();
-    let UpOutcome::Up(statuses) = outcome else {
-        panic!("{outcome:?}");
-    };
-    assert!(matches!(statuses[0].state, ProcessState::Running { .. }));
-    runs.down(
-        &runs.lock(&workspace.name).unwrap(),
-        &workspace,
-        Some(&manifest),
-        &[],
-    )
-    .unwrap();
-}
-
-#[test]
 fn down_kills_a_process_that_ignores_sigterm_after_the_grace() {
     let setup = Setup::new();
-    let mut workspace = setup.workspace("triage");
-    let manifest = manifest(
-        "[processes.stubborn]\nargv = [\"sh\", \"-c\", \"trap '' TERM; while :; do sleep 1; done\"]\n",
-    );
-    let checkout = workspace.checkouts[0].path.clone();
+    let workspace = setup.workspace("triage");
+    let manifest = manifest("[processes.stubborn]\nargv = [\"true\"]\n");
     let runs = setup.runs();
-    runs.legacy_up(
-        &runs.lock(&workspace.name).unwrap(),
-        &setup.store(),
-        &mut workspace,
-        &checkout,
-        &manifest,
-        &[],
-    )
-    .unwrap();
+    start_as_an_older_mxv(
+        &setup,
+        &workspace,
+        "stubborn",
+        &[
+            "sh",
+            "-c",
+            "trap '' TERM; echo trapped; while :; do sleep 1; done",
+        ],
+    );
+    // The process ignores SIGTERM only once its trap is set.
+    let log = runs.log(&workspace.name, "stubborn");
+    while fs::read_to_string(&log).unwrap_or_default().is_empty() {
+        crate::clock::pause(crate::clock::POLL_INTERVAL);
+    }
     let DownOutcome::Down(stopped) = runs
         .down(
             &runs.lock(&workspace.name).unwrap(),
@@ -312,26 +270,10 @@ fn a_second_lock_of_a_workspace_fails_with_busy_while_the_first_is_held() {
 #[test]
 fn a_record_with_the_start_time_that_ps_prints_still_owns_its_running_process_on_macos() {
     let setup = Setup::new();
-    let mut workspace = setup.workspace("triage");
+    let workspace = setup.workspace("triage");
     let manifest = manifest("[processes.a]\nargv = [\"sleep\", \"30\"]\n");
-    let checkout = workspace.checkouts[0].path.clone();
     let runs = setup.runs();
-    let outcome = runs
-        .legacy_up(
-            &runs.lock(&workspace.name).unwrap(),
-            &setup.store(),
-            &mut workspace,
-            &checkout,
-            &manifest,
-            &[],
-        )
-        .unwrap();
-    let UpOutcome::Up(statuses) = outcome else {
-        panic!("{outcome:?}");
-    };
-    let ProcessState::Running { pid: Some(pid) } = statuses[0].state else {
-        panic!("{statuses:?}");
-    };
+    let pid = start_as_an_older_mxv(&setup, &workspace, "a", &["sleep", "30"]);
     // An mxv before libproc recorded what `ps -o lstart=` prints in UTC.
     let record_file = runs.workspace_dir(&workspace.name).join("a.json");
     let mut record: serde_json::Value =
@@ -350,60 +292,6 @@ fn a_record_with_the_start_time_that_ps_prints_still_owns_its_running_process_on
     )
     .unwrap();
     assert!(!crate::process::group_exists(pid));
-}
-
-#[test]
-fn the_manifests_containers_become_the_container_engines_specs_with_every_field() {
-    let manifest = Manifest::parse(
-        r#"
-ports = ["dynamodb"]
-
-[containers.dynamodb]
-image = "amazon/dynamodb-local:2.5.4"
-command = ["sh", "-c", "echo $HOME"]
-env = { AWS_REGION = "eu-west-1", TOKEN = "s3cret$x" }
-ports = { 8000 = "dynamodb" }
-volumes = { data = "/data" }
-
-[containers.cache]
-image = "busybox:1.37.0"
-"#,
-        std::path::Path::new("/repo/mxv.toml"),
-    )
-    .unwrap();
-    let specs = crate::runs::container_specs(&manifest.containers);
-    let names: Vec<&str> = specs.keys().map(|service| service.as_str()).collect();
-    assert_eq!(names, ["cache", "dynamodb"]);
-    let dynamodb = specs
-        .iter()
-        .find(|(service, _)| service.as_str() == "dynamodb")
-        .map(|(_, spec)| spec)
-        .unwrap();
-    assert_eq!(dynamodb.image, "amazon/dynamodb-local:2.5.4");
-    assert_eq!(
-        dynamodb.command.as_deref(),
-        Some(["sh".to_owned(), "-c".to_owned(), "echo $HOME".to_owned()].as_slice())
-    );
-    let variables: Vec<&str> = dynamodb.env.keys().map(String::as_str).collect();
-    assert_eq!(variables, ["AWS_REGION", "TOKEN"]);
-    assert_eq!(
-        dynamodb.env["TOKEN"],
-        phase::container::ComposeValue::new("s3cret$x".to_owned())
-    );
-    assert_eq!(
-        dynamodb.ports,
-        [phase::container::PublishedPort::new(
-            8000,
-            "dynamodb".to_owned()
-        )]
-    );
-    let volumes: Vec<(&str, &str)> = dynamodb
-        .volumes
-        .iter()
-        .map(|(key, path)| (key.as_str(), path.as_str()))
-        .collect();
-    assert_eq!(volumes, [("data", "/data")]);
-    assert!(!format!("{dynamodb:?}").contains("s3cret"));
 }
 
 #[test]

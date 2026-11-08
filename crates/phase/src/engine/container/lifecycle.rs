@@ -1,24 +1,19 @@
 //! The containers of one workspace across mxv commands: the store id and
 //! the scope, the run records that name the workspace's containers and
-//! volumes, starting a service with Docker Compose, following its log,
-//! and reporting, stopping and removing what the records name.
+//! volumes, following a container's log, and reporting, stopping and
+//! removing what the records name. An older mxv wrote these records when it
+//! started the containers, and phase's container runner writes none.
 //!
 //! The run records say which docker objects belong to a workspace.
 //! `<container>.container` holds the id of the container that `up`
 //! started, and `.volumes` names the volumes that its containers mounted,
-//! named and anonymous. `compose.yaml` is the compose file of the
-//! workspace's project, which holds no value of a container's variables.
-//! Every command acts on the recorded ids and names after it checked their
+//! named and anonymous. Every command acts on the recorded ids and names after it checked their
 //! labels, so a container that the manifest dropped while it ran is still
 //! found, reported and stopped. `status`, `down` and `logs` run docker only
 //! for a workspace with a container record, and `remove` only for one with
 //! a container or volume record, so a missing docker or a daemon that does
 //! not answer does not stop a workspace that has never run a container. For
 //! a workspace with records, either one fails the command.
-//!
-//! The caller orders the services of a workspace among its other
-//! processes, and waits for a started container's readiness with
-//! [`super::reinspect`] and [`super::answers`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -28,24 +23,19 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::container::command::{check, check_compose, quick};
-use crate::engine::container::compose::{
-    ContainerSpecs, Up, compose_env, compose_file, compose_up,
-};
+use crate::engine::container::command::quick;
 use crate::engine::container::host::{Follow, Host, Versioned};
 use crate::engine::container::names::{
     ContainerId, Identity, Scope, ServiceName, StoreId, VOLUME_LABEL, VolumeKey, VolumeName,
     WORKSPACE_ID_LABEL,
 };
 use crate::engine::container::objects::{
-    AnonymousVolume, AnonymousVolumes, ContainerState, Inspected, OwnedContainer, Volume,
-    delete_volume, follow_args, inspect_anonymous, inspect_id, inspect_named, inspect_volume,
-    reinspect_volume, remove, stop,
+    AnonymousVolume, AnonymousVolumes, ContainerState, Inspected, Volume, delete_volume,
+    follow_args, inspect_anonymous, inspect_id, inspect_volume, reinspect_volume, remove, stop,
 };
 use crate::engine::container::{ContainerError, RunDir, volume_owner};
 use crate::name::{AppName, WorkspaceId, WorkspaceName};
 use crate::phase::Phase;
-use crate::random::RANDOM_DEVICE;
 
 #[cfg(test)]
 mod tests;
@@ -67,9 +57,6 @@ const FOLLOWER_EXTENSION: &str = "follower";
 /// The file in a workspace's run directory that names the volumes of its
 /// containers.
 const VOLUMES_FILE: &str = ".volumes";
-
-/// The compose file of a workspace's project, in its run directory.
-const COMPOSE_FILE: &str = "compose.yaml";
 
 /// The store id file: the id of the state directory, which labels its
 /// containers and volumes.
@@ -119,32 +106,10 @@ impl Versioned for VolumesRecord {
     }
 }
 
-/// Returns a new store id: 32 hex digits from the operating system's
-/// cryptographically secure random number generator. A generator that
-/// cannot be read fails as [`ContainerError::Unreadable`] at
-/// [`RANDOM_DEVICE`], as the stable id of a workspace does.
-fn new_store_id() -> Result<StoreId, ContainerError> {
-    let text = crate::random::hex_id().map_err(|source| ContainerError::Unreadable {
-        path: PathBuf::from(RANDOM_DEVICE),
-        source,
-    })?;
-    StoreId::new(&text).map_err(|_| {
-        ContainerError::unexpected(
-            "store id",
-            None,
-            format!("mxv made the store id {text:?}, which is not 32 hex digits"),
-        )
-    })
-}
-
 /// A workspace's stable id that its host has saved in the workspace's
-/// record, which only [`Lifecycle::saved_id`] returns. [`Lifecycle::prepare`]
-/// takes one, so the engine never labels a docker object with an id that
-/// the record does not hold.
+/// record, which only [`Lifecycle::saved_id`] returns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedWorkspaceId {
-    /// The workspace whose record holds the id.
-    workspace: WorkspaceName,
     /// The id.
     id: WorkspaceId,
 }
@@ -157,8 +122,8 @@ impl SavedWorkspaceId {
     }
 }
 
-/// The scope of a workspace's containers, which only [`Lifecycle::prepare`]
-/// and [`Lifecycle::existing`] return. Every method that acts on the
+/// The scope of a workspace's containers, which only [`Lifecycle::existing`]
+/// returns. Every method that acts on the
 /// workspace's docker objects takes one, so the labels that it checks are
 /// those of the store id in the runs directory. A [`Lifecycle`] refuses a
 /// `Prepared` of another workspace or runs directory.
@@ -168,28 +133,6 @@ pub struct Prepared {
     dir: RunDir,
     /// The scope.
     scope: Scope,
-}
-
-/// What [`Lifecycle::start`] did.
-#[derive(Debug)]
-pub enum Start {
-    /// The recorded container already ran, and has a log follower now.
-    Running,
-    /// `docker compose up` started the container, and its log follower
-    /// runs. The caller waits for its readiness.
-    Started(OwnedContainer),
-    /// Something outside the workspace holds the host port `number` of
-    /// the port `port`, so the container did not start, or `docker compose
-    /// up` removed it again.
-    PortTaken {
-        /// The port's name.
-        port: String,
-        /// The host port.
-        number: u16,
-    },
-    /// `docker compose up` succeeded, and docker no longer has the
-    /// container.
-    Gone,
 }
 
 /// The volumes of a workspace that a removal deletes, which
@@ -438,30 +381,20 @@ pub struct Lifecycle<'h, H> {
     workspace: WorkspaceName,
     /// How long `docker stop` waits after SIGTERM.
     grace: Duration,
-    /// How long the store id's lock waits for another command.
-    lock_wait: Duration,
 }
 
 impl<'h, H: Host> Lifecycle<'h, H> {
     /// Returns the containers of the workspace `workspace` in the runs
     /// directory `runs`, whose files, locks and followers `host` keeps. A
-    /// container stops with `grace` between SIGTERM and SIGKILL, and the
-    /// store id's lock waits up to `lock_wait`.
+    /// container stops with `grace` between SIGTERM and SIGKILL.
     #[must_use]
-    pub fn new(
-        host: &'h H,
-        runs: &Path,
-        workspace: &WorkspaceName,
-        grace: Duration,
-        lock_wait: Duration,
-    ) -> Self {
+    pub fn new(host: &'h H, runs: &Path, workspace: &WorkspaceName, grace: Duration) -> Self {
         Self {
             host,
             runs: runs.to_path_buf(),
             dir: RunDir::new(runs, workspace),
             workspace: workspace.clone(),
             grace,
-            lock_wait,
         }
     }
 
@@ -477,27 +410,6 @@ impl<'h, H: Host> Lifecycle<'h, H> {
         Ok(record.map(|record| record.id))
     }
 
-    /// Returns the store id, and writes a new one when the store has none.
-    /// It holds `<runs>/.store-id.lock` meanwhile, so two commands that
-    /// start the store's first containers at once agree on one id.
-    fn ensure_store_id(&self) -> Result<StoreId, H::Error> {
-        let _lock = self
-            .host
-            .lock(&self.runs.join(".store-id.lock"), self.lock_wait)?;
-        if let Some(id) = self.store_id()? {
-            return Ok(id);
-        }
-        let id = new_store_id()?;
-        self.host.write_json(
-            &self.runs.join(STORE_ID_FILE),
-            &StoreIdRecord {
-                version: RUN_VERSION,
-                id: id.clone(),
-            },
-        )?;
-        Ok(id)
-    }
-
     /// Returns the workspace's stable id once its host has saved it in the
     /// workspace's record, which [`Host::saved_workspace_id`] does.
     ///
@@ -506,50 +418,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     /// Returns the host's errors of reading and writing the record.
     pub fn saved_id(&self) -> Result<SavedWorkspaceId, H::Error> {
         let id = self.host.saved_workspace_id(&self.workspace)?;
-        Ok(SavedWorkspaceId {
-            workspace: self.workspace.clone(),
-            id,
-        })
-    }
-
-    /// Checks that docker and its compose plugin answer, and returns the
-    /// scope of the workspace's containers, after it wrote the store id
-    /// when the store had none, for [`Lifecycle::start`].
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of `docker version` and
-    /// `docker compose version`, and the host's errors when another
-    /// command holds the store id's lock or the store id cannot be written.
-    ///
-    /// The containers and volumes that the scope creates are also labelled
-    /// with the workspace's stable id `saved`, which the host has saved in
-    /// the workspace's record, the path of its run record, which
-    /// [`Phase::run_record`] gives under `phase`'s state directory, and its
-    /// app. A `saved` of another workspace is refused with
-    /// [`ContainerError::Failed`] before any docker command runs.
-    pub fn prepare(&self, phase: &Phase, saved: &SavedWorkspaceId) -> Result<Prepared, H::Error> {
-        if saved.workspace != self.workspace {
-            return Err(ContainerError::unexpected(
-                "scope check",
-                None,
-                format!(
-                    "the stable id of {} cannot label the containers of {}",
-                    saved.workspace, self.workspace
-                ),
-            )
-            .into());
-        }
-        check()?;
-        check_compose()?;
-        let identity = Identity {
-            id: saved.id.clone(),
-            run_record: phase.run_record(&saved.id),
-        };
-        Ok(Prepared {
-            dir: self.dir.clone(),
-            scope: Scope::new(&self.ensure_store_id()?, &self.workspace).identified(identity),
-        })
+        Ok(SavedWorkspaceId { id })
     }
 
     /// Returns the scope of the workspace's containers, or `None` before
@@ -589,7 +458,7 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     }
 
     /// Returns the scope of `prepared`, which this lifecycle's
-    /// [`Lifecycle::prepare`] or [`Lifecycle::existing`] returned.
+    /// [`Lifecycle::existing`] returned.
     ///
     /// # Errors
     ///
@@ -613,8 +482,8 @@ impl<'h, H: Host> Lifecycle<'h, H> {
     }
 
     /// Returns the services of the workspace that have a container record,
-    /// which `start` writes when it starts one and `stop` deletes when it
-    /// removes it. It runs no docker command.
+    /// which an older mxv wrote when it started one and `stop` deletes when
+    /// it removes it. It runs no docker command.
     ///
     /// # Errors
     ///
@@ -710,150 +579,6 @@ impl<'h, H: Host> Lifecycle<'h, H> {
             self.follow(&inspected, true)?;
         }
         Ok(Some(inspected.state))
-    }
-
-    /// Starts the container of `service`, one of `containers`, with the
-    /// host ports `ports` by port name, or makes sure that a recorded
-    /// container that already runs has a log follower. Before `docker
-    /// compose up` it removes the recorded container and any container of
-    /// the scope with the service's name, checks that its host ports are
-    /// free and its named volumes are the scope's, records its volumes,
-    /// moves its log to `<service>.log.1`, and writes the compose file.
-    /// When a step after `docker compose up` fails, it removes the
-    /// container before it returns the error.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ContainerError::Foreign`], [`ContainerError::NoAddressPool`],
-    /// the errors of `docker version`, [`ContainerError::Failed`],
-    /// and the errors of reading and writing the run records.
-    pub fn start(
-        &self,
-        prepared: &Prepared,
-        containers: &ContainerSpecs,
-        service: &ServiceName,
-        ports: &BTreeMap<String, u16>,
-    ) -> Result<Start, H::Error> {
-        let scope = self.scope_of(prepared)?;
-        let declared = containers.get(service);
-        match self.inspect_recorded(scope, service)? {
-            Some(inspected) if inspected.state.is_up() => {
-                if !self.follower_alive(service)? {
-                    self.follow(&inspected, true)?;
-                }
-                return Ok(Start::Running);
-            }
-            // A container that exited on its own, or that docker created
-            // without starting, still holds its name, so it is removed
-            // before the new one starts.
-            Some(inspected) => {
-                self.discard(inspected)?;
-                self.forget(service)?;
-            }
-            None => self.forget(service)?,
-        }
-        // A container of the scope that has the name and no record, such
-        // as one that an earlier `up` started before it was stopped, is
-        // removed too. One with other labels fails as foreign.
-        if let Some(named) = inspect_named(scope, service)? {
-            self.discard(named)?;
-        }
-        let published = declared
-            .map(|declared| declared.ports.as_slice())
-            .unwrap_or_default();
-        for port in published {
-            let Some(number) = ports.get(&port.port).copied() else {
-                continue;
-            };
-            if self.host.port_taken(number) {
-                return Ok(Start::PortTaken {
-                    port: port.port.clone(),
-                    number,
-                });
-            }
-        }
-        let volumes: Vec<VolumeName> = declared
-            .map(|declared| {
-                declared
-                    .volumes
-                    .keys()
-                    .map(|volume| scope.volume_name(volume))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for volume in &volumes {
-            inspect_volume(scope, volume)?;
-        }
-        self.record_volumes(volumes)?;
-        self.host.rotate_log(
-            &self.dir.log(service.as_str()),
-            &self.dir.older_log(service.as_str()),
-        )?;
-        let file = self.dir.path().join(COMPOSE_FILE);
-        self.host
-            .write_json(&file, &compose_file(scope, containers, ports))?;
-        let started = compose_up(
-            scope,
-            self.dir.path(),
-            &file,
-            service,
-            compose_env(containers, service),
-        );
-        // `compose up` may have created the container before it failed, so
-        // the container is recorded and removed whatever it reported.
-        let recorded = inspect_named(scope, service)
-            .map_err(H::Error::from)
-            .and_then(|inspected| {
-                if let Some(inspected) = &inspected {
-                    self.host.write_json(
-                        &self.file(service, CONTAINER_EXTENSION),
-                        &ContainerRecord {
-                            version: RUN_VERSION,
-                            id: inspected.container.id().as_str().to_owned(),
-                        },
-                    )?;
-                }
-                Ok(inspected)
-            });
-        match started {
-            Ok(Up::Started) => {}
-            Ok(Up::PortAllocated { port: number, .. }) => {
-                // docker publishes the port for a container that the port
-                // check before `compose up` could not see, such as one
-                // that is created and not started.
-                let _ = self.remove_recorded(scope, service);
-                let port = published
-                    .iter()
-                    .find(|port| number.is_none() || ports.get(&port.port).copied() == number)
-                    .or_else(|| published.first())
-                    .map(|port| port.port.clone())
-                    .unwrap_or_default();
-                return Ok(Start::PortTaken {
-                    number: number
-                        .or_else(|| ports.get(&port).copied())
-                        .unwrap_or_default(),
-                    port,
-                });
-            }
-            Err(error) => {
-                let _ = self.remove_recorded(scope, service);
-                return Err(error.into());
-            }
-        }
-        let Some(inspected) = recorded? else {
-            return Ok(Start::Gone);
-        };
-        if let Err(error) = self.follow(&inspected, false) {
-            let _ = self.remove_recorded(scope, service);
-            return Err(error);
-        }
-        Ok(Start::Started(inspected.container))
-    }
-
-    /// Adds the named volumes `named` of the scope to the record of the
-    /// workspace's volumes.
-    fn record_volumes(&self, named: Vec<VolumeName>) -> Result<(), H::Error> {
-        self.record(named.iter().map(VolumeName::as_str))
     }
 
     /// Adds the anonymous volumes `anonymous`, which an inspection of one

@@ -51,20 +51,12 @@ impl Host for Files {
         Ok(())
     }
 
-    fn rotate_log(&self, _log: &Path, _older: &Path) -> Result<(), Error> {
-        Ok(())
-    }
-
     fn lock(&self, _path: &Path, _wait: Duration) -> Result<(), Error> {
         Ok(())
     }
 
     fn saved_workspace_id(&self, _workspace: &WorkspaceName) -> Result<WorkspaceId, Error> {
         Ok("0123456789abcdef0123456789abcdef".parse().unwrap())
-    }
-
-    fn port_taken(&self, _port: u16) -> bool {
-        false
     }
 
     fn follower_alive(&self, _record: &Path) -> Result<bool, Error> {
@@ -94,7 +86,6 @@ fn lifecycle(runs: &Path, workspace: &str) -> Lifecycle<'static, Files> {
         &Files,
         runs,
         &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
-        Duration::ZERO,
         Duration::ZERO,
     )
 }
@@ -133,12 +124,8 @@ fn a_lifecycle_refuses_the_prepared_scope_of_another_workspace_before_it_runs_do
     refused_scope(other.stop_all(&foreign));
     refused_scope(other.volumes(&foreign));
     refused_scope(other.delete_volumes(&foreign, WorkspaceVolumes::default()));
-    refused_scope(other.start(&foreign, &Default::default(), &db, &Default::default()));
-    // The stable id that the host saved for one workspace never labels
-    // the containers of another.
     let saved = reading.saved_id().unwrap();
     assert_eq!(saved.id().as_str(), "0123456789abcdef0123456789abcdef");
-    refused_scope(other.prepare(&Phase::new(runs.path().join("phase")), &saved));
     // The workspace's own scope reaches no docker command for a workspace
     // without records.
     assert_eq!(other.state(&prepared(&other), &db).unwrap(), None);

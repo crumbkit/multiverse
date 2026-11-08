@@ -31,9 +31,7 @@ pub(crate) trait ChildEnv {
 }
 
 impl ChildEnv for ComposeEnv {
-    fn set_on(self, command: &mut Command) {
-        command.envs(self.into_vars());
-    }
+    fn set_on(self, _command: &mut Command) {}
 }
 
 /// The values of a process's resolved environment that reach a `docker
@@ -257,9 +255,6 @@ pub(super) fn secret_exec(
 
 /// The program that this backend runs.
 pub(crate) const DOCKER: &str = "docker";
-
-/// The deadline of `docker compose up`, which may pull the image first.
-pub(crate) const PULL_DEADLINE: Duration = Duration::from_secs(600);
 
 /// The deadline of every other docker command, apart from `docker stop`,
 /// whose deadline is its grace plus this.
@@ -503,7 +498,7 @@ where
     run_full(
         program,
         args,
-        ComposeEnv::default(),
+        ComposeEnv,
         None,
         operation,
         Until {
@@ -678,13 +673,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_program(
-        program,
-        args,
-        ComposeEnv::default(),
-        operation,
-        DOCKER_DEADLINE,
-    )
+    run_program(program, args, ComposeEnv, operation, DOCKER_DEADLINE)
 }
 
 /// Reads `stream` on a thread of its own: the first [`MOST_OUTPUT_BYTES`]
