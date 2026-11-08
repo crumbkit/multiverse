@@ -459,28 +459,6 @@ listen on each of its ports on every address of the machine. It is null for a
 container. A process that phase started is shown as its run record
 recorded it.
 
-#### Workspaces that an earlier mxv started
-
-An earlier mxv ran processes and containers itself and kept run files under
-`$XDG_STATE_HOME/mxv/runs/<workspace>`. mxv still reads those files, so
-that a workspace started before the change keeps working until it is
-stopped:
-
-- `mxv status` and `mxv logs` report the processes and containers that the
-  run files name, as the earlier mxv did.
-- `mxv down` stops them under the earlier mxv's rules, and deletes the run
-  files once nothing they name runs.
-- `mxv up` and `mxv restart` refuse with `mxv::workspace::legacy_running`
-  while anything that the run files name may still run, and the recovery
-  runs `mxv down -w <workspace>`. When everything they name has ended,
-  `up` deletes the run files and starts the workspace under phase.
-- A named volume that the earlier mxv created, `mxv-<id8>-<workspace>.<volume>`,
-  is not taken over. When it exists and phase's volume of that name does
-  not, `up` starts nothing and fails with `mxv::volume::not_moved`. Its
-  hint gives the commands that create phase's volume with the labels phase
-  gives it and copy the data into it, or that delete the old volume when
-  its data is not needed.
-
 #### The environment of a host process
 
 phase starts each host process from an empty environment. The process
@@ -646,7 +624,7 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   running, as after something killed the keeper or the machine
   restarted, both are null and `reason` says why. An exited process
   whose `code` is anything but 0, including null, makes `status` exit with
-  code 1. `group_alive` is null for every process that phase runs.
+  code 1.
   `ready` is true for a running process once its readiness check has
   passed since it last started, or once a process without one has outlasted
   its start grace, and false while it runs and has not, such as after its
@@ -705,31 +683,7 @@ record, `$XDG_STATE_HOME/mxv/phase/runs/<workspace id>.json`, and its logs in
 `$XDG_STATE_HOME/mxv/phase/logs/<workspace id>/<app>.<process>.log`. mxv
 runs each manifest process as a phase app with one process named `main`, so
 the log of a manifest process is `<process>.main.log` in that directory. A
-container has no such file, and `mxv logs` reads its log from Docker. The
-next two paragraphs describe how mxv handles a workspace that an older
-version started. That version kept the run files of each workspace's
-processes in `$XDG_STATE_HOME/mxv/runs/<name>/`, and mxv still reads them to
-report and stop what that version started: `<process>.json` with the process id
-and its start time, `<process>.log`, `<process>.log.1`, and
-`<process>.exit`, which holds the exit code once the process ends. Each
-process runs under `/bin/sh`, which waits for it and writes that code, so a
-crash is reported without a long-running mxv. The shell's redirection
-creates the exit file empty before `printf` writes the code, so mxv counts
-the file as written only once it ends in a line feed. The shell writes the
-file before it exits, so `status` reads the file once more after it finds
-the shell gone. A shell that something such as SIGKILL ended writes no
-file, and `status` then reports the process as exited with a null code and
-signal and a `reason` that says the shell ended without writing its code.
-
-For a workspace that an older mxv started, that version moved the previous
-log of a process to `<process>.log.1` at each `up`, which replaced the log
-before it, so a process kept at most two logs. No mxv process runs between
-commands, so mxv checks the size of those logs only when a command runs:
-`down`, `status` and `logs` copy a log that holds more than 32 MiB to
-`<process>.log.1` and empty it. The process keeps writing to the emptied
-log, and lines that it writes between the copy and the emptying are lost.
-Between two of those commands a log has no bound, so a process that writes
-a lot while nobody runs mxv can fill the disk.
+container has no such file, and `mxv logs` reads its log from Docker.
 
 `mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
 while processes run, hold an exclusive lock on
@@ -1167,8 +1121,7 @@ is never followed. It refuses, and changes nothing, in these cases:
 - The workspace's processes or containers run. The refusal is
   `mxv::workspace::running`, and `--force` stops them before it removes
   the workspace.
-- The workspace has docker volumes: named volumes, or anonymous volumes
-  of its containers' images. A volume may hold the only copy of a
+- The workspace has named docker volumes. A volume may hold the only copy of a
   database, and docker cannot tell cheaply whether a volume holds data, so
   mxv treats every volume as holding data. The refusal is
   `mxv::workspace::volumes`, which lists the volumes, and its hint repeats

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use super::{BuiltImage, IMAGE, Mode, World, app, docker, docker_ready, outcome, start_deadline};
 use crate::cancel::Cancel;
-use crate::engine::container::lifecycle::{app_volumes, delete_app_volumes};
 use crate::engine::container::volume_owner::HELPER_IMAGE;
+use crate::engine::container::volumes::{app_volumes, delete_app_volumes};
 use crate::phase::Phase;
 use crate::plan::AppPlan;
 use crate::record::run::{ObjectKey, Started, VolumeOwner};

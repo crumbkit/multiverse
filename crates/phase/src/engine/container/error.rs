@@ -223,15 +223,6 @@ impl ContainerError {
             | Self::Unreadable { .. } => error,
         }
     }
-
-    /// Returns the failure of an object of `kind` named `name` whose labels
-    /// do not name the scope.
-    pub(crate) fn foreign(kind: &'static str, name: &str) -> Self {
-        Self::Foreign {
-            kind,
-            name: name.to_owned(),
-        }
-    }
 }
 
 /// Returns the kind of object that [`ContainerError::Foreign`] names as

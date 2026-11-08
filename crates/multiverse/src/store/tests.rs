@@ -7,7 +7,7 @@ use crate::name::WorkspaceName;
 use crate::record::{
     Checkout, ID_RECORD_VERSION, MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceKind,
 };
-use crate::store::{Created, Store, cap_log, lock};
+use crate::store::{Created, Store, lock};
 use crate::testing::write;
 
 fn workspace(name: &str) -> Workspace {
@@ -278,21 +278,6 @@ fn a_dropped_lock_lets_the_next_caller_take_it() {
     let path = dir.path().join(".lock");
     drop(lock(&path, Duration::ZERO).unwrap());
     assert!(lock(&path, Duration::ZERO).is_ok());
-}
-
-#[test]
-fn a_log_over_its_cap_is_copied_to_the_older_log_and_emptied_while_its_writer_appends() {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("web.log");
-    let older = dir.path().join("web.log.1");
-    let mut writer = crate::store::append_file(&log).unwrap();
-    std::io::Write::write_all(&mut writer, b"0123456789\n").unwrap();
-    cap_log(&log, &older, 100).unwrap();
-    assert!(!older.exists(), "a log under its cap stays");
-    cap_log(&log, &older, 5).unwrap();
-    assert_eq!(fs::read_to_string(&older).unwrap(), "0123456789\n");
-    std::io::Write::write_all(&mut writer, b"next\n").unwrap();
-    assert_eq!(fs::read_to_string(&log).unwrap(), "next\n");
 }
 
 #[test]

@@ -41,13 +41,6 @@ pub enum ExecTarget<'a> {
     UnknownProcess,
     /// The unit is known and does not run, so `exec` runs nothing.
     NotRunning,
-    /// Processes or containers that mxv started before phase ran the
-    /// workspace's apps may still run, so `exec` runs nothing until
-    /// `mxv down` stops them and `mxv up` starts the workspace under phase.
-    LegacyRunning {
-        /// The processes and containers that may still run.
-        processes: Vec<String>,
-    },
     /// phase cannot run the manifest.
     Unrunnable(Unrunnable),
 }
@@ -134,10 +127,6 @@ impl Runs {
         manifest: &Manifest,
         unit: &str,
     ) -> Result<ExecTarget<'a>, Error> {
-        let processes = self.legacy_live(workspace)?;
-        if !processes.is_empty() {
-            return Ok(ExecTarget::LegacyRunning { processes });
-        }
         let declared = manifest.unit(unit).is_some();
         // A workspace without a stable id has never run under phase.
         let Some(id) = workspace.id.clone() else {

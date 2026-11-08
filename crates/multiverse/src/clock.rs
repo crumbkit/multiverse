@@ -11,9 +11,6 @@ use std::time::Duration;
 /// port.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// The interval at which `mxv logs -f` polls a log file for new lines.
-pub const FOLLOW_INTERVAL: Duration = Duration::from_millis(200);
-
 /// Pauses the calling thread for `interval`, between two polls of a source
 /// that has no event.
 pub(crate) fn pause(interval: Duration) {
