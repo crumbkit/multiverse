@@ -1788,7 +1788,7 @@ links the library and calls it for each process verb:
 | `mxv exec [-w WORKSPACE] PROCESS -- COMMAND...` | `Phase::exec` and `Phase::exec_sandboxed` |
 | `mxv remove` | `Phase::sweep`, through `Runs::forget` |
 
-`mxv` names processes, not apps. `Phase::logs` with `since` returns
+`mxv` commands take process names. `Phase::logs` with `since` returns
 `PhaseError::NotBuilt`, and `mxv logs` has no `--since`.
 
 These designed verbs do not exist yet: `reset SERVICE`, which removes a
