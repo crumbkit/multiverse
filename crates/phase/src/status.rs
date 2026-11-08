@@ -1,6 +1,6 @@
-//! The status document `phase/status/v1`, which `mxv phase status --json`
-//! prints for people, agents and other tools, and [`status`], which builds
-//! it from the run record.
+//! The status document `phase/status/v1`, which `Phase::status` returns for
+//! `mxv status` and for other tools, and [`status`], which builds it from the
+//! run record.
 //!
 //! `status` opens the record read-only and takes no lock. It never trusts
 //! a stored state alone. A keeper that an outside `TERM` stops while

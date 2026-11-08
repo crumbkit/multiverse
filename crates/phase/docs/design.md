@@ -1,16 +1,20 @@
 # phase design
 
-Status: phase is built. This document is the record of its design. It was
-drafted on 4 November 2026, and the table at the end still lists each
+Status: phase is built in part. This document is the record of its design.
+It was drafted on 4 November 2026, and the table at the end still lists each
 decision, and says which are decided and what the draft assumes for the
-rest.
+rest. phase runs an app from a checkout that has no build step or from an
+image. `up` refuses an app from a release, and a checkout with a build step,
+with `PhaseError::NotRunnable`. `logs` with `since` and the trust grants are
+not built.
 
 ## What phase does
 
 phase runs the apps of one workspace on the local machine. For each app it:
 
 1. gets the app's program, either by downloading and verifying a published
-   release or by building the checkout you are editing;
+   release or by building the checkout you are editing (not built: `up`
+   refuses a release and a checkout with a build step);
 2. resolves the environment variables the app's manifest declares, including
    secrets, and gives them to that app's process alone;
 3. starts the process under the operating system's sandbox, with access only
@@ -212,9 +216,11 @@ the same access, and phase provisions nothing.
 ### Lifecycle and data
 
 - `mxv up` starts the services an app needs before it starts the app.
-- `mxv down` with process names leaves a service running while another
-  running app needs it. `mxv down` with no names stops every app and then
-  the services.
+- `mxv down` with process names stops the apps that they name, and
+  `mxv down` with no names stops every app and then the services. `down`
+  does not look at which running apps need a service, so it stops a service
+  that a running app needs. The designed behaviour, which is not built, is
+  that `down` leaves a service running while another running app needs it.
 - A service's data lives in a Docker volume labelled with the workspace and
   service. It survives `down` and restarts. The designed verb
   `reset SERVICE`, which does not exist yet, would remove it after asking,
@@ -225,14 +231,19 @@ the same access, and phase provisions nothing.
 ## Starting a workspace
 
 1. multiverse builds the plan and calls `Phase::up` with it.
-2. For each app, phase settles its source. For a release, it downloads the
-   asset for the pinned version, verifies it, and stores the program in a
-   content-addressed cache. For a checkout, it runs the build command in the
+2. For each app, phase settles its source. This step is not built: `up`
+   refuses an app from a release (`NotRunnable::Release`) and a checkout
+   with a build step (`NotRunnable::CheckoutBuild`), and runs a checkout
+   without a build step or an image. The design is that phase downloads
+   the asset for a pinned release, verifies it, and stores the program in
+   a content-addressed cache, and that it runs the build command in a
    checkout. If a release is pinned but has no asset for this machine,
    phase stops with an error that names the app and the missing asset.
-3. phase checks each app's permissions against what you have granted (see
-   [Trust](#trust)). Apps whose permissions grew wait for your answer; the
-   rest continue.
+3. The design is that phase checks each app's permissions against what you
+   have granted (see [Trust](#trust)), and that apps whose permissions grew
+   wait for your answer while the rest continue. This check is not built.
+   `up` compares no permissions, and an app whose manifest widens its
+   permissions starts with the wider permissions.
 4. phase starts the apps in dependency order. For each process it resolves
    the app's environment, generates the sandbox profile, starts a keeper,
    and waits for the readiness probe.
@@ -1801,6 +1812,10 @@ the denials show: as "Operation not permitted" in its log, and on macOS in
 
 ## Trust
 
+The trust check is not built. `up` compares no granted permissions, an app
+whose manifest widens its permissions starts with the wider permissions,
+and phase checks no publisher. This section is the design.
+
 phase asks you two questions, and only when the answer could change what
 runs.
 
@@ -2156,12 +2171,14 @@ still refused with `NotRunnable::Oneshot`.
 
 ### Unattended runs
 
-- When an app's permissions grew and nobody is at a terminal, `up` refuses
-  that app with a stable error code and the permission difference. The
-  designed verb `grants approve APP`, which does not exist yet, would grant
-  it.
-- `up --env KEY=VALUE` sets a value that is not a secret for one run. It
-  needs no grant, and the plan records the name only.
+- The design is that `up` refuses an app whose permissions grew, when
+  nobody is at a terminal, with a stable error code and the permission
+  difference, and that `grants approve APP` grants them. None of this is
+  built: `up` does not compare permissions, and the verb does not exist.
+- The design is that `up --env KEY=VALUE` sets a value that is not a secret
+  for one run, needs no grant, and is recorded in the plan by name only.
+  This is not built: `mxv up` takes only `-w` and process names, and
+  `Phase::up` has no such option.
 
 ## Releases
 
