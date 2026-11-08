@@ -1896,12 +1896,12 @@ Built 5 November 2026.
   sandbox that phase would build for it now, with its lists sorted. That
   sandbox covers the ports the process may listen on and connect to, so a
   dependency that moves to another port restarts each sandboxed dependent
-  whose `connect` names it. It also covers the paths that phase and the host program
-  protect, `HOME`, the workspace's paths, phase's state directory and the
-  launcher, so a host program that protects one more path restarts every
-  sandboxed process at the next `up`. A sandbox that phase cannot build
-  counts by its error, so `up` stops the process and its launch reports
-  the error.
+  whose `connect` names it. It also covers the paths that phase and the
+  host program protect, `HOME`, the workspace's paths, phase's state
+  directory and the launcher, so a host program that protects one more
+  path restarts every sandboxed process at the next `up`. A sandbox that
+  phase cannot build counts by its error, and `up` reports the error with
+  the running process left alone.
 - The hash leaves out the grants that come only from the inherited
   `PATH`: the `PATH` directories, the toolchain directories and links
   that they lead to, and the Homebrew denials of a Homebrew prefix on
@@ -1921,7 +1921,10 @@ Built 5 November 2026.
   earlier phase wrote does not, `up` restarts the process. It resolves
   the process's environment first, so a resolver that fails leaves the
   running process alone, as it leaves a container that `up` would
-  replace. It then stops the keeper and the process through the stop
+  replace. It then builds the new sandbox and checks that nothing but the
+  running process holds the new port, so a sandbox that cannot be built
+  or a port that another process holds also leaves it running. It then
+  stops the keeper and the process through the stop
   that `down` and `restart` use, within the readiness deadline of `up`,
   and launches the process again from the new plan, as a first start
   does: it checks the port, writes the entry back to planned, starts a
@@ -1931,8 +1934,8 @@ Built 5 November 2026.
   sandbox, and later `up`s leave it alone. An upgrade that changes what
   phase's sandbox protects restarts each sandboxed process once in the
   same way.
-- The app's report reads `started`, as for a replaced container, and
-  carries a `plan-changed` note, such as `restarted api/server because
+- Once the new process is ready, the app's report reads `restarted`, as
+  for a replaced container, and carries a `plan-changed` note, such as `restarted api/server because
   its part of the plan changed`, or `restarted api/server because the run
   record does not say which part of the plan it started from`. A stop
   that leaves something behind reports the app as `left`, or as
@@ -1951,9 +1954,18 @@ Built 5 November 2026.
   not restart a host process. `AppliedEnvironment::digest` gives a keyed
   hash of the values, but phase has no key of its own to give it yet, and
   would have to resolve every running process's environment on each `up`
-  to compare it. An unsandboxed process that reads a dependency's port
-  from its environment therefore keeps running when only that port
-  changes.
+  to compare it. A dependency's port that a process receives is part of
+  the process's own part of the plan, because the host program lists it
+  in the app's `ports`, so a process that receives a port that moved
+  restarts whether or not it runs sandboxed.
+- A failed `up` leaves every process that was running before it running,
+  apart from the one that failed. phase stops what this `up` started from
+  nothing, and the process or container whose start was in progress when
+  the failure or a cancel came. Something this `up` restarted and found
+  ready stays running, and its app reads `restarted`, so a host program
+  that rolls back the apps reported as `started` leaves it too. A
+  container whose entry reads running counts as restarted even when it
+  had crashed, because the record cannot tell the two apart.
 
 ### Oneshot processes
 
@@ -2123,7 +2135,7 @@ Each decision states what this draft assumes until it is decided.
 | P13 | How apps share a service such as Postgres: one copy per workspace, or one per machine. | Decided 4 November 2026: one copy per workspace, with a database and role per app. See [Shared services](#shared-services). |
 | P14 | Whether phase builds container images, or runs images that the host program builds. | Decided 4 November 2026: the host program builds images. phase runs a host-supplied image with the checkout bind-mounted, cache volumes, and a run-as user. |
 | P15 | How the watcher that keeps a container's secret files current between runs of `up` gets fresh values: a detached `phase watch` process per app that resolves them through the host program's `EnvironmentSource`, or values that `up` hands to a long-lived process. | Decided 5 November 2026: a detached `phase watch` process per app that re-resolves through the environment source itself, so no long-lived process holds values. It waits for a resolver that works in a detached process, which starmap's will provide, and for a later version of the run record (v7, since v4 records the sandbox, v5 records oneshot completions and v6 records each host process's part hash), which records the watcher. Until then, each `up` rewrites the files of the containers it leaves running, and a process with secret files keeps Docker's `no` restart policy. |
-| P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps it depends on. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
+| P16 | What network a sandboxed app has until the allowlist proxy exists. | Decided 5 November 2026: loopback only. An app may listen on its own ports and connect over loopback only to the ports of the apps its `connect` names, each an app it depends on; on 6 November 2026 a dependency that `connect` leaves out became unreachable. A plan whose `connect` names an external host is refused with an error that says the proxy is not built yet. phase writes its own Seatbelt port rules in place of nono's, which allow binding any port. |
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt cannot limit an app's listening ports to the loopback interface, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. On 6 November 2026 macOS gained the metadata of the regular files that a process's standard streams have open, so node starts, and `SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app sets it, so rustls-native-certs and the AWS SDK find the system's trusted roots. See [The sandbox as built](#the-sandbox-as-built). |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |

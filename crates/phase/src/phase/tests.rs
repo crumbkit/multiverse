@@ -730,7 +730,7 @@ fn up_restarts_a_running_unsandboxed_process_under_seatbelt_once_its_app_declare
         matches!(before.sandbox, Some(Sandboxing::Unsandboxed { .. })),
         "{before:?}"
     );
-    assert_eq!(second.apps[0].outcome, AppOutcome::Started, "{second:?}");
+    assert_eq!(second.apps[0].outcome, AppOutcome::Restarted, "{second:?}");
     assert_eq!(
         second.apps[0].notes,
         vec![Note::plan_changed(

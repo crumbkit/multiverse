@@ -3,7 +3,7 @@ use phase::{
     StatusRow,
 };
 
-use super::{notes_of, ready_of};
+use super::{notes_of, ready_of, started_from_nothing};
 use crate::runs::ProcessNote;
 
 fn row(state: Phase) -> StatusRow {
@@ -91,4 +91,19 @@ fn a_restart_because_the_plan_changed_is_noted_with_phases_own_sentence() {
             message: "restarted api/main because its part of the plan changed".to_owned(),
         }
     );
+}
+
+#[test]
+fn a_failed_up_rolls_back_only_the_apps_it_started_from_nothing() {
+    let name = |text: &str| AppName::try_from(text.to_owned()).unwrap();
+    let report = Report::new(vec![
+        AppReport::new(name("fresh"), AppOutcome::Started),
+        AppReport::new(name("changed"), AppOutcome::Restarted),
+        AppReport::new(name("same"), AppOutcome::AlreadyRunning),
+    ]);
+
+    let targets = started_from_nothing(&report);
+
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].app.as_str(), "fresh");
 }

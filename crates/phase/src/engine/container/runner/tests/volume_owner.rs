@@ -285,7 +285,7 @@ fn an_up_that_finds_a_leftover_helper_removes_it_and_sets_the_owner_again() {
 
     let report = world.up(&plan);
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
     assert_eq!(world.data_owner(), "1000:1000");
     world.down();
@@ -758,7 +758,7 @@ fn an_up_that_starts_one_process_and_cannot_check_the_volume_of_a_running_one_st
 
     let report = world.up(&plan);
 
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
     assert!(
         matches!(notes(&report, "db"), [Note::VolumeOwnerUnchecked { .. }]),
         "{report:?}"

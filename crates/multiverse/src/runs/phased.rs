@@ -161,6 +161,19 @@ fn ready_of(row: &StatusRow) -> Option<bool> {
     }
 }
 
+/// Returns the apps of `report` that a failed `up` rolls back.
+fn started_from_nothing(report: &Report) -> Vec<Target> {
+    report
+        .apps
+        .iter()
+        .filter(|app| matches!(app.outcome, AppOutcome::Started))
+        .map(|app| Target {
+            app: app.app.clone(),
+            process: None,
+        })
+        .collect()
+}
+
 /// Returns the notes of `report` that mxv shows, by unit: the secret files
 /// that `up` rewrote or kept for each app, and the host processes that
 /// `up` restarted because their part of the plan changed.
@@ -690,6 +703,10 @@ impl Runs {
     /// [`Runs::status`], the docker errors, [`Error::ProcessUnstartable`]
     /// for a process that cannot start, and [`Error::Phase`] for another
     /// failure of phase.
+    ///
+    /// When `up` fails after phase ran, `earlier` receives the notes of the
+    /// apps it reached, such as the processes it restarted, which keep
+    /// running. An `up` that succeeds puts its notes on each status.
     pub fn up(
         &self,
         _lock: &Lock,
@@ -697,6 +714,7 @@ impl Runs {
         workspace: &mut Workspace,
         manifest: &Manifest,
         names: &[String],
+        earlier: &mut Vec<ProcessNote>,
     ) -> Result<UpOutcome, Error> {
         let order = match manifest.start_order(names) {
             Ok(order) => order,
@@ -766,10 +784,12 @@ impl Runs {
         match self.failure(workspace, manifest, &id, &report) {
             Ok(None) => {}
             Ok(Some(outcome)) => {
+                earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Ok(outcome);
             }
             Err(error) => {
+                earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Err(error);
             }
@@ -844,19 +864,12 @@ impl Runs {
         Ok(None)
     }
 
-    /// Stops the apps that a failed `up` started, as its `report` names
-    /// them. Each step is best effort, because the caller reports the
+    /// Stops the apps that a failed `up` started from nothing, as its
+    /// `report` names them. An app that it restarted ran before it, so that
+    /// app keeps running. Each step is best effort, because the caller reports the
     /// failure that stopped `up`.
     fn roll_back_phase(&self, id: &WorkspaceId, report: &Report) {
-        let started: Vec<Target> = report
-            .apps
-            .iter()
-            .filter(|app| matches!(app.outcome, AppOutcome::Started))
-            .map(|app| Target {
-                app: app.app.clone(),
-                process: None,
-            })
-            .collect();
+        let started = started_from_nothing(report);
         if started.is_empty() {
             return;
         }

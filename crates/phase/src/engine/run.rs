@@ -95,6 +95,9 @@ use stop::{Stopped, Target};
 /// report of the failed start holds no code and no signal.
 const END_LINE_WAIT: Duration = Duration::from_secs(2);
 
+/// Why phase cannot start a process when the host program gave no keeper.
+const NO_KEEPER: &str = "the program that links phase gave no keeper program";
+
 /// What the engine's operations are given besides their arguments.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Settings<'a> {
@@ -246,7 +249,9 @@ struct Op<'e, 's> {
 }
 
 /// Something that an operation started, which it stops again when the
-/// caller cancels or a failure ends the operation.
+/// caller cancels or a failure ends the operation. A process or container
+/// that replaced a running one leaves this list once it is ready, so a
+/// later failure leaves it running.
 enum Begun {
     /// A host process and its keeper.
     Host(Target),
@@ -278,6 +283,9 @@ enum Step {
     Ready,
     /// The oneshot exited with status 0, and its keeper is stopped.
     Completed,
+    /// A process that ran from another plan was stopped, and the process
+    /// that replaced it is ready.
+    Restarted,
     /// The process was already running and is left alone.
     AlreadyRunning,
     /// A process that phase started survived an earlier stop, so phase
@@ -382,7 +390,10 @@ impl Op<'_, '_> {
             };
             match step {
                 AppStep::Done(outcome, notes) => {
-                    if !matches!(outcome, AppOutcome::Started | AppOutcome::AlreadyRunning) {
+                    if !matches!(
+                        outcome,
+                        AppOutcome::Started | AppOutcome::Restarted | AppOutcome::AlreadyRunning
+                    ) {
                         unready.insert(name.clone());
                         halted = true;
                     }
@@ -449,6 +460,7 @@ impl Op<'_, '_> {
         let mark = self.started.len();
         let mut notes = Vec::new();
         let mut any = false;
+        let mut restarted = false;
         for process in &choice.processes {
             if self.leaves_oneshot(app, process, rerun) {
                 continue;
@@ -462,6 +474,10 @@ impl Op<'_, '_> {
                     any = true;
                     continue;
                 }
+                Step::Restarted => {
+                    restarted = true;
+                    continue;
+                }
                 Step::AlreadyRunning => continue,
                 Step::Cancelled => return Ok(AppStep::Cancelled(notes)),
                 Step::Uncertain => return Ok(AppStep::Done(AppOutcome::StartUncertain, notes)),
@@ -472,7 +488,12 @@ impl Op<'_, '_> {
             self.stop_since(mark, &mut StopsByApp::new(), &mut notes)?;
             return Ok(AppStep::Done(outcome, notes));
         }
-        let outcome = if any {
+        // An app that restarted a process is reported as restarted even if
+        // it also started another from nothing, so a host program that rolls
+        // back whole apps leaves the restarted process running.
+        let outcome = if restarted {
+            AppOutcome::Restarted
+        } else if any {
             AppOutcome::Started
         } else {
             AppOutcome::AlreadyRunning
@@ -562,6 +583,12 @@ impl Op<'_, '_> {
         if processes.is_empty() && !checks_volume_owners(app, &running) {
             return Ok(AppStep::Done(AppOutcome::AlreadyRunning, notes));
         }
+        // The record cannot tell a container that crashed from one that
+        // `start` replaces because its plan changed, so a process whose
+        // entry reads running counts as running before this `up`.
+        let replaced = recorded
+            .iter()
+            .any(|entry| processes.contains(&entry.process));
         let left_running: Vec<ProcessName> = running.iter().cloned().collect();
         let owners = self.recorded_volume_owners();
         let start = ContainerStart {
@@ -623,6 +650,9 @@ impl Op<'_, '_> {
         let Some((process, problem)) = started.problem else {
             let outcome = if processes.is_empty() {
                 AppOutcome::AlreadyRunning
+            } else if replaced {
+                self.started.truncate(mark);
+                AppOutcome::Restarted
             } else {
                 AppOutcome::Started
             };
@@ -648,6 +678,7 @@ impl Op<'_, '_> {
     ) -> Result<Step, PhaseError> {
         let host = self.engine.host;
         let mut environment = environment;
+        let mut replaces = None;
         match self.recorded(app, process) {
             Ok(Recorded::Nothing) => {}
             // A oneshot that still runs was started by an operation that
@@ -677,10 +708,13 @@ impl Op<'_, '_> {
                         })?,
                     );
                 }
+                if let Some(step) = self.refused_before_stop(app, process) {
+                    return Ok(step);
+                }
                 if let Some(step) = self.stop_drifted(app, process, notes)? {
                     return Ok(step);
                 }
-                notes.push(note);
+                replaces = Some(note);
             }
             Ok(Recorded::Left) => return Ok(Step::Left),
             Ok(Recorded::Unverified(group)) => {
@@ -799,8 +833,50 @@ impl Op<'_, '_> {
                 &ObjectKey::Process(app.name.clone(), process.name.clone()),
                 Ready::now(0),
             )?;
+            if let Some(note) = replaces {
+                // The new process is ready, so a later failure of this
+                // operation leaves it running in place of the old one.
+                self.started.pop();
+                notes.push(note);
+                return Ok(Step::Restarted);
+            }
         }
         Ok(step)
+    }
+
+    /// Returns the step that ends the start of the running `process` of
+    /// `app` before phase stops it, or `None` when nothing checkable keeps
+    /// its new launch from starting: a sandbox that cannot be built, or a
+    /// port that a process outside the running one holds.
+    fn refused_before_stop(&self, app: &AppPlan, process: &ProcessPlan) -> Option<Step> {
+        let unstartable = |reason: String| {
+            Step::Errored(PhaseError::KeeperUnstartable {
+                app: app.name.clone(),
+                process: process.name.clone(),
+                reason,
+            })
+        };
+        let Some(command) = self.engine.settings.keeper else {
+            return Some(unstartable(NO_KEEPER.to_owned()));
+        };
+        if let Err(error) = self.sandbox(app, process, command) {
+            return Some(unstartable(error.to_string()));
+        }
+        let listen = listen(app, process)?;
+        let group = self.journal.record().map_or(0, |record| {
+            let (_, entry) = record.host_pair(&app.name, &process.name);
+            entry
+                .and_then(|entry| entry.host.as_ref())
+                .map_or(0, |host| host.group)
+        });
+        match port_holder(self.engine.host, group, listen.port, LookupFailed::Bind) {
+            PortHolder::Other(pid) => Some(Step::Failed(StartProblem::port_taken(
+                listen.name,
+                pid.into_iter().collect(),
+            ))),
+            // The check after the stop reports a holder it cannot find.
+            PortHolder::Free | PortHolder::Group(_) | PortHolder::Unknown(_) => None,
+        }
     }
 
     /// Returns the start problem of a port that something already holds
@@ -944,9 +1020,7 @@ impl Op<'_, '_> {
             })
         };
         let Some(command) = engine.settings.keeper else {
-            return Err(unstartable(
-                "the program that links phase gave no keeper program".to_owned(),
-            ));
+            return Err(unstartable(NO_KEEPER.to_owned()));
         };
         let log = engine.log_path(&self.workspace, &app.name, &process.name);
         let spec = KeeperSpec::new(
@@ -1004,8 +1078,8 @@ impl Op<'_, '_> {
     /// launcher. It leaves out the grants that come only from the
     /// inherited `PATH`, so an `up` from a shell with another `PATH` does
     /// not restart every sandboxed process. A sandbox that phase cannot
-    /// build counts by its error, so the launch that follows reports it. A
-    /// oneshot's completion keeps the hash of its part alone.
+    /// build counts by its error, and `up` reports that error with the
+    /// running process left alone. A oneshot's completion keeps the hash of its part alone.
     fn launch_part(&self, app: &AppPlan, process: &ProcessPlan) -> PlanHash {
         let part = app.process_digest(process);
         let built = self
@@ -1311,8 +1385,9 @@ impl Op<'_, '_> {
         Ok(Report::new(apps))
     }
 
-    /// Stops everything this operation started after `error`, which ends
-    /// the operation, and returns `error`. A failure of the stops is not
+    /// Stops what this operation started from nothing and the start in
+    /// progress, after `error`, which ends the operation, and returns
+    /// `error`. What it already restarted stays running. A failure of the stops is not
     /// returned, because `error` ended the operation first and the record
     /// keeps what was not stopped.
     fn abort(&mut self, error: PhaseError) -> PhaseError {
@@ -1394,6 +1469,11 @@ impl Op<'_, '_> {
                 Ok(report) => report,
                 Err(error) => return Err(self.abort(error)),
             };
+            // A restarted app ran before this operation, so a later failure
+            // leaves it running.
+            if report.outcome == AppOutcome::Restarted {
+                self.started.clear();
+            }
             reports.push(report);
         }
         Ok(Report::new(reports))
@@ -1450,7 +1530,10 @@ impl Op<'_, '_> {
         let mark = self.started.len();
         let step = self.start_app(&again, Some(&mut fresh), Rerun::Always)?;
         Ok(match step {
-            AppStep::Done(AppOutcome::Started | AppOutcome::AlreadyRunning, more) => {
+            AppStep::Done(
+                AppOutcome::Started | AppOutcome::Restarted | AppOutcome::AlreadyRunning,
+                more,
+            ) => {
                 notes.extend(more);
                 AppReport::new(name, AppOutcome::Restarted).with_notes(notes)
             }
@@ -1503,7 +1586,7 @@ impl Op<'_, '_> {
         }
         let mark = self.started.len();
         Ok(match self.start_containers(choice)? {
-            AppStep::Done(AppOutcome::Started, notes) => {
+            AppStep::Done(AppOutcome::Started | AppOutcome::Restarted, notes) => {
                 AppReport::new(name, AppOutcome::Restarted).with_notes(notes)
             }
             AppStep::Done(outcome, notes) => AppReport::new(name, outcome).with_notes(notes),

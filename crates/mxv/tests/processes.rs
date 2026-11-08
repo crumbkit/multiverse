@@ -341,6 +341,39 @@ fn up_in_a_checkout_starts_that_workspaces_named_process_and_its_dependencies() 
     assert_eq!(document["data"].as_array().unwrap().len(), 2);
 }
 
+/// Returns a manifest of `first` and `second`, which depends on it, whose
+/// shells run `first_script` and `second_script`.
+fn pair(first_script: &str, second_script: &str) -> String {
+    format!(
+        "[processes.first]\nargv = [\"sh\", \"-c\", \"{first_script}\"]\nready = {{ log = \"^ready$\" }}\n\n[processes.second]\nargv = [\"sh\", \"-c\", \"{second_script}\"]\nready = {{ log = \"^ready$\" }}\ndepends_on = [\"first\"]\n"
+    )
+}
+
+#[test]
+fn a_failed_up_leaves_a_process_it_restarted_running_and_says_it_restarted_it() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        &pair("echo ready; exec sleep 60", "echo ready; exec sleep 60"),
+    );
+    let (exit, up) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+    let before = row(&up, "first")["pid"].clone();
+    setup.workspace_manifest("triage", &pair("echo ready; exec sleep 61", "exit 5"));
+
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{errors}");
+    assert!(
+        errors.contains("restarted first/main because its part of the plan changed"),
+        "{errors}"
+    );
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(row(&status, "first")["state"], "running", "{status}");
+    assert_ne!(row(&status, "first")["pid"], before, "{status}");
+    assert_eq!(row(&status, "second")["state"], "exited", "{status}");
+}
+
 #[test]
 fn up_again_leaves_running_processes_as_they_are() {
     let setup = Setup::new();
