@@ -136,17 +136,19 @@ impl Setup {
     /// Starts `sleep` with its working directory `dir`, as an agent's shell
     /// that works in a workspace would be.
     fn shell_in(&mut self, dir: &Path) -> u32 {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the test starts a process outside phase that works in the workspace"
-        )]
-        let child = std::process::Command::new("sleep")
-            .arg("600")
+        // A shell starts `sleep` in the background and exits, so the test
+        // holds no child to wait for, and prints the pid of `sleep`.
+        let output = Command::new("sh")
+            .args(["-c", "sleep 600 >/dev/null 2>&1 & echo $!"])
             .current_dir(dir)
             .env("PATH", PATH)
-            .spawn()
+            .output()
             .unwrap();
-        let pid = child.id();
+        let pid: u32 = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         self.children.push(pid);
         pid
     }
