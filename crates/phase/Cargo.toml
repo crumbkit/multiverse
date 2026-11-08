@@ -18,6 +18,15 @@ name = "phase"
 [lints]
 workspace = true
 
+[features]
+default = ["sandbox"]
+# `sandbox` applies the operating system's sandbox to a host app that
+# declares permissions, through nono. Without it, such an app runs
+# unsandboxed and `status` says that phase was built without its sandbox.
+# nono turns on serde_json's `preserve_order` for the whole build, so a
+# program whose JSON output depends on key order can leave it out.
+sandbox = ["dep:nono"]
+
 [dependencies]
 serde = { workspace = true }
 # The run record is JSON on disk.
@@ -42,7 +51,7 @@ wait-timeout = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["param"] }
 # The keeper applies Landlock to an app that declares permissions.
-nono = { workspace = true }
+nono = { workspace = true, optional = true }
 
 # macOS reads a process's start time to the microsecond, and the sockets of
 # a process's descriptors, with libproc's `proc_pidinfo`, `proc_pidfdinfo`
@@ -50,7 +59,7 @@ nono = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 # The keeper applies Seatbelt to an app that declares permissions.
-nono = { workspace = true }
+nono = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

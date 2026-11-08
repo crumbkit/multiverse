@@ -5,6 +5,16 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Added
+
+- mxv-phase has a `sandbox` feature, on by default, that applies the
+  operating system's sandbox through nono. A program that links mxv-phase
+  with `default-features = false` builds without nono, and with it without
+  serde_json's `preserve_order`, which nono turns on for the whole build.
+  In such a build an app that declares permissions runs unsandboxed, `exec`
+  runs its command unsandboxed, the launcher refuses `--sandboxed`, and
+  `status` gives the reason "phase was built without its sandbox feature".
+
 ### Changed
 
 - A sandboxed process can connect over loopback only to the units that its

@@ -187,7 +187,7 @@ fn standard_files() -> Vec<std::path::PathBuf> {
 }
 
 /// Applies the sandbox of `spec` to this process.
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 fn apply(spec: &SandboxSpec) -> Result<(), String> {
     let caps = super::capabilities(spec)?;
     nono::Sandbox::apply_auto(&caps)
@@ -197,7 +197,7 @@ fn apply(spec: &SandboxSpec) -> Result<(), String> {
 /// Applies the sandbox of `spec` to this process with Landlock alone, which
 /// fails rather than fall back to seccomp when the kernel cannot restrict
 /// TCP ports.
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 fn apply(spec: &SandboxSpec) -> Result<(), String> {
     let caps = super::capabilities(spec)?;
     nono::Sandbox::apply_landlock(&caps)
@@ -206,8 +206,19 @@ fn apply(spec: &SandboxSpec) -> Result<(), String> {
 
 /// Refuses to start the app, because this platform has no sandbox. The
 /// engine never asks for one here.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "sandbox",
+    not(any(target_os = "macos", target_os = "linux"))
+))]
 fn apply(spec: &SandboxSpec) -> Result<(), String> {
     let _ = spec;
     Err(format!("phase has no sandbox for {}", std::env::consts::OS))
+}
+
+/// Refuses to start the app, because phase was built without its `sandbox`
+/// feature. The engine never asks for one in such a build.
+#[cfg(not(feature = "sandbox"))]
+fn apply(spec: &SandboxSpec) -> Result<(), String> {
+    let _ = spec;
+    Err(super::UNBUILT.to_owned())
 }

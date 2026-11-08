@@ -219,6 +219,20 @@ fn an_app_without_permissions_runs_unsandboxed_and_says_why() {
     );
 }
 
+#[cfg(not(feature = "sandbox"))]
+#[test]
+fn a_build_without_the_sandbox_feature_runs_an_app_with_permissions_unsandboxed_and_says_why() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    assert_eq!(
+        sandboxing(&api, &super::platform()),
+        Some(Sandboxing::Unsandboxed {
+            reason: super::UNBUILT.to_owned()
+        })
+    );
+}
+
 #[test]
 fn an_app_with_permissions_runs_unsandboxed_on_a_platform_without_a_sandbox_and_says_why() {
     let fixture = Fixture::new();
@@ -520,6 +534,26 @@ fn a_launcher_that_cannot_read_its_sandbox_refuses_to_start_the_app() {
     let code = launch(&[
         "--sandboxed".into(),
         "{}".into(),
+        "--".into(),
+        "/bin/true".into(),
+    ]);
+
+    assert_eq!(
+        code,
+        Some(std::process::ExitCode::from(super::SANDBOX_REFUSED))
+    );
+}
+
+#[cfg(not(feature = "sandbox"))]
+#[test]
+fn a_launcher_built_without_the_sandbox_feature_refuses_a_valid_sandbox() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    let code = launch(&[
+        "--sandboxed".into(),
+        serde_json::to_string(&spec).unwrap().into(),
         "--".into(),
         "/bin/true".into(),
     ]);
@@ -1473,7 +1507,7 @@ mod rules {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 mod seatbelt {
     use std::collections::BTreeSet;
     use std::io::Read as _;
