@@ -1401,8 +1401,13 @@ why in `warnings`.
 `mxv clean <workspace>...` deletes the disposable paths of the named
 workspaces that are idle, and `mxv clean --all` does so for every workspace.
 It deletes nothing else. A workspace is idle when none of its processes or
-containers run, and no file or directory of its checkouts outside the
-disposable paths and `.git` has changed for the idle age. mxv reads the
+containers run, no other process has its working directory inside the
+workspace, and no file or directory of its checkouts outside the
+disposable paths and `.git` has changed for the idle age. mxv sees only
+the processes whose working directory it can read, which are the person's
+own. A running `cargo build` keeps its workspace, and so does a shell or an
+editor that someone left in the workspace's directory; the row's `reason`
+names the process and its directory. mxv reads the
 later of each entry's modification time and its status-change time
 (`ctime`), which no tool can set back, so a file whose modification time a
 tool restored still counts as changed. A directory's times change when an
@@ -1429,15 +1434,16 @@ script. With `--yes`, `clean` keeps each path that only the repository's
 same way, so they do not count toward the bytes that the run frees.
 
 Before it deletes anything in a workspace, `clean` takes the workspace's
-lock, which `mxv up` and `mxv down` also take, so no process starts while
-it deletes. It then measures the workspace again and checks that no process
-or container runs and nothing changed within the idle age. A workspace that
-became busy keeps every path. For each path, it checks again that git
-reports the path as ignored, that the repository tracks no file in it, that
-it holds no `.git` entry and that it is not a symbolic link. A path that
-fails a check stays and is listed in `skipped`. When another mxv command
-holds the lock for more than 5 seconds, the workspace is kept with that
-reason.
+lock, which `mxv up` and `mxv down` also take, so neither runs while mxv
+deletes. It then measures the workspace again and checks that no process
+or container runs, no other process works in the workspace and nothing
+changed within the idle age. A workspace that became busy keeps every path.
+A build that someone starts outside mxv after the check is neither blocked
+nor detected. For each path, it checks again that git reports the path as
+ignored, that the repository tracks no file in it, that it holds no `.git`
+entry and that it is not a symbolic link. A path that fails a check stays
+and is listed in `skipped`. When another mxv command holds the lock for more
+than 5 seconds, the workspace is kept with that reason.
 
 `clean` deletes by file descriptor, as Rust's `std::fs::remove_dir_all`
 does. It opens the checkout's root once, then opens each component of the
@@ -1556,7 +1562,8 @@ exits with 1.
 `mxv reclaim --need disk=<SIZE>` deletes the disposable paths of idle
 workspaces as `mxv clean --over-limit --yes` does, the workspace unchanged
 longest first, until the bytes it frees cover the need. It uses `clean`'s
-idle rule and idle age, and keeps each path that only a repository's own
+idle rule, including its check for processes that work in the workspace,
+and idle age, and keeps each path that only a repository's own
 `mxv.toml` declares disposable. Its rows read `cleaned` or `would_clean`.
 
 `mxv pin -w <workspace>` keeps `reclaim` from stopping a workspace, and

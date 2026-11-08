@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use super::{CleanSummary, DEFAULT_IDLE, busy, over_limit, within_limit_reason};
@@ -12,14 +13,29 @@ fn days_ago(now: SystemTime, days: u32) -> Option<SystemTime> {
 #[test]
 fn a_workspace_whose_processes_run_is_never_idle() {
     let now = SystemTime::now();
-    let reason = busy(&["web".to_owned()], days_ago(now, 30), now, DEFAULT_IDLE).unwrap();
+    let reason = busy(
+        &["web".to_owned()],
+        &[],
+        days_ago(now, 30),
+        now,
+        DEFAULT_IDLE,
+    )
+    .unwrap();
     assert!(reason.contains("web"), "{reason}");
+}
+
+#[test]
+fn a_workspace_that_an_outside_process_works_in_is_never_idle() {
+    let now = SystemTime::now();
+    let users = [(4242, PathBuf::from("/work/app"))];
+    let reason = busy(&[], &users, days_ago(now, 30), now, DEFAULT_IDLE).unwrap();
+    assert!(reason.contains("4242"), "{reason}");
 }
 
 #[test]
 fn a_workspace_changed_within_the_idle_age_is_not_idle() {
     let now = SystemTime::now();
-    let reason = busy(&[], days_ago(now, 2), now, DEFAULT_IDLE).unwrap();
+    let reason = busy(&[], &[], days_ago(now, 2), now, DEFAULT_IDLE).unwrap();
     assert!(reason.contains("2d ago"), "{reason}");
     assert!(reason.contains("1w"), "{reason}");
 }
@@ -27,9 +43,9 @@ fn a_workspace_changed_within_the_idle_age_is_not_idle() {
 #[test]
 fn a_workspace_unchanged_for_the_idle_age_or_never_changed_is_idle() {
     let now = SystemTime::now();
-    assert_eq!(busy(&[], days_ago(now, 8), now, DEFAULT_IDLE), None);
-    assert_eq!(busy(&[], None, now, DEFAULT_IDLE), None);
-    assert_eq!(busy(&[], Some(now), now, Duration::ZERO), None);
+    assert_eq!(busy(&[], &[], days_ago(now, 8), now, DEFAULT_IDLE), None);
+    assert_eq!(busy(&[], &[], None, now, DEFAULT_IDLE), None);
+    assert_eq!(busy(&[], &[], Some(now), now, Duration::ZERO), None);
 }
 
 #[test]
@@ -63,7 +79,7 @@ fn over_the_limit_a_busy_or_empty_workspace_is_never_cleaned() {
 #[test]
 fn a_workspace_changed_after_the_current_time_is_busy_and_says_why() {
     let now = SystemTime::now();
-    let reason = busy(&[], Some(now + DAY), now, Duration::ZERO).unwrap();
+    let reason = busy(&[], &[], Some(now + DAY), now, Duration::ZERO).unwrap();
     assert!(reason.contains("after the current time"), "{reason}");
     assert!(!reason.contains("0s ago"), "{reason}");
 }
