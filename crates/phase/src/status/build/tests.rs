@@ -392,7 +392,7 @@ fn status_shows_a_host_process_whose_app_declares_permissions_under_this_machine
 
     let expected = crate::sandbox::sandboxing(&plan.apps()[0], &crate::sandbox::platform());
     assert_eq!(status.rows[0].sandbox, expected);
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "sandbox", target_os = "macos"))]
     assert_eq!(status.rows[0].sandbox, Some(Sandboxing::seatbelt()));
 }
 

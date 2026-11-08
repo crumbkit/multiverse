@@ -11,7 +11,8 @@ workspace may need to act on.
   operating system's sandbox through nono. A program that links mxv-phase
   with `default-features = false` builds without nono, and with it without
   serde_json's `preserve_order`, which nono turns on for the whole build.
-  In such a build an app that declares permissions runs unsandboxed, and
+  In such a build an app that declares permissions runs unsandboxed, `exec`
+  runs its command unsandboxed, the launcher refuses `--sandboxed`, and
   `status` gives the reason "phase was built without its sandbox feature".
 
 ### Changed

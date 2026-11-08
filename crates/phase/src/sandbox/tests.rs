@@ -544,6 +544,26 @@ fn a_launcher_that_cannot_read_its_sandbox_refuses_to_start_the_app() {
     );
 }
 
+#[cfg(not(feature = "sandbox"))]
+#[test]
+fn a_launcher_built_without_the_sandbox_feature_refuses_a_valid_sandbox() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    let code = launch(&[
+        "--sandboxed".into(),
+        serde_json::to_string(&spec).unwrap().into(),
+        "--".into(),
+        "/bin/true".into(),
+    ]);
+
+    assert_eq!(
+        code,
+        Some(std::process::ExitCode::from(super::SANDBOX_REFUSED))
+    );
+}
+
 #[test]
 fn the_launcher_command_passes_the_sandbox_and_then_the_apps_command() {
     let fixture = Fixture::new();
