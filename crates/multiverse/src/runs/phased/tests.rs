@@ -44,6 +44,7 @@ fn the_notes_of_a_report_are_the_secret_notes_of_each_app() {
         ]),
         AppReport::new(api.clone(), AppOutcome::AlreadyRunning).with_notes(vec![
             Note::secrets_kept(&api, main(), "the source could not supply TOKEN"),
+            Note::volume_owner_unchecked(&api, "the helper image cannot be pulled"),
         ]),
         AppReport::new(
             AppName::try_from("web".to_owned()).unwrap(),
@@ -59,9 +60,14 @@ fn the_notes_of_a_report_are_the_secret_notes_of_each_app() {
     );
     assert_eq!(
         notes.get("api"),
-        Some(&vec![ProcessNote::SecretsKept {
-            message: "api/main still runs with its earlier secret files: the source could not supply TOKEN".to_owned(),
-        }])
+        Some(&vec![
+            ProcessNote::SecretsKept {
+                message: "api/main still runs with its earlier secret files: the source could not supply TOKEN".to_owned(),
+            },
+            ProcessNote::VolumeOwnerUnchecked {
+                message: "api is running and phase did not check the owner of its volumes: the helper image cannot be pulled".to_owned(),
+            },
+        ])
     );
     assert_eq!(notes.get("web"), None);
 }

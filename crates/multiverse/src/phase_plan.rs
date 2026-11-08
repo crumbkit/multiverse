@@ -19,6 +19,14 @@
 //! that the manifest does not set as optional, so phase starts the process
 //! without the ones that the caller's environment lacks. The plan, and its
 //! digest, are therefore the same whichever shell runs `mxv up`.
+//!
+//! A manifest with services adds a container app for each backend, named
+//! and published as [`crate::service::Backend::app`], and the host oneshot
+//! `mxv-provision`, which depends on the backends. A process that needs a
+//! service depends on the service's backend and on `mxv-provision`, and
+//! receives the service's variables. No variable of the caller's
+//! environment whose name starts with `AWS_` is in [`PASSED_THROUGH`], so
+//! such a process receives only the AWS variables that mxv sets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -38,8 +46,12 @@ use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::redacted::Redacted;
 
+mod services;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use services::{BACKEND_READY_TIMEOUT, PROVISION_TIMEOUT};
+use services::{service_apps, service_connects, service_depends};
 
 /// The name of the one process of each unit's app.
 pub const MAIN: &str = "main";
@@ -225,6 +237,21 @@ pub(crate) struct Inputs<'a> {
     pub(crate) grace: Duration,
     /// The caller's environment.
     pub(crate) caller: &'a CallerEnvironment,
+    /// The command that provisions the services, such as the mxv program
+    /// and `phase provision`, to which the plan adds the resources as one
+    /// JSON argument, or `None` when it is unknown. A manifest with
+    /// services cannot run without it.
+    pub(crate) provisioner: Option<Vec<String>>,
+}
+
+/// Returns the command that a manifest's check builds its plan with, which
+/// stands in for the mxv program that `up` names.
+pub(crate) fn checking_provisioner() -> Vec<String> {
+    vec![
+        "/mxv".to_owned(),
+        "phase".to_owned(),
+        "provision".to_owned(),
+    ]
 }
 
 /// Returns the directories that a process of `workspace`'s merged manifest
@@ -304,16 +331,12 @@ fn lexical(path: &Path) -> PathBuf {
 /// is not one that phase pins, or the apps break one of phase's plan
 /// rules.
 pub(crate) fn build(inputs: &Inputs<'_>) -> Result<Built, Unrunnable> {
-    if let Some(service) = inputs.manifest.services.keys().next() {
-        return Err(Unrunnable {
-            unit: None,
-            message: format!(
-                "the manifest declares the service `{service}`, and this mxv cannot run services yet"
-            ),
-        });
-    }
     let mut apps = Vec::new();
     let mut values = BTreeMap::new();
+    for (plan, vars) in service_apps(inputs)? {
+        values.insert(plan.name.clone(), vars);
+        apps.push(plan);
+    }
     for name in inputs.manifest.start_order(&[]).unwrap_or_default() {
         let app = app_name(&name)?;
         let (plan, vars) = match inputs.manifest.unit(&name) {
@@ -439,6 +462,20 @@ fn host_app(
     for (variable, value) in &process.env {
         vars.insert(variable.clone(), value.render(inputs.ports));
     }
+    // No variable of the caller's environment whose name starts with
+    // `AWS_` passes, so a process that needs a service receives only the
+    // AWS variables that mxv sets here.
+    let serviced = inputs.manifest.service_variables(process, inputs.ports);
+    let mut set: BTreeSet<&str> = process
+        .env
+        .keys()
+        .chain(process.ports.keys())
+        .map(String::as_str)
+        .collect();
+    set.extend(serviced.keys().map(String::as_str));
+    for (variable, value) in &serviced {
+        vars.insert(variable.clone(), Redacted::new(value.clone()));
+    }
     let mut used: BTreeSet<&str> = process.ports.values().map(String::as_str).collect();
     used.extend(process.env.values().flat_map(|value| value.ports()));
     used.extend(process.listen.as_deref());
@@ -458,6 +495,8 @@ fn host_app(
     );
     plan.ports = app_ports(inputs, name, used)?;
     plan.depends = depends(&process.depends_on)?;
+    plan.depends
+        .extend(service_depends(inputs.manifest, process)?);
     let mut main = ProcessPlan::new(main_process()?, process.argv.clone());
     main.cwd = cwd;
     // Each passed-through variable that the manifest does not set is
@@ -465,8 +504,8 @@ fn host_app(
     // environment holds, and the source leaves out those it lacks.
     main.optional_env = PASSED_THROUGH
         .iter()
+        .filter(|name| !set.contains(**name))
         .map(|name| (*name).to_owned())
-        .filter(|name| !process.env.contains_key(name) && !process.ports.contains_key(name))
         .collect();
     main.env = vars
         .keys()
@@ -492,6 +531,11 @@ fn host_app(
         .as_ref()
         .map(|permissions| app_permissions(name, permissions, &source))
         .transpose()?;
+    if let Some(granted) = &mut plan.permissions {
+        granted
+            .connect
+            .extend(service_connects(inputs.manifest, process));
+    }
     Ok((plan, vars.into_iter().collect()))
 }
 

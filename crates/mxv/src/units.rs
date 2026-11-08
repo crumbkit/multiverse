@@ -1,10 +1,10 @@
-//! The sizes and ages that `mxv clean` and the config file read, and the
+//! The sizes and ages that `mxv clean`, `mxv reclaim` and the config file read, and the
 //! size that rows print.
 //!
 //! A size is a whole number followed by a unit: `B`, the binary units
-//! `KiB`, `MiB`, `GiB` and `TiB`, which count in powers of 1024, or the
-//! decimal units `KB`, `MB`, `GB` and `TB`, which count in powers of 1000,
-//! such as `50GiB`. An age is a whole number followed by `w`, `d`, `h`, `m`
+//! `KiB`, `MiB`, `GiB` and `TiB`, or their short forms `K`, `M`, `G` and
+//! `T`, which count in powers of 1024, or the decimal units `KB`, `MB`,
+//! `GB` and `TB`, which count in powers of 1000, such as `50GiB`. An age is a whole number followed by `w`, `d`, `h`, `m`
 //! or `s`, for weeks, days, hours, minutes and seconds, such as `7d`. A
 //! space may stand between the number and the unit.
 
@@ -25,6 +25,10 @@ const SIZE_UNITS: &[(&str, u64)] = &[
     ("MiB", 1 << 20),
     ("GiB", 1 << 30),
     ("TiB", 1 << 40),
+    ("K", 1 << 10),
+    ("M", 1 << 20),
+    ("G", 1 << 30),
+    ("T", 1 << 40),
     ("KB", 1_000),
     ("MB", 1_000_000),
     ("GB", 1_000_000_000),

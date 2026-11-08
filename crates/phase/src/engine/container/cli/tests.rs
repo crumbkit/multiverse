@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use crate::engine::container::ContainerState;
 use crate::engine::container::cli::DockerCli;
 use crate::engine::container::names::{Scope, StoreId};
+use crate::engine::container::{ContainerError, ContainerState};
 use crate::name::{WorkspaceId, WorkspaceName};
 use crate::record::DockerName;
 use crate::record::docker::{
@@ -1029,4 +1029,24 @@ fn a_find_that_docker_fails_names_the_inspect_command_of_the_objects_kind() {
     assert_eq!(container.operation(), Some("container inspect"));
     assert_eq!(volume.operation(), Some("volume inspect"));
     assert_eq!(volume.container_id(), None);
+}
+
+#[test]
+fn a_helper_removal_that_docker_did_not_answer_in_time_counts_as_docker_not_answering() {
+    let timed_out = ContainerError::timed_out("container ls", "docker did not answer in time");
+
+    assert!(matches!(
+        super::helper_removal_failure(&timed_out),
+        DockerError::Unavailable { .. }
+    ));
+}
+
+#[test]
+fn a_helper_removal_that_docker_refused_stays_a_refusal() {
+    let refused = ContainerError::failed("container ls", None, "permission denied");
+
+    assert!(matches!(
+        super::helper_removal_failure(&refused),
+        DockerError::Refused { .. }
+    ));
 }

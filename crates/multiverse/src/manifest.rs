@@ -285,11 +285,10 @@ pub struct Process {
 /// allows, which is to read its checkout and the system's directories and
 /// to write its own state and temporary directories.
 ///
-/// phase's first-stage sandbox lets a process connect over loopback to the
-/// ports of every unit it depends on, so a sandboxed process can reach a
-/// unit only when its `depends_on` names it, and it can reach each unit
-/// that `depends_on` names. `connect` must name only units of
-/// `depends_on`, and the manifest fails otherwise. A sandboxed process
+/// phase's first-stage sandbox lets a process connect over loopback only to
+/// the ports of the units that `connect` names. `connect` must name only
+/// units of `depends_on`, and the manifest fails otherwise. A unit of
+/// `depends_on` that `connect` leaves out is unreachable. A sandboxed process
 /// cannot reach any external host until phase runs its allowlist proxy.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1025,14 +1024,13 @@ fn check_runnable(
                 .connect
                 .retain(|name| !joined.units.contains(name));
         }
-        process.needs.clear();
+        process
+            .needs
+            .retain(|service| manifest.services.contains_key(service));
     }
     for container in checked.containers.values_mut() {
         own(&mut container.depends_on);
     }
-    // mxv cannot run services yet, and `up` refuses a manifest that declares
-    // them, so the check of the rest of the manifest leaves them out.
-    checked.services.clear();
     let manifest = &checked;
     let span = |name: &str| {
         raw.processes
@@ -1050,7 +1048,7 @@ fn check_runnable(
         }
     }
     let ports: BTreeMap<String, u16> = manifest
-        .ports
+        .ledger_ports()
         .iter()
         .chain(&joined.ports)
         .zip(1_u16..)
@@ -1082,6 +1080,7 @@ fn check_runnable(
         workspace_dir: None,
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
+        provisioner: Some(crate::phase_plan::checking_provisioner()),
     };
     match crate::phase_plan::build(&inputs) {
         Ok(_) => Ok(()),
@@ -1958,7 +1957,7 @@ fn check_permissions(
             return Err(errors.invalid(
                 &unit.span(),
                 format!(
-                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because the sandbox opens only the ports of the units that a process depends on"
+                    "the permissions of `{process}` let it connect to `{name}`, which it does not depend on; add `{name}` to its `depends_on`, because a sandboxed process may connect only to units it depends on"
                 ),
             ));
         }

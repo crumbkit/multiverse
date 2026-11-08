@@ -38,9 +38,10 @@
 //!
 //! The network is loopback only until phase runs its allowlist proxy: the
 //! app may listen on the ports its permissions name and connect to the
-//! ports of the apps it depends on. The plan refuses a `connect` that
-//! names an external host. On macOS phase writes its own Seatbelt rules for
-//! those ports, because nono's port rules allow binding any port. Seatbelt
+//! ports that the apps its `connect` names serve. The plan refuses a
+//! `connect` that names an external host or an app the app does not depend
+//! on. On macOS phase writes its own Seatbelt rules for those ports,
+//! because nono's port rules allow binding any port. Seatbelt
 //! applies the last rule that matches, so the rules work only because nono
 //! writes them after its `(deny network*)`, which it does for every rule
 //! that starts with `(allow network`. The exact pin of nono in Cargo.toml,
@@ -59,16 +60,16 @@ use crate::name::{AppName, WorkspaceId};
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind, STATE};
 use crate::source::Source;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
 mod capabilities;
 mod launch;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(all(feature = "sandbox", target_os = "macos"), test))]
 mod seatbelt;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
 pub(crate) use capabilities::capabilities;
 pub(crate) use launch::launcher_command;
 pub use launch::{SANDBOX_REFUSED, launch};
@@ -128,21 +129,55 @@ impl fmt::Display for Sandboxing {
 /// `~/.config/git`, and git stops with "unable to access" when its global
 /// configuration exists but cannot be read, so without it a sandboxed git
 /// ran no command at all.
-pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str)] = &[("GIT_CONFIG_GLOBAL", "/dev/null")];
+///
+/// On macOS `SSL_CERT_FILE=/etc/ssl/cert.pem` names the bundle of the
+/// trusted roots that macOS ships. rustls-native-certs, which the AWS
+/// SDK's TLS uses, reads the roots from that file instead of asking the
+/// keychain's `com.apple.SecurityServer` service, which nono's profile
+/// denies, and OpenSSL reads it as its default bundle. Without it
+/// rustls-native-certs found no roots under the sandbox, and the AWS SDK
+/// panicked at startup. The file is a system file that the sandbox may
+/// already read, so the variable grants nothing. An app that sets
+/// `SSL_CERT_DIR` gets no `SSL_CERT_FILE`, because both readers trust the
+/// roots of the two together, and the app's directory would then no
+/// longer limit what it trusts.
+///
+/// Each entry is the variable, its value, and the variables any of which
+/// the app's environment sets to keep phase from setting it.
+#[cfg(target_os = "macos")]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] = &[
+    ("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"]),
+    (
+        "SSL_CERT_FILE",
+        "/etc/ssl/cert.pem",
+        &["SSL_CERT_FILE", "SSL_CERT_DIR"],
+    ),
+];
+
+/// The variables that every sandboxed process receives on Linux unless
+/// its own environment sets them, as the macOS list describes. Linux
+/// reads its trusted roots from `/etc`, which the sandbox may read, so it
+/// needs no `SSL_CERT_FILE`.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const SANDBOX_ENVIRONMENT: &[(&str, &str, &[&str])] =
+    &[("GIT_CONFIG_GLOBAL", "/dev/null", &["GIT_CONFIG_GLOBAL"])];
 
 /// Sets on `command` the environment of a process that runs under a
 /// sandbox whose temporary directory is `tmp`. `TMPDIR` names `tmp` and
 /// replaces any other value, because the sandbox lets the process write no
 /// other temporary directory. Each variable of [`SANDBOX_ENVIRONMENT`] is
-/// set only when `command` does not set it already, so a value from the
-/// app's own environment wins. Call it after the command's environment is
-/// set.
+/// set only when `command` sets none of the variables that its entry
+/// names, so a value from the app's own environment wins. Call it after
+/// the command's environment is set.
 pub(crate) fn sandboxed_environment(command: &mut Command, tmp: &Path) {
     command.env("TMPDIR", tmp);
-    for (name, value) in SANDBOX_ENVIRONMENT {
-        let set = command
-            .get_envs()
-            .any(|(key, given)| key == std::ffi::OsStr::new(name) && given.is_some());
+    for (name, value, unless) in SANDBOX_ENVIRONMENT {
+        let set = command.get_envs().any(|(key, given)| {
+            given.is_some()
+                && unless
+                    .iter()
+                    .any(|other| key == std::ffi::OsStr::new(other))
+        });
         if !set {
             command.env(name, value);
         }
@@ -175,13 +210,20 @@ pub(crate) enum Platform {
     /// reports a process under it as this value: [`Sandboxing::Seatbelt`]
     /// on macOS, and [`Sandboxing::Unsandboxed`] on Linux, because
     /// Landlock leaves Unix sockets open.
+    #[cfg_attr(
+        all(not(feature = "sandbox"), not(test)),
+        expect(
+            dead_code,
+            reason = "a build without the sandbox feature offers no sandbox"
+        )
+    )]
     Available(Sandboxing),
     /// This machine has no sandbox that phase supports, for this reason.
     Unavailable(String),
 }
 
 /// Returns the sandbox that this machine offers.
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 pub(crate) fn platform() -> Platform {
     if nono::Sandbox::is_supported() {
         Platform::Available(Sandboxing::seatbelt())
@@ -193,7 +235,7 @@ pub(crate) fn platform() -> Platform {
 /// Returns the sandbox that this machine offers. Landlock counts only when
 /// it can restrict TCP ports, which needs its ABI 4. phase applies it, and
 /// reports each process under it as unsandboxed ([`LANDLOCK_UNSANDBOXED`]).
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 pub(crate) fn platform() -> Platform {
     match nono::Sandbox::detect_abi() {
         Ok(abi) if abi.has_network() => Platform::Available(Sandboxing::landlock()),
@@ -206,10 +248,25 @@ pub(crate) fn platform() -> Platform {
 }
 
 /// Returns the sandbox that this machine offers, which is none.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "sandbox",
+    not(any(target_os = "macos", target_os = "linux"))
+))]
 pub(crate) fn platform() -> Platform {
     Platform::Unavailable(format!("phase has no sandbox for {}", std::env::consts::OS))
 }
+
+/// Returns the sandbox that this machine offers, which is none, because
+/// phase was built without its `sandbox` feature.
+#[cfg(not(feature = "sandbox"))]
+pub(crate) fn platform() -> Platform {
+    Platform::Unavailable(UNBUILT.to_owned())
+}
+
+/// Why an app with permissions runs unsandboxed when phase was built
+/// without its `sandbox` feature.
+#[cfg(not(feature = "sandbox"))]
+pub(crate) const UNBUILT: &str = "phase was built without its sandbox feature";
 
 /// Returns how the processes of the host `app` run on a machine that offers
 /// `platform`, or `None` for a container app, which runs in Docker.
@@ -536,7 +593,7 @@ pub(crate) struct Context<'a> {
     /// The paths that the host program protects, such as its own state and
     /// data directories.
     pub(crate) protected: &'a [PathBuf],
-    /// The loopback ports of the apps that the app depends on.
+    /// The loopback ports that the apps of the app's `connect` serve.
     pub(crate) connect: BTreeSet<u16>,
     /// The program that runs the launcher.
     pub(crate) launcher: Launcher,

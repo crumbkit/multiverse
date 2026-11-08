@@ -280,6 +280,37 @@ ready = {{ log = "^ready$" }}
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_sandboxed_node_reports_its_version_into_the_log_that_mxv_keeps() {
+    if !support::PATH
+        .split(':')
+        .any(|dir| std::path::Path::new(dir).join("node").is_file())
+    {
+        println!("node=absent");
+        return;
+    }
+    let sandboxed = Sandboxed::new(
+        r#"[processes.node]
+argv = ["/bin/sh", "-c", "node --version && echo ready; exec sleep 60"]
+ready = { log = "^ready$" }
+permissions = {}
+"#,
+    );
+
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    let logs = sandboxed.text(&["logs", "-w", "triage", "node"]);
+
+    assert_eq!(exit, 0, "{up}\n{logs}");
+    let version = logs.lines().next().unwrap_or_default();
+    assert!(
+        version
+            .strip_prefix('v')
+            .is_some_and(|rest| rest.starts_with(|first: char| first.is_ascii_digit())),
+        "{logs}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn up_restarts_a_running_process_under_the_sandbox_once_its_manifest_gains_permissions() {
     let without = "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\n";
     let sandboxed = Sandboxed::new(without);
@@ -312,4 +343,147 @@ fn up_restarts_a_running_process_under_the_sandbox_once_its_manifest_gains_permi
     let writer_again = Sandboxed::row(&third, "writer");
     assert_eq!(writer_again["pid"], writer["pid"], "{third}");
     assert_eq!(writer_again["notes"], serde_json::json!([]), "{third}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_in_a_sandboxed_process_runs_the_command_under_the_processs_sandbox() {
+    let sandboxed = Sandboxed::new(
+        "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\npermissions = { write = [\"out\"] }\n",
+    );
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+
+    let output = sandboxed
+        .command(&[
+            "exec",
+            "-w",
+            "triage",
+            "writer",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo granted > out/file && echo granted=written; \
+             if echo denied > denied 2>/dev/null; then echo denied=written; else echo denied=refused; fi",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "granted=written\ndenied=refused\n"
+    );
+    assert!(sandboxed.checkout().join("out/file").exists());
+    assert!(!sandboxed.checkout().join("denied").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn sigint_to_mxv_stops_a_sandboxed_command_that_ignores_sigint() {
+    use std::io::BufRead as _;
+    let sandboxed = Sandboxed::new(
+        "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\npermissions = { write = [\"out\"] }\n",
+    );
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+    let root = sandboxed.root();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mxv"));
+    command
+        .args([
+            "exec",
+            "-w",
+            "triage",
+            "writer",
+            "--",
+            "/bin/sh",
+            "-c",
+            "trap '' INT; echo started; sleep 60",
+        ])
+        .current_dir(&root)
+        .env_clear()
+        .env("PATH", support::PATH)
+        .envs(support::GIT_ENV.iter().copied())
+        .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("MXV_ROOT", root.join("workspaces"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut child = command.spawn().unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "started\n");
+
+    let sent = snapbox::cmd::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .env("PATH", support::PATH)
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            panic!("mxv exec did not stop the sandboxed command");
+        }
+        std::thread::yield_now();
+    };
+    assert_eq!(status.code(), Some(143), "{status:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_process_reaches_the_unit_its_connect_names_and_not_a_dependency_it_leaves_out() {
+    // `named` also receives `unnamed`'s port, as a process that calls
+    // another unit does. Each listener is ready once its port accepts.
+    let listener = |port: &str, receives: &str| {
+        format!(
+            "[processes.{port}]\nargv = [\"/bin/sh\", \"-c\", \"exec nc -lk 127.0.0.1 \\\"$PORT\\\"\"]\nports = {{ PORT = \"{port}\"{receives} }}\nlisten = \"{port}\"\nready = {{ port = \"{port}\" }}\n"
+        )
+    };
+    let sandboxed = Sandboxed::new(&format!(
+        "ports = [\"named\", \"unnamed\"]\n\n{}\n{}\n[processes.client]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nports = {{ NAMED = \"named\", UNNAMED = \"unnamed\" }}\nready = {{ log = \"^ready$\" }}\ndepends_on = [\"named\", \"unnamed\"]\npermissions = {{ connect = [\"named\"] }}\n",
+        listener("named", ", PEER_PORT = \"unnamed\""),
+        listener("unnamed", ""),
+    ));
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+
+    let output = sandboxed
+        .command(&[
+            "exec",
+            "-w",
+            "triage",
+            "client",
+            "--",
+            "/bin/sh",
+            "-c",
+            "check() { if nc -z -w 2 127.0.0.1 \"$2\" >/dev/null 2>&1; then echo \"$1=reached\"; else echo \"$1=denied\"; fi; }; \
+             check named \"$NAMED\"; check unnamed \"$UNNAMED\"",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "named=reached\nunnamed=denied\n"
+    );
 }

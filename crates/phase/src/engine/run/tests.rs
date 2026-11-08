@@ -15,7 +15,7 @@ mod oneshot;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::containers::{
-    ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
+    Before, ContainerObjects, ContainerRewrite, ContainerRunner, ContainerStart, ContainerStop,
     ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
@@ -439,7 +439,7 @@ impl ContainerRunner for FakeContainers {
     fn start(
         &self,
         start: &ContainerStart<'_>,
-        launching: &mut dyn FnMut(&ProcessName) -> Result<(), PhaseError>,
+        before: &mut dyn FnMut(Before<'_>) -> Result<(), PhaseError>,
     ) -> ContainersStarted {
         assert_eq!(start.workspace, &workspace());
         assert!(start.deadline > now());
@@ -458,7 +458,7 @@ impl ContainerRunner for FakeContainers {
             }
         }
         for process in start.processes {
-            if let Err(error) = launching(process) {
+            if let Err(error) = before(Before::Container(process)) {
                 return ContainersStarted {
                     failure: Some(error),
                     ..ContainersStarted::default()

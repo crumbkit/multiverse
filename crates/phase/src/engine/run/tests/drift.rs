@@ -20,6 +20,15 @@ fn with_permissions(mut app: AppPlan) -> AppPlan {
     app
 }
 
+/// Returns `app` with a sandbox that may connect to the ports of `target`.
+fn connecting_to(mut app: AppPlan, target: &str) -> AppPlan {
+    app.permissions = Some(Permissions {
+        connect: [target.to_owned()].into(),
+        ..Permissions::default()
+    });
+    app
+}
+
 #[test]
 fn up_restarts_a_running_process_whose_app_gained_permissions_and_its_pid_changes() {
     let world = World::outside_temp();
@@ -226,15 +235,13 @@ fn a_changed_process_that_survives_its_stop_is_left_and_nothing_starts_in_its_pl
 }
 
 #[test]
-fn up_restarts_a_sandboxed_dependent_whose_dependency_moved_to_another_port() {
-    use crate::sandbox::{Platform, platform};
-
+fn up_restarts_a_sandboxed_dependent_whose_connect_names_a_dependency_that_moved_to_another_port() {
     // Without a sandbox, no profile names the dependency's port.
-    if !matches!(platform(), Platform::Available(_)) {
+    if !sandbox_available() {
         return;
     }
     let world = World::outside_temp();
-    let api = || with_permissions(host_app("api", None, &["db"]));
+    let api = || connecting_to(host_app("api", None, &["db"]), "db");
     world
         .up(
             &plan(vec![api(), host_app("db", Some(5432), &[])]),
@@ -256,6 +263,31 @@ fn up_restarts_a_sandboxed_dependent_whose_dependency_moved_to_another_port() {
     );
     assert_ne!(pid(&world, "api/server"), before);
     assert_eq!(outcome(&again, "api"), &AppOutcome::AlreadyRunning);
+}
+
+#[test]
+fn up_leaves_a_sandboxed_dependent_running_when_a_dependency_its_connect_leaves_out_moved_to_another_port()
+ {
+    if !sandbox_available() {
+        return;
+    }
+    let world = World::outside_temp();
+    let api = || with_permissions(host_app("api", None, &["db"]));
+    world
+        .up(
+            &plan(vec![api(), host_app("db", Some(5432), &[])]),
+            &Selection::All,
+            &Env::default(),
+        )
+        .unwrap();
+    let before = pid(&world, "api/server");
+
+    let moved = plan(vec![api(), host_app("db", Some(5433), &[])]);
+    let report = world.up(&moved, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(pid(&world, "api/server"), before);
 }
 
 #[test]

@@ -30,7 +30,8 @@ use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
 
@@ -60,7 +61,7 @@ mod phased;
 #[cfg(test)]
 mod tests;
 
-pub use phased::{LogOutput, Volumes};
+pub use phased::{Exec, ExecEnd, ExecTarget, LogOutput, Volumes};
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
@@ -78,9 +79,6 @@ pub const START_GRACE: Duration = Duration::from_millis(500);
 /// reads the workspace's state moves it to `<process>.log.1` and empties
 /// it.
 pub const MOST_LOG_BYTES: u64 = 32 * 1024 * 1024;
-
-/// The number of log lines that a failed start reports.
-pub const TAIL_LINES: usize = 20;
 
 pub use phase::{MOST_TAIL_BYTES, tail};
 
@@ -186,6 +184,18 @@ pub enum Kind {
     Container,
 }
 
+/// The host processes and containers of a workspace that may run, as
+/// [`Runs::footprint`] finds them, whose memory a reclaim measures.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Footprint {
+    /// The process id of each host process, which is also its process
+    /// group's id.
+    pub pids: Vec<u32>,
+    /// The docker id of each container.
+    pub containers: Vec<String>,
+}
+
 /// One process or container of a workspace and its state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -252,6 +262,13 @@ pub enum ProcessNote {
         /// as `restarted api/main because its part of the plan changed`.
         message: String,
     },
+    /// `up` found a container running and could not check the owner of a
+    /// volume it mounts, so it left the volume as it was. The next `up`
+    /// checks again.
+    VolumeOwnerUnchecked {
+        /// phase's sentence, which names the app and why.
+        message: String,
+    },
 }
 
 impl ProcessNote {
@@ -261,7 +278,8 @@ impl ProcessNote {
         match self {
             Self::SecretsRewritten { message }
             | Self::SecretsKept { message }
-            | Self::PlanChanged { message } => message,
+            | Self::PlanChanged { message }
+            | Self::VolumeOwnerUnchecked { message } => message,
         }
     }
 
@@ -269,7 +287,10 @@ impl ProcessNote {
     /// did not happen as asked.
     #[must_use]
     pub const fn is_warning(&self) -> bool {
-        matches!(self, Self::SecretsKept { .. })
+        matches!(
+            self,
+            Self::SecretsKept { .. } | Self::VolumeOwnerUnchecked { .. }
+        )
     }
 }
 
@@ -327,8 +348,6 @@ pub enum UpOutcome {
         /// Its log file, or `None` for a container that phase runs, whose
         /// log comes from `docker logs`.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// The readiness port of a process accepted a connection, and no member
     /// of the process's group listens on it, so another program answered
@@ -346,8 +365,6 @@ pub enum UpOutcome {
         /// The process's log file, or `None` for a container that phase
         /// runs.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// The listen port answered, and the process that holds it descends
     /// from the process's shell but left the process group, as a daemon
@@ -365,8 +382,6 @@ pub enum UpOutcome {
         /// The process's log file, or `None` for a container that phase
         /// runs.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// A process ran past its readiness timeout before its readiness check
     /// passed, so `up` stopped it.
@@ -380,8 +395,6 @@ pub enum UpOutcome {
         /// Its log file, or `None` for a container that phase runs, whose
         /// log comes from `docker logs`.
         log: Option<PathBuf>,
-        /// The last lines of its log.
-        tail: Vec<String>,
     },
     /// A process or container that mxv started before phase ran its apps
     /// may still run, so `up` started nothing. `mxv down` stops it.
@@ -477,10 +490,34 @@ enum Readiness {
 /// each workspace's processes.
 const RUNS_DIR: &str = "runs";
 
+/// The file in a workspace's run directory whose modification time is when
+/// an mxv command last named the workspace. Its name starts with `.`, so it
+/// is never read as a run record.
+const TOUCHED_FILE: &str = ".touched";
+
 /// The directory under mxv's state directory that phase keeps its own state
 /// in. Phase keeps each workspace's run record at
 /// `<PHASE_DIR>/runs/<workspace-id>.json`, apart from mxv's records.
 const PHASE_DIR: &str = "phase";
+
+/// The keeper that [`Runs::keep_touched`] starts, which touches a
+/// workspace until it is dropped.
+#[derive(Debug)]
+pub struct Toucher {
+    /// Dropping it tells the thread to stop.
+    stop: Option<mpsc::Sender<()>>,
+    /// The thread that touches the workspace.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Toucher {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 /// The run files of every workspace's processes, under one directory.
 #[derive(Clone, Debug)]
@@ -499,6 +536,9 @@ pub struct Runs {
     /// The environment that mxv's `main` read, which phase's keepers and
     /// host processes receive part of.
     caller: CallerEnvironment,
+    /// The command that provisions a workspace's services, or `None`
+    /// until [`Runs::with_provisioner`] names it.
+    provisioner: Option<Vec<String>>,
 }
 
 impl Runs {
@@ -516,7 +556,22 @@ impl Runs {
             port_range: DEFAULT_PORT_RANGE,
             lock_wait: LOCK_WAIT,
             caller: CallerEnvironment::default(),
+            provisioner: None,
         }
+    }
+
+    /// Returns these run files with `program`, followed by the words of
+    /// `leading`, as the command of the app `mxv-provision`, which creates
+    /// the resources of a workspace's services, such as mxv itself and
+    /// `phase provision`. The command receives the resources as one more
+    /// argument. `up` cannot start a manifest with services until the
+    /// command is named.
+    #[must_use]
+    pub fn with_provisioner(mut self, program: &Path, leading: &[&str]) -> Self {
+        let mut command = vec![program.to_string_lossy().into_owned()];
+        command.extend(leading.iter().map(|word| (*word).to_owned()));
+        self.provisioner = Some(command);
+        self
     }
 
     /// Returns these run files with `program`, followed by the words of
@@ -586,6 +641,53 @@ impl Runs {
     /// [`Error::Unwritable`] when the lock file cannot be opened.
     pub fn lock(&self, name: &WorkspaceName) -> Result<Lock, Error> {
         store::lock(&self.run_dir(name).lock(), self.lock_wait)
+    }
+
+    /// Records that an mxv command named the workspace `name` now, as the
+    /// modification time of the file `<runs>/<name>/.touched`.
+    /// [`Runs::touched`] reads it back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when the file cannot be written.
+    pub fn touch(&self, name: &WorkspaceName) -> Result<(), Error> {
+        store::touch_file(&self.workspace_dir(name).join(TOUCHED_FILE))
+    }
+
+    /// Touches the workspace `name` now and again every `every` until the
+    /// returned [`Toucher`] is dropped, for a command that runs as long as
+    /// a person uses it, such as `mxv exec` or `mxv logs --follow`. A touch
+    /// that cannot be written is skipped, as for [`Runs::touch`].
+    #[must_use]
+    pub fn keep_touched(&self, name: &WorkspaceName, every: Duration) -> Toucher {
+        let _ = self.touch(name);
+        let (stop, stopped) = mpsc::channel::<()>();
+        let runs = self.clone();
+        let name = name.clone();
+        // A keeper that cannot start leaves the workspace touched once, at
+        // the start of the command.
+        let thread = std::thread::Builder::new()
+            .name("mxv-touch".to_owned())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                    let _ = runs.touch(&name);
+                }
+            })
+            .ok();
+        Toucher {
+            stop: Some(stop),
+            thread,
+        }
+    }
+
+    /// Returns when an mxv command last named the workspace `name`, as
+    /// [`Runs::touch`] recorded it, or `None` when none has since the
+    /// workspace's run files were deleted.
+    #[must_use]
+    pub fn touched(&self, name: &WorkspaceName) -> Option<SystemTime> {
+        fs::metadata(self.workspace_dir(name).join(TOUCHED_FILE))
+            .and_then(|metadata| metadata.modified())
+            .ok()
     }
 
     /// Returns these run files with `range` as the host ports that
@@ -1100,7 +1202,6 @@ impl Runs {
                     process: process.to_owned(),
                     code,
                     signal,
-                    tail: tail(&log, TAIL_LINES),
                     log: Some(log),
                 }))
             }
@@ -1125,7 +1226,6 @@ impl Runs {
                     process: process.to_owned(),
                     waited,
                     timeout: ready.timeout,
-                    tail: tail(&log, TAIL_LINES),
                     log: Some(log),
                 }))
             }
@@ -1179,7 +1279,6 @@ impl Runs {
         }
         launched.kill();
         self.drop_run_files(name, process);
-        let tail = tail(&log, TAIL_LINES);
         Ok(Some(match holder {
             Holder::Descendant(pid) => UpOutcome::DetachedListener {
                 process: process.to_owned(),
@@ -1187,7 +1286,6 @@ impl Runs {
                 number,
                 pid,
                 log: Some(log),
-                tail,
             },
             Holder::Group | Holder::Other(_) => UpOutcome::ForeignListener {
                 process: process.to_owned(),
@@ -1198,7 +1296,6 @@ impl Runs {
                     Holder::Group | Holder::Descendant(_) => None,
                 },
                 log: Some(log),
-                tail,
             },
         }))
     }
@@ -1350,6 +1447,9 @@ impl Runs {
         avoid: &BTreeSet<u16>,
         held: bool,
     ) -> Result<(), Error> {
+        // The ledger holds the manifest's ports and the port of each
+        // backend of its services.
+        let ledger = manifest.ledger_ports();
         // A port that the manifest no longer names stays while a process
         // that received it still runs, so the old listener keeps its port
         // until `down`.
@@ -1367,13 +1467,9 @@ impl Runs {
         let before = workspace.ports.len();
         workspace
             .ports
-            .retain(|port, number| manifest.ports.contains(port) || live.contains(number));
+            .retain(|port, number| ledger.contains(port) || live.contains(number));
         let dropped = workspace.ports.len() != before;
-        if manifest
-            .ports
-            .iter()
-            .all(|port| workspace.ports.contains_key(port))
-        {
+        if ledger.iter().all(|port| workspace.ports.contains_key(port)) {
             return if dropped {
                 store.update(workspace)
             } else {
@@ -1390,7 +1486,7 @@ impl Runs {
             .collect();
         reserved.extend(workspace.ports.values().copied());
         reserved.extend(avoid);
-        for port in &manifest.ports {
+        for port in &ledger {
             if !workspace.ports.contains_key(port) {
                 let number = ports::allocate(&self.port_range, &reserved)?;
                 reserved.insert(number);
@@ -1418,11 +1514,12 @@ impl Runs {
         manifest: &Manifest,
         names: &[String],
     ) -> Result<Result<(), String>, Error> {
-        if let Some(unknown) = names.iter().find(|name| !manifest.ports.contains(name)) {
+        let ledger = manifest.ledger_ports();
+        if let Some(unknown) = names.iter().find(|name| !ledger.contains(name)) {
             return Ok(Err(unknown.clone()));
         }
         let mut old = BTreeSet::new();
-        for port in &manifest.ports {
+        for port in &ledger {
             if (names.is_empty() || names.contains(port))
                 && let Some(number) = workspace.ports.remove(port)
             {
@@ -1666,7 +1763,6 @@ impl Runs {
             process: container.to_owned(),
             code,
             signal: None,
-            tail: tail(&log, TAIL_LINES),
             log: Some(log),
         }
     }
@@ -1724,7 +1820,6 @@ impl Runs {
                         number: port.unwrap_or_default(),
                     },
                     timeout: ready.timeout,
-                    tail: tail(&log, TAIL_LINES),
                     log: Some(log),
                 }));
             }

@@ -418,6 +418,38 @@ fn a_process_that_depends_on_a_container_starts_after_it_and_receives_its_port()
 }
 
 #[test]
+fn exec_runs_a_command_inside_a_running_container_and_exits_with_its_code() {
+    if !docker_runs("exec_runs_a_command_inside_a_running_container") {
+        return;
+    }
+    let setup = Setup::new("mxvtest-exec", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-exec"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let output = setup
+        .command(
+            PATH,
+            &[
+                "exec",
+                "-w",
+                "mxvtest-exec",
+                "web",
+                "--",
+                "sh",
+                "-c",
+                "test -d /srv && echo inside; exit 3",
+            ],
+        )
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "inside\n");
+    let (exit, document) = setup.json(&["down", "-w", "mxvtest-exec"]);
+    assert_eq!(exit, 0, "{document}");
+}
+
+#[test]
 fn a_container_that_exits_before_it_is_ready_fails_up_with_its_exit_code() {
     if !docker_runs("a_container_that_exits_before_it_is_ready") {
         return;

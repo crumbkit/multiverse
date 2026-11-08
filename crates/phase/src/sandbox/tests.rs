@@ -206,6 +206,37 @@ fn sh(script: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_launch_digest_ignores_the_order_of_a_specs_lists() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let built = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+    let mut reordered = built.clone();
+    reordered.path_dirs.reverse();
+    reordered.protected.reverse();
+    assert!(built.protected.len() > 1, "{built:?}");
+
+    assert_eq!(built.launch_digest(), reordered.launch_digest());
+}
+
+#[test]
+fn a_launch_digest_changes_with_a_metadata_path_and_with_a_connect_port() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let built = fixture
+        .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+        .unwrap();
+    let mut metadata = built.clone();
+    metadata.metadata.insert(PathBuf::from("/private/etc/link"));
+    let mut connect = built.clone();
+    connect.connect.insert(5432);
+
+    assert_ne!(built.launch_digest(), metadata.launch_digest());
+    assert_ne!(built.launch_digest(), connect.launch_digest());
+}
+
+#[test]
 fn an_app_without_permissions_runs_unsandboxed_and_says_why() {
     let fixture = Fixture::new();
     let mut api = fixture.app(sh("true"), 41_000);
@@ -215,6 +246,20 @@ fn an_app_without_permissions_runs_unsandboxed_and_says_why() {
         sandboxing(&api, &Platform::Available(Sandboxing::seatbelt())),
         Some(Sandboxing::Unsandboxed {
             reason: UNDECLARED.to_owned()
+        })
+    );
+}
+
+#[cfg(not(feature = "sandbox"))]
+#[test]
+fn a_build_without_the_sandbox_feature_runs_an_app_with_permissions_unsandboxed_and_says_why() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    assert_eq!(
+        sandboxing(&api, &super::platform()),
+        Some(Sandboxing::Unsandboxed {
+            reason: super::UNBUILT.to_owned()
         })
     );
 }
@@ -520,6 +565,26 @@ fn a_launcher_that_cannot_read_its_sandbox_refuses_to_start_the_app() {
     let code = launch(&[
         "--sandboxed".into(),
         "{}".into(),
+        "--".into(),
+        "/bin/true".into(),
+    ]);
+
+    assert_eq!(
+        code,
+        Some(std::process::ExitCode::from(super::SANDBOX_REFUSED))
+    );
+}
+
+#[cfg(not(feature = "sandbox"))]
+#[test]
+fn a_launcher_built_without_the_sandbox_feature_refuses_a_valid_sandbox() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+    let spec = fixture.spec_of(&api, "/usr/bin", BTreeSet::new()).unwrap();
+
+    let code = launch(&[
+        "--sandboxed".into(),
+        serde_json::to_string(&spec).unwrap().into(),
         "--".into(),
         "/bin/true".into(),
     ]);
@@ -1266,13 +1331,43 @@ fn a_sandboxed_command_gets_the_sandbox_temporary_directory_and_reads_no_global_
 
     super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
 
+    let mut expected = vec![("GIT_CONFIG_GLOBAL".to_owned(), Some("/dev/null".to_owned()))];
+    if cfg!(target_os = "macos") {
+        expected.push((
+            "SSL_CERT_FILE".to_owned(),
+            Some("/etc/ssl/cert.pem".to_owned()),
+        ));
+    }
+    expected.push(("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())));
+    assert_eq!(environment(&command), expected);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_command_on_macos_gets_the_system_root_bundle_unless_its_environment_names_its_own_roots()
+ {
+    let roots_of = |given: Option<(&str, &str)>| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test reads the environment it sets and never starts the command"
+        )]
+        let mut command = std::process::Command::new("true");
+        if let Some((name, value)) = given {
+            command.env(name, value);
+        }
+        super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
+        environment(&command)
+            .into_iter()
+            .find(|(name, _)| name == "SSL_CERT_FILE")
+            .and_then(|(_, value)| value)
+    };
+
+    assert_eq!(roots_of(None).as_deref(), Some("/etc/ssl/cert.pem"));
     assert_eq!(
-        environment(&command),
-        vec![
-            ("GIT_CONFIG_GLOBAL".to_owned(), Some("/dev/null".to_owned())),
-            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
-        ]
+        roots_of(Some(("SSL_CERT_FILE", "/checkout/roots.pem"))).as_deref(),
+        Some("/checkout/roots.pem")
     );
+    assert_eq!(roots_of(Some(("SSL_CERT_DIR", "/checkout/roots"))), None);
 }
 
 #[test]
@@ -1286,16 +1381,11 @@ fn a_sandboxed_command_keeps_the_git_configuration_that_its_environment_names() 
 
     super::sandboxed_environment(&mut command, std::path::Path::new("/sandbox/tmp"));
 
-    assert_eq!(
-        environment(&command),
-        vec![
-            (
-                "GIT_CONFIG_GLOBAL".to_owned(),
-                Some("/plan/gitconfig".to_owned())
-            ),
-            ("TMPDIR".to_owned(), Some("/sandbox/tmp".to_owned())),
-        ]
-    );
+    let git = environment(&command)
+        .into_iter()
+        .find(|(name, _)| name == "GIT_CONFIG_GLOBAL")
+        .and_then(|(_, value)| value);
+    assert_eq!(git.as_deref(), Some("/plan/gitconfig"));
 }
 
 /// The tests of phase's Seatbelt rules, which are plain text, so they run
@@ -1448,7 +1538,7 @@ mod rules {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 mod seatbelt {
     use std::collections::BTreeSet;
     use std::io::Read as _;
@@ -1769,7 +1859,27 @@ mod seatbelt {
     /// and `PATH`, with the checkout's `target` writable, and returns its
     /// output and exit status.
     fn with_real_toolchains(fixture: &Fixture, script: &str) -> (String, i32) {
-        let mut api = fixture.app(sh(script), 41_000);
+        let mut command = real_toolchains_command(fixture, &sh(script));
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let output = command.output().unwrap();
+        (
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            output.status.code().unwrap_or(-1),
+        )
+    }
+
+    /// Returns the launcher command that runs `run` under the sandbox of
+    /// an app with this machine's real `HOME` and `PATH`, with the
+    /// checkout's `target` writable, as [`with_real_toolchains`] does.
+    fn real_toolchains_command(fixture: &Fixture, run: &[String]) -> Command {
+        let mut api = fixture.app(run.to_vec(), 41_000);
         api.permissions.as_mut().unwrap().write = ["target".to_owned()].into();
         #[expect(
             clippy::disallowed_methods,
@@ -1799,7 +1909,7 @@ mod seatbelt {
             &context,
         )
         .unwrap();
-        let mut command = launcher_command(&spec, &sh(script)).unwrap();
+        let mut command = launcher_command(&spec, run).unwrap();
         command
             .env_clear()
             .env("PATH", &path)
@@ -1808,19 +1918,106 @@ mod seatbelt {
             .current_dir(fixture.checkout())
             .stdin(Stdio::null());
         crate::sandbox::sandboxed_environment(&mut command, &spec.tmp);
+        command
+    }
+
+    /// The variable that makes
+    /// [`the_native_roots_probe_prints_the_roots_it_loads_only_when_a_test_starts_it`]
+    /// load the trusted
+    /// roots, which it does only when a test starts it under the sandbox.
+    const NATIVE_ROOTS_PROBE: &str = "PHASE_TEST_NATIVE_ROOTS_PROBE";
+
+    /// Loads the system's trusted roots as rustls-native-certs does for
+    /// the AWS SDK, and prints how many it found, when the test
+    /// [`a_sandboxed_process_loads_the_systems_trusted_roots_with_rustls_native_certs`]
+    /// starts this test binary under the sandbox. Otherwise it does
+    /// nothing.
+    #[test]
+    fn the_native_roots_probe_prints_the_roots_it_loads_only_when_a_test_starts_it() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the probe runs only when the test that starts it sets the variable"
+        )]
+        if std::env::var_os(NATIVE_ROOTS_PROBE).is_none() {
+            return;
+        }
+        let roots = rustls_native_certs::load_native_certs();
+        println!("roots={} errors={}", roots.certs.len(), roots.errors.len());
+    }
+
+    #[test]
+    fn a_sandboxed_process_loads_the_systems_trusted_roots_with_rustls_native_certs() {
+        let fixture = Fixture::new();
+        let probe = vec![
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            "--exact".to_owned(),
+            "--nocapture".to_owned(),
+            "sandbox::tests::seatbelt::the_native_roots_probe_prints_the_roots_it_loads_only_when_a_test_starts_it".to_owned(),
+        ];
+        let mut command = real_toolchains_command(&fixture, &probe);
+        command.env(NATIVE_ROOTS_PROBE, "1");
+
         #[expect(
             clippy::disallowed_methods,
             reason = "the test starts this test binary as the launcher"
         )]
         let output = command.output().unwrap();
-        (
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            output.status.code().unwrap_or(-1),
-        )
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let found = stdout
+            .lines()
+            .find_map(|line| line.split_once("roots=").map(|(_, found)| found))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the probe printed no roots: {stdout}{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        let (count, errors) = found.split_once(" errors=").unwrap();
+        assert!(count.parse::<usize>().unwrap() > 0, "{stdout}");
+        assert_eq!(errors, "0", "{stdout}");
+    }
+
+    #[test]
+    fn node_reports_its_version_under_the_sandbox_when_its_output_is_a_log_the_app_may_not_read() {
+        if !on_path("node") {
+            println!("node=absent");
+            return;
+        }
+        let fixture = Fixture::new();
+        // The keeper writes an app's output to a log in phase's state
+        // directory, which the sandbox denies, and node stops when it
+        // cannot stat its own standard output.
+        let logs = fixture.state().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let log = logs.join("api.server.log");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test opens the log that the sandboxed node writes, as a keeper does"
+        )]
+        let file = std::fs::File::create(&log).unwrap();
+        let mut command = real_toolchains_command(&fixture, &sh("node --version"));
+        command.stdout(file.try_clone().unwrap()).stderr(file);
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let status = command.status().unwrap();
+
+        let written = std::fs::read_to_string(&log).unwrap();
+        assert!(status.success(), "{status}: {written}");
+        // The launcher, which is this test binary, writes its own lines to
+        // the log before it becomes node.
+        assert!(
+            written.lines().any(|line| line
+                .strip_prefix('v')
+                .is_some_and(|version| version.starts_with(|first: char| first.is_ascii_digit()))),
+            "{written}"
+        );
     }
 
     #[test]

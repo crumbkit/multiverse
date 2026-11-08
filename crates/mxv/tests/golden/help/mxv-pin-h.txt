@@ -1,0 +1,13 @@
+Keep mxv reclaim from stopping a workspace
+
+Usage: mxv pin [OPTIONS]
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv pin -w reading-list
+
+Effects: additive, idempotent, closed-world.
+Global flags: --json, --no-input. `mxv pin --help` describes them.

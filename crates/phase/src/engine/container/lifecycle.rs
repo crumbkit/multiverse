@@ -42,7 +42,7 @@ use crate::engine::container::objects::{
     delete_volume, follow_args, inspect_anonymous, inspect_id, inspect_named, inspect_volume,
     reinspect_volume, remove, stop,
 };
-use crate::engine::container::{ContainerError, RunDir};
+use crate::engine::container::{ContainerError, RunDir, volume_owner};
 use crate::name::{AppName, WorkspaceId, WorkspaceName};
 use crate::phase::Phase;
 use crate::random::RANDOM_DEVICE;
@@ -335,6 +335,11 @@ pub fn delete_app_volumes(volumes: WorkspaceVolumes) -> Result<(), ContainerErro
     {
         return Err(ContainerError::foreign("volume", anonymous.name().as_str()));
     }
+    // A volume-owner helper that an interrupted `up` left behind keeps
+    // its volume in use, and Docker refuses to delete a volume in use.
+    if let Some(workspace) = scope.workspace_id() {
+        volume_owner::remove_helpers(workspace, None)?;
+    }
     for volume in &volumes.volumes {
         if let Some(volume) = reinspect_volume(scope, volume)? {
             delete_volume(volume)?;
@@ -357,6 +362,66 @@ pub fn volume_exists(name: &str) -> Result<bool, ContainerError> {
         return Ok(false);
     }
     finished.checked("volume inspect", None).map(|_| true)
+}
+
+/// Returns the resident memory of each running container of `ids`, by
+/// id, as `docker stats --no-stream` measures it. A container that is not
+/// running, or whose memory docker does not report, is left out. It runs
+/// no docker command when `ids` is empty.
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`ContainerError::Failed`].
+pub fn container_memory(ids: &[String]) -> Result<BTreeMap<String, u64>, ContainerError> {
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut args = vec![
+        "stats",
+        "--no-stream",
+        "--no-trunc",
+        "--format",
+        "{{.ID}}\t{{.MemUsage}}",
+    ];
+    args.extend(ids.iter().map(String::as_str));
+    let listed = quick(args, "stats")?.checked("stats", None)?;
+    Ok(listed.lines().filter_map(stats_line).collect())
+}
+
+/// Returns the container id and the resident bytes of one line of
+/// `docker stats --format '{{.ID}}\t{{.MemUsage}}'`, such as
+/// `0123abcd\t12.5MiB / 7.6GiB`, or `None` when docker reports no usage.
+pub(crate) fn stats_line(line: &str) -> Option<(String, u64)> {
+    let (id, usage) = line.split_once('\t')?;
+    let used = usage.split('/').next()?.trim();
+    let split = used.find(|char: char| !(char.is_ascii_digit() || char == '.'))?;
+    let (number, unit) = used.split_at(split);
+    let scale: u64 = match unit.trim() {
+        "B" => 1,
+        "KiB" => 1 << 10,
+        "MiB" => 1 << 20,
+        "GiB" => 1 << 30,
+        "TiB" => 1 << 40,
+        "kB" | "KB" => 1_000,
+        "MB" => 1_000_000,
+        "GB" => 1_000_000_000,
+        "TB" => 1_000_000_000_000,
+        _ => return None,
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let whole: u64 = whole.parse().ok()?;
+    // Docker prints at most a few decimal places, so the fraction is read
+    // as a whole number of its own and scaled, without floating point.
+    let digits = u32::try_from(fraction.len()).ok()?;
+    let fraction: u64 = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse().ok()?
+    };
+    let bytes = whole
+        .checked_mul(scale)?
+        .checked_add(fraction.checked_mul(scale)? / 10_u64.checked_pow(digits)?)?;
+    Some((id.trim().to_owned(), bytes))
 }
 
 /// The containers of one workspace and their run records, kept through the

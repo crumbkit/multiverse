@@ -13,6 +13,9 @@ mxv/logs/v1               output  stream    The last lines of a process's log, t
 mxv/ports-reset/v1        output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
 mxv/remove/v1             output  document  What the run removed, deleted and kept, or would on a dry run.
 mxv/clean/v1              output  document  Each workspace that the run considered, with the disposable directories it deleted, or would delete on a dry run, and the bytes they took, or why it kept them, and a failure for each workspace whose directories could not be deleted.
+mxv/reclaim/v1            output  document  Each workspace that the run considered, with what it stopped or cleaned, or would on a dry run, the bytes that frees, and why the workspace counts as idle or why the run kept it, and a failure for each workspace that could not be measured, stopped or cleaned.
+mxv/pin/v1                output  document  The workspace and whether it is pinned, which it is after the run.
+mxv/unpin/v1              output  document  The workspace and whether it is pinned, which it is not after the run.
 mxv/commands-list/v1      output  document  One branch of the tool's commands with their arguments, examples and columns.
 mxv/schemas-list/v1       output  document  The JSON documents that the tool prints, with a description of each.
 mxv/schemas-show/v1       output  document  The JSON Schema of each document id given.

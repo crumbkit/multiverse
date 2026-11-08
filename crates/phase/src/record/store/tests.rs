@@ -11,7 +11,7 @@ use crate::plan::restart::{Restart, RestartLimits, Stop, StopSignal};
 use crate::record::ContainerId;
 use crate::record::run::{
     DependencyRun, Ended, EntryState, Exit, HostProcess, Launching, ObjectKey, OneshotLaunch,
-    PlanHash, Ready, RunRecord, Started,
+    PlanHash, Ready, RunRecord, Started, VolumeLifetime, VolumeOwner,
 };
 use crate::record::testing::{app, empty_record, process, workspace, write_file};
 
@@ -142,7 +142,9 @@ fn a_change_to_an_object_the_record_does_not_name_is_refused() {
     let error = journal.started(&other, Started::Host(host())).unwrap_err();
 
     assert_eq!(error.code(), "phase::record::unplanned");
-    let wrong_kind = journal.started(&server(), Started::Volume).unwrap_err();
+    let wrong_kind = journal
+        .started(&server(), Started::Volume(None))
+        .unwrap_err();
     assert_eq!(wrong_kind.code(), "phase::record::unplanned");
 }
 
@@ -1075,4 +1077,114 @@ fn a_v5_record_reads_as_one_whose_processes_record_no_part() {
     assert_eq!(entry.part_hash, None);
     assert_eq!(entry.plan_hash, Some(PlanHash::new([1; 32])));
     assert_eq!(entry.host, Some(host()));
+}
+
+/// Returns the planned record with the workspace volume `data`.
+fn with_volume() -> RunRecord {
+    planned().volume(
+        "phase-0b9f3c8e.data".parse().unwrap(),
+        VolumeLifetime::Workspace,
+    )
+}
+
+fn data() -> ObjectKey {
+    ObjectKey::Volume("phase-0b9f3c8e.data".parse().unwrap())
+}
+
+#[test]
+fn a_volume_records_the_owner_that_phase_set_in_a_v6_record() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(with_volume()).unwrap();
+    let owner: VolumeOwner = "1000:1000".parse().unwrap();
+
+    journal
+        .started(&data(), Started::Volume(Some(owner.clone())))
+        .unwrap();
+
+    assert_eq!(on_disk(&store).volumes[0].owner, Some(owner));
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path(&workspace())).unwrap()).unwrap();
+    assert_eq!(json["schema"], "phase/run/v6");
+    assert_eq!(json["volumes"][0]["owner"], "1000:1000");
+}
+
+#[test]
+fn a_volume_whose_owner_phase_did_not_set_writes_no_owner_and_forgets_an_earlier_one() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(with_volume()).unwrap();
+    journal
+        .started(&data(), Started::Volume(Some("1000".parse().unwrap())))
+        .unwrap();
+
+    journal.started(&data(), Started::Volume(None)).unwrap();
+
+    assert_eq!(on_disk(&store).volumes[0].owner, None);
+    let text = fs::read_to_string(store.path(&workspace())).unwrap();
+    assert!(!text.contains("owner"), "{text}");
+}
+
+#[test]
+fn a_volume_entry_without_an_owner_reads_as_one_whose_owner_phase_never_set() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(with_volume()).unwrap();
+    journal.started(&data(), Started::Volume(None)).unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    write_file(&path, &text.replace("phase/run/v6", "phase/run/v4"));
+
+    let record = on_disk(&store);
+
+    assert_eq!(record.volumes[0].owner, None);
+    assert_eq!(record.volumes[0].state, EntryState::Running);
+}
+
+#[test]
+fn a_v5_record_that_holds_a_volume_owner_reads_with_the_owner_and_writes_it_back_as_v6() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(with_volume()).unwrap();
+    journal
+        .started(&data(), Started::Volume(Some("999:999".parse().unwrap())))
+        .unwrap();
+    drop(journal);
+    let path = store.path(&workspace());
+    let text = fs::read_to_string(&path).unwrap();
+    write_file(&path, &text.replace("phase/run/v6", "phase/run/v5"));
+
+    let owner: VolumeOwner = "999:999".parse().unwrap();
+    assert_eq!(on_disk(&store).volumes[0].owner, Some(owner.clone()));
+
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(with_volume()).unwrap();
+    drop(journal);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(json["schema"], "phase/run/v6");
+    assert_eq!(json["volumes"][0]["owner"], "999:999");
+    assert_eq!(on_disk(&store).volumes[0].owner, Some(owner));
+}
+
+#[test]
+fn a_planned_volume_keeps_the_owner_that_an_earlier_run_recorded() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let mut journal = Journal::open(&store, &workspace(), SHORT).unwrap();
+    journal.plan(with_volume()).unwrap();
+    let owner: VolumeOwner = "999:999".parse().unwrap();
+    journal
+        .started(&data(), Started::Volume(Some(owner.clone())))
+        .unwrap();
+
+    journal.plan(with_volume()).unwrap();
+
+    assert_eq!(on_disk(&store).volumes[0].owner, Some(owner));
 }

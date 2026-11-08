@@ -352,7 +352,8 @@ fn up_again_leaves_running_processes_as_they_are() {
 }
 
 #[test]
-fn a_process_that_exits_before_it_is_ready_fails_up_with_its_code_and_log_tail() {
+fn a_process_that_exits_before_it_is_ready_fails_up_with_its_code_and_points_to_its_log_without_quoting_it()
+ {
     let setup = Setup::new();
     setup.workspace(
         "triage",
@@ -363,7 +364,15 @@ fn a_process_that_exits_before_it_is_ready_fails_up_with_its_code_and_log_tail()
     assert_eq!(document["code"], "mxv::process::exited");
     assert_eq!(document["fields"]["process"], "server");
     assert_eq!(document["fields"]["code"], 4);
-    assert_eq!(document["fields"]["tail"][0], "cannot bind");
+    assert!(
+        document["fields"]["log"]
+            .as_str()
+            .is_some_and(|log| log.ends_with(".log")),
+        "{document}"
+    );
+    let hint = document["recovery"]["text"].as_str().unwrap_or_default();
+    assert!(hint.contains("mxv logs -w triage server"), "{hint}");
+    assert!(!document.to_string().contains("cannot bind"), "{document}");
 }
 
 #[test]
@@ -396,7 +405,7 @@ fn a_process_that_misses_its_readiness_timeout_fails_up_and_is_stopped() {
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::process::not_ready");
-    assert_eq!(document["fields"]["tail"][0], "starting");
+    assert!(!document.to_string().contains("starting"), "{document}");
     assert_eq!(
         setup.states("triage"),
         [("server".to_owned(), "stopped".to_owned())]
@@ -943,31 +952,6 @@ fn an_unknown_key_in_the_manifest_fails_with_the_key_and_its_line() {
 }
 
 #[test]
-fn up_refuses_a_manifest_that_declares_a_service_and_show_lists_its_variables() {
-    let setup = Setup::new();
-    setup.workspace(
-        "triage",
-        "[service.mail]\nkind = \"s3\"\nbuckets = [\"inbox-mail\"]\nenv = { MAIL_BUCKET = \"{bucket.inbox-mail}\" }\n\n[processes.a]\nargv = [\"true\"]\nneeds = [\"mail\"]\n",
-    );
-    let (exit, document) = setup.json(&["up", "-w", "triage"]);
-    assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::manifest::unrunnable");
-    let message = document["message"].as_str().unwrap();
-    assert!(
-        message.contains(
-            "the manifest declares the service `mail`, and this mxv cannot run services yet"
-        ),
-        "{message}"
-    );
-    let (exit, shown) = setup.json(&["show", "triage", "--long"]);
-    assert_eq!(exit, 0, "{shown}");
-    let mail = &shown["data"][0]["services"]["mail"];
-    assert_eq!(mail["MAIL_BUCKET"], "inbox-mail");
-    assert_eq!(mail["AWS_ENDPOINT_URL_S3"], "http://127.0.0.1:<port>");
-    assert_eq!(mail["AWS_ACCESS_KEY_ID"], "test");
-}
-
-#[test]
 fn a_reserved_section_in_the_manifest_fails_with_the_reserved_code() {
     let setup = Setup::new();
     setup.workspace("triage", "[secrets.db]\nsource = \"file\"\n");
@@ -1267,21 +1251,21 @@ fn group_alive_is_null_for_a_process_that_phase_runs() {
 }
 
 #[test]
-fn up_in_text_prints_the_last_lines_of_the_log_of_a_process_that_exited_before_it_was_ready() {
+fn up_in_text_names_the_log_of_a_process_that_exited_before_it_was_ready_and_quotes_none_of_it() {
     let setup = Setup::new();
     setup.workspace(
         "triage",
-        "[processes.build]\nargv = [\"sh\", \"-c\", \"echo compiling; echo 'error: cannot find value x'; exit 101\"]\n",
+        "[processes.build]\nargv = [\"sh\", \"-c\", \"echo compiling; echo 'secret=hunter2'; exit 101\"]\n",
     );
     let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
     assert_eq!(exit, 1, "{errors}");
-    let compiling = errors
-        .find("compiling")
-        .unwrap_or_else(|| panic!("{errors}"));
-    let error = errors
-        .find("error: cannot find value x")
-        .unwrap_or_else(|| panic!("{errors}"));
-    assert!(compiling < error, "{errors}");
+    assert!(
+        errors.contains("the process build exited with code 101 before it was ready"),
+        "{errors}"
+    );
+    assert!(errors.contains("mxv logs -w triage build"), "{errors}");
+    assert!(!errors.contains("compiling"), "{errors}");
+    assert!(!errors.contains("hunter2"), "{errors}");
 }
 
 #[test]
@@ -1333,7 +1317,7 @@ fn a_worker_that_writes_no_matching_log_line_fails_up_as_not_ready_with_the_patt
     assert_eq!(document["code"], "mxv::process::not_ready");
     assert_eq!(document["fields"]["pattern"], "^worker ready");
     assert_eq!(document["fields"]["port"], Value::Null);
-    assert_eq!(document["fields"]["tail"][0], "starting");
+    assert!(!document.to_string().contains("starting"), "{document}");
     assert_eq!(
         setup.states("triage"),
         [("worker".to_owned(), "stopped".to_owned())]
@@ -1431,7 +1415,9 @@ fn up_warns_about_a_misspelt_table_and_a_manifest_that_declares_nothing() {
         "{errors}"
     );
     assert!(
-        errors.contains("declares no processes and no containers, so mxv started nothing"),
+        errors.contains(
+            "declares no processes, no containers and no services, so mxv started nothing"
+        ),
         "{errors}"
     );
     let (exit, status) = setup.json(&["status", "-w", "triage"]);
@@ -1725,4 +1711,267 @@ fn down_of_a_named_process_of_a_workspace_that_never_ran_reports_it_stopped() {
     assert_eq!(rows.len(), 1, "{document}");
     assert_eq!(rows[0]["name"], "api");
     assert_eq!(rows[0]["state"], "stopped");
+}
+
+/// Runs `mxv` with `args` in the temporary directory, and returns the exit
+/// code, standard output and standard error.
+fn exec_output(setup: &Setup, args: &[&str]) -> (i32, String, String) {
+    let output = setup.command_in(&setup.root(), args).output().unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+/// A manifest whose process `api` runs in the checkout's `sub` directory
+/// with the variable `GREETING` and the port `api` as `PORT`.
+const EXEC_MANIFEST: &str = "ports = [\"api\"]\n[processes.api]\nargv = [\"sh\", \"-c\", \"exec sleep 300\"]\ncwd = \"sub\"\nenv = { GREETING = \"hello\" }\nports = { PORT = \"api\" }\n";
+
+#[test]
+fn exec_runs_a_command_with_the_processs_variables_and_directory_and_exits_with_its_code() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let port = setup.port("triage", "api");
+
+    let (exit, out, err) = exec_output(
+        &setup,
+        &[
+            "exec",
+            "-w",
+            "triage",
+            "api",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$GREETING $PORT $(pwd -P)\"; exit 7",
+        ],
+    );
+
+    assert_eq!(exit, 7, "{err}");
+    assert_eq!(
+        out,
+        format!("hello {port} {}\n", checkout.join("sub").display())
+    );
+    assert_eq!(err, "");
+}
+
+#[test]
+fn exec_gives_the_command_none_of_mxvs_own_variables_outside_the_passed_through_ones() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let output = setup
+        .command_in(&setup.root(), &["exec", "-w", "triage", "api", "--", "env"])
+        .env("MXV_TEST_SECRET", "not-for-the-command")
+        .env("AWS_PROFILE", "production")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let env = String::from_utf8(output.stdout).unwrap();
+    assert!(env.lines().any(|line| line == "GREETING=hello"), "{env}");
+    assert!(!env.contains("MXV_TEST_SECRET"), "{env}");
+    assert!(!env.contains("AWS_PROFILE"), "{env}");
+}
+
+#[test]
+fn exec_exits_with_128_plus_the_signal_that_ended_the_command() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let (exit, _, err) = exec_output(
+        &setup,
+        &[
+            "exec",
+            "-w",
+            "triage",
+            "api",
+            "--",
+            "sh",
+            "-c",
+            "kill -TERM $$",
+        ],
+    );
+
+    assert_eq!(exit, 143, "{err}");
+}
+
+#[test]
+fn exec_in_a_checkout_finds_the_workspace_and_passes_the_commands_own_flags_to_it() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let output = setup
+        .command_in(&checkout, &["exec", "api", "--", "echo", "-w", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "-w --json\n");
+}
+
+#[test]
+fn exec_of_a_process_that_is_not_running_fails_with_not_running_and_runs_nothing() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+
+    let (exit, out, err) = exec_output(
+        &setup,
+        &["exec", "-w", "triage", "api", "--", "touch", "ran"],
+    );
+
+    assert_eq!(exit, 1, "{err}");
+    assert_eq!(out, "");
+    assert!(err.contains("mxv::process::not_running"), "{err}");
+    assert!(err.contains("mxv up --workspace triage api"), "{err}");
+    assert!(!checkout.join("sub/ran").exists());
+}
+
+#[test]
+fn exec_of_a_process_after_down_fails_with_not_running() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let (exit, _, err) = exec_output(&setup, &["exec", "-w", "triage", "api", "--", "true"]);
+
+    assert_eq!(exit, 1, "{err}");
+    assert!(err.contains("mxv::process::not_running"), "{err}");
+}
+
+#[test]
+fn exec_of_a_process_that_the_manifest_does_not_declare_fails_with_process_not_found() {
+    let setup = Setup::new();
+    setup.workspace("triage", EXEC_MANIFEST);
+
+    let (exit, _, err) = exec_output(&setup, &["exec", "-w", "triage", "web", "--", "true"]);
+
+    assert_eq!(exit, 1, "{err}");
+    assert!(err.contains("mxv::process::not_found"), "{err}");
+}
+
+#[test]
+fn exec_of_a_program_that_does_not_exist_fails_with_unstartable() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let (exit, _, err) = exec_output(
+        &setup,
+        &["exec", "-w", "triage", "api", "--", "/nonexistent/program"],
+    );
+
+    assert_eq!(exit, 1, "{err}");
+    assert!(err.contains("mxv::exec::unstartable"), "{err}");
+}
+
+#[test]
+fn exec_refuses_json_because_the_output_is_the_commands_own() {
+    let setup = Setup::new();
+    setup.workspace("triage", EXEC_MANIFEST);
+
+    let output = setup
+        .command_in(
+            &setup.root(),
+            &["exec", "--json", "-w", "triage", "api", "--", "true"],
+        )
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["code"], "mxv::cli::usage", "{document}");
+}
+
+#[test]
+fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code() {
+    use std::io::BufRead as _;
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let root = setup.root();
+    // The command waits for a file that the test writes after the signal,
+    // so it is still running when mxv receives SIGINT.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
+    command
+        .args([
+            "exec",
+            "-w",
+            "triage",
+            "api",
+            "--",
+            "sh",
+            "-c",
+            "echo started; while [ ! -f go ]; do sleep 0.05; done; exit 4",
+        ])
+        .current_dir(&root)
+        .env_clear()
+        .env("PATH", PATH)
+        .envs(GIT_ENV.iter().copied())
+        .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("MXV_ROOT", root.join("workspaces"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs mxv exec in the background and sends it SIGINT"
+    )]
+    let mut child = command.spawn().unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line, "started\n");
+
+    let sent = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
+    let still = child.try_wait().unwrap().is_none();
+    write(&checkout.join("sub/go"), "");
+
+    let deadline = Instant::now() + MOST_WAIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            drop(child.kill());
+            panic!("mxv exec did not end");
+        }
+        std::thread::yield_now();
+    };
+    assert!(still, "mxv exec ended on SIGINT before the command did");
+    assert_eq!(status.code(), Some(4), "{status:?}");
 }

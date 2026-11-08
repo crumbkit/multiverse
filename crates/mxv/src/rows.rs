@@ -1263,6 +1263,19 @@ pub(crate) struct StatusSummary {
     /// checked out and how many of its entries are uncommitted or
     /// untracked.
     checkouts: Vec<CheckoutStateRow>,
+    /// Whether `mxv pin` keeps `mxv reclaim` from stopping the workspace.
+    pinned: bool,
+    /// What `mxv reclaim` stopped, which `mxv up` starts again, or null
+    /// when reclaim has not stopped the workspace since the last `up` or
+    /// `down`.
+    reclaimed: Option<ReclaimedRow>,
+}
+
+/// What `mxv reclaim` stopped in a workspace, as `mxv status` reports it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct ReclaimedRow {
+    /// The processes and containers that ran when reclaim stopped them.
+    processes: Vec<String>,
 }
 
 /// One checkout of a workspace, as `mxv status` reports it.
@@ -1390,6 +1403,10 @@ impl StatusSummary {
                 .map(|manifest| manifest.warnings.clone())
                 .unwrap_or_default(),
             checkouts,
+            pinned: workspace.pinned,
+            reclaimed: workspace.reclaimed.as_ref().map(|reclaimed| ReclaimedRow {
+                processes: reclaimed.processes.clone(),
+            }),
         }
     }
 }
@@ -1423,6 +1440,16 @@ impl fmt::Display for StatusSummary {
         }
         for warning in &self.warnings {
             write!(formatter, "\nWarning: {warning}.")?;
+        }
+        if let Some(reclaimed) = &self.reclaimed {
+            write!(
+                formatter,
+                "\nmxv reclaim stopped {} to free memory, and mxv up starts them again.",
+                reclaimed.processes.join(", ")
+            )?;
+        }
+        if self.pinned {
+            formatter.write_str("\nThe workspace is pinned, so mxv reclaim never stops it.")?;
         }
         for checkout in &self.checkouts {
             write!(formatter, "\n{checkout}")?;

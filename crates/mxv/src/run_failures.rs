@@ -148,8 +148,6 @@ pub(crate) enum RunFailure {
         signal: Option<i32>,
         /// Its log, or `None` for a container, whose output docker keeps.
         log: Option<Box<Path>>,
-        /// The last lines of its log.
-        tail: LogTail,
     },
     /// A process missed its readiness timeout.
     NotReady {
@@ -163,8 +161,6 @@ pub(crate) enum RunFailure {
         seconds: u64,
         /// Its log, or `None` for a container, whose output docker keeps.
         log: Option<Box<Path>>,
-        /// The last lines of its log.
-        tail: LogTail,
     },
     /// Another program answered on a process's readiness port.
     ForeignListener {
@@ -182,8 +178,6 @@ pub(crate) enum RunFailure {
         /// The process's log, or `None` for a container, whose output
         /// docker keeps.
         log: Option<Box<Path>>,
-        /// The last lines of its log.
-        tail: LogTail,
     },
     /// A descendant of a process that left the process's group held its
     /// listen port, so `up` stopped both.
@@ -201,8 +195,6 @@ pub(crate) enum RunFailure {
         /// The process's log, or `None` for a container, whose output
         /// docker keeps.
         log: Option<Box<Path>>,
-        /// The last lines of its log.
-        tail: LogTail,
     },
     /// A process group outlived SIGKILL, or `down` left it alone because
     /// it could not prove the group its own.
@@ -350,6 +342,22 @@ fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// Returns the recovery of the process `process` of `workspace`, which
+/// exited or was not ready. mxv starts its own apps, such as
+/// mxv-provision, with the workspace, and `up` takes no name of one, so
+/// their hint runs `up` for the whole workspace.
+fn start_failed(workspace: &str, process: &str) -> Recovery {
+    if process.starts_with(multiverse::RESERVED_PREFIX) {
+        hint(format!(
+            "run `mxv logs -w {workspace} {process}` to read what failed, fix it, and run `mxv up -w {workspace}` again"
+        ))
+    } else {
+        hint(format!(
+            "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
+        ))
+    }
+}
+
 /// Returns the hint `text` as a recovery.
 fn hint(text: impl Into<String>) -> Recovery {
     Recovery::Hint(text.into())
@@ -485,9 +493,7 @@ impl Failure for RunFailure {
             }
             | Self::NotReady {
                 workspace, process, ..
-            } => hint(format!(
-                "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
-            )),
+            } => start_failed(workspace, process),
             Self::ForeignListener {
                 workspace,
                 process,
@@ -577,14 +583,12 @@ impl Failure for RunFailure {
                 code,
                 signal,
                 log,
-                tail,
             } => vec![
                 Field::new("workspace", workspace),
                 Field::new("process", process),
                 Field::new("code", *code),
                 Field::new("signal", *signal),
                 Field::new("log", log.as_deref().map(shown)),
-                Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::NotReady {
                 workspace,
@@ -592,7 +596,6 @@ impl Failure for RunFailure {
                 waited,
                 seconds,
                 log,
-                tail,
             } => {
                 let mut fields = vec![
                     Field::new("workspace", workspace),
@@ -609,7 +612,6 @@ impl Failure for RunFailure {
                 fields.extend([
                     Field::new("timeout_seconds", *seconds),
                     Field::new("log", log.as_deref().map(shown)),
-                    Field::new("tail", FieldValue::list(tail.lines.iter())),
                 ]);
                 fields
             }
@@ -620,7 +622,6 @@ impl Failure for RunFailure {
                 number,
                 pid,
                 log,
-                tail,
             } => vec![
                 Field::new("workspace", workspace),
                 Field::new("process", process),
@@ -628,7 +629,6 @@ impl Failure for RunFailure {
                 Field::new("number", *number),
                 Field::new("pid", *pid),
                 Field::new("log", log.as_deref().map(shown)),
-                Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::DetachedListener {
                 workspace,
@@ -637,7 +637,6 @@ impl Failure for RunFailure {
                 number,
                 pid,
                 log,
-                tail,
             } => vec![
                 Field::new("workspace", workspace),
                 Field::new("process", process),
@@ -645,7 +644,6 @@ impl Failure for RunFailure {
                 Field::new("number", *number),
                 Field::new("pid", *pid),
                 Field::new("log", log.as_deref().map(shown)),
-                Field::new("tail", FieldValue::list(tail.lines.iter())),
             ],
             Self::Unstoppable {
                 process,
@@ -947,69 +945,4 @@ impl RunFailure {
     }
 }
 
-impl std::error::Error for RunFailure {
-    /// The last lines of the log of a process that exited or missed its
-    /// timeout, one cause for each line, so the text form prints each on a
-    /// `cause:` line under the message.
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Exited { tail, .. }
-            | Self::NotReady { tail, .. }
-            | Self::ForeignListener { tail, .. }
-            | Self::DetachedListener { tail, .. } => tail
-                .first
-                .as_deref()
-                .map(|line| line as &(dyn std::error::Error + 'static)),
-            _ => None,
-        }
-    }
-}
-
-/// The last lines of a process's log, as a failure reports them.
-#[derive(Debug)]
-pub(crate) struct LogTail {
-    /// The lines, oldest first.
-    lines: Box<[String]>,
-    /// The same lines as a chain of errors, the first of which the failure
-    /// gives as its source.
-    first: Option<Box<TailLine>>,
-}
-
-impl LogTail {
-    /// Returns the tail of `lines`, oldest first.
-    pub(crate) fn new(lines: Vec<String>) -> Self {
-        let first = lines.iter().rev().fold(None, |next, line| {
-            Some(Box::new(TailLine {
-                line: line.clone(),
-                next,
-            }))
-        });
-        Self {
-            lines: lines.into_boxed_slice(),
-            first,
-        }
-    }
-}
-
-/// One line of a log tail, whose source is the next line.
-#[derive(Debug)]
-struct TailLine {
-    /// The line.
-    line: String,
-    /// The next line, or `None` after the last.
-    next: Option<Box<TailLine>>,
-}
-
-impl fmt::Display for TailLine {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.line)
-    }
-}
-
-impl std::error::Error for TailLine {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.next
-            .as_deref()
-            .map(|line| line as &(dyn std::error::Error + 'static))
-    }
-}
+impl std::error::Error for RunFailure {}

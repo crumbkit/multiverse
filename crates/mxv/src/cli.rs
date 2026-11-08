@@ -11,6 +11,7 @@ use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
 
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
+use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
 use crate::units::parse_age;
 use crate::verbs::{ADD, CD, LIST, NEW, REMOVE, SHOW};
 
@@ -39,7 +40,7 @@ pub const GUIDE: Guide = Guide::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",
-            "archive", "restore", "remove", "clean",
+            "exec", "archive", "restore", "remove", "clean", "reclaim", "pin", "unpin",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
     )
@@ -49,10 +50,11 @@ pub const GUIDE: Guide = Guide::new()
             Goal::new("Work in a workspace", &["new", "add", "list", "show", "cd"]),
             Goal::new(
                 "Run a workspace's app",
-                &["up", "down", "restart", "status", "logs", "ports"],
+                &["up", "down", "restart", "status", "logs", "exec", "ports"],
             ),
             Goal::new("Put a workspace away", &["archive", "restore", "remove"]),
             Goal::new("Free disk space", &["clean"]),
+            Goal::new("Free memory", &["reclaim", "pin", "unpin"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
         ],
@@ -129,6 +131,13 @@ pub const GUIDE: Guide = Guide::new()
             )])
             .effects(Effects::read_only())
             .stream(LOGS),
+        Leaf::new(&["exec"])
+            .examples(&[Example::new(
+                &["-w", "reading-list", "web", "--", "env"],
+                "Print the variables that a command receives in the context of web",
+            )])
+            .effects(Effects::destructive().open_world().all_or_none())
+            .passes_on_exit("the command"),
         Leaf::new(&["ports", "reset"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "api"],
@@ -162,6 +171,27 @@ pub const GUIDE: Guide = Guide::new()
             )])
             .effects(Effects::destructive().idempotent().per_item())
             .document(CLEAN),
+        Leaf::new(&["reclaim"])
+            .examples(&[Example::new(
+                &["--need", "memory=2GiB", "--dry-run"],
+                "Print which idle workspaces stopping would free 2 GiB of memory",
+            )])
+            .effects(Effects::destructive().idempotent().per_item())
+            .document(RECLAIM),
+        Leaf::new(&["pin"])
+            .examples(&[Example::new(
+                &["-w", "reading-list"],
+                "Keep mxv reclaim from stopping the workspace reading-list",
+            )])
+            .effects(Effects::additive().idempotent())
+            .document(PIN),
+        Leaf::new(&["unpin"])
+            .examples(&[Example::new(
+                &["-w", "reading-list"],
+                "Let mxv reclaim stop the workspace reading-list while it is idle",
+            )])
+            .effects(Effects::additive().idempotent())
+            .document(UNPIN),
         Leaf::new(&["commands", "list"])
             .examples(&[Example::new(&[], "List every command")])
             .effects(Effects::read_only())
@@ -219,6 +249,10 @@ pub(crate) enum Verb {
     Status(StatusArgs),
     /// Print the last lines of a process's log, and follow it with --follow.
     Logs(LogsArgs),
+    /// Run a one-off command in the context of a running process or container, and exit with its exit code.
+    ///
+    /// A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
+    Exec(ExecArgs),
     /// Archive a workspace, so restore can rebuild it at the same commits.
     Archive(WriteArgs),
     /// Rebuild an archived workspace at its archived commits.
@@ -232,6 +266,14 @@ pub(crate) enum Verb {
     ///
     /// A workspace is idle when none of its processes or containers run and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
     Clean(CleanArgs),
+    /// Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
+    ///
+    /// With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+    Reclaim(ReclaimArgs),
+    /// Keep mxv reclaim from stopping a workspace.
+    Pin(PinArgs),
+    /// Let mxv reclaim stop a workspace again while it is idle.
+    Unpin(PinArgs),
     /// Manage the host ports that a workspace holds.
     Ports {
         /// What to do with the ports.
@@ -567,6 +609,30 @@ pub(crate) struct CleanArgs {
     pub(crate) yes: Yes,
 }
 
+/// The arguments of `mxv reclaim`.
+#[derive(Debug, Args)]
+pub(crate) struct ReclaimArgs {
+    /// What to free: memory=SIZE or disk=SIZE, such as memory=2GiB
+    #[arg(long, value_name = "NEED", value_parser = parse_need)]
+    pub(crate) need: Need,
+
+    /// How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
+    #[arg(long, value_name = "AGE", value_parser = parse_idle)]
+    pub(crate) idle: Option<std::time::Duration>,
+
+    /// Print what the command would stop or delete, and change nothing.
+    #[command(flatten)]
+    pub(crate) dry_run: DryRun,
+}
+
+/// The arguments of `mxv pin` and `mxv unpin`.
+#[derive(Debug, Args)]
+pub(crate) struct PinArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+}
+
 /// The arguments of `mxv show`.
 #[derive(Debug, Args)]
 pub(crate) struct ShowArgs {
@@ -593,6 +659,22 @@ pub(crate) struct StatusArgs {
     /// The workspace, which defaults to the one that holds the current directory
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
+}
+
+/// The arguments of `mxv exec`.
+#[derive(Debug, Args)]
+pub(crate) struct ExecArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+
+    /// The running process or container in whose context the command runs
+    #[arg(value_name = "PROCESS")]
+    pub(crate) process: String,
+
+    /// The command's program and its arguments, after `--`
+    #[arg(value_name = "COMMAND", last = true, required = true, num_args = 1..)]
+    pub(crate) command: Vec<String>,
 }
 
 /// The arguments of `mxv logs`.

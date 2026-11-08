@@ -29,7 +29,21 @@ pub struct ContainerOptions {
     /// form, such as `1000:1000`, or `None` to keep the image's user.
     #[serde(default)]
     pub user: Option<String>,
+    /// The owner that phase gives the root directory of each workspace
+    /// volume that the app mounts, as a numeric `uid` or `uid:gid`, such
+    /// as `999:999`, or `keep` to leave each volume's owner as it is.
+    /// `None` gives the volumes to the run-as user, or else to the image's
+    /// own user, and leaves a volume alone when that user is root. Before
+    /// the app's containers start, phase sets the owner with a short-lived
+    /// helper container, so a process that runs as another user than root
+    /// can write its volume. In JSON it is left out when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
+
+/// The value of [`ContainerOptions::owner`] that leaves the owner of each
+/// volume as it is.
+pub const KEEP_OWNER: &str = "keep";
 
 /// A host directory mounted into a container.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -23,6 +23,9 @@ cargo hack clippy --locked --workspace --each-feature --all-targets
 cargo +1.95.0 check --locked --workspace --all-targets --all-features
 ```
 
+The check suite is `/suites/multiverse-pr-lane`, which records each run of
+this lane on a head commit.
+
 - Write the test first, named as a sentence (BASE-36).
 - Give each new dependency a reason in `Cargo.toml` (BASE-23).
 - `SNAPSHOTS=overwrite cargo nextest run` rewrites the golden files under

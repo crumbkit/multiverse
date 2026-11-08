@@ -167,6 +167,15 @@ pub enum Note {
         /// plan changed`.
         message: String,
     },
+    /// `up` found the app's containers running and could not check the
+    /// owner of a volume that they mount, so it left the volume as it was.
+    /// The next `up` checks it again.
+    #[non_exhaustive]
+    VolumeOwnerUnchecked {
+        /// What happened and why, as a sentence that names the app and
+        /// holds no text from an image's `USER`.
+        message: String,
+    },
     /// The process ran under the sandbox and ended before it was ready, so
     /// the sandbox may have denied it something. The message says where
     /// the denials show.
@@ -278,6 +287,17 @@ impl Note {
             "restarted {app}/{process} because the run record does not say which part of the plan it started from"
         );
         Self::PlanChanged { process, message }
+    }
+
+    /// Returns the note that `up` could not check the owner of a volume of
+    /// the running containers of `app`, because of `reason`.
+    #[must_use]
+    pub fn volume_owner_unchecked(app: &AppName, reason: &str) -> Self {
+        Self::VolumeOwnerUnchecked {
+            message: format!(
+                "{app} is running and phase did not check the owner of its volumes: {reason}"
+            ),
+        }
     }
 
     /// Returns the note that `process` of `app` still runs with its earlier

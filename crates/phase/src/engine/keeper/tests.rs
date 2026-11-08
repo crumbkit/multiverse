@@ -714,7 +714,7 @@ fn a_keeper_restarts_a_failing_app_after_each_backoff_until_its_most_restarts() 
 /// Returns a sandbox that reads the system's directories and writes only
 /// `tmp`, its temporary directory, which must be canonical, because the
 /// launcher checks that each path is canonical before it applies it.
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 fn system_sandbox(tmp: &std::path::Path) -> crate::sandbox::SandboxSpec {
     crate::sandbox::SandboxSpec {
         read: [
@@ -748,7 +748,7 @@ fn system_sandbox(tmp: &std::path::Path) -> crate::sandbox::SandboxSpec {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 #[test]
 fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specification() {
     let fixture = Fixture::new();
@@ -789,7 +789,7 @@ fn a_keeper_starts_its_app_and_each_restart_under_the_sandbox_of_its_specificati
     assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 2);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 #[test]
 fn a_sandboxed_app_keeps_the_git_configuration_that_its_environment_names_at_each_start() {
     let fixture = Fixture::new();
