@@ -348,8 +348,87 @@ fn down_and_sweep_remove_a_leftover_helper() {
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
 }
 
+/// A Dockerfile whose image ships `/data` holding a file and owned by
+/// `999:999`.
+const SHIPS_DATA: &str = "RUN mkdir -p /data && echo seed > /data/seed && chown -R 999:999 /data\n";
+
+/// A Dockerfile whose image ships an empty `/data` owned by `999:999`.
+const SHIPS_EMPTY_DATA: &str = "RUN mkdir -p /data && chown 999:999 /data\n";
+
+/// Returns an app `db` on an image built with `lines` after `FROM`, whose
+/// `server` runs as `1000:1000`, mounts the volume `data` at `/data` and
+/// runs `script`, or `None` when the image did not build.
+fn on_built_image(lines: &str, script: &str) -> Option<(BuiltImage, AppPlan)> {
+    let image = BuiltImage::build(&format!("FROM {IMAGE}\n{lines}"))?;
+    let mut db = mounting("db", script);
+    db.source = Source::image(image.tag.parse().unwrap());
+    db.container.user = Some("1000:1000".to_owned());
+    Some((image, db))
+}
+
 #[test]
-fn a_volume_whose_recorded_owner_matches_gets_no_helper_on_a_second_up_or_a_restart() {
+fn the_first_up_of_an_image_with_a_directory_at_the_mount_path_gives_the_volume_the_wanted_owner() {
+    if !ready() {
+        return;
+    }
+    let Some((_image, db)) = on_built_image(SHIPS_DATA, WRITES) else {
+        return;
+    };
+    let world = World::new();
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.data_owner(), "1000:1000");
+    assert_eq!(world.recorded_owner(), Some("1000:1000".parse().unwrap()));
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    world.down();
+}
+
+#[test]
+fn an_owner_of_keep_runs_no_helper_and_leaves_the_owner_docker_copied_from_the_image() {
+    if !ready() {
+        return;
+    }
+    let Some((_image, mut db)) = on_built_image(SHIPS_DATA, "exec sleep 60") else {
+        return;
+    };
+    db.container.owner = Some("keep".to_owned());
+    let world = World::new();
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.data_owner(), "999:999");
+    assert_eq!(world.recorded_owner(), None);
+    world.down();
+}
+
+#[test]
+fn a_second_process_that_mounts_a_still_empty_volume_leaves_it_with_the_wanted_owner() {
+    if !ready() {
+        return;
+    }
+    let Some((_image, mut db)) = on_built_image(SHIPS_EMPTY_DATA, "exec sleep 60") else {
+        return;
+    };
+    let mut second = db.processes[0].clone();
+    second.name = "worker".parse().unwrap();
+    db.processes.push(second);
+    let world = World::new();
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    assert_eq!(world.data_owner(), "1000:1000");
+    world.down();
+}
+
+#[test]
+fn an_up_of_a_running_app_corrects_an_owner_changed_behind_phases_back() {
     if !ready() {
         return;
     }
@@ -358,9 +437,39 @@ fn a_volume_whose_recorded_owner_matches_gets_no_helper_on_a_second_up_or_a_rest
     db.container.user = Some("1000:1000".to_owned());
     let plan = world.plan(vec![db]);
     world.up(&plan);
+    assert_eq!(world.recorded_owner(), Some("1000:1000".parse().unwrap()));
+    world.chown_data("4321:4321");
+
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
     assert_eq!(world.data_owner(), "1000:1000");
-    // An owner set outside phase stays while the record says phase gave
-    // the volume its owner, which shows that no helper ran.
+    assert_eq!(world.recorded_owner(), Some("1000:1000".parse().unwrap()));
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+
+    world.chown_data("4321:4321");
+    let report = world.restart(&plan);
+
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
+    assert_eq!(world.data_owner(), "1000:1000");
+    world.down();
+}
+
+#[test]
+fn an_owner_of_keep_leaves_an_owner_changed_behind_phases_back_on_a_second_up() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    db.container.owner = Some("keep".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
     world.chown_data("4321:4321");
 
     let report = world.up(&plan);
@@ -371,12 +480,41 @@ fn a_volume_whose_recorded_owner_matches_gets_no_helper_on_a_second_up_or_a_rest
         "{report:?}"
     );
     assert_eq!(world.data_owner(), "4321:4321");
-
-    let report = world.restart(&plan);
-
-    assert_eq!(outcome(&report, "db"), &AppOutcome::Restarted, "{report:?}");
-    assert_eq!(world.data_owner(), "4321:4321");
+    assert_eq!(world.recorded_owner(), None);
     world.down();
+}
+
+#[test]
+fn an_up_of_a_running_app_keeps_the_owner_of_its_container_when_the_images_user_moves() {
+    if !ready() {
+        return;
+    }
+    let Some(first) = BuiltImage::build(&format!("FROM {IMAGE}\nUSER 1000:1000\n")) else {
+        return;
+    };
+    let Some(moved) = BuiltImage::build(&format!("FROM {IMAGE}\nUSER 2000:2000\n")) else {
+        return;
+    };
+    let world = World::new();
+    let tag = format!("phase-test-moving-{}:test", world.id);
+    docker(&["tag", &first.tag, &tag]).unwrap();
+    let mut db = mounting("db", "exec sleep 60");
+    db.source = Source::image(tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    assert_eq!(world.data_owner(), "1000:1000");
+    docker(&["tag", &moved.tag, &tag]).unwrap();
+
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert_eq!(world.data_owner(), "1000:1000");
+    world.down();
+    docker(&["image", "rm", &tag]).unwrap();
 }
 
 #[test]

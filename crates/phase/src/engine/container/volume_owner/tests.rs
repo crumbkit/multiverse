@@ -227,9 +227,9 @@ fn a_leftover_helper_is_one_whose_labels_name_the_workspace_the_role_and_the_app
     let app: AppName = "db".parse().unwrap();
     let of = |labels: &str| helper_of(&workspace, Some(&app), labels);
     let own = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"db","mxv.volume":"data"}"#;
-    assert_eq!(of(own), Some(Some(VolumeKey::new("data").unwrap())));
+    assert!(of(own));
     let id_helper = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"db"}"#;
-    assert_eq!(of(id_helper), Some(None));
+    assert!(of(id_helper));
     for foreign in [
         r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e22","mxv.role":"volume-owner","mxv.app":"db"}"#,
         r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner ","mxv.app":"db"}"#,
@@ -238,8 +238,8 @@ fn a_leftover_helper_is_one_whose_labels_name_the_workspace_the_role_and_the_app
         "null",
         "not json",
     ] {
-        assert_eq!(of(foreign), None, "{foreign}");
+        assert!(!of(foreign), "{foreign}");
     }
     let web = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"web"}"#;
-    assert_eq!(helper_of(&workspace, None, web), Some(None));
+    assert!(helper_of(&workspace, None, web));
 }

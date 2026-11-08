@@ -1,7 +1,9 @@
 //! The volume-owner step, which gives the root directory of each workspace
 //! volume that a container app mounts to the user that the app runs as,
-//! before the app's containers start. Docker creates a named volume owned
-//! by root, and a process that runs as another user could not write it.
+//! after the app's container is created and before it starts. Docker
+//! creates a named volume owned by root, and copies the owner of the image
+//! directory at the mount path onto an empty volume when `docker create`
+//! runs, so a process that runs as another user could not write it.
 //!
 //! The owner comes from the same rule as the owner of the secret files,
 //! [`secrets::chosen_owner`]: the app's `owner`, or else its run-as user,
@@ -36,12 +38,11 @@
 //! with `mxv.volume`. A run of phase that ends between a helper's
 //! creation and its removal leaves the helper behind. [`remove_helpers`]
 //! finds such helpers by their labels and removes them: `up` does so
-//! before it sets any owner, and sets the owner of each volume that a
-//! leftover helper named again, whatever the run record says. `down`, a
-//! sweep and the removal of a workspace's volumes remove them too, so a
-//! leftover helper never keeps a volume in use.
+//! before it sets any owner. `down`, a sweep and the removal of a
+//! workspace's volumes remove them too, so a leftover helper never keeps a
+//! volume in use.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::time::Instant;
 
@@ -52,8 +53,7 @@ use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, check_with, quick_with, run_program_until,
 };
 use crate::engine::container::names::{
-    APP_LABEL, ContainerId, ROLE_LABEL, Scope, VOLUME_LABEL, VOLUME_OWNER_ROLE, VolumeKey,
-    WORKSPACE_ID_LABEL,
+    APP_LABEL, ContainerId, ROLE_LABEL, Scope, VOLUME_OWNER_ROLE, VolumeKey, WORKSPACE_ID_LABEL,
 };
 use crate::engine::container::secrets::{self, run_as};
 use crate::error::{PhaseError, VolumeOwnerProblem};
@@ -235,28 +235,21 @@ pub(crate) fn parse_id(printed: &str) -> Option<u32> {
     line.parse().ok()
 }
 
-/// Returns the volume that a helper with the labels `labels`, as the JSON
-/// that `docker container inspect` prints, mounts, or `None` inside when
-/// it mounts none. It returns `None` when the labels do not name a
-/// volume-owner helper of the workspace `workspace`, and of `app` when
-/// `app` is given. Each value must equal the expected one exactly.
-pub(crate) fn helper_of(
-    workspace: &WorkspaceId,
-    app: Option<&AppName>,
-    labels: &str,
-) -> Option<Option<VolumeKey>> {
-    let labels = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
+/// Reports whether `labels`, as the JSON that `docker container inspect`
+/// prints, name a volume-owner helper of the workspace `workspace`, and of
+/// `app` when `app` is given. Each value must equal the expected one
+/// exactly.
+pub(crate) fn helper_of(workspace: &WorkspaceId, app: Option<&AppName>, labels: &str) -> bool {
+    let Some(labels) = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
         .ok()
-        .flatten()?;
+        .flatten()
+    else {
+        return false;
+    };
     let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-    let ours = is(WORKSPACE_ID_LABEL, workspace.as_str())
+    is(WORKSPACE_ID_LABEL, workspace.as_str())
         && is(ROLE_LABEL, VOLUME_OWNER_ROLE)
-        && app.is_none_or(|app| is(APP_LABEL, app.as_str()));
-    ours.then(|| {
-        labels
-            .get(VOLUME_LABEL)
-            .and_then(|volume| VolumeKey::new(volume).ok())
-    })
+        && app.is_none_or(|app| is(APP_LABEL, app.as_str()))
 }
 
 /// How a helper ended.
@@ -370,7 +363,7 @@ fn remove_helper(program: &OsStr, id: &ContainerId) -> Result<(), ContainerError
 }
 
 /// Gives the root directory of the volume `key` of `scope` to `owner`,
-/// with a helper that must finish before `deadline`, unless `cancel` ends
+/// whatever owner it has now, with a helper that must finish before `deadline`, unless `cancel` ends
 /// it first.
 ///
 /// # Errors
@@ -440,8 +433,7 @@ pub(crate) fn resolve(
 
 /// Removes every volume-owner helper of the workspace `workspace`, or of
 /// its app `app` when it is given, that the `docker` program `program`
-/// finds by its labels, and returns the volumes that the removed helpers
-/// mounted. A helper that Docker no longer has is skipped.
+/// finds by its labels. A helper that Docker no longer has is skipped.
 ///
 /// # Errors
 ///
@@ -450,7 +442,7 @@ pub(crate) fn remove_helpers_with(
     program: &OsStr,
     workspace: &WorkspaceId,
     app: Option<&AppName>,
-) -> Result<BTreeSet<VolumeKey>, ContainerError> {
+) -> Result<(), ContainerError> {
     let listed = quick_with(
         program,
         [
@@ -467,7 +459,6 @@ pub(crate) fn remove_helpers_with(
         "container ls",
     )?
     .checked_with(program, "container ls", None)?;
-    let mut volumes = BTreeSet::new();
     for line in listed.lines() {
         let Ok(id) = ContainerId::new(line.trim()) else {
             continue;
@@ -488,13 +479,11 @@ pub(crate) fn remove_helpers_with(
             continue;
         }
         let labels = inspected.checked_with(program, "container inspect", None)?;
-        let Some(volume) = helper_of(workspace, app, labels.trim()) else {
-            continue;
-        };
-        remove_helper(program, &id)?;
-        volumes.extend(volume);
+        if helper_of(workspace, app, labels.trim()) {
+            remove_helper(program, &id)?;
+        }
     }
-    Ok(volumes)
+    Ok(())
 }
 
 /// Removes the volume-owner helpers of the workspace `workspace`, or of its
@@ -507,6 +496,6 @@ pub(crate) fn remove_helpers_with(
 pub(crate) fn remove_helpers(
     workspace: &WorkspaceId,
     app: Option<&AppName>,
-) -> Result<BTreeSet<VolumeKey>, ContainerError> {
+) -> Result<(), ContainerError> {
     remove_helpers_with(DOCKER.as_ref(), workspace, app)
 }

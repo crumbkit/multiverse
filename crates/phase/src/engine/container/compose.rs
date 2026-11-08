@@ -320,12 +320,24 @@ pub(crate) fn compose_up(
     up_result(scope, service, &finished)
 }
 
-/// Starts the service `service` of phase's app project in `scope` with
-/// `docker compose up`, reading the compose file `file` from standard
-/// input, with the variables `env`. The project directory is `dir`, which
-/// holds no file that Compose reads, and Compose reads no `.env` file.
-/// `until` holds the time the command may take and the flag that stops
-/// it.
+/// What `docker compose up` does with a service of phase's app project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppStep {
+    /// It creates the container and leaves it created, so that Docker
+    /// copies an image directory into a new volume before phase sets the
+    /// volume's owner.
+    Create,
+    /// It starts the container, creating it if it does not exist, and
+    /// keeps a container that exists.
+    Start,
+}
+
+/// Runs `docker compose up` with `step` for the service `service` of
+/// phase's app project in `scope`, reading the compose file `file` from
+/// standard input, with the variables `env`. The project directory is
+/// `dir`, which holds no file that Compose reads, and Compose reads no
+/// `.env` file. `until` holds the time the command may take and the flag
+/// that stops it.
 ///
 /// The caller has checked the compose plugin with `docker compose version`,
 /// and has pulled the image, so Compose pulls nothing.
@@ -339,10 +351,15 @@ pub(crate) fn app_up(
     file: &Value,
     service: &ServiceName,
     env: impl ChildEnv,
+    step: AppStep,
     until: (Duration, &Cancel),
 ) -> Result<Up, Error> {
     let project = scope.project();
-    let args: [&OsStr; 16] = [
+    let step_args: [&OsStr; 2] = match step {
+        AppStep::Create => ["--no-start".as_ref(), "--no-recreate".as_ref()],
+        AppStep::Start => ["--detach".as_ref(), "--no-recreate".as_ref()],
+    };
+    let args: [&OsStr; 17] = [
         "compose".as_ref(),
         "--project-name".as_ref(),
         project.as_str().as_ref(),
@@ -353,7 +370,8 @@ pub(crate) fn app_up(
         "--file".as_ref(),
         "-".as_ref(),
         "up".as_ref(),
-        "--detach".as_ref(),
+        step_args[0],
+        step_args[1],
         "--no-deps".as_ref(),
         "--pull".as_ref(),
         "never".as_ref(),

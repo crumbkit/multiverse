@@ -173,6 +173,20 @@ pub(crate) fn volume_keys(app: &AppPlan) -> Vec<VolumeKey> {
     keys.into_iter().collect()
 }
 
+/// Returns the workspace's volumes that the processes of `app` that
+/// `names` names mount, by key, in name order.
+pub(crate) fn process_volume_keys(
+    app: &AppPlan,
+    names: &[ProcessName],
+) -> std::collections::BTreeSet<VolumeKey> {
+    app.processes
+        .iter()
+        .filter(|process| names.contains(&process.name))
+        .flat_map(|process| mounted(app, process))
+        .map(|(volume, _)| volume_key(volume))
+        .collect()
+}
+
 /// Returns why phase cannot run `process` of the container app `app` yet,
 /// if it cannot.
 fn runnable(app: &AppPlan, process: &ProcessPlan) -> Result<(), PhaseError> {

@@ -54,6 +54,7 @@ use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::error::{NotRunnable, PhaseError};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::phase::UpDeadlines;
+use crate::plan::container::KEEP_OWNER;
 use crate::plan::probe::{LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
@@ -547,9 +548,12 @@ impl Op<'_, '_> {
             .map(|process| process.name.clone())
             .filter(|process| !running.contains(process))
             .collect();
-        if processes.is_empty() {
+        // The running containers' volumes are checked even when no
+        // container is replaced, so an app with volumes goes to the runner.
+        if processes.is_empty() && !checks_volume_owners(app, &running) {
             return Ok(AppStep::Done(AppOutcome::AlreadyRunning, notes));
         }
+        let left_running: Vec<ProcessName> = running.iter().cloned().collect();
         let owners = self.recorded_volume_owners();
         let start = ContainerStart {
             workspace: &self.workspace,
@@ -559,6 +563,7 @@ impl Op<'_, '_> {
             build: self.deadlines.build,
             deadline: self.deadlines.ready,
             cancel: self.cancel,
+            running: &left_running,
             owners: &owners,
         };
         let journal = &mut self.journal;
@@ -604,7 +609,12 @@ impl Op<'_, '_> {
             return Ok(AppStep::Done(AppOutcome::StartUncertain, notes));
         }
         let Some((process, problem)) = started.problem else {
-            return Ok(AppStep::Done(AppOutcome::Started, notes));
+            let outcome = if processes.is_empty() {
+                AppOutcome::AlreadyRunning
+            } else {
+                AppOutcome::Started
+            };
+            return Ok(AppStep::Done(outcome, notes));
         };
         self.stop_since(mark, &mut StopsByApp::new(), &mut notes)?;
         Ok(AppStep::Done(AppOutcome::failed(process, problem), notes))
@@ -1352,6 +1362,18 @@ impl Op<'_, '_> {
             AppStep::Cancelled(notes) => self.cancelled_restart(name, mark, notes)?,
         })
     }
+}
+
+/// Reports whether `up` checks the owner of a volume of the running
+/// processes of `app` that `running` names: `app` does not say `keep`, and
+/// one of them mounts a workspace volume.
+fn checks_volume_owners(app: &AppPlan, running: &BTreeSet<ProcessName>) -> bool {
+    app.container.owner.as_deref() != Some(KEEP_OWNER)
+        && app
+            .processes
+            .iter()
+            .filter(|process| running.contains(&process.name))
+            .any(|process| !process.volumes.is_empty() || !app.container.caches.is_empty())
 }
 
 /// Returns why phase cannot run the host processes of `app` yet, if it

@@ -355,14 +355,14 @@ impl Docker for DockerCli {
     }
 
     fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
-        volume_owner::remove_helpers_with(self.program(), workspace, None)
-            .map(|_| ())
-            .map_err(|error| match error {
+        volume_owner::remove_helpers_with(self.program(), workspace, None).map_err(|error| {
+            match error {
                 ContainerError::Missing { .. } | ContainerError::Unavailable { .. } => {
                     unavailable(&error)
                 }
                 _ => error
                     .describe(DockerError::refused(error.to_string()).with_cause(error.cause())),
-            })
+            }
+        })
     }
 }

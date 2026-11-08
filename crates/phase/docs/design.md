@@ -807,9 +807,10 @@ The tmpfs file was found nowhere else, and rewriting it took under 100 ms.
 
 Decided 5 November 2026 (P20): Docker creates a named volume owned by
 root, so a container that runs as another user cannot write its own
-volume, such as a cache or a database's data directory. Before an app's
-containers start, phase gives the root directory of each workspace
-volume that the app mounts to the user that the app runs as.
+volume, such as a cache or a database's data directory. phase gives the
+root directory of each workspace volume that an app mounts to the user
+that the app runs as, after the app's container is created and before it
+starts, on every `up`.
 
 The owner comes from the same rule as the owner of the secret files, and
 the code shares it:
@@ -871,18 +872,55 @@ change slow on every change of owner. When an app's owner changes, the
 files that the old owner created keep their owner. An app that cannot
 use them needs its volume reset.
 
+The order of the steps follows from when Docker gives a volume its owner,
+measured on Docker 29.8 with Compose. Docker copies the image's directory at the mount
+path into an empty named volume, and gives the volume's root the
+directory's owner, when it creates the container: after `docker create`
+or `docker compose up --no-start` the root is already the image's, and a
+`docker start` of that container copies nothing and changes no owner. An
+owner that phase set before the creation is therefore lost, and an owner
+that phase sets after the creation stays. An image directory that is empty
+still gives the volume its owner, and that happens at every creation for
+as long as the volume stays empty. A volume that holds files keeps its
+owner, because Docker copies only into an empty volume.
+
+So phase creates a process's container with `docker compose up --no-start`,
+then runs one helper for each volume that the process mounts, then starts
+the container with `docker compose up --detach --no-recreate`. The app's
+main process never runs before the owner is right, and a helper that fails
+ends the start and removes the created container. The two `compose up`
+commands read the same compose file and environment. An app with no owner
+to set, such as one under `keep`, runs one `compose up --detach` and no
+helper.
+
+phase runs a helper on every `up` and reads nothing from it. The helper
+runs `chown`, which leaves a volume that already has the owner as it was
+apart from its change time, so one helper checks the owner and corrects it,
+and no output is read to tell the two apart. This costs one helper per
+volume on each `up`, and nothing caches the result. A volume that several
+processes of an app mount gets one helper for each process that gets a new
+container, because each creation can copy an owner onto a volume that is
+still empty, as above. A running container's volumes are checked too, when
+`up` reports the app as already running. A volume of a process that `up`
+leaves running gets the owner that the run record names, because that is
+the owner its container started with: a tag that has moved to an image
+with another `USER` must not take a running container's volume away from
+it. When the record names none, the volume gets the owner from the plan.
+Under `keep`, and for an app that runs as root when the plan names no
+owner, no helper runs and nothing is checked.
+
 The run record keeps the owner that phase gave each volume, as `owner`
 on the volume's entry, such as `"1000:1000"`. Before a helper starts,
 phase records the volume with no owner, and after the helper exits with
-status 0 it records the owner. `up` runs no helper for a volume whose
-recorded owner is the owner it wants. A volume that phase leaves alone,
-for `keep` or for an app that runs as root, is recorded with no owner, so a later owner is
-set again. The plan's `owner` is also in the compose file of each service
+status 0 it records the owner. The record says which owner phase wanted,
+and it does not prove that the volume has that owner. A volume that phase
+leaves alone, for `keep` or for an app that runs as root, is recorded with
+no owner. The plan's `owner` is also in the compose file of each service
 that mounts a volume, as `x-phase-volume-owner`, so a new owner changes
 the service's plan hash and `up` replaces the container and sets the new
-owner first. A tag that moves to an image with another `USER` changes no
-plan hash, so the volumes keep their owner until the container is
-replaced for another reason.
+owner. A tag that moves to an image with another `USER` changes no plan
+hash, so the volumes keep their owner until the container is replaced for
+another reason.
 
 Every helper carries the workspace's labels, its app's `mxv.app` and
 `mxv.role=volume-owner`, and a chown helper names its volume with
@@ -892,9 +930,7 @@ name, its labels or the record ever takes a helper for that container or
 refuses it as foreign. A run of phase that ends while a helper exists
 leaves it behind, and it keeps its volume in use:
 
-- `up` removes the app's leftover helpers before it sets any owner, and
-  sets the owner of each volume that a leftover helper mounted again,
-  whatever the record says;
+- `up` removes the app's leftover helpers before it sets any owner;
 - `down` removes the leftover helpers of each app that it stops, and a
   failure to remove one is no container's failure;
 - a sweep removes every leftover helper of the workspace when some
@@ -905,23 +941,6 @@ leaves it behind, and it keeps its volume in use:
   containers have stopped sweeps without Docker;
 - the removal of a workspace's volumes removes the workspace's leftover
   helpers first, because Docker refuses to delete a volume in use.
-
-Docker copies an image's directory into an empty named volume the first
-time a container mounts the volume at that path, and gives the volume's
-root the directory's owner. That replaces the owner that phase set. On
-Docker 29.8, mounting a volume that the helper had given to `1000:1000`
-at busybox's `/home` left it owned by `65534:65534`, the owner of `/home`
-in the image. An image that prepares its data directory for its own user,
-as the Postgres image does, therefore gets the right owner from Docker
-itself. A directory that the image gives to root at the mount path stays
-root's on the first start. The record still names phase's owner, so a
-later `up` or `restart` of the same run runs no helper for that volume and
-leaves it with root. `down` removes the record once everything has
-stopped, so the next `up` after a `down` runs the helper again. By then
-the volume holds the copied files, so Docker copies nothing, and the
-owner that phase sets stays. An app that must write its volume on the
-first start mounts it at a path the image lacks, or its image gives the
-directory to its user.
 
 Two apps that mount one workspace volume with different owners each set
 their own owner when they start, and the last start wins.
@@ -1986,4 +2005,4 @@ Each decision states what this draft assumes until it is decided.
 | P17 | Which apps run under the sandbox. | Decided 5 November 2026: opt-in. Only an app that declares `[permissions]` is sandboxed, and the plan's hash records an app without them as unsandboxed. `status` shows each host process as sandboxed or unsandboxed, with the reason. A platform without a sandbox is sandbox-less rather than unsupported: an app with permissions runs there unsandboxed, and `status` shows it. On Linux, a kernel without Landlock, or with a Landlock ABI older than 4, falls back in the same way. Landlock leaves Unix sockets and UDP unrestricted, so on Linux `status` reports a process under Landlock as unsandboxed (P19), and a Linux sandbox waits for nono to restrict Unix sockets or for a seccomp filter. Seatbelt cannot limit an app's listening ports to the loopback interface, so on macOS `status` shows the sandbox as partial. Each process's run record entry records how it was launched, and `status` shows that. |
 | P18 | What a sandboxed app may read and write. | Decided 5 November 2026: an allowlist. It may read the system's directories, the toolchain directories on `PATH` (Cargo, rustup, mise and Homebrew) and its checkout. It may write `<phase state>/apps/<workspace id>/<app>/state` and `.../tmp`, which becomes its `TMPDIR` outside the per-user temporary directory, and what its permissions add. It is always denied the agent's directory and socket, `~/.ssh` and the other credential directories in the home directory, the Keychains, mxv's state and mirrors, phase's state, the workspace manifest and the workspace outside its checkout. The security review of the first stage added the read-only paths (the launcher, `PATH`, the toolchains and the checkout's `.git`), the narrower `/Library` and Homebrew grants, the narrower `/dev` grant and the deny of other sessions' terminal devices (added with exec), the refusal of an app that runs at the workspace's top, and the launcher's second check. On 6 November 2026 macOS gained the metadata of the regular files that a process's standard streams have open, so node starts, and `SSL_CERT_FILE=/etc/ssl/cert.pem` unless the app sets it, so rustls-native-certs and the AWS SDK find the system's trusted roots. See [The sandbox as built](#the-sandbox-as-built). |
 | P19 | How `status` reports Linux, where Landlock cannot restrict Unix sockets. | Decided by Luke on 5 November 2026: as `unsandboxed`, with the reason that Landlock cannot restrict Unix sockets (nono does not yet enforce `ResolveUnix`), so a process could leave the sandbox through Docker or D-Bus. phase still applies Landlock as a speed bump, because it confines files and TCP ports. macOS keeps reporting Seatbelt as partial. |
-| P20 | How a container app that runs as another user than root writes a workspace volume. | Decided 5 November 2026: before the app's containers start, a busybox helper pinned by digest gives the root directory of each volume, and only the root, to the app's `owner`, or else its run-as user, or else its image's `USER`, as the secret files take their owner. `keep` leaves the volumes alone, and so does an app that runs as root when the plan names no `owner`; an `owner` of `0:0` gives them to root. A name is resolved with `id` in the app's image, and one that resolves to uid 0 is refused. The run record keeps each volume's owner in a v5 field, so a later `up` runs no helper for a volume that has its owner. See [Volume owners](#volume-owners). |
+| P20 | How a container app that runs as another user than root writes a workspace volume. | Decided 5 November 2026: after the app's container is created and before it starts, a busybox helper pinned by digest gives the root directory of each volume, and only the root, to the app's `owner`, or else its run-as user, or else its image's `USER`, as the secret files take their owner. `keep` leaves the volumes alone, and so does an app that runs as root when the plan names no `owner`; an `owner` of `0:0` gives them to root. A name is resolved with `id` in the app's image, and one that resolves to uid 0 is refused. A helper runs after Docker creates the container and on every `up`, because Docker copies an image directory's owner onto an empty volume at creation and the run record cannot prove the owner still holds. The run record keeps the owner phase wanted in a v5 field. See [Volume owners](#volume-owners). |

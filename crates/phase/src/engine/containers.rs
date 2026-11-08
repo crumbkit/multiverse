@@ -191,9 +191,15 @@ pub(crate) struct ContainerStart<'a> {
     pub(crate) deadline: Instant,
     /// The flag that asks the start to stop.
     pub(crate) cancel: &'a Cancel,
-    /// The owner that the run record says phase gave each volume, by the
-    /// volume's name. The start leaves alone a volume whose recorded owner
-    /// is the one it wants.
+    /// The processes of `app` that `up` leaves running. The start checks
+    /// the owner of each volume that they mount and that no process of
+    /// `processes` mounts.
+    pub(crate) running: &'a [ProcessName],
+    /// The owner that the run record says phase wanted for each volume,
+    /// by the volume's name. The start gives a volume of a running process
+    /// that owner, because a tag that has moved to an image with another
+    /// `USER` does not change the user of a running container. The record
+    /// is no proof of the owner the volume has, so the start checks it.
     pub(crate) owners: &'a BTreeMap<DockerName, VolumeOwner>,
 }
 
@@ -205,8 +211,8 @@ pub(crate) struct ContainersStarted {
     /// Each network that exists, by name.
     pub(crate) networks: Vec<(DockerName, NetworkId)>,
     /// Each volume that exists, by name, with the owner that the start
-    /// gave its root directory or found recorded as the one it wants, or
-    /// `None` when the start did not set it.
+    /// gave its root directory or that it kept from the run record for a
+    /// volume it had no reason to touch, or `None` when no owner holds.
     pub(crate) volumes: Vec<(DockerName, Option<VolumeOwner>)>,
     /// The process that failed to become ready, and why, or `None` when
     /// every process is ready.
