@@ -39,6 +39,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
 
+use crate::archive::PortChange;
 use crate::clock::{FOLLOW_INTERVAL, POLL_INTERVAL, pause};
 use phase::Phase;
 use phase::container::{ContainerState, Lifecycle, ServiceName, WorkspaceVolumes};
@@ -1115,6 +1116,74 @@ impl Runs {
             }
         }
         store.update(workspace)
+    }
+
+    /// Keeps each host port of `workspace`, a workspace that a restore
+    /// rebuilt, that is still free and that no other workspace in `store`
+    /// holds, replaces any other from the port range, as [`Runs::up`]
+    /// assigns a port, and returns what changed. It calls `write` to write
+    /// the record while it holds the lock of the ports, so no other
+    /// workspace takes one of them first, and returns `None` when `write`
+    /// reports that the record could not be written.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Store::list`], [`Error::Busy`],
+    /// [`Error::NoFreePort`] and the errors of `write`.
+    pub(crate) fn restored_ports(
+        &self,
+        workspace: &mut Workspace,
+        store: &Store,
+        write: impl FnOnce(&mut Workspace, &Store) -> Result<bool, Error>,
+    ) -> Result<Option<Vec<PortChange>>, Error> {
+        let _lock = store::lock(&self.dir.join(".ports.lock"), self.lock_wait)?;
+        let changes = self.taken_ports(workspace, store)?;
+        Ok(write(workspace, store)?.then_some(changes))
+    }
+
+    /// Replaces each port of `workspace` that another workspace in `store`
+    /// holds or that something else has taken, and returns what changed.
+    fn taken_ports(
+        &self,
+        workspace: &mut Workspace,
+        store: &Store,
+    ) -> Result<Vec<PortChange>, Error> {
+        let mut reserved: BTreeSet<u16> = store
+            .list()?
+            .workspaces
+            .iter()
+            .filter(|other| other.name != workspace.name)
+            .flat_map(|other| other.ports.values().copied())
+            .collect();
+        let held: BTreeSet<u16> = workspace.ports.values().copied().collect();
+        let mut changes = Vec::new();
+        for (name, number) in &mut workspace.ports {
+            if !reserved.contains(number) && !ports::is_taken(*number) {
+                continue;
+            }
+            let mut avoid = reserved.clone();
+            avoid.extend(held.iter().copied());
+            let replacement = ports::allocate(&self.port_range, &avoid)?;
+            reserved.insert(replacement);
+            changes.push(PortChange::new(name.clone(), *number, replacement));
+            *number = replacement;
+        }
+        Ok(changes)
+    }
+
+    /// Returns which ports a restore of `workspace` would change, and
+    /// changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Store::list`] and [`Error::NoFreePort`].
+    pub fn planned_ports(
+        &self,
+        workspace: &Workspace,
+        store: &Store,
+    ) -> Result<Vec<PortChange>, Error> {
+        let mut copy = workspace.clone();
+        self.taken_ports(&mut copy, store)
     }
 
     /// Gives `workspace` new host ports for the ports `names` of

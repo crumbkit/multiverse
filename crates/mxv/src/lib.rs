@@ -6,13 +6,8 @@
 //! integration tests can pass them to crumbkit-test's checks beside the
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
-//!
-//! `new`, `add`, `list`, `show`, `cd`, `remove`, `clean`, `reclaim`, `pin`,
-//! `unpin` and the process verbs `up`, `down`, `restart`, `status`, `logs`
-//! and `exec` are built. `archive` and
-//! `restore` are declared and fail with `mxv::command::unbuilt` until the
-//! pull request that builds each one.
 
+mod archive;
 mod clean;
 mod cli;
 mod config;
@@ -25,7 +20,6 @@ mod rows;
 mod run_failures;
 #[cfg(test)]
 mod testing;
-mod unbuilt;
 mod units;
 mod verbs;
 
@@ -35,6 +29,14 @@ use std::process::ExitCode;
 use clap::CommandFactory as _;
 use crumbkit::Code;
 
+#[doc(hidden)]
+#[doc(hidden)]
+pub use crate::archive::{
+    ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
+    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED,
+    ARCHIVE_UNSAVED_WORK, RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN,
+    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+};
 #[doc(hidden)]
 pub use crate::cli::{Cli, GUIDE};
 use crate::cli::{
@@ -72,14 +74,12 @@ pub use crate::run_failures::{
     VOLUME_NOT_MOVED, VOLUME_RENAMED, WORKSPACE_LEGACY_RUNNING, WORKSPACE_NOT_CURRENT,
     WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
-#[doc(hidden)]
-pub use crate::unbuilt::UNBUILT;
-use crate::unbuilt::{UNBUILT_RESULT, fail};
 
-/// The failure code of the unbuilt verbs, which the tests pass to
-/// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
+/// Every failure code of `mxv archive`, `mxv restore` and `mxv remove
+/// --archived`, which the tests pass to crumbkit-test's codes, recovery and
+/// twin checks beside [`CODES`].
 #[doc(hidden)]
-pub const UNBUILT_CODES: &[&Code] = &[&UNBUILT];
+pub const ARCHIVE_CODES: &[&Code] = archive::CODES;
 
 /// Every failure code of the workspace verbs, which the tests pass to
 /// crumbkit-test's codes, recovery and twin checks.
@@ -115,122 +115,113 @@ where
         Ok(parsed) => parsed,
         Err(stop) => return stop.exit_code(),
     };
-    let verb = match cli.verb {
+    match cli.verb {
         Verb::New(args) => {
             let result = verbs::new(&output, environment, &args);
-            return crumbkit::finish(output, verbs::NEW, result);
+            crumbkit::finish(output, verbs::NEW, result)
         }
         Verb::Add(args) => {
             let result = verbs::add(&output, environment, &args);
-            return crumbkit::finish(output, verbs::ADD, result);
+            crumbkit::finish(output, verbs::ADD, result)
         }
-        Verb::List(args) => {
-            return crumbkit::finish(output, verbs::LIST, verbs::list(environment, &args));
-        }
-        Verb::Show(args) => {
-            return crumbkit::finish(output, verbs::SHOW, verbs::show(environment, &args));
-        }
-        Verb::Cd(args) => {
-            return crumbkit::finish(output, verbs::CD, verbs::cd(environment, &args));
-        }
+        Verb::List(args) => crumbkit::finish(output, verbs::LIST, verbs::list(environment, &args)),
+        Verb::Show(args) => crumbkit::finish(output, verbs::SHOW, verbs::show(environment, &args)),
+        Verb::Cd(args) => crumbkit::finish(output, verbs::CD, verbs::cd(environment, &args)),
         // `remove` reads `--dry-run` and asks for confirmation through
         // `&mut output`, so it runs before `finish`.
         Verb::Remove(args) => {
             let result = verbs::remove(&mut output, environment, &args);
-            return crumbkit::finish(output, verbs::REMOVE, result);
+            crumbkit::finish(output, verbs::REMOVE, result)
         }
         // `clean` reads `--dry-run` and asks for confirmation through
         // `&mut output`, so it runs before `finish`.
         Verb::Clean(args) => {
             let result = clean::clean(&mut output, environment, &args);
-            return crumbkit::finish(output, clean::CLEAN, result);
+            crumbkit::finish(output, clean::CLEAN, result)
         }
         // `reclaim` reads `--dry-run` through `&mut output`, so it runs
         // before `finish`.
         Verb::Reclaim(args) => {
             let result = reclaim::reclaim(&mut output, environment, &args);
-            return crumbkit::finish(output, reclaim::RECLAIM, result);
+            crumbkit::finish(output, reclaim::RECLAIM, result)
         }
         Verb::Pin(args) => {
             let result = reclaim::pin(environment, &args, true);
-            return crumbkit::finish(output, reclaim::PIN, result);
+            crumbkit::finish(output, reclaim::PIN, result)
         }
         Verb::Unpin(args) => {
             let result = reclaim::pin(environment, &args, false);
-            return crumbkit::finish(output, reclaim::UNPIN, result);
+            crumbkit::finish(output, reclaim::UNPIN, result)
         }
         Verb::Up(args) => {
-            return crumbkit::finish(output, processes::UP, processes::up(environment, &args));
+            crumbkit::finish(output, processes::UP, processes::up(environment, &args))
         }
         Verb::Down(args) => {
-            return crumbkit::finish(output, processes::DOWN, processes::down(environment, &args));
+            crumbkit::finish(output, processes::DOWN, processes::down(environment, &args))
         }
         Verb::Restart(args) => {
             let result = processes::restart(environment, &args);
-            return crumbkit::finish(output, processes::RESTART, result);
+            crumbkit::finish(output, processes::RESTART, result)
         }
         Verb::Status(args) => {
             let result = processes::status(environment, &args);
-            return crumbkit::finish(output, processes::STATUS, result);
+            crumbkit::finish(output, processes::STATUS, result)
         }
         // `logs` prints a stream, so it opens the stream from `output`
         // itself.
-        Verb::Logs(args) => return processes::logs(output, environment, &args),
+        Verb::Logs(args) => processes::logs(output, environment, &args),
         // `exec` hands the terminal to the command and exits with its exit
         // code, so it prints no document.
-        Verb::Exec(args) => return exec::exec(output, environment, &args),
+        Verb::Exec(args) => exec::exec(output, environment, &args),
         Verb::Ports {
             command: PortsCommand::Reset(args),
         } => {
             let result = processes::ports_reset(environment, &args);
-            return crumbkit::finish(output, processes::PORTS_RESET, result);
+            crumbkit::finish(output, processes::PORTS_RESET, result)
         }
-        Verb::Archive(_) => "archive",
-        Verb::Restore(_) => "restore",
+        // `archive` and `restore` read `--dry-run` and ask for confirmation
+        // through `&mut output`, so each runs before `finish`.
+        Verb::Archive(args) => {
+            let result = archive::archive(&mut output, environment, &args);
+            crumbkit::finish(output, archive::ARCHIVE, result)
+        }
+        Verb::Restore(args) => {
+            let result = archive::restore(&mut output, environment, &args);
+            crumbkit::finish(output, archive::RESTORE, result)
+        }
         // crumbkit's own commands read the command tree through
         // `&mut output`, so each runs before `finish` takes `output`.
         Verb::Commands {
             command: CommandsCommand::List(args),
         } => {
             let result = crumbkit::commands::list(&mut output, &GUIDE, &args);
-            return crumbkit::finish(output, crumbkit::commands::COMMANDS_LIST, result);
+            crumbkit::finish(output, crumbkit::commands::COMMANDS_LIST, result)
         }
-        Verb::Schemas { command } => {
-            return match command {
-                SchemasCommand::List(args) => {
-                    let result = crumbkit::schemas::list(&mut output, &GUIDE, &args);
-                    crumbkit::finish(output, crumbkit::schemas::SCHEMAS_LIST, result)
-                }
-                SchemasCommand::Show(args) => {
-                    let result = crumbkit::schemas::show(&mut output, &GUIDE, &args);
-                    crumbkit::finish(output, crumbkit::schemas::SCHEMAS_SHOW, result)
-                }
-            };
-        }
-        Verb::SelfCommand { command } => {
-            return match command {
-                SelfCommand::Usage(args) => {
-                    let result = Ok::<_, crumbkit::Error>(crumbkit_usage::findings(
-                        &mut output,
-                        &GUIDE,
-                        &args,
-                    ));
-                    crumbkit::finish(output, crumbkit_usage::SELF_USAGE, result)
-                }
-                SelfCommand::Figures {
-                    command: FiguresCommand::List(args),
-                } => {
-                    let result = Ok::<_, crumbkit::Error>(crumbkit_usage::figures(
-                        &mut output,
-                        &GUIDE,
-                        &args,
-                    ));
-                    crumbkit::finish(output, crumbkit_usage::SELF_FIGURES_LIST, result)
-                }
-            };
-        }
-    };
-    crumbkit::finish(output, UNBUILT_RESULT, fail(verb))
+        Verb::Schemas { command } => match command {
+            SchemasCommand::List(args) => {
+                let result = crumbkit::schemas::list(&mut output, &GUIDE, &args);
+                crumbkit::finish(output, crumbkit::schemas::SCHEMAS_LIST, result)
+            }
+            SchemasCommand::Show(args) => {
+                let result = crumbkit::schemas::show(&mut output, &GUIDE, &args);
+                crumbkit::finish(output, crumbkit::schemas::SCHEMAS_SHOW, result)
+            }
+        },
+        Verb::SelfCommand { command } => match command {
+            SelfCommand::Usage(args) => {
+                let result =
+                    Ok::<_, crumbkit::Error>(crumbkit_usage::findings(&mut output, &GUIDE, &args));
+                crumbkit::finish(output, crumbkit_usage::SELF_USAGE, result)
+            }
+            SelfCommand::Figures {
+                command: FiguresCommand::List(args),
+            } => {
+                let result =
+                    Ok::<_, crumbkit::Error>(crumbkit_usage::figures(&mut output, &GUIDE, &args));
+                crumbkit::finish(output, crumbkit_usage::SELF_FIGURES_LIST, result)
+            }
+        },
+    }
 }
 
 /// Prints each of `warnings` on standard error as a line of its own, for

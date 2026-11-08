@@ -9,6 +9,7 @@ use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, ViewFlags, Yes};
 use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
 
+use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
@@ -147,16 +148,18 @@ pub const GUIDE: Guide = Guide::new()
             .document(PORTS_RESET),
         Leaf::new(&["archive"])
             .examples(&[Example::new(
-                &["--dry-run"],
-                "Print what archiving would do",
+                &["-w", "reading-list", "--dry-run"],
+                "Print what archiving the workspace reading-list would do",
             )])
-            .effects(Effects::destructive()),
+            .effects(Effects::destructive())
+            .document(ARCHIVE),
         Leaf::new(&["restore"])
             .examples(&[Example::new(
-                &["--dry-run"],
-                "Print what restoring would do",
+                &["sample", "--dry-run"],
+                "Print what restoring the archived workspace sample would do",
             )])
-            .effects(Effects::additive().open_world()),
+            .effects(Effects::additive().open_world())
+            .document(RESTORE),
         Leaf::new(&["remove"])
             .examples(&[Example::new(
                 &["reading-list", "--dry-run"],
@@ -254,9 +257,9 @@ pub(crate) enum Verb {
     /// A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
     Exec(ExecArgs),
     /// Archive a workspace, so restore can rebuild it at the same commits.
-    Archive(WriteArgs),
+    Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
-    Restore(WriteArgs),
+    Restore(RestoreArgs),
     /// Remove a workspace's checkouts, its merged branches, its directory and its record.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`
     // lines and `commands list` name only `remove`.
@@ -354,19 +357,6 @@ pub(crate) enum SelfCommand {
 pub(crate) enum FiguresCommand {
     /// List the figures of each command in mxv's usage log.
     List(SelfFigures),
-}
-
-/// The flags of a verb that changes workspaces. The pull request that
-/// builds each verb adds its own arguments.
-#[derive(Debug, Args)]
-pub(crate) struct WriteArgs {
-    /// Print what the command would do, and change nothing.
-    #[command(flatten)]
-    pub(crate) dry_run: DryRun,
-
-    /// Run without asking.
-    #[command(flatten)]
-    pub(crate) yes: Yes,
 }
 
 /// The arguments of `mxv new`.
@@ -537,6 +527,10 @@ pub(crate) struct RemoveArgs {
     /// The name of the workspace to remove
     pub(crate) name: String,
 
+    /// Delete the archive of this name and its pins, instead of a workspace
+    #[arg(long, conflicts_with_all = ["force", "delete_unmerged"])]
+    pub(crate) archived: bool,
+
     /// Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
     #[arg(long)]
     pub(crate) force: bool,
@@ -568,6 +562,10 @@ pub(crate) struct ListArgs {
     /// Measure each workspace's size on disk and its disposable size, which reads every file of every workspace on the page
     #[arg(long)]
     pub(crate) sizes: bool,
+
+    /// List the archived workspaces instead
+    #[arg(long, conflicts_with = "sizes")]
+    pub(crate) archived: bool,
 }
 
 /// The arguments of `mxv clean`.

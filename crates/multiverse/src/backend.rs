@@ -321,4 +321,108 @@ pub trait Backend {
     ///
     /// Returns the failure of the deletion, such as when the branch moved.
     fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error>;
+
+    /// Writes the reference `reference` at `commit` in the repository at
+    /// `repository`, replacing what it held. The reference keeps the commit
+    /// from garbage collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the update.
+    fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error>;
+
+    /// Fetches the `HEAD` of the clone at `checkout` into the bare `mirror`
+    /// under the reference `reference`, and returns the commit that the
+    /// reference then names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the fetch.
+    fn fetch_head_into_mirror(
+        &self,
+        mirror: &Path,
+        checkout: &Path,
+        reference: &str,
+    ) -> Result<String, Error>;
+
+    /// Deletes the reference `reference` of the repository at `repository`.
+    /// Deleting a reference that does not exist succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the deletion.
+    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error>;
+
+    /// Returns the commit that `revision` names in the repository at
+    /// `repository`, or `None` when it names no commit there.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup, such as a directory that is not a
+    /// repository.
+    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error>;
+
+    /// Stages every change and untracked file of `checkout` that the ignore
+    /// rules do not ignore, and commits them with `message`, without
+    /// running any hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the staging or the commit.
+    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error>;
+
+    /// Returns the commits of `revision` that no remote branch of `origin`
+    /// holds, as the checkout or repository at `dir` last fetched them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error>;
+
+    /// Returns the remote branch that `branch` of the checkout at
+    /// `checkout` tracks, as a reference on the remote such as
+    /// `refs/heads/main`, or `None` when it tracks none.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error>;
+
+    /// Makes `branch` of the checkout at `checkout` track the branch
+    /// `merge`, a reference on `origin` such as `refs/heads/main`. The
+    /// remote branch need not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the config command.
+    fn set_upstream(&self, checkout: &Path, branch: &str, merge: &str) -> Result<(), Error>;
+
+    /// Points the repository's entry of the worktree at `checkout` at that
+    /// directory again, after the directory moved away and back.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the repair.
+    fn repair_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error>;
+
+    /// Creates a worktree of the repository at `checkout` on a detached
+    /// `HEAD` at `commit`, and returns the commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the command that creates the worktree.
+    fn add_detached_checkout(
+        &self,
+        repository: &Path,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<String, Error>;
+
+    /// Checks out `commit` on a detached `HEAD` in the clone at `checkout`,
+    /// writing its files, and returns the commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the checkout.
+    fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error>;
 }

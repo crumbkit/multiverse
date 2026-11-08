@@ -720,6 +720,22 @@ pub(crate) fn stop_all(
     stop_every(&context, &lock, None)
 }
 
+/// Stops every process and container of `workspace`, for a caller that
+/// already holds the workspace's lock as `lock`.
+pub(crate) fn stop_all_locked(
+    environment: &Environment,
+    workspace: &Workspace,
+    lock: &Lock,
+) -> Result<(), crumbkit::Error> {
+    let context = Context {
+        store: Store::new(environment.records()?),
+        runs: environment.runs()?,
+        workspace: workspace.clone(),
+        processes: Vec::new(),
+    };
+    stop_every(&context, lock, None)
+}
+
 /// Removes the stopped containers of the workspace `name`, whose stable id
 /// is `id`, and deletes its run files and logs.
 pub(crate) fn forget(

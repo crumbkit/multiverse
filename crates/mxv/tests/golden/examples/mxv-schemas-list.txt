@@ -11,6 +11,8 @@ mxv/restart/v1            output  document  The restarted processes and their de
 mxv/status/v1             output  document  Each process of the workspace's manifest in start order, then each other process that has run files, with its state, and the manifest's error when it does not parse.
 mxv/logs/v1               output  stream    The last lines of a process's log, then with --follow each line that the process writes.
 mxv/ports-reset/v1        output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
+mxv/archive/v1            output  document  What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.
+mxv/restore/v1            output  document  The workspace that the restore rebuilt and each port that changed, or what it would do on a dry run.
 mxv/remove/v1             output  document  What the run removed, deleted and kept, or would on a dry run.
 mxv/clean/v1              output  document  Each workspace that the run considered, with the disposable directories it deleted, or would delete on a dry run, and the bytes they took, or why it kept them, and a failure for each workspace whose directories could not be deleted.
 mxv/reclaim/v1            output  document  Each workspace that the run considered, with what it stopped or cleaned, or would on a dry run, the bytes that frees, and why the workspace counts as idle or why the run kept it, and a failure for each workspace that could not be measured, stopped or cleaned.

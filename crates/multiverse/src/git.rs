@@ -1089,6 +1089,193 @@ impl Backend for Git {
         .ok("update-ref -d", repository)
         .map(drop)
     }
+
+    fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error> {
+        run(
+            repository,
+            ["update-ref", reference, commit],
+            "update-ref",
+            LOCAL_DEADLINE,
+        )?
+        .ok("update-ref", repository)
+        .map(drop)
+    }
+
+    fn fetch_head_into_mirror(
+        &self,
+        mirror: &Path,
+        checkout: &Path,
+        reference: &str,
+    ) -> Result<String, Error> {
+        let refspec = format!("+HEAD:{reference}");
+        run(
+            mirror,
+            [
+                OsStr::new("fetch"),
+                OsStr::new("--quiet"),
+                OsStr::new("--no-tags"),
+                OsStr::new("--no-auto-gc"),
+                OsStr::new("--no-recurse-submodules"),
+                checkout.as_os_str(),
+                OsStr::new(refspec.as_str()),
+            ],
+            "fetch into mirror",
+            FETCH_DEADLINE,
+        )?
+        .ok("fetch into mirror", mirror)?;
+        let commit = run(
+            mirror,
+            ["rev-parse", "--verify", reference],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-parse", mirror)?;
+        Ok(trimmed(&commit))
+    }
+
+    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error> {
+        run(
+            repository,
+            ["update-ref", "-d", reference],
+            "update-ref -d",
+            LOCAL_DEADLINE,
+        )?
+        .ok("update-ref -d", repository)
+        .map(drop)
+    }
+
+    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error> {
+        let target = format!("{revision}^{{commit}}");
+        let found = run(
+            repository,
+            ["rev-parse", "--verify", "--quiet", target.as_str()],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        Ok(found
+            .status
+            .success()
+            .then(|| trimmed(&found.stdout))
+            .filter(|commit| !commit.is_empty()))
+    }
+
+    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
+        run(checkout, ["add", "--all"], "add", CHECKOUT_DEADLINE)?.ok("add", checkout)?;
+        // `core.hooksPath` turns off every hook, and `--no-verify` alone
+        // would still run `prepare-commit-msg` and `post-commit`. A hook can
+        // fail or change files after mxv read the checkout. A signature can
+        // wait for a passphrase that nobody is there to give.
+        run(
+            checkout,
+            [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "-m",
+                message,
+            ],
+            "commit",
+            CHECKOUT_DEADLINE,
+        )?
+        .ok("commit", checkout)
+        .map(drop)
+    }
+
+    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
+        let listed = run(
+            dir,
+            [
+                "rev-list",
+                revision,
+                "--not",
+                "--remotes=origin",
+                ORIGIN_REFS,
+                "--",
+            ],
+            "rev-list",
+            LOCAL_DEADLINE,
+        )?
+        .ok("rev-list", dir)?;
+        Ok(lines(&listed))
+    }
+
+    fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
+        let key = format!("branch.{branch}.merge");
+        let found = run(
+            checkout,
+            ["config", "--get", key.as_str()],
+            "config",
+            LOCAL_DEADLINE,
+        )?;
+        Ok(found
+            .status
+            .success()
+            .then(|| trimmed(&found.stdout))
+            .filter(|merge| !merge.is_empty()))
+    }
+
+    fn set_upstream(&self, checkout: &Path, branch: &str, merge: &str) -> Result<(), Error> {
+        let remote = format!("branch.{branch}.remote");
+        let tracked = format!("branch.{branch}.merge");
+        for (key, value) in [(remote.as_str(), "origin"), (tracked.as_str(), merge)] {
+            run(checkout, ["config", key, value], "config", LOCAL_DEADLINE)?
+                .ok("config", checkout)?;
+        }
+        Ok(())
+    }
+
+    fn repair_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error> {
+        run(
+            repository,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("repair"),
+                checkout.as_os_str(),
+            ],
+            "worktree repair",
+            LOCAL_DEADLINE,
+        )?
+        .ok("worktree repair", repository)
+        .map(drop)
+    }
+
+    fn add_detached_checkout(
+        &self,
+        repository: &Path,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<String, Error> {
+        run(
+            repository,
+            [
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--quiet"),
+                OsStr::new("--detach"),
+                checkout.as_os_str(),
+                OsStr::new(commit),
+            ],
+            "worktree add",
+            CHECKOUT_DEADLINE,
+        )?
+        .ok("worktree add", repository)?;
+        Ok(commit.to_owned())
+    }
+
+    fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error> {
+        run(
+            checkout,
+            ["checkout", "--quiet", "--detach", commit, "--"],
+            "checkout",
+            CHECKOUT_DEADLINE,
+        )?
+        .ok("checkout", checkout)?;
+        Ok(commit.to_owned())
+    }
 }
 
 /// Returns the entry for `checkout` in `listed`, the output of

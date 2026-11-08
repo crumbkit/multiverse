@@ -796,6 +796,49 @@ impl Backend for Scripted {
         (self.before_delete)(repository);
         Git.delete_branch_at(repository, branch, commit)
     }
+    fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error> {
+        Git.write_ref(repository, reference, commit)
+    }
+    fn fetch_head_into_mirror(
+        &self,
+        mirror: &Path,
+        checkout: &Path,
+        reference: &str,
+    ) -> Result<String, Error> {
+        Git.fetch_head_into_mirror(mirror, checkout, reference)
+    }
+    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error> {
+        Git.delete_ref(repository, reference)
+    }
+    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error> {
+        Git.resolve_commit(repository, revision)
+    }
+    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
+        Git.commit_all(checkout, message)
+    }
+    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
+        Git.local_only_commits(dir, revision)
+    }
+    fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
+        Git.upstream(checkout, branch)
+    }
+    fn set_upstream(&self, checkout: &Path, branch: &str, merge: &str) -> Result<(), Error> {
+        Git.set_upstream(checkout, branch, merge)
+    }
+    fn repair_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error> {
+        Git.repair_checkout(repository, checkout)
+    }
+    fn add_detached_checkout(
+        &self,
+        repository: &Path,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<String, Error> {
+        Git.add_detached_checkout(repository, checkout, commit)
+    }
+    fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error> {
+        Git.detach_head(checkout, commit)
+    }
 }
 
 /// Returns workspaces whose backend is `backend`, with the root and store

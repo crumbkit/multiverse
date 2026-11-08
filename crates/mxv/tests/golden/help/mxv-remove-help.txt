@@ -7,6 +7,9 @@ Arguments:
           The name of the workspace to remove
 
 Options:
+      --archived
+          Delete the archive of this name and its pins, instead of a workspace
+
       --force
           Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
 

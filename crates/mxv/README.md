@@ -1316,6 +1316,88 @@ branch that it had not deleted yet, so `mxv remove` can run again:
   `--force`, mxv deletes what is left by file descriptor and runs
   `git worktree prune`, which drops the repository's entry for it.
 
+## Archiving a workspace
+
+`mxv archive [-w WORKSPACE]` removes a workspace's directory and name and
+keeps what `mxv restore NAME` needs to rebuild it at the same commits, on the
+same branches, with the same stable id. Use it for work that you may want
+back; `mxv remove` is for work that you do not.
+
+An archive keeps three things. Each checkout's `HEAD` commit stays reachable
+through a reference, `refs/mxv/archives/<archive id>/<folder>`, in the
+worktree's repository or the clone's mirror. The directory
+`$XDG_STATE_HOME/mxv/archives/<name>`, which only you can read, holds the
+record `archive.json`, the workspace manifest and a copy of each extra file
+in the workspace's directory. Docker volumes stay under the workspace's stable
+id, so `mxv up` finds them after a restore, and `--delete-volumes` deletes
+them instead.
+
+Archives have no expiry, and `mxv clean` never touches one. `mxv list
+--archived` lists them with each one's age and the number of commits that
+exist only on this machine. `mxv remove --archived NAME` deletes an archive
+and its references, and `--delete-volumes` on that command also deletes its
+docker volumes.
+
+mxv never pushes. The result of an archive lists each commit that no remote
+branch of `origin` holds, and those commits exist only on this machine until
+you push them.
+
+### What refuses an archive
+
+`mxv archive` refuses with `mxv::archive::unsaved_work`, changes nothing and
+lists every item in these cases:
+
+- A checkout holds uncommitted changes or untracked files. `--wip` commits
+  them onto the branch with the message `wip: archived by mxv`, skipping
+  hooks. `--force` loses them.
+- A checkout holds an ignored file outside the disposable set, such as a
+  `.env`. `--wip` does not touch ignored files, so a secret never enters an
+  archive. Move the file or pass `--force`, which loses it.
+- A clone holds a stash, or a commit that `origin` does not hold and `HEAD`
+  does not reach. `--force` loses it.
+- The workspace's directory holds a file that mxv cannot copy, such as a
+  socket.
+
+The archive record lists what `--force` lost. The workspace's processes and
+containers stop after you confirm. A process outside phase whose working
+directory is in the workspace refuses the archive with
+`mxv::archive::in_use`. The shell that runs `mxv archive` does not count,
+and a background job of that shell does.
+
+mxv retires each checkout by renaming it aside, reading its git state and
+its paths again in the new place, and comparing them with what the archive
+admitted. When anything differs, mxv puts the checkout back, keeps the record
+and refuses with `mxv::archive::source_changed`. An archive that stops
+partway shows in `mxv list` as a row with a problem, and the same `mxv
+archive -w NAME` finishes it.
+
+When the current directory was inside the workspace, the last line of the
+result names a directory to change to.
+
+### Restoring
+
+`mxv restore NAME` rebuilds each checkout at its pinned commit on its recorded
+branch, writes the manifest and the extra files back, keeps each recorded host
+port that is still free and replaces any other, says which ports changed, and
+deletes the archive and its references. It starts no process; `mxv up` does.
+A restore that fails deletes what it made and keeps the archive.
+
+A clone tracks the remote branch that it tracked when it was archived. A clone
+that tracked none tracks the branch that it started from. A checkout that had
+a detached `HEAD` comes back detached. A mirror that has gone is cloned again
+from the recorded origin.
+
+A restore refuses, and builds nothing, with these codes:
+
+| Code | Cause |
+| --- | --- |
+| `mxv::restore::not_found` | No archive has the name. |
+| `mxv::restore::name_taken` | A workspace holds the name, or something exists at the recorded path. |
+| `mxv::restore::branch_moved` | A worktree's branch points at another commit than the archive pinned. |
+| `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
+| `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |
+| `mxv::restore::root_file_changed` | A file of the archive differs from its recorded digest. |
+
 ## Disk space
 
 Build output, such as Rust's `target/` and Node's `node_modules/`, takes
@@ -1639,9 +1721,6 @@ When mxv finds no home directory at all, a workspace command fails with
 waiting.
 
 ## Not built yet
-
-`mxv archive` and `mxv restore` are declared and fail with
-`mxv::command::unbuilt` until the pull request that builds each one.
 
 mxv has no verb yet that runs one command with a workspace's service
 variables, such as a test runner or a script. A process that needs the

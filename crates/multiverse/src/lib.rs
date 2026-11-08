@@ -19,6 +19,7 @@
 //! The library reads no environment variable. Its caller passes the root
 //! directory of the workspaces and the directory of the store.
 
+mod archive;
 mod backend;
 mod clock;
 mod clone;
@@ -43,6 +44,12 @@ mod store;
 mod template;
 mod workspaces;
 
+pub use crate::archive::{
+    ARCHIVE_VERSION, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
+    ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout, ArchivedRemoval, Archives,
+    PortChange, RestoreOutcome, RestorePlan, RestorePlanned, RestoreRefusal, Restored, RootEntry,
+    RootKind, Unsaved, WIP_MESSAGE,
+};
 pub use crate::backend::{Backend, Changes, Head, INITIALIZING, Listed, Repository};
 pub use crate::clock::FOLLOW_INTERVAL;
 pub use crate::clone::{Cloned, UNSUPPORTED};

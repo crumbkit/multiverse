@@ -173,7 +173,7 @@ fn resolved(path: &Path) -> Option<String> {
 /// [`encoded`] describes, with the last `.` of a `.git` or `.lock` ending
 /// encoded as well, so the directory is never a mirror or a mirror's
 /// lock.
-fn directory(component: &str) -> String {
+pub(crate) fn directory(component: &str) -> String {
     let text = encoded(component);
     for ending in [".git", ".lock"] {
         if let Some(stem) = text.strip_suffix(ending) {

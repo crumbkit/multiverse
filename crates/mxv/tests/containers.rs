@@ -391,6 +391,49 @@ fn up_runs_a_container_on_the_loopback_address_and_down_removes_it_and_keeps_its
 }
 
 #[test]
+fn a_restored_workspace_keeps_its_stable_id_and_finds_its_volume_again() {
+    if !docker_runs("a_restored_workspace_keeps_its_stable_id") {
+        return;
+    }
+    let name = "mxvtest-archive-volume";
+    let setup = Setup::new(name, &web());
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let id = setup.workspace_id().unwrap();
+    let volume = setup.volume_name("srv");
+    let mount = format!("{volume}:/data");
+    let (wrote, _) = docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &mount,
+        IMAGE,
+        "sh",
+        "-c",
+        "echo kept > /data/marker",
+    ]);
+    assert!(wrote);
+    let (exit, document) = setup.json(&["archive", "-w", name, "--wip", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["stopped"][0], "web", "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &volume]);
+    assert!(kept, "the archive keeps the volume: {document}");
+    let (exit, document) = setup.json(&["restore", name, "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.workspace_id().unwrap(), id);
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.volumes(), std::slice::from_ref(&volume));
+    let (read, text) = docker(&["run", "--rm", "-v", &mount, IMAGE, "cat", "/data/marker"]);
+    assert!(read);
+    assert_eq!(text, "kept");
+    let (exit, document) = setup.json(&["archive", "-w", name, "--delete-volumes", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &volume]);
+    assert!(!kept, "--delete-volumes deletes the volume: {document}");
+}
+
+#[test]
 fn a_process_that_depends_on_a_container_starts_after_it_and_receives_its_port() {
     if !docker_runs("a_process_that_depends_on_a_container") {
         return;

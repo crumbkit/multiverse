@@ -7,6 +7,15 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv archive` removes a workspace's directory and name and keeps each
+  checkout's commit in a reference under `refs/mxv/archives/`, and
+  `mxv restore` rebuilds the workspace at those commits with the same stable
+  id, so its docker volumes attach again. `mxv list --archived` lists the
+  archives and `mxv remove --archived NAME` deletes one. mxv writes archives
+  to `$XDG_STATE_HOME/mxv/archives`, and a tool that read the failure code
+  `mxv::command::unbuilt` no longer sees it. The JSON document of `mxv list`
+  has the new fields `archived` and `local_only`, and the document of
+  `mxv remove` has the new field `pins`.
 - mxv-phase has a `sandbox` feature, on by default, that applies the
   operating system's sandbox through nono. A program that links mxv-phase
   with `default-features = false` builds without nono, and with it without

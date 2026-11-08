@@ -1,4 +1,4 @@
-mxv has 24 opt-outs from the conventions.
+mxv has 20 opt-outs from the conventions.
 
 examples/run: mxv up
   Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
@@ -30,12 +30,7 @@ examples/run: mxv add
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
 
 examples/run: mxv archive
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
-  Cost: The examples are not run, so help can show an example that fails.
-  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-examples/run: mxv restore
-  Reason: The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.
+  Reason: The example archives a live workspace, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/archive.rs runs the verb.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
 
@@ -48,16 +43,6 @@ examples/run: mxv self figures list
   Reason: The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-guide/document: mxv archive
-  Reason: The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.
-  Cost: Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.
-  Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
-
-guide/document: mxv restore
-  Reason: The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.
-  Cost: Help offers every view flag on the command, and crumbkit cannot refuse a flag that the output cannot use before the change happens, so the tool's own output decides what the flag does.
-  Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
 
 effects/yes: mxv down
   Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
@@ -79,10 +64,6 @@ examples/run: mxv ports reset
   Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
-
-twins/no-twin: mxv archive
-  Reason: Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.
-  Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
 twins/no-twin: mxv show reading-list
   Reason: The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.
