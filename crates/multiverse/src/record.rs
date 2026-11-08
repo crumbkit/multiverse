@@ -160,6 +160,24 @@ impl Reclaimed {
     pub const fn new(processes: Vec<String>) -> Self {
         Self { processes }
     }
+
+    /// Returns the mark that is left once `mxv up`, `restart` or `down`
+    /// has started or stopped the processes `names`, or every process when
+    /// `names` is empty: the processes that are still to start, or `None`
+    /// when none is.
+    #[must_use]
+    pub fn without(&self, names: &[String]) -> Option<Self> {
+        if names.is_empty() {
+            return None;
+        }
+        let processes: Vec<String> = self
+            .processes
+            .iter()
+            .filter(|process| !names.contains(process))
+            .cloned()
+            .collect();
+        (!processes.is_empty()).then_some(Self { processes })
+    }
 }
 
 impl Workspace {

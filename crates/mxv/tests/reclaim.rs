@@ -74,6 +74,18 @@ impl Setup {
         setup
     }
 
+    /// Writes the config file with `age` as both idle ages, which may be
+    /// shorter than the shortest age that `--idle` accepts.
+    fn idle_age(&self, age: &str) {
+        write(
+            &self.root().join("config/mxv/config.toml"),
+            &format!(
+                "{}stop_idle = \"{age}\"\nclean_idle = \"{age}\"\n",
+                self._ports.config_line()
+            ),
+        );
+    }
+
     fn root(&self) -> PathBuf {
         self.dir.path().canonicalize().unwrap()
     }
@@ -186,6 +198,7 @@ fn row<'a>(document: &'a Value, name: &str) -> &'a Value {
 /// two seconds only `idle` is idle.
 fn active_and_idle() -> Setup {
     let setup = Setup::new();
+    setup.idle_age("2s");
     setup.running("active");
     setup.running("idle");
     wait(Duration::from_secs(3));
@@ -196,14 +209,7 @@ fn active_and_idle() -> Setup {
 #[test]
 fn a_dry_run_names_only_the_idle_workspace_and_stops_nothing() {
     let setup = active_and_idle();
-    let (exit, document) = setup.json(&[
-        "reclaim",
-        "--need",
-        "memory=1K",
-        "--idle",
-        "2s",
-        "--dry-run",
-    ]);
+    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K", "--dry-run"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["schema"], "mxv/reclaim/v1");
     let idle = row(&document, "idle");
@@ -223,7 +229,7 @@ fn a_dry_run_names_only_the_idle_workspace_and_stops_nothing() {
 #[test]
 fn reclaim_stops_the_idle_workspace_and_marks_it_and_up_starts_it_again() {
     let setup = active_and_idle();
-    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K", "--idle", "2s"]);
+    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(row(&document, "idle")["state"], "stopped", "{document}");
     assert_eq!(row(&document, "active")["state"], "kept", "{document}");
@@ -246,9 +252,10 @@ fn reclaim_stops_the_idle_workspace_and_marks_it_and_up_starts_it_again() {
 #[test]
 fn a_process_outside_phase_that_works_in_a_workspace_keeps_it_running() {
     let mut setup = Setup::new();
+    setup.idle_age("0s");
     let checkout = setup.running("busy");
     let pid = setup.shell_in(&checkout);
-    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K", "--idle", "0s"]);
+    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
     assert_eq!(exit, 0, "{document}");
     let busy = row(&document, "busy");
     assert_eq!(busy["state"], "kept", "{document}");
@@ -260,11 +267,12 @@ fn a_process_outside_phase_that_works_in_a_workspace_keeps_it_running() {
 #[test]
 fn a_pinned_workspace_is_never_chosen_until_it_is_unpinned() {
     let setup = Setup::new();
+    setup.idle_age("0s");
     setup.running("kept");
     let (exit, document) = setup.json(&["pin", "-w", "kept"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"]["pinned"], true, "{document}");
-    let (_, document) = setup.json(&["reclaim", "--need", "memory=1K", "--idle", "0s"]);
+    let (_, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
     let kept = row(&document, "kept");
     assert_eq!(kept["state"], "kept", "{document}");
     assert!(
@@ -275,7 +283,7 @@ fn a_pinned_workspace_is_never_chosen_until_it_is_unpinned() {
     let (exit, document) = setup.json(&["unpin", "-w", "kept"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"]["pinned"], false, "{document}");
-    let (_, document) = setup.json(&["reclaim", "--need", "memory=1K", "--idle", "0s"]);
+    let (_, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
     assert_eq!(row(&document, "kept")["state"], "stopped", "{document}");
     assert_eq!(setup.state("kept"), "stopped");
 }
@@ -283,9 +291,10 @@ fn a_pinned_workspace_is_never_chosen_until_it_is_unpinned() {
 #[test]
 fn a_disk_need_cleans_the_build_output_of_idle_workspaces_and_reports_what_it_freed() {
     let setup = Setup::new();
+    setup.idle_age("0s");
     let checkout = setup.workspace("built");
     write(&checkout.join("target/debug/app"), &"x".repeat(64 * 1024));
-    let (exit, document) = setup.json(&["reclaim", "--need", "disk=1K", "--idle", "0s"]);
+    let (exit, document) = setup.json(&["reclaim", "--need", "disk=1K"]);
     assert_eq!(exit, 0, "{document}");
     let built = row(&document, "built");
     assert_eq!(built["state"], "cleaned", "{document}");
@@ -307,4 +316,16 @@ fn a_need_without_a_resource_or_a_size_is_refused() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn an_idle_age_under_ten_minutes_on_the_command_line_is_refused() {
+    let setup = Setup::new();
+    let output = setup
+        .command(&["reclaim", "--need", "memory=1K", "--idle", "5m"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("shorter than 10m"), "{stderr}");
 }

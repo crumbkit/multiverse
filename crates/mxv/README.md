@@ -1495,25 +1495,44 @@ A running workspace is idle when all of these hold:
 - No mxv command named the workspace within the idle age. `up`, `down`,
   `restart`, `status`, `logs`, `exec`, `ports reset`, `show`, `cd`, `add`,
   `pin` and `unpin` record the time in the file `.touched` of the
-  workspace's run directory. `clean` and `reclaim` do not.
+  workspace's run directory. `exec` and `logs --follow` record it again
+  every 5 minutes while they run. `clean` and `reclaim` do not record it.
 
 The idle age is `--idle`, or else the config file's `stop_idle`, or else 2
-hours. A workspace whose processes and containers all stopped is not
-considered.
+hours. `--idle` refuses an age under 10 minutes, so a workspace that a
+person left for a few minutes is never stopped; `stop_idle` can set a
+shorter age, for tests. A workspace whose processes and containers all
+stopped is not considered. mxv reads `.touched` first, and skips reading
+the checkouts' files of a workspace that an mxv command named within the
+idle age.
+
+mxv measures idle time on the wall clock. Time that the machine spends
+asleep counts as idle time, so a workspace can be idle as soon as the
+machine wakes. When the clock moves back, a workspace whose recorded
+times now lie ahead of the clock counts as in use until the clock passes
+them.
 
 mxv measures the resident memory of each idle workspace: the resident
 bytes of the processes that phase runs for it, from the process table, and
-of its containers, from `docker stats`. It stops the idle workspaces that
+of its containers, from `docker stats`. On Linux both count towards the
+need. On macOS containers run in Docker Desktop's virtual machine, which
+keeps the memory that stopped containers free for a while, so mxv reports
+their memory in the `containers` column and leaves it out of `freed`. It stops the idle workspaces that
 were active least recently first, one by one, until the bytes of those it
 stopped cover the need, or until none is left. A workspace whose memory
 mxv cannot measure frees nothing and is never stopped. Each stop is the
-stop of `mxv down`, made while mxv holds the workspace's lock. Just before
-it stops a workspace, mxv reads the record again, and keeps the workspace
-when it became pinned or an mxv command named it since mxv measured it.
+stop of `mxv down`, made while mxv holds the workspace's lock. Under the
+lock, just before it stops a workspace, mxv checks again: it reads the
+record, the process table and the checkouts' last change again, and keeps
+the workspace when it became pinned, an mxv command named it, a process
+outside phase started working in it, its checkouts changed, or its
+processes stopped since mxv measured it.
 
 mxv marks each workspace that it stopped with the processes and containers
 that ran. `mxv status` reports the mark in `reclaimed`, and `mxv up` without
 names starts those processes and containers again and removes the mark.
+`mxv up` with names, `mxv restart` and `mxv down` remove only the names
+that they start or stop, or the whole mark when they name none.
 `mxv down` removes it too. `--dry-run` reports the choice and stops
 nothing.
 

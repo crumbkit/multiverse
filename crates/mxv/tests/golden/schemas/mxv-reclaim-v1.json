@@ -413,7 +413,13 @@
           "$ref": "#/$defs/ReclaimState"
         },
         "freed": {
-          "description": "The bytes that the run freed, or would free on a dry run, which is\n0 for a workspace that it kept. For memory it is the resident\nmemory of the workspace's processes and containers, measured\nbefore the stop.",
+          "description": "The bytes that the run freed, or would free on a dry run, which is\n0 for a workspace that it kept. For memory it is the resident\nmemory of the workspace's processes, measured before the stop, and\non Linux of its containers too.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "containers": {
+          "description": "For memory, the resident memory of the workspace's containers,\nmeasured before the stop, and 0 for a workspace that the run kept\nor a disk need. On macOS Docker Desktop's virtual machine keeps the\nmemory that stopped containers free for a while, so freed leaves it\nout there.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -438,6 +444,7 @@
         "name",
         "state",
         "freed",
+        "containers",
         "active",
         "reason"
       ]

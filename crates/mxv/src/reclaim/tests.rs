@@ -3,7 +3,10 @@ use std::time::{Duration, SystemTime};
 
 use multiverse::phase::host::TableEntry;
 
-use super::{Facts, Need, Verdict, choose, idle, owned, parse_need, users};
+use super::{
+    Facts, MIN_IDLE, Need, Verdict, choose, counted, idle, owned, parse_idle, parse_need, recheck,
+    users, walks,
+};
 
 const HOUR: Duration = Duration::from_secs(60 * 60);
 
@@ -165,4 +168,101 @@ fn a_need_names_memory_or_disk_and_a_size() {
     assert!(parse_need("cpu=1K").unwrap_err().contains("memory=<SIZE>"));
     assert!(parse_need("memory").is_err());
     assert!(parse_need("memory=lots").is_err());
+}
+
+/// The facts of a workspace that mxv measured as idle three hours after
+/// it was last named, read again under its lock.
+fn still_idle(now: SystemTime) -> Facts {
+    facts(ago(now, 5), ago(now, 3))
+}
+
+#[test]
+fn the_check_under_the_lock_lets_a_workspace_that_is_still_idle_stop() {
+    let now = SystemTime::now();
+    let facts = still_idle(now);
+    assert_eq!(recheck(Some(&facts), facts.touched, now, 2 * HOUR), None);
+}
+
+#[test]
+fn the_check_under_the_lock_keeps_a_workspace_whose_processes_stopped_after_mxv_measured_it() {
+    let now = SystemTime::now();
+    let reason = recheck(None, ago(now, 3), now, 2 * HOUR).unwrap();
+    assert!(reason.contains("stopped before mxv reached it"), "{reason}");
+}
+
+#[test]
+fn the_check_under_the_lock_keeps_a_workspace_pinned_after_mxv_measured_it() {
+    let now = SystemTime::now();
+    let mut facts = still_idle(now);
+    facts.pinned = true;
+    let reason = recheck(Some(&facts), ago(now, 3), now, 2 * HOUR).unwrap();
+    assert!(reason.contains("pinned after mxv measured it"), "{reason}");
+}
+
+#[test]
+fn the_check_under_the_lock_keeps_a_workspace_that_an_mxv_command_named_after_mxv_measured_it() {
+    let now = SystemTime::now();
+    let facts = still_idle(now);
+    let reason = recheck(Some(&facts), ago(now, 4), now, 2 * HOUR).unwrap();
+    assert!(
+        reason.contains("named it after mxv measured it"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn the_check_under_the_lock_keeps_a_workspace_that_a_process_outside_phase_started_working_in() {
+    let now = SystemTime::now();
+    let mut facts = still_idle(now);
+    facts.users = vec![(4242, PathBuf::from("/work/triage/app"))];
+    let reason = recheck(Some(&facts), facts.touched, now, 2 * HOUR).unwrap();
+    assert!(reason.contains("process 4242 outside phase"), "{reason}");
+    assert!(
+        reason.contains("checked again under the workspace's lock"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn the_check_under_the_lock_keeps_a_workspace_whose_checkouts_changed_after_mxv_measured_it() {
+    let now = SystemTime::now();
+    let mut facts = still_idle(now);
+    facts.modified = Some(now - Duration::from_secs(30));
+    let reason = recheck(Some(&facts), facts.touched, now, 2 * HOUR).unwrap();
+    assert!(reason.contains("its checkouts changed"), "{reason}");
+    assert!(
+        reason.contains("checked again under the workspace's lock"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_workspace_named_within_the_idle_age_is_kept_without_walking_its_checkouts() {
+    let now = SystemTime::now();
+    assert!(!walks(&facts(None, ago(now, 1)), now, 2 * HOUR));
+    assert!(walks(&facts(None, ago(now, 3)), now, 2 * HOUR));
+    assert!(walks(&facts(None, None), now, 2 * HOUR));
+    let mut pinned = facts(None, None);
+    pinned.pinned = true;
+    assert!(!walks(&pinned, now, 2 * HOUR));
+    let mut used = facts(None, None);
+    used.users = vec![(4242, PathBuf::from("/work/triage/app"))];
+    assert!(!walks(&used, now, 2 * HOUR));
+}
+
+#[test]
+fn container_memory_counts_towards_the_need_only_where_stopping_returns_it_to_the_host() {
+    assert_eq!(counted(100, 50, true), 150);
+    assert_eq!(counted(100, 50, false), 100);
+}
+
+#[test]
+fn an_idle_age_under_ten_minutes_is_refused() {
+    assert_eq!(MIN_IDLE, Duration::from_secs(10 * 60));
+    assert_eq!(parse_idle("10m"), Ok(MIN_IDLE));
+    assert_eq!(parse_idle("2h"), Ok(2 * HOUR));
+    let refusal = parse_idle("9m").unwrap_err();
+    assert!(refusal.contains("10m"), "{refusal}");
+    assert!(refusal.contains("stop_idle"), "{refusal}");
+    assert!(parse_idle("0s").is_err());
 }

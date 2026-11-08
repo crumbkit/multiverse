@@ -30,6 +30,7 @@ use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
@@ -487,6 +488,25 @@ const TOUCHED_FILE: &str = ".touched";
 /// `<PHASE_DIR>/runs/<workspace-id>.json`, apart from mxv's records.
 const PHASE_DIR: &str = "phase";
 
+/// The keeper that [`Runs::keep_touched`] starts, which touches a
+/// workspace until it is dropped.
+#[derive(Debug)]
+pub struct Toucher {
+    /// Dropping it tells the thread to stop.
+    stop: Option<mpsc::Sender<()>>,
+    /// The thread that touches the workspace.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Toucher {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// The run files of every workspace's processes, under one directory.
 #[derive(Clone, Debug)]
 pub struct Runs {
@@ -620,6 +640,32 @@ impl Runs {
     /// Returns [`Error::Unwritable`] when the file cannot be written.
     pub fn touch(&self, name: &WorkspaceName) -> Result<(), Error> {
         store::touch_file(&self.workspace_dir(name).join(TOUCHED_FILE))
+    }
+
+    /// Touches the workspace `name` now and again every `every` until the
+    /// returned [`Toucher`] is dropped, for a command that runs as long as
+    /// a person uses it, such as `mxv exec` or `mxv logs --follow`. A touch
+    /// that cannot be written is skipped, as for [`Runs::touch`].
+    #[must_use]
+    pub fn keep_touched(&self, name: &WorkspaceName, every: Duration) -> Toucher {
+        let _ = self.touch(name);
+        let (stop, stopped) = mpsc::channel::<()>();
+        let runs = self.clone();
+        let name = name.clone();
+        // A keeper that cannot start leaves the workspace touched once, at
+        // the start of the command.
+        let thread = std::thread::Builder::new()
+            .name("mxv-touch".to_owned())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(every) {
+                    let _ = runs.touch(&name);
+                }
+            })
+            .ok();
+        Toucher {
+            stop: Some(stop),
+            thread,
+        }
     }
 
     /// Returns when an mxv command last named the workspace `name`, as

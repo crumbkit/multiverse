@@ -267,6 +267,11 @@ fn run(environment: &Environment, args: &ExecArgs) -> Result<(ExitStatus, bool),
             .into());
         }
     };
+    // A person who runs a command in a workspace is using it, so mxv
+    // touches it while the command runs.
+    let _toucher = context
+        .runs
+        .keep_touched(&context.workspace.name, processes::TOUCH_EVERY);
     let (end, caught) = hand_over(exec, args.command.clone()).map_err(MxvFailure::from)?;
     Ok((ended(&workspace, &args.process, end)?, caught))
 }

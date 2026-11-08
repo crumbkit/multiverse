@@ -429,3 +429,17 @@ fn a_pin_and_a_reclaim_mark_read_back_and_an_older_record_has_neither() {
         Some(vec!["server".to_owned(), "worker".to_owned()])
     );
 }
+
+#[test]
+fn a_start_of_named_processes_leaves_the_rest_of_a_reclaim_mark() {
+    let mark = crate::record::Reclaimed::new(vec!["server".to_owned(), "worker".to_owned()]);
+    assert_eq!(
+        mark.without(&["server".to_owned()]),
+        Some(crate::record::Reclaimed::new(vec!["worker".to_owned()]))
+    );
+    assert_eq!(
+        mark.without(&["server".to_owned(), "worker".to_owned()]),
+        None
+    );
+    assert_eq!(mark.without(&[]), None);
+}

@@ -11,7 +11,7 @@ use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
 
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
-use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_need};
+use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
 use crate::units::parse_age;
 use crate::verbs::{ADD, CD, LIST, NEW, REMOVE, SHOW};
 
@@ -268,7 +268,7 @@ pub(crate) enum Verb {
     Clean(CleanArgs),
     /// Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
     ///
-    /// With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes and containers, measured before the stop, covers the need, or until none is left. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+    /// With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
     Reclaim(ReclaimArgs),
     /// Keep mxv reclaim from stopping a workspace.
     Pin(PinArgs),
@@ -616,8 +616,8 @@ pub(crate) struct ReclaimArgs {
     #[arg(long, value_name = "NEED", value_parser = parse_need)]
     pub(crate) need: Need,
 
-    /// How long a workspace must go unused to count as idle, such as 2h or 0s; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
-    #[arg(long, value_name = "AGE", value_parser = parse_age)]
+    /// How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
+    #[arg(long, value_name = "AGE", value_parser = parse_idle)]
     pub(crate) idle: Option<std::time::Duration>,
 
     /// Print what the command would stop or delete, and change nothing.

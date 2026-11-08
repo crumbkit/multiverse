@@ -480,3 +480,25 @@ fn a_touch_records_when_an_mxv_command_last_named_the_workspace() {
     assert!(touched >= before, "{touched:?}");
     assert!(runs.recorded(&name).unwrap().is_empty());
 }
+
+#[test]
+fn a_keeper_touches_the_workspace_again_until_it_is_dropped() {
+    let setup = Setup::new();
+    let runs = setup.runs();
+    let name: WorkspaceName = "triage".parse().unwrap();
+    let keeper = runs.keep_touched(&name, Duration::from_millis(20));
+    let first = runs.touched(&name).unwrap();
+    let later = (0..250).find_map(|_| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test lets real time pass, because the keeper touches on a real clock"
+        )]
+        std::thread::sleep(Duration::from_millis(20));
+        runs.touched(&name).filter(|touched| *touched > first)
+    });
+    assert!(
+        later.is_some(),
+        "the keeper did not touch the workspace again"
+    );
+    drop(keeper);
+}

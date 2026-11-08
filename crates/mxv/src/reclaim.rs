@@ -26,7 +26,7 @@ use std::time::{Duration, SystemTime};
 
 use crumbkit::{Age, Batch, Document, Output, Prose, Row};
 use multiverse::phase::host::TableEntry;
-use multiverse::{Git, Runs, Workspace, Workspaces};
+use multiverse::{Footprint, Git, Runs, Workspace, Workspaces};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -35,7 +35,7 @@ use crate::cli::{PinArgs, ReclaimArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
-use crate::units::{Size, parse_size};
+use crate::units::{Size, parse_age, parse_size};
 use crate::verbs::configured;
 
 #[cfg(test)]
@@ -44,6 +44,47 @@ mod tests;
 /// The idle age of a running workspace when neither `--idle` nor the
 /// config file's `stop_idle` sets one: two hours.
 pub(crate) const DEFAULT_STOP_IDLE: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// The shortest idle age that `--idle` accepts: ten minutes. A shorter
+/// one would stop a workspace that a person left for a few minutes. The
+/// config file's `stop_idle` and `clean_idle` may set a shorter age, for
+/// tests.
+pub(crate) const MIN_IDLE: Duration = Duration::from_secs(10 * 60);
+
+/// Whether stopping a container returns its resident memory to the host
+/// at once. On macOS containers run in Docker Desktop's virtual machine,
+/// which keeps the memory that they free for a while, so mxv reports
+/// their memory and does not count it towards a need.
+const CONTAINERS_RETURN_MEMORY: bool = !cfg!(target_os = "macos");
+
+/// Returns the idle age that `text` names for `--idle`, which is at least
+/// [`MIN_IDLE`].
+///
+/// # Errors
+///
+/// Returns the reason that `text` is not an age or is shorter than
+/// [`MIN_IDLE`].
+pub(crate) fn parse_idle(text: &str) -> Result<Duration, String> {
+    let age = parse_age(text)?;
+    if age < MIN_IDLE {
+        return Err(format!(
+            "{text:?} is shorter than 10m, the shortest idle age that --idle accepts; stop_idle and clean_idle in the config file can set a shorter one"
+        ));
+    }
+    Ok(age)
+}
+
+/// Returns the bytes that stopping a workspace frees towards a need: the
+/// resident memory of its processes, `processes`, and of its containers,
+/// `containers`, when `containers_count` says that stopping a container
+/// returns its memory to the host.
+pub(crate) const fn counted(processes: u64, containers: u64, containers_count: bool) -> u64 {
+    if containers_count {
+        processes.saturating_add(containers)
+    } else {
+        processes
+    }
+}
 
 /// The document that `mxv reclaim` prints.
 pub(crate) const RECLAIM: Document<Batch<ReclaimRow, crumbkit::Error>> = Document::new(
@@ -125,9 +166,15 @@ pub(crate) struct ReclaimRow {
     state: ReclaimState,
     /// The bytes that the run freed, or would free on a dry run, which is
     /// 0 for a workspace that it kept. For memory it is the resident
-    /// memory of the workspace's processes and containers, measured
-    /// before the stop.
+    /// memory of the workspace's processes, measured before the stop, and
+    /// on Linux of its containers too.
     freed: Size,
+    /// For memory, the resident memory of the workspace's containers,
+    /// measured before the stop, and 0 for a workspace that the run kept
+    /// or a disk need. On macOS Docker Desktop's virtual machine keeps the
+    /// memory that stopped containers free for a while, so freed leaves it
+    /// out there.
+    containers: Size,
     /// How long ago the workspace was last active: its checkouts changed
     /// or an mxv command named it. It is null when neither happened, and
     /// for a workspace that the run kept without measuring.
@@ -138,7 +185,8 @@ pub(crate) struct ReclaimRow {
 }
 
 impl Row for ReclaimRow {
-    const COLUMNS: &'static [&'static str] = &["name", "state", "freed", "active", "reason"];
+    const COLUMNS: &'static [&'static str] =
+        &["name", "state", "freed", "containers", "active", "reason"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -239,6 +287,47 @@ pub(crate) fn idle(facts: &Facts, now: SystemTime, stop_idle: Duration) -> Verdi
     Verdict::Idle {
         active: facts.modified.max(facts.touched),
         why: format!("{unchanged}, {untouched}, and no process outside phase works in it"),
+    }
+}
+
+/// Returns whether measuring the workspace that `facts` describes must
+/// walk its checkouts for when they last changed, which reads each of
+/// their files. A workspace that is pinned, that a process outside phase
+/// works in, or that an mxv command named within the idle age `stop_idle`
+/// at `now` is in use whatever the walk finds, so it skips the walk.
+pub(crate) fn walks(facts: &Facts, now: SystemTime, stop_idle: Duration) -> bool {
+    let named_recently = matches!(
+        elapsed(facts.touched, now, "an mxv command named it"),
+        Ok(Some(named)) if named < stop_idle
+    );
+    !facts.pinned && facts.users.is_empty() && !named_recently
+}
+
+/// Returns why a workspace that a run measured as idle must not stop, from
+/// `facts`, which mxv read again under the workspace's lock, or `None`
+/// when it is still idle. `facts` is `None` when nothing of the workspace
+/// runs any longer. `touched` is when an mxv command last named it, as the
+/// run read it, and `now` and `stop_idle` are the time and the idle age.
+pub(crate) fn recheck(
+    facts: Option<&Facts>,
+    touched: Option<SystemTime>,
+    now: SystemTime,
+    stop_idle: Duration,
+) -> Option<String> {
+    let Some(facts) = facts else {
+        return Some("its processes and containers stopped before mxv reached it".to_owned());
+    };
+    if facts.pinned {
+        return Some("it was pinned after mxv measured it".to_owned());
+    }
+    if facts.touched > touched {
+        return Some("an mxv command named it after mxv measured it".to_owned());
+    }
+    match idle(facts, now, stop_idle) {
+        Verdict::Idle { .. } => None,
+        Verdict::InUse(reason) => Some(format!(
+            "{reason}, which mxv found when it checked again under the workspace's lock"
+        )),
     }
 }
 
@@ -344,14 +433,22 @@ struct Measured {
     touched: Option<SystemTime>,
     /// Whether it is idle, or `None` when nothing of it runs.
     verdict: Option<Verdict>,
-    /// The bytes that stopping it frees, measured for an idle one.
+    /// The bytes that stopping it frees towards the need, measured for an
+    /// idle one.
     bytes: u64,
+    /// The resident memory of its containers, measured for an idle one.
+    containers: u64,
 }
 
 impl Measured {
     /// Returns the row of the workspace in `state`, with `freed` bytes and
     /// `reason`.
     fn row(&self, state: ReclaimState, freed: u64, reason: String, now: SystemTime) -> ReclaimRow {
+        let containers = if matches!(state, ReclaimState::Stopped | ReclaimState::WouldStop) {
+            self.containers
+        } else {
+            0
+        };
         let active = match &self.verdict {
             Some(Verdict::Idle { active, .. }) => *active,
             _ => None,
@@ -360,6 +457,7 @@ impl Measured {
             name: self.workspace.name.to_string(),
             state,
             freed: Size(freed),
+            containers: Size(containers),
             active: active.map(|time| Age::since(time, now)),
             reason: Some(reason),
         }
@@ -381,19 +479,16 @@ struct Machine {
 }
 
 impl Machine {
-    /// Measures `workspace` and decides whether it is idle.
-    fn measure(&self, workspace: Workspace) -> Result<Measured, MxvFailure> {
-        let mut measured = Measured {
-            touched: None,
-            verdict: None,
-            bytes: 0,
-            workspace,
-        };
-        let workspace = &measured.workspace;
-        if self.runs.running(workspace)?.is_empty() {
-            return Ok(measured);
-        }
-        let footprint = self.runs.footprint(workspace)?;
+    /// Reads the facts that decide whether `workspace`, whose processes
+    /// and containers are `footprint`, is idle at `now`, from the process
+    /// table `table`.
+    fn facts(
+        &self,
+        workspace: &Workspace,
+        footprint: &Footprint,
+        table: &[TableEntry],
+        now: SystemTime,
+    ) -> Result<Facts, MxvFailure> {
         let dir = workspace
             .path
             .canonicalize()
@@ -402,21 +497,57 @@ impl Machine {
             pinned: workspace.pinned,
             modified: None,
             touched: self.runs.touched(&workspace.name),
-            users: users(&self.table, &dir, &footprint.pids, std::process::id()),
+            users: users(table, &dir, &footprint.pids, std::process::id()),
         };
-        // Measuring when a checkout last changed reads each of its files,
-        // so a workspace that is in use for another reason skips it.
-        if !facts.pinned && facts.users.is_empty() {
+        if walks(&facts, now, self.stop_idle) {
             facts.modified = self.workspaces.disk_usage(workspace)?.modified;
         }
+        Ok(facts)
+    }
+
+    /// Measures `workspace` and decides whether it is idle.
+    fn measure(&self, workspace: Workspace) -> Result<Measured, MxvFailure> {
+        let mut measured = Measured {
+            touched: None,
+            verdict: None,
+            bytes: 0,
+            containers: 0,
+            workspace,
+        };
+        let workspace = &measured.workspace;
+        if self.runs.running(workspace)?.is_empty() {
+            return Ok(measured);
+        }
+        let footprint = self.runs.footprint(workspace)?;
+        let facts = self.facts(workspace, &footprint, &self.table, self.now)?;
         let verdict = idle(&facts, self.now, self.stop_idle);
         if matches!(verdict, Verdict::Idle { .. }) {
-            measured.bytes = resident(&self.table, &footprint.pids)
-                .saturating_add(self.runs.container_memory(&footprint)?);
+            let processes = resident(&self.table, &footprint.pids);
+            measured.containers = self.runs.container_memory(&footprint)?;
+            measured.bytes = counted(processes, measured.containers, CONTAINERS_RETURN_MEMORY);
         }
         measured.touched = facts.touched;
         measured.verdict = Some(verdict);
         Ok(measured)
+    }
+
+    /// Reads again, under the workspace's lock, whether `workspace`, which
+    /// the run measured as `measured` and which now runs `running`, is
+    /// still idle, and returns why it is not, or `None`.
+    fn recheck(
+        &self,
+        measured: &Measured,
+        workspace: &Workspace,
+        running: &[String],
+    ) -> Result<Option<String>, MxvFailure> {
+        let now = SystemTime::now();
+        if running.is_empty() {
+            return Ok(recheck(None, measured.touched, now, self.stop_idle));
+        }
+        let table = multiverse::process_table()?;
+        let footprint = self.runs.footprint(workspace)?;
+        let facts = self.facts(workspace, &footprint, &table, now)?;
+        Ok(recheck(Some(&facts), measured.touched, now, self.stop_idle))
     }
 }
 
@@ -558,13 +689,15 @@ fn memory(
                     summary.freed = summary.freed.saturating_add(measured.bytes);
                     Ok(measured.row(ReclaimState::WouldStop, measured.bytes, why.clone(), now))
                 } else {
-                    stop(environment, &measured, &mut summary, why)
+                    stop(environment, &machine, &measured, &mut summary, why)
                 }
             }
             Some(Verdict::Idle { .. }) => Ok(measured.row(
                 ReclaimState::Kept,
                 0,
-                if measured.bytes == 0 {
+                if measured.bytes == 0 && measured.containers > 0 {
+                    "it is idle, and only its containers hold resident memory, which Docker Desktop's virtual machine does not return to macOS at once".to_owned()
+                } else if measured.bytes == 0 {
                     "it is idle, and its processes and containers hold no resident memory that mxv can measure".to_owned()
                 } else {
                     "it is idle, and stopping workspaces that were idle longer covers the need"
@@ -583,14 +716,18 @@ fn memory(
 /// row, which keeps it when it became active since the run measured it.
 fn stop(
     environment: &Environment,
+    machine: &Machine,
     measured: &Measured,
     summary: &mut ReclaimSummary,
     why: &str,
 ) -> Result<ReclaimRow, crumbkit::Error> {
     let now = SystemTime::now();
-    if let Err(reason) =
-        processes::reclaim_stop(environment, &measured.workspace, measured.touched)?
-    {
+    let check = |workspace: &Workspace, running: &[String]| {
+        machine
+            .recheck(measured, workspace, running)
+            .map_err(crumbkit::Error::from)
+    };
+    if let Err(reason) = processes::reclaim_stop(environment, &measured.workspace, check)? {
         return Ok(measured.row(ReclaimState::Kept, 0, reason, now));
     }
     summary.count += 1;
@@ -634,6 +771,7 @@ fn disk(
                 name: row.name,
                 state,
                 freed: row.freed,
+                containers: Size(0),
                 active: row.modified,
                 reason: row.reason.or_else(|| {
                     (state != ReclaimState::Kept).then(|| {
