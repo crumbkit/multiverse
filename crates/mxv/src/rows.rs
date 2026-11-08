@@ -633,7 +633,7 @@ pub(crate) struct RemovalResult {
     /// removal removes.
     containers: Vec<String>,
     /// The docker volumes that the removal deletes because of
-    /// `--delete-volumes`, named and anonymous.
+    /// `--delete-volumes`, which are its named volumes.
     volumes: Vec<String>,
     /// The paths of `disposable` that only the repository's own `mxv.toml`
     /// declares disposable, which mxv deletes only after the person

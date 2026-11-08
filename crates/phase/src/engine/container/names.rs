@@ -100,7 +100,7 @@ macro_rules! name_type {
     };
 }
 
-/// The name of a workspace's compose project, `mxv-<id8>-<workspace>`,
+/// The name of a workspace app's compose project, `phase-<hash>-<app>`,
 /// which only [`Scope::project`] builds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectName(String);
@@ -134,7 +134,7 @@ impl ServiceName {
 
 /// The name of a named volume in the manifest, such as `data`, which
 /// follows the rule of a [`ServiceName`]. Its docker name is
-/// `<project>.<volume>`, which its scope builds.
+/// `phase-<hash>.<volume>`, which its scope builds.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VolumeKey(String);
 
@@ -169,9 +169,8 @@ pub(crate) struct ContainerName(String);
 
 name_type!(ContainerName, as_str);
 
-/// The docker name of a volume: `<project>.<volume>` for a named volume of
-/// a scope. It holds an
-/// ASCII letter or digit, then one or more letters, digits, `_`, `.` and
+/// The docker name of a volume, `phase-<hash>.<volume>` for a named volume
+/// of a scope. It holds an ASCII letter or digit, then one or more letters, digits, `_`, `.` and
 /// `-`, which is the rule that docker applies to volume names, so docker
 /// never reads it as an option.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

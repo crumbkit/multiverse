@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
-use crate::clock::{FOLLOW_INTERVAL, pause};
 use phase::Phase;
-use phase::host::LogFollower;
 
 use crate::error::Error;
 use crate::manifest::{Manifest, Process};
@@ -36,12 +34,6 @@ pub use phased::{Exec, ExecEnd, ExecTarget, LogOutput, Volumes};
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
-
-pub use phase::{MOST_TAIL_BYTES, tail};
-
-/// The most bytes that one read of a followed log takes. The rest waits
-/// for the next read.
-pub use phase::host::MOST_FOLLOW_BYTES;
 
 /// Why mxv does not know the exit code of a process that exited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -734,50 +726,4 @@ fn received(workspace: &Workspace, declared: &Process) -> BTreeMap<String, u16> 
         .chain(placeholders)
         .filter_map(|(key, port)| workspace.ports.get(port).map(|number| (key, *number)))
         .collect()
-}
-
-/// A log file that `mxv logs -f` reads as it grows, through phase's
-/// [`LogFollower`].
-#[derive(Debug)]
-pub struct Follower {
-    /// The follower of the log.
-    log: LogFollower,
-}
-
-impl Follower {
-    /// Opens the log at `path` at its end, or returns `None` when it does
-    /// not exist.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StateUnreadable`] when the log cannot be opened.
-    pub fn at_end(path: &Path) -> Result<Option<Self>, Error> {
-        Ok(LogFollower::at_end(path)
-            .map_err(|source| Error::StateUnreadable {
-                path: path.to_path_buf(),
-                source,
-            })?
-            .map(|log| Self { log }))
-    }
-
-    /// Returns the complete lines written since the last read, up to
-    /// [`MOST_FOLLOW_BYTES`] bytes of them; the rest waits for the next
-    /// read. A line longer than [`MOST_FOLLOW_BYTES`] comes back in parts.
-    /// When a cap empties the log, the next read starts at its start.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StateUnreadable`] when the log cannot be read.
-    pub fn lines(&mut self) -> Result<Vec<String>, Error> {
-        self.log.lines().map_err(|source| Error::StateUnreadable {
-            path: self.log.path().to_path_buf(),
-            source,
-        })
-    }
-
-    /// Pauses for [`FOLLOW_INTERVAL`] before the next read. A log file
-    /// gives no event when it grows, so a follower polls it.
-    pub fn wait(&self) {
-        pause(FOLLOW_INTERVAL);
-    }
 }

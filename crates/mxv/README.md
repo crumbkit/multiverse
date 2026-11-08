@@ -1120,8 +1120,7 @@ is never followed. It refuses, and changes nothing, in these cases:
 - The workspace's processes or containers run. The refusal is
   `mxv::workspace::running`, and `--force` stops them before it removes
   the workspace.
-- The workspace has docker volumes: named volumes, or anonymous volumes
-  of its containers' images. A volume may hold the only copy of a
+- The workspace has named docker volumes. A volume may hold the only copy of a
   database, and docker cannot tell cheaply whether a volume holds data, so
   mxv treats every volume as holding data. The refusal is
   `mxv::workspace::volumes`, which lists the volumes, and its hint repeats

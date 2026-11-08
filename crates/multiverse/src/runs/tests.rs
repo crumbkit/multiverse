@@ -1,7 +1,6 @@
 use std::fs;
 
 use crate::testing::write;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, ID_RECORD_VERSION, Workspace};
 use crate::runs::phased::saved_workspace_id;
-use crate::runs::{DownOutcome, Follower, ProcessState, Runs, tail};
+use crate::runs::{DownOutcome, ProcessState, Runs};
 use crate::store::{Created, Store};
 
 /// A temporary directory with a store, run files and a checkout.
@@ -82,33 +81,6 @@ fn down_of_a_name_that_no_process_has_returns_the_name() {
         )
         .unwrap();
     assert!(matches!(outcome, DownOutcome::UnknownProcess(name) if name == "web"));
-}
-
-#[test]
-fn a_tail_returns_the_last_lines_of_a_log() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("a.log");
-    write(&path, "one\ntwo\nthree\n");
-    assert_eq!(tail(&path, 2), ["two", "three"]);
-    assert!(tail(&dir.path().join("missing.log"), 2).is_empty());
-}
-
-#[test]
-fn a_follower_returns_each_complete_line_written_after_it_opened() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("a.log");
-    write(&path, "before\n");
-    let mut follower = Follower::at_end(&path).unwrap().unwrap();
-    let mut file = crate::store::append_file(&path).unwrap();
-    file.write_all(b"first\nsec").unwrap();
-    assert_eq!(follower.lines().unwrap(), ["first"]);
-    file.write_all(b"ond\n").unwrap();
-    assert_eq!(follower.lines().unwrap(), ["second"]);
-    assert!(
-        Follower::at_end(&dir.path().join("missing.log"))
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[test]

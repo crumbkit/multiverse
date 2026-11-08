@@ -54,9 +54,9 @@ pub(crate) const STATUS: Document<Listing<ProcessRow, StatusSummary>> = Document
     "mxv",
     "status",
     1,
-    "Each process of the workspace's manifest in start order, then each other process that has run files, with its state, and the manifest's error when it does not parse.",
+    "Each process of the workspace's manifest in start order, then each other process that its run record holds, with its state, and the manifest's error when it does not parse.",
 )
-.when_empty("the workspace has no manifest that declares processes, and no process has run files");
+.when_empty("the workspace has no manifest that declares processes, and its run record holds no process");
 
 /// The document that `mxv logs` prints.
 pub(crate) const LOGS: Document<Stream<LogLine>> = Document::new(

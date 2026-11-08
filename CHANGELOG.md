@@ -23,15 +23,41 @@ workspace may need to act on.
   the upgrade mxv ignores the run files under
   `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/` and `mxv remove` deletes them, but
   a process or container that still runs is no longer stopped or reported.
-  A process left running keeps its port, so `mxv up` fails with
-  `mxv::port::taken` until you stop it by hand.
+  A process left running keeps its ports. When it holds the port that a
+  process declares as its `listen` port, `mxv up` fails with
+  `mxv::port::taken`. When it holds a port that the process only receives,
+  the new copy cannot bind it, and `mxv up` reports `mxv::process::exited`
+  or a readiness failure. A container left running keeps its published
+  ports, and `mxv up` fails with a docker error. Stop what is left by hand.
 - A container whose data sits in a volume named
   `mxv-<id8>-<WORKSPACE>.<volume>` starts on an empty volume, because
   `mxv up` no longer checks for that name, and `mxv remove --delete-volumes`
-  no longer deletes it. To keep the data, copy it into phase's volume with
-  `docker run --rm -v <OLD>:/from -v <NEW>:/to busybox:1.37.0 cp -a /from/. /to/`,
-  and delete the old volume with `docker volume rm <OLD>` when you no longer
-  need it.
+  no longer deletes it. To keep the data, follow these steps in order. Do
+  not create the new volume yourself, because `mxv up` refuses a volume
+  without the workspace's labels.
+  1. Run `mxv up -w <WORKSPACE>` and then `mxv down -w <WORKSPACE>`, which
+     create the new volume with its labels and leave no container using it.
+  2. Find the new volume's name, `phase-<hash>.<volume>`, with
+     `docker volume ls --filter label=mxv.workspace-id=<ID> --filter label=mxv.volume=<volume> --format '{{.Name}}'`.
+     `<ID>` is the `id` field of
+     `$XDG_STATE_HOME/mxv/workspaces/<WORKSPACE>.json`.
+  3. Empty the new volume, because the container may have initialised it:
+     `docker run --rm -v <NEW>:/to busybox:1.37.0 find /to -mindepth 1 -delete`.
+  4. Copy the old data:
+     `docker run --rm -v <OLD>:/from -v <NEW>:/to busybox:1.37.0 cp -a /from/. /to/`.
+  5. Run `mxv up -w <WORKSPACE>`. Delete the old volume with
+     `docker volume rm <OLD>` when you no longer need it.
+- An anonymous volume of a container's image that an earlier `mxv down`
+  kept stays in docker, and nothing names its workspace any more, because
+  `mxv remove` no longer lists it, refuses for it or deletes it, and it
+  deletes the `.volumes` file that held its name. Run
+  `mxv remove --delete-volumes` with the earlier mxv if you are removing the
+  workspace before you upgrade. Otherwise run `docker volume rm` on each
+  name in `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/.volumes` before
+  `mxv remove` deletes that file. After that,
+  `docker volume ls --filter label=com.docker.volume.anonymous --filter dangling=true`
+  lists every anonymous volume that no container uses, across all of
+  docker, so check each one before you delete it.
 - The failure codes `mxv::workspace::legacy_running` and
   `mxv::volume::not_moved` and the `group_alive` field of the documents of
   the unit verbs are gone. The field was null for every unit that phase

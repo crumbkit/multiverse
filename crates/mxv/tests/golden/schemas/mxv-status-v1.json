@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/status/v1",
-  "description": "Each process of the workspace's manifest in start order, then each other process that has run files, with its state, and the manifest's error when it does not parse.",
+  "description": "Each process of the workspace's manifest in start order, then each other process that its run record holds, with its state, and the manifest's error when it does not parse.",
   "type": "object",
   "properties": {
     "schema": {

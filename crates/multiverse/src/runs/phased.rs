@@ -311,8 +311,6 @@ impl LineSink for LogOutput<'_> {
 /// alone.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Volumes {
-    /// The volumes' docker names, in name order.
-    names: Vec<String>,
     /// The volumes of the workspace's container apps.
     apps: WorkspaceVolumes,
 }
@@ -320,14 +318,14 @@ pub struct Volumes {
 impl Volumes {
     /// Returns the volumes' docker names, in name order.
     #[must_use]
-    pub fn names(&self) -> &[String] {
-        &self.names
+    pub fn names(&self) -> Vec<String> {
+        self.apps.names()
     }
 
     /// Reports whether the workspace has no volume to delete.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.names.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.apps.names().is_empty()
     }
 }
 
@@ -1123,8 +1121,7 @@ impl Runs {
             Some(id) if ran => app_volumes(&self.phase, id)?,
             _ => WorkspaceVolumes::default(),
         };
-        let names = apps.names();
-        Ok(Volumes { names, apps })
+        Ok(Volumes { apps })
     }
 
     /// Deletes `volumes`, which [`Runs::volumes`] returned for one
@@ -1135,9 +1132,6 @@ impl Runs {
     /// Returns [`Error::DockerForeign`], [`Error::DockerMissing`],
     /// [`Error::DockerUnavailable`] and [`Error::DockerFailed`].
     pub fn delete_volumes(&self, volumes: Volumes) -> Result<(), Error> {
-        if volumes.is_empty() {
-            return Ok(());
-        }
         delete_app_volumes(volumes.apps)?;
         Ok(())
     }
