@@ -359,6 +359,27 @@ pub fn volume_exists(name: &str) -> Result<bool, ContainerError> {
     finished.checked("volume inspect", None).map(|_| true)
 }
 
+/// Returns the resident memory of each running container of `ids`, by
+/// id, as `docker stats --no-stream` measures it. A container that is not
+/// running, or whose memory docker does not report, is left out. It runs
+/// no docker command when `ids` is empty.
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`ContainerError::Failed`].
+pub fn container_memory(ids: &[String]) -> Result<BTreeMap<String, u64>, ContainerError> {
+    let _ = ids;
+    Ok(BTreeMap::new())
+}
+
+/// Returns the container id and the resident bytes of one line of
+/// `docker stats --format '{{.ID}}\t{{.MemUsage}}'`, such as
+/// `0123abcd\t12.5MiB / 7.6GiB`, or `None` when docker reports no usage.
+pub(crate) fn stats_line(line: &str) -> Option<(String, u64)> {
+    let _ = line;
+    None
+}
+
 /// The containers of one workspace and their run records, kept through the
 /// host `H`.
 #[derive(Debug)]

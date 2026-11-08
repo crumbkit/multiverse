@@ -64,12 +64,13 @@ pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
-    MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, WORKTREE_RECORD_VERSION, Workspace,
+    MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, Reclaimed, WORKTREE_RECORD_VERSION, Workspace,
     WorkspaceKind, agents_text,
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
-    DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Follower, KILL_WAIT, Kind, LogOutput,
+    DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Follower, Footprint, KILL_WAIT, Kind,
+    LogOutput,
     MOST_FOLLOW_BYTES, MOST_LOG_BYTES, MOST_TAIL_BYTES, ProcessNote, ProcessState, ProcessStatus,
     RenamedVolume, Runs, START_GRACE, STOP_GRACE, Unstoppable, UpOutcome, Volumes, Waited, tail,
 };

@@ -470,3 +470,81 @@ fn a_docker_error_keeps_dockers_own_line_apart_from_phases_sentence() {
     let bounded = DockerError::refused("no".to_owned()).with_docker_line(Some(long));
     assert!(bounded.docker_line().unwrap().len() <= MOST_DOCKER_MESSAGE_BYTES);
 }
+
+#[test]
+fn a_linux_stat_gives_the_parent_and_the_group_of_a_live_process() {
+    let live =
+        "4242 (my (odd) app) S 17 4200 4200 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 10";
+    assert_eq!(
+        super::process::stat_entry(live, 4242),
+        Some(super::process::TableEntry {
+            pid: 4242,
+            parent: 17,
+            group: 4200,
+            dir: None,
+            resident: None,
+        })
+    );
+    let zombie = live.replacen(") S ", ") Z ", 1);
+    assert_eq!(super::process::stat_entry(&zombie, 4242), None);
+}
+
+#[test]
+fn a_linux_status_gives_the_resident_bytes_of_vm_rss() {
+    let status = "Name:\tsleep\nVmPeak:\t  9000 kB\nVmRSS:\t    1536 kB\nThreads:\t1\n";
+    assert_eq!(super::process::status_resident(status), Some(1536 * 1024));
+    assert_eq!(super::process::status_resident("Name:\tkthreadd\n"), None);
+}
+
+#[test]
+fn a_bsd_info_gives_the_parent_and_the_group_and_leaves_out_zombies() {
+    let mut info = [0_u8; 136];
+    info[4..8].copy_from_slice(&2_i32.to_ne_bytes());
+    info[16..20].copy_from_slice(&17_u32.to_ne_bytes());
+    info[100..104].copy_from_slice(&4200_i32.to_ne_bytes());
+    assert_eq!(
+        super::process::bsd_info_entry(&info, 4242),
+        Some(super::process::TableEntry {
+            pid: 4242,
+            parent: 17,
+            group: 4200,
+            dir: None,
+            resident: None,
+        })
+    );
+    info[4..8].copy_from_slice(&5_i32.to_ne_bytes());
+    assert_eq!(super::process::bsd_info_entry(&info, 4242), None);
+}
+
+#[test]
+fn a_vnode_path_info_gives_the_working_directory_up_to_its_nul() {
+    let mut info = vec![0_u8; 2352];
+    let path = b"/Users/agent/work/triage/app";
+    info[152..152 + path.len()].copy_from_slice(path);
+    assert_eq!(
+        super::process::vnode_dir(&info),
+        Some(std::path::PathBuf::from("/Users/agent/work/triage/app"))
+    );
+    assert_eq!(super::process::vnode_dir(&[0_u8; 2352]), None);
+}
+
+#[test]
+fn a_task_info_gives_the_resident_bytes() {
+    let mut info = [0_u8; 96];
+    info[8..16].copy_from_slice(&4_194_304_u64.to_ne_bytes());
+    assert_eq!(super::process::task_resident(&info), Some(4_194_304));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_process_table_holds_this_process_with_its_working_directory_and_resident_memory() {
+    let table = super::process::process_table().unwrap();
+    let pid = std::process::id();
+    let own = table.iter().find(|entry| entry.pid == pid).unwrap();
+    assert_eq!(
+        own.dir.as_deref().map(|dir| dir.canonicalize().unwrap()),
+        Some(std::env::current_dir().unwrap().canonicalize().unwrap())
+    );
+    assert!(own.resident.is_some_and(|bytes| bytes > 0), "{own:?}");
+    assert!(own.parent > 0, "{own:?}");
+}

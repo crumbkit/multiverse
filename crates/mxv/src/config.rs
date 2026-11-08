@@ -62,6 +62,9 @@ pub(crate) struct Config {
     /// directories of every workspace under, or `None` when the file sets
     /// no limit.
     pub(crate) max_disposable: Option<u64>,
+    /// How long a running workspace must go unused before `mxv reclaim`
+    /// may stop it, or `None` for the default.
+    pub(crate) stop_idle: Option<Duration>,
 }
 
 /// The lowest port that `ports_range` may hold. Ports below it are

@@ -196,3 +196,15 @@ fn a_clone_glob_in_the_config_file_must_name_a_directory_by_a_literal_name() {
     assert!(reason.contains("directory"), "{reason}");
     assert!(!reason.contains("only the config file"), "{reason}");
 }
+
+#[test]
+fn stop_idle_sets_how_long_a_running_workspace_must_be_unused_before_reclaim_stops_it() {
+    let config = parsed("stop_idle = \"90m\"\n").unwrap();
+    assert_eq!(
+        config.stop_idle,
+        Some(std::time::Duration::from_secs(90 * 60))
+    );
+    let (line, reason) = invalid("\nstop_idle = 2\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("stop_idle"), "{reason}");
+}

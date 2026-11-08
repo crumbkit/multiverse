@@ -25,6 +25,13 @@ use crate::record::run::HostProcess;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod darwin;
+mod table;
+
+pub use table::{TableEntry, process_table};
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use table::{stat_entry, status_resident};
+#[cfg(any(target_os = "macos", test))]
+pub(crate) use table::{bsd_info_entry, task_resident, vnode_dir};
 
 /// The most bytes of a `/proc` file that this module and the host
 /// runner's listener lookup read. A busy host's socket table may need

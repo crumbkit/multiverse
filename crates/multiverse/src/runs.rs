@@ -30,7 +30,7 @@ use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustix::process::Signal;
 
@@ -181,6 +181,18 @@ pub enum Kind {
     Process,
     /// A container that mxv runs with docker.
     Container,
+}
+
+/// The host processes and containers of a workspace that may run, as
+/// [`Runs::footprint`] finds them, whose memory a reclaim measures.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Footprint {
+    /// The process id of each host process, which is also its process
+    /// group's id.
+    pub pids: Vec<u32>,
+    /// The docker id of each container.
+    pub containers: Vec<String>,
 }
 
 /// One process or container of a workspace and its state.
@@ -592,6 +604,27 @@ impl Runs {
     /// [`Error::Unwritable`] when the lock file cannot be opened.
     pub fn lock(&self, name: &WorkspaceName) -> Result<Lock, Error> {
         store::lock(&self.run_dir(name).lock(), self.lock_wait)
+    }
+
+    /// Records that an mxv command named the workspace `name` now, as the
+    /// modification time of the file `<runs>/<name>/.touched`.
+    /// [`Runs::touched`] reads it back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when the file cannot be written.
+    pub fn touch(&self, name: &WorkspaceName) -> Result<(), Error> {
+        let _ = name;
+        Ok(())
+    }
+
+    /// Returns when an mxv command last named the workspace `name`, as
+    /// [`Runs::touch`] recorded it, or `None` when none has since the
+    /// workspace's run files were deleted.
+    #[must_use]
+    pub fn touched(&self, name: &WorkspaceName) -> Option<SystemTime> {
+        let _ = name;
+        None
     }
 
     /// Returns these run files with `range` as the host ports that

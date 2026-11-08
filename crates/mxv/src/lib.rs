@@ -19,6 +19,7 @@ mod environment;
 mod exec;
 mod failures;
 mod processes;
+mod reclaim;
 mod rows;
 mod run_failures;
 #[cfg(test)]

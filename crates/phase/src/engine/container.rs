@@ -106,7 +106,7 @@ pub use crate::engine::container::error::ContainerError;
 pub use crate::engine::container::host::{Follow, Host, Versioned};
 pub use crate::engine::container::lifecycle::{
     Lifecycle, Prepared, RUN_VERSION, SavedWorkspaceId, Start, WorkspaceVolumes, app_volume_labels,
-    app_volume_name, app_volumes, delete_app_volumes, volume_exists,
+    app_volume_name, app_volumes, container_memory, delete_app_volumes, volume_exists,
 };
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
 pub(crate) use crate::engine::container::objects::answers_within;

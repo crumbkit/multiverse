@@ -467,3 +467,16 @@ fn the_run_host_without_a_store_or_without_the_record_gives_no_stable_id_and_say
         );
     }
 }
+
+#[test]
+fn a_touch_records_when_an_mxv_command_last_named_the_workspace() {
+    let setup = Setup::new();
+    let runs = setup.runs();
+    let name: WorkspaceName = "triage".parse().unwrap();
+    assert_eq!(runs.touched(&name), None);
+    let before = std::time::SystemTime::now() - Duration::from_secs(1);
+    runs.touch(&name).unwrap();
+    let touched = runs.touched(&name).unwrap();
+    assert!(touched >= before, "{touched:?}");
+    assert!(runs.recorded(&name).unwrap().is_empty());
+}
