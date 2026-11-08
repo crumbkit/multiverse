@@ -219,6 +219,20 @@ fn an_app_without_permissions_runs_unsandboxed_and_says_why() {
     );
 }
 
+#[cfg(not(feature = "sandbox"))]
+#[test]
+fn a_build_without_the_sandbox_feature_runs_an_app_with_permissions_unsandboxed_and_says_why() {
+    let fixture = Fixture::new();
+    let api = fixture.app(sh("true"), 41_000);
+
+    assert_eq!(
+        sandboxing(&api, &super::platform()),
+        Some(Sandboxing::Unsandboxed {
+            reason: super::UNBUILT.to_owned()
+        })
+    );
+}
+
 #[test]
 fn an_app_with_permissions_runs_unsandboxed_on_a_platform_without_a_sandbox_and_says_why() {
     let fixture = Fixture::new();
@@ -1473,7 +1487,7 @@ mod rules {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 mod seatbelt {
     use std::collections::BTreeSet;
     use std::io::Read as _;

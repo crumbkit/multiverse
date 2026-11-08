@@ -60,16 +60,16 @@ use crate::name::{AppName, WorkspaceId};
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind, STATE};
 use crate::source::Source;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
 mod capabilities;
 mod launch;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(all(feature = "sandbox", target_os = "macos"), test))]
 mod seatbelt;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
 pub(crate) use capabilities::capabilities;
 pub(crate) use launch::launcher_command;
 pub use launch::{SANDBOX_REFUSED, launch};
@@ -210,13 +210,20 @@ pub(crate) enum Platform {
     /// reports a process under it as this value: [`Sandboxing::Seatbelt`]
     /// on macOS, and [`Sandboxing::Unsandboxed`] on Linux, because
     /// Landlock leaves Unix sockets open.
+    #[cfg_attr(
+        all(not(feature = "sandbox"), not(test)),
+        expect(
+            dead_code,
+            reason = "a build without the sandbox feature offers no sandbox"
+        )
+    )]
     Available(Sandboxing),
     /// This machine has no sandbox that phase supports, for this reason.
     Unavailable(String),
 }
 
 /// Returns the sandbox that this machine offers.
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "sandbox", target_os = "macos"))]
 pub(crate) fn platform() -> Platform {
     if nono::Sandbox::is_supported() {
         Platform::Available(Sandboxing::seatbelt())
@@ -228,7 +235,7 @@ pub(crate) fn platform() -> Platform {
 /// Returns the sandbox that this machine offers. Landlock counts only when
 /// it can restrict TCP ports, which needs its ABI 4. phase applies it, and
 /// reports each process under it as unsandboxed ([`LANDLOCK_UNSANDBOXED`]).
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 pub(crate) fn platform() -> Platform {
     match nono::Sandbox::detect_abi() {
         Ok(abi) if abi.has_network() => Platform::Available(Sandboxing::landlock()),
@@ -241,10 +248,25 @@ pub(crate) fn platform() -> Platform {
 }
 
 /// Returns the sandbox that this machine offers, which is none.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "sandbox",
+    not(any(target_os = "macos", target_os = "linux"))
+))]
 pub(crate) fn platform() -> Platform {
     Platform::Unavailable(format!("phase has no sandbox for {}", std::env::consts::OS))
 }
+
+/// Returns the sandbox that this machine offers, which is none, because
+/// phase was built without its `sandbox` feature.
+#[cfg(not(feature = "sandbox"))]
+pub(crate) fn platform() -> Platform {
+    Platform::Unavailable(UNBUILT.to_owned())
+}
+
+/// Why an app with permissions runs unsandboxed when phase was built
+/// without its `sandbox` feature.
+#[cfg(not(feature = "sandbox"))]
+pub(crate) const UNBUILT: &str = "phase was built without its sandbox feature";
 
 /// Returns how the processes of the host `app` run on a machine that offers
 /// `platform`, or `None` for a container app, which runs in Docker.
