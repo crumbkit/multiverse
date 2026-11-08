@@ -20,8 +20,9 @@
 //! such volume's root directory the app's owner through the volume-owner
 //! step of [`super::volume_owner`], and only then starts the container, so
 //! the app's main process never runs with the wrong owner. A volume that
-//! only processes `up` leaves running mount gets the same check, once. The
-//! pull and the
+//! only processes `up` leaves running mount gets the same check, once, and
+//! a check that cannot run becomes a note and leaves the container running.
+//! The pull of the app's image and of the helper's image and the
 //! resolution come before any removal, so a failure in either leaves the
 //! old containers running. A process that receives secrets as files then
 //! has each one written into its container's tmpfs through `docker exec`
@@ -167,6 +168,9 @@ pub(crate) struct ComposeRunner {
     /// The only environment of the `docker exec` that writes a secret, or
     /// `None` for the host program's whole environment.
     docker_environment: Option<BTreeMap<String, String>>,
+    /// The image that `start` makes sure Docker has before it runs a
+    /// volume-owner helper, which only a test changes.
+    helper_image: String,
 }
 
 /// The values of the file secrets of a process, by secret name.
@@ -217,12 +221,20 @@ fn delivered(
 impl ComposeRunner {
     /// Returns the runner of the phase whose state is in `state_dir` and
     /// which watches a process without a probe for `start_grace`.
-    pub(crate) const fn new(state_dir: PathBuf, start_grace: Duration) -> Self {
+    pub(crate) fn new(state_dir: PathBuf, start_grace: Duration) -> Self {
         Self {
             state_dir,
             start_grace,
             docker_environment: None,
+            helper_image: volume_owner::HELPER_IMAGE.to_owned(),
         }
+    }
+
+    /// Returns this runner with `image` as the helper image it pulls.
+    #[cfg(test)]
+    pub(crate) fn with_helper_image(mut self, image: String) -> Self {
+        self.helper_image = image;
+        self
     }
 
     /// Returns this runner with `vars` as the only environment of the
@@ -408,6 +420,38 @@ fn halt(error: &ContainerError) -> Halt {
     }
 }
 
+/// Returns `checked` as the start goes on from it. A failure to check the
+/// owner of a running process's volume, because Docker refused a step, a
+/// helper failed or the app's image cannot be read, leaves the container
+/// running, so it becomes a note in `started`. A cancelled start and a
+/// failure to write the record still end the start.
+fn unchecked_owners(
+    checked: Result<(), Halt>,
+    started: &mut ContainersStarted,
+) -> Result<(), Halt> {
+    match checked {
+        Err(Halt::Failed(error @ (PhaseError::Docker { .. } | PhaseError::VolumeOwner { .. }))) => {
+            started.owners_unchecked = Some(error.to_string());
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Returns the volumes, with their record names, that the processes `up`
+/// leaves running mount and that no process it starts mounts.
+fn running_volumes(
+    start: &ContainerStart<'_>,
+    scope: &Scope,
+) -> Result<Vec<(VolumeKey, DockerName)>, Halt> {
+    let starting = app::process_volume_keys(start.app, start.processes);
+    app::process_volume_keys(start.app, start.running)
+        .into_iter()
+        .filter(|key| !starting.contains(key))
+        .map(|key| volume_docker_name(scope, &key).map(|name| (key, name)))
+        .collect()
+}
+
 /// Returns the name of the volume `key` of `scope` as the run record
 /// holds it.
 fn volume_docker_name(scope: &Scope, key: &VolumeKey) -> Result<DockerName, Halt> {
@@ -421,7 +465,7 @@ fn volume_docker_name(scope: &Scope, key: &VolumeKey) -> Result<DockerName, Halt
 }
 
 /// Gives the root directory of the volume `key` to `owner` through a
-/// helper, pulling the helper's image first when Docker lacks it. The
+/// helper. The caller has made sure Docker has the helper's image. The
 /// record names no owner for the volume while the helper runs, so a run
 /// that ends meanwhile claims none, and names `owner` once it has run.
 fn give_volume(
@@ -443,8 +487,6 @@ fn give_volume(
         }
     };
     recorded(started, None);
-    ensure_image(volume_owner::HELPER_IMAGE, left(start.build), start.cancel)
-        .map_err(|error| halt(&error))?;
     before(Before::VolumeOwner(&name))?;
     volume_owner::set_owner(scope, key, owner, start.deadline, start.cancel)
         .map_err(|error| halt(&error))?;
@@ -551,7 +593,14 @@ impl Launch<'_> {
                 started.uncertain = Some(self.name.clone());
                 Ok(false)
             }
-            Err(error) => Err(halt(&no_shell_hint(error, self.secret_files))),
+            Err(error) => {
+                let error = if self.start.app.container.user.is_none() {
+                    without_image_user(error)
+                } else {
+                    error
+                };
+                Err(halt(&no_shell_hint(error, self.secret_files)))
+            }
         }
     }
 
@@ -600,12 +649,15 @@ impl ComposeRunner {
     ) -> Result<(), Halt> {
         let app = start.app;
         let scope = self.scope(start.workspace, &app.name);
+        if start.processes.is_empty() {
+            let checked = check().map_err(|error| halt(&error)).and_then(|()| {
+                let wanted = self.ensure_volumes(start, &scope, None, started)?;
+                self.check_running_volumes(start, &scope, wanted.as_ref(), before, started)
+            });
+            return unchecked_owners(checked, started);
+        }
         check().map_err(|error| halt(&error))?;
         check_compose().map_err(|error| halt(&error))?;
-        if start.processes.is_empty() {
-            self.ensure_volumes(start, &scope, None, before, started)?;
-            return Ok(());
-        }
         let cleared = app::references(app);
         let dir = self.project_dir()?;
         // The image is pulled before any container is removed, so a pull
@@ -627,8 +679,10 @@ impl ComposeRunner {
         // child reads its own form of it, made once its environment is
         // resolved.
         app::compose_file(&scope, app, image_config.as_ref())?;
-        let wanted_owner =
-            self.ensure_volumes(start, &scope, image_config.as_ref(), before, started)?;
+        let wanted_owner = self.ensure_volumes(start, &scope, image_config.as_ref(), started)?;
+        let checked =
+            self.check_running_volumes(start, &scope, wanted_owner.as_ref(), before, started);
+        unchecked_owners(checked, started)?;
         for name in start.processes {
             if start.cancel.is_cancelled() {
                 return Err(Halt::Cancelled);
@@ -762,24 +816,17 @@ impl ComposeRunner {
     }
 
     /// Creates the workspace's volumes that `start.app` mounts into
-    /// `started`, removes the app's leftover helpers, checks the owner of
-    /// each volume that only processes `up` leaves running mount, and
-    /// returns the owner that the app wants for the volumes of the
-    /// processes it starts, or `None` when they keep their owner. The
-    /// owner is settled before any volume is created, so a user that
-    /// cannot be resolved leaves everything as it was.
-    ///
-    /// A running process keeps the owner its container started with, so a
-    /// volume of a running process gets the recorded owner, and the owner
-    /// from the plan only when the record names none. No start of a
-    /// running process comes after this, so Docker copies nothing onto
-    /// such a volume.
+    /// `started`, removes the app's leftover helpers, and returns the
+    /// owner that the app wants for the volumes of the processes it
+    /// starts, or `None` when they keep their owner. The owner is settled,
+    /// and the helper's image pulled, before any volume is created and any
+    /// container removed, so a user that cannot be resolved or a pull that
+    /// fails leaves everything as it was.
     fn ensure_volumes(
         &self,
         start: &ContainerStart<'_>,
         scope: &Scope,
         image_config: Option<&ImageConfig>,
-        before: &mut dyn FnMut(Before<'_>) -> Result<(), PhaseError>,
         started: &mut ContainersStarted,
     ) -> Result<Option<VolumeOwner>, Halt> {
         let app = start.app;
@@ -789,16 +836,10 @@ impl ComposeRunner {
         if keys.is_empty() {
             return Ok(None);
         }
-        let starting = app::process_volume_keys(app, start.processes);
-        let running: Vec<(VolumeKey, DockerName)> = app::process_volume_keys(app, start.running)
-            .into_iter()
-            .filter(|key| !starting.contains(key))
-            .map(|key| volume_docker_name(scope, &key).map(|name| (key, name)))
-            .collect::<Result<_, _>>()?;
         // The plan's owner needs no reading when only running processes
         // mount volumes and the record names each of them.
         let needs_plan = !start.processes.is_empty()
-            || running
+            || running_volumes(start, scope)?
                 .iter()
                 .any(|(_, name)| !start.owners.contains_key(name));
         let wanted = if needs_plan {
@@ -806,6 +847,10 @@ impl ComposeRunner {
         } else {
             None
         };
+        if wanted.is_some() && !app::process_volume_keys(app, start.processes).is_empty() {
+            ensure_image(&self.helper_image, left(start.build), start.cancel)
+                .map_err(|error| halt(&error))?;
+        }
         for key in keys {
             ensure_volume(scope, &key).map_err(|error| halt(&error))?;
             let name = volume_docker_name(scope, &key)?;
@@ -818,12 +863,36 @@ impl ComposeRunner {
             };
             started.volumes.push((name, kept));
         }
-        for (key, name) in &running {
-            if let Some(owner) = start.owners.get(name).or(wanted.as_ref()) {
-                give_volume(start, scope, key, owner, before, started)?;
-            }
-        }
         Ok(wanted)
+    }
+
+    /// Checks the owner of each volume that only processes `up` leaves
+    /// running mount. A running process keeps the owner its container
+    /// started with, so such a volume gets the recorded owner, and the
+    /// `wanted` owner from the plan only when the record names none. No
+    /// creation of a container follows, so Docker copies nothing onto
+    /// such a volume.
+    fn check_running_volumes(
+        &self,
+        start: &ContainerStart<'_>,
+        scope: &Scope,
+        wanted: Option<&VolumeOwner>,
+        before: &mut dyn FnMut(Before<'_>) -> Result<(), PhaseError>,
+        started: &mut ContainersStarted,
+    ) -> Result<(), Halt> {
+        let mut pulled = false;
+        for (key, name) in running_volumes(start, scope)? {
+            let Some(owner) = start.owners.get(&name).or(wanted) else {
+                continue;
+            };
+            if !pulled {
+                ensure_image(&self.helper_image, left(start.build), start.cancel)
+                    .map_err(|error| halt(&error))?;
+                pulled = true;
+            }
+            give_volume(start, scope, &key, owner, before, started)?;
+        }
+        Ok(())
     }
 
     /// Returns the owner that the volumes of `start.app` should have, or
@@ -981,6 +1050,26 @@ pub(crate) fn watch_grace(
             };
         }
         pause(POLL_INTERVAL.min(deadline - at));
+    }
+}
+
+/// Returns `error`, the failure of `docker compose up` of a container that
+/// runs as its image's `USER`, without Docker's text when Docker could not
+/// find that user. Docker's line quotes the user, and the image's author
+/// controls that text, so phase says what happened in its own words.
+fn without_image_user(error: ContainerError) -> ContainerError {
+    match error {
+        ContainerError::Failed {
+            operation,
+            service,
+            message,
+            ..
+        } if message.contains("unable to find user") => ContainerError::failed(
+            operation,
+            service.as_deref(),
+            "the user named by the image's USER is not in the image's /etc/passwd",
+        ),
+        other => other,
     }
 }
 

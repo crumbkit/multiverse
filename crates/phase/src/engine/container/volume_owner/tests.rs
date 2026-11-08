@@ -215,6 +215,7 @@ fn what_id_printed_counts_only_when_it_is_one_number_on_one_line() {
         " 1000\n",
         "+1000\n",
         "4294967296\n",
+        "4294967295\n",
         "1000 password=made-up-1\n",
     ] {
         assert_eq!(parse_id(printed), None, "{printed:?}");

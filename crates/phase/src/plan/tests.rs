@@ -564,6 +564,9 @@ fn a_plan_refuses_a_volume_owner_that_names_a_user() {
         "-1",
         "+1000",
         "4294967296",
+        "4294967295",
+        "1000:4294967295",
+        "4294967295:1000",
         "1000:1000:1",
     ] {
         let mut db = container_app("db");

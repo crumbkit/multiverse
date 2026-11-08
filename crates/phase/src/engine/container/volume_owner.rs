@@ -19,12 +19,16 @@
 //! The image's author controls the text of its `USER`, which may hold a
 //! newline or a terminal escape sequence, so no error repeats it. An error
 //! about a user from the image names the image's `USER` as its source, and
-//! an error about the plan's run-as user prints it quoted.
+//! an error about the plan's run-as user prints it quoted. Docker's own
+//! line can quote the user too, when `docker start` cannot find it in the
+//! image's `/etc/passwd`, so a refused creation or start of the `id`
+//! helper keeps none of Docker's text.
 //!
 //! Each helper is a container that phase creates, starts, waits for and
 //! removes: `docker create`, `docker start`, `docker wait` and `docker
 //! rm`. Each of those prints only Docker's own text, so a failure carries
-//! Docker's line as the other container commands do. phase never reads
+//! Docker's line as the other container commands do, apart from the `id`
+//! helper's creation and start, as above. phase never reads
 //! what a helper writes, apart from the standard output of `id`, which
 //! counts only when it is one number, and which no error repeats. A
 //! helper runs with no network, every capability dropped (the chown
@@ -60,7 +64,8 @@ use crate::error::{PhaseError, VolumeOwnerProblem};
 use crate::name::{AppName, WorkspaceId};
 use crate::plan::AppPlan;
 use crate::plan::container::KEEP_OWNER;
-use crate::record::run::VolumeOwner;
+use crate::record::DockerCause;
+use crate::record::run::{UNCHANGED_ID, VolumeOwner};
 
 #[cfg(test)]
 mod tests;
@@ -226,13 +231,13 @@ pub(crate) fn id_args(scope: &Scope, image: &str, user: &str, flag: &str) -> Vec
 
 /// Returns the number that `id -u` or `id -g` printed as `printed`, or
 /// `None` when it printed anything else than one decimal number on one
-/// line.
+/// line, or [`UNCHANGED_ID`], which `chown` would read as no change.
 pub(crate) fn parse_id(printed: &str) -> Option<u32> {
     let line = printed.strip_suffix('\n').unwrap_or(printed);
     if line.is_empty() || !line.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    line.parse().ok()
+    line.parse().ok().filter(|id| *id != UNCHANGED_ID)
 }
 
 /// Reports whether `labels`, as the JSON that `docker container inspect`
@@ -250,6 +255,20 @@ pub(crate) fn helper_of(workspace: &WorkspaceId, app: Option<&AppName>, labels: 
     is(WORKSPACE_ID_LABEL, workspace.as_str())
         && is(ROLE_LABEL, VOLUME_OWNER_ROLE)
         && app.is_none_or(|app| is(APP_LABEL, app.as_str()))
+}
+
+/// Reports whether `error` says that Docker refused to create or start a
+/// helper, so that its text, which can quote the helper's user, must not
+/// be kept.
+fn never_ran(error: &ContainerError) -> bool {
+    matches!(
+        error,
+        ContainerError::Failed {
+            operation: "volume owner create" | "volume owner start",
+            cause: DockerCause::Refused,
+            ..
+        }
+    )
 }
 
 /// How a helper ended.
@@ -410,7 +429,11 @@ pub(crate) fn resolve(
     cancel: &Cancel,
 ) -> Result<Result<VolumeOwner, VolumeOwnerProblem>, ContainerError> {
     let id = |flag: &str| -> Result<Result<u32, VolumeOwnerProblem>, ContainerError> {
-        let ran = run_helper(&id_args(scope, image, user, flag), true, deadline, cancel)?;
+        let ran = match run_helper(&id_args(scope, image, user, flag), true, deadline, cancel) {
+            Ok(ran) => ran,
+            Err(error) if never_ran(&error) => return Ok(Err(VolumeOwnerProblem::IdNotRun)),
+            Err(error) => return Err(error),
+        };
         if ran.status != 0 {
             return Ok(Err(VolumeOwnerProblem::IdFailed { status: ran.status }));
         }

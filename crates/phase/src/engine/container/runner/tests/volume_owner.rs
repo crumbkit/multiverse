@@ -7,11 +7,13 @@ use std::path::PathBuf;
 
 use super::{BuiltImage, IMAGE, Mode, World, app, docker, docker_ready, outcome, start_deadline};
 use crate::cancel::Cancel;
+use crate::engine::container::lifecycle::{app_volumes, delete_app_volumes};
 use crate::engine::container::volume_owner::HELPER_IMAGE;
+use crate::phase::Phase;
 use crate::plan::AppPlan;
 use crate::record::run::{ObjectKey, Started, VolumeOwner};
 use crate::record::store::{Journal, RunStore};
-use crate::report::{AppOutcome, Report};
+use crate::report::{AppOutcome, Note, Report};
 use crate::select::Selection;
 use crate::source::Source;
 
@@ -515,6 +517,316 @@ fn an_up_of_a_running_app_keeps_the_owner_of_its_container_when_the_images_user_
     assert_eq!(world.data_owner(), "1000:1000");
     world.down();
     docker(&["image", "rm", &tag]).unwrap();
+}
+
+/// An image that no registry has, so a pull of it fails.
+const UNPULLABLE: &str =
+    "busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+impl World {
+    /// Makes every later `up` of this world fail to get the helper image.
+    fn lose_helper_image(&mut self) {
+        self.phase = Phase::new(self.state.path().to_path_buf())
+            .with_start_grace(std::time::Duration::from_millis(500))
+            .with_volume_helper_image(UNPULLABLE.to_owned());
+    }
+
+    /// Reports whether no file of the state directory holds `text`.
+    fn state_lacks(&self, text: &str) -> bool {
+        let path = RunStore::new(self.state.path()).path(&self.id);
+        std::fs::read_to_string(path).map_or(true, |record| !record.contains(text))
+    }
+}
+
+/// Returns the notes of the app `app` in `report`.
+fn notes<'r>(report: &'r Report, app: &str) -> &'r [Note] {
+    &report
+        .apps
+        .iter()
+        .find(|report| report.app.as_str() == app)
+        .unwrap()
+        .notes
+}
+
+/// Asserts that `up` of `db` failed as unresolved, naming the two ways out
+/// and nothing of the image's `USER`.
+fn assert_unresolved(world: &World, report: &Report) {
+    let json = serde_json::to_string(report).unwrap();
+    assert!(!json.contains("[31m"), "{json}");
+    assert!(!json.contains("\\u001b"), "{json}");
+    assert!(!json.contains("no-such"), "{json}");
+    assert!(world.state_lacks("no-such"));
+    match outcome(report, "db") {
+        AppOutcome::Errored { code, message, .. } => {
+            assert_eq!(
+                code, "phase::container::volume_owner_unresolved",
+                "{message}"
+            );
+            assert!(message.contains("the image's USER"), "{message}");
+            assert!(message.contains("numeric uid:gid"), "{message}");
+            assert!(message.contains("keep"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+}
+
+#[test]
+fn an_images_user_absent_from_its_passwd_file_never_reaches_the_report_or_the_record() {
+    if !ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&format!("FROM {IMAGE}\nUSER no-such\u{1b}[31muser\n"))
+    else {
+        return;
+    };
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_unresolved(&world, &report);
+}
+
+#[test]
+fn an_images_user_absent_from_its_passwd_file_never_reaches_the_report_when_no_id_helper_runs() {
+    if !ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&format!("FROM {IMAGE}\nUSER no-such\u{1b}[31muser\n"))
+    else {
+        return;
+    };
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    db.container.owner = Some("keep".to_owned());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("[31m"), "{json}");
+    assert!(!json.contains("no-such"), "{json}");
+    assert!(world.state_lacks("no-such"));
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(message.contains("the image's USER"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_image_with_no_id_program_fails_as_unresolved_and_names_a_numeric_owner_or_keep() {
+    if !ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&format!(
+        "FROM {IMAGE}\nRUN adduser -D -u 1234 app && rm /bin/id\nUSER app\n"
+    )) else {
+        return;
+    };
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.source = Source::image(image.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+
+    let report = world.up(&plan);
+
+    assert_unresolved(&world, &report);
+}
+
+#[test]
+fn a_helper_image_that_cannot_be_pulled_leaves_the_old_container_running() {
+    if !ready() {
+        return;
+    }
+    let mut world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    db.container.owner = Some("keep".to_owned());
+    assert_eq!(
+        outcome(&world.up(&world.plan(vec![db.clone()])), "db"),
+        &AppOutcome::Started
+    );
+    let before = world.container("db", "server").unwrap();
+    db.container.owner = Some("1000:1000".to_owned());
+    world.lose_helper_image();
+
+    let report = world.up(&world.plan(vec![db]));
+
+    assert!(
+        matches!(outcome(&report, "db"), AppOutcome::Errored { .. }),
+        "{report:?}"
+    );
+    assert_eq!(world.container("db", "server").unwrap(), before);
+    assert_eq!(
+        docker(&[
+            "container",
+            "inspect",
+            "--format",
+            "{{.State.Status}}",
+            &before
+        ])
+        .unwrap()
+        .trim(),
+        "running"
+    );
+    world.down();
+}
+
+#[test]
+fn an_up_of_a_running_app_that_cannot_get_the_helper_reports_already_running_with_a_note() {
+    if !ready() {
+        return;
+    }
+    let mut world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    world.lose_helper_image();
+
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert!(
+        matches!(notes(&report, "db"), [Note::VolumeOwnerUnchecked { .. }]),
+        "{report:?}"
+    );
+    world.down();
+}
+
+#[test]
+fn an_up_of_a_running_app_whose_image_is_gone_reports_already_running_with_a_note() {
+    if !ready() {
+        return;
+    }
+    let Some(image) = BuiltImage::build(&format!("FROM {IMAGE}\nLABEL gone=soon\n")) else {
+        return;
+    };
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.source = Source::image(image.tag.parse().unwrap());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    docker(&["image", "rm", "--force", &image.tag]).unwrap();
+
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert!(
+        matches!(notes(&report, "db"), [Note::VolumeOwnerUnchecked { .. }]),
+        "{report:?}"
+    );
+    world.down();
+}
+
+#[test]
+fn an_up_of_a_running_app_whose_owner_it_can_check_adds_no_note() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+
+    let report = world.up(&plan);
+
+    assert_eq!(
+        outcome(&report, "db"),
+        &AppOutcome::AlreadyRunning,
+        "{report:?}"
+    );
+    assert!(notes(&report, "db").is_empty(), "{report:?}");
+    world.down();
+}
+
+#[test]
+fn a_chown_helper_that_fails_after_the_container_is_created_ends_the_start_and_removes_it() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    let volume = world.data_volume();
+    let labels = docker(&[
+        "volume",
+        "inspect",
+        "--format",
+        "{{range $k, $v := .Labels}}{{$k}}={{$v}}\n{{end}}",
+        &volume,
+    ])
+    .unwrap();
+    world.down();
+    docker(&["volume", "rm", &volume]).unwrap();
+    // A volume mounted read-only makes `chown` fail after phase has
+    // created the app's container.
+    let mut create = vec![
+        "volume",
+        "create",
+        "--opt",
+        "type=tmpfs",
+        "--opt",
+        "device=tmpfs",
+        "--opt",
+        "o=ro",
+    ];
+    for label in labels.lines().filter(|line| !line.is_empty()) {
+        create.extend(["--label", label]);
+    }
+    create.push(&volume);
+    docker(&create).unwrap();
+
+    let report = world.up(&plan);
+
+    match outcome(&report, "db") {
+        AppOutcome::Errored { message, .. } => {
+            assert!(message.contains("exited with status 1"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!world.has_containers());
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    docker(&["volume", "rm", &volume]).unwrap();
+}
+
+#[test]
+fn deleting_a_workspaces_app_volumes_removes_a_leftover_helper_first() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", "exec sleep 60");
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    let volume = world.data_volume();
+    let id = world.container("db", "server").unwrap();
+    docker(&["rm", "--force", "--", &id]).unwrap();
+    world.leave_helper("db");
+
+    delete_app_volumes(app_volumes(&world.phase, &world.id).unwrap()).unwrap();
+
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    assert!(docker(&["volume", "inspect", &volume]).is_none());
 }
 
 #[test]

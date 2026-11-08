@@ -174,6 +174,9 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
                 Note::SecretsKept { message, .. } => ProcessNote::SecretsKept {
                     message: message.clone(),
                 },
+                Note::VolumeOwnerUnchecked { message, .. } => ProcessNote::VolumeOwnerUnchecked {
+                    message: message.clone(),
+                },
                 _ => continue,
             };
             notes

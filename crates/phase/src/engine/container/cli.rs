@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
+use crate::DockerCause;
 use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
 use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, Finished, check_with, message, quick_with, run_program,
@@ -251,6 +252,18 @@ fn unavailable(error: &ContainerError) -> DockerError {
     error.describe(DockerError::unavailable(error.to_string()).with_cause(error.cause()))
 }
 
+/// Returns the failure of the removal of the volume-owner helpers that
+/// `error` ended. A Docker that did not answer in time counts as one that
+/// does not answer, which a sweep treats as having no helpers to remove.
+fn helper_removal_failure(error: &ContainerError) -> DockerError {
+    match error.cause() {
+        DockerCause::DockerMissing | DockerCause::DaemonUnavailable | DockerCause::TimedOut => {
+            unavailable(error)
+        }
+        _ => error.describe(DockerError::refused(error.to_string()).with_cause(error.cause())),
+    }
+}
+
 /// Returns the operation of the inspect command of `kind`, as phase names
 /// it in an error, such as `container inspect`.
 const fn inspect_operation(kind: DockerKind) -> &'static str {
@@ -355,14 +368,7 @@ impl Docker for DockerCli {
     }
 
     fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
-        volume_owner::remove_helpers_with(self.program(), workspace, None).map_err(|error| {
-            match error {
-                ContainerError::Missing { .. } | ContainerError::Unavailable { .. } => {
-                    unavailable(&error)
-                }
-                _ => error
-                    .describe(DockerError::refused(error.to_string()).with_cause(error.cause())),
-            }
-        })
+        volume_owner::remove_helpers_with(self.program(), workspace, None)
+            .map_err(|error| helper_removal_failure(&error))
     }
 }

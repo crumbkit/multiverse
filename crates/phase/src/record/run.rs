@@ -525,9 +525,10 @@ pub(crate) struct VolumeEntry {
     pub(crate) state: EntryState,
     /// The owner that phase last gave the volume's root directory, or
     /// `None` when phase did not set it, as for a volume whose app keeps
-    /// its owner or runs as root. `up` leaves a volume whose recorded
-    /// owner matches the owner it wants alone. A v5 record that an earlier
-    /// phase wrote has no owner, and reads as `None`.
+    /// its owner or runs as root. It says which owner phase wanted and
+    /// proves nothing about the owner the volume has now, so `up` checks
+    /// the volume whatever it says. A v5 record that an earlier phase
+    /// wrote has no owner, and reads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owner: Option<VolumeOwner>,
 }
@@ -551,14 +552,18 @@ impl VolumeOwner {
     }
 }
 
+/// The id that the kernel's `chown` reads as -1, which leaves the owner
+/// as it is, so a volume given to it would keep its old owner.
+pub(crate) const UNCHANGED_ID: u32 = u32::MAX;
+
 /// Returns `part` as a number when it is only ASCII digits that fit in 32
-/// bits. Rust's own parse also takes a leading `+`, which `chown` and a
-/// plan do not.
+/// bits and it is not [`UNCHANGED_ID`]. Rust's own parse also takes a
+/// leading `+`, which `chown` and a plan do not.
 fn numeric_id(part: &str) -> Option<u32> {
     if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    part.parse().ok()
+    part.parse().ok().filter(|id| *id != UNCHANGED_ID)
 }
 
 /// The text of an owner that is not a numeric `uid` or `uid:gid`.

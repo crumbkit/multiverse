@@ -599,6 +599,9 @@ impl Op<'_, '_> {
             self.journal
                 .stopped(&ObjectKey::Container(app.name.clone(), process))?;
         }
+        if let Some(reason) = &started.owners_unchecked {
+            notes.push(Note::volume_owner_unchecked(&app.name, reason));
+        }
         if let Some(error) = started.failure {
             return Ok(AppStep::Done(AppOutcome::errored(&error), notes));
         }

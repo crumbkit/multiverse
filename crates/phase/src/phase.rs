@@ -53,6 +53,9 @@ pub struct Phase {
     lock_wait: Duration,
     /// How long `up` watches a process without a probe.
     start_grace: Duration,
+    /// The image that replaces the volume-owner helper's image in a test.
+    #[cfg(test)]
+    volume_helper_image: Option<String>,
     /// How long phase waits after `KILL`.
     kill_wait: Duration,
     /// The program that runs keepers, or `None` until the builder names
@@ -100,6 +103,8 @@ impl Phase {
             state_dir,
             lock_wait: DEFAULT_LOCK_WAIT,
             start_grace: DEFAULT_START_GRACE,
+            #[cfg(test)]
+            volume_helper_image: None,
             kill_wait: DEFAULT_KILL_WAIT,
             keeper: None,
             inherited: BTreeMap::new(),
@@ -173,6 +178,16 @@ impl Phase {
     #[must_use]
     pub const fn with_start_grace(mut self, grace: Duration) -> Self {
         self.start_grace = grace;
+        self
+    }
+
+    /// Returns this `Phase` with `image` as the image that it makes sure
+    /// Docker has before it runs a volume-owner helper, so a test can make
+    /// that step fail.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_volume_helper_image(mut self, image: String) -> Self {
+        self.volume_helper_image = Some(image);
         self
     }
 
@@ -326,8 +341,14 @@ impl Phase {
 
     /// Returns the runner of container apps on this machine.
     fn containers(&self) -> ComposeRunner {
-        ComposeRunner::new(self.state_dir.clone(), self.start_grace)
-            .with_docker_environment(self.docker_environment.clone())
+        let runner = ComposeRunner::new(self.state_dir.clone(), self.start_grace)
+            .with_docker_environment(self.docker_environment.clone());
+        #[cfg(test)]
+        let runner = match &self.volume_helper_image {
+            Some(image) => runner.with_helper_image(image.clone()),
+            None => runner,
+        };
+        runner
     }
 
     /// Returns the engine that carries out `up`, `down` and `restart` on

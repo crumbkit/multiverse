@@ -825,7 +825,9 @@ names no `owner` and the app runs as root, by its run-as user or its
 image's `USER`, phase leaves the volumes alone, because a container that
 runs as root can write a volume as Docker made it. The plan refuses an `owner` that names a user or a group, with
 `ContainerProblem::BadOwner`, because a name can mean uid 0 inside an
-image.
+image. It also refuses the id 4294967295, which the kernel's `chown` reads
+as -1, meaning that the owner stays as it is. An `id` in an image that
+prints that number fails as one that prints no number.
 
 A run-as user or an image `USER` that is a name, such as `postgres` or
 `1000:staff`, is resolved to numbers in the app's image. phase runs
@@ -835,7 +837,14 @@ A name that resolves to uid 0 fails the app with
 `phase::container::volume_owner_root`, and only a plan's numeric `owner`
 can give a volume to root. An `id` that exits with another status than 0,
 or prints anything else than one number, fails the app with
-`phase::container::volume_owner_unresolved`, which gives the status. Each
+`phase::container::volume_owner_unresolved`, which gives the status. The
+same error covers a helper that Docker refuses to create or start, as for
+an image with no `id` program or with a `USER` that its `/etc/passwd`
+lacks. Docker's line for that case can quote the `USER`, so phase keeps
+none of Docker's text there. Each of these errors says that a numeric
+`owner` or `keep` fixes it. When no `id` helper runs, as under `keep`, a
+`docker compose up` that cannot find the image's `USER` fails with phase's
+own sentence for the same reason. Each
 start of an app whose user is a name runs `id` twice. A numeric `owner`
 or run-as user avoids that.
 
@@ -888,7 +897,9 @@ So phase creates a process's container with `docker compose up --no-start`,
 then runs one helper for each volume that the process mounts, then starts
 the container with `docker compose up --detach --no-recreate`. The app's
 main process never runs before the owner is right, and a helper that fails
-ends the start and removes the created container. The two `compose up`
+ends the start and removes the created container. phase pulls the helper's
+image before it removes any old container, so a pull that fails leaves the
+old container running. The two `compose up`
 commands read the same compose file and environment. An app with no owner
 to set, such as one under `keep`, runs one `compose up --detach` and no
 helper.
@@ -906,6 +917,10 @@ leaves running gets the owner that the run record names, because that is
 the owner its container started with: a tag that has moved to an image
 with another `USER` must not take a running container's volume away from
 it. When the record names none, the volume gets the owner from the plan.
+When that check cannot run, because the app's image is gone, the helper's
+image cannot be pulled or a helper fails, the container keeps running. An
+app whose every container runs is still reported as already running, and a
+note says that the owner was not checked. The next `up` checks it again.
 Under `keep`, and for an app that runs as root when the plan names no
 owner, no helper runs and nothing is checked.
 

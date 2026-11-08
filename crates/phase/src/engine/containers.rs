@@ -214,6 +214,10 @@ pub(crate) struct ContainersStarted {
     /// gave its root directory or that it kept from the run record for a
     /// volume it had no reason to touch, or `None` when no owner holds.
     pub(crate) volumes: Vec<(DockerName, Option<VolumeOwner>)>,
+    /// Why the owner of a volume of a running process could not be
+    /// checked, or `None`. It is no failure: the container keeps running
+    /// and the next `up` checks again.
+    pub(crate) owners_unchecked: Option<String>,
     /// The process that failed to become ready, and why, or `None` when
     /// every process is ready.
     pub(crate) problem: Option<(ProcessName, StartProblem)>,

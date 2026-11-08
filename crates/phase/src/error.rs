@@ -246,9 +246,13 @@ pub enum VolumeOwnerProblem {
     /// means root may hide that the app runs as root, so phase gives a
     /// volume to root only when the plan's volume owner says `0:0`.
     ResolvesToRoot,
+    /// Docker refused to create or start the helper that runs `id` in the
+    /// app's image, as when the image has no `id` program or no such user.
+    /// phase keeps none of Docker's text, because Docker's line can quote
+    /// the image's `USER`.
+    IdNotRun,
     /// `id` in the app's image exited with this status, so the name could
-    /// not be resolved, as when the image has no `id` program or no such
-    /// user.
+    /// not be resolved.
     #[non_exhaustive]
     IdFailed {
         /// The exit status of `id`.
@@ -413,6 +417,10 @@ impl fmt::Display for PhaseError {
                     VolumeOwnerProblem::ResolvesToRoot => write!(
                         formatter,
                         "{user} is uid 0 in its image, so phase does not give the app's volumes to it"
+                    )?,
+                    VolumeOwnerProblem::IdNotRun => write!(
+                        formatter,
+                        "phase could not resolve {user} to a numeric uid and gid: Docker could not run id in the app's image, as when the image has no id program or no such user"
                     )?,
                     VolumeOwnerProblem::IdFailed { status } => write!(
                         formatter,
