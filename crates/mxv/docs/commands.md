@@ -23,6 +23,9 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
 - [`mxv clean`](#mxv-clean): Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces
+- [`mxv reclaim`](#mxv-reclaim): Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+- [`mxv pin`](#mxv-pin): Keep mxv reclaim from stopping a workspace
+- [`mxv unpin`](#mxv-unpin): Let mxv reclaim stop a workspace again while it is idle
 - [`mxv ports`](#mxv-ports): Manage the host ports that a workspace holds
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
@@ -550,6 +553,74 @@ mxv clean --all --dry-run
 Effects: destructive, idempotent, closed-world.
 
 Writes: reports each item and exits 1 when any item fails.
+
+## `mxv reclaim`
+
+Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
+
+With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes and containers, measured before the stop, covers the need, or until none is left. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+
+### Arguments
+
+- `--need <NEED>`: What to free: memory=SIZE or disk=SIZE, such as memory=2GiB. Required.
+- `--idle <AGE>`: How long a workspace must go unused to count as idle, such as 2h or 0s; it defaults to the config file's stop\_idle, or else 2h, for memory, and to clean\_idle, or else 7d, for disk
+- `--dry-run`: Report what the command would change, and change nothing
+
+### Examples
+
+Print which idle workspaces stopping would free 2 GiB of memory.
+
+```sh
+mxv reclaim --need memory=2GiB --dry-run
+```
+
+### Columns
+
+- `name`: The workspace's name.
+- `state`: `stopped`, `would_stop`, `cleaned`, `would_clean` or `kept`.
+- `freed`: The bytes that the run freed, or would free on a dry run, which is 0 for a workspace that it kept. For memory it is the resident memory of the workspace's processes and containers, measured before the stop.
+- `active`: How long ago the workspace was last active: its checkouts changed or an mxv command named it. It is null when neither happened, and for a workspace that the run kept without measuring.
+- `reason`: Why the workspace counts as idle, for one that the run stopped or cleaned, or why the run kept it.
+
+Effects: destructive, idempotent, closed-world.
+
+Writes: reports each item and exits 1 when any item fails.
+
+## `mxv pin`
+
+Keep mxv reclaim from stopping a workspace
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+
+### Examples
+
+Keep mxv reclaim from stopping the workspace reading-list.
+
+```sh
+mxv pin -w reading-list
+```
+
+Effects: additive, idempotent, closed-world.
+
+## `mxv unpin`
+
+Let mxv reclaim stop a workspace again while it is idle
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+
+### Examples
+
+Let mxv reclaim stop the workspace reading-list while it is idle.
+
+```sh
+mxv unpin -w reading-list
+```
+
+Effects: additive, idempotent, closed-world.
 
 ## `mxv ports`
 

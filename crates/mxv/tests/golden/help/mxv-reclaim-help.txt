@@ -1,0 +1,44 @@
+Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
+
+With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes and containers, measured before the stop, covers the need, or until none is left. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+
+Usage: mxv reclaim [OPTIONS] --need <NEED>
+
+Options:
+      --need <NEED>
+          What to free: memory=SIZE or disk=SIZE, such as memory=2GiB
+
+      --idle <AGE>
+          How long a workspace must go unused to count as idle, such as 2h or 0s; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
+
+      --dry-run
+          Report what the command would change, and change nothing
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv reclaim --need memory=2GiB --dry-run
+          Print which idle workspaces stopping would free 2 GiB of memory
+
+Columns:
+  name    The workspace's name.
+  state   `stopped`, `would_stop`, `cleaned`, `would_clean` or `kept`.
+  freed   The bytes that the run freed, or would free on a dry run, which is 0 for a workspace that it kept. For memory it is the resident memory of the workspace's processes and containers, measured before the stop.
+  active  How long ago the workspace was last active: its checkouts changed or an mxv command named it. It is null when neither happened, and for a workspace that the run kept without measuring.
+  reason  Why the workspace counts as idle, for one that the run stopped or cleaned, or why the run kept it.
+
+Effects: destructive, idempotent, closed-world.
+Writes: reports each item and exits 1 when any item fails.

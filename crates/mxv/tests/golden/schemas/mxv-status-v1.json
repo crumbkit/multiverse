@@ -307,6 +307,21 @@
           "items": {
             "$ref": "#/$defs/CheckoutStateRow"
           }
+        },
+        "pinned": {
+          "description": "Whether `mxv pin` keeps `mxv reclaim` from stopping the workspace.",
+          "type": "boolean"
+        },
+        "reclaimed": {
+          "description": "What `mxv reclaim` stopped, which `mxv up` starts again, or null\nwhen reclaim has not stopped the workspace since the last `up` or\n`down`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReclaimedRow"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -316,7 +331,9 @@
         "manifest_error",
         "manifest_error_code",
         "warnings",
-        "checkouts"
+        "checkouts",
+        "pinned",
+        "reclaimed"
       ]
     },
     "ManifestRow": {
@@ -394,6 +411,22 @@
         "commit",
         "changes",
         "problem"
+      ]
+    },
+    "ReclaimedRow": {
+      "description": "What `mxv reclaim` stopped in a workspace, as `mxv status` reports it.",
+      "type": "object",
+      "properties": {
+        "processes": {
+          "description": "The processes and containers that ran when reclaim stopped them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "processes"
       ]
     }
   }

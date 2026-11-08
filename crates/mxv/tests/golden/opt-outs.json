@@ -140,6 +140,15 @@
     },
     {
       "rule": "effects/yes",
+      "applies_to": "mxv reclaim",
+      "reason": "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "effects/yes",
       "applies_to": "mxv ports reset",
       "reason": "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
       "costs": [
@@ -224,7 +233,7 @@
   "customisations": [
     {
       "declaration": "root-verbs",
-      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv archive, mxv restore, mxv remove, mxv clean",
+      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv archive, mxv restore, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin",
       "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
       "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
     },

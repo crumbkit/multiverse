@@ -26,6 +26,11 @@ Put a workspace away
 Free disk space
   clean     Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
 
+Free memory
+  reclaim   Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+  pin       Keep mxv reclaim from stopping a workspace
+  unpin     Let mxv reclaim stop a workspace again while it is idle
+
 Explore the commands
   commands  Explore mxv's commands
   schemas   Explore the JSON documents that mxv prints

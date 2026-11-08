@@ -1,0 +1,17 @@
+Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+
+Usage: mxv reclaim [OPTIONS] --need <NEED>
+
+Options:
+      --need <NEED>  What to free: memory=SIZE or disk=SIZE, such as memory=2GiB
+      --idle <AGE>   How long a workspace must go unused to count as idle, such as 2h or 0s; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
+      --dry-run      Report what the command would change, and change nothing
+  -h, --help         Print help (see more with '--help')
+
+Examples:
+  mxv reclaim --need memory=2GiB --dry-run
+
+Effects: destructive, idempotent, closed-world.
+Writes: reports each item and exits 1 when any item fails.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv reclaim --help` describes them.
+Next: mxv reclaim --help explains each column.
