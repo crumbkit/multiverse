@@ -694,8 +694,13 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   the port.
 - `mxv show` lists the host port that the workspace holds for each port.
 
-mxv keeps the run files of each workspace's processes in
-`$XDG_STATE_HOME/mxv/runs/<name>/`: `<process>.json` with the process id
+A workspace that the current mxv starts has its records in phase's run
+record, `$XDG_STATE_HOME/mxv/phase/runs/<workspace id>.json`, and its logs in
+`$XDG_STATE_HOME/mxv/phase/logs/<workspace id>/<app>.<process>.log`. The
+rest of this section describes how mxv handles a workspace that an older
+version started. That version kept the run files of each workspace's
+processes in `$XDG_STATE_HOME/mxv/runs/<name>/`, and mxv still reads them to
+report and stop what that version started: `<process>.json` with the process id
 and its start time, `<process>.log`, `<process>.log.1`, and
 `<process>.exit`, which holds the exit code once the process ends. Each
 process runs under `/bin/sh`, which waits for it and writes that code, so a
@@ -707,7 +712,7 @@ the shell gone. A shell that something such as SIGKILL ended writes no
 file, and `status` then reports the process as exited with a null code and
 signal and a `reason` that says the shell ended without writing its code.
 
-Each `up` of a process moves its previous log to `<process>.log.1`, which
+For a workspace that an older mxv started, each `up` of a process moves its previous log to `<process>.log.1`, which
 replaces the log before it, so a process keeps at most two logs. No mxv
 process runs between commands, so mxv checks the size of the logs only
 when a command runs: `up`, `down`, `status` and `logs` copy a log that

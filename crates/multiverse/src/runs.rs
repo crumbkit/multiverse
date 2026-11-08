@@ -1,7 +1,11 @@
 //! The processes of a workspace's app: starting them from the manifest,
 //! stopping them, reporting their state, and reading their logs.
 //!
-//! No long-running mxv watches the processes. Each process leaves files in
+//! [`Runs`] runs a workspace's apps through phase. The files described below
+//! are what an older mxv left, which mxv still reads to report and stop what
+//! that version started.
+//!
+//! No long-running mxv watches those processes. Each process leaves files in
 //! `<runs>/<workspace>/`: `<process>.json`, the run record with the process
 //! id and its start time; `<process>.log`, its standard output and standard
 //! error; `<process>.log.1`, the log of its previous start or the part of
