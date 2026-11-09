@@ -185,7 +185,7 @@ impl Candidate {
             self.kept.push(KeptPath::new(
                 found.checkout,
                 found.path,
-                "only the repository's mxv.toml declares it disposable, and no person confirmed it; answer the prompt of mxv clean, or run mxv clean --yes --disposable".to_owned(),
+                "only the repository's mxv.toml declares it disposable, and no person confirmed it; answer the prompt of mxv clean, or run mxv clean <NAME> --yes --disposable".to_owned(),
             ));
         }
     }

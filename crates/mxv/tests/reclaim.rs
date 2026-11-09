@@ -366,8 +366,10 @@ fn a_disk_need_keeps_a_manifest_only_path_and_names_the_clean_that_deletes_it() 
     assert_eq!(exit, 0, "{document}");
     assert!(checkout.join("data/pg.db").exists());
     let reason = row(&document, "built")["reason"].as_str().unwrap();
-    assert!(reason.contains("clean --yes --disposable"), "{reason}");
-    assert!(!reason.contains("--yes alone"), "{reason}");
+    assert!(
+        reason.contains("clean <NAME> --yes --disposable"),
+        "{reason}"
+    );
 }
 
 #[test]

@@ -626,7 +626,7 @@ fn show_and_clean_mark_a_path_that_only_the_manifest_declares_disposable() {
 }
 
 #[test]
-fn clean_with_yes_keeps_a_path_that_only_the_manifest_declares_disposable_unless_forced() {
+fn clean_with_yes_keeps_a_manifest_only_disposable_path_and_deletes_it_with_disposable() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_text(&checkout.join("mxv.toml"), "disposable = [\"data/\"]\n");
@@ -647,7 +647,10 @@ fn clean_with_yes_keeps_a_path_that_only_the_manifest_declares_disposable_unless
     );
     let skipped = row["skipped"][0].as_str().unwrap();
     assert!(skipped.contains("app: data/"), "{skipped}");
-    assert!(skipped.contains("clean --yes --disposable"), "{skipped}");
+    assert!(
+        skipped.contains("clean <NAME> --yes --disposable"),
+        "{skipped}"
+    );
     assert!(checkout.join("data/pg.db").exists());
     assert!(!checkout.join("target").exists());
 
