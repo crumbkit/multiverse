@@ -32,6 +32,10 @@ use crate::test_ports::PortBlock;
 /// macOS.
 const MOST_WAIT: Duration = Duration::from_secs(30);
 
+/// A deadband socket that no daemon listens on, so a test never waits for
+/// a daemon that happens to run on the machine.
+const MISSING_SOCKET: &str = "/nonexistent/deadband.sock";
+
 /// Yields until [`MOST_WAIT`] has passed, for a loop that polls until a
 /// process changes.
 fn waiting() -> impl Iterator<Item = ()> {
@@ -154,6 +158,8 @@ impl Setup {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("MXV_ROOT", root.join("workspaces"))
+            // A test that wants a daemon sets its own socket after this one.
+            .env("DEADBAND_SOCKET", MISSING_SOCKET)
     }
 
     /// Starts `mxv up` for the workspace `name` as a child process that the
@@ -163,21 +169,32 @@ impl Setup {
         reason = "the test starts mxv as a child so that it can signal it"
     )]
     fn spawn_up(&self, name: &str) -> std::process::Child {
-        self.spawn_up_on(name, Path::new("/nonexistent/deadband.sock"))
+        self.spawn_up_on(name, Path::new(MISSING_SOCKET))
     }
 
     /// Starts `mxv up` as [`Setup::spawn_up`] does, with `socket` as the
     /// deadband daemon's socket.
     #[expect(
-        clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the test starts mxv as a child so that it can signal it"
     )]
     fn spawn_up_on(&self, name: &str, socket: &Path) -> std::process::Child {
+        self.spawn_through(env!("CARGO_BIN_EXE_mxv"), &["up", "-w", name], socket)
+    }
+
+    /// Starts `program` with `args` and mxv's environment as a child that
+    /// the test can signal, with `socket` as the deadband daemon's socket
+    /// and its standard error discarded.
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the test starts mxv as a child so that it can signal it"
+    )]
+    fn spawn_through(&self, program: &str, args: &[&str], socket: &Path) -> std::process::Child {
         let root = self.root();
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
+        let mut command = std::process::Command::new(program);
         command
-            .args(["up", "-w", name])
+            .args(args)
             .current_dir(&root)
             .env_clear()
             .env("PATH", PATH)
@@ -1656,6 +1673,36 @@ fn exec_refuses_json_because_the_output_is_the_commands_own() {
 }
 
 #[test]
+fn exec_under_an_ignored_sighup_leaves_the_signal_ignored_in_the_command() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let ended = setup
+        .spawn_through(
+            "/usr/bin/nohup",
+            &[
+                env!("CARGO_BIN_EXE_mxv"),
+                "exec",
+                "-w",
+                "triage",
+                "api",
+                "--",
+                "sh",
+                "-c",
+                "kill -HUP $$; exit 4",
+            ],
+            Path::new(MISSING_SOCKET),
+        )
+        .wait()
+        .unwrap();
+
+    assert_eq!(ended.code(), Some(4), "{ended:?}");
+}
+
+#[test]
 fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code() {
     use std::io::BufRead as _;
     let setup = Setup::new();
@@ -1784,6 +1831,39 @@ fn a_build_receives_the_job_variables_and_a_variable_that_the_process_declares_k
 }
 
 #[test]
+fn a_build_that_prints_to_standard_output_leaves_the_json_document_alone() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"sh\", \"-c\", \"echo the-build-ran\"]\n";
+    setup.workspace("triage", manifest);
+
+    let output = setup
+        .command_in(&setup.root(), &["up", "-w", "triage", "--json"])
+        .output()
+        .unwrap();
+
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{document}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the-build-ran"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn a_failing_build_still_prints_the_warnings_of_the_manifest() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"cargo\", \"run\"]\nbuild = [\"false\"]\n",
+    );
+
+    let (exit, stderr) = setup.errors(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{stderr}");
+    assert!(stderr.contains("`cargo run`"), "{stderr}");
+}
+
+#[test]
 fn a_failing_build_leaves_a_running_process_with_the_same_pid_under_restart() {
     let setup = Setup::new();
     let checkout = setup.workspace("triage", &breakable(""));
@@ -1881,6 +1961,26 @@ fn an_interrupt_during_a_build_ends_its_group_starts_nothing_and_exits_with_130(
     assert_eq!(ended.code(), Some(130));
     assert!(!group_exists(group));
     assert!(!setup.started("api"));
+}
+
+#[test]
+fn a_build_under_an_ignored_sighup_is_not_cancelled_by_sighup() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"sh\", \"-c\", \"touch started; while [ ! -e go ]; do sleep 0.1; done\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+    let mut up = setup.spawn_through(
+        "/usr/bin/nohup",
+        &[env!("CARGO_BIN_EXE_mxv"), "up", "-w", "triage"],
+        Path::new(MISSING_SOCKET),
+    );
+    wait_for(&checkout.join("started"));
+
+    send("HUP", up.id());
+    write(&checkout.join("go"), "");
+    let ended = up.wait().unwrap();
+
+    assert_eq!(ended.code(), Some(0), "{ended:?}");
+    assert!(setup.started("api"));
 }
 
 /// Sends `signal` to an `mxv up` during its build, and checks that the

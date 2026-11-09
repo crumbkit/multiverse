@@ -2598,3 +2598,116 @@ mod landlock {
         }
     }
 }
+
+#[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
+mod inherited_descriptors {
+    use std::collections::BTreeSet;
+    use std::io::Read as _;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+
+    use super::{Fixture, sh};
+    use crate::sandbox::{Platform, launcher_command, platform};
+
+    /// Opens a pseudo-terminal, and returns its master and its slave.
+    fn pty() -> (OwnedFd, OwnedFd) {
+        let (mut master, mut slave) = (-1, -1);
+        #[expect(
+            unsafe_code,
+            reason = "the test opens a pty, which only libc's openpty does without a feature of rustix that phase does not use"
+        )]
+        // SAFETY: `openpty` writes two descriptors into `master` and
+        // `slave`, which live for the call, and reads nothing through its
+        // null name, termios and window-size pointers.
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        #[expect(
+            unsafe_code,
+            reason = "the test takes ownership of the descriptors that openpty returned"
+        )]
+        // SAFETY: openpty returned both descriptors open, and nothing else
+        // owns them.
+        unsafe {
+            (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave))
+        }
+    }
+
+    #[test]
+    fn a_sandboxed_command_started_with_a_terminal_on_descriptor_3_cannot_use_it() {
+        if !matches!(platform(), Platform::Available(_)) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let script = "if [ -t 3 ]; then echo terminal; else echo no-terminal; fi; \
+            if (echo leaked >&3) 2>/dev/null; then echo wrote; else echo not-written; fi; \
+            if (read -r line <&3) 2>/dev/null; then echo read; else echo not-read; fi";
+        let api = fixture.app(sh(script), 41_000);
+        let spec = fixture
+            .spec_of(&api, "/usr/bin:/bin", BTreeSet::new())
+            .unwrap();
+        let (master, slave) = pty();
+        // The line waits in the terminal, so a read through a descriptor
+        // that stayed open returns at once and fails the test without
+        // hanging it.
+        rustix::io::write(&master, b"typed\n").unwrap();
+        // The descriptor is above any that the spawn gives the child, so
+        // the `dup2` below always makes a new descriptor without
+        // close-on-exec.
+        let high = rustix::io::fcntl_dupfd_cloexec(&slave, 10).unwrap();
+        let high_fd = high.as_raw_fd();
+        let mut command = launcher_command(&spec, &sh(script)).unwrap();
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &spec.tmp)
+            .current_dir(fixture.checkout())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        #[expect(
+            unsafe_code,
+            reason = "the test leaves a terminal on descriptor 3 of the launcher, as a caller can, which only a hook between fork and exec does"
+        )]
+        // SAFETY: `dup2` is async-signal-safe and the hook touches only
+        // the descriptors that it names.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(high_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test starts this test binary as the launcher"
+        )]
+        let mut child = command.spawn().unwrap();
+        let mut output = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut output)
+            .unwrap();
+        child.wait().unwrap();
+        drop(master);
+
+        // The test binary, which runs as the launcher, prints its own
+        // lines before the script's.
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(
+            lines.ends_with(&["no-terminal", "not-written", "not-read"]),
+            "{output}"
+        );
+    }
+}

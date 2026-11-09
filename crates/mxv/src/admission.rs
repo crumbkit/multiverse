@@ -166,6 +166,9 @@ fn cut(command: &str) -> &str {
 /// without this handler. The usage log's thread still does that for
 /// `SIGINT`, so this thread leaves `SIGINT` to it.
 ///
+/// The signals are those of [`interrupts`], so a `SIGHUP` or `SIGQUIT` that
+/// mxv started out ignoring stays ignored and `nohup mxv up` keeps working.
+///
 /// `SIGTERM` is not caught here, because crumbkit's usage log ends mxv on it
 /// whether or not a child was handed over, as it does for `mxv exec`. A
 /// `SIGTERM` during a build therefore ends mxv and frees the place, while
@@ -173,9 +176,9 @@ fn cut(command: &str) -> &str {
 /// `up` starts a second build. A `SIGTERM` rule in crumbkit's usage log like
 /// its `SIGINT` rule would replace this.
 fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<AtomicBool>> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
+    use signal_hook::consts::SIGINT;
     use signal_hook::iterator::Signals;
-    let mut signals = Signals::new([SIGINT, SIGHUP, SIGQUIT]).ok()?;
+    let mut signals = Signals::new(interrupts()).ok()?;
     let building = Arc::new(AtomicBool::new(true));
     let flag = Arc::clone(&building);
     std::thread::Builder::new()
@@ -193,4 +196,40 @@ fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<Atomic
         .ok()?;
     crumbkit::events::handed_over();
     Some(building)
+}
+
+/// Returns the signals that mxv catches while a child runs: `SIGINT`,
+/// `SIGHUP` and `SIGQUIT`, without any that is set to be ignored. Installing
+/// a handler would replace the ignored setting, so mxv leaves such a signal
+/// alone, and it neither cancels the child nor ends mxv.
+///
+/// This misses `SIGINT`. A run started with `SIGINT` ignored still has its
+/// build cancelled on `SIGINT`, because the usage log's handler is installed
+/// first, so `SIGINT` no longer reads as ignored here. Reading the setting
+/// before `crumbkit_usage::start()` would replace this, as would the
+/// `start_under` follow-up task that covers `SIGTERM`.
+pub(crate) fn interrupts() -> Vec<i32> {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
+    [SIGINT, SIGHUP, SIGQUIT]
+        .into_iter()
+        .filter(|signal| !ignored(*signal))
+        .collect()
+}
+
+/// Reports whether `signal` is set to be ignored. A signal whose setting
+/// cannot be read counts as not ignored, which keeps mxv's handling of it.
+fn ignored(signal: i32) -> bool {
+    let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
+    #[expect(
+        unsafe_code,
+        reason = "only sigaction reads a signal's setting, and neither rustix nor signal-hook offers it (BASE-3)"
+    )]
+    // SAFETY: the new action is null, so the call changes nothing, and
+    // `current` lives for the call and is zeroed, so reading it afterwards
+    // reads initialised bytes whether or not the call succeeded.
+    let (read, current) = unsafe {
+        let read = libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr());
+        (read, current.assume_init())
+    };
+    read == 0 && current.sa_sigaction == libc::SIG_IGN
 }

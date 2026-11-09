@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use super::{ExecIo, ExecRequest, Session, run};
@@ -649,6 +651,63 @@ fn a_sandboxed_apps_exec_without_a_keeper_program_is_refused_rather_than_run_uns
     let ran = exec_script(&phase, &plan, &greeting(), "true", state.path());
 
     assert_eq!(ran.result.unwrap_err().code(), "phase::exec::unstartable");
+}
+
+#[test]
+fn a_cancel_kills_a_group_member_that_ignores_term_after_the_leader_exits() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("member.pid");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test builds a command for the exec runner"
+    )]
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        &format!(
+            "sh -c 'trap \"\" TERM; echo $$ > \"{}\"; while :; do sleep 1; done' & wait",
+            pid_file.display()
+        ),
+    ]);
+    let cancel = Cancel::new();
+    let setter = cancel.clone();
+    let watched = pid_file.clone();
+    let canceller = std::thread::spawn(move || {
+        while std::fs::read_to_string(&watched).map_or(true, |text| !text.ends_with('\n')) {
+            crate::clock::pause(Duration::from_millis(20));
+        }
+        setter.cancel();
+    });
+    let io = ExecIo::Streams {
+        stdin: None,
+        stdout: None,
+        stderr: None,
+    };
+
+    run(
+        command,
+        Session::Caller,
+        io,
+        &cancel,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+
+    canceller.join().unwrap();
+    let member: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let member = rustix::process::Pid::from_raw(member).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rustix::process::test_kill_process(member).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the member that ignores TERM outlived the run"
+        );
+        crate::clock::pause(Duration::from_millis(20));
+    }
 }
 
 #[test]

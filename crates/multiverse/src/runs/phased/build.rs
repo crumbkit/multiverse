@@ -30,11 +30,15 @@
 //!   macOS has no parent-death signal. A small supervising process that holds
 //!   the place and outlives mxv would replace this.
 //! - A process that outlives its build and keeps the build's output open,
-//!   such as a compiler's daemon, has its output copied for [`OUTPUT_GRACE`]
-//!   after the build ends and lost after that. Its next write then fails.
-//!   Without the limit, such a process would hold `up` until it exited.
-//!   Giving each build a log file of its own, which needs no copying, would
-//!   replace this.
+//!   such as a compiler's daemon, delays the command by at most
+//!   [`OUTPUT_GRACE`]. Its output is still copied until mxv exits. After
+//!   that the pipe has no reader, so its next write fails, and by default
+//!   the process dies of `SIGPIPE`. Without the limit, such a process would
+//!   hold `up` until it exited. Giving each build a log file of its own,
+//!   which needs no copying, would replace this.
+//! - A sandboxed build that itself exits with the launcher's status 78 is
+//!   reported as unable to start. A status that only the launcher can give
+//!   would replace this.
 
 use std::io::{self, PipeReader, Read as _, Write};
 use std::marker::PhantomData;
@@ -46,8 +50,10 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use phase::keeper::SANDBOX_REFUSED;
 use phase::{Cancel, ExecIo, ExecRequest, PhaseError, VariableName, WorkspaceId};
 
+use super::exec::EXEC_WAIT;
 use super::{app, main_process};
 use crate::error::Error;
 use crate::manifest::{Command, Manifest};
@@ -58,11 +64,6 @@ use crate::store::{Lock, Store};
 
 #[cfg(test)]
 mod tests;
-
-/// How long a build waits for an operation in progress to release phase's
-/// lifecycle lock, and for its variables to resolve. It does not cover the
-/// running command, which [`Timer`] bounds.
-const STEP_WAIT: Duration = Duration::from_secs(600);
 
 /// How long a build's output may take to reach its end once the build has
 /// exited. It passes only when a process that the build left behind holds
@@ -233,8 +234,6 @@ impl Drop for Timer {
 struct Copier {
     /// Closes when the thread ends.
     ended: mpsc::Receiver<()>,
-    /// Tells the thread to discard what it reads next and end.
-    abandoned: Arc<AtomicBool>,
 }
 
 impl Copier {
@@ -245,38 +244,33 @@ impl Copier {
     ///
     /// Returns the error of spawning the thread.
     fn start(reader: PipeReader, writer: Box<dyn Write + Send>) -> io::Result<Self> {
-        let abandoned = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&abandoned);
         let (done, ended) = mpsc::channel::<()>();
         std::thread::Builder::new()
             .name("mxv-build-output".to_owned())
             .spawn(move || {
-                copy(reader, writer, &flag);
+                copy(reader, writer);
                 drop(done);
             })?;
-        Ok(Self { ended, abandoned })
+        Ok(Self { ended })
     }
 
     /// Waits for the output of a build that has exited to reach its end,
     /// for at most [`OUTPUT_GRACE`].
     ///
     /// A process that the build left behind can hold the write end open for
-    /// as long as it lives, so the end may never come. The copier then stays
-    /// blocked in its read, and this returns without it. The copier ends at
-    /// its next read, or with mxv, and closing the read end makes the
-    /// process's next write fail. The build's cancel and deadline do not
-    /// depend on this, because phase watches them on the caller's thread
-    /// while the copier runs on its own.
+    /// as long as it lives, so the end may never come. This then returns
+    /// without the copier, which goes on copying until mxv exits. The
+    /// build's cancel and deadline do not depend on this, because phase
+    /// watches them on the caller's thread while the copier runs on its own.
     fn finish(self) {
         let _ = self.ended.recv_timeout(OUTPUT_GRACE);
-        self.abandoned.store(true, Ordering::SeqCst);
     }
 }
 
-/// Copies `reader` to `writer` until the write end has closed or `abandoned`
-/// is set. A write that fails is ignored, and the copy goes on reading, so a
-/// closed standard error does not end the build.
-fn copy(mut reader: PipeReader, mut writer: Box<dyn Write + Send>, abandoned: &AtomicBool) {
+/// Copies `reader` to `writer` until the write end has closed. A write that
+/// fails is ignored, and the copy goes on reading, so a closed standard
+/// error does not end the build.
+fn copy(mut reader: PipeReader, mut writer: Box<dyn Write + Send>) {
     let mut buffer = [0_u8; 8192];
     loop {
         let read = match reader.read(&mut buffer) {
@@ -285,9 +279,6 @@ fn copy(mut reader: PipeReader, mut writer: Box<dyn Write + Send>, abandoned: &A
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return,
         };
-        if abandoned.load(Ordering::SeqCst) {
-            return;
-        }
         if let Some(bytes) = buffer.get(..read) {
             drop(writer.write_all(bytes));
         }
@@ -351,21 +342,36 @@ impl Builds<'_> {
                 }));
             }
         };
+        let sandboxed = self
+            .runs
+            .phase
+            .exec_sandboxed(&self.built.plan, &app, &process)
+            .unwrap_or(false);
         let request = ExecRequest::new(app, process, step.command.words().to_vec(), streams)
             .with_variables(self.variables.to_vec());
         let ended = self.runs.phase.exec(
             &self.built.plan,
             request,
             &self.built.environment,
-            Instant::now() + STEP_WAIT,
+            Instant::now() + EXEC_WAIT,
             self.cancel,
         );
         copier.finish();
         match ended {
             Ok(status) if status.success() => Ok(self.stopped()),
-            Ok(status) => Ok(Some(self.stopped().unwrap_or(BuildStop::Failed {
-                code: status.code(),
-                signal: status.signal(),
+            Ok(status) => Ok(Some(self.stopped().unwrap_or_else(|| {
+                if sandboxed && status.code() == Some(i32::from(SANDBOX_REFUSED)) {
+                    BuildStop::Unstartable {
+                        reason: format!(
+                            "the sandbox's launcher exited with {SANDBOX_REFUSED}, so it could not apply the sandbox or start the program, and the build's output says why"
+                        ),
+                    }
+                } else {
+                    BuildStop::Failed {
+                        code: status.code(),
+                        signal: status.signal(),
+                    }
+                }
             }))),
             Err(PhaseError::ExecUnstartable { reason, .. }) => {
                 Ok(Some(BuildStop::Unstartable { reason }))

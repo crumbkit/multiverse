@@ -68,6 +68,10 @@ deadband = { version = "0.1.0", git = "https://github.com/crumbkit/deadband", ta
 # leaves mxv running until the command ends, and stops a sandboxed command
 # that Ctrl-C does not reach. phase and crumbkit-usage already depend on it.
 signal-hook = { workspace = true }
+# libc reads a signal's disposition with `sigaction`, so mxv leaves a signal
+# that started out ignored alone, and nothing that mxv already links offers
+# that call.
+libc = { workspace = true }
 
 [dev-dependencies]
 crumbkit-test = { workspace = true }

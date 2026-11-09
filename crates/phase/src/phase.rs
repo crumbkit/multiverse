@@ -554,7 +554,9 @@ impl Phase {
     ///
     /// Returns [`PhaseError::UnknownTarget`] when the plan lacks the app
     /// or the process, [`PhaseError::ExecNeedsTerminal`] for a sandboxed
-    /// host command whose caller's standard input is a terminal,
+    /// host command when `terminal` holds, when any of the caller's
+    /// standard streams that it inherits is a terminal, or when any stream
+    /// given through [`ExecIo::Streams`](crate::ExecIo::Streams) is one,
     /// [`PhaseError::Busy`] when an operation holds the
     /// lock until `deadline`, [`PhaseError::NotRunnable`] for a host app
     /// whose program comes from a release or a build,

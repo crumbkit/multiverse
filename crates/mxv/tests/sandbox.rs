@@ -201,6 +201,8 @@ impl Sandboxed {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("MXV_ROOT", root.join("workspaces"))
+            // No test here wants a daemon that happens to run on the machine.
+            .env("DEADBAND_SOCKET", "/nonexistent/deadband.sock")
     }
 
     /// Runs `mxv` with `args` and `--json`, and returns the exit code and
@@ -255,7 +257,7 @@ permissions = {{ write = ["out"] }}
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_build_never_receives_the_terminal_that_mxv_runs_on() {
-    let script = "if [ -t 1 ] || [ -t 2 ]; then echo yes > out/terminal; else echo no > out/terminal; fi; echo the-build-ran";
+    let script = "if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then echo yes > out/terminal; else echo no > out/terminal; fi; echo the-build-ran";
     let sandboxed = Sandboxed::new(&format!(
         r#"[processes.writer]
 argv = ["/bin/sh", "-c", "echo ready; exec sleep 60"]
@@ -290,6 +292,66 @@ permissions = {{ write = ["out"] }}
         "{printed}"
     );
     assert!(printed.contains("the-build-ran"), "{printed}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_build_and_exec_cannot_use_a_terminal_that_mxv_holds_on_descriptor_3() {
+    let check = |file: &str| {
+        format!("if [ -t 3 ]; then echo terminal > out/{file}; else echo none > out/{file}; fi")
+    };
+    let build = check("build");
+    let exec = check("exec");
+    let sandboxed = Sandboxed::new(&format!(
+        r#"[processes.writer]
+argv = ["/bin/sh", "-c", "echo ready; exec sleep 60"]
+build = ["/bin/sh", "-c", {build:?}]
+ready = {{ log = "^ready$" }}
+permissions = {{ write = ["out"] }}
+"#
+    ));
+    std::fs::create_dir(sandboxed.checkout().join("out")).unwrap();
+    let mxv = env!("CARGO_BIN_EXE_mxv");
+    // `script` gives the shell a new pty as its standard streams. The
+    // shell keeps the pty on descriptor 3 alone, so mxv's standard streams
+    // are no terminal and a sandboxed `exec` is not refused.
+    let shell = format!(
+        "exec 3<&0 </dev/null >/dev/null 2>&1; {mxv} up -w triage || exit 1; \
+         exec {mxv} exec -w triage writer -- /bin/sh -c '{exec}'"
+    );
+
+    let output = sandboxed
+        .program(
+            "/usr/bin/script",
+            &["-q", "/dev/null", "/bin/sh", "-c", &shell],
+        )
+        .output()
+        .unwrap();
+
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    let read = |file: &str| std::fs::read_to_string(sandboxed.checkout().join("out").join(file));
+    assert_eq!(read("build").unwrap(), "none\n", "{printed}");
+    assert_eq!(read("exec").unwrap(), "none\n", "{printed}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_build_whose_program_does_not_exist_cannot_start() {
+    let sandboxed = Sandboxed::new(
+        r#"[processes.writer]
+argv = ["/bin/sh", "-c", "echo ready; exec sleep 60"]
+build = ["/no/such/program"]
+ready = { log = "^ready$" }
+permissions = { write = ["out"] }
+"#,
+    );
+    std::fs::create_dir(sandboxed.checkout().join("out")).unwrap();
+
+    let (exit, failure) = sandboxed.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{failure}");
+    assert_eq!(failure["code"], "mxv::build::unstartable", "{failure}");
 }
 
 #[cfg(target_os = "macos")]

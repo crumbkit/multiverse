@@ -324,6 +324,8 @@ fn build<'lock>(
     lock: &'lock Lock,
     manifest: &Manifest,
 ) -> Result<Result<BuildsPassed<'lock>, Interrupted>, crumbkit::Error> {
+    // The warnings come first, so a long or failing build cannot hide them.
+    crate::warn(&start_warnings(&context.workspace, manifest));
     let workspace = context.workspace.name.to_string();
     let mut admission = Deadband::new(environment);
     let end = context
@@ -418,7 +420,6 @@ fn start(
     manifest: &Manifest,
     named: &[String],
 ) -> Result<Vec<ProcessRow>, crumbkit::Error> {
-    crate::warn(&start_warnings(&context.workspace, manifest));
     let workspace = context.workspace.name.to_string();
     let mut earlier = Vec::new();
     let outcome = context.runs.up(

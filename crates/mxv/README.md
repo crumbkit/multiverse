@@ -317,8 +317,9 @@ that process's grants, so it needs `write = ["target"]` to write `target`, and
 it cannot download crates. A build reads no input. It writes to a pipe that
 mxv copies to standard error, so `--json` still prints one document on standard
 output, and a build never holds the terminal. A process that outlives its build
-and keeps that pipe open has its output copied for two more seconds, and then
-mxv goes on without it and its next write fails.
+and keeps that pipe open delays the command by at most two seconds. Its output
+is still copied until mxv exits. After that a write to the pipe fails, and by
+default the process dies of `SIGPIPE`.
 
 A build that fails stops the command before it has stopped, started or replaced
 anything, so running units keep running:
@@ -326,11 +327,12 @@ anything, so running units keep running:
 | Code | What happened |
 | --- | --- |
 | `mxv::build::failed` | A build ended with a status other than 0. The later builds did not run. |
-| `mxv::build::unstartable` | A build could not start, such as a program that does not exist. |
+| `mxv::build::unstartable` | A build could not start, such as a program that does not exist. A sandboxed build that exits with 78, the status of the sandbox's launcher, counts as this. |
 | `mxv::build::timed_out` | The command's builds were still running one hour after their place was granted, so phase ended the running build's process group with `TERM` and then `KILL`. |
 
 Ctrl-C, `SIGHUP` or `SIGQUIT` during a build ends the build's process group, and
-mxv exits with 128 plus the signal. `SIGTERM` during a build ends mxv alone: the
+mxv exits with 128 plus the signal. `SIGHUP` or `SIGQUIT` that mxv started out ignoring, as under `nohup`, stays
+ignored. `SIGTERM` during a build ends mxv alone: the
 place is freed, the build's process group runs on, uncounted by deadband, and
 the next `up` starts a second build. A `SIGTERM` rule in crumbkit's usage log
 like its `SIGINT` rule would replace this. While the builds wait and run, mxv holds the

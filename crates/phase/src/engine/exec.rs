@@ -39,7 +39,7 @@ use rustix::process::{Pid, Signal};
 use wait_timeout::ChildExt as _;
 
 use crate::cancel::Cancel;
-use crate::clock::{POLL_INTERVAL, now};
+use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::container::exec::{ContainerExec, exec_command};
 use crate::engine::keeper::{KeeperCommand, check_inherited, check_resolved};
 use crate::engine::run::{SandboxScope, Settings, app_ports, process_dir, process_sandbox};
@@ -515,8 +515,11 @@ fn sandbox(
 /// own with [`ExecIo::Streams`]. When `cancel` is set, `run` sends `TERM`
 /// to the command's group when it has one of its own, and to the command,
 /// waits up to `kill_wait`, then sends `KILL` the same way, and returns the
-/// status that the signal gave. A command in the caller's group receives
-/// the signals alone, so processes that it started may survive it.
+/// status that the signal gave. When the command exits and other members of
+/// its group remain, `run` waits for them until `kill_wait` has passed since
+/// the `TERM`, sends `KILL` to the group, and only then returns. A command
+/// in the caller's group receives the signals alone, so processes that it
+/// started may survive it.
 ///
 /// # Errors
 ///
@@ -577,6 +580,12 @@ pub(crate) fn run(
     let mut killed_at: Option<Instant> = None;
     loop {
         if let Some(status) = child.wait_timeout(POLL_INTERVAL)? {
+            if own_group
+                && cancel.is_cancelled()
+                && let Some(group) = pid
+            {
+                end_group(group, killed_at, kill_wait);
+            }
             return Ok(status);
         }
         match killed_at {
@@ -590,5 +599,25 @@ pub(crate) fn run(
             }
             _ => {}
         }
+    }
+}
+
+/// Ends what remains of the process group `group` after its leader exited
+/// on a cancel: it sends `TERM` unless `killed_at` says that `run` already
+/// did, waits until that time for the group to empty, and otherwise sends
+/// `KILL`. A group that has emptied can have its number reused, but only
+/// within one poll of it emptying, and `run` looks again before each signal.
+fn end_group(group: Pid, killed_at: Option<Instant>, kill_wait: Duration) {
+    let kill_at = killed_at.unwrap_or_else(|| {
+        // A group that has already gone reports that to the wait below.
+        let _ = rustix::process::kill_process_group(group, Signal::TERM);
+        now() + kill_wait
+    });
+    while rustix::process::test_kill_process_group(group).is_ok() {
+        if now() >= kill_at {
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            return;
+        }
+        pause(POLL_INTERVAL);
     }
 }
