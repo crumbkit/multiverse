@@ -179,6 +179,22 @@ fn new_checks_out_the_repository_inside_the_workspace_directory_on_a_branch_of_t
 }
 
 #[test]
+fn new_makes_and_reuses_a_mirror_when_git_refuses_to_discover_bare_repositories() {
+    let setup = Setup::new();
+    let config = setup.root().join("explicit.gitconfig");
+    write_text(&config, "[safe]\n\tbareRepository = explicit\n");
+    for name in ["reading-list", "triage"] {
+        let command = setup
+            .command(&["new", name, "--repo", "app"])
+            .env("GIT_CONFIG_GLOBAL", &config);
+        let (exit, document) = Setup::run_json(command);
+        assert_eq!(exit, 0, "{document}");
+        let checkout = setup.workspace(name).join("app");
+        assert_eq!(git(&checkout, &["branch", "--show-current"]).trim(), name);
+    }
+}
+
+#[test]
 fn list_show_and_cd_report_the_new_workspace() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");

@@ -63,6 +63,27 @@ pub struct Concealed {
     pub orphaned: Vec<SubmoduleWork>,
 }
 
+/// The repository that holds a reference, and how git must be told about
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefHolder<'a> {
+    /// A bare mirror, which each git command names as its git directory.
+    Mirror(&'a Path),
+    /// A repository with a work tree, which git discovers from the path.
+    Repository(&'a Path),
+}
+
+impl<'a> RefHolder<'a> {
+    /// Returns the path of the repository.
+    #[must_use]
+    pub fn path(self) -> &'a Path {
+        match self {
+            Self::Mirror(path) | Self::Repository(path) => path,
+        }
+    }
+}
+
 /// The names in a clone that its mirror does not hold, which a rebuilt
 /// clone does not have.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -408,22 +429,28 @@ pub trait Backend {
         reference: &str,
     ) -> Result<String, Error>;
 
-    /// Deletes the reference `reference` of the repository at `repository`.
-    /// Deleting a reference that does not exist succeeds.
+    /// Deletes the reference `reference` of the repository that `holder`
+    /// names. Deleting a reference that does not exist succeeds.
     ///
     /// # Errors
     ///
     /// Returns the failure of the deletion.
-    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error>;
+    fn delete_ref(&self, holder: RefHolder<'_>, reference: &str) -> Result<(), Error>;
 
-    /// Returns the commit that `revision` names in the repository at
-    /// `repository`, or `None` when it names no commit there.
+    /// Returns the commit that `revision` names in the repository that
+    /// `holder` names, or `None` when git exits with a failure, which it
+    /// does when `revision` names no commit there and when the directory
+    /// is not a repository.
     ///
     /// # Errors
     ///
-    /// Returns the failure of the lookup, such as a directory that is not a
-    /// repository.
-    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error>;
+    /// Returns the failure to run git, such as a missing program or a
+    /// missed deadline.
+    fn resolve_commit(
+        &self,
+        holder: RefHolder<'_>,
+        revision: &str,
+    ) -> Result<Option<String>, Error>;
 
     /// Stages every change and untracked file of `checkout` that the ignore
     /// rules do not ignore, and commits them with `message`, without

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use crate::backend::{Backend, Changes, Head, Listed, Repository};
+use crate::backend::{Backend, Changes, Head, Listed, RefHolder, Repository};
 use crate::disposable::PathGlob;
 use crate::error::Error;
 use crate::git::Git;
@@ -808,11 +808,15 @@ impl Backend for Scripted {
     ) -> Result<String, Error> {
         Git.fetch_head_into_mirror(mirror, checkout, reference)
     }
-    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error> {
-        Git.delete_ref(repository, reference)
+    fn delete_ref(&self, holder: RefHolder<'_>, reference: &str) -> Result<(), Error> {
+        Git.delete_ref(holder, reference)
     }
-    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error> {
-        Git.resolve_commit(repository, revision)
+    fn resolve_commit(
+        &self,
+        holder: RefHolder<'_>,
+        revision: &str,
+    ) -> Result<Option<String>, Error> {
+        Git.resolve_commit(holder, revision)
     }
     fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
         Git.commit_all(checkout, message)

@@ -50,7 +50,8 @@ pub use crate::archive::{
     RootKind, Unsaved, WIP_MESSAGE,
 };
 pub use crate::backend::{
-    Backend, Changes, Concealed, Head, INITIALIZING, Listed, LocalNames, Repository, SubmoduleWork,
+    Backend, Changes, Concealed, Head, INITIALIZING, Listed, LocalNames, RefHolder, Repository,
+    SubmoduleWork,
 };
 pub use crate::clone::{Cloned, UNSUPPORTED};
 pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};

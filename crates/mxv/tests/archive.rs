@@ -96,7 +96,21 @@ impl Setup {
     }
 
     fn run_in(&self, dir: &Path, args: &[&str]) -> (i32, Value) {
-        let output = self.command(dir).args(args).arg("--json").output().unwrap();
+        Self::finished(self.command(dir), args)
+    }
+
+    /// Runs `mxv` with `args` and `--json` at the root, with git reading
+    /// `config` as its global configuration, and returns the exit code and
+    /// the document that it printed.
+    fn run_with_git_config(&self, config: &Path, args: &[&str]) -> (i32, Value) {
+        let command = self.command(&self.root()).env("GIT_CONFIG_GLOBAL", config);
+        Self::finished(command, args)
+    }
+
+    /// Runs `command` with `args` and `--json`, and returns the exit code
+    /// and the document that it printed.
+    fn finished(command: Command, args: &[&str]) -> (i32, Value) {
+        let output = command.args(args).arg("--json").output().unwrap();
         let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "{args:?}: {error}: {} {}",
@@ -183,6 +197,30 @@ fn archive_then_restore_brings_back_the_commit_and_the_branch() {
     assert_eq!(setup.head(), commit);
     let (_, listed) = setup.run(&["list", "--archived"]);
     assert_eq!(listed["data"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn archive_restore_and_removal_work_on_a_mirror_when_git_refuses_to_discover_bare_repositories() {
+    let setup = Setup::new();
+    let config = setup.root().join("explicit.gitconfig");
+    write(&config, "[safe]\n\tbareRepository = explicit\n");
+    let succeeds = |args: &[&str]| {
+        let (exit, document) = setup.run_with_git_config(&config, args);
+        assert_eq!(exit, 0, "{args:?}: {document}");
+    };
+    succeeds(&["new", "explicit", "--repo", "app"]);
+    let (_, shown) = setup.run(&["show", "explicit", "--full"]);
+    let mirror = PathBuf::from(shown["data"][0]["checkouts"][0]["mirror"].as_str().unwrap());
+    let pins = || git(&mirror, &["for-each-ref", "refs/mxv/archives"]);
+    let before = pins();
+    succeeds(&["archive", "-w", "explicit", "--yes"]);
+    assert_ne!(pins(), before, "the archive left no pin in the mirror");
+    succeeds(&["restore", "explicit", "--yes"]);
+    assert_eq!(pins(), before, "the restore left its pin in the mirror");
+    succeeds(&["archive", "-w", "explicit", "--yes"]);
+    assert_ne!(pins(), before, "the archive left no pin in the mirror");
+    succeeds(&["remove", "--archived", "explicit", "--yes"]);
+    assert_eq!(pins(), before, "the removal left its pin in the mirror");
 }
 
 #[test]
