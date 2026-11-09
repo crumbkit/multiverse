@@ -860,6 +860,33 @@ fn another_add_refuses_while_a_checkout_is_unfinished_and_names_it() {
 }
 
 #[test]
+fn a_broken_checkout_manifest_removes_the_workspace_manifests_globs_from_every_checkout() {
+    let setup = setup();
+    let workspace = created(&setup, "triage", &both(&setup));
+    write(
+        workspace.manifest_file(),
+        "disposable = [\"api/coverage/\"]\n",
+    );
+    let api = &workspace.checkouts[0];
+    let web = &workspace.checkouts[1];
+    let (set, warning) = setup.workspaces.disposable_set(&workspace, api);
+    assert!(set.matches("coverage/"));
+    assert_eq!(warning, None);
+    let broken = web.path.join("mxv.toml");
+    write(&broken, "ports = [\n");
+    let (set, warning) = setup.workspaces.disposable_set(&workspace, api);
+    assert!(!set.matches("coverage/"));
+    let warning = warning.unwrap();
+    assert!(warning.contains(&broken.display().to_string()), "{warning}");
+    assert!(warning.contains("another checkout"), "{warning}");
+    assert!(!warning.contains("the workspace manifest "), "{warning}");
+    let (_, warning) = setup.workspaces.disposable_set(&workspace, web);
+    let warning = warning.unwrap();
+    assert!(warning.contains("of the checkout web"), "{warning}");
+    assert_eq!(warning.matches("is invalid").count(), 1, "{warning}");
+}
+
+#[test]
 fn removing_a_workspace_of_two_repositories_removes_both_clones() {
     let setup = setup();
     created(&setup, "triage", &both(&setup));

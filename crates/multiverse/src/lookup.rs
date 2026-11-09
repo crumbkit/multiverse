@@ -537,21 +537,27 @@ impl Workspace {
     }
 
     /// Returns the workspace manifest alone, with its paths checked
-    /// against [`Workspace::manifest_root`], or `None` when it does not
-    /// exist or a checkout holds it.
+    /// against [`Workspace::manifest_root`] and, for a workspace with
+    /// several checkouts, against the names that the checkouts' own
+    /// `mxv.toml` files declare, or `None` when it does not exist or a
+    /// checkout holds it.
     ///
     /// # Errors
     ///
-    /// Returns the [`ManifestError`] of the file.
+    /// Returns the [`ManifestError`] of the workspace manifest, or, for a
+    /// workspace with several checkouts, of the first checkout manifest
+    /// that cannot be read, whose `path` is that checkout's file.
     pub fn workspace_manifest(&self) -> Result<Option<Manifest>, ManifestError> {
         let Some(path) = self.workspace_manifest_input() else {
             return Ok(None);
         };
         let mut joined = Joined::default();
         if self.has_several_checkouts() {
-            // A checkout's file that does not parse adds no names, and
-            // fails on its own wherever the merged manifest is read.
-            for (_, renamed) in self.renamed_checkout_manifests().into_iter().flatten() {
+            // A checkout's file that does not parse fails this read with
+            // its own error, as it fails the merged manifest, so both reads
+            // check the workspace manifest against the same names.
+            for read in self.renamed_checkout_manifests() {
+                let (_, renamed) = read?;
                 joined.add(&renamed);
             }
             self.join_checkouts(&mut joined);

@@ -96,6 +96,18 @@ workspace may need to act on.
 
 ### Changed
 
+- A workspace with several checkouts now reads its workspace manifest
+  strictly: while one checkout's `mxv.toml` cannot be parsed, the read
+  fails with that file's error. Before this change the read skipped the
+  broken file and checked the workspace manifest against the names of the
+  other checkouts, so it could report an undeclared name with a different
+  message. The commands that read the workspace manifest for its
+  `disposable` globs, which are `remove`, `archive` and `clean`, now warn
+  and use no `disposable` globs of the workspace manifest in any checkout
+  while one checkout's manifest is broken. `remove` and `archive` without
+  `--force` can then refuse because of ignored files that only those
+  globs cover, and `clean` reclaims fewer paths. Fix the broken file to
+  restore the globs.
 - mxv uses crumbkit 0.2.0, which changes some documents that a tool may
   read. `mxv list --json` and `mxv list --archived --json` now print a
   top-level `next` array of next steps when there are any, and the schemas
