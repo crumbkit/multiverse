@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/run/v1",
+  "description": "Each task of the workspace: those that a manifest declares, then those that mise lists, by checkout.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/run/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "data": {
+      "description": "The rows, in order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TaskRow"
+      }
+    },
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The over-budget code, in the tool's spelling.",
+          "type": "string"
+        },
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "code",
+        "budget"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "data"
+  ],
+  "$defs": {
+    "TaskRow": {
+      "description": "One task of a workspace, as `mxv run` lists it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The name that `mxv run` takes.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Where the task comes from: `mxv.toml` or `mise`.",
+          "type": "string"
+        },
+        "checkout": {
+          "description": "The folder of the checkout that holds it, or null for the workspace\nmanifest of a workspace with several checkouts.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gate": {
+          "description": "Whether it takes a place from deadband.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "checkout",
+        "gate"
+      ]
+    }
+  }
+}

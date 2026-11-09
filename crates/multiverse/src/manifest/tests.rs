@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::manifest::{
     DEFAULT_READY_TIMEOUT, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
-    Published, ReadyCheck, Unit,
+    Published, ReadyCheck, TaskName, Unit,
 };
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
@@ -1326,4 +1326,92 @@ fn a_workspace_manifests_write_path_inside_a_checkout_parses() {
             .write,
         BTreeSet::from(["api/target".to_owned()])
     );
+}
+
+#[test]
+fn a_task_section_reads_its_dir_argv_needs_and_gate() {
+    let manifest = parse(
+        r#"
+[service.queues]
+kind = "sqs"
+queues.jobs = {}
+
+[tasks.test]
+dir = "server"
+argv = ["cargo", "nextest", "run"]
+needs = ["queues"]
+gate = false
+"#,
+    )
+    .unwrap();
+    let task = &manifest.tasks[&TaskName::new("test").unwrap()];
+    assert_eq!(task.dir, Path::new("server"));
+    assert_eq!(task.argv.words(), ["cargo", "nextest", "run"]);
+    assert_eq!(task.needs, ["queues"]);
+    assert!(!task.gate);
+}
+
+#[test]
+fn a_task_defaults_to_the_top_of_the_checkout_and_takes_a_place() {
+    let manifest = parse("[tasks.test]\nargv = [\"true\"]\n").unwrap();
+    let task = &manifest.tasks[&TaskName::new("test").unwrap()];
+    assert_eq!(task.dir, Path::new("."));
+    assert!(task.needs.is_empty());
+    assert!(task.gate);
+}
+
+#[test]
+fn a_task_with_an_empty_argv_fails_on_its_line() {
+    let (line, problem) = problem("[tasks.test]\nargv = []\n");
+    assert_eq!(line, Some(2));
+    assert!(matches!(problem, ManifestProblem::Invalid { .. }));
+}
+
+#[test]
+fn a_task_whose_dir_leaves_the_repository_fails() {
+    let (_, problem) = problem("[tasks.test]\nargv = [\"true\"]\ndir = \"../other\"\n");
+    assert!(matches!(
+        problem,
+        ManifestProblem::Invalid { message } if message.contains("dir")
+    ));
+}
+
+#[test]
+fn a_task_that_needs_an_undeclared_service_fails() {
+    let (_, problem) = problem("[tasks.test]\nargv = [\"true\"]\nneeds = [\"missing\"]\n");
+    assert!(matches!(
+        problem,
+        ManifestProblem::Invalid { message } if message.contains("missing")
+    ));
+}
+
+#[test]
+fn a_task_with_a_name_that_breaks_the_unit_rule_fails() {
+    let (_, problem) = problem("[tasks.\"lint:fix\"]\nargv = [\"true\"]\n");
+    assert!(matches!(
+        problem,
+        ManifestProblem::Invalid { message } if message.contains("task name")
+    ));
+}
+
+#[test]
+fn a_task_with_an_unknown_key_fails_with_that_key() {
+    let (_, problem) = problem("[tasks.test]\nargv = [\"true\"]\nshell = true\n");
+    assert!(matches!(
+        problem,
+        ManifestProblem::UnknownKey { key } if key == "shell"
+    ));
+}
+
+#[test]
+fn the_actions_section_stays_reserved_beside_tasks() {
+    let (_, problem) = problem("[tasks.test]\nargv = [\"true\"]\n\n[actions.other]\nrun = 1\n");
+    assert!(matches!(problem, ManifestProblem::Reserved { section } if section == "actions"));
+}
+
+#[test]
+fn a_renamed_manifest_keeps_its_tasks_under_their_own_names() {
+    let manifest = parse("[tasks.test]\nargv = [\"true\"]\n").unwrap();
+    let renamed = manifest.renamed(&|name| format!("app-{name}"));
+    assert!(renamed.tasks.contains_key(&TaskName::new("test").unwrap()));
 }

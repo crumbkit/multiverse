@@ -364,6 +364,60 @@ tables, such as
 `[processes.api]`, an unknown key still fails with
 `mxv::manifest::unknown_key`.
 
+### Tasks
+
+`mxv run <name> [args]` runs a task of the workspace and exits with the
+task's exit code, or with 128 plus the number of the signal that ended it.
+`mxv run` with no name lists the tasks, and `--json` works only for the list,
+because a task owns its own output.
+
+A task is declared in `mxv.toml`, or it is a mise task of a checkout:
+
+```toml
+[tasks.test]
+dir = "."
+argv = ["cargo", "nextest", "run"]
+needs = ["queues"]
+```
+
+`dir` is relative to the checkout and defaults to its top. No shell reads
+`argv`, and the words after the name are added to it. `mxv up` never starts a
+task.
+
+A repository that uses mise needs no entry and no `mxv.toml`. mxv asks
+`mise tasks ls --json` in each checkout, outside any sandbox, and reads only
+each entry's `name`. It runs a mise task as `mise run <name> [args]`. mxv
+never trusts a mise config for you. When mise refuses to list a checkout's
+tasks, mxv prints mise's message, a declared task still runs, and a name that
+only mise knows is unknown.
+
+mxv looks in `mxv.toml` first. A declared task wins a clash with a mise task
+of the same name, and mxv prints a note. A name found in several checkouts is
+refused with `mxv::task::ambiguous`, and `--repo <folder>` chooses. A task in
+the workspace manifest of a workspace with several checkouts wins over the
+checkouts' tasks of that name. A name found nowhere fails with
+`mxv::task::unknown`, which lists the names.
+
+Each task takes one place from deadband, as a `build` does, and mxv lowers its
+own priority as the job's lane says, because the process ends with the task.
+`gate = false` opts a declared task out, so it asks deadband nothing and gets
+no job variables. mxv adds `MISE_JOBS=1` beside deadband's variables, so mise
+cannot run several tasks in parallel under one place.
+
+A task runs with no sandbox and no time limit, in the workspace's own ports:
+each named port is a variable `MXV_PORT_<NAME>`, in upper case with `-` written
+as `_`, so the port `web-ui` is `MXV_PORT_WEB_UI`. A declared task receives the
+variables of the services it `needs`, and a mise task those of every service
+the manifest declares. mxv does not start the services or the units, so run
+`mxv up` first when a task talks to them. The other variables are those that
+a host process receives from your environment.
+
+Ctrl-C, `SIGHUP` and `SIGQUIT` cancel the task, end its place, and end mxv with
+128 plus the signal. When something sends `SIGTERM` or `SIGKILL` to mxv alone,
+the place is freed and the task runs on, no longer counted by deadband. mxv
+does not hold the workspace's lock while a task runs, so `mxv up` and
+`mxv down` still work.
+
 ### Containers
 
 A manifest may declare containers beside its processes. mxv runs them with
@@ -1793,9 +1847,3 @@ When mxv finds no home directory at all, a workspace command fails with
 `mxv::environment::no_directory`. mxv passes its environment to git, with
 `GIT_TERMINAL_PROMPT=0` so a fetch that needs a password fails instead of
 waiting.
-
-## Not built yet
-
-mxv has no verb yet that runs one command with a workspace's service
-variables, such as a test runner or a script. A process that needs the
-services is the only way to receive them.

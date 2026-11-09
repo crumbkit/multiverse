@@ -51,11 +51,13 @@ const CONTAINERS_RAN: &str = ".containers";
 
 mod build;
 mod exec;
+mod task;
 #[cfg(test)]
 mod tests;
 
 pub use build::{Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Place};
 pub use exec::{Exec, ExecEnd, ExecTarget};
+pub use task::{MiseListing, MiseTaskName, PreparedTask, TaskEnd, TaskServices, TaskStart};
 
 /// Returns the checkout that holds `workspace`'s manifest. A workspace
 /// holds one checkout for now.

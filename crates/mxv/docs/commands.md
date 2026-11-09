@@ -19,6 +19,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv status`](#mxv-status): Report whether each unit of a workspace is running, exited or stopped
 - [`mxv logs`](#mxv-logs): Print the last lines of a unit's log, and follow it with --follow
 - [`mxv exec`](#mxv-exec): Run a one-off command in the context of a running unit, and exit with its exit code
+- [`mxv run`](#mxv-run): Run a task of a workspace through deadband, or list its tasks
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
@@ -441,6 +442,39 @@ Print the variables that a command receives in the context of web.
 ```sh
 mxv exec -w reading-list web -- env
 ```
+
+Effects: destructive, not idempotent, open-world.
+
+Writes: applies all items or none.
+
+## `mxv run`
+
+Run a task of a workspace through deadband, or list its tasks.
+
+A task is declared under `[tasks.<name>]` in mxv.toml, or is a mise task of a checkout, which `mise tasks ls --json` lists and `mise run` runs. A repository with mise tasks needs no mxv.toml. mxv never trusts a mise config for the person, so a config that mise refuses leaves its tasks unknown and mise's message is shown. A declared task wins over a mise task of the same name, with a note. A name found in several checkouts is refused, and --repo chooses.
+
+Each task takes one place from deadband, and `gate = false` opts a declared task out. A task has no sandbox and no time limit, and receives the workspace's ports as MXV\_PORT\_\<NAME\>. A declared task receives the variables of the services that it needs, and a mise task those of every service. mxv adds MISE\_JOBS=1 beside deadband's job variables, so a mise task runs one step at a time under its place. mxv exits with the task's exit code, or with 128 plus the number of the signal that ended it. On Ctrl-C mxv stops the task. A task runs on, no longer counted by deadband, when something sends SIGTERM or SIGKILL to mxv alone.
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `--repo <CHECKOUT>`: The folder of the checkout whose task to run, which a name found in several checkouts needs
+- `<TASK>`: The task, which defaults to listing the tasks, then the words to add to its command. Every word after the task belongs to the task, flags too. Takes more than one value.
+
+### Examples
+
+List the tasks of the workspace reading-list.
+
+```sh
+mxv run -w reading-list
+```
+
+### Columns
+
+- `name`: The name that `mxv run` takes.
+- `source`: Where the task comes from: `mxv.toml` or `mise`.
+- `checkout`: The folder of the checkout that holds it, or null for the workspace manifest of a workspace with several checkouts.
+- `gate`: Whether it takes a place from deadband.
 
 Effects: destructive, not idempotent, open-world.
 

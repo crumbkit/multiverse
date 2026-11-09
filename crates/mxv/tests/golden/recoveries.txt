@@ -75,6 +75,11 @@ mxv status
   run mxv list
     exits 0
 
+mxv run --json -w reading-list missing
+  fails with mxv::task::unknown
+  run mxv run --workspace reading-list
+    exits 0
+
 mxv status -w missing
   fails with mxv::workspace::not_found
   run mxv list
@@ -134,6 +139,10 @@ mxv remove stashed --dry-run
   hint
   run mxv remove stashed --force --yes
     exits 0
+
+mxv run --json -w both check
+  fails with mxv::task::ambiguous
+  hint
 
 codes that no start provokes:
   mxv::archive::not_found: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.

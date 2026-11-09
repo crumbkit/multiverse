@@ -18,6 +18,7 @@ mod failures;
 mod processes;
 mod reclaim;
 mod rows;
+mod run;
 mod run_failures;
 #[cfg(test)]
 mod testing;
@@ -72,8 +73,8 @@ pub use crate::run_failures::{
     MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME,
     MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, PORT_NOT_FOUND, PORT_TAKEN,
     PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
-    PROCESS_NOT_READY, PROCESS_UNSTOPPABLE, VOLUME_RENAMED, WORKSPACE_NOT_CURRENT,
-    WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    PROCESS_NOT_READY, PROCESS_UNSTOPPABLE, TASK_AMBIGUOUS, TASK_UNKNOWN, VOLUME_RENAMED,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 
 /// Every failure code of `mxv archive`, `mxv restore` and `mxv remove
@@ -175,6 +176,9 @@ where
         // `exec` hands the terminal to the command and exits with its exit
         // code, so it prints no document.
         Verb::Exec(args) => exec::exec(output, environment, &args),
+        // `run` hands the terminal to a task and exits with its exit code,
+        // or prints the list of tasks, so it finishes the output itself.
+        Verb::Run(args) => run::run(output, environment, &args),
         Verb::Ports {
             command: PortsCommand::Reset(args),
         } => {

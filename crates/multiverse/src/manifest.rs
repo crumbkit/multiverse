@@ -50,6 +50,21 @@
 //! An `env` value may name a host port as `{port.<name>}`, and writes a
 //! literal brace as `{{` or `}}`. Any other brace fails the manifest.
 //!
+//! `[tasks.<name>]` tables declare the commands that `mxv run` runs, such
+//! as a test suite, which `mxv up` never starts:
+//!
+//! ```toml
+//! [tasks.test]
+//! dir = "."
+//! argv = ["cargo", "nextest", "run"]
+//! needs = ["queues"]
+//! gate = false
+//! ```
+//!
+//! `dir` defaults to the top of the checkout, and no shell reads `argv`. A
+//! task takes one place from the machine's job limiter unless `gate` is
+//! `false`.
+//!
 //! `[service.<name>]` tables declare local AWS services, which a process
 //! lists in `needs`, as [`crate::service`] describes. A process, container
 //! or port may not have a name that starts with `mxv-`, which mxv keeps
@@ -100,7 +115,7 @@ pub const MANIFEST_VERSION: u64 = 1;
 const MOST_IMAGE_BYTES: usize = 255;
 
 /// An application's manifest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Manifest {
     /// The named ports, in the order declared. mxv gives each workspace its
@@ -125,10 +140,54 @@ pub struct Manifest {
     /// A workspace with several checkouts shares one set of service names,
     /// and merges equal declarations of one name.
     pub services: BTreeMap<String, Service>,
+    /// The tasks that `mxv run` runs, by name. A merged manifest holds
+    /// none, because [`Workspace::task_homes`] keeps each file's tasks apart.
+    ///
+    /// [`Workspace::task_homes`]: crate::Workspace::task_homes
+    pub tasks: BTreeMap<TaskName, Task>,
     /// One sentence for each top-level table that mxv ignores although
     /// its name is close to one of mxv's own, such as `[proceses.web]`,
     /// or is phase's `[process.*]`, with the file and line in front.
     pub warnings: Vec<String>,
+}
+
+/// The name of a task of a manifest, which follows the rule of a unit's
+/// name: 1 to 64 letters, digits, '-' and '_'.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TaskName(String);
+
+impl TaskName {
+    /// Returns the name `text`, or `None` when it breaks the rule.
+    #[must_use]
+    pub fn new(text: &str) -> Option<Self> {
+        is_unit_name(text).then(|| Self(text.to_owned()))
+    }
+
+    /// Returns the name as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TaskName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// A command that `mxv run` runs, declared under `[tasks.<name>]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Task {
+    /// The directory it runs in, relative to the checkout.
+    pub dir: PathBuf,
+    /// Its program and arguments, which no shell reads.
+    pub argv: Command,
+    /// The services whose variables it receives.
+    pub needs: Vec<String>,
+    /// Whether it takes a place from the machine's job limiter.
+    pub gate: bool,
 }
 
 /// The names of the other manifests that a manifest joins, which its units
@@ -667,6 +726,7 @@ const OWN_KEYS: &[&str] = &[
     "disposable",
     "clone_on_new",
     "service",
+    "tasks",
     "secrets",
     "actions",
 ];
@@ -697,10 +757,28 @@ struct RawManifest {
     /// The local AWS services.
     #[serde(default)]
     service: BTreeMap<Spanned<String>, services::RawService>,
+    /// The tasks.
+    #[serde(default)]
+    tasks: BTreeMap<Spanned<String>, RawTask>,
     /// Reserved for secrets.
     secrets: Option<Spanned<IgnoredAny>>,
     /// Reserved for actions.
     actions: Option<Spanned<IgnoredAny>>,
+}
+
+/// One task as TOML holds it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTask {
+    /// The directory it runs in.
+    dir: Option<Spanned<String>>,
+    /// The program and its arguments.
+    argv: Spanned<Vec<String>>,
+    /// The services it uses.
+    #[serde(default)]
+    needs: Vec<Spanned<String>>,
+    /// Whether it takes a place from the machine's job limiter.
+    gate: Option<bool>,
 }
 
 /// One process as TOML holds it.
@@ -1303,9 +1381,10 @@ impl Manifest {
         Ok(Some(text))
     }
 
-    /// Checks that each process's `cwd` that exists in `checkout` stays
-    /// inside it once symbolic links are resolved. A `cwd` that does not
-    /// exist is left for `mxv up` to report when the process cannot start.
+    /// Checks that each process's `cwd` and each task's `dir` that exists
+    /// in `checkout` stays inside it once symbolic links are resolved. One
+    /// that does not exist is left for the command that starts it to
+    /// report.
     fn check_cwds(&self, checkout: &Path, path: &Path) -> Result<(), ManifestError> {
         let Ok(root) = checkout.canonicalize() else {
             return Ok(());
@@ -1321,6 +1400,23 @@ impl Manifest {
                         message: format!(
                             "the cwd `{}` of `{name}` leaves the repository through a symbolic link to {}",
                             process.cwd.display(),
+                            resolved.display()
+                        ),
+                    },
+                });
+            }
+        }
+        for (name, task) in &self.tasks {
+            if let Ok(resolved) = checkout.join(&task.dir).canonicalize()
+                && !resolved.starts_with(&root)
+            {
+                return Err(ManifestError {
+                    path: path.to_path_buf(),
+                    line: None,
+                    problem: ManifestProblem::Invalid {
+                        message: format!(
+                            "the dir `{}` of the task `{name}` leaves the repository through a symbolic link to {}",
+                            task.dir.display(),
                             resolved.display()
                         ),
                     },
@@ -1355,25 +1451,7 @@ impl Manifest {
         let warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         check_version_and_reserved(&errors, &raw)?;
-        let mut ports = Vec::new();
-        for port in &raw.ports {
-            if !is_unit_name(port.get_ref()) {
-                return Err(errors.invalid(
-                    &port.span(),
-                    format!(
-                        "`{}` is not a port name, which holds 1 to 64 letters, digits, '-' and '_'",
-                        port.get_ref()
-                    ),
-                ));
-            }
-            if ports.contains(port.get_ref()) {
-                return Err(errors.invalid(
-                    &port.span(),
-                    format!("the port `{}` is declared twice", port.get_ref()),
-                ));
-            }
-            ports.push(port.get_ref().clone());
-        }
+        let ports = check_ports(&errors, &raw.ports)?;
         if let Some(name) = raw
             .ports
             .iter()
@@ -1466,6 +1544,11 @@ impl Manifest {
             containers.insert(name.get_ref().clone(), container);
         }
         check_listen_grants(&errors, &raw, &listeners, joined)?;
+        let mut tasks = BTreeMap::new();
+        for (name, raw_task) in &raw.tasks {
+            let (task_name, task) = check_task(&errors, name, raw_task, &services, joined)?;
+            tasks.insert(task_name, task);
+        }
         let globs = |raw: &[Spanned<String>],
                      parse: fn(&str) -> Result<PathGlob, BadGlob>,
                      key: &str| {
@@ -1499,6 +1582,7 @@ impl Manifest {
             disposable: globs(&raw.disposable, PathGlob::parse_directory, "disposable")?,
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
             services,
+            tasks,
             warnings,
         };
         check_cycle(&errors, &raw, &manifest)?;
@@ -1598,6 +1682,7 @@ impl Manifest {
             disposable: self.disposable.clone(),
             clone_on_new: self.clone_on_new.clone(),
             services: self.services.clone(),
+            tasks: self.tasks.clone(),
             warnings: self.warnings.clone(),
         }
     }
@@ -1775,6 +1860,82 @@ impl Manifest {
                 || (seen.insert(dependency.as_str()) && self.reaches(dependency, target, seen))
         })
     }
+}
+
+/// Checks the declared ports and returns their names in order.
+fn check_ports(errors: &Errors<'_>, raw: &[Spanned<String>]) -> Result<Vec<String>, ManifestError> {
+    let mut ports = Vec::new();
+    for port in raw {
+        if !is_unit_name(port.get_ref()) {
+            return Err(errors.invalid(
+                &port.span(),
+                format!(
+                    "`{}` is not a port name, which holds 1 to 64 letters, digits, '-' and '_'",
+                    port.get_ref()
+                ),
+            ));
+        }
+        if ports.contains(port.get_ref()) {
+            return Err(errors.invalid(
+                &port.span(),
+                format!("the port `{}` is declared twice", port.get_ref()),
+            ));
+        }
+        ports.push(port.get_ref().clone());
+    }
+    Ok(ports)
+}
+
+/// Checks the task `name` and returns its name and the task. Its `needs`
+/// name services of `services` or of `joined`.
+fn check_task(
+    errors: &Errors<'_>,
+    name: &Spanned<String>,
+    raw: &RawTask,
+    services: &BTreeMap<String, Service>,
+    joined: &Joined,
+) -> Result<(TaskName, Task), ManifestError> {
+    let task = name.get_ref();
+    let task_name = TaskName::new(task).ok_or_else(|| {
+        errors.invalid(
+            &name.span(),
+            format!(
+                "`{task}` is not a task name, which holds 1 to 64 letters, digits, '-' and '_'"
+            ),
+        )
+    })?;
+    let argv = Command::new(raw.argv.get_ref().clone()).ok_or_else(|| {
+        errors.invalid(
+            &raw.argv.span(),
+            format!("the task `{task}` has an empty argv, which needs at least the program"),
+        )
+    })?;
+    let dir = match &raw.dir {
+        Some(dir) => {
+            let path = PathBuf::from(dir.get_ref());
+            if !stays_inside(&path) {
+                return Err(errors.invalid(
+                    &dir.span(),
+                    format!(
+                        "the dir `{}` of the task `{task}` is not a relative path inside the repository",
+                        dir.get_ref()
+                    ),
+                ));
+            }
+            path
+        }
+        None => PathBuf::from("."),
+    };
+    let needs = services::check_needs(errors, task, &raw.needs, &[], services, &joined.services)?;
+    Ok((
+        task_name,
+        Task {
+            dir,
+            argv,
+            needs,
+            gate: raw.gate.unwrap_or(true),
+        },
+    ))
 }
 
 /// Checks one raw process against the declared `ports` and process

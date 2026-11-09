@@ -1009,13 +1009,6 @@ fn remove_refuses_while_processes_run_and_force_stops_them_first() {
     assert!(!setup.root().join("state/mxv/runs/triage").exists());
 }
 
-#[test]
-fn run_is_no_longer_a_command() {
-    let setup = Setup::new();
-    let (exit, _) = setup.text(&["run"]);
-    assert_eq!(exit, 2);
-}
-
 /// A workspace that an older mxv started keeps run files that phase never
 /// reads: a run record, an exit file, a container record and the record of
 /// its volumes. `up` starts the workspace under phase beside them, and
@@ -2120,6 +2113,66 @@ fn start_daemon(socket: &Path) {
     std::thread::spawn(move || {
         let _ = deadband::daemon::serve(&bound.listener, Calm, settings, &log);
     });
+}
+
+/// Waits for `child` to end, for at most [`MOST_WAIT`], and fails the test
+/// when it does not.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the test waits for an mxv that it started as a child"
+)]
+fn wait_for_exit(mut child: std::process::Child) {
+    for () in waiting() {
+        if child.try_wait().unwrap().is_some() {
+            return;
+        }
+    }
+    let _ = child.kill();
+    panic!("mxv did not end within the test's limit");
+}
+
+#[test]
+fn a_gated_task_waits_for_a_place_and_a_task_with_gate_false_does_not() {
+    let setup = Setup::new();
+    let manifest = "[tasks.free]\nargv = [\"sh\", \"-c\", \"echo ${DEADBAND_HELD:-none} > free\"]\ngate = false\n\n[tasks.held]\nargv = [\"sh\", \"-c\", \"echo $DEADBAND_HELD $MISE_JOBS > held\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+    let socket = setup.root().join("d.sock");
+    start_daemon(&socket);
+    let job = deadband::protocol::Job {
+        label: "holder".to_owned(),
+        pid: std::process::id(),
+        command: "the job that holds the one place".to_owned(),
+        lane: deadband::admit::Lane::default(),
+    };
+    let deadband::client::Admission::Granted(lease) =
+        deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
+            panic!("the first job waits")
+        })
+    else {
+        panic!("the daemon did not grant the first job");
+    };
+    let mxv = env!("CARGO_BIN_EXE_mxv");
+
+    // The only place is held, so this task ends only because it never asks.
+    wait_for_exit(setup.spawn_through(mxv, &["run", "-w", "triage", "free"], &socket));
+    assert_eq!(
+        fs::read_to_string(checkout.join("free")).unwrap().trim(),
+        "none"
+    );
+
+    let held = setup.spawn_through(mxv, &["run", "-w", "triage", "held"], &socket);
+    let queued = waiting().any(|()| {
+        let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
+        jobs.waiting.len() == 1
+    });
+    assert!(queued, "mxv never joined the queue");
+    assert!(!checkout.join("held").exists());
+    lease.end(Some(0));
+    wait_for_exit(held);
+    assert_eq!(
+        fs::read_to_string(checkout.join("held")).unwrap().trim(),
+        "1 1"
+    );
 }
 
 #[test]

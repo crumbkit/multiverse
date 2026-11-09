@@ -16,6 +16,10 @@
 //! build in the normal lane runs at normal priority. A helper process that
 //! holds the place and runs the build would let the build alone be lowered.
 //!
+//! `mxv run` does lower its priority, through [`Deadband::for_task`],
+//! because that process ends with its task. A task with `gate = false` asks
+//! the daemon nothing, and keeps the same handling of signals.
+//!
 //! When mxv itself runs inside a job that deadband granted, deadband's call
 //! asks nothing and returns no variables. phase starts a build from an empty
 //! environment, so the build then has neither the outer job's thread counts
@@ -61,6 +65,10 @@ pub(crate) struct Deadband {
     /// The number of the signal that interrupted the builds, or
     /// [`NONE_CAUGHT`].
     caught: Arc<AtomicI32>,
+    /// Whether mxv asks the daemon for a place.
+    asks: bool,
+    /// Whether mxv lowers its own priority once it has a place.
+    lowers: bool,
 }
 
 impl Deadband {
@@ -70,6 +78,19 @@ impl Deadband {
         Self {
             variables: environment.deadband_variables().clone(),
             caught: Arc::new(AtomicI32::new(NONE_CAUGHT)),
+            asks: true,
+            lowers: false,
+        }
+    }
+
+    /// Returns the admission of one `mxv run` task, which lowers mxv's
+    /// priority once it has a place. When `gate` is false it asks the daemon
+    /// nothing, so the task gets no job variables.
+    pub(crate) fn for_task(environment: &Environment, gate: bool) -> Self {
+        Self {
+            asks: gate,
+            lowers: true,
+            ..Self::new(environment)
         }
     }
 
@@ -84,20 +105,12 @@ impl Deadband {
 
 impl Admission for Deadband {
     fn admit(&mut self, asked: &Asked<'_>) -> Box<dyn Place> {
-        let read = |name: &str| self.variables.get(name).cloned();
-        let environment = DeadbandEnvironment::read(read, Some(PathBuf::from(asked.cwd)));
-        let socket = deadband::socket::path(read);
-        let admitted = admit(
-            &DeadbandAsked {
-                socket: &socket,
-                environment: &environment,
-                cores: std::thread::available_parallelism().ok(),
-                label: asked.label,
-                command: cut(asked.command),
-                lane: None,
-            },
-            &mut crate::notice,
-        );
+        let admitted = self.asks.then(|| self.ask(asked));
+        if self.lowers
+            && let Some(admitted) = &admitted
+        {
+            admitted.lower_priority(&mut crate::notice);
+        }
         let building = catch_interrupts(asked.cancel.clone(), Arc::clone(&self.caught));
         Box::new(Held { admitted, building })
     }
@@ -107,10 +120,30 @@ impl Admission for Deadband {
     }
 }
 
+impl Deadband {
+    /// Asks the daemon for the place that `asked` describes.
+    fn ask(&self, asked: &Asked<'_>) -> Admitted {
+        let read = |name: &str| self.variables.get(name).cloned();
+        let environment = DeadbandEnvironment::read(read, Some(PathBuf::from(asked.cwd)));
+        let socket = deadband::socket::path(read);
+        admit(
+            &DeadbandAsked {
+                socket: &socket,
+                environment: &environment,
+                cores: std::thread::available_parallelism().ok(),
+                label: asked.label,
+                command: cut(asked.command),
+                lane: None,
+            },
+            &mut crate::notice,
+        )
+    }
+}
+
 /// A place that the daemon granted, or that it could not be asked for.
 struct Held {
-    /// The lease.
-    admitted: Admitted,
+    /// The lease, or `None` for a task that asks the daemon nothing.
+    admitted: Option<Admitted>,
     /// Whether the builds still run, which tells the signal thread that
     /// a signal cancels them. It is `None` when mxv could not catch the
     /// signals.
@@ -119,7 +152,9 @@ struct Held {
 
 impl Place for Held {
     fn variables(&self) -> Vec<(VariableName, String)> {
-        job_variables(self.admitted.variables())
+        self.admitted
+            .as_ref()
+            .map_or_else(Vec::new, |admitted| job_variables(admitted.variables()))
     }
 
     fn end(self: Box<Self>, exit_code: Option<i32>) {
@@ -131,7 +166,9 @@ impl Place for Held {
             crumbkit::events::taken_back();
             building.store(false, Ordering::SeqCst);
         }
-        admitted.end(exit_code);
+        if let Some(admitted) = admitted {
+            admitted.end(exit_code);
+        }
     }
 }
 

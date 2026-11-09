@@ -1,0 +1,20 @@
+Run a task of a workspace through deadband, or list its tasks
+
+Usage: mxv run [OPTIONS] [TASK]...
+
+Arguments:
+  [TASK]...  The task, which defaults to listing the tasks, then the words to add to its command. Every word after the task belongs to the task, flags too
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+      --repo <CHECKOUT>        The folder of the checkout whose task to run, which a name found in several checkouts needs
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv run -w reading-list
+
+Effects: destructive, not idempotent, open-world.
+Writes: applies all items or none.
+Exit code: the command passes on the exit code of the task.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv run --help` describes them.
+Next: mxv run --help explains each column.

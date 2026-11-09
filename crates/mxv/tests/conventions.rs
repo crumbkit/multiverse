@@ -67,10 +67,10 @@ use mxv::{
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
     REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED,
     RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
-    RESTORE_UNFINISHED, RUN_CODES, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, VOLUME_RENAMED,
-    WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
-    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
-    WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
+    RESTORE_UNFINISHED, RUN_CODES, TASK_AMBIGUOUS, TASK_UNKNOWN, TEMPLATE_AMBIGUOUS,
+    TEMPLATE_INVALID, VOLUME_RENAMED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED,
+    WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT,
+    WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
 
@@ -99,6 +99,11 @@ const ALLOW: &[Allow] = &[
         Rule::Yes,
         "exec",
         "The person writes the command after `--`, and mxv cannot tell what it changes, so a question from mxv would ask about every command, harmless or not.",
+    ),
+    Allow::new(
+        Rule::Yes,
+        "run",
+        "The person chose the task by name, and mxv cannot tell what it changes, so a question from mxv would ask about every task, harmless or not.",
     ),
     Allow::new(
         Rule::Examples,
@@ -431,6 +436,14 @@ const CLEAN_NO_LIMIT: Failing<'static> =
     Failing::new(&CONFIG_NO_LIMIT, &["clean", "--over-limit", "--dry-run"]);
 
 /// `status` outside every workspace, without a name.
+/// `mxv run` of a task that the fixture's workspace does not have. The
+/// checkout's directory does not exist, so mise cannot start there. `--json`
+/// comes before the task, because each word after the task is the task's.
+const RUN_UNKNOWN: Failing<'static> = Failing::new(
+    &TASK_UNKNOWN,
+    &["run", "--json", "-w", "reading-list", "missing"],
+);
+
 const STATUS_OUTSIDE: Failing<'static> = Failing::new(&WORKSPACE_NOT_CURRENT, &["status"]);
 
 /// `status` of a name that no workspace has.
@@ -504,6 +517,7 @@ const STARTS: &[Failing<'static>] = &[
     Failing::new(&CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
     RESTORE_MISSING,
     STATUS_OUTSIDE,
+    RUN_UNKNOWN,
     STATUS_MISSING,
     CLEAN_NO_LIMIT,
     NEW_TAKEN_FOLDER,
@@ -752,6 +766,7 @@ fn live_workspaces() -> Live {
     for name in ["detached", "locked"] {
         worktree_workspace(&app, &root.join("workspaces"), &xdg, name);
     }
+    two_checkouts_with_one_task(&root, &app, &xdg);
     write_text(&checkout("changed").join("notes.md"), "notes");
     write_text(&checkout("secret").join(".env"), "TOKEN=1");
     git(
@@ -779,6 +794,48 @@ fn live_workspaces() -> Live {
         ],
     );
     Live { _dir: dir, xdg }
+}
+
+/// Creates the workspace `both`, with the checkouts `app` and `second` of
+/// `app`, whose manifests declare the same task, so a run of that task is
+/// refused.
+fn two_checkouts_with_one_task(
+    root: &std::path::Path,
+    app: &std::path::Path,
+    xdg: &std::path::Path,
+) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture runs the built binary to create a real workspace"
+    )]
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"))
+        .args(["new", "both", "--repo"])
+        .arg(app)
+        .arg("--repo")
+        .arg(app)
+        .args(["--as", "second"])
+        .env_clear()
+        .envs(LIVE_ENV.iter().copied())
+        .env("HOME", root.join("home"))
+        .env("MXV_ROOT", root.join("workspaces"))
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_STATE_HOME", xdg.join("state"))
+        .env("XDG_CACHE_HOME", xdg.join("cache"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mxv new both failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let task = "[tasks.check]\nargv = [\"true\"]\n";
+    for folder in ["app", "second"] {
+        write_text(
+            &root.join("workspaces/both").join(folder).join("mxv.toml"),
+            task,
+        );
+    }
 }
 
 /// Makes the workspace `name` below `workspaces` as mxv made workspaces
@@ -852,6 +909,12 @@ impl Live {
             self.line(CHECKOUT_STASHES, "stashed"),
         ]
     }
+
+    /// Returns `mxv run` of a task that two checkouts hold. `--json` comes
+    /// before the task, because each word after the task is the task's.
+    fn ambiguous(&self) -> RuntimeFailing {
+        RuntimeFailing::new(TASK_AMBIGUOUS, ["run", "--json", "-w", "both", "check"]).xdg(&self.xdg)
+    }
 }
 
 #[test]
@@ -862,6 +925,7 @@ fn every_recovery_leads_to_a_command_that_runs() {
     starts.extend(
         live.refusals()
             .into_iter()
+            .chain([live.ambiguous()])
             .map(RuntimeFailing::into_failing),
     );
     let recoveries = Recoveries::new(
@@ -877,6 +941,7 @@ fn every_recovery_leads_to_a_command_that_runs() {
 /// differs from its refused line in one word or one variable (TEST-1).
 const PAIRS: &[Twin<'static>] = &[
     Twin::new(CD_MISSING, &["cd", "reading-list"]),
+    Twin::new(RUN_UNKNOWN, &["run", "--json", "-w", "reading-list"]),
     Twin::new(RESTORE_MISSING, &["restore", "sample", "--dry-run"]),
     Twin::new(NEW_TAKEN_NAME, NEW_TRIAGE),
     Twin::new(NEW_BAD_NAME, NEW_TRIAGE),
@@ -923,6 +988,7 @@ fn every_declared_code_has_a_twin_that_the_command_accepts() {
             .into_iter()
             .map(|refused| refused.twin(["remove", "clean", "--dry-run"])),
     );
+    pairs.push(live.ambiguous().twin(["run", "--json", "-w", "both"]));
     let twins = Twins::new(
         examples(&repositories.path),
         &[CODES, RUN_CODES, ARCHIVE_CODES],

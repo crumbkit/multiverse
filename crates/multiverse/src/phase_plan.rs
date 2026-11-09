@@ -28,6 +28,9 @@
 //! receives the service's variables. No variable of the caller's
 //! environment whose name starts with `AWS_` is in [`PASSED_THROUGH`], so
 //! such a process receives only the AWS variables that mxv sets.
+//!
+//! [`build_with_task`] adds one more host app, [`TASK_APP`], which only
+//! `mxv run` asks for, so the plan of `mxv up` never holds a task.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -47,6 +50,7 @@ use crate::manifest::{Container, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::redacted::Redacted;
+use crate::service::Service;
 
 mod services;
 #[cfg(test)]
@@ -57,6 +61,15 @@ use services::{service_apps, service_connects, service_depends};
 
 /// The name of the one process of each unit's app.
 pub const MAIN: &str = "main";
+
+/// The name of the app that holds a task while `mxv run` runs it. It starts
+/// with [`crate::service::RESERVED_PREFIX`], so no unit of a manifest can
+/// have it.
+pub(crate) const TASK_APP: &str = "mxv-task";
+
+/// The prefix of the variable that gives a task the host port of one of the
+/// workspace's named ports.
+const PORT_VARIABLE_PREFIX: &str = "MXV_PORT_";
 
 /// The variables of the caller's environment that a host process receives
 /// when the caller's environment holds them, on top of `PATH` and `HOME`,
@@ -188,7 +201,7 @@ impl CallerEnvironment {
     }
 
     /// Returns the variables that a host process receives, by name.
-    fn passed(&self) -> impl Iterator<Item = (&String, &Redacted)> {
+    pub(crate) fn passed(&self) -> impl Iterator<Item = (&String, &Redacted)> {
         self.vars.iter().filter(|(name, _)| passes(name))
     }
 }
@@ -333,6 +346,104 @@ fn lexical(path: &Path) -> PathBuf {
 /// is not one that phase pins, or the apps break one of phase's plan
 /// rules.
 pub(crate) fn build(inputs: &Inputs<'_>) -> Result<Built, Unrunnable> {
+    assemble(inputs, None)
+}
+
+/// What [`build_with_task`] adds to a plan.
+pub(crate) struct TaskEntry<'a> {
+    /// The directory that the task's source is, an absolute path.
+    pub(crate) root: &'a Path,
+    /// The directory it runs in, relative to `root`.
+    pub(crate) dir: &'a Path,
+    /// Its program and arguments.
+    pub(crate) argv: Vec<String>,
+    /// The services whose variables it receives.
+    pub(crate) services: Vec<&'a Service>,
+}
+
+/// Returns the plan that [`build`] returns, with the app [`TASK_APP`] added
+/// for `task`.
+///
+/// # Errors
+///
+/// Returns the errors of [`build`].
+pub(crate) fn build_with_task(
+    inputs: &Inputs<'_>,
+    task: &TaskEntry<'_>,
+) -> Result<Built, Unrunnable> {
+    assemble(inputs, Some(task_app(inputs, task)?))
+}
+
+/// Returns the name of the variable that gives a task the host port of the
+/// port `port`: `web-ui` is `MXV_PORT_WEB_UI`. The ports `a-b` and `a_b`
+/// share one variable, and the later name wins.
+fn port_variable(port: &str) -> String {
+    let name: String = port
+        .chars()
+        .map(|character| match character {
+            '-' => '_',
+            other => other.to_ascii_uppercase(),
+        })
+        .collect();
+    format!("{PORT_VARIABLE_PREFIX}{name}")
+}
+
+/// Returns the app of `task` and the values of its variables: those that
+/// pass through from the caller, one for each of the workspace's ports, and
+/// those of its services. The app declares no permissions, so it has no
+/// sandbox.
+fn task_app(
+    inputs: &Inputs<'_>,
+    task: &TaskEntry<'_>,
+) -> Result<(AppPlan, Vec<(String, Redacted)>), Unrunnable> {
+    let mut vars: BTreeMap<String, Redacted> = inputs
+        .caller
+        .passed()
+        .map(|(variable, value)| (variable.clone(), value.clone()))
+        .collect();
+    let mut set = BTreeSet::new();
+    for (port, number) in inputs.ports {
+        let variable = port_variable(port);
+        vars.insert(variable.clone(), Redacted::new(number.to_string()));
+        set.insert(variable);
+    }
+    if !task.services.is_empty() {
+        for (variable, value) in
+            crate::service::variables(task.services.iter().copied(), inputs.ports)
+        {
+            vars.insert(variable.clone(), Redacted::new(value));
+            set.insert(variable);
+        }
+    }
+    let mut plan = AppPlan::new(
+        app_name(TASK_APP)?,
+        RunnerKind::Host,
+        Source::checkout(task.root.to_path_buf(), None),
+    );
+    let mut main = ProcessPlan::new(main_process()?, task.argv.clone());
+    main.cwd =
+        (task.dir != Path::new(".") && task.dir != Path::new("")).then(|| task.dir.to_path_buf());
+    main.optional_env = PASSED_THROUGH
+        .iter()
+        .filter(|name| !set.contains(**name))
+        .map(|name| (*name).to_owned())
+        .collect();
+    main.env = vars
+        .keys()
+        .cloned()
+        .chain(main.optional_env.iter().cloned())
+        .collect();
+    main.stop.grace = inputs.grace;
+    plan.processes = vec![main];
+    Ok((plan, vars.into_iter().collect()))
+}
+
+/// Returns the plan of the units of `inputs.manifest` and `extra`, and the
+/// values of their variables.
+fn assemble(
+    inputs: &Inputs<'_>,
+    extra: Option<(AppPlan, Vec<(String, Redacted)>)>,
+) -> Result<Built, Unrunnable> {
     let mut apps = Vec::new();
     let mut values = BTreeMap::new();
     for (plan, vars) in service_apps(inputs)? {
@@ -348,6 +459,10 @@ pub(crate) fn build(inputs: &Inputs<'_>) -> Result<Built, Unrunnable> {
         };
         apps.push(plan);
         values.insert(app, vars);
+    }
+    if let Some((plan, vars)) = extra {
+        values.insert(plan.name.clone(), vars);
+        apps.push(plan);
     }
     let mut plan =
         Plan::new(inputs.workspace.clone(), inputs.id.clone(), apps).map_err(|error| {

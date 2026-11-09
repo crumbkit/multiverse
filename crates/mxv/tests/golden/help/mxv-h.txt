@@ -3,7 +3,7 @@ Create, archive and restore task workspaces that span several git repositories
 Usage: mxv [OPTIONS] <COMMAND>
 
 Work in a workspace:     new, add, list, show, cd
-Run a workspace's app:   up, down, restart, status, logs, exec, ports
+Run a workspace's app:   up, down, restart, status, logs, exec, run, ports
 Put a workspace away:    archive, restore, remove
 Free disk space:         clean
 Free memory:             reclaim, pin, unpin

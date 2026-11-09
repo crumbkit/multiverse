@@ -13,6 +13,7 @@ use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
+use crate::run::RUN;
 use crate::units::parse_age;
 use crate::verbs::{ADD, CD, LIST, NEW, REMOVE, SHOW};
 
@@ -41,7 +42,7 @@ pub const GUIDE: Guide = Guide::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",
-            "exec", "archive", "restore", "remove", "clean", "reclaim", "pin", "unpin",
+            "exec", "run", "archive", "restore", "remove", "clean", "reclaim", "pin", "unpin",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
     )
@@ -51,7 +52,7 @@ pub const GUIDE: Guide = Guide::new()
             Goal::new("Work in a workspace", &["new", "add", "list", "show", "cd"]),
             Goal::new(
                 "Run a workspace's app",
-                &["up", "down", "restart", "status", "logs", "exec", "ports"],
+                &["up", "down", "restart", "status", "logs", "exec", "run", "ports"],
             ),
             Goal::new("Put a workspace away", &["archive", "restore", "remove"]),
             Goal::new("Free disk space", &["clean"]),
@@ -139,6 +140,14 @@ pub const GUIDE: Guide = Guide::new()
             )])
             .effects(Effects::destructive().open_world().all_or_none())
             .passes_on_exit("the command"),
+        Leaf::new(&["run"])
+            .examples(&[Example::new(
+                &["-w", "reading-list"],
+                "List the tasks of the workspace reading-list",
+            )])
+            .effects(Effects::destructive().open_world().all_or_none())
+            .passes_on_exit("the task")
+            .document(RUN),
         Leaf::new(&["ports", "reset"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "api"],
@@ -256,6 +265,12 @@ pub(crate) enum Verb {
     ///
     /// A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
     Exec(ExecArgs),
+    /// Run a task of a workspace through deadband, or list its tasks.
+    ///
+    /// A task is declared under `[tasks.<name>]` in mxv.toml, or is a mise task of a checkout, which `mise tasks ls --json` lists and `mise run` runs. A repository with mise tasks needs no mxv.toml. mxv never trusts a mise config for the person, so a config that mise refuses leaves its tasks unknown and mise's message is shown. A declared task wins over a mise task of the same name, with a note. A name found in several checkouts is refused, and --repo chooses.
+    ///
+    /// Each task takes one place from deadband, and `gate = false` opts a declared task out. A task has no sandbox and no time limit, and receives the workspace's ports as MXV_PORT_<NAME>. A declared task receives the variables of the services that it needs, and a mise task those of every service. mxv adds MISE_JOBS=1 beside deadband's job variables, so a mise task runs one step at a time under its place. mxv exits with the task's exit code, or with 128 plus the number of the signal that ended it. On Ctrl-C mxv stops the task. A task runs on, no longer counted by deadband, when something sends SIGTERM or SIGKILL to mxv alone.
+    Run(RunArgs),
     /// Archive a workspace, so restore can rebuild it at the same commits.
     Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
@@ -673,6 +688,38 @@ pub(crate) struct ExecArgs {
     /// The command's program and its arguments, after `--`
     #[arg(value_name = "COMMAND", last = true, required = true, num_args = 1..)]
     pub(crate) command: Vec<String>,
+}
+
+/// The arguments of `mxv run`.
+#[derive(Debug, Args)]
+pub(crate) struct RunArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
+
+    /// The folder of the checkout whose task to run, which a name found in several checkouts needs
+    #[arg(long, value_name = "CHECKOUT")]
+    pub(crate) repo: Option<String>,
+
+    /// The task, which defaults to listing the tasks, then the words to add to its command. Every word after the task belongs to the task, flags too.
+    #[arg(
+        value_name = "TASK",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub(crate) words: Vec<String>,
+}
+
+impl RunArgs {
+    /// Returns the task's name, or `None` when the command line names none.
+    pub(crate) fn task(&self) -> Option<&String> {
+        self.words.first()
+    }
+
+    /// Returns the words to add to the task's command.
+    pub(crate) fn task_words(&self) -> &[String] {
+        self.words.get(1..).unwrap_or_default()
+    }
 }
 
 /// The arguments of `mxv logs`.
