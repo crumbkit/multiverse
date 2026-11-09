@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::net::TcpListener;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -9,11 +10,14 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::*;
+use crate::backend::Backend;
 use crate::git::Git;
+use crate::name::WorkspaceName;
+use crate::record::Workspace;
 use crate::runs::Runs;
 use crate::store::Store;
 use crate::testing::{Fixture, fixture, fixture_named, git, write};
-use crate::workspaces::{Mode, NewOutcome, Repo};
+use crate::workspaces::{Mode, NewOutcome, Repo, Workspaces};
 
 type Hook = Box<dyn FnMut(&str) -> Result<(), Error>>;
 
@@ -22,7 +26,7 @@ thread_local! {
 }
 
 /// Runs the hook of this test's thread at `step`.
-pub(super) fn at_checkpoint(step: &str) -> Result<(), Error> {
+fn at_checkpoint(step: &str) -> Result<(), Error> {
     HOOK.with(|hook| match hook.borrow_mut().as_mut() {
         Some(run) => run(step),
         None => Ok(()),
@@ -74,6 +78,7 @@ fn setup(kind: Kind) -> Setup {
     if kind == Kind::Clone {
         workspaces = workspaces.with_mirrors(base.join("mirrors"));
     }
+    workspaces.checkpoint = at_checkpoint;
     Setup {
         fixture: fixture(),
         root: base.join("mxv"),
@@ -927,4 +932,621 @@ fn a_pin_name_stays_one_reference_component_for_an_odd_folder() {
     assert!(pin.starts_with("refs/mxv/archives/abc/"));
     assert!(!pin.contains(".."), "{pin}");
     assert_eq!(pin.matches('/').count(), 4, "{pin}");
+}
+
+/// Returns the text of the refusal of `planned`, and fails when the archive
+/// was not refused.
+fn refusal_text(planned: ArchivePlanned) -> String {
+    match planned {
+        ArchivePlanned::Refused(refusal) => format!("{refusal:?}"),
+        other => panic!("the archive was not refused: {other:?}"),
+    }
+}
+
+/// Carries out `plan` and returns the text of its refusal, and fails when
+/// the archive was not refused.
+fn outcome_refusal(setup: &Setup, plan: ArchivePlan) -> String {
+    match setup.workspaces.archive(&setup.archives, plan).unwrap() {
+        ArchiveOutcome::Refused(refusal) => format!("{refusal:?}"),
+        ArchiveOutcome::Retired { archive, .. } => {
+            panic!("the archive was not refused: {archive:?}")
+        }
+    }
+}
+
+fn writes_late_file(kind: Kind, step: &'static str) {
+    let setup = setup(kind);
+    setup.create();
+    let checkout = setup.checkout();
+    let late = checkout.join("late.txt");
+    let plan = setup.plan(ArchiveOptions::default());
+    set_hook(move |at| {
+        if at == step {
+            write(&late, "late\n");
+        }
+        Ok(())
+    });
+    let refusal = outcome_refusal(&setup, plan);
+    clear_hook();
+    assert!(refusal.contains("SourceChanged"), "{step}: {refusal}");
+    assert!(refusal.contains("late.txt"), "{step}: {refusal}");
+    assert!(checkout.join("late.txt").is_file(), "{step}");
+}
+
+#[test]
+fn a_file_written_after_the_pin_of_a_clone_refuses_the_archive_and_is_kept() {
+    writes_late_file(Kind::Clone, "pins");
+}
+
+#[test]
+fn a_file_written_after_the_pin_of_a_worktree_refuses_the_archive_and_is_kept() {
+    writes_late_file(Kind::Worktree, "pins");
+}
+
+#[test]
+fn a_file_written_after_the_record_of_a_clone_refuses_the_archive_and_is_kept() {
+    writes_late_file(Kind::Clone, "record");
+}
+
+#[test]
+fn a_commit_made_after_the_pin_refuses_the_archive_and_stays_in_the_checkout() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    let at = checkout.clone();
+    let plan = setup.plan(ArchiveOptions::default());
+    set_hook(move |step| {
+        if step == "record" {
+            git(&at, &["commit", "--quiet", "--allow-empty", "-m", "Late"]);
+        }
+        Ok(())
+    });
+    let refusal = outcome_refusal(&setup, plan);
+    clear_hook();
+    assert!(refusal.contains("SourceChanged"), "{refusal}");
+    assert_eq!(git(&checkout, &["log", "-1", "--format=%s"]).trim(), "Late");
+}
+
+#[test]
+fn a_rerun_after_head_moved_pins_the_new_commit_and_finishes_the_archive() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    stop_at("record");
+    let plan = setup.plan(ArchiveOptions::default());
+    assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
+    clear_hook();
+    let commit = setup.commit_locally();
+    let archive = setup.archive();
+    assert_eq!(archive.checkouts[0].commit, commit);
+    setup.restore();
+    assert_eq!(setup.head(), commit);
+}
+
+fn add_nested_repository(setup: &Setup) {
+    let nested = setup.checkout().join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["init", "--quiet"]);
+    write(nested.join("work.txt"), "important\n");
+    git(&nested, &["add", "work.txt"]);
+    git(&nested, &["commit", "--quiet", "-m", "Nested"]);
+}
+
+#[test]
+fn an_untracked_nested_repository_refuses_a_wip_archive_and_is_named() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_nested_repository(&setup);
+    let head = setup.head();
+    let text = refusal_text(setup.planned(wip()));
+    assert!(text.contains("nested"), "{text}");
+    assert!(setup.checkout().join("nested/work.txt").is_file());
+    assert_eq!(setup.head(), head, "a refused --wip commits nothing");
+}
+
+#[test]
+fn force_records_an_untracked_nested_repository_as_lost() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    add_nested_repository(&setup);
+    let archive = setup.archive_with(force());
+    assert!(
+        archive.lost.iter().any(|item| item.contains("nested")),
+        "{:?}",
+        archive.lost
+    );
+}
+
+fn add_submodule(setup: &Setup) {
+    let checkout = setup.checkout();
+    let origin = setup.fixture.origin.to_string_lossy().into_owned();
+    git(
+        &checkout,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "add",
+            &origin,
+            "sub",
+        ],
+    );
+    git(&checkout, &["commit", "--quiet", "-m", "Add sub"]);
+}
+
+#[test]
+fn an_ignored_file_in_a_submodule_refuses_the_archive_and_is_named() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_submodule(&setup);
+    let checkout = setup.checkout();
+    write(checkout.join(".git/modules/sub/info/exclude"), ".env\n");
+    write(checkout.join("sub/.env"), "SECRET=1\n");
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("sub") && text.contains(".env"), "{text}");
+}
+
+#[test]
+fn a_stash_in_a_submodule_refuses_the_archive_and_is_named() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_submodule(&setup);
+    let sub = setup.checkout().join("sub");
+    write(sub.join("stashed.txt"), "stash\n");
+    git(&sub, &["add", "stashed.txt"]);
+    git(&sub, &["stash", "--quiet"]);
+    let stash = git(&sub, &["rev-parse", "stash@{0}"]);
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains(stash.trim()), "{text}");
+}
+
+#[test]
+fn a_change_in_a_submodule_refuses_a_wip_archive_and_is_named() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_submodule(&setup);
+    write(setup.checkout().join("sub/draft.txt"), "draft\n");
+    let text = refusal_text(setup.planned(wip()));
+    assert!(text.contains("draft.txt"), "{text}");
+}
+
+#[test]
+fn a_clean_submodule_in_a_clone_archives_and_restores() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_submodule(&setup);
+    let commit = setup.head();
+    setup.archive();
+    setup.restore();
+    assert_eq!(setup.head(), commit);
+}
+
+#[test]
+fn a_worktree_with_an_initialised_submodule_refuses_before_anything_changes() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    add_submodule(&setup);
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("Unusable") && text.contains("sub"), "{text}");
+    assert!(setup.record().is_none());
+    assert!(setup.checkout().join("sub/.git").exists());
+}
+
+fn hides_local_edit(flag: &str) {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    write(checkout.join("config.txt"), "shared\n");
+    git(&checkout, &["add", "config.txt"]);
+    git(&checkout, &["commit", "--quiet", "-m", "Config"]);
+    git(&checkout, &["update-index", flag, "config.txt"]);
+    write(checkout.join("config.txt"), "local override\n");
+    for options in [ArchiveOptions::default(), wip()] {
+        let text = refusal_text(setup.planned(options));
+        assert!(text.contains("config.txt"), "{flag}: {text}");
+    }
+    assert_eq!(
+        fs::read_to_string(checkout.join("config.txt")).unwrap(),
+        "local override\n"
+    );
+}
+
+#[test]
+fn a_skip_worktree_file_with_local_edits_refuses_the_archive_and_is_named() {
+    hides_local_edit("--skip-worktree");
+}
+
+#[test]
+fn an_assume_unchanged_file_with_local_edits_refuses_the_archive_and_is_named() {
+    hides_local_edit("--assume-unchanged");
+}
+
+#[test]
+fn a_skip_worktree_file_without_local_edits_does_not_refuse_the_archive() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    write(checkout.join("config.txt"), "shared\n");
+    git(&checkout, &["add", "config.txt"]);
+    git(&checkout, &["commit", "--quiet", "-m", "Config"]);
+    git(
+        &checkout,
+        &["update-index", "--skip-worktree", "config.txt"],
+    );
+    setup.archive();
+}
+
+#[test]
+fn an_edited_agents_file_comes_back_from_the_archive() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let agents = setup.root.join("triage/AGENTS.md");
+    let mut text = fs::read_to_string(&agents).unwrap();
+    text.push_str("\nMY NOTES\n");
+    write(&agents, &text);
+    let archive = setup.archive();
+    assert!(archive.root.iter().any(|entry| entry.path == "AGENTS.md"));
+    setup.restore();
+    assert_eq!(fs::read_to_string(&agents).unwrap(), text);
+}
+
+#[test]
+fn an_agents_file_that_mxv_wrote_is_generated_again_and_not_carried() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let agents = setup.root.join("triage/AGENTS.md");
+    let text = fs::read_to_string(&agents).unwrap();
+    let archive = setup.archive();
+    assert!(archive.root.is_empty(), "{:?}", archive.root);
+    setup.restore();
+    assert_eq!(fs::read_to_string(&agents).unwrap(), text);
+}
+
+fn edit_during_retirement(path: &str, first: &'static str, second: &'static str) {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let file = setup.root.join("triage").join(path);
+    write(&file, first);
+    let at = file.clone();
+    let plan = setup.plan(ArchiveOptions::default());
+    set_hook(move |step| {
+        if step == "retired:app" {
+            write(&at, second);
+        }
+        Ok(())
+    });
+    let refusal = outcome_refusal(&setup, plan);
+    clear_hook();
+    assert!(refusal.contains("SourceChanged"), "{refusal}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), second);
+    setup.archive();
+    setup.restore();
+    assert_eq!(fs::read_to_string(&file).unwrap(), second);
+}
+
+#[test]
+fn a_root_file_edited_during_retirement_refuses_and_the_rerun_keeps_the_edit() {
+    edit_during_retirement("notes.md", "v1\n", "v2 edited\n");
+}
+
+#[test]
+fn a_manifest_edited_during_retirement_refuses_and_the_rerun_keeps_the_edit() {
+    edit_during_retirement("mxv.toml", "# v1\n", "# v2\n");
+}
+
+#[test]
+fn a_root_file_that_appears_during_retirement_refuses_and_the_rerun_keeps_it() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let file = setup.root.join("triage/late.md");
+    let at = file.clone();
+    let plan = setup.plan(ArchiveOptions::default());
+    set_hook(move |step| {
+        if step == "retired:app" {
+            write(&at, "late\n");
+        }
+        Ok(())
+    });
+    let refusal = outcome_refusal(&setup, plan);
+    clear_hook();
+    assert!(refusal.contains("late.md"), "{refusal}");
+    setup.archive();
+    setup.restore();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "late\n");
+}
+
+#[test]
+fn a_record_over_the_size_limit_refuses_before_anything_changes() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let dir = setup.root.join("triage/many");
+    fs::create_dir_all(&dir).unwrap();
+    for index in 0..12_000 {
+        write(dir.join(format!("file-{index:05}.txt")), "x");
+    }
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("RecordTooLarge"), "{text}");
+    assert!(setup.record().is_none());
+    assert!(setup.checkout().is_dir());
+}
+
+#[test]
+fn an_unreachable_origin_leaves_no_empty_mirror_behind() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let commit = setup.commit_locally();
+    git(&setup.checkout(), &["push", "--quiet", "origin", "triage"]);
+    let archive = setup.archive();
+    let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    fs::remove_dir_all(&mirror).unwrap();
+    let origin = setup.fixture.origin.clone();
+    let hidden = origin.with_extension("hidden");
+    fs::rename(&origin, &hidden).unwrap();
+    assert!(
+        setup
+            .workspaces
+            .restore(&setup.archives, setup.restore_plan(), &setup.runs)
+            .is_err()
+    );
+    assert!(
+        !mirror.join("HEAD").exists(),
+        "the failed run left a mirror"
+    );
+    fs::rename(&hidden, &origin).unwrap();
+    setup.restore();
+    assert_eq!(setup.head(), commit);
+}
+
+#[test]
+fn a_clone_without_an_origin_comes_back_from_its_mirror_without_an_origin() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let commit = setup.commit_locally();
+    git(&setup.checkout(), &["remote", "remove", "origin"]);
+    setup.archive();
+    setup.restore();
+    assert_eq!(setup.head(), commit);
+    assert_eq!(git(&setup.checkout(), &["remote"]).trim(), "");
+}
+
+#[test]
+fn a_clone_with_no_upstream_comes_back_with_no_upstream() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.archive();
+    setup.restore();
+    let config = git(&setup.checkout(), &["config", "--list", "--local"]);
+    assert!(!config.contains("branch.triage.merge"), "{config}");
+}
+
+#[test]
+fn an_error_after_the_rename_puts_the_checkout_back_under_its_own_name() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    let held = quarantine(&checkout).unwrap();
+    let head = held.join(".git/HEAD");
+    let plan = setup.plan(ArchiveOptions::default());
+    set_hook(move |step| {
+        if step == "moved:app" {
+            write(&head, "not a head\n");
+        }
+        Ok(())
+    });
+    let result = setup.workspaces.archive(&setup.archives, plan);
+    clear_hook();
+    assert!(result.is_err(), "{result:?}");
+    assert!(checkout.join(".git").is_dir());
+    assert!(!quarantine(&checkout).unwrap().exists());
+}
+
+#[test]
+fn a_password_leaves_an_ssh_origin_and_its_user_name_stays() {
+    assert_eq!(
+        crate::mirror::recorded_origin("ssh://git:secret@example.com/app.git"),
+        "ssh://git@example.com/app.git"
+    );
+    assert_eq!(
+        crate::mirror::recorded_origin("ssh://git@example.com/app.git"),
+        "ssh://git@example.com/app.git"
+    );
+    assert_eq!(
+        crate::mirror::recorded_origin("https://token@example.com/app.git"),
+        "https://example.com/app.git"
+    );
+}
+
+#[test]
+fn a_root_directory_that_mxv_cannot_empty_refuses_before_anything_changes() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let dir = setup.root.join("triage/ro");
+    fs::create_dir_all(&dir).unwrap();
+    write(dir.join("a.txt"), "a\n");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let text = refusal_text(setup.planned(force()));
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(text.contains("ro"), "{text}");
+    assert!(setup.record().is_none());
+}
+
+#[test]
+fn a_root_file_that_mxv_cannot_read_refuses_before_anything_changes() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let file = setup.root.join("triage/secret.txt");
+    write(&file, "a\n");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(text.contains("secret.txt"), "{text}");
+    assert!(setup.record().is_none());
+}
+
+#[test]
+fn a_workspace_manifest_that_mxv_cannot_read_refuses_before_anything_changes() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let manifest = setup.root.join("triage/mxv.toml");
+    write(&manifest, "# private\n");
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o000)).unwrap();
+    let planned = setup
+        .workspaces
+        .plan_archive(&setup.archives, &name(), force(), Mode::Change);
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+    let text = match planned {
+        Ok(planned) => refusal_text(planned),
+        Err(error) => format!("{error:?}"),
+    };
+    assert!(text.contains("mxv.toml"), "{text}");
+    assert!(setup.record().is_none());
+}
+
+#[test]
+fn a_root_directory_whose_name_is_not_utf8_refuses_before_anything_changes() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let name_bytes = std::ffi::OsStr::from_bytes(b"odd-\xFF");
+    // APFS refuses such a name, so only a Linux file system reaches the rest.
+    if fs::create_dir(setup.root.join("triage").join(name_bytes)).is_err() {
+        return;
+    }
+    let text = refusal_text(setup.planned(force()));
+    assert!(text.contains("Unusable"), "{text}");
+    assert!(setup.record().is_none());
+}
+
+#[test]
+fn a_rerun_copies_a_root_file_again_after_a_second_checkout_stopped_the_first_run() {
+    let setup = setup(Kind::Clone);
+    let other = fixture_named("web");
+    let repos = [Repo::new(&setup.fixture.clone), Repo::new(&other.clone)];
+    setup
+        .workspaces
+        .create_repos(&setup.root, &name(), &repos, Mode::Change, None)
+        .unwrap();
+    let web = setup.root.join("triage/web");
+    let late = web.join("late.txt");
+    let held = quarantine(&web).unwrap().join("late.txt");
+    let plan = setup.plan(ArchiveOptions::default());
+    set_hook(move |step| {
+        if step == "moved:web" {
+            write(&held, "late\n");
+        }
+        Ok(())
+    });
+    let refusal = outcome_refusal(&setup, plan);
+    clear_hook();
+    assert!(refusal.contains("SourceChanged"), "{refusal}");
+    assert!(!setup.checkout().exists(), "the first checkout is retired");
+    assert!(late.is_file(), "the second checkout is back in its place");
+    fs::remove_file(&late).unwrap();
+    let archive = setup.archive();
+    assert_eq!(archive.checkouts.len(), 2);
+    setup.restore();
+    assert!(setup.checkout().join(".git").exists());
+    assert!(web.join(".git").exists());
+}
+
+#[test]
+fn a_restored_manifest_keeps_its_permission_bits() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let manifest = setup.root.join("triage/mxv.toml");
+    write(&manifest, "# private\n");
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+    setup.archive();
+    setup.restore();
+    assert_eq!(
+        fs::metadata(&manifest).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn a_manifest_with_a_second_hard_link_refuses_the_archive() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let manifest = setup.root.join("triage/mxv.toml");
+    write(&manifest, "# shared\n");
+    fs::hard_link(&manifest, setup.base.join("other.toml")).unwrap();
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("mxv.toml"), "{text}");
+}
+
+#[test]
+fn force_deletes_a_socket_in_the_root_so_the_restore_finds_the_path_free() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let _socket = UnixListener::bind(setup.root.join("triage/s")).unwrap();
+    let archive = setup.archive_with(force());
+    assert!(archive.lost.iter().any(|item| item.contains('s')));
+    assert!(!setup.root.join("triage").exists());
+    setup.restore();
+}
+
+#[test]
+fn a_record_whose_root_path_leaves_the_workspace_is_refused_as_corrupt() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    write(setup.root.join("triage/notes.md"), "keep\n");
+    setup.archive();
+    let path = setup.archives.dir_of(&name()).join("archive.json");
+    let text = fs::read_to_string(&path).unwrap();
+    write(&path, text.replace("\"notes.md\"", "\"../notes.md\""));
+    assert!(matches!(
+        setup.archives.read(&name()),
+        Err(Error::CorruptRecord { .. })
+    ));
+}
+
+#[test]
+fn a_clone_branch_and_extra_remote_that_the_archive_drops_are_named_in_a_warning() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    git(&checkout, &["branch", "side"]);
+    git(
+        &checkout,
+        &["remote", "add", "fork", "https://example.invalid/app.git"],
+    );
+    let plan = setup.plan(ArchiveOptions::default());
+    let warnings = plan.warnings.join("\n");
+    assert!(warnings.contains("side"), "{warnings}");
+    assert!(warnings.contains("fork"), "{warnings}");
+}
+
+#[test]
+fn an_unborn_head_refuses_as_a_checkout_that_cannot_be_read() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    git(
+        &setup.checkout(),
+        &["switch", "--quiet", "--orphan", "empty"],
+    );
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("Unusable"), "{text}");
+}
+
+#[test]
+fn a_mirror_that_is_gone_refuses_the_archive() {
+    let setup = setup(Kind::Clone);
+    let workspace = setup.create();
+    let mirror = workspace.checkouts[0].mirror.clone().unwrap();
+    fs::remove_dir_all(&mirror).unwrap();
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("MirrorMissing"), "{text}");
+}
+
+#[test]
+fn a_locked_worktree_refuses_as_a_checkout_that_cannot_be_read() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let path = setup.checkout().to_string_lossy().into_owned();
+    git(
+        &setup.fixture.clone,
+        &["worktree", "lock", "--reason", "mine", &path],
+    );
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("Unusable"), "{text}");
 }

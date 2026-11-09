@@ -21,6 +21,48 @@ pub struct Repository {
     pub name: String,
 }
 
+/// The work of one initialised submodule of a checkout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubmoduleWork {
+    /// The submodule's path, relative to the checkout.
+    pub path: String,
+    /// Its uncommitted changes, untracked paths and ignored paths.
+    pub changes: Changes,
+    /// The commit of each of its stash entries.
+    pub stashes: Vec<String>,
+    /// Each of its commits that no remote branch holds.
+    pub commits: Vec<String>,
+}
+
+/// What `git status` does not show about a checkout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Concealed {
+    /// Each repository inside the checkout that git does not track, which
+    /// `git add` would store as a commit id without its files.
+    pub nested: Vec<String>,
+    /// Each file marked skip-worktree or assume-unchanged that differs from
+    /// the index.
+    pub hidden: Vec<String>,
+    /// Each initialised submodule, parents before the submodules inside
+    /// them.
+    pub submodules: Vec<SubmoduleWork>,
+}
+
+/// The names in a clone that its mirror does not hold, which a rebuilt
+/// clone does not have.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LocalNames {
+    /// Each local branch.
+    pub branches: Vec<String>,
+    /// Each tag.
+    pub tags: Vec<String>,
+    /// Each remote other than `origin`.
+    pub remotes: Vec<String>,
+}
+
 /// The changes in a checkout that removing it would delete.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -370,6 +412,37 @@ pub trait Backend {
     ///
     /// Returns the failure of the staging or the commit.
     fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error>;
+
+    /// Returns the failure when [`Backend::commit_all`] could not run in
+    /// `checkout`, such as a held index lock, and changes nothing that the
+    /// person can see.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason that the commit could not run.
+    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error>;
+
+    /// Returns what `git status` does not show about `checkout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error>;
+
+    /// Returns the names in the clone at `checkout` that its mirror at
+    /// `mirror` does not hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn local_names(&self, checkout: &Path, mirror: &Path) -> Result<LocalNames, Error>;
+
+    /// Deletes the remote `origin` of `checkout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the command.
+    fn remove_origin(&self, checkout: &Path) -> Result<(), Error>;
 
     /// Returns the commits of `revision` that no remote branch of `origin`
     /// holds, as the checkout or repository at `dir` last fetched them.

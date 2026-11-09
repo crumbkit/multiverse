@@ -26,6 +26,10 @@ pub const ARCHIVE_UNFINISHED: Code = Code::new("mxv", "archive", "unfinished");
 /// The code of `--yes` with paths that only a repository's own `mxv.toml`
 /// declares disposable.
 pub const ARCHIVE_MANIFEST_DISPOSABLE: Code = Code::new("mxv", "archive", "manifest_disposable");
+/// The code of an archive whose record would be larger than a record may be.
+pub const ARCHIVE_RECORD_TOO_LARGE: Code = Code::new("mxv", "archive", "record_too_large");
+/// The code of `--delete-volumes` for volumes that a live workspace uses.
+pub const ARCHIVE_VOLUMES_IN_USE: Code = Code::new("mxv", "archive", "volumes_in_use");
 /// The code of a restore of a name that no archive has.
 pub const RESTORE_NOT_FOUND: Code = Code::new("mxv", "restore", "not_found");
 /// The code of a restore whose name or directory something else holds.
@@ -50,6 +54,8 @@ pub(crate) const CODES: &[&Code] = &[
     &ARCHIVE_CHECKOUT_UNUSABLE,
     &ARCHIVE_UNFINISHED,
     &ARCHIVE_MANIFEST_DISPOSABLE,
+    &ARCHIVE_RECORD_TOO_LARGE,
+    &ARCHIVE_VOLUMES_IN_USE,
     &RESTORE_NOT_FOUND,
     &RESTORE_NAME_TAKEN,
     &RESTORE_BRANCH_MOVED,
@@ -120,6 +126,22 @@ pub(crate) enum ArchiveFailure {
         name: String,
         /// The paths.
         paths: Vec<String>,
+    },
+    /// The record would be larger than a record may be.
+    RecordTooLarge {
+        /// The workspace's name.
+        name: String,
+        /// The size that the record would have, in bytes.
+        bytes: u64,
+        /// The largest record, in bytes.
+        most: u64,
+    },
+    /// A live workspace has the stable id of the archive's volumes.
+    VolumesInUse {
+        /// The archive's name.
+        name: String,
+        /// The live workspace.
+        workspace: String,
     },
     /// No archive has the name.
     RestoreNotFound {
@@ -195,6 +217,9 @@ pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> 
             folder,
             differences,
         },
+        ArchiveRefusal::RecordTooLarge { bytes, most } => {
+            ArchiveFailure::RecordTooLarge { name, bytes, most }
+        }
         _ => ArchiveFailure::NotFound { name },
     }
 }
@@ -243,6 +268,8 @@ impl Failure for ArchiveFailure {
             Self::Unusable { .. } => &ARCHIVE_CHECKOUT_UNUSABLE,
             Self::Unfinished { .. } => &ARCHIVE_UNFINISHED,
             Self::ManifestDisposable { .. } => &ARCHIVE_MANIFEST_DISPOSABLE,
+            Self::RecordTooLarge { .. } => &ARCHIVE_RECORD_TOO_LARGE,
+            Self::VolumesInUse { .. } => &ARCHIVE_VOLUMES_IN_USE,
             Self::RestoreNotFound { .. } => &RESTORE_NOT_FOUND,
             Self::RestoreUnfinished { .. } => &RESTORE_UNFINISHED,
             Self::RestoreNameTaken { .. } => &RESTORE_NAME_TAKEN,
@@ -267,17 +294,13 @@ impl Failure for ArchiveFailure {
                 "run `mxv new` for the same repository, which clones the mirror again, then archive the workspace again",
             ),
             Self::UnsavedWork { name, unsaved } => {
-                let wip_saves_all = unsaved.ignored.is_empty()
-                    && unsaved.stashes.is_empty()
-                    && unsaved.commits.is_empty()
-                    && unsaved.root.is_empty();
-                if wip_saves_all {
+                if unsaved.wip_saves_all() {
                     hint(format!(
                         "commit the work, or run `mxv archive -w {name} --wip` to commit it onto the branch, or `--force` to lose it"
                     ))
                 } else {
                     hint(format!(
-                        "save or delete the paths and commits that the failure lists, and archive again, or run `mxv archive -w {name} --force` to lose them; `--wip` does not touch ignored files, stashes or other commits"
+                        "save or delete the paths and commits that the failure lists, and archive again, or run `mxv archive -w {name} --force` to lose them; `--wip` does not save ignored files, stashes, other commits, nested repositories, submodules or hidden edits"
                     ))
                 }
             }
@@ -292,6 +315,12 @@ impl Failure for ArchiveFailure {
             )),
             Self::ManifestDisposable { name, .. } => hint(format!(
                 "run `mxv archive -w {name}` without --yes and answer the prompt, or pass --force"
+            )),
+            Self::RecordTooLarge { .. } => hint(
+                "move or delete some of the extra files in the workspace's directory, then archive again",
+            ),
+            Self::VolumesInUse { name, workspace } => hint(format!(
+                "run `mxv remove --archived {name}` without --delete-volumes, because the volumes belong to the workspace {workspace}"
             )),
             Self::RestoreNameTaken { name, path, record } => {
                 if *record {
@@ -340,6 +369,9 @@ impl Failure for ArchiveFailure {
                 Field::new("stashes", FieldValue::list(unsaved.stashes.iter())),
                 Field::new("commits", FieldValue::list(unsaved.commits.iter())),
                 Field::new("root", FieldValue::list(unsaved.root.iter())),
+                Field::new("nested", FieldValue::list(unsaved.nested.iter())),
+                Field::new("hidden", FieldValue::list(unsaved.hidden.iter())),
+                Field::new("submodules", FieldValue::list(unsaved.submodules.iter())),
             ],
             Self::InUse { name, reason } => {
                 vec![Field::new("name", name), Field::new("reason", reason)]
@@ -351,6 +383,14 @@ impl Failure for ArchiveFailure {
                 Field::new("name", name),
                 Field::new("paths", FieldValue::list(paths.iter())),
             ],
+            Self::RecordTooLarge { name, bytes, most } => vec![
+                Field::new("name", name),
+                Field::new("bytes", bytes.to_string()),
+                Field::new("most", most.to_string()),
+            ],
+            Self::VolumesInUse { name, workspace } => {
+                vec![Field::new("name", name), Field::new("workspace", workspace)]
+            }
             Self::RestoreNameTaken { name, path, .. } => {
                 vec![Field::new("name", name), Field::new("path", path)]
             }
@@ -424,6 +464,14 @@ impl fmt::Display for ArchiveFailure {
                 formatter,
                 "archiving {name} would delete {}, which only the repository's mxv.toml declares disposable, and --yes alone does not delete such paths",
                 paths.join(", ")
+            ),
+            Self::RecordTooLarge { name, bytes, most } => write!(
+                formatter,
+                "the archive of {name} would need a record of {bytes} bytes, and a record holds at most {most} bytes"
+            ),
+            Self::VolumesInUse { name, workspace } => write!(
+                formatter,
+                "the docker volumes of the archive {name} belong to the live workspace {workspace}"
             ),
             Self::RestoreNotFound { name } => write!(formatter, "no archive is named {name}"),
             Self::RestoreNameTaken { name, path, record } => {

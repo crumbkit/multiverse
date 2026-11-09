@@ -3,14 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::archive::{Archive, ArchiveState, ArchivedCheckout, Archives, checkpoint, root};
+use crate::archive::{Archive, ArchiveState, ArchivedCheckout, Archives, root};
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::runs::Runs;
 use crate::store::Created;
-use crate::workspaces::{CloneStart, Entry, Made, Mode, Workspaces, default_branch};
+use crate::workspaces::{
+    CloneStart, Entry, Made, Mode, Workspaces, default_branch, delete_directory,
+};
 
 /// Why `mxv restore` built nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -234,7 +236,7 @@ impl<B: Backend> Workspaces<B> {
                 return Ok(RestoreOutcome::Refused(refusal));
             }
         }
-        checkpoint("mirrors")?;
+        (self.checkpoint)("mirrors")?;
         let mut workspace = archive.workspace();
         let mut made = Made {
             record_not_ours: true,
@@ -255,7 +257,7 @@ impl<B: Backend> Workspaces<B> {
                 return Err(error);
             }
         };
-        checkpoint("record")?;
+        (self.checkpoint)("record")?;
         if archive.containers_ran {
             runs.remember_containers(&archive.name)?;
         }
@@ -283,32 +285,38 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Makes sure that the mirror of the clone `checkout` holds its commit.
-    /// A mirror that has gone is cloned again from the recorded origin. The
-    /// mirror that is still there is fetched when the origin answers,
-    /// because its branches are what the clone starts with, and the pin
-    /// keeps the commit when it does not.
+    /// A mirror that has gone is cloned again from the recorded origin, and
+    /// a failed fetch deletes the empty mirror that the run made. The mirror
+    /// that is still there is fetched when the origin answers, because its
+    /// branches are what the clone starts with, and the pin keeps the commit
+    /// when it does not. A clone without an origin depends on its pin.
     fn ensure_mirror(
         &self,
         checkout: &ArchivedCheckout,
         mirror: &Path,
         warnings: &mut Vec<String>,
     ) -> Result<Option<RestoreRefusal>, Error> {
-        let Some(origin) = &checkout.origin else {
-            return Ok(Some(missing_commit(checkout)));
-        };
         let _lock = self.lock_mirror(mirror)?;
         let exists = mirror.join("HEAD").is_file();
-        self.backend.prepare_mirror(mirror)?;
-        let fetched = self
-            .backend
-            .fetch_mirror(mirror, origin, &default_branch(&checkout.base));
-        match fetched {
-            Ok(_) => {}
-            Err(error) if exists => warnings.push(format!(
-                "mxv could not fetch the origin of {}, so the restored clone starts from what its mirror last fetched: {error}",
-                checkout.folder
-            )),
-            Err(error) => return Err(error),
+        if !exists && checkout.origin.is_none() {
+            return Ok(Some(missing_commit(checkout)));
+        }
+        if let Some(origin) = &checkout.origin {
+            self.backend.prepare_mirror(mirror)?;
+            let fetched =
+                self.backend
+                    .fetch_mirror(mirror, origin, &default_branch(&checkout.base));
+            match fetched {
+                Ok(_) => {}
+                Err(error) if exists => warnings.push(format!(
+                    "mxv could not fetch the origin of {}, so the restored clone starts from what its mirror last fetched: {error}",
+                    checkout.folder
+                )),
+                Err(error) => {
+                    delete_directory(mirror)?;
+                    return Err(error);
+                }
+            }
         }
         if self
             .backend
@@ -340,20 +348,20 @@ impl<B: Backend> Workspaces<B> {
         }
         std::fs::create_dir(&archive.path).map_err(unwritable(&archive.path))?;
         made.directory = true;
-        checkpoint("directory")?;
+        (self.checkpoint)("directory")?;
         for (checkout, archived) in workspace.checkouts.iter_mut().zip(&archive.checkouts) {
             if archive.kind == WorkspaceKind::Clone {
                 self.rebuild_clone(checkout, archived, made)?;
             } else {
                 self.rebuild_worktree(checkout, archived, made)?;
             }
-            checkpoint(&format!("checkout:{}", checkout.name))?;
+            (self.checkpoint)(&format!("checkout:{}", checkout.name))?;
         }
         made.agents = true;
         self.write_agents(workspace)?;
         made.manifest = archive.manifest.is_some();
         root::write_back(archives, archive, &archive.path, &workspace.manifest_file())?;
-        checkpoint("root")?;
+        (self.checkpoint)("root")?;
         runs.restored_ports(workspace, &self.store, |workspace, store| {
             Ok(store.create(workspace)? == Created::Written)
         })
@@ -367,20 +375,24 @@ impl<B: Backend> Workspaces<B> {
         archived: &ArchivedCheckout,
         made: &mut Made,
     ) -> Result<(), Error> {
-        let origin = archived.origin.clone().unwrap_or_default();
+        // A clone starts with its mirror's path as a placeholder origin
+        // when the archived clone had none, and loses it below.
+        let origin = archived
+            .origin
+            .clone()
+            .unwrap_or_else(|| archived.pin_repository().display().to_string());
         let start = if archived.detached {
             CloneStart::Detached(&archived.commit)
         } else {
             CloneStart::Branch(&archived.commit)
         };
         self.make_clone_at(checkout, &origin, start, false, &mut made.clones)?;
-        if !archived.detached {
-            let tracked = archived
-                .upstream
-                .clone()
-                .unwrap_or_else(|| format!("refs/heads/{}", default_branch(&archived.base)));
+        if archived.origin.is_none() {
+            self.backend.remove_origin(&checkout.path)?;
+        }
+        if let Some(tracked) = archived.upstream.as_ref().filter(|_| !archived.detached) {
             self.backend
-                .set_upstream(&checkout.path, &checkout.branch, &tracked)?;
+                .set_upstream(&checkout.path, &checkout.branch, tracked)?;
         }
         Ok(())
     }

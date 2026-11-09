@@ -6,6 +6,36 @@ use crate::git::{Git, explanation, message};
 use crate::testing::{advance_origin, fixture, git, write};
 
 #[test]
+fn a_status_longer_than_the_kept_output_of_a_command_names_every_path() {
+    let fixture = fixture();
+    let padding = "x".repeat(100);
+    for index in 0..12_000 {
+        write(
+            fixture.clone.join(format!("{padding}-{index:05}.txt")),
+            "work\n",
+        );
+    }
+    let changes = Git.changes(&fixture.clone).unwrap();
+    assert_eq!(changes.changed.len(), 12_000);
+}
+
+#[test]
+fn a_worktree_has_no_submodule_git_directories_to_read() {
+    let fixture = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let worktree = dir.path().join("worktree");
+    let path = worktree.to_string_lossy().into_owned();
+    git(
+        &fixture.clone,
+        &["worktree", "add", "--quiet", "-b", "side", &path],
+    );
+    assert_eq!(
+        Git.unpushed_commits(&worktree).unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn a_directory_outside_any_repository_is_not_a_repository() {
     let dir = tempfile::tempdir().unwrap();
     let error = Git.repository(dir.path()).unwrap_err();

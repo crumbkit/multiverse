@@ -59,6 +59,9 @@ pub struct Workspaces<B> {
     /// How long [`Workspaces::create`] waits for the lock of a mirror that
     /// another command fetches, which is [`MIRROR_WAIT`] outside the tests.
     pub(crate) mirror_wait: Duration,
+    /// What an archive or a restore calls after each stage, which does
+    /// nothing outside the tests.
+    pub(crate) checkpoint: fn(&str) -> Result<(), Error>,
     /// What [`Workspaces::create`] calls, with the mirror and how long it
     /// waits, when another command holds the lock of a mirror, so a person
     /// at a terminal learns why the command pauses.
@@ -841,6 +844,7 @@ impl<B: Backend> Workspaces<B> {
             disposable: Vec::new(),
             mirrors: None,
             mirror_wait: MIRROR_WAIT,
+            checkpoint: crate::archive::no_checkpoint,
             mirror_notice: None,
         }
     }
@@ -1793,19 +1797,26 @@ impl<B: Backend> Workspaces<B> {
     /// checkout as the checkout's own `origin` holds it, without a user
     /// name or password.
     pub(crate) fn write_agents(&self, workspace: &Workspace) -> Result<(), Error> {
+        store::replace_file(
+            &workspace.agents_file(),
+            self.generated_agents(workspace)?.as_bytes(),
+        )
+    }
+
+    /// Returns the text of the `AGENTS.md` that mxv writes for `workspace`,
+    /// from each checkout's origin as it is now. A checkout without an
+    /// origin, or one that is gone, is named as having none.
+    pub(crate) fn generated_agents(&self, workspace: &Workspace) -> Result<String, Error> {
         let origins: Vec<String> = workspace
             .checkouts
             .iter()
-            .map(|checkout| {
-                self.backend
-                    .origin_url(&checkout.path)
-                    .map(|url| crate::mirror::redacted(&url))
+            .map(|checkout| match self.backend.origin_url(&checkout.path) {
+                Ok(url) => Ok(crate::mirror::redacted(&url)),
+                Err(Error::NoOrigin { .. }) => Ok("(none)".to_owned()),
+                Err(error) => Err(error),
             })
             .collect::<Result<_, _>>()?;
-        store::replace_file(
-            &workspace.agents_file(),
-            agents_text(workspace, &origins).as_bytes(),
-        )
+        Ok(agents_text(workspace, &origins))
     }
 
     /// Copies the `info/exclude` file of the person's repository into the

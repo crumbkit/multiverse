@@ -35,10 +35,11 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::backend::{Backend, Changes, Head, Listed, Repository};
+use crate::backend::{Backend, Changes, Concealed, Head, Listed, LocalNames, Repository};
 use crate::error::Error;
 use crate::mirror::redacted;
 
+mod concealed;
 #[cfg(test)]
 mod tests;
 
@@ -56,6 +57,17 @@ pub const LOCAL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The most bytes of each output stream that a command keeps.
 pub const MOST_OUTPUT_BYTES: u64 = 1024 * 1024;
+
+/// The most bytes of output that a listing of every path of a checkout
+/// keeps, because a listing that stops early would hide work.
+const MOST_LISTING_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The configuration that makes git sync references and loose objects before
+/// it reports success, so a pin survives a power cut. The components add to
+/// git's default, which syncs packs and leaves out both of these. The
+/// components are named because git documents the aggregate `committed` as
+/// covering only objects.
+const DURABLE: &str = "core.fsync=reference,loose-object";
 
 /// The program that this backend runs.
 const GIT: &str = "git";
@@ -289,8 +301,14 @@ fn patch_ids(
             return Err(unstartable(source));
         }
     };
-    let stdout = consumer.stdout.take().map(drain);
-    let stderr = consumer.stderr.take().map(drain);
+    let stdout = consumer
+        .stdout
+        .take()
+        .map(|stream| drain(stream, MOST_OUTPUT_BYTES));
+    let stderr = consumer
+        .stderr
+        .take()
+        .map(|stream| drain(stream, MOST_OUTPUT_BYTES));
     let waited = consumer.wait_timeout(LOCAL_DEADLINE);
     let status = match waited {
         Ok(Some(status)) => status,
@@ -329,13 +347,22 @@ fn patch_ids(
 /// git directory of each submodule that the clone has initialised, which
 /// git keeps below `.git/modules`, at any depth. A submodule's commits
 /// live only in its git directory, so deleting the clone loses them too.
+/// A worktree or a submodule has a file named `.git`, so its `.git/modules`
+/// is no directory and it adds no submodules here.
 fn git_dirs(checkout: &Path) -> Result<Vec<PathBuf>, Error> {
     let mut dirs = vec![checkout.to_path_buf()];
     let mut pending = vec![checkout.join(".git").join("modules")];
     while let Some(dir) = pending.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
             Err(source) => return Err(Error::Inaccessible { path: dir, source }),
         };
         for entry in entries {
@@ -433,6 +460,22 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_keeping(dir, args, operation, deadline, MOST_OUTPUT_BYTES)
+}
+
+/// Runs `git -C <dir> <args>` as [`run`] does, and keeps the first `kept`
+/// bytes of its standard output.
+fn run_keeping<I, S>(
+    dir: &Path,
+    args: I,
+    operation: &'static str,
+    deadline: Duration,
+    kept: u64,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
@@ -460,8 +503,11 @@ where
         program: GIT,
         source,
     })?;
-    let stdout = child.stdout.take().map(drain);
-    let stderr = child.stderr.take().map(drain);
+    let stdout = child.stdout.take().map(|stream| drain(stream, kept));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|stream| drain(stream, MOST_OUTPUT_BYTES));
     let waited = child.wait_timeout(deadline);
     let status = match waited {
         Ok(Some(status)) => status,
@@ -485,13 +531,13 @@ where
     })
 }
 
-/// Reads `stream` on a thread of its own: the first [`MOST_OUTPUT_BYTES`]
-/// bytes into a buffer, and the rest into nothing, so the child never
-/// blocks on a full pipe.
-fn drain<R: Read + Send + 'static>(mut stream: R) -> thread::JoinHandle<Vec<u8>> {
+/// Reads `stream` on a thread of its own: the first `most` bytes into a
+/// buffer, and the rest into nothing, so the child never blocks on a full
+/// pipe.
+fn drain<R: Read + Send + 'static>(mut stream: R, most: u64) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut kept = Vec::new();
-        let _ = (&mut stream).take(MOST_OUTPUT_BYTES).read_to_end(&mut kept);
+        let _ = (&mut stream).take(most).read_to_end(&mut kept);
         let _ = io::copy(&mut stream, &mut io::sink());
         kept
     })
@@ -746,7 +792,7 @@ impl Backend for Git {
         // matches, and names a matched directory once, such as
         // `web/node_modules/`, so a large build directory costs one line
         // and keeps the name that marks it disposable.
-        let status = run(
+        let status = run_keeping(
             checkout,
             [
                 // A status refreshes the index when it can, which would
@@ -764,6 +810,7 @@ impl Backend for Git {
             ],
             "status",
             LOCAL_DEADLINE,
+            MOST_LISTING_BYTES,
         )?
         .ok("status", checkout)?;
         let mut changes = Changes::default();
@@ -1093,7 +1140,7 @@ impl Backend for Git {
     fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error> {
         run(
             repository,
-            ["update-ref", reference, commit],
+            ["-c", DURABLE, "update-ref", reference, commit],
             "update-ref",
             LOCAL_DEADLINE,
         )?
@@ -1111,6 +1158,8 @@ impl Backend for Git {
         run(
             mirror,
             [
+                OsStr::new("-c"),
+                OsStr::new(DURABLE),
                 OsStr::new("fetch"),
                 OsStr::new("--quiet"),
                 OsStr::new("--no-tags"),
@@ -1165,9 +1214,11 @@ impl Backend for Git {
         // would still run `prepare-commit-msg` and `post-commit`. A hook can
         // fail or change files after mxv read the checkout. A signature can
         // wait for a passphrase that nobody is there to give.
-        run(
-            checkout,
+        let mut args = concealed::identity(checkout)?;
+        args.extend(
             [
+                "-c",
+                DURABLE,
                 "-c",
                 "core.hooksPath=/dev/null",
                 "-c",
@@ -1177,11 +1228,34 @@ impl Backend for Git {
                 "--no-verify",
                 "-m",
                 message,
-            ],
-            "commit",
-            CHECKOUT_DEADLINE,
+            ]
+            .map(str::to_owned),
+        );
+        run(checkout, args, "commit", CHECKOUT_DEADLINE)?
+            .ok("commit", checkout)
+            .map(drop)
+    }
+
+    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error> {
+        concealed::check_commit_all(checkout)
+    }
+
+    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error> {
+        concealed::concealed(checkout)
+    }
+
+    fn local_names(&self, checkout: &Path, mirror: &Path) -> Result<LocalNames, Error> {
+        concealed::local_names(checkout, mirror)
+    }
+
+    fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
+        run(
+            checkout,
+            ["remote", "remove", "origin"],
+            "remote remove",
+            LOCAL_DEADLINE,
         )?
-        .ok("commit", checkout)
+        .ok("remote remove", checkout)
         .map(drop)
     }
 

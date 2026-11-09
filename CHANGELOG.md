@@ -15,7 +15,12 @@ workspace may need to act on.
   to `$XDG_STATE_HOME/mxv/archives`, and a tool that read the failure code
   `mxv::command::unbuilt` no longer sees it. The JSON document of `mxv list`
   has the new fields `archived` and `local_only`, and the document of
-  `mxv remove` has the new field `pins`.
+  `mxv remove` has the new field `pins`. An archive refuses and names an
+  untracked nested repository, a submodule's unsaved work, and a
+  skip-worktree or assume-unchanged file with local edits. The new failure
+  codes `mxv::archive::record_too_large` and
+  `mxv::archive::volumes_in_use` report an archive record over 1 MiB and
+  docker volumes that a live workspace uses.
 - mxv-phase has a `sandbox` feature, on by default, that applies the
   operating system's sandbox through nono. A program that links mxv-phase
   with `default-features = false` builds without nono, and with it without

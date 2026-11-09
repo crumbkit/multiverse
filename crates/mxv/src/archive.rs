@@ -37,9 +37,10 @@ mod tests;
 pub(crate) use failure::CODES;
 pub use failure::{
     ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
-    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED,
-    ARCHIVE_UNSAVED_WORK, RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN,
-    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_SOURCE_CHANGED,
+    ARCHIVE_UNFINISHED, ARCHIVE_UNSAVED_WORK, ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED,
+    RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
+    RESTORE_UNFINISHED,
 };
 use failure::{ArchiveFailure, archive_refusal, restore_refusal};
 
@@ -477,8 +478,17 @@ fn question(plan: &ArchivePlan, running: &[String], delete_volumes: bool) -> Str
             plan.removal.manifest.join(", ")
         ));
     }
+    if !plan.wip.is_empty() {
+        text.push_str(&format!(
+            " It commits {} onto the branch first.",
+            plan.wip.join(", ")
+        ));
+    }
     if !plan.lost.is_empty() {
         text.push_str(&format!(" It loses {}.", plan.lost.join(", ")));
+    }
+    for warning in &plan.warnings {
+        text.push_str(&format!(" Warning: {warning}."));
     }
     if delete_volumes {
         text.push_str(" It deletes the workspace's docker volumes and the data in them.");
@@ -561,10 +571,11 @@ pub(crate) fn archive(
         return Err(manifest_disposable(&name, &plan).into());
     }
     output.confirm(args.yes, &question(&plan, &running, args.delete_volumes))?;
+    workspaces.check_wip(&plan).map_err(MxvFailure::from)?;
     if !running.is_empty() {
         processes::stop_all_locked(environment, &workspace, &lock)?;
-        refuse_outsider(&workspace)?;
     }
+    refuse_outsider(&workspace)?;
     let volumes = if args.delete_volumes {
         Some(processes::volumes(environment, &workspace)?)
     } else {
@@ -829,7 +840,10 @@ pub(crate) fn remove(
         }
         .into());
     }
-    let (volumes, mut warnings) = archive_volumes(environment, &archive, args.delete_volumes);
+    if args.delete_volumes {
+        refuse_live_volumes(environment, &archive)?;
+    }
+    let (volumes, mut warnings) = archive_volumes(environment, &archive, args.delete_volumes)?;
     let names = volumes
         .as_ref()
         .map(|volumes| volumes.names())
@@ -847,13 +861,18 @@ pub(crate) fn remove(
     }
     output.confirm(args.yes, &text)?;
     let lock = processes::lock(environment, &name)?;
+    if args.delete_volumes {
+        refuse_live_volumes(environment, &archive)?;
+    }
+    // The archive holds the only record of the volumes' stable id, so it
+    // stays until they are gone, and a failure can be tried again.
+    if let Some(volumes) = volumes {
+        processes::delete_volumes(environment, volumes)?;
+    }
     let removed = workspaces
         .remove_archive(&records, archive, Mode::Change)
         .map_err(MxvFailure::from)?;
     warnings.extend(removed.warnings);
-    if let Some(volumes) = volumes {
-        processes::delete_volumes(environment, volumes)?;
-    }
     drop(lock);
     Ok(Prose::new(RemovalResult::of_archive(
         &removed.archive,
@@ -863,41 +882,63 @@ pub(crate) fn remove(
     )))
 }
 
+/// Returns the failure when a live workspace has the stable id of
+/// `archive`, because its docker volumes are then that workspace's.
+fn refuse_live_volumes(
+    environment: &Environment,
+    archive: &Archive,
+) -> Result<(), crumbkit::Error> {
+    let store = multiverse::Store::new(environment.records()?);
+    let live = store.list().map_err(MxvFailure::from)?.workspaces;
+    match live
+        .iter()
+        .find(|workspace| workspace.id.is_some() && workspace.id == archive.workspace_id)
+    {
+        Some(workspace) => Err(ArchiveFailure::VolumesInUse {
+            name: archive.name.to_string(),
+            workspace: workspace.name.to_string(),
+        }
+        .into()),
+        None => Ok(()),
+    }
+}
+
 /// Returns the volumes of `archive` that `delete` asks to delete, and the
 /// warning about volumes that stay. A docker that does not answer becomes
 /// a warning when no volume is to be deleted, because the removal of the
-/// archive does not depend on it.
+/// archive does not depend on it, and a failure when the person asked for
+/// the deletion.
 fn archive_volumes(
     environment: &Environment,
     archive: &Archive,
     delete: bool,
-) -> (Option<Volumes>, Vec<String>) {
+) -> Result<(Option<Volumes>, Vec<String>), crumbkit::Error> {
     let Some(id) = archive
         .workspace_id
         .as_ref()
         .filter(|_| archive.containers_ran)
     else {
-        return (None, Vec::new());
+        return Ok((None, Vec::new()));
     };
     let found = environment
         .runs()
-        .map_err(|failure| failure.to_string())
-        .and_then(|runs| runs.archived_volumes(id).map_err(|error| error.to_string()));
+        .and_then(|runs| runs.archived_volumes(id).map_err(MxvFailure::from));
     match found {
-        Ok(volumes) if delete => (Some(volumes), Vec::new()),
-        Ok(volumes) if volumes.is_empty() => (None, Vec::new()),
-        Ok(volumes) => (
+        Ok(volumes) if delete => Ok((Some(volumes), Vec::new())),
+        Ok(volumes) if volumes.is_empty() => Ok((None, Vec::new())),
+        Ok(volumes) => Ok((
             None,
             vec![format!(
                 "the docker volumes {} stay; `--delete-volumes` deletes them",
                 volumes.names().join(", ")
             )],
-        ),
-        Err(reason) => (
+        )),
+        Err(failure) if delete => Err(failure.into()),
+        Err(failure) => Ok((
             None,
             vec![format!(
-                "mxv could not read the workspace's docker volumes, which stay: {reason}"
+                "mxv could not read the workspace's docker volumes, which stay: {failure}"
             )],
-        ),
+        )),
     }
 }

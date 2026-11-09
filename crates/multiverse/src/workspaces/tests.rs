@@ -816,6 +816,22 @@ impl Backend for Scripted {
     fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
         Git.commit_all(checkout, message)
     }
+    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error> {
+        Git.check_commit_all(checkout)
+    }
+    fn concealed(&self, checkout: &Path) -> Result<crate::backend::Concealed, Error> {
+        Git.concealed(checkout)
+    }
+    fn local_names(
+        &self,
+        checkout: &Path,
+        mirror: &Path,
+    ) -> Result<crate::backend::LocalNames, Error> {
+        Git.local_names(checkout, mirror)
+    }
+    fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
+        Git.remove_origin(checkout)
+    }
     fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
         Git.local_only_commits(dir, revision)
     }

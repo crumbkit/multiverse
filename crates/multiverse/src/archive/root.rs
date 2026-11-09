@@ -1,12 +1,13 @@
 //! The extra entries of a workspace's directory, which `mxv archive` copies
-//! into the archive and `mxv restore` writes back. mxv writes `AGENTS.md`
-//! and each checkout's folder, and the workspace manifest has a place of
-//! its own in the archive, so an extra entry is anything else.
+//! into the archive and `mxv restore` writes back. mxv writes each
+//! checkout's folder and an `AGENTS.md` that nobody edited, and the
+//! workspace manifest has a place of its own in the archive, so an extra
+//! entry is anything else, including an edited `AGENTS.md`.
 
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +52,15 @@ pub struct RootEntry {
     pub kind: RootKind,
 }
 
+/// An entry of a workspace's directory that mxv cannot copy.
+#[derive(Debug)]
+pub(super) struct Special {
+    /// The entry's path relative to the directory, as text.
+    pub(super) name: String,
+    /// The entry's path on the disk.
+    path: PathBuf,
+}
+
 /// What a scan of a workspace's directory found.
 #[derive(Debug, Default)]
 pub(super) struct Scanned {
@@ -59,7 +69,10 @@ pub(super) struct Scanned {
     pub(super) entries: Vec<RootEntry>,
     /// Each entry that mxv cannot copy, such as a socket or a name that is
     /// not UTF-8.
-    pub(super) special: Vec<String>,
+    pub(super) special: Vec<Special>,
+    /// Each file that mxv cannot read and each directory that it cannot
+    /// read or empty, which would stop an archive partway.
+    pub(super) blocked: Vec<String>,
 }
 
 impl Scanned {
@@ -73,14 +86,20 @@ impl Scanned {
 }
 
 /// Reports whether `name`, an entry of the workspace's directory, belongs
-/// to mxv or to a checkout of `workspace`.
-fn is_own(workspace: &Workspace, name: &str, path: &Path) -> bool {
+/// to mxv or to a checkout of `workspace`. `generated` is the text that mxv
+/// writes as `AGENTS.md`, so a file that differs from it is the person's.
+fn is_own(workspace: &Workspace, name: &str, path: &Path, generated: &str) -> bool {
     if name == AGENTS_FILE {
-        return true;
+        return fs::read(path).is_ok_and(|text| text == generated.as_bytes());
     }
     // The workspace manifest is copied by itself only when it is a file. A
     // link stays a link, as any other entry does.
-    if name == MANIFEST_FILE && matches!(Entry::at(path), Ok(Entry::Present)) && path.is_file() {
+    // An unreadable one goes through the scan, which refuses it at the plan.
+    if name == MANIFEST_FILE
+        && matches!(Entry::at(path), Ok(Entry::Present))
+        && path.is_file()
+        && readable(path)
+    {
         return true;
     }
     workspace.checkouts.iter().any(|checkout| {
@@ -90,9 +109,10 @@ fn is_own(workspace: &Workspace, name: &str, path: &Path) -> bool {
     }) || name.ends_with(QUARANTINE_SUFFIX)
 }
 
-/// Returns the extra entries of the directory of `workspace`. A workspace
-/// whose checkout is the directory itself, as in an old record, has none.
-pub(super) fn scan(workspace: &Workspace) -> Result<Scanned, Error> {
+/// Returns the extra entries of the directory of `workspace`, where mxv
+/// writes `generated` as `AGENTS.md`. A workspace whose checkout is the
+/// directory itself, as in an old record, has none.
+pub(super) fn scan(workspace: &Workspace, generated: &str) -> Result<Scanned, Error> {
     let mut scanned = Scanned::default();
     let holds_itself = workspace
         .checkouts
@@ -101,14 +121,20 @@ pub(super) fn scan(workspace: &Workspace) -> Result<Scanned, Error> {
     if holds_itself || Entry::at(&workspace.path)? == Entry::Absent {
         return Ok(scanned);
     }
-    walk(workspace, &workspace.path, "", &mut scanned)?;
+    walk(workspace, generated, &workspace.path, "", &mut scanned)?;
     Ok(scanned)
+}
+
+/// Reports whether mxv can read the file at `path`.
+fn readable(path: &Path) -> bool {
+    fs::File::open(path).is_ok()
 }
 
 /// Adds the entries below `dir`, whose path relative to the workspace's
 /// directory is `prefix`, to `scanned`.
 fn walk(
     workspace: &Workspace,
+    generated: &str,
     dir: &Path,
     prefix: &str,
     scanned: &mut Scanned,
@@ -126,36 +152,54 @@ fn walk(
         let path = entry.path();
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            scanned
-                .special
-                .push(format!("{prefix}{}", name.to_string_lossy()));
+            let name = format!("{prefix}{}", name.to_string_lossy());
+            // A special entry is deleted as one file. A directory whose name
+            // is not UTF-8 cannot be, so it stops the archive at the plan.
+            if path.is_dir() && !path.is_symlink() {
+                scanned.blocked.push(name);
+            } else {
+                scanned.special.push(Special { name, path });
+            }
             continue;
         };
-        if prefix.is_empty() && is_own(workspace, name, &path) {
+        if prefix.is_empty() && is_own(workspace, name, &path, generated) {
             continue;
         }
         let relative = format!("{prefix}{name}");
         let metadata = fs::symlink_metadata(&path).map_err(unreadable)?;
+        let mode = metadata.permissions().mode() & 0o7777;
         let kind = if metadata.file_type().is_symlink() {
             let target = fs::read_link(&path).map_err(unreadable)?;
             let Some(target) = target.to_str() else {
-                scanned.special.push(relative);
+                scanned.special.push(Special {
+                    name: relative,
+                    path,
+                });
                 continue;
             };
             RootKind::Link {
                 target: target.to_owned(),
             }
         } else if metadata.is_dir() {
-            RootKind::Directory {
-                mode: metadata.permissions().mode() & 0o7777,
+            if mode & 0o700 != 0o700 {
+                scanned.blocked.push(relative);
+                continue;
             }
+            RootKind::Directory { mode }
         } else if metadata.is_file() {
+            if !readable(&path) {
+                scanned.blocked.push(relative);
+                continue;
+            }
             RootKind::File {
                 digest: String::new(),
-                mode: metadata.permissions().mode() & 0o7777,
+                mode,
             }
         } else {
-            scanned.special.push(relative);
+            scanned.special.push(Special {
+                name: relative,
+                path,
+            });
             continue;
         };
         let is_dir = matches!(kind, RootKind::Directory { .. });
@@ -164,10 +208,22 @@ fn walk(
             kind,
         });
         if is_dir {
-            walk(workspace, &path, &format!("{relative}/"), scanned)?;
+            walk(
+                workspace,
+                generated,
+                &path,
+                &format!("{relative}/"),
+                scanned,
+            )?;
         }
     }
     Ok(())
+}
+
+/// Puts `entry` into `known` in place of an entry of the same path.
+pub(super) fn merge(known: &mut Vec<RootEntry>, entry: RootEntry) {
+    known.retain(|kept| kept.path != entry.path);
+    known.push(entry);
 }
 
 /// Copies the workspace manifest and the extra entries of `workspace` into
@@ -177,11 +233,13 @@ pub(super) fn copy_in(
     archives: &Archives,
     archive: &mut Archive,
     workspace: &Workspace,
+    generated: &str,
 ) -> Result<(), Error> {
     let dir = archives.dir_of(&archive.name);
-    let scanned = scan(workspace)?;
+    let scanned = scan(workspace, generated)?;
     let root = dir.join(ROOT_DIR);
     store::private_dir(&root)?;
+    let mut created = vec![root.clone()];
     for mut entry in scanned.entries {
         let from = workspace.path.join(&entry.path);
         let to = root.join(&entry.path);
@@ -194,11 +252,15 @@ pub(super) fn copy_in(
                     path: to.clone(),
                     source,
                 })?;
+                created.extend(to.parent().map(Path::to_path_buf));
             }
             RootKind::Link { .. } => {}
         }
-        archive.root.retain(|known| known.path != entry.path);
-        archive.root.push(entry);
+        merge(&mut archive.root, entry);
+    }
+    // A file's own sync does not make the directories above it durable.
+    for directory in created {
+        store::sync_dir(&directory);
     }
     archive
         .root
@@ -210,8 +272,64 @@ pub(super) fn copy_in(
             &dir.join(MANIFEST_COPY),
             0o600,
         )?);
+        archive.manifest_mode = fs::symlink_metadata(&manifest)
+            .ok()
+            .map(|metadata| metadata.permissions().mode() & 0o7777);
     }
     Ok(())
+}
+
+/// Returns one sentence for each difference between the workspace's
+/// directory and what `archive` copied from it, so a file that changed
+/// after its copy is not deleted.
+pub(super) fn differences(
+    archive: &Archive,
+    workspace: &Workspace,
+    generated: &str,
+) -> Result<Vec<String>, Error> {
+    let scanned = scan(workspace, generated)?;
+    let mut found = Vec::new();
+    for entry in &scanned.entries {
+        let Some(copied) = archive.root.iter().find(|kept| kept.path == entry.path) else {
+            found.push(format!("new path: {}", entry.path));
+            continue;
+        };
+        let same = match (&entry.kind, &copied.kind) {
+            (RootKind::File { mode, .. }, RootKind::File { digest, mode: kept }) => {
+                mode == kept && store::file_digest(&workspace.path.join(&entry.path))? == *digest
+            }
+            (kept, other) => kept == other,
+        };
+        if !same {
+            found.push(format!("path changed after its copy: {}", entry.path));
+        }
+    }
+    found.extend(
+        scanned
+            .special
+            .iter()
+            .filter(|special| !archive.lost.contains(&lost_name(special)))
+            .map(|special| format!("new path: {}", special.name)),
+    );
+    found.extend(
+        scanned
+            .blocked
+            .iter()
+            .map(|path| format!("path cannot be read: {path}")),
+    );
+    let manifest = workspace.manifest_file();
+    if !workspace.path.eq(&manifest)
+        && is_regular(&manifest)
+        && archive.manifest.as_ref() != Some(&store::file_digest(&manifest)?)
+    {
+        found.push(format!("path changed after its copy: {MANIFEST_FILE}"));
+    }
+    Ok(found)
+}
+
+/// Returns the name that an archive records for `special` when it is lost.
+pub(super) fn lost_name(special: &Special) -> String {
+    format!("root: {}", special.name)
 }
 
 /// Reports whether a regular file is at `path`, without following a link.
@@ -220,9 +338,21 @@ fn is_regular(path: &Path) -> bool {
 }
 
 /// Deletes the extra entries of `workspace` that `archive` recorded,
-/// children before their parents. A directory that holds something new
-/// stays.
-pub(super) fn delete_originals(archive: &Archive, workspace: &Workspace) -> Result<(), Error> {
+/// children before their parents, and each entry that it could not copy and
+/// recorded as lost. A directory that holds something new stays.
+pub(super) fn delete_originals(
+    archive: &Archive,
+    workspace: &Workspace,
+    generated: &str,
+) -> Result<(), Error> {
+    for special in scan(workspace, generated)?.special {
+        if archive.lost.contains(&lost_name(&special)) {
+            fs::remove_file(&special.path).map_err(|source| Error::Unwritable {
+                path: special.path.clone(),
+                source,
+            })?;
+        }
+    }
     delete_entries(&archive.root, &workspace.path)
 }
 
@@ -291,7 +421,8 @@ pub(super) fn write_back(
 ) -> Result<(), Error> {
     let dir = archives.dir_of(&archive.name);
     if archive.manifest.is_some() {
-        store::copy_file(&dir.join(MANIFEST_COPY), manifest, 0o644)?;
+        let mode = archive.manifest_mode.unwrap_or(0o644);
+        store::copy_file(&dir.join(MANIFEST_COPY), manifest, mode)?;
     }
     for entry in &archive.root {
         let to = root.join(&entry.path);
