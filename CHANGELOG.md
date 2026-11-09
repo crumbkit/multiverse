@@ -96,11 +96,18 @@ workspace may need to act on.
 
 ### Changed
 
-- A workspace with several checkouts now reports the parse error of a
-  checkout's `mxv.toml` when it reads the workspace manifest. Before this
-  change that read skipped the broken file and checked the workspace
-  manifest against the names of the other checkouts, so it could report a
-  clash or an undeclared name with a different message.
+- A workspace with several checkouts now reads its workspace manifest
+  strictly: while one checkout's `mxv.toml` cannot be parsed, the read
+  fails with that file's error. Before this change the read skipped the
+  broken file and checked the workspace manifest against the names of the
+  other checkouts, so it could report an undeclared name with a different
+  message. The commands that read the workspace manifest for its
+  `disposable` globs, which are `remove`, `archive` and `clean`, now warn
+  and use no `disposable` globs of the workspace manifest in any checkout
+  while one checkout's manifest is broken. `remove` and `archive` without
+  `--force` can then refuse because of ignored files that only those
+  globs cover, and `clean` reclaims fewer paths. Fix the broken file to
+  restore the globs.
 - `up` of a container app that runs as another user than root and mounts a
   volume now gives the root directory of each such volume to that user,
   through a helper container. The helper runs busybox pinned by digest, so

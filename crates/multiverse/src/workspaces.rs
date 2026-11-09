@@ -945,7 +945,10 @@ impl<B: Backend> Workspaces<B> {
     /// decides, and the person's globs. The workspace manifest's globs
     /// count as the person's own ([`DisposableSource::Workspace`]) only
     /// while [`Workspace::manifest_trusted`] holds. A manifest that cannot
-    /// be read adds no globs, and the returned warning says so.
+    /// be read adds no globs, and the returned warning says so. The
+    /// workspace manifest is read with every checkout's `mxv.toml`, so a
+    /// checkout's manifest that cannot be read removes the workspace
+    /// manifest's globs from every checkout of the workspace.
     fn merged_disposable_set(
         &self,
         workspace: &Workspace,
@@ -960,7 +963,7 @@ impl<B: Backend> Workspaces<B> {
                 }
             }
             Err(error) => warnings.push(format!(
-                "the manifest {} of the checkout {} is invalid, so mxv uses only the built-in disposable set, the workspace manifest's globs and the config file's globs there: {error}",
+                "the manifest {} of the checkout {} is invalid, so mxv uses only the built-in disposable set and the config file's globs there: {error}",
                 error.path.display(),
                 checkout.name
             )),
@@ -984,8 +987,15 @@ impl<B: Backend> Workspaces<B> {
                 set = set.with(&globs, source);
             }
             Ok(None) => {}
-            Err(error) => warnings.push(format!(
+            Err(error) if error.path == workspace.manifest_file() => warnings.push(format!(
                 "the workspace manifest {} is invalid, so mxv adds none of its globs in the checkout {}: {error}",
+                error.path.display(),
+                checkout.name
+            )),
+            // The checkout's own file was reported above.
+            Err(error) if error.path == checkout.path.join(crate::manifest::MANIFEST_FILE) => {}
+            Err(error) => warnings.push(format!(
+                "the manifest {} of another checkout is invalid, so mxv adds none of the workspace manifest's globs in the checkout {}: {error}",
                 error.path.display(),
                 checkout.name
             )),
