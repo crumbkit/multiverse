@@ -37,8 +37,10 @@ pub struct Cli {
 /// The `mxv` command's tool record: its root verbs, goal headings and leaves. The workspace
 /// verbs sit directly under the root, and every other command keeps
 /// crumbkit's resource-verb form.
-pub const TOOL: Tool = Tool::new().help(
-    Help::new()
+pub const TOOL: Tool = Tool::new().help(HELP);
+
+/// The help record of the `mxv` command.
+const HELP: Help = Help::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",
@@ -222,8 +224,7 @@ pub const TOOL: Tool = Tool::new().help(
             )])
             .effects(Effects::read_only())
             .document(SELF_FIGURES_LIST),
-    ]),
-);
+    ]);
 
 /// The commands of `mxv`.
 #[derive(Debug, Subcommand)]

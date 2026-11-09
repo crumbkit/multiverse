@@ -775,78 +775,69 @@ const PAIRS: &[Twin<'static>] = &[
     Twin::new(CD_MISSING_CHECKOUT, &["cd", "reading-list", "app"]),
 ];
 
-/// The settings of every check, built in a fresh set of fixtures that the
-/// checks' runs leave behind them when the value drops.
+/// The fixtures of every check, built fresh for each test that `conventions!`
+/// expands, and deleted when the test ends.
 ///
-/// Each test that `conventions!` expands builds its own, so the recovery
-/// chains, which act on the live checkouts, never share a checkout with the
-/// twin check or with another test.
+/// The recovery chains act on the live checkouts, so a test never shares
+/// them with another test.
 struct Fixtures {
-    /// The suite, whose settings borrow the leaked paths and lists below.
-    suite: Suite<'static>,
     /// The temporary directory of the repositories that each example starts
-    /// in a copy of, which the test deletes when it drops.
-    _repositories: Repositories,
-    /// The live workspaces of the recovery check.
-    _recovery: Live,
-    /// The live workspaces of the twin check.
-    _twin: Live,
+    /// in a copy of.
+    repositories: Repositories,
+    /// The live workspaces that the recovery and twin checks act on, which
+    /// the test deletes when it drops.
+    _live: Live,
+    /// The failures that the recovery check starts from.
+    starts: Vec<Failing<'static>>,
+    /// The pairs that the twin check compares.
+    pairs: Vec<Twin<'static>>,
 }
 
-impl std::ops::Deref for Fixtures {
-    type Target = Suite<'static>;
+/// Every failure code that a command of `mxv` can print.
+const ALL_CODES: &[&[&crumbkit::Code]] = &[CODES, RUN_CODES, ARCHIVE_CODES];
 
-    fn deref(&self) -> &Suite<'static> {
-        &self.suite
-    }
-}
-
-/// Returns `value` for the rest of the process. The suite borrows its path
-/// and lists, and a test process builds the suite once.
-fn leaked<T: ?Sized>(value: Box<T>) -> &'static T {
-    Box::leak(value)
-}
-
-/// Returns the suite of the `mxv` command and the fixtures it reads.
-fn suite() -> Fixtures {
+/// Returns the fixtures that the suite of the `mxv` command reads.
+fn fixtures() -> Fixtures {
     let repositories = repositories();
-    let recovery = live_workspaces();
-    let twin = live_workspaces();
-    let path: &'static str = leaked(repositories.path.clone().into_boxed_str());
-    let examples = examples(path);
+    let live = live_workspaces();
     let mut starts = STARTS.to_vec();
     starts.extend(
-        recovery
-            .refusals()
+        live.refusals()
             .into_iter()
             .map(RuntimeFailing::into_failing),
     );
     let mut pairs = PAIRS.to_vec();
     pairs.extend(
-        twin.refusals()
+        live.refusals()
             .into_iter()
             .map(|refused| refused.twin(["remove", "clean", "--dry-run"])),
     );
-    let codes: &[&[&crumbkit::Code]] = &[CODES, RUN_CODES, ARCHIVE_CODES];
-    let recoveries = Recoveries::new(examples, codes)
-        .starts(leaked(starts.into_boxed_slice()))
-        .unprovoked(UNPROVOKED);
-    let twins = Twins::new(examples, codes)
-        .pairs(leaked(pairs.into_boxed_slice()))
-        .unprovoked(UNPROVOKED);
-    let suite = Suite::new(|| (Cli::command(), TOOL))
-        .allow(ALLOW)
-        .verbs(&["usage", "reset"])
-        .path_budgets(PATH_BUDGETS)
-        .examples(examples)
-        .recoveries(recoveries)
-        .twins(twins);
     Fixtures {
-        suite,
-        _repositories: repositories,
-        _recovery: recovery,
-        _twin: twin,
+        repositories,
+        _live: live,
+        starts,
+        pairs,
     }
 }
 
-crumbkit_test::conventions!(suite());
+impl Fixtures {
+    /// Returns the suite of the `mxv` command.
+    fn suite(&self) -> Suite<'_> {
+        let examples = examples(&self.repositories.path);
+        let recoveries = Recoveries::new(examples, ALL_CODES)
+            .starts(&self.starts)
+            .unprovoked(UNPROVOKED);
+        let twins = Twins::new(examples, ALL_CODES)
+            .pairs(&self.pairs)
+            .unprovoked(UNPROVOKED);
+        Suite::new(|| (Cli::command(), TOOL))
+            .allow(ALLOW)
+            .verbs(&["usage", "reset"])
+            .path_budgets(PATH_BUDGETS)
+            .examples(examples)
+            .recoveries(recoveries)
+            .twins(twins)
+    }
+}
+
+crumbkit_test::conventions!(fixtures().suite());
