@@ -59,11 +59,11 @@ pub use crate::disposable::{
 };
 pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
-pub use crate::lookup::{ManifestInputs, ManifestSource, checkout_prefix, prefixed};
+pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefix, prefixed};
 pub use crate::manifest::{
     Command, Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
     MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
-    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Unit,
+    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Task, TaskName, Unit,
 };
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
@@ -78,8 +78,9 @@ pub use crate::record::{
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
     Admission, Asked, BuildEnd, BuildStop, BuildsPassed, DownOutcome, Exec, ExecEnd, ExecTarget,
-    ExitReason, Footprint, Kind, LogOutput, Place, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, STOP_GRACE, Toucher, Unstoppable, UpOutcome, Volumes, Waited,
+    ExitReason, Footprint, Kind, LogOutput, MiseListing, MiseTaskName, Place, PreparedTask,
+    ProcessNote, ProcessState, ProcessStatus, RenamedVolume, Runs, STOP_GRACE, TaskEnd,
+    TaskServices, TaskStart, Toucher, Unstoppable, UpOutcome, Volumes, Waited,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,

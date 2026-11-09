@@ -60,12 +60,16 @@ pub const BUILD_FAILED: Code = Code::new("mxv", "build", "failed");
 pub const BUILD_UNSTARTABLE: Code = Code::new("mxv", "build", "unstartable");
 /// The code of a `build` that outlived its deadline.
 pub const BUILD_TIMED_OUT: Code = Code::new("mxv", "build", "timed_out");
+/// The code of a task name that no manifest and no mise listing holds.
+pub const TASK_UNKNOWN: Code = Code::new("mxv", "task", "unknown");
+/// The code of a task name that several checkouts hold.
+pub const TASK_AMBIGUOUS: Code = Code::new("mxv", "task", "ambiguous");
 /// The code of a stored port that something outside the workspace holds.
 pub const PORT_TAKEN: Code = Code::new("mxv", "port", "taken");
 /// The code of a port name that the manifest does not declare.
 pub const PORT_NOT_FOUND: Code = Code::new("mxv", "port", "not_found");
 
-/// Every code that a [`RunFailure`] returns.
+/// Every code that a [`RunFailure`] or a `mxv run` failure returns.
 pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_NOT_CURRENT,
     &WORKSPACE_RUNNING,
@@ -89,6 +93,8 @@ pub(crate) const CODES: &[&Code] = &[
     &BUILD_FAILED,
     &BUILD_UNSTARTABLE,
     &BUILD_TIMED_OUT,
+    &TASK_UNKNOWN,
+    &TASK_AMBIGUOUS,
     &PORT_TAKEN,
     &PORT_NOT_FOUND,
 ];

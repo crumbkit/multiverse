@@ -51,6 +51,15 @@
       "budget": null
     },
     {
+      "rule": "effects/yes",
+      "applies_to": "mxv run",
+      "reason": "The person chose the task by name, and mxv cannot tell what it changes, so a question from mxv would ask about every task, harmless or not.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
       "rule": "examples/run",
       "applies_to": "mxv add",
       "reason": "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
@@ -194,7 +203,7 @@
   "declarations": [
     {
       "declaration": "root-verbs",
-      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv archive, mxv restore, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin",
+      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv run, mxv archive, mxv restore, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin",
       "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
       "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
     },
@@ -227,6 +236,11 @@
       "declaration": "passes-on-exit",
       "applies_to": "mxv exec",
       "declares": "The command exits with the exit code of the command."
+    },
+    {
+      "declaration": "passes-on-exit",
+      "applies_to": "mxv run",
+      "declares": "The command exits with the exit code of the task."
     }
   ]
 }

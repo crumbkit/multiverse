@@ -16,6 +16,12 @@
 //! build in the normal lane runs at normal priority. A helper process that
 //! holds the place and runs the build would let the build alone be lowered.
 //!
+//! `mxv run` does lower its priority, through [`Deadband::for_task`],
+//! because that process ends with its task. A task with `gate = false` asks
+//! the daemon nothing. A task shares mxv's process group and the terminal
+//! sends Ctrl-C to it directly, so a caught signal sets no cancel flag for
+//! a task, as for an unsandboxed `mxv exec`, and mxv waits for the task.
+//!
 //! When mxv itself runs inside a job that deadband granted, deadband's call
 //! asks nothing and returns no variables. phase starts a build from an empty
 //! environment, so the build then has neither the outer job's thread counts
@@ -61,6 +67,12 @@ pub(crate) struct Deadband {
     /// The number of the signal that interrupted the builds, or
     /// [`NONE_CAUGHT`].
     caught: Arc<AtomicI32>,
+    /// Whether mxv asks the daemon for a place.
+    asks: bool,
+    /// Whether mxv lowers its own priority once it has a place.
+    lowers: bool,
+    /// Whether a caught signal sets the cancel flag.
+    cancels: bool,
 }
 
 impl Deadband {
@@ -70,6 +82,22 @@ impl Deadband {
         Self {
             variables: environment.deadband_variables().clone(),
             caught: Arc::new(AtomicI32::new(NONE_CAUGHT)),
+            asks: true,
+            lowers: false,
+            cancels: true,
+        }
+    }
+
+    /// Returns the admission of one `mxv run` task, which lowers mxv's
+    /// priority once it has a place. When `gate` is false it asks the daemon
+    /// nothing, so the task gets no job variables. A caught signal does not
+    /// cancel the task, which the terminal has signalled itself.
+    pub(crate) fn for_task(environment: &Environment, gate: bool) -> Self {
+        Self {
+            asks: gate,
+            lowers: true,
+            cancels: false,
+            ..Self::new(environment)
         }
     }
 
@@ -84,10 +112,29 @@ impl Deadband {
 
 impl Admission for Deadband {
     fn admit(&mut self, asked: &Asked<'_>) -> Box<dyn Place> {
+        let admitted = self.asks.then(|| self.ask(asked));
+        if self.lowers
+            && let Some(admitted) = &admitted
+        {
+            admitted.lower_priority(&mut crate::notice);
+        }
+        let cancel = self.cancels.then(|| asked.cancel.clone());
+        let building = catch_interrupts(cancel, Arc::clone(&self.caught));
+        Box::new(Held { admitted, building })
+    }
+
+    fn output(&self) -> Box<dyn Write + Send> {
+        crate::stderr_writer()
+    }
+}
+
+impl Deadband {
+    /// Asks the daemon for the place that `asked` describes.
+    fn ask(&self, asked: &Asked<'_>) -> Admitted {
         let read = |name: &str| self.variables.get(name).cloned();
         let environment = DeadbandEnvironment::read(read, Some(PathBuf::from(asked.cwd)));
         let socket = deadband::socket::path(read);
-        let admitted = admit(
+        admit(
             &DeadbandAsked {
                 socket: &socket,
                 environment: &environment,
@@ -97,20 +144,14 @@ impl Admission for Deadband {
                 lane: None,
             },
             &mut crate::notice,
-        );
-        let building = catch_interrupts(asked.cancel.clone(), Arc::clone(&self.caught));
-        Box::new(Held { admitted, building })
-    }
-
-    fn output(&self) -> Box<dyn Write + Send> {
-        crate::stderr_writer()
+        )
     }
 }
 
 /// A place that the daemon granted, or that it could not be asked for.
 struct Held {
-    /// The lease.
-    admitted: Admitted,
+    /// The lease, or `None` for a task that asks the daemon nothing.
+    admitted: Option<Admitted>,
     /// Whether the builds still run, which tells the signal thread that
     /// a signal cancels them. It is `None` when mxv could not catch the
     /// signals.
@@ -119,7 +160,9 @@ struct Held {
 
 impl Place for Held {
     fn variables(&self) -> Vec<(VariableName, String)> {
-        job_variables(self.admitted.variables())
+        self.admitted
+            .as_ref()
+            .map_or_else(Vec::new, |admitted| job_variables(admitted.variables()))
     }
 
     fn end(self: Box<Self>, exit_code: Option<i32>) {
@@ -131,7 +174,9 @@ impl Place for Held {
             crumbkit::events::taken_back();
             building.store(false, Ordering::SeqCst);
         }
-        admitted.end(exit_code);
+        if let Some(admitted) = admitted {
+            admitted.end(exit_code);
+        }
     }
 }
 
@@ -162,7 +207,7 @@ fn cut(command: &str) -> &str {
 /// leaves a signal ending mxv and the build running on.
 ///
 /// While the flag is set, each signal stores its number in `caught` and
-/// sets `cancel`. Once it is clear, a signal ends mxv as it would have
+/// sets `cancel` when it is given. Once it is clear, a signal ends mxv as it would have
 /// without this handler. The usage log's thread still does that for
 /// `SIGINT`, so this thread leaves `SIGINT` to it.
 ///
@@ -175,7 +220,7 @@ fn cut(command: &str) -> &str {
 /// the build's process group runs on, uncounted by deadband, and the next
 /// `up` starts a second build. A `SIGTERM` rule in crumbkit's usage log like
 /// its `SIGINT` rule would replace this.
-fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<AtomicBool>> {
+fn catch_interrupts(cancel: Option<Cancel>, caught: Arc<AtomicI32>) -> Option<Arc<AtomicBool>> {
     use signal_hook::consts::SIGINT;
     use signal_hook::iterator::Signals;
     let mut signals = Signals::new(interrupts()).ok()?;
@@ -187,7 +232,9 @@ fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<Atomic
             for signal in signals.forever() {
                 if flag.load(Ordering::SeqCst) {
                     caught.store(signal, Ordering::SeqCst);
-                    cancel.cancel();
+                    if let Some(cancel) = &cancel {
+                        cancel.cancel();
+                    }
                 } else if signal != SIGINT || !crumbkit::events::handles_interrupt() {
                     drop(signal_hook::low_level::emulate_default_handler(signal));
                 }
