@@ -256,6 +256,17 @@ fn two_equal_merged_names_fail_with_a_name_clash_that_names_both_files() {
     );
 }
 
+#[test]
+fn a_broken_checkout_manifest_fails_the_workspace_manifest_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), "ports = [\"http\"]\n");
+    write(workspace.path.join("web/mxv.toml"), "ports = [\n");
+    write(workspace.manifest_file(), "ports = [\"web-http\"]\n");
+    let error = workspace.workspace_manifest().unwrap_err();
+    assert_eq!(error.path, workspace.path.join("web/mxv.toml"));
+}
+
 /// A manifest whose container `db` mounts the volume `data`, which phase
 /// names `<workspace>.data` for every app of the workspace.
 const DB: &str = "[containers.db]\nimage = \"postgres:16.4\"\nvolumes = { data = \"/var/lib/postgresql/data\" }\n\n[containers.replica]\nimage = \"postgres:16.4\"\nvolumes = { data = \"/var/lib/postgresql/data\" }\n";
