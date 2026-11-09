@@ -195,11 +195,6 @@ pub(crate) enum ArchiveFailure {
     },
 }
 
-/// Returns a next step that a person reads.
-fn hint(text: impl Into<String>) -> Recovery {
-    Recovery::Hint(text.into())
-}
-
 /// Returns the failure of `refusal` for the workspace `name`.
 pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFailure {
     let name = name.to_string();
@@ -295,63 +290,63 @@ impl Failure for ArchiveFailure {
             Self::NameTaken {
                 name,
                 retiring: true,
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv remove {name}` to remove the newer workspace, then `mxv archive -w {name}` finishes the earlier archive"
             )),
-            Self::NameTaken { name, .. } => hint(format!(
+            Self::NameTaken { name, .. } => Recovery::hint(format!(
                 "run `mxv restore {name}` to bring the archive back, or `mxv remove --archived {name}` to delete it"
             )),
-            Self::SourceChanged { name, .. } => hint(format!(
+            Self::SourceChanged { name, .. } => Recovery::hint(format!(
                 "look at what changed, then run `mxv archive -w {name}` again to finish the archive"
             )),
-            Self::MirrorMissing { .. } => hint(
+            Self::MirrorMissing { .. } => Recovery::hint(
                 "run `mxv new` for the same repository, which clones the mirror again, then archive the workspace again",
             ),
             Self::UnsavedWork { name, unsaved } => {
                 if unsaved.wip_saves_all() {
-                    hint(format!(
+                    Recovery::hint(format!(
                         "commit the work, or run `mxv archive -w {name} --wip` to commit it onto the branch, or `--force` to lose it"
                     ))
                 } else {
-                    hint(format!(
+                    Recovery::hint(format!(
                         "save or delete the paths and commits that the failure lists, and archive again, or run `mxv archive -w {name} --force` to lose them; `--wip` does not save ignored files, stashes, other commits, nested repositories, submodules, hidden edits, files that git does not list, or a paused git operation"
                     ))
                 }
             }
-            Self::InUse { name, .. } => hint(format!(
+            Self::InUse { name, .. } => Recovery::hint(format!(
                 "stop that process or move it out of the workspace, then run `mxv archive -w {name}` again"
             )),
-            Self::Unusable { .. } => {
-                hint("repair the checkout with git or `mxv add`, then archive the workspace again")
-            }
-            Self::Unfinished { name } | Self::RestoreUnfinished { name } => hint(format!(
-                "run `mxv archive -w {name}`, which finishes the archive"
-            )),
-            Self::ManifestDisposable { name, .. } => hint(format!(
+            Self::Unusable { .. } => Recovery::hint(
+                "repair the checkout with git or `mxv add`, then archive the workspace again",
+            ),
+            Self::Unfinished { name } | Self::RestoreUnfinished { name } => Recovery::hint(
+                format!("run `mxv archive -w {name}`, which finishes the archive"),
+            ),
+            Self::ManifestDisposable { name, .. } => Recovery::hint(format!(
                 "run `mxv archive -w {name}` without --yes and answer the prompt, or pass --force"
             )),
-            Self::RecordTooLarge { .. } => hint(
+            Self::RecordTooLarge { .. } => Recovery::hint(
                 "move or delete some of the extra files in the workspace's directory, then archive again",
             ),
-            Self::VolumesInUse { name, workspace } => hint(format!(
+            Self::VolumesInUse { name, workspace } => Recovery::hint(format!(
                 "run `mxv remove --archived {name}` without --delete-volumes, because the volumes belong to the workspace {workspace}"
             )),
             Self::RestoreNameTaken { name, path, record } => {
                 if *record {
-                    hint(format!(
+                    Recovery::hint(format!(
                         "remove the workspace {name} first, or run `mxv remove --archived {name}` to delete the archive"
                     ))
                 } else {
-                    hint(format!("move or delete {path}, then restore again"))
+                    Recovery::hint(format!("move or delete {path}, then restore again"))
                 }
             }
-            Self::BranchMoved { branch, pinned, .. } => hint(format!(
+            Self::BranchMoved { branch, pinned, .. } => Recovery::hint(format!(
                 "point the branch back with `git branch --force {branch} {pinned}`, or rename it, then restore again"
             )),
-            Self::CommitMissing { name, .. } => hint(format!(
+            Self::CommitMissing { name, .. } => Recovery::hint(format!(
                 "`mxv remove --archived {name}` deletes the archive, because nothing can rebuild this checkout"
             )),
-            Self::RootFileChanged { name, .. } => hint(format!(
+            Self::RootFileChanged { name, .. } => Recovery::hint(format!(
                 "put the file back, or run `mxv remove --archived {name}` to delete the archive"
             )),
         }

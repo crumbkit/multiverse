@@ -479,11 +479,6 @@ fn settings() -> String {
     format!("{} and {last}", rest.join(", "))
 }
 
-/// Returns the hint `text` as a recovery.
-fn hint(text: impl Into<String>) -> Recovery {
-    Recovery::Hint(text.into())
-}
-
 /// Returns the words after `mxv` of a removal of the workspace `name` with
 /// the flags that `allow` stands for, followed by `last`, such as
 /// `["remove", "notes", "--force", "--yes"]`.
@@ -611,18 +606,18 @@ impl Failure for MxvFailure {
         match self {
             Self::NotFound { .. } => Recovery::Run(Call::new(&["list"])),
             Self::Exists { name } => Recovery::Run(Call::new(&["show"]).value("names", name)),
-            Self::BadName { .. } => hint(
+            Self::BadName { .. } => Recovery::hint(
                 "use 1 to 64 letters, digits, '-', '_' and '.', starting with a letter or a digit",
             ),
-            Self::Dirty { name, allow, .. } => hint(format!(
+            Self::Dirty { name, allow, .. } => Recovery::hint(format!(
                 "commit, stash or delete the changes and run `{}` again; `--force` discards them with the workspace and keeps a branch with unmerged commits",
                 remove_line(name, *allow)
             )),
-            Self::IgnoredFiles { name, allow, .. } => hint(format!(
+            Self::IgnoredFiles { name, allow, .. } => Recovery::hint(format!(
                 "move the ignored files you want to keep out of the checkout and run `{}` again; `--force` deletes them with the workspace",
                 remove_line(name, *allow)
             )),
-            Self::ManifestDisposable { name, .. } => hint(format!(
+            Self::ManifestDisposable { name, .. } => Recovery::hint(format!(
                 "check that the paths hold nothing you want to keep, then answer the prompt of `mxv remove {name}` at a terminal, or pass `--force`, which deletes them with the workspace"
             )),
             Self::Changed { name, allow } => {
@@ -634,7 +629,7 @@ impl Failure for MxvFailure {
                 path,
                 allow,
                 ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "when nothing else uses the checkout, run `git -C {} worktree unlock {}`, and then `{}` again",
                 shown(repository),
                 shown(path),
@@ -642,56 +637,56 @@ impl Failure for MxvFailure {
             )),
             Self::StrayCommits {
                 name, path, allow, ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "keep the commits on a branch with `git -C {} switch -c <BRANCH>` and run `{}` again; `--delete-unmerged` deletes them",
                 shown(path),
                 remove_line(name, *allow)
             )),
             Self::Unpushed {
                 name, path, allow, ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "push the commits with `git -C {} push origin HEAD` and run `{}` again; `--delete-unmerged` deletes them with the clone",
                 shown(path),
                 remove_line(name, *allow)
             )),
             Self::Stashed {
                 name, path, allow, ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "apply or drop the stash entries with `git -C {} stash pop` or `git -C {} stash drop` and run `{}` again; `--force` deletes them with the clone",
                 shown(path),
                 shown(path),
                 remove_line(name, *allow)
             )),
-            Self::DirectoryTaken { path } => hint(format!(
+            Self::DirectoryTaken { path } => Recovery::hint(format!(
                 "choose another name, or move {} out of the way",
                 shown(path)
             )),
-            Self::Unowned { path, .. } => hint(format!(
+            Self::Unowned { path, .. } => Recovery::hint(format!(
                 "move {} out of the way, because git does not list it as a checkout, and run the removal again",
                 shown(path)
             )),
-            Self::BranchExists { repository, branch } => hint(format!(
+            Self::BranchExists { repository, branch } => Recovery::hint(format!(
                 "choose another name, or delete the branch {branch} in {}",
                 shown(repository)
             )),
-            Self::FolderTaken { repository, folder } => hint(format!(
+            Self::FolderTaken { repository, folder } => Recovery::hint(format!(
                 "give the checkout of {} another folder with `--as <FOLDER>` right after its `--repo`, because the folder {folder} is taken",
                 shown(repository)
             )),
-            Self::BadFolder { .. } => hint(
+            Self::BadFolder { .. } => Recovery::hint(
                 "give the checkout a folder with `--as <FOLDER>` right after its `--repo`, of 1 to 64 lowercase letters, digits, '-', '_' and '.', starting with a letter or a digit, other than mxv.toml",
             ),
             Self::CheckoutNotFound { name, .. } => {
                 Recovery::Run(Call::new(&["show"]).value("names", name))
             }
-            Self::Worktrees { name } => hint(format!(
+            Self::Worktrees { name } => Recovery::hint(format!(
                 "create a new workspace with every repository, such as `mxv new <NAME> --repo <A> --repo <B>`, because the workspace {name} holds git worktrees, which mxv made before clones, and mxv adds no checkout to it"
             )),
             Self::ManifestNeeded {
                 name,
                 manifest,
                 folder,
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "write the workspace manifest that the workspace reads once it has two checkouts, in a file outside the workspace, with each path relative to the workspace's directory, such as `cwd = \"{folder}\"` for a process that ran at the root of {folder}, and pass it to `mxv add -w {name} --manifest <FILE>`, which replaces {} with a copy of it and leaves your file as it is",
                 shown(manifest)
             )),
@@ -699,22 +694,22 @@ impl Failure for MxvFailure {
                 name,
                 folder,
                 repository,
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "finish the unfinished checkout first with `mxv add -w {name} --repo {} --as {folder}`, which resumes it, and then run this command again",
                 shown(repository)
             )),
-            Self::ExistingFolderInvalid { name, folder, .. } => hint(format!(
+            Self::ExistingFolderInvalid { name, folder, .. } => Recovery::hint(format!(
                 "mxv cannot rename the folder {folder} of the workspace {name}, so create a new workspace with every repository and a valid folder for each, such as `mxv new <NAME> --repo <PATH> --as <FOLDER> --repo <OTHER>`"
             )),
-            Self::ResumeBlocked { path, .. } => hint(format!(
+            Self::ResumeBlocked { path, .. } => Recovery::hint(format!(
                 "look in {}, keep what you need somewhere else, delete the directory, and run the same `mxv add` again",
                 shown(path)
             )),
-            Self::NoHome => hint("set HOME to your home directory"),
-            Self::RelativeRoot { .. } => hint(
+            Self::NoHome => Recovery::hint("set HOME to your home directory"),
+            Self::RelativeRoot { .. } => Recovery::hint(
                 "set MXV_ROOT to an absolute path, or unset it to use the config file or the default root",
             ),
-            Self::BadConfig { path, line, .. } => hint(match line {
+            Self::BadConfig { path, line, .. } => Recovery::hint(match line {
                 Some(line) => format!(
                     "fix line {line} of {}, which may set only {}",
                     shown(path),
@@ -724,16 +719,16 @@ impl Failure for MxvFailure {
             }),
             // Deleting an entry needs write permission on the directory
             // that holds it, so the hint names that directory.
-            Self::PartlyCleaned { name, path, .. } => hint(format!(
+            Self::PartlyCleaned { name, path, .. } => Recovery::hint(format!(
                 "give the directory {} write permission, or delete {} yourself, and run `mxv clean {name}` again",
                 shown(path.parent().unwrap_or(path)),
                 shown(path)
             )),
-            Self::NoLimit { path } => hint(format!(
+            Self::NoLimit { path } => Recovery::hint(format!(
                 "set `max_disposable = \"50GiB\"` in {}, or name the workspaces to clean, or pass `--all`",
                 shown(path)
             )),
-            Self::ConfigUnreadable { path, .. } => hint(format!(
+            Self::ConfigUnreadable { path, .. } => Recovery::hint(format!(
                 "make {} a readable file, or remove it",
                 shown(path)
             )),
@@ -892,104 +887,106 @@ impl Failure for MxvFailure {
 fn library_recovery(error: &Error) -> Recovery {
     match error {
         Error::RepositoryNotFound { .. } => {
-            hint("pass --repo the path of a git repository that has a working tree")
+            Recovery::hint("pass --repo the path of a git repository that has a working tree")
         }
-        Error::NoOrigin { repository } => hint(format!(
+        Error::NoOrigin { repository } => Recovery::hint(format!(
             "add a remote named origin to {}",
             shown(repository)
         )),
-        Error::EmptyOrigin { repository } => hint(format!(
+        Error::EmptyOrigin { repository } => Recovery::hint(format!(
             "push an initial commit to the default branch of origin, such as with `git commit --allow-empty -m 'Start' && git push -u origin HEAD:main` in {}, and run the command again",
             shown(repository)
         )),
-        Error::NoDefaultBranch { repository } => hint(format!(
+        Error::NoDefaultBranch { repository } => Recovery::hint(format!(
             "push an initial commit to the default branch of origin, or run `git remote set-head origin --auto` in {} when origin already has one",
             shown(repository)
         )),
-        Error::ProgramMissing { .. } => hint("install git and put it on PATH"),
+        Error::ProgramMissing { .. } => Recovery::hint("install git and put it on PATH"),
         Error::CommandFailed { .. } => {
-            hint("fix the cause that git's message names, and run the command again")
+            Recovery::hint("fix the cause that git's message names, and run the command again")
         }
-        Error::TimedOut { operation, dir, .. } => hint(format!(
+        Error::TimedOut { operation, dir, .. } => Recovery::hint(format!(
             "check that git {operation} can finish in {}, such as that its origin answers and no other git command holds a lock there, and run the command again; when `mxv list` still lists the workspace, `mxv remove <NAME> --force` removes what is left",
             shown(dir)
         )),
-        Error::StateUnreadable { path, .. } => hint(format!("make {} readable", shown(path))),
-        Error::CorruptRecord { path, .. } => hint(format!(
+        Error::StateUnreadable { path, .. } => {
+            Recovery::hint(format!("make {} readable", shown(path)))
+        }
+        Error::CorruptRecord { path, .. } => Recovery::hint(format!(
             "repair {} or delete it, which makes mxv forget that workspace",
             shown(path)
         )),
         Error::NewerRecord { .. } => {
-            hint("upgrade mxv to the version that wrote the record, or a later one")
+            Recovery::hint("upgrade mxv to the version that wrote the record, or a later one")
         }
-        Error::Inaccessible { path, .. } => hint(format!(
+        Error::Inaccessible { path, .. } => Recovery::hint(format!(
             "make the directories above {} searchable, and run the command again",
             shown(path)
         )),
-        Error::MismatchedRecord { path, .. } => hint(format!(
+        Error::MismatchedRecord { path, .. } => Recovery::hint(format!(
             "rename {} to the name that it holds, or delete it, which makes mxv forget that workspace",
             shown(path)
         )),
-        Error::Unwritable { path, .. } => hint(format!(
+        Error::Unwritable { path, .. } => Recovery::hint(format!(
             "make {} writable, and run the command again",
             shown(path)
         )),
-        Error::ProcessUnstartable { process, .. } => hint(format!(
+        Error::ProcessUnstartable { process, .. } => Recovery::hint(format!(
             "check that the cwd of {process} in mxv.toml exists in the checkout, and run the command again"
         )),
-        Error::ProcessTable { .. } => hint("put ps on PATH, and run the command again"),
-        Error::UnsupportedOs { .. } => hint(
+        Error::ProcessTable { .. } => Recovery::hint("put ps on PATH, and run the command again"),
+        Error::UnsupportedOs { .. } => Recovery::hint(
             "run mxv on a version of the operating system whose process table it reads, and report the version and the message",
         ),
-        Error::NoFreePort { .. } => hint(
+        Error::NoFreePort { .. } => Recovery::hint(
             "widen `ports_range` in the config file, or remove workspaces that hold ports you no longer need",
         ),
-        Error::MirrorBusy { .. } => hint(
+        Error::MirrorBusy { .. } => Recovery::hint(
             "wait for the other mxv command that fetches the mirror to finish, such as another `mxv new` of the same repository, and run the command again",
         ),
-        Error::MirrorFetchFailed { origin, .. } => hint(format!(
+        Error::MirrorFetchFailed { origin, .. } => Recovery::hint(format!(
             "check that the machine is online and that `git ls-remote {origin}` works with your credentials, and run the command again"
         )),
-        Error::TemplateInvalid { path, .. } => hint(format!(
+        Error::TemplateInvalid { path, .. } => Recovery::hint(format!(
             "fix {} as the README's section on templates describes, with a top-level [template] table that lists its origins, or move it out of the templates directory, and run the command again; `--manifest <FILE>` copies a file of your choice in place of a template",
             shown(path)
         )),
-        Error::TemplateAmbiguous { origin, .. } => hint(format!(
+        Error::TemplateAmbiguous { origin, .. } => Recovery::hint(format!(
             "list {origin} in the [template] table of one template only, or pass `--manifest <FILE>` to choose the file, and run the command again"
         )),
-        Error::ManifestUntrusted { path, .. } => hint(format!(
+        Error::ManifestUntrusted { path, .. } => Recovery::hint(format!(
             "read {}, copy it to a file of your own outside every git repository and outside the workspaces' root, such as a template in the config directory's `mxv/templates`, and pass that file to `--manifest`",
             shown(path)
         )),
-        Error::OriginFetchFailed { checkout, .. } => hint(format!(
+        Error::OriginFetchFailed { checkout, .. } => Recovery::hint(format!(
             "check that the machine is online and that `git -C {} fetch origin` works with your credentials, and run the command again; `--delete-unmerged` removes the workspace without the fetch, and deletes the commits that origin does not hold",
             shown(checkout)
         )),
-        Error::Busy { .. } => hint(
+        Error::Busy { .. } => Recovery::hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
         ),
-        Error::DockerMissing { .. } => hint(
+        Error::DockerMissing { .. } => Recovery::hint(
             "install docker and put it on PATH, and run the command again; a workspace that has run containers needs docker until `mxv remove` removes it",
         ),
-        Error::DockerNoAddressPool { .. } => hint(
+        Error::DockerNoAddressPool { .. } => Recovery::hint(
             "list docker's networks with `docker network ls`, remove the ones nothing uses with `docker network prune`, or add address pools under `default-address-pools` in the docker daemon's settings, and run the command again",
         ),
-        Error::DockerComposeMissing { .. } => hint(
+        Error::DockerComposeMissing { .. } => Recovery::hint(
             "install the docker compose plugin, such as with Docker Desktop or your package manager's docker-compose-plugin, and run the command again",
         ),
-        Error::DockerUnavailable { .. } => hint(
+        Error::DockerUnavailable { .. } => Recovery::hint(
             "start the docker daemon, such as by opening Docker Desktop, and run the command again",
         ),
-        Error::DockerFailed { operation, .. } => hint(format!(
+        Error::DockerFailed { operation, .. } => Recovery::hint(format!(
             "read docker's message, fix what `docker {operation}` reports, such as an image name that cannot be pulled, and run the command again"
         )),
-        Error::DockerForeign { kind, name } => hint(format!(
+        Error::DockerForeign { kind, name } => Recovery::hint(format!(
             "find out who made the docker {kind} {name}, rename or remove it with docker if nobody needs it, and run the command again"
         )),
-        Error::Phase { .. } => hint(
+        Error::Phase { .. } => Recovery::hint(
             "read phase's message, fix what it names, and run the command again; `mxv status` shows what runs",
         ),
-        _ => hint("run the command again"),
+        _ => Recovery::hint("run the command again"),
     }
 }
 

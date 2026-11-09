@@ -292,19 +292,14 @@ fn shown(path: &Path) -> String {
 /// their hint runs `up` for the whole workspace.
 fn start_failed(workspace: &str, process: &str) -> Recovery {
     if process.starts_with(multiverse::RESERVED_PREFIX) {
-        hint(format!(
+        Recovery::hint(format!(
             "run `mxv logs -w {workspace} {process}` to read what failed, fix it, and run `mxv up -w {workspace}` again"
         ))
     } else {
-        hint(format!(
+        Recovery::hint(format!(
             "fix the cause that the log names, and run `mxv up -w {workspace} {process}` again; `mxv logs -w {workspace} {process}` prints the log"
         ))
     }
-}
-
-/// Returns the hint `text` as a recovery.
-fn hint(text: impl Into<String>) -> Recovery {
-    Recovery::Hint(text.into())
 }
 
 impl Failure for RunFailure {
@@ -348,7 +343,7 @@ impl Failure for RunFailure {
             Self::Running { workspace, .. } => {
                 Recovery::Run(Call::new(&["down"]).value("workspace", workspace))
             }
-            Self::VolumeRenamed { volumes, .. } => hint(format!(
+            Self::VolumeRenamed { volumes, .. } => Recovery::hint(format!(
                 "copy each volume's data into the volume that the container mounts after the add, {}, then delete each old volume, and run `mxv add` again; to drop the data instead, only delete the old volumes",
                 volumes
                     .iter()
@@ -365,54 +360,54 @@ impl Failure for RunFailure {
                     .collect::<Vec<_>>()
                     .join("; ")
             )),
-            Self::Unrunnable { .. } => hint("fix what the message names in the manifest"),
+            Self::Unrunnable { .. } => Recovery::hint("fix what the message names in the manifest"),
             Self::Volumes {
                 workspace, allow, ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "copy out any data you need from the volumes, then run `{}`, which deletes them",
                 remove_volumes_line(workspace, *allow)
             )),
             Self::ManifestMissing {
                 checkout,
                 workspace,
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "write a workspace manifest at {} or an {MANIFEST_FILE} at the root of {} that declares the app's units",
                 shown(workspace),
                 shown(checkout)
             )),
             Self::Manifest(error) => match &error.problem {
-                ManifestProblem::UnknownKey { key } => hint(format!(
+                ManifestProblem::UnknownKey { key } => Recovery::hint(format!(
                     "remove or rename `{key}` in {}, because the manifest schema does not declare it",
                     shown(&error.path)
                 )),
                 ManifestProblem::Newer { .. } => {
-                    hint("upgrade mxv to a version that reads this manifest version")
+                    Recovery::hint("upgrade mxv to a version that reads this manifest version")
                 }
-                ManifestProblem::Reserved { section } => hint(format!(
+                ManifestProblem::Reserved { section } => Recovery::hint(format!(
                     "remove the section `{section}` from {}, because this version of mxv does not run it",
                     shown(&error.path)
                 )),
                 ManifestProblem::Unreadable { .. } => {
-                    hint(format!("make {} readable", shown(&error.path)))
+                    Recovery::hint(format!("make {} readable", shown(&error.path)))
                 }
-                ManifestProblem::UnitName { name } => hint(format!(
+                ManifestProblem::UnitName { name } => Recovery::hint(format!(
                     "rename the unit `{name}` in {} to 1 to 64 lowercase letters, digits, `-` and `_`, starting with a letter or a digit",
                     shown(&error.path)
                 )),
-                ManifestProblem::NameClash { name, other } => hint(format!(
+                ManifestProblem::NameClash { name, other } => Recovery::hint(format!(
                     "rename `{name}` in {} or in {}, or give one of the checkouts another folder, whose name prefixes its names, with `--as`",
                     shown(&error.path),
                     shown(other)
                 )),
-                ManifestProblem::ServiceClash { name, .. } => hint(format!(
+                ManifestProblem::ServiceClash { name, .. } => Recovery::hint(format!(
                     "declare `{name}` the same way in every service of the workspace, or rename it in one of them, in {}",
                     shown(&error.path)
                 )),
-                _ if error.line.is_some() => hint(format!(
+                _ if error.line.is_some() => Recovery::hint(format!(
                     "fix the line of {} that the message names",
                     shown(&error.path)
                 )),
-                _ => hint(format!(
+                _ => Recovery::hint(format!(
                     "fix what the message names in {}",
                     shown(&error.path)
                 )),
@@ -432,7 +427,7 @@ impl Failure for RunFailure {
                 number,
                 pid: Some(pid),
                 ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "stop the process {pid}, which listens on port {number}, or make {process} listen on the port it receives, and run `mxv up -w {workspace} {process}` again"
             )),
             Self::ForeignListener {
@@ -441,17 +436,17 @@ impl Failure for RunFailure {
                 number,
                 pid: None,
                 ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "stop the program of another user that listens on port {number}, or make {process} listen on the port it receives, and run `mxv up -w {workspace} {process}` again"
             )),
             Self::DetachedListener {
                 workspace, process, ..
-            } => hint(format!(
+            } => Recovery::hint(format!(
                 "make {process} keep the program that listens in its own process group, such as by running the program in the foreground without detaching it, and run `mxv up -w {workspace} {process}` again"
             )),
             Self::Unstoppable {
                 pid, not_started, ..
-            } => hint(if not_started.is_empty() {
+            } => Recovery::hint(if not_started.is_empty() {
                 format!("find the process group {pid} with `ps -g {pid}` and stop it by hand")
             } else {
                 format!(
