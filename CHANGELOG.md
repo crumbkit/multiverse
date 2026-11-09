@@ -169,3 +169,13 @@ workspace may need to act on.
   host process's part of the plan. phase reads every earlier version and
   writes v6. An older mxv or phase refuses a v6 record with
   `phase::record::newer` and asks for an upgrade.
+
+### Fixed
+
+- mxv works on a machine where git's `safe.bareRepository` setting is
+  `explicit`. Before this fix, `mxv new`, `mxv add` and `mxv archive` failed
+  there with "not in a git directory" or "cannot use bare repository",
+  `mxv restore` refused and said that the commit was missing, and
+  `mxv remove --archived` exited 0, printed a warning and left the archive's
+  pin in the mirror. A pin that an earlier `mxv remove --archived` left
+  behind stays in the mirror.

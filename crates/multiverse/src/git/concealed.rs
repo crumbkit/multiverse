@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 
 use super::{
     CHECKOUT_DEADLINE, Git, LOCAL_DEADLINE, MOST_LISTING_BYTES, ORIGIN_REFS, git_dirs, lines,
-    module_dirs, run, run_keeping, trimmed,
+    module_dirs, run, run_in_holder, run_keeping, trimmed,
 };
-use crate::backend::{Backend, Concealed, LocalNames, SubmoduleWork};
+use crate::backend::{Backend, Concealed, LocalNames, RefHolder, SubmoduleWork};
 use crate::error::Error;
 
 /// The most levels of nested submodules that mxv reads.
@@ -496,16 +496,16 @@ pub(super) fn check_commit_all(checkout: &Path) -> Result<(), Error> {
         .map(drop)
 }
 
-/// Returns the references of the kind `prefix` in `repository`, each
-/// without the prefix.
-fn names_under(repository: &Path, prefix: &str) -> Result<Vec<String>, Error> {
-    let listed = run(
-        repository,
+/// Returns the references of the kind `prefix` in the repository that
+/// `holder` names, each without the prefix.
+fn names_under(holder: RefHolder<'_>, prefix: &str) -> Result<Vec<String>, Error> {
+    let listed = run_in_holder(
+        holder,
         ["for-each-ref", "--format=%(refname)", prefix],
         "for-each-ref",
         LOCAL_DEADLINE,
     )?
-    .ok("for-each-ref", repository)?;
+    .ok("for-each-ref", holder.path())?;
     Ok(lines(&listed)
         .iter()
         .filter_map(|name| name.strip_prefix(prefix))
@@ -585,8 +585,8 @@ pub(super) fn local_names(
     source: &Path,
 ) -> Result<LocalNames, Error> {
     let absent = |prefix: &str| -> Result<Vec<String>, Error> {
-        let held = names_under(mirror, prefix)?;
-        Ok(names_under(checkout, prefix)?
+        let held = names_under(RefHolder::Mirror(mirror), prefix)?;
+        Ok(names_under(RefHolder::Repository(checkout), prefix)?
             .into_iter()
             .filter(|name| !held.contains(name))
             .collect())

@@ -36,6 +36,49 @@ fn a_worktree_has_no_submodule_git_directories_to_read() {
 }
 
 #[test]
+fn the_git_directory_of_a_clone_is_not_a_repository() {
+    let fixture = fixture();
+    let error = Git.repository(&fixture.clone.join(".git")).unwrap_err();
+    assert!(
+        matches!(error, Error::RepositoryNotFound { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_tracked_directory_with_a_junk_head_and_objects_resolves_to_the_enclosing_clone() {
+    let fixture = fixture();
+    let tracked = fixture.clone.join("tracked");
+    fs::create_dir_all(tracked.join("objects")).unwrap();
+    write(tracked.join("HEAD"), "junk\n");
+    write(tracked.join("objects").join("file"), "junk\n");
+    git(&fixture.clone, &["add", "tracked"]);
+    git(&fixture.clone, &["commit", "--quiet", "-m", "Tracked"]);
+    let repository = Git.repository(&tracked).unwrap();
+    assert_eq!(
+        repository.root.canonicalize().unwrap(),
+        fixture.clone.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn a_directory_without_a_git_entry_that_imitates_a_git_directory_is_not_read_as_a_checkout() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().canonicalize().unwrap().join("lost-its-git");
+    fs::create_dir_all(dir.join("objects")).unwrap();
+    fs::create_dir_all(dir.join("refs")).unwrap();
+    write(dir.join("HEAD"), "ref: refs/heads/main\n");
+    write(dir.join("objects").join("x"), "tracked\n");
+    write(dir.join("refs").join("x"), "tracked\n");
+    write(
+        dir.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n",
+    );
+    let head = Git.head(&dir).unwrap();
+    assert_ne!(head.toplevel, Some(dir));
+}
+
+#[test]
 fn a_directory_outside_any_repository_is_not_a_repository() {
     let dir = tempfile::tempdir().unwrap();
     let error = Git.repository(dir.path()).unwrap_err();
