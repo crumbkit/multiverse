@@ -558,8 +558,8 @@ A workspace is idle when none of its units run, no other process, such as a carg
 - `<NAME>`: The names of the workspaces to clean, separated by spaces. Required, or give one of `--all` and `--over-limit` in its place. Takes more than one value.
 - `--all`: Clean every idle workspace. Required, or give one of `<NAME>` and `--over-limit` in its place.
 - `--over-limit`: Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max\_disposable. Required, or give one of `<NAME>` and `--all` in its place.
-- `--idle <AGE>`: How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean\_idle, or else 7d
-- `--force`: With --yes, also delete the paths that only mxv.toml declares disposable
+- `--unmodified <AGE>`: How long a checkout must go unmodified to count as idle; it defaults to the config file's clean\_idle, or else 7d
+- `--disposable`: With --yes, also delete the paths that only mxv.toml declares disposable
 
   \--yes alone keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it.
 - `--dry-run`: Report what the command would change, and change nothing
@@ -602,7 +602,7 @@ With --need memory=SIZE, a running workspace is idle when it is not pinned, no p
 ### Arguments
 
 - `--need <NEED>`: What to free: memory=SIZE or disk=SIZE, such as memory=2GiB. Required.
-- `--idle <AGE>`: How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop\_idle, or else 2h, for memory, and to clean\_idle, or else 7d, for disk
+- `--unused <AGE>`: How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop\_idle, or else 2h, for memory, and to clean\_idle, or else 7d, for disk
 - `--dry-run`: Report what the command would change, and change nothing
 
 ### Examples

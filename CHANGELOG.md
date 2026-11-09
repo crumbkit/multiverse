@@ -96,6 +96,11 @@ workspace may need to act on.
 
 ### Changed
 
+- The flags of `mxv clean` and `mxv reclaim` now name what they select.
+  `mxv clean --idle` is `--unmodified`, `mxv reclaim --idle` is `--unused`,
+  and `mxv clean --force` is `--disposable`. The old spellings are gone and
+  are not accepted, so update any script or cron job that passes them. The
+  `--force` flags of `remove` and `archive` keep their names.
 - A workspace with several checkouts now reads its workspace manifest
   strictly: while one checkout's `mxv.toml` cannot be parsed, the read
   fails with that file's error. Before this change the read skipped the
@@ -106,7 +111,9 @@ workspace may need to act on.
   and use no `disposable` globs of the workspace manifest in any checkout
   while one checkout's manifest is broken. `remove` and `archive` without
   `--force` can then refuse because of ignored files that only those
-  globs cover, and `clean` reclaims fewer paths. Fix the broken file to
+  globs cover, and `clean` reclaims fewer paths. `list` and `show` reach the
+  same read through `disk_usage`, so their disposable byte figures shrink
+  too, and `show` carries the same warning. Fix the broken file to
   restore the globs.
 - mxv uses crumbkit 0.2.0, which changes some documents that a tool may
   read. `mxv list --json` and `mxv list --archived --json` now print a

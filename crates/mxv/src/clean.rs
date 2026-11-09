@@ -6,7 +6,7 @@
 //! working directory inside the workspace, and its checkouts have not
 //! changed for the idle age, as
 //! [`multiverse::DiskUsage::modified`] measures it. The idle age is
-//! `--idle`, or else the config file's `clean_idle`, or else
+//! `--unmodified`, or else the config file's `clean_idle`, or else
 //! [`DEFAULT_IDLE`]. `clean` measures every workspace it considers, which
 //! reads each file of each one, so it is meant for an occasional run, such
 //! as from a cron job. Nothing runs in the background.
@@ -33,7 +33,7 @@ use crate::verbs::{configured, parse_name};
 #[cfg(test)]
 mod tests;
 
-/// The idle age when neither `--idle` nor the config file's `clean_idle`
+/// The idle age when neither `--unmodified` nor the config file's `clean_idle`
 /// sets one: seven days.
 pub(crate) const DEFAULT_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -172,7 +172,7 @@ struct Candidate {
 
 impl Candidate {
     /// Keeps each path that only the repository's own `mxv.toml` makes
-    /// disposable, because `--yes` without `--force` gave no person a
+    /// disposable, because `--yes` without `--disposable` gave no person a
     /// chance to confirm it.
     fn hold_manifest_paths(&mut self) {
         let (held, paths): (Vec<DisposablePath>, Vec<DisposablePath>) = self
@@ -185,7 +185,7 @@ impl Candidate {
             self.kept.push(KeptPath::new(
                 found.checkout,
                 found.path,
-                "only the repository's mxv.toml declares it disposable, and --yes alone does not delete such paths; answer the prompt without --yes, or pass --force".to_owned(),
+                "only the repository's mxv.toml declares it disposable, and --yes alone does not delete such paths; answer the prompt without --yes, or pass --disposable".to_owned(),
             ));
         }
     }
@@ -588,9 +588,9 @@ pub(crate) fn clean(
         &Selection {
             names: &args.names,
             limit,
-            idle: args.idle,
+            idle: args.unmodified,
             // `Yes` hides its flag, and only its default holds no `--yes`.
-            hold: args.yes != crumbkit::Yes::default() && !args.force,
+            hold: args.yes != crumbkit::Yes::default() && !args.disposable,
             ask: Some(args.yes),
         },
     )?;

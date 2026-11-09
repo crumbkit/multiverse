@@ -6,13 +6,13 @@ Arguments:
   [NAME]...  The names of the workspaces to clean, separated by spaces
 
 Options:
-      --all         Clean every idle workspace
-      --over-limit  Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max_disposable
-      --idle <AGE>  How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean_idle, or else 7d
-      --force       With --yes, also delete the paths that only mxv.toml declares disposable
-      --dry-run     Report what the command would change, and change nothing
-      --yes         Proceed without asking for confirmation
-  -h, --help        Print help (see more with '--help')
+      --all               Clean every idle workspace
+      --over-limit        Clean idle workspaces, oldest first, until the disposable directories of every workspace take no more than the config file's max_disposable
+      --unmodified <AGE>  How long a checkout must go unmodified to count as idle; it defaults to the config file's clean_idle, or else 7d
+      --disposable        With --yes, also delete the paths that only mxv.toml declares disposable
+      --dry-run           Report what the command would change, and change nothing
+      --yes               Proceed without asking for confirmation
+  -h, --help              Print help (see more with '--help')
 
 Examples:
   mxv clean --all --dry-run

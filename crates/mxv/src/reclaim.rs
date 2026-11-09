@@ -7,7 +7,7 @@
 //! pinned, no process outside phase has its working directory inside the
 //! workspace, and neither its checkouts, commits and staged changes nor an
 //! mxv command that named it changed within the idle age. That age is
-//! `--idle`, or else the config file's `stop_idle`, or else
+//! `--unused`, or else the config file's `stop_idle`, or else
 //! [`DEFAULT_STOP_IDLE`]. Reclaim stops the idle workspaces that were
 //! active least recently, until the resident memory of their processes
 //! and containers covers the need, through the same stop as `mxv down`,
@@ -41,11 +41,11 @@ use crate::verbs::configured;
 #[cfg(test)]
 mod tests;
 
-/// The idle age of a running workspace when neither `--idle` nor the
+/// The idle age of a running workspace when neither `--unused` nor the
 /// config file's `stop_idle` sets one: two hours.
 pub(crate) const DEFAULT_STOP_IDLE: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// The shortest idle age that `--idle` accepts: ten minutes. A shorter
+/// The shortest idle age that `--unused` accepts: ten minutes. A shorter
 /// one would stop a workspace that a person left for a few minutes. The
 /// config file's `stop_idle` and `clean_idle` may set a shorter age, for
 /// tests.
@@ -57,7 +57,7 @@ pub(crate) const MIN_IDLE: Duration = Duration::from_secs(10 * 60);
 /// their memory and does not count it towards a need.
 const CONTAINERS_RETURN_MEMORY: bool = !cfg!(target_os = "macos");
 
-/// Returns the idle age that `text` names for `--idle`, which is at least
+/// Returns the idle age that `text` names for `--unused`, which is at least
 /// [`MIN_IDLE`].
 ///
 /// # Errors
@@ -68,7 +68,7 @@ pub(crate) fn parse_idle(text: &str) -> Result<Duration, String> {
     let age = parse_age(text)?;
     if age < MIN_IDLE {
         return Err(format!(
-            "{text:?} is shorter than 10m, the shortest idle age that --idle accepts; stop_idle and clean_idle in the config file can set a shorter one"
+            "{text:?} is shorter than 10m, the shortest idle age that --unused accepts; stop_idle and clean_idle in the config file can set a shorter one"
         ));
     }
     Ok(age)
@@ -650,7 +650,10 @@ fn memory(
     let machine = Machine {
         runs: environment.runs()?,
         table: multiverse::process_table().map_err(MxvFailure::from)?,
-        stop_idle: args.idle.or(config.stop_idle).unwrap_or(DEFAULT_STOP_IDLE),
+        stop_idle: args
+            .unused
+            .or(config.stop_idle)
+            .unwrap_or(DEFAULT_STOP_IDLE),
         now: SystemTime::now(),
         workspaces,
     };
@@ -754,7 +757,7 @@ fn disk(
         &Selection {
             names: &[],
             limit: Limit::Free(need),
-            idle: args.idle,
+            idle: args.unused,
             hold: true,
             ask: None,
         },
