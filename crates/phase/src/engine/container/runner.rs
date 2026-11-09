@@ -123,8 +123,8 @@ use crate::engine::container::command::{
 use crate::engine::container::compose::{AppStep, AppUp, Up, app_up};
 use crate::engine::container::names::{self, Identity, Scope, VolumeKey};
 use crate::engine::container::objects::{
-    self, AnonymousVolumes, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id,
-    inspect_named, no_restart, reinspect, remove, stop, stop_until,
+    self, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id, inspect_named,
+    no_restart, reinspect, remove, stop, stop_until,
 };
 use crate::engine::container::secrets::{self, ImageConfig, SecretBytes};
 use crate::engine::container::volume_owner;
@@ -1411,7 +1411,7 @@ fn discard(inspected: &Inspected, grace: Duration) -> Result<(), ContainerError>
     if fresh.state.runs() {
         stop(&fresh.container, grace)?;
     }
-    remove(fresh.container, AnonymousVolumes::Remove)
+    remove(fresh.container)
 }
 
 /// Stops and removes the container `inspected` as [`discard`] does, and
@@ -1423,7 +1423,7 @@ fn discard_until(inspected: &Inspected, grace: Duration, cancel: &Cancel) -> Res
     if fresh.state.runs() {
         stop_until(&fresh.container, grace, cancel).map_err(|error| halt(&error))?;
     }
-    remove(fresh.container, AnonymousVolumes::Remove).map_err(|error| halt(&error))
+    remove(fresh.container).map_err(|error| halt(&error))
 }
 
 /// Stops and removes each container of `started`, after a failure ended

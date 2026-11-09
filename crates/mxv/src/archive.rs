@@ -510,7 +510,7 @@ fn finish(
     processes::forget(environment, &archive.name, archive.workspace_id.as_ref())?;
     let mut names = Vec::new();
     if let Some(volumes) = volumes {
-        names = volumes.names().to_vec();
+        names = volumes.names();
         processes::delete_volumes(environment, volumes)?;
     }
     workspaces
@@ -644,7 +644,7 @@ fn stale_volumes(
         (Some(id), true) => Ok(Some(
             environment
                 .runs()?
-                .archived_volumes(&archive.name, id)
+                .archived_volumes(id)
                 .map_err(MxvFailure::from)?,
         )),
         _ => Ok(None),
@@ -832,7 +832,7 @@ pub(crate) fn remove(
     let (volumes, mut warnings) = archive_volumes(environment, &archive, args.delete_volumes);
     let names = volumes
         .as_ref()
-        .map(|volumes| volumes.names().to_vec())
+        .map(|volumes| volumes.names())
         .unwrap_or_default();
     if output.is_dry_run() {
         return Ok(Prose::new(RemovalResult::of_archive(
@@ -882,10 +882,7 @@ fn archive_volumes(
     let found = environment
         .runs()
         .map_err(|failure| failure.to_string())
-        .and_then(|runs| {
-            runs.archived_volumes(&archive.name, id)
-                .map_err(|error| error.to_string())
-        });
+        .and_then(|runs| runs.archived_volumes(id).map_err(|error| error.to_string()));
     match found {
         Ok(volumes) if delete => (Some(volumes), Vec::new()),
         Ok(volumes) if volumes.is_empty() => (None, Vec::new()),

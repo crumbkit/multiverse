@@ -12,17 +12,16 @@ use crate::engine::container::command::{
 };
 use crate::engine::container::compose::{UpFailure, up_failure, without_image_user};
 use crate::engine::container::names::{
-    ContainerId, Identity, Scope, ServiceName, StoreId, VolumeKey, VolumeName,
+    ContainerId, Identity, Scope, ServiceName, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
-    ContainerState, STOP_TIMEOUT_FORMAT, mint_anonymous, mint_container, mint_volume,
-    stop_timeout_of,
+    ContainerState, STOP_TIMEOUT_FORMAT, mint_container, mint_volume, stop_timeout_of,
 };
-use crate::name::WorkspaceName;
+use crate::name::{AppName, WorkspaceId};
 use crate::record::DockerCause;
 
-/// A store id of the tests.
-const STORE: &str = "0123456789abcdef0123456789abcdef";
+/// A workspace id of the tests.
+const WORKSPACE: &str = "0123456789abcdef0123456789abcdef";
 
 /// A container id of the tests.
 const ID: &str = "4f1c0a8e9b7d6c5a4f1c0a8e9b7d6c5a4f1c0a8e9b7d6c5a4f1c0a8e9b7d6c5a";
@@ -36,13 +35,13 @@ fn key(name: &str) -> VolumeKey {
 }
 
 /// Returns an object's labels as `docker inspect` prints them with
-/// `{{json .Labels}}`: the store, workspace and `label` labels, where an
+/// `{{json .Labels}}`: the workspace id, app and `label` labels, where an
 /// empty value leaves its label out.
-fn printed_labels(store: &str, workspace: &str, label: &str, object: &str) -> String {
+fn printed_labels(workspace: &str, app: &str, label: &str, object: &str) -> String {
     let mut labels = serde_json::Map::new();
     for (key, value) in [
-        ("mxv.store", store),
-        ("mxv.workspace", workspace),
+        ("mxv.workspace-id", workspace),
+        ("mxv.app", app),
         (label, object),
     ] {
         if !value.is_empty() {
@@ -53,71 +52,42 @@ fn printed_labels(store: &str, workspace: &str, label: &str, object: &str) -> St
 }
 
 /// Returns the labels of the scope's container `service`.
-fn container_labels(store: &str, workspace: &str, service: &str) -> String {
-    printed_labels(store, workspace, "mxv.container", service)
+fn container_labels(workspace: &str, app: &str, service: &str) -> String {
+    printed_labels(workspace, app, "mxv.container", service)
 }
 
 /// Returns the labels of the scope's volume `volume`.
-fn volume_labels(store: &str, workspace: &str, volume: &str) -> String {
-    printed_labels(store, workspace, "mxv.volume", volume)
+fn volume_labels(workspace: &str, app: &str, volume: &str) -> String {
+    printed_labels(workspace, app, "mxv.volume", volume)
 }
 
-fn scope(workspace: &str) -> Scope {
-    Scope::new(
-        &StoreId::new(STORE).unwrap(),
-        &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
+fn scope(app: &str) -> Scope {
+    Scope::app(
+        Identity {
+            id: WorkspaceId::try_from(WORKSPACE.to_owned()).unwrap(),
+            run_record: "/state/phase/runs/record.json".into(),
+        },
+        &AppName::try_from(app.to_owned()).unwrap(),
     )
 }
 
 #[test]
-fn two_workspaces_whose_names_join_alike_never_share_a_container_or_volume_name() {
-    assert_ne!(
-        scope("reading-list").container_name(&service("db")),
-        scope("reading").container_name(&service("list-db"))
-    );
-    assert_eq!(
-        scope("reading-list").container_name(&service("db")),
-        "mxv-01234567-reading-list.db"
-    );
-    assert_eq!(
-        scope("reading-list").volume_name(&key("data")),
-        "mxv-01234567-reading-list.data"
-    );
-}
-
-#[test]
-fn two_stores_give_one_workspace_name_different_container_and_volume_names() {
-    let other = Scope::new(
-        &StoreId::new("fedcba9876543210fedcba9876543210").unwrap(),
-        &WorkspaceName::try_from("reading-list".to_owned()).unwrap(),
-    );
-    assert_ne!(
-        other.container_name(&service("db")),
-        scope("reading-list").container_name(&service("db"))
-    );
-    assert_ne!(
-        other.volume_name(&key("data")),
-        scope("reading-list").volume_name(&key("data"))
-    );
-}
-
-#[test]
-fn a_scope_owns_only_objects_whose_labels_name_its_store_workspace_and_object() {
+fn a_scope_owns_only_objects_whose_labels_name_its_workspace_app_and_object() {
     let scope = scope("reading-list");
     let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
-    assert!(owns(&container_labels(STORE, "reading-list", "db")));
+    assert!(owns(&container_labels(WORKSPACE, "reading-list", "db")));
     assert!(!owns("null"));
     assert!(!owns("{}"));
     assert!(!owns(""));
-    assert!(!owns(&container_labels(STORE, "reading-list", "cache")));
-    assert!(!owns(&container_labels(STORE, "reading", "db")));
+    assert!(!owns(&container_labels(WORKSPACE, "reading-list", "cache")));
+    assert!(!owns(&container_labels(WORKSPACE, "reading", "db")));
     assert!(!owns(&container_labels(
         "fedcba9876543210fedcba9876543210",
         "reading-list",
         "db"
     )));
     assert!(!owns(&printed_labels(
-        STORE,
+        WORKSPACE,
         "reading-list",
         "mxv.volume",
         "db"
@@ -130,27 +100,18 @@ fn a_scope_owns_no_object_whose_label_values_differ_by_a_tab_or_a_space() {
     let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
     // A value that holds tabs cannot stand in for the other labels.
     assert!(!owns(&printed_labels(
-        &format!("{STORE}\treading-list\tdb"),
+        &format!("{WORKSPACE}\treading-list\tdb"),
         "",
         "mxv.container",
         ""
     )));
     assert!(!owns(&container_labels(
-        &format!("{STORE} "),
+        &format!("{WORKSPACE} "),
         "reading-list",
         "db"
     )));
-    assert!(!owns(&container_labels(STORE, " reading-list", "db")));
-    assert!(!owns(&container_labels(STORE, "reading-list", "db\n")));
-}
-
-#[test]
-fn a_workspace_name_with_an_underscore_or_a_dot_gives_a_project_name_that_compose_accepts_and_no_other_workspace_shares()
- {
-    assert_eq!(scope("reading-list").project(), "mxv-01234567-reading-list");
-    assert_eq!(scope("release.2").project(), "mxv-01234567-release_d2");
-    assert_eq!(scope("release_d2").project(), "mxv-01234567-release__d2");
-    assert_eq!(scope("a_b").project(), "mxv-01234567-a__b");
+    assert!(!owns(&container_labels(WORKSPACE, " reading-list", "db")));
+    assert!(!owns(&container_labels(WORKSPACE, "reading-list", "db\n")));
 }
 
 #[test]
@@ -191,20 +152,6 @@ fn only_a_running_or_paused_container_takes_a_stop_signal_and_a_restarting_one_i
     assert_eq!(runs, [true, true, false, false, false, false]);
     let up: Vec<bool> = states.iter().map(|state| state.is_up()).collect();
     assert_eq!(up, [true, true, true, false, false, false]);
-}
-
-#[test]
-fn a_workspace_name_with_a_dot_still_splits_from_the_container_name_at_the_dot() {
-    // A project name never holds `.`, so `mxv-01234567-release_d2.db` is
-    // only the workspace `release.2` with the container `db`.
-    assert_eq!(
-        scope("release.2").container_name(&service("db")),
-        "mxv-01234567-release_d2.db"
-    );
-    assert_ne!(
-        scope("release.2").container_name(&service("db")),
-        scope("release").container_name(&service("2-db"))
-    );
 }
 
 #[test]
@@ -324,46 +271,32 @@ fn a_container_id_is_64_lowercase_hex_digits() {
 /// Returns what `docker container inspect` prints for a container whose
 /// labels print as `labels`.
 fn printed_container(labels: &str) -> String {
-    format!(
-        "{labels}\n{ID}\nexited 3\n2026-11-04T10:00:00.000000000Z\nmxv-01234567-reading-list.data 0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675 \n0\n\"\"\n"
-    )
+    format!("{labels}\n{ID}\nexited 3\n2026-11-04T10:00:00.000000000Z\n0\n\"\"\n")
 }
 
 #[test]
-fn a_container_handle_is_minted_for_labels_that_name_its_store_workspace_and_service() {
+fn a_container_handle_is_minted_for_labels_that_name_its_workspace_app_and_service() {
     let scope = scope("reading-list");
     let inspected = mint_container(
         &scope,
         &service("db"),
         ID,
-        &printed_container(&container_labels(STORE, "reading-list", "db")),
+        &printed_container(&container_labels(WORKSPACE, "reading-list", "db")),
     )
     .unwrap();
     assert_eq!(inspected.container.service(), &service("db"));
     assert_eq!(inspected.container.id(), &ContainerId::new(ID).unwrap());
     assert_eq!(inspected.state, ContainerState::Exited(3));
     assert_eq!(inspected.started, "2026-11-04T10:00:00.000000000Z");
-    let anonymous: Vec<&VolumeName> = inspected
-        .anonymous
-        .iter()
-        .map(|volume| volume.name())
-        .collect();
-    assert_eq!(
-        anonymous,
-        [
-            &VolumeName::new("0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675")
-                .unwrap()
-        ]
-    );
 }
 
 #[test]
-fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_service() {
+fn no_container_handle_is_minted_for_labels_of_another_workspace_or_service() {
     let scope = scope("reading-list");
     for labels in [
         "null".to_owned(),
-        container_labels(STORE, "reading-list", "cache"),
-        container_labels(STORE, "reading", "db"),
+        container_labels(WORKSPACE, "reading-list", "cache"),
+        container_labels(WORKSPACE, "reading", "db"),
         container_labels("fedcba9876543210fedcba9876543210", "reading-list", "db"),
     ] {
         let minted = mint_container(
@@ -387,7 +320,7 @@ fn no_container_handle_is_minted_for_labels_of_another_store_workspace_or_servic
 fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
     let printed = format!(
         "{}\nnot-an-id\nrunning 0\n\n\n",
-        container_labels(STORE, "reading-list", "db")
+        container_labels(WORKSPACE, "reading-list", "db")
     );
     let minted = mint_container(&scope("reading-list"), &service("db"), ID, &printed);
     assert!(
@@ -403,7 +336,7 @@ fn no_container_handle_is_minted_when_docker_prints_no_container_id() {
 }
 
 #[test]
-fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_store_workspace_and_volume() {
+fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_workspace_and_volume() {
     let scope = scope("reading-list");
     let name = scope.volume_name(&key("data"));
     let printed = |labels: String| format!("{labels}\n");
@@ -411,27 +344,26 @@ fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_store_workspace
         mint_volume(
             &scope,
             &name,
-            &printed(volume_labels(STORE, "reading-list", "data"))
+            &printed(volume_labels(WORKSPACE, "reading-list", "data"))
         )
         .is_ok()
     );
     for labels in [
         printed("null".to_owned()),
-        printed(volume_labels(STORE, "reading-list", "other")),
-        printed(volume_labels(STORE, "reading", "data")),
+        printed(volume_labels(WORKSPACE, "reading-list", "other")),
         printed(volume_labels(
             "fedcba9876543210fedcba9876543210",
             "reading-list",
             "data",
         )),
-        printed(container_labels(STORE, "reading-list", "data")),
+        printed(container_labels(WORKSPACE, "reading-list", "data")),
     ] {
         let minted = mint_volume(&scope, &name, &labels);
         assert!(
             matches!(
                 &minted,
                 Err(Error::Foreign { kind: "volume", name })
-                    if name == "mxv-01234567-reading-list.data"
+                    if name == scope.volume_name(&key("data")).as_str()
             ),
             "{labels:?}: {minted:?}"
         );
@@ -452,43 +384,12 @@ fn no_named_volume_handle_is_minted_for_a_volume_without_a_name_of_the_scope() {
         let minted = mint_volume(
             &scope,
             &name,
-            &format!("{}\n", volume_labels(STORE, "reading-list", "data")),
+            &format!("{}\n", volume_labels(WORKSPACE, "reading-list", "data")),
         );
         assert!(
             matches!(&minted, Err(Error::Foreign { kind: "volume", .. })),
             "{name}: {minted:?}"
         );
-    }
-}
-
-#[test]
-fn an_anonymous_volume_handle_is_minted_only_for_a_volume_with_dockers_anonymous_label() {
-    let name = VolumeName::new("0f9e8d7c6b5a49382716051f0e9d8c7b6a594837261504f3e2d1c0b9a8978675")
-        .unwrap();
-    assert_eq!(mint_anonymous(&name, "anonymous\n").unwrap().name(), &name);
-    for printed in ["", "\n", "named\n"] {
-        assert!(
-            matches!(
-                mint_anonymous(&name, printed),
-                Err(Error::Foreign { kind: "volume", .. })
-            ),
-            "{printed:?}"
-        );
-    }
-}
-
-#[test]
-fn a_store_id_is_32_lowercase_hex_digits() {
-    assert_eq!(StoreId::new(STORE).unwrap(), STORE);
-    for bad in [
-        "",
-        "01234567",
-        "0123456789ABCDEF0123456789ABCDEF",
-        "0123456789abcdef0123456789abcdef0",
-        "-123456789abcdef0123456789abcdef",
-        "../456789abcdef0123456789abcdef0",
-    ] {
-        assert!(StoreId::new(bad).is_err(), "{bad:?}");
     }
 }
 
@@ -607,7 +508,7 @@ fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_o
         "server"
     ));
     assert!(!scope.owns(
-        &container_labels(STORE, "reading-list", "server"),
+        &container_labels(WORKSPACE, "reading-list", "server"),
         "mxv.container",
         "server"
     ));
@@ -631,19 +532,19 @@ fn a_containers_stop_timeout_is_read_alone_and_is_none_when_docker_omits_it() {
 #[test]
 fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
     let scope = scope("reading-list");
-    let labels = container_labels(STORE, "reading-list", "db");
+    let labels = container_labels(WORKSPACE, "reading-list", "db");
     let printed =
-        format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n\n4\n\"\"\n");
+        format!("{labels}\n{ID}\nrestarting 1\n2026-11-04T10:00:00.000000000Z\n4\n\"\"\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Restarting);
     assert_eq!(inspected.restarts, 4);
 
-    let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n\"\"\n");
+    let printed = format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n0\n\"\"\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Running);
     assert_eq!(inspected.restarts, 0);
 
-    let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n\n0\n\"\"\n");
+    let printed = format!("{labels}\n{ID}\npaused 0\n2026-11-04T10:00:00.000000000Z\n0\n\"\"\n");
     let inspected = mint_container(&scope, &service("db"), ID, &printed).unwrap();
     assert_eq!(inspected.state, ContainerState::Paused);
 }
@@ -651,13 +552,13 @@ fn an_inspection_keeps_dockers_exact_status_and_restart_count() {
 #[test]
 fn an_inspection_tells_a_container_with_secret_files_by_its_secrets_label() {
     let scope = scope("reading-list");
-    let plain = container_labels(STORE, "reading-list", "db");
+    let plain = container_labels(WORKSPACE, "reading-list", "db");
     let mut labeled: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&plain).unwrap();
     labeled.insert("mxv.secrets".to_owned(), json!("files"));
     let labeled = serde_json::Value::Object(labeled).to_string();
     let printed = |labels: &str| {
-        format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n\"\"\n")
+        format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n0\n\"\"\n")
     };
 
     let with_files = mint_container(&scope, &service("db"), ID, &printed(&labeled)).unwrap();
@@ -670,9 +571,9 @@ fn an_inspection_tells_a_container_with_secret_files_by_its_secrets_label() {
 #[test]
 fn an_inspection_keeps_the_user_that_the_container_was_created_with() {
     let scope = scope("reading-list");
-    let labels = container_labels(STORE, "reading-list", "db");
+    let labels = container_labels(WORKSPACE, "reading-list", "db");
     let printed = |user: &str| {
-        format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n\n0\n{user}\n")
+        format!("{labels}\n{ID}\nrunning 0\n2026-11-04T10:00:00.000000000Z\n0\n{user}\n")
     };
 
     let named = mint_container(&scope, &service("db"), ID, &printed("\"1000:1000\"")).unwrap();
@@ -823,7 +724,10 @@ fn each_container_error_has_the_cause_of_its_kind() {
             DockerCause::Cancelled,
         ),
         (
-            Error::foreign("volume", "phase-db.data"),
+            Error::Foreign {
+                kind: "volume",
+                name: "phase-db.data".to_owned(),
+            },
             DockerCause::Foreign,
         ),
         (

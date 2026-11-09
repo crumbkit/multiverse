@@ -33,8 +33,7 @@ use crate::plan::restart::StopSignal;
 use crate::record::process::{self, Identity, System};
 pub use crate::record::process::{
     BadProcessId, Member, ProcessError, ProcessGroup, ProcessId, RawStart, TableEntry,
-    group_exists, live_members, process_table, raw_start, reap, signal_group, signal_pid,
-    started_at,
+    group_exists, live_members, process_table, raw_start, reap, signal_group, started_at,
 };
 use crate::record::run::HostProcess;
 

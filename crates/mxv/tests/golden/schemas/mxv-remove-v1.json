@@ -449,7 +449,7 @@
           }
         },
         "volumes": {
-          "description": "The docker volumes that the removal deletes because of\n`--delete-volumes`, named and anonymous.",
+          "description": "The docker volumes that the removal deletes because of\n`--delete-volumes`, which are its named volumes.",
           "type": "array",
           "items": {
             "type": "string"

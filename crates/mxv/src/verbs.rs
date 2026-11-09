@@ -688,7 +688,7 @@ pub(crate) fn remove(
         if !found.is_empty() && !args.delete_volumes {
             return Err(RunFailure::Volumes {
                 workspace: name.to_string(),
-                volumes: found.names().to_vec(),
+                volumes: found.names(),
                 allow,
             }
             .into());
@@ -698,7 +698,7 @@ pub(crate) fn remove(
     }
     let names: Vec<String> = volumes
         .as_ref()
-        .map(|volumes| volumes.names().to_vec())
+        .map(|volumes| volumes.names())
         .unwrap_or_default();
     let plan = workspaces
         .plan_removal(&name, allow)

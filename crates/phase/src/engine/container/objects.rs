@@ -2,19 +2,12 @@
 //! that prove it checked their labels.
 //!
 //! An [`OwnedContainer`] or [`OwnedVolume`] exists only after a call here
-//! inspected the object and found that its `mxv.store`, `mxv.workspace`
-//! and `mxv.container` or `mxv.volume` labels name the scope and the
-//! object. That call is the only place that fails with
+//! inspected the object and found that its `mxv.workspace-id` and
+//! `mxv.container` or `mxv.volume` labels name the scope and the object. That call is the only place that fails with
 //! [`Error::Foreign`]. Stopping, removing, deleting and following
 //! the log of an object take its handle, so nothing outside this module
 //! acts on an object whose labels it did not check.
 //!
-//! An anonymous volume, which docker creates for an image's `VOLUME` path,
-//! carries no label that names a scope. An [`AnonymousVolume`] therefore
-//! comes from the inspection of the [`OwnedContainer`] that mounts it.
-//! After the container is removed, the workspace's volume record, which
-//! the engine writes only from such values, is what names the volume, and
-//! [`inspect_anonymous`] checks that docker still labels it anonymous.
 
 use std::io::{self, Read as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -24,16 +17,12 @@ use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
-use crate::engine::container::command::{DOCKER, DOCKER_DEADLINE, quick, run, run_until};
+use crate::engine::container::command::{DOCKER_DEADLINE, quick, run, run_until};
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
     CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeKey, VolumeName,
 };
 use crate::engine::container::secrets::{IMAGE_CONFIG_FORMAT, ImageConfig};
-
-/// The label that docker gives the anonymous volumes of an image's
-/// `VOLUME` paths.
-const ANONYMOUS_LABEL: &str = "com.docker.volume.anonymous";
 
 /// How long a readiness probe waits for a published port to close a
 /// connection, which tells a port that nothing inside the container
@@ -152,9 +141,6 @@ pub struct Inspected {
     /// When it last started, as docker prints it, for `docker logs
     /// --since`.
     pub(crate) started: String,
-    /// The volumes that it mounts and that carry no name of the scope,
-    /// which are the anonymous volumes of its image.
-    pub(crate) anonymous: Vec<AnonymousVolume>,
 }
 
 /// A named volume of the scope whose labels name the scope and the
@@ -165,37 +151,10 @@ pub(crate) struct OwnedVolume {
     name: VolumeName,
 }
 
-/// An anonymous volume that an owned container mounts, as the container's
-/// inspection found it, or that the workspace's volume record names.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct AnonymousVolume {
-    /// The volume's name, which docker chose.
-    name: VolumeName,
-}
-
-impl AnonymousVolume {
+impl OwnedVolume {
     /// Returns the volume's name.
     pub(crate) const fn name(&self) -> &VolumeName {
         &self.name
-    }
-}
-
-/// A volume of a workspace that a removal may delete.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Volume {
-    /// A named volume of the scope.
-    Named(OwnedVolume),
-    /// An anonymous volume of one of the scope's containers.
-    Anonymous(AnonymousVolume),
-}
-
-impl Volume {
-    /// Returns the volume's name.
-    pub(crate) const fn name(&self) -> &VolumeName {
-        match self {
-            Self::Named(volume) => &volume.name,
-            Self::Anonymous(volume) => &volume.name,
-        }
     }
 }
 
@@ -203,7 +162,7 @@ impl Volume {
 /// [`mint_container`] reads.
 fn container_format() -> String {
     format!(
-        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{range .Mounts}}}}{{{{if eq .Type \"volume\"}}}}{{{{.Name}}}} {{{{end}}}}{{{{end}}}}\n{{{{.RestartCount}}}}\n{{{{json .Config.User}}}}",
+        "{}\n{{{{.Id}}}}\n{{{{.State.Status}}}} {{{{.State.ExitCode}}}}\n{{{{.State.StartedAt}}}}\n{{{{.RestartCount}}}}\n{{{{json .Config.User}}}}",
         labels_format(".Config.Labels")
     )
 }
@@ -242,15 +201,6 @@ pub(super) fn mint_container(
     let printed_state = lines.next().unwrap_or_default();
     let state = ContainerState::parse(printed_state);
     let started = lines.next().unwrap_or_default().trim().to_owned();
-    let prefix = scope.volume_prefix();
-    let anonymous = lines
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter(|volume| !volume.starts_with(&prefix))
-        .filter_map(|volume| VolumeName::new(volume).ok())
-        .map(|name| AnonymousVolume { name })
-        .collect();
     let restarts = lines
         .next()
         .and_then(|line| line.trim().parse().ok())
@@ -276,7 +226,6 @@ pub(super) fn mint_container(
         files: has_secret_files(labels),
         user,
         started,
-        anonymous,
     })
 }
 
@@ -518,50 +467,24 @@ fn stop_args(seconds: u64, container: &OwnedContainer) -> [String; 5] {
     ]
 }
 
-/// What happens to a container's anonymous volumes when [`remove`]
-/// removes the container.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AnonymousVolumes {
-    /// The anonymous volumes stay, for a caller that records them and
-    /// deletes them later.
-    Keep,
-    /// docker removes the anonymous volumes with the container, as
-    /// `docker rm --volumes` does. A named volume always stays.
-    Remove,
-}
-
 /// Returns the arguments of the `docker rm` of the container `id`, which
-/// removes its anonymous volumes with it when `anonymous` says so.
-pub(crate) fn rm_args(id: &str, anonymous: AnonymousVolumes) -> Vec<&str> {
-    let mut args = vec!["rm", "--force"];
-    if anonymous == AnonymousVolumes::Remove {
-        args.push("--volumes");
-    }
-    args.extend(["--", id]);
-    args
+/// removes its anonymous volumes with it. A named volume stays.
+pub(crate) fn rm_args(id: &str) -> Vec<&str> {
+    vec!["rm", "--force", "--volumes", "--", id]
 }
 
-/// Removes `container`, and its anonymous volumes when `anonymous` says
-/// so. Its named volumes always stay. A container that docker no longer
-/// has counts as removed.
+/// Removes `container` and its anonymous volumes. Its named volumes
+/// always stay. A container that docker no longer has counts as removed.
 ///
 /// # Errors
 ///
 /// Returns the errors of `docker version` and [`Error::Failed`].
-pub(crate) fn remove(container: OwnedContainer, anonymous: AnonymousVolumes) -> Result<(), Error> {
-    let removed = quick(rm_args(container.id.as_str(), anonymous), "rm")?;
+pub(crate) fn remove(container: OwnedContainer) -> Result<(), Error> {
+    let removed = quick(rm_args(container.id.as_str()), "rm")?;
     if !removed.missing() {
         removed.checked("rm", Some(container.service.as_str()))?;
     }
     Ok(())
-}
-
-/// The Go template of `docker volume inspect` that prints `anonymous` for
-/// a volume with docker's [`ANONYMOUS_LABEL`].
-fn anonymous_format() -> String {
-    format!(
-        "{{{{range $key, $value := .Labels}}}}{{{{if eq $key \"{ANONYMOUS_LABEL}\"}}}}anonymous{{{{end}}}}{{{{end}}}}"
-    )
 }
 
 /// Runs `docker volume inspect` of `name` with `format`, and returns what
@@ -603,24 +526,6 @@ pub(super) fn mint_volume(
     }
 }
 
-/// Returns the anonymous volume `name` that `docker volume inspect`
-/// printed as `printed`, in the format of [`anonymous_format`].
-///
-/// # Errors
-///
-/// Returns [`Error::Foreign`] when docker does not label the volume
-/// anonymous.
-pub(super) fn mint_anonymous(name: &VolumeName, printed: &str) -> Result<AnonymousVolume, Error> {
-    if printed.trim() == "anonymous" {
-        Ok(AnonymousVolume { name: name.clone() })
-    } else {
-        Err(Error::Foreign {
-            kind: "volume",
-            name: name.as_str().to_owned(),
-        })
-    }
-}
-
 /// Inspects the named volume `name` and returns it as a volume of `scope`,
 /// or `None` when it does not exist.
 ///
@@ -638,31 +543,17 @@ pub(crate) fn inspect_volume(
         .transpose()
 }
 
-/// Inspects the volume `name`, which an [`AnonymousVolume`] named when the
-/// workspace's volume record was written, and returns it when docker still
-/// has it and labels it anonymous, or `None` when it does not exist.
-///
-/// # Errors
-///
-/// Returns [`Error::Foreign`] as [`mint_anonymous`] describes, and
-/// the errors of `docker version` and [`Error::Failed`].
-pub(super) fn inspect_anonymous(name: &VolumeName) -> Result<Option<AnonymousVolume>, Error> {
-    inspect_volume_with(name, &anonymous_format())?
-        .map(|printed| mint_anonymous(name, &printed))
-        .transpose()
-}
-
 /// Inspects `volume` again, and returns it when it still exists and is the
 /// scope's, or `None` when it does not exist.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`inspect_volume`] and [`inspect_anonymous`].
-pub(crate) fn reinspect_volume(scope: &Scope, volume: &Volume) -> Result<Option<Volume>, Error> {
-    Ok(match volume {
-        Volume::Named(named) => inspect_volume(scope, &named.name)?.map(Volume::Named),
-        Volume::Anonymous(anonymous) => inspect_anonymous(&anonymous.name)?.map(Volume::Anonymous),
-    })
+/// Returns the errors of [`inspect_volume`].
+pub(crate) fn reinspect_volume(
+    scope: &Scope,
+    volume: &OwnedVolume,
+) -> Result<Option<OwnedVolume>, Error> {
+    inspect_volume(scope, &volume.name)
 }
 
 /// Returns the named volume `name` of `scope`, after creating it with the
@@ -704,39 +595,19 @@ pub(crate) fn ensure_volume(scope: &Scope, key: &VolumeKey) -> Result<OwnedVolum
 ///
 /// Returns the errors of `docker version` and
 /// [`Error::Failed`].
-pub(crate) fn delete_volume(volume: Volume) -> Result<(), Error> {
-    let finished = quick(["volume", "rm", "--", volume.name().as_str()], "volume rm")?;
+pub(crate) fn delete_volume(volume: OwnedVolume) -> Result<(), Error> {
+    let finished = quick(["volume", "rm", "--", volume.name.as_str()], "volume rm")?;
     if !finished.missing() {
         finished.checked("volume rm", None)?;
     }
     Ok(())
 }
 
-/// Returns the arguments of the `docker logs` that follows `container`
-/// from `since`, when docker last started it, or from its first line
-/// without `since`. The host starts the follower, which ends when the
-/// container stops.
-pub(crate) fn follow_args(container: &OwnedContainer, since: Option<&str>) -> Vec<String> {
-    let mut argv = vec![DOCKER.to_owned(), "logs".to_owned(), "--follow".to_owned()];
-    if let Some(since) = since {
-        argv.extend(["--since".to_owned(), since.to_owned()]);
-    }
-    argv.extend(["--".to_owned(), container.id.as_str().to_owned()]);
-    argv
-}
-
 /// Reports whether something inside a container answers on the host port
-/// `port`. Docker's port proxy accepts a connection to a published port
-/// before anything in the container listens, and then closes it at once,
-/// so the probe counts the port as answering only when a connection stays
-/// open for 300 ms or the container sends data.
-#[must_use]
-pub fn answers(port: u16) -> bool {
-    answers_within(port, PROBE_WAIT + PROBE_WAIT, &Cancel::new())
-}
-
-/// Reports whether something inside a container answers on the host port
-/// `port`, as [`answers`] describes, within `timeout`. The connection gets
+/// `port` within `timeout`. Docker's port proxy accepts a connection to a
+/// published port before anything in the container listens, and then closes
+/// it at once, so the probe counts the port as answering only when a
+/// connection stays open for 300 ms or the container sends data. The connection gets
 /// at most 300 ms, and must then stay open for the full 300 ms or bring
 /// data, so a `timeout` too short to leave 300 ms after the connection
 /// gives no answer. [`crate::plan::probe::LEAST_PUBLISHED_PROBE_TIMEOUT`]

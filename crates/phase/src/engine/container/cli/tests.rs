@@ -10,9 +10,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use crate::engine::container::cli::DockerCli;
-use crate::engine::container::names::{Scope, StoreId};
 use crate::engine::container::{ContainerError, ContainerState};
-use crate::name::{WorkspaceId, WorkspaceName};
+use crate::name::WorkspaceId;
 use crate::record::DockerName;
 use crate::record::docker::{
     Docker, DockerCause, DockerError, DockerKind, DockerObject, SeenContainer,
@@ -84,9 +83,6 @@ exit 1
 /// The tests' workspace id.
 const WORKSPACE_ID: &str = "0123456789abcdef0123456789abcdef";
 
-/// The tests' store id.
-const STORE: &str = "fedcba9876543210fedcba9876543210";
-
 /// A container id.
 fn container_id(digit: char) -> String {
     std::iter::repeat_n(digit, 64).collect()
@@ -112,21 +108,17 @@ impl Fake {
         self.dir.path().join("docker")
     }
 
-    /// Adds an object that docker finds by each of `targets`, whose id,
-    /// workspace id, store and workspace labels are `fields`. An empty
-    /// label is left out, and an object without labels prints `null`, as
+    /// Adds an object that docker finds by each of `targets`, whose id and
+    /// workspace id label are `fields`. An empty label is left out, and an object without labels prints `null`, as
     /// docker does.
-    fn object(&self, targets: &[&str], fields: [&str; 4]) {
-        let [id, workspace_id, store, workspace] = fields;
-        let labels: serde_json::Map<String, serde_json::Value> = [
-            ("mxv.workspace-id", workspace_id),
-            ("mxv.store", store),
-            ("mxv.workspace", workspace),
-        ]
-        .into_iter()
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(key, value)| (key.to_owned(), value.into()))
-        .collect();
+    fn object(&self, targets: &[&str], fields: [&str; 2]) {
+        let [id, workspace_id] = fields;
+        let labels: serde_json::Map<String, serde_json::Value> =
+            [("mxv.workspace-id", workspace_id)]
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty())
+                .map(|(key, value)| (key.to_owned(), value.into()))
+                .collect();
         let labels = if labels.is_empty() {
             "null".to_owned()
         } else {
@@ -187,13 +179,6 @@ fn name(text: &str) -> DockerName {
     text.parse().unwrap()
 }
 
-fn legacy_scope() -> Scope {
-    Scope::new(
-        &StoreId::new(STORE).unwrap(),
-        &"reading-list".parse::<WorkspaceName>().unwrap(),
-    )
-}
-
 fn object<'a>(
     workspace: &'a WorkspaceId,
     kind: DockerKind,
@@ -212,7 +197,7 @@ fn object<'a>(
 fn a_container_with_a_recorded_id_is_found_by_that_id_when_it_carries_this_workspaces_id() {
     let fake = Fake::new();
     let id = container_id('a');
-    fake.object(&[&id], [&id, WORKSPACE_ID, STORE, "reading"]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     let workspace = workspace();
     let name = name("mxv-fedcba98-reading.db");
     let found = fake
@@ -228,15 +213,10 @@ fn a_container_with_a_recorded_id_is_found_by_that_id_when_it_carries_this_works
 fn a_container_found_by_its_name_is_matched_only_by_this_workspaces_id_label() {
     let fake = Fake::new();
     let ours = container_id('b');
-    fake.object(&["ours.db"], [&ours, WORKSPACE_ID, STORE, "reading"]);
+    fake.object(&["ours.db"], [&ours, WORKSPACE_ID]);
     fake.object(
         &["theirs.db"],
-        [
-            &container_id('c'),
-            "99999999999999999999999999999999",
-            STORE,
-            "reading",
-        ],
+        [&container_id('c'), "99999999999999999999999999999999"],
     );
     let workspace = workspace();
     let docker = fake.docker();
@@ -265,10 +245,10 @@ fn a_container_found_by_its_name_is_matched_only_by_this_workspaces_id_label() {
 fn an_object_without_an_mxv_label_is_never_matched_even_by_a_recorded_id() {
     let fake = Fake::new();
     let id = container_id('d');
-    fake.object(&[&id, "plain.db"], [&id, "", "", ""]);
+    fake.object(&[&id, "plain.db"], [&id, ""]);
     let workspace = workspace();
     let plain = name("plain.db");
-    let docker = fake.docker().with_legacy(legacy_scope());
+    let docker = fake.docker();
     assert_eq!(
         docker
             .find(&object(
@@ -289,66 +269,11 @@ fn an_object_without_an_mxv_label_is_never_matched_even_by_a_recorded_id() {
 }
 
 #[test]
-fn an_object_with_only_the_older_labels_is_matched_by_its_store_and_workspace() {
-    let fake = Fake::new();
-    let id = container_id('e');
-    let target = "mxv-fedcba98-reading-list.db";
-    fake.object(&[target], [&id, "", STORE, "reading-list"]);
-    let workspace = workspace();
-    let container = name(target);
-    let wanted = object(&workspace, DockerKind::Container, &container, None);
-    assert_eq!(
-        fake.docker()
-            .with_legacy(legacy_scope())
-            .find(&wanted)
-            .unwrap(),
-        Some(id)
-    );
-    // Without the scope of the older labels, the object is not this
-    // workspace's.
-    assert_eq!(fake.docker().find(&wanted).unwrap(), None);
-    // The older labels of another store do not match.
-    let other = Scope::new(
-        &StoreId::new("00000000000000000000000000000000").unwrap(),
-        &"reading-list".parse::<WorkspaceName>().unwrap(),
-    );
-    assert_eq!(
-        fake.docker().with_legacy(other).find(&wanted).unwrap(),
-        None
-    );
-}
-
-#[test]
-fn an_object_that_carries_another_workspaces_id_is_never_matched_by_the_older_labels() {
-    let fake = Fake::new();
-    let target = "mxv-fedcba98-reading-list.db";
-    fake.object(
-        &[target],
-        [
-            &container_id('f'),
-            "99999999999999999999999999999999",
-            STORE,
-            "reading-list",
-        ],
-    );
-    let workspace = workspace();
-    let container = name(target);
-    let wanted = object(&workspace, DockerKind::Container, &container, None);
-    assert_eq!(
-        fake.docker()
-            .with_legacy(legacy_scope())
-            .find(&wanted)
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn a_network_and_a_volume_are_found_through_their_own_inspect_commands() {
     let fake = Fake::new();
     let network_id = container_id('1');
-    fake.object(&["net"], [&network_id, WORKSPACE_ID, "", ""]);
-    fake.object(&["data"], ["data", WORKSPACE_ID, "", ""]);
+    fake.object(&["net"], [&network_id, WORKSPACE_ID]);
+    fake.object(&["data"], ["data", WORKSPACE_ID]);
     let workspace = workspace();
     let docker = fake.docker();
     let net = name("net");
@@ -414,7 +339,7 @@ fn a_missing_docker_program_fails_a_find_as_unavailable() {
 fn removing_a_container_stops_it_within_the_wait_and_then_removes_it() {
     let fake = Fake::new();
     let id = container_id('2');
-    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     fake.docker()
         .remove(DockerKind::Container, &id, Duration::from_secs(7))
         .unwrap();
@@ -431,7 +356,7 @@ fn removing_a_container_stops_it_within_the_wait_and_then_removes_it() {
 fn removing_a_container_turns_off_its_restart_policy_before_it_stops_it() {
     let fake = Fake::new();
     let id = container_id('2');
-    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     fake.docker()
         .remove(DockerKind::Container, &id, Duration::from_secs(7))
         .unwrap();
@@ -445,7 +370,7 @@ fn removing_a_container_turns_off_its_restart_policy_before_it_stops_it() {
 fn removing_a_container_that_docker_is_restarting_removes_it_without_a_stop() {
     let fake = Fake::new();
     let id = container_id('2');
-    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     fake.state(&id, "restarting 1");
     fake.docker()
         .remove(DockerKind::Container, &id, Duration::from_secs(7))
@@ -463,7 +388,7 @@ fn removing_a_container_that_docker_is_restarting_removes_it_without_a_stop() {
 fn removing_a_stopped_container_whose_update_docker_refuses_still_removes_it() {
     let fake = Fake::new();
     let id = container_id('2');
-    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     fake.state(&id, "exited 1");
     fake.mark("noupdate");
     fake.docker()
@@ -477,7 +402,7 @@ fn removing_a_stopped_container_whose_update_docker_refuses_still_removes_it() {
 fn removing_a_running_container_whose_update_docker_refuses_fails_as_refused() {
     let fake = Fake::new();
     let id = container_id('2');
-    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     fake.mark("noupdate");
     let removed = fake
         .docker()
@@ -493,8 +418,8 @@ fn removing_a_running_container_whose_update_docker_refuses_fails_as_refused() {
 fn removing_a_network_or_a_volume_runs_their_own_remove_commands() {
     let fake = Fake::new();
     let network_id = container_id('3');
-    fake.object(&[&network_id], [&network_id, WORKSPACE_ID, "", ""]);
-    fake.object(&["data"], ["data", WORKSPACE_ID, "", ""]);
+    fake.object(&[&network_id], [&network_id, WORKSPACE_ID]);
+    fake.object(&["data"], ["data", WORKSPACE_ID]);
     let docker = fake.docker();
     docker
         .remove(DockerKind::Network, &network_id, Duration::ZERO)
@@ -525,7 +450,7 @@ fn removing_an_object_that_is_already_gone_succeeds() {
 #[test]
 fn a_removal_that_docker_answers_and_refuses_fails_as_refused() {
     let fake = Fake::new();
-    fake.object(&["data"], ["data", WORKSPACE_ID, "", ""]);
+    fake.object(&["data"], ["data", WORKSPACE_ID]);
     fake.mark("refuse");
     let removed = fake
         .docker()
@@ -571,7 +496,7 @@ fn the_failures_of_sweeps_docker_carry_the_cause_of_what_failed() {
     assert_eq!(down.cause(), DockerCause::DaemonUnavailable);
 
     let fake = Fake::new();
-    fake.object(&["data"], ["data", WORKSPACE_ID, "", ""]);
+    fake.object(&["data"], ["data", WORKSPACE_ID]);
     fake.mark("refuse");
     let refused = fake
         .docker()
@@ -729,22 +654,21 @@ fn a_label_value_that_holds_tabs_or_spaces_never_matches() {
     let fake = Fake::new();
     let workspace = workspace();
     let target = "mxv-fedcba98-reading-list.db";
-    // A workspace id label that holds the older labels' values after tabs
-    // is a workspace id of its own, so the object is not this workspace's.
+    // A workspace id label that holds other values after tabs is a
+    // workspace id of its own, so the object is not this workspace's.
     fake.labelled(
         &[target],
         &container_id('5'),
-        &serde_json::json!({ "mxv.workspace-id": format!("\t{STORE}\treading-list") }).to_string(),
+        &serde_json::json!({ "mxv.workspace-id": format!("\t{WORKSPACE_ID}\treading-list") })
+            .to_string(),
     );
     let container = name(target);
     let wanted = object(&workspace, DockerKind::Container, &container, None);
-    let docker = fake.docker().with_legacy(legacy_scope());
+    let docker = fake.docker();
     assert_eq!(docker.find(&wanted).unwrap(), None);
     for labels in [
         serde_json::json!({ "mxv.workspace-id": " " }),
         serde_json::json!({ "mxv.workspace-id": format!("{WORKSPACE_ID} ") }),
-        serde_json::json!({ "mxv.store": format!("{STORE} "), "mxv.workspace": "reading-list" }),
-        serde_json::json!({ "mxv.store": STORE, "mxv.workspace": "reading-list\n" }),
     ] {
         fake.labelled(&[target], &container_id('5'), &labels.to_string());
         assert_eq!(docker.find(&wanted).unwrap(), None, "{labels}");
@@ -755,7 +679,7 @@ fn a_label_value_that_holds_tabs_or_spaces_never_matches() {
 fn an_unknown_docker_context_fails_a_find_and_a_removal_and_never_reports_an_object_gone() {
     let fake = Fake::new();
     let id = container_id('6');
-    fake.object(&[&id, "data"], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id, "data"], [&id, WORKSPACE_ID]);
     fake.mark("nocontext");
     let workspace = workspace();
     let docker = fake.docker();
@@ -844,7 +768,7 @@ fn a_container_removal_waits_at_least_a_second_and_rounds_a_part_second_up() {
         (Duration::from_secs(3), 3),
     ] {
         let fake = Fake::new();
-        fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+        fake.object(&[&id], [&id, WORKSPACE_ID]);
         fake.docker()
             .remove(DockerKind::Container, &id, wait)
             .unwrap();
@@ -991,7 +915,7 @@ running 0"#,
 fn a_refused_removal_names_the_operation_and_the_containers_id_and_no_service() {
     let fake = Fake::new();
     let id = container_id('2');
-    fake.object(&[&id], [&id, WORKSPACE_ID, "", ""]);
+    fake.object(&[&id], [&id, WORKSPACE_ID]);
     fake.mark("noupdate");
 
     let error = fake
