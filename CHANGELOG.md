@@ -60,9 +60,11 @@ workspace may need to act on.
   deletes the `.volumes` file that held its name. If you are removing the
   workspace and its data before you upgrade, run
   `mxv remove --delete-volumes` with the earlier mxv. Otherwise, before
-  `mxv remove` deletes the file, run `docker volume rm` on each name in
+  `mxv remove` deletes the file, and only when you no longer need its data,
+  run `docker volume rm` on each name in
   `$XDG_STATE_HOME/mxv/runs/<WORKSPACE>/.volumes` that does not start with
-  `mxv-`. That file also lists the workspace's named volumes, and a name
+  `mxv-`. An image with a `VOLUME` path keeps its only copy of that data in
+  such a volume. That file also lists the workspace's named volumes, and a name
   that starts with `mxv-` is one of them, so deleting it destroys the data
   that the previous item keeps. This command prints only the anonymous
   volumes' names:

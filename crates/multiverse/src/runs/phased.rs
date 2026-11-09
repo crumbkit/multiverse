@@ -275,7 +275,7 @@ const fn describe_unknown(reason: UnknownReason) -> &'static str {
         UnknownReason::LeaderGone => {
             "the process has ended and left members in its process group, and nothing proves that the group is still the one phase started"
         }
-        _ => "phase cannot tell what the process is doing",
+        _ => "phase cannot tell what the unit is doing",
     }
 }
 

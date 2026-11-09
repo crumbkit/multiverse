@@ -1,9 +1,9 @@
-Run a one-off command in the context of a running process or container, and exit with its exit code
+Run a one-off command in the context of a running unit, and exit with its exit code
 
-Usage: mxv exec [OPTIONS] <PROCESS> -- <COMMAND>...
+Usage: mxv exec [OPTIONS] <UNIT> -- <COMMAND>...
 
 Arguments:
-  <PROCESS>     The running process or container in whose context the command runs
+  <UNIT>        The running unit in whose context the command runs
   <COMMAND>...  The command's program and its arguments, after `--`
 
 Options:

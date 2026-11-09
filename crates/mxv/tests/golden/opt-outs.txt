@@ -60,19 +60,19 @@ guide/document: mxv restore
   Cost: An agent that gets a refusal or an output it did not ask for after the change may run the command again and repeat the change.
 
 effects/yes: mxv down
-  Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
+  Reason: The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 effects/yes: mxv restart
-  Reason: The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
+  Reason: The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 effects/yes: mxv reclaim
-  Reason: A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.
+  Reason: A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the units that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 effects/yes: mxv ports reset
-  Reason: The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.
+  Reason: The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.
   Cost: An agent without a terminal cannot run the command, or the command runs without asking anyone.
 
 examples/run: mxv ports reset
@@ -115,16 +115,16 @@ root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv 
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
 
 children: mxv up
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 children: mxv down
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 children: mxv restart
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 children: mxv status
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 
 text-line: mxv logs
   Declares: The text prints each row as the line <LINE> in place of a table row.

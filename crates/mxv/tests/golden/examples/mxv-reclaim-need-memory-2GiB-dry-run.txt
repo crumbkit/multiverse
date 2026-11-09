@@ -1,2 +1,2 @@
 NAME          STATE  FREED  CONTAINERS  REASON
-reading-list  kept   0 B    0 B         none of its processes or containers runs
+reading-list  kept   0 B    0 B         none of its units runs

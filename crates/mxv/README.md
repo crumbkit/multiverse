@@ -50,8 +50,8 @@ workspace under the same rules, on the workspace's branch, and takes
 `--as` as `new` does. `add` without `-w` adds to the workspace that holds
 the current directory. `add` refuses a workspace of git worktrees with
 `mxv::workspace::worktree_kind`. It also refuses while the workspace's
-processes or containers run, because a second checkout renames the first
-checkout's processes, containers and ports, as
+units run, because a second checkout renames the first
+checkout's units and ports, as
 [Manifests of several checkouts](#manifests-of-several-checkouts)
 describes.
 
@@ -215,9 +215,11 @@ exits with 1.
 A repository declares its app in `mxv.toml` at its root, or a workspace
 declares it in its own workspace manifest, as
 [The workspace manifest](#the-workspace-manifest) describes. `mxv up` starts
-the processes and containers it declares in each workspace of that
+the units it declares in each workspace of that
 repository, in the background, and returns once each is ready. No mxv
-process stays running.
+process stays running. A unit is one entry of the
+manifest's `[processes.*]` or `[containers.*]` tables: a process that runs
+on the host or a container that runs in Docker.
 
 ```toml
 version = 1                                  # optional; a higher version fails
@@ -261,11 +263,11 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.ports` | Variables that receive a host port, each naming a port of `ports`. |
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. A table may not set both. |
-| `processes.<name>.depends_on` | Processes that start, and are ready, before this one. A cycle fails. |
+| `processes.<name>.depends_on` | Units that start, and are ready, before this one. A cycle fails. |
 | `processes.<name>.permissions` | Runs the process under phase's sandbox, with the grants of `write`, `listen` and `connect`. An empty table runs it sandboxed with no grants, and a process without the table runs unsandboxed. [Sandboxed processes](#sandboxed-processes) describes it. |
 | `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself, a path inside `.git` in any case, and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
 | `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. A port that another process listens on or a container publishes fails with `mxv::manifest::invalid` and its line. |
-| `processes.<name>.permissions.connect` | Processes and containers that the process may connect to. Each must be a unit that the process depends on through `depends_on`. |
+| `processes.<name>.permissions.connect` | Units that the process may connect to. Each must be a unit that the process depends on through `depends_on`. |
 | `disposable` | Globs of more disposable directories of this repository, such as `["web/test-results/"]`. Each glob must end with `/` and have a literal last name. [Disk space](#disk-space) describes them. |
 | `clone_on_new` | Globs of more ignored directories that `mxv new` clones from this repository, such as `["web/.venv/"]`, under the same rule. |
 
@@ -334,22 +336,19 @@ depends_on = ["dynamodb", "localstack"]
 | `containers.<name>.volumes` | Named volumes: each key names a volume, and each value is the absolute path it mounts at inside the container. mxv mounts no directory of the host. |
 | `containers.<name>.owner` | The owner that `mxv up` gives the root directory of each of the container's volumes: a numeric `uid` or `uid:gid`, such as `"999:999"`, or `"keep"` to leave each volume as it is. It is optional. Without it, mxv gives the volumes to the user that the container runs as, and leaves them alone when that user is root. Use it for an image that names a `USER` and has no `id` program, or with `"keep"` on a machine that cannot pull the helper image. A name, the id 4294967295 and an `owner` on a container with no `volumes` are invalid. A changed `owner` replaces the container on the next `up`. |
 | `containers.<name>.ready` | `port` and `timeout_seconds`, as for a process. `port` must be a port that the container publishes, and it defaults to that port when the container publishes exactly one. A container's readiness check waits only for a port, so `log` is invalid here, and a container's `env` values hold no port placeholders. |
-| `containers.<name>.depends_on` | Processes or containers that start, and are ready, before this one. |
+| `containers.<name>.depends_on` | Units that start, and are ready, before this one. |
 
 A container takes no `permissions`, because Docker runs it and phase's
 sandbox holds only host processes. `permissions` under `[containers.*]`
 fails with `mxv::manifest::invalid` and its line.
 
-Processes and containers share one set of names, and either may depend on
-the other. A process receives a container's host port through its own
+Units share one set of names, and any unit may depend on
+any other. A process receives a container's host port through its own
 `ports`, as `api` receives `DYNAMODB_PORT` above.
 
 mxv runs a workspace's app with phase, the library in `crates/phase`.
-Each process and each container of the manifest is one phase app, named
-after the unit, and each app has one process, named `main`. A unit's
-`depends_on` becomes its app's dependencies. A unit name must therefore be
-a name phase accepts: 1 to 64 lowercase letters, digits, `-` and `_`,
-starting with a letter or a digit. A manifest with any other unit name fails
+A unit name must be a name phase accepts: 1 to 64 lowercase letters,
+digits, `-` and `_`, starting with a letter or a digit. A manifest with any other unit name fails
 with `mxv::manifest::unit_name`, and one that breaks another of phase's plan
 rules fails with `mxv::manifest::unrunnable`, in both cases before anything
 starts.
@@ -377,7 +376,7 @@ write its own state and temporary directories. `permissions` adds:
   address. A process with a `listen` port must name it here, and the
   manifest fails without it. A port that another process listens on or a
   container publishes fails, so a process cannot take a dependency's port.
-- `connect`: the processes and containers that the process may connect to
+- `connect`: the units that the process may connect to
   over the loopback address.
 
 phase's sandbox opens the ports that the units of `connect` serve, and no
@@ -577,17 +576,17 @@ sentence of phase or mxv that says what failed. A
 failure of phase that mxv has no code for fails with `mxv::phase::failed`,
 whose `phase_code` field holds phase's code.
 
-#### The process verbs
+#### The unit verbs
 
-Each process verb works on the workspace that `-w/--workspace` names, or on
+Each unit verb works on the workspace that `-w/--workspace` names, or on
 the one that holds the current directory when it names none. Its positional
-words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
+words name units: `mxv up [-w WORKSPACE] [UNIT]...`, `mxv down`,
 `mxv restart`, `mxv status [-w WORKSPACE]`,
-`mxv logs [-w WORKSPACE] PROCESS` and
-`mxv exec [-w WORKSPACE] PROCESS -- COMMAND [ARGS]...`.
+`mxv logs [-w WORKSPACE] UNIT` and
+`mxv exec [-w WORKSPACE] UNIT -- COMMAND [ARGS]...`.
 
-- `mxv up` starts the named processes, or every process, with their
-  dependencies first. It skips a process that already runs. phase starts
+- `mxv up` starts the named units, or every unit, with their
+  dependencies first. It skips a unit that already runs. phase starts
   each host process under a keeper, a small `mxv` process that runs the
   process in a process group of its own, with standard input empty and
   standard output and standard error appended to its log, and stops what
@@ -611,9 +610,9 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   `mxv::process::unstoppable`. When `up` meets such a group while it stops
   what it started, it fails with the same error, starts nothing more, and
   names the units it did not start.
-- `mxv restart` stops the named processes, or every process, and starts them
+- `mxv restart` stops the named units, or every unit, and starts them
   again.
-- `mxv status` reports each process as `running`, `starting`, `stopping`,
+- `mxv status` reports each unit as `running`, `starting`, `stopping`,
   `restarting`, `exited`, `stopped`, or `unknown` with a `reason`. An
   exited process has its exit `code`, or the number of the `signal` that
   ended it and a null `code`. A process that runs a shell, such as
@@ -647,8 +646,8 @@ words name processes: `mxv up [-w WORKSPACE] [PROCESS]...`, `mxv down`,
   lines, and `-f` prints it once it is finished, also with `--lines 0`. An
   unfinished last line longer than 64 KiB loses its start, so `-f`, even
   with `--lines 0`, starts in the middle of it.
-- `mxv exec` runs a one-off command in the context of a running process
-  or container, and exits with the command's exit code, or with 128 plus
+- `mxv exec` runs a one-off command in the context of a running unit,
+  and exits with the command's exit code, or with 128 plus
   the number of the signal that ended it. The command is the words after
   `--`, which no shell reads, so `mxv exec api -- env` prints the
   variables that `api` receives.
@@ -836,7 +835,7 @@ value is a secret, because the access keys are the literal `test`. A
 manifest that declares services and no process is valid, and `up` starts
 the backends and provisions the resources.
 
-The prefix `mxv-` belongs to mxv. A port, process or container whose name
+The prefix `mxv-` belongs to mxv. A port or unit whose name
 starts with `mxv-` fails with `mxv::manifest::invalid` and its line, and a
 checkout whose prefixed names would start with `mxv-` needs `--as`.
 
@@ -900,7 +899,7 @@ and `show` and `new` put it in the row's `warnings`. phase's own tables,
 because mxv sandboxes each process on its own, so it fails with
 `mxv::manifest::invalid` and a hint to move its keys to
 `[processes.<name>.permissions]`. `up` also warns when the manifest declares
-no processes, no containers and no services, and starts nothing.
+no units and no services, and starts nothing.
 
 A workspace manifest that is a symbolic link leading nowhere cannot be
 read. `up` fails with `mxv::manifest::unreadable`, which names the link and
@@ -935,7 +934,7 @@ reports `merged`, with every file it read in `manifest_paths`.
   says to create the workspace again with `mxv new` and `--as`.
 - The prefixes appear only once a workspace has two checkouts. Adding a
   second repository with `mxv add` therefore renames the first
-  repository's processes, containers, ports and volumes. `add` moves the
+  repository's units, ports and volumes. `add` moves the
   host ports that the workspace holds to the new names, so `mxv up` gives
   each process the port it had before. The first repository's containers
   mount volumes under the new names, such as `api-data` in place of
@@ -1118,7 +1117,7 @@ mxv deletes a clone by file descriptor, as `mxv clean` deletes a disposable
 path, so a directory in it that another process swaps for a symbolic link
 is never followed. It refuses, and changes nothing, in these cases:
 
-- The workspace's processes or containers run. The refusal is
+- The workspace's units run. The refusal is
   `mxv::workspace::running`, and `--force` stops them before it removes
   the workspace.
 - The workspace has named docker volumes. A volume may hold the only copy of a
@@ -1370,8 +1369,8 @@ why in `warnings`.
 
 `mxv clean <workspace>...` deletes the disposable paths of the named
 workspaces that are idle, and `mxv clean --all` does so for every workspace.
-It deletes nothing else. A workspace is idle when none of its processes or
-containers run, no other process has its working directory inside the
+It deletes nothing else. A workspace is idle when none of its units
+run, no other process has its working directory inside the
 workspace, and no file or directory of its checkouts outside the
 disposable paths and `.git` has changed for the idle age. mxv sees only
 the processes whose working directory it can read, which are the person's
@@ -1405,8 +1404,8 @@ same way, so they do not count toward the bytes that the run frees.
 
 Before it deletes anything in a workspace, `clean` takes the workspace's
 lock, which `mxv up` and `mxv down` also take, so neither runs while mxv
-deletes. It then measures the workspace again and checks that no process
-or container runs, no other process works in the workspace and nothing
+deletes. It then measures the workspace again and checks that no unit
+runs, no other process works in the workspace and nothing
 changed within the idle age. A workspace that became busy keeps every path.
 A build that someone starts outside mxv after the check is neither blocked
 nor detected. For each path, it checks again that git reports the path as
@@ -1486,7 +1485,7 @@ A running workspace is idle when all of these hold:
 The idle age is `--idle`, or else the config file's `stop_idle`, or else 2
 hours. `--idle` refuses an age under 10 minutes, so a workspace that a
 person left for a few minutes is never stopped; `stop_idle` can set a
-shorter age, for tests. A workspace whose processes and containers all
+shorter age, for tests. A workspace whose units all
 stopped is not considered. mxv reads `.touched` first, and skips reading
 the checkouts' files of a workspace that an mxv command named within the
 idle age.
@@ -1513,9 +1512,9 @@ the workspace when it became pinned, an mxv command named it, a process
 outside phase started working in it, its checkouts changed, or its
 processes stopped since mxv measured it.
 
-mxv marks each workspace that it stopped with the processes and containers
+mxv marks each workspace that it stopped with the units
 that ran. `mxv status` reports the mark in `reclaimed`, and `mxv up` without
-names starts those processes and containers again and removes the mark.
+names starts those units again and removes the mark.
 `mxv up` with names, `mxv restart` and `mxv down` remove only the names
 that they start or stop, or the whole mark when they name none.
 `mxv down` removes it too. `--dry-run` reports the choice and stops

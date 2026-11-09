@@ -453,12 +453,12 @@
       "description": "What `mxv reclaim` does with one workspace.",
       "oneOf": [
         {
-          "description": "The run stopped the workspace's processes and containers.",
+          "description": "The run stopped the workspace's units.",
           "type": "string",
           "const": "stopped"
         },
         {
-          "description": "A dry run would stop the workspace's processes and containers.",
+          "description": "A dry run would stop the workspace's units.",
           "type": "string",
           "const": "would_stop"
         },

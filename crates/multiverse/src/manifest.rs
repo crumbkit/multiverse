@@ -1956,7 +1956,7 @@ fn check_permissions(
             return Err(errors.invalid(
                 &unit.span(),
                 format!(
-                    "the permissions of `{process}` let it connect to `{name}`, which the manifest does not declare as a process or a container; a sandboxed process cannot reach an external host until phase's allowlist proxy is built"
+                    "the permissions of `{process}` let it connect to `{name}`, which the manifest does not declare as a unit; a sandboxed process cannot reach an external host until phase's allowlist proxy is built"
                 ),
             ));
         }

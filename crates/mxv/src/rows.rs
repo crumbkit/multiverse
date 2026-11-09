@@ -957,11 +957,11 @@ fn commits(count: u32) -> String {
     }
 }
 
-/// One process or container of a workspace, as `up`, `down`, `restart`
+/// One unit of a workspace, as `up`, `down`, `restart`
 /// and `status` print it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ProcessRow {
-    /// The process's or container's name in the manifest.
+    /// The unit's name in the manifest.
     name: String,
     /// `process` or `container`.
     kind: KindName,
@@ -971,8 +971,8 @@ pub(crate) struct ProcessRow {
     /// ready yet, `stopping`, `restarting` while docker restarts a
     /// container, or `unknown` when mxv cannot tell.
     state: StateName,
-    /// Whether the process has been ready since it last started: true
-    /// once its readiness check passed, or once a process without one
+    /// Whether the unit has been ready since it last started: true
+    /// once its readiness check passed, or once a unit without one
     /// outlasted its start grace, and false while it runs and has not,
     /// such as after its keeper or docker restarted it. It is null when it
     /// does not run.
@@ -980,21 +980,21 @@ pub(crate) struct ProcessRow {
     /// The process id, which is also its process group's id, while a
     /// process runs, and null for a container.
     pid: Option<u32>,
-    /// The exit code of an exited process, or null when a signal ended it
+    /// The exit code of an exited unit, or null when a signal ended it
     /// or it has not exited. A container's code is the one docker reports,
     /// such as 137 for a container that SIGKILL ended.
     code: Option<i32>,
-    /// The number of the signal that ended an exited process, such as 15
+    /// The number of the signal that ended an exited unit, such as 15
     /// for SIGTERM, or null.
     signal: Option<i32>,
-    /// Why mxv cannot tell the state of an `unknown` process, or why it
-    /// does not know the exit code of an exited process, or null when it
+    /// Why mxv cannot tell the state of an `unknown` unit, or why it
+    /// does not know the exit code of an exited unit, or null when it
     /// knows.
     reason: Option<String>,
     /// The ports that a process receives, as `VARIABLE=port`, or that a
     /// container publishes, as `port-name=port`.
     ports: Vec<String>,
-    /// The process's log file, which `mxv logs` prints, or null for a
+    /// The unit's log file, which `mxv logs` prints, or null for a
     /// container, whose output docker keeps and `mxv logs` also prints.
     log: Option<String>,
     /// Whether phase runs a host process under its sandbox, as phase
@@ -1004,8 +1004,8 @@ pub(crate) struct ProcessRow {
     /// table. It is null for a container and for a process that phase
     /// does not run.
     sandbox: Option<String>,
-    /// What `up` and `restart` found about the process beside its state:
-    /// a warning when the process's running container still has its
+    /// What `up` and `restart` found about the unit beside its state:
+    /// a warning when the unit's running container still has its
     /// earlier secret files, because `up` could not rewrite them, an info
     /// line when `up` rewrote them, and an info line when `up` restarted a
     /// running host process because its part of the plan changed. Every
@@ -1013,13 +1013,13 @@ pub(crate) struct ProcessRow {
     notes: Vec<NoteRow>,
 }
 
-/// Something that `up` or `restart` found about a process, as its row
+/// Something that `up` or `restart` found about a unit, as its row
 /// prints it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct NoteRow {
     /// `warning` when something did not happen as asked, or `info`.
     level: NoteLevel,
-    /// phase's sentence, which names the process and holds no value.
+    /// phase's sentence, which names the unit and holds no value.
     message: String,
 }
 
@@ -1058,25 +1058,25 @@ pub(crate) enum KindName {
     Container,
 }
 
-/// The state of a process, as a row prints it.
+/// The state of a unit, as a row prints it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum StateName {
-    /// The process runs.
+    /// The unit runs.
     Running,
-    /// The process ended.
+    /// The unit ended.
     Exited,
     /// docker created the container and did not start it.
     Created,
-    /// The process is not started.
+    /// The unit is not started.
     Stopped,
-    /// The process started and is not ready yet.
+    /// The unit started and is not ready yet.
     Starting,
-    /// The process is stopping.
+    /// The unit is stopping.
     Stopping,
     /// docker is restarting the container.
     Restarting,
-    /// mxv cannot tell the process's state.
+    /// mxv cannot tell the unit's state.
     Unknown,
 }
 
@@ -1087,12 +1087,12 @@ impl Row for ProcessRow {
     const LONG_COLUMNS: &'static [&'static str] = &["log"];
     const CHILDREN: Option<&'static str> = Some("notes");
     const CHILDREN_HELP: Option<&'static str> = Some(
-        "one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.",
+        "one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.",
     );
     // A person copies the name into `mxv logs`.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 
-    /// An exited process reports a problem unless it exited with code 0.
+    /// An exited unit reports a problem unless it exited with code 0.
     fn is_problem(&self) -> bool {
         self.state == StateName::Exited && self.code != Some(0)
     }
@@ -1156,7 +1156,7 @@ impl From<&ProcessStatus> for ProcessRow {
     }
 }
 
-/// One line of a process's log, as `mxv logs` prints it.
+/// One line of a unit's log, as `mxv logs` prints it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct LogLine {
     /// The line's text, without its line feed.
@@ -1254,7 +1254,7 @@ pub(crate) struct StatusSummary {
 /// What `mxv reclaim` stopped in a workspace, as `mxv status` reports it.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ReclaimedRow {
-    /// The processes and containers that ran when reclaim stopped them.
+    /// The units that ran when reclaim stopped them.
     processes: Vec<String>,
 }
 
@@ -1415,7 +1415,7 @@ impl fmt::Display for StatusSummary {
         if let Some(error) = &self.manifest_error {
             write!(
                 formatter,
-                "\nThe manifest cannot be used, so the processes come from the run records: {error}"
+                "\nThe manifest cannot be used, so the units come from the run records: {error}"
             )?;
         }
         for warning in &self.warnings {

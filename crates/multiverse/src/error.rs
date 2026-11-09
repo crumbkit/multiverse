@@ -492,7 +492,7 @@ impl fmt::Display for Error {
                 path.display()
             ),
             Self::ProcessUnstartable { process, source } => {
-                write!(formatter, "cannot start the process {process}: {source}")
+                write!(formatter, "cannot start the unit {process}: {source}")
             }
             Self::ProcessTable { message } => {
                 write!(formatter, "cannot read the process table: {message}")

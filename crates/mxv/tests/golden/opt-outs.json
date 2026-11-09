@@ -123,7 +123,7 @@
     {
       "rule": "effects/yes",
       "applies_to": "mxv down",
-      "reason": "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",
+      "reason": "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",
       "costs": [
         "An agent without a terminal cannot run the command, or the command runs without asking anyone."
       ],
@@ -132,7 +132,7 @@
     {
       "rule": "effects/yes",
       "applies_to": "mxv restart",
-      "reason": "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",
+      "reason": "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",
       "costs": [
         "An agent without a terminal cannot run the command, or the command runs without asking anyone."
       ],
@@ -141,7 +141,7 @@
     {
       "rule": "effects/yes",
       "applies_to": "mxv reclaim",
-      "reason": "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
+      "reason": "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the units that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
       "costs": [
         "An agent without a terminal cannot run the command, or the command runs without asking anyone."
       ],
@@ -150,7 +150,7 @@
     {
       "rule": "effects/yes",
       "applies_to": "mxv ports reset",
-      "reason": "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
+      "reason": "The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.",
       "costs": [
         "An agent without a terminal cannot run the command, or the command runs without asking anyone."
       ],
@@ -240,22 +240,22 @@
     {
       "declaration": "children",
       "applies_to": "mxv up",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "children",
       "applies_to": "mxv down",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "children",
       "applies_to": "mxv restart",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "children",
       "applies_to": "mxv status",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`."
     },
     {
       "declaration": "text-line",

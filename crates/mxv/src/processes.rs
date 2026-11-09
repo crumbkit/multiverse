@@ -30,7 +30,7 @@ pub(crate) const UP: Document<Vec<ProcessRow>> = Document::new(
     "mxv",
     "up",
     1,
-    "The selected processes and their dependencies, in the order they started, each running.",
+    "The selected units and their dependencies, in the order they started, each running.",
 );
 
 /// The document that `mxv down` prints.
@@ -38,7 +38,7 @@ pub(crate) const DOWN: Document<Batch<ProcessRow, RunFailure>> = Document::new(
     "mxv",
     "down",
     1,
-    "The processes that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.",
+    "The units that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.",
 );
 
 /// The document that `mxv restart` prints.
@@ -46,7 +46,7 @@ pub(crate) const RESTART: Document<Vec<ProcessRow>> = Document::new(
     "mxv",
     "restart",
     1,
-    "The restarted processes and their dependencies, in the order they started, each running.",
+    "The restarted units and their dependencies, in the order they started, each running.",
 );
 
 /// The document that `mxv status` prints.
@@ -54,16 +54,16 @@ pub(crate) const STATUS: Document<Listing<ProcessRow, StatusSummary>> = Document
     "mxv",
     "status",
     1,
-    "Each process of the workspace's manifest in start order, then each other process that its run record holds, with its state, and the manifest's error when it does not parse.",
+    "Each unit of the workspace's manifest in start order, then each other unit that its run record holds, with its state, and the manifest's error when it does not parse.",
 )
-.when_empty("the workspace has no manifest that declares processes, and its run record holds no process");
+.when_empty("the workspace has no manifest that declares units, and its run record holds no unit");
 
 /// The document that `mxv logs` prints.
 pub(crate) const LOGS: Document<Stream<LogLine>> = Document::new(
     "mxv",
     "logs",
     1,
-    "The last lines of a process's log, then with --follow each line that the process writes.",
+    "The last lines of a unit's log, then with --follow each line that the unit writes.",
 );
 
 /// The document that `mxv ports reset` prints.
@@ -236,7 +236,7 @@ fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
             .chosen()
             .map_or_else(|| workspace.manifest_file(), Path::to_path_buf);
         warnings.push(format!(
-            "the manifest {} declares no processes, no containers and no services, so mxv started nothing",
+            "the manifest {} declares no units and no services, so mxv started nothing",
             path.display()
         ));
     }
