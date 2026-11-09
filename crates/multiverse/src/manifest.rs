@@ -22,7 +22,8 @@
 //! volumes = { data = "/data" }
 //!
 //! [processes.api]
-//! argv = ["cargo", "run", "--bin", "api"]
+//! argv = ["./target/debug/api"]
+//! build = ["cargo", "build", "--bin", "api"]
 //! env = { RUST_LOG = "info" }
 //! ports = { PORT = "api", DYNAMODB_PORT = "dynamodb" }
 //! listen = "api"
@@ -41,6 +42,10 @@
 //! argv = ["cargo", "run", "--bin", "worker"]
 //! ready = { log = "^worker ready", timeout_seconds = 300 }
 //! ```
+//!
+//! A process's `build` is a command that `mxv up` and `mxv restart` run
+//! before the process starts, under a place from the machine's job limiter,
+//! as [`crate::Runs::build`] describes. No shell reads it.
 //!
 //! An `env` value may name a host port as `{port.<name>}`, and writes a
 //! literal brace as `{{` or `}}`. Any other brace fails the manifest.
@@ -284,6 +289,35 @@ pub struct Process {
     /// after their backends are ready and their resources exist, and
     /// receives their variables.
     pub needs: Vec<String>,
+    /// The command that builds the process, which `mxv up` and `mxv
+    /// restart` run before they start it, or `None` when it has no build
+    /// step. It is not part of phase's plan, so a change to it alone does
+    /// not restart a running process.
+    pub build: Option<Command>,
+}
+
+/// A program and its arguments, as separate values that no shell reads.
+/// It always holds a program, because [`Command::new`] is the only way to
+/// make one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Command(Vec<String>);
+
+impl Command {
+    /// Returns the command of `words`, whose first word is the program, or
+    /// `None` when `words` is empty or its program is empty.
+    #[must_use]
+    pub fn new(words: Vec<String>) -> Option<Self> {
+        words
+            .first()
+            .is_some_and(|program| !program.is_empty())
+            .then_some(Self(words))
+    }
+
+    /// Returns the program and its arguments.
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.0
+    }
 }
 
 /// What a sandboxed process may do beyond what phase's sandbox always
@@ -675,6 +709,8 @@ struct RawManifest {
 struct RawProcess {
     /// The program and its arguments.
     argv: Spanned<Vec<String>>,
+    /// The command that builds the process.
+    build: Option<Spanned<Vec<String>>>,
     /// The starting directory.
     cwd: Option<Spanned<String>>,
     /// The extra variables.
@@ -1529,6 +1565,7 @@ impl Manifest {
                             .collect(),
                     }),
                     needs: process.needs.clone(),
+                    build: process.build.clone(),
                 };
                 (rename(name), renamed)
             })
@@ -1763,6 +1800,20 @@ fn check_process(
             format!("the process `{process}` has an empty argv, which needs at least the program"),
         ));
     }
+    let build = raw
+        .build
+        .as_ref()
+        .map(|build| {
+            Command::new(build.get_ref().clone()).ok_or_else(|| {
+                errors.invalid(
+                    &build.span(),
+                    format!(
+                        "the process `{process}` has an empty build, which needs at least the program"
+                    ),
+                )
+            })
+        })
+        .transpose()?;
     let cwd = match &raw.cwd {
         Some(cwd) => {
             let path = PathBuf::from(cwd.get_ref());
@@ -1867,6 +1918,7 @@ fn check_process(
         depends_on,
         permissions,
         needs: Vec::new(),
+        build,
     })
 }
 

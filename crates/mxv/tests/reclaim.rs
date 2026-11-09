@@ -250,6 +250,35 @@ fn reclaim_stops_the_idle_workspace_and_marks_it_and_up_starts_it_again() {
 }
 
 #[test]
+fn reclaim_skips_a_workspace_while_a_restart_runs_its_build() {
+    let setup = Setup::new();
+    setup.idle_age("0s");
+    let checkout = setup.running("building");
+    write(
+        &checkout.join("mxv.toml"),
+        &format!(
+            "{SLEEPER}build = [\"sh\", \"-c\", \"touch started; while [ ! -e release ]; do sleep 0.05; done\"]\n"
+        ),
+    );
+    std::thread::scope(|scope| {
+        let restart = scope.spawn(|| setup.json(&["restart", "-w", "building"]));
+        while !checkout.join("started").exists() && !restart.is_finished() {
+            std::thread::yield_now();
+        }
+        assert!(checkout.join("started").exists());
+
+        let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
+
+        write(&checkout.join("release"), "");
+        assert_eq!(exit, 0, "{document}");
+        let building = row(&document, "building");
+        assert_eq!(building["state"], "kept", "{document}");
+        let (exit, restarted) = restart.join().unwrap();
+        assert_eq!(exit, 0, "{restarted}");
+    });
+}
+
+#[test]
 fn a_process_outside_phase_that_works_in_a_workspace_keeps_it_running() {
     let mut setup = Setup::new();
     setup.idle_age("0s");

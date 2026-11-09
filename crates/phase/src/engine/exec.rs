@@ -28,7 +28,9 @@
 //! since they all take it exclusively.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -37,13 +39,13 @@ use rustix::process::{Pid, Signal};
 use wait_timeout::ChildExt as _;
 
 use crate::cancel::Cancel;
-use crate::clock::{POLL_INTERVAL, now};
+use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::container::exec::{ContainerExec, exec_command};
 use crate::engine::keeper::{KeeperCommand, check_inherited, check_resolved};
 use crate::engine::run::{SandboxScope, Settings, app_ports, process_dir, process_sandbox};
 use crate::env::EnvironmentSource;
 use crate::error::{NotRunnable, PhaseError};
-use crate::name::{AppName, ProcessName};
+use crate::name::{AppName, ProcessName, VariableName};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::store::RunStore;
 use crate::sandbox::{launcher_command, sandboxed_environment};
@@ -66,6 +68,12 @@ pub struct ExecRequest {
     pub run: Vec<String>,
     /// The command's standard streams.
     pub io: ExecIo,
+    /// The variables that the command receives beside the process's own,
+    /// such as the thread counts that a job gets from a machine-wide
+    /// scheduler. A variable that the process's plan already declares keeps
+    /// its declared value. A value here is passed on `docker exec`'s command
+    /// line for a container process, so it must hold no secret.
+    pub variables: Vec<(VariableName, String)>,
 }
 
 impl ExecRequest {
@@ -78,7 +86,16 @@ impl ExecRequest {
             process,
             run,
             io,
+            variables: Vec::new(),
         }
+    }
+
+    /// Returns the request with `variables` added to the command's
+    /// environment, as [`ExecRequest::variables`] describes.
+    #[must_use]
+    pub fn with_variables(mut self, variables: Vec<(VariableName, String)>) -> Self {
+        self.variables = variables;
+        self
     }
 }
 
@@ -124,17 +141,24 @@ pub enum ExecIo {
         /// only whether each is a terminal before a sandboxed command.
         terminal: bool,
     },
-    /// The command reads and writes these streams, such as
-    /// [`Stdio::null`] or a file, and runs in a process group of its own,
-    /// which no terminal signals. A cancel ends the whole group. A
+    /// The command reads and writes these streams, such as a file or a
+    /// pipe, and `None` is the null device. It runs in a process group of
+    /// its own, which no terminal signals. A cancel ends the whole group. A
     /// sandboxed host command's group leads a session of its own.
+    ///
+    /// `exec` refuses a sandboxed host command with
+    /// [`PhaseError::ExecNeedsTerminal`] when any of these is a terminal.
+    /// Its own session takes away the controlling terminal but leaves the
+    /// open descriptor, through which the command could read what the user
+    /// types. The streams are descriptors because a [`Stdio`] cannot be
+    /// asked whether it is a terminal.
     Streams {
         /// The command's standard input.
-        stdin: Stdio,
+        stdin: Option<OwnedFd>,
         /// The command's standard output.
-        stdout: Stdio,
+        stdout: Option<OwnedFd>,
         /// The command's standard error.
-        stderr: Stdio,
+        stderr: Option<OwnedFd>,
     },
 }
 
@@ -184,10 +208,7 @@ pub(crate) fn exec(
     if request.run.is_empty() {
         return Err(unstartable(app, process, "the command is empty".to_owned()));
     }
-    if is_sandboxed(app)
-        && let ExecIo::Inherit { terminal } = request.io
-        && (terminal || caller_has_terminal())
-    {
+    if is_sandboxed(app) && reaches_terminal(&request.io) {
         return Err(PhaseError::ExecNeedsTerminal {
             app: app.name.clone(),
             process: process.name.clone(),
@@ -202,7 +223,7 @@ pub(crate) fn exec(
     let failed = |error: io::Error| unstartable(app, process, error.to_string());
     match app.runner {
         RunnerKind::Host => {
-            let (command, session) = host_command(
+            let (mut command, session) = host_command(
                 &exec.settings,
                 plan,
                 app,
@@ -211,6 +232,7 @@ pub(crate) fn exec(
                 env,
                 deadline,
             )?;
+            add_variables(&mut command, &request.variables);
             run(
                 command,
                 session,
@@ -221,12 +243,22 @@ pub(crate) fn exec(
             .map_err(failed)
         }
         RunnerKind::Container => {
+            // The plan names every variable that mxv's own side declares. A
+            // variable that only the image sets is unknown here, so a job
+            // variable of that name replaces the image's value. Reading the
+            // image's `Env` before each `exec` would close this.
+            let variables: Vec<&(VariableName, String)> = request
+                .variables
+                .iter()
+                .filter(|(name, _)| !process.env.contains(name.as_str()))
+                .collect();
             let prepared = exec_command(&ContainerExec {
                 state_dir: exec.settings.state_dir,
                 workspace: plan.id(),
                 app: &app.name,
                 process: &process.name,
                 run: &request.run,
+                variables: &variables,
                 terminal: matches!(request.io, ExecIo::Inherit { terminal: true }),
                 docker_environment: exec.docker_environment,
             })?;
@@ -249,6 +281,39 @@ pub(crate) fn exec(
             }
             Ok(status)
         }
+    }
+}
+
+/// Sets each of `variables` on `command`, except one that `command`'s
+/// environment already sets, so a variable that the process declares, or
+/// that phase sets itself, such as `PATH` or a sandbox's `TMPDIR`, keeps its
+/// value.
+fn add_variables(command: &mut Command, variables: &[(VariableName, String)]) {
+    let set: BTreeSet<OsString> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_some())
+        .map(|(name, _)| name.to_os_string())
+        .collect();
+    for (name, value) in variables {
+        if !set.contains(OsStr::new(name.as_str())) {
+            command.env(name.as_str(), value);
+        }
+    }
+}
+
+/// Reports whether a command with the streams `io` would hold a terminal.
+fn reaches_terminal(io: &ExecIo) -> bool {
+    use std::io::IsTerminal;
+    match io {
+        ExecIo::Inherit { terminal } => *terminal || caller_has_terminal(),
+        ExecIo::Streams {
+            stdin,
+            stdout,
+            stderr,
+        } => [stdin, stdout, stderr]
+            .into_iter()
+            .flatten()
+            .any(IsTerminal::is_terminal),
     }
 }
 
@@ -450,8 +515,11 @@ fn sandbox(
 /// own with [`ExecIo::Streams`]. When `cancel` is set, `run` sends `TERM`
 /// to the command's group when it has one of its own, and to the command,
 /// waits up to `kill_wait`, then sends `KILL` the same way, and returns the
-/// status that the signal gave. A command in the caller's group receives
-/// the signals alone, so processes that it started may survive it.
+/// status that the signal gave. When the command exits and other members of
+/// its group remain, `run` waits for them until `kill_wait` has passed since
+/// the `TERM`, sends `KILL` to the group, and only then returns. A command
+/// in the caller's group receives the signals alone, so processes that it
+/// started may survive it.
 ///
 /// # Errors
 ///
@@ -471,7 +539,11 @@ pub(crate) fn run(
             stdout,
             stderr,
         } => {
-            command.stdin(stdin).stdout(stdout).stderr(stderr);
+            let stream = |given: Option<OwnedFd>| given.map_or_else(Stdio::null, Stdio::from);
+            command
+                .stdin(stream(stdin))
+                .stdout(stream(stdout))
+                .stderr(stream(stderr));
             // A process that leads its group cannot start a session, so a
             // command that starts its own stays out of a group here.
             if session == Session::Caller {
@@ -508,6 +580,12 @@ pub(crate) fn run(
     let mut killed_at: Option<Instant> = None;
     loop {
         if let Some(status) = child.wait_timeout(POLL_INTERVAL)? {
+            if own_group
+                && cancel.is_cancelled()
+                && let Some(group) = pid
+            {
+                end_group(group, killed_at, kill_wait);
+            }
             return Ok(status);
         }
         match killed_at {
@@ -521,5 +599,25 @@ pub(crate) fn run(
             }
             _ => {}
         }
+    }
+}
+
+/// Ends what remains of the process group `group` after its leader exited
+/// on a cancel: it sends `TERM` unless `killed_at` says that `run` already
+/// did, waits until that time for the group to empty, and otherwise sends
+/// `KILL`. A group that has emptied can have its number reused, but only
+/// within one poll of it emptying, and `run` looks again before each signal.
+fn end_group(group: Pid, killed_at: Option<Instant>, kill_wait: Duration) {
+    let kill_at = killed_at.unwrap_or_else(|| {
+        // A group that has already gone reports that to the wait below.
+        let _ = rustix::process::kill_process_group(group, Signal::TERM);
+        now() + kill_wait
+    });
+    while rustix::process::test_kill_process_group(group).is_ok() {
+        if now() >= kill_at {
+            let _ = rustix::process::kill_process_group(group, Signal::KILL);
+            return;
+        }
+        pause(POLL_INTERVAL);
     }
 }

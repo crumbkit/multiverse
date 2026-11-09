@@ -61,7 +61,7 @@ pub use crate::error::Error;
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::lookup::{ManifestInputs, ManifestSource, checkout_prefix, prefixed};
 pub use crate::manifest::{
-    Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
+    Command, Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
     MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
     ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Unit,
 };
@@ -77,9 +77,9 @@ pub use crate::record::{
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
-    DownOutcome, Exec, ExecEnd, ExecTarget, ExitReason, Footprint, Kind, LogOutput, ProcessNote,
-    ProcessState, ProcessStatus, RenamedVolume, Runs, STOP_GRACE, Toucher, Unstoppable, UpOutcome,
-    Volumes, Waited,
+    Admission, Asked, BuildEnd, BuildStop, BuildsPassed, DownOutcome, Exec, ExecEnd, ExecTarget,
+    ExitReason, Footprint, Kind, LogOutput, Place, ProcessNote, ProcessState, ProcessStatus,
+    RenamedVolume, Runs, STOP_GRACE, Toucher, Unstoppable, UpOutcome, Volumes, Waited,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,

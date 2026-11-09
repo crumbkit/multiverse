@@ -1,6 +1,7 @@
 //! The snapshot of the environment variables that mxv reads, and the
 //! catalog that says what each one does (BASE-6, BASE-28).
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,8 @@ pub struct Variable {
 }
 
 /// Every environment variable that mxv depends on. The binary's `main`
-/// reads `MXV_ROOT` once into an [`Environment`], and finds the base
+/// reads `MXV_ROOT` and deadband's variables once into an [`Environment`],
+/// and finds the base
 /// directories once with etcetera's base strategy, which reads `HOME` and
 /// the `XDG_*_HOME` variables, as crumbkit does (ADR-0027, ADR-0029).
 /// crumbkit-usage reads `XDG_STATE_HOME` and `HOME` again for the usage
@@ -48,6 +50,26 @@ pub const VARIABLES: &[Variable] = &[
     Variable {
         name: "XDG_STATE_HOME",
         purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock and marks of each workspace in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. Each archive is in `$XDG_STATE_HOME/mxv/archives/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
+    },
+    Variable {
+        name: "DEADBAND_SOCKET",
+        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`. When it is unset or empty, mxv uses `deadband.sock` in `TMPDIR`. When no daemon answers, the build starts at once.",
+    },
+    Variable {
+        name: "TMPDIR",
+        purpose: "The temporary directory, which holds deadband's socket when `DEADBAND_SOCKET` is unset. When it is unset or empty, mxv uses `/tmp/deadband-<USER>.sock`.",
+    },
+    Variable {
+        name: "USER",
+        purpose: "The person's user name, which names deadband's socket in `/tmp` when neither `DEADBAND_SOCKET` nor `TMPDIR` is set. When it is unset or empty, mxv uses `/tmp/deadband.sock`.",
+    },
+    Variable {
+        name: "DEADBAND_HELD",
+        purpose: "Set by deadband for a job that it granted. When it is set, a `build` runs at once without asking for another place, because the job that started mxv already holds one. When it is unset or empty, mxv asks.",
+    },
+    Variable {
+        name: "DEADBAND_BYPASS",
+        purpose: "When it is set to anything but 0, a `build` runs at once without asking deadband for a place. When it is unset, empty or 0, mxv asks.",
     },
     Variable {
         name: "MXV_ROOT",
@@ -123,7 +145,22 @@ pub struct Environment {
     /// The mxv program, which phase starts each keeper with, or `None`
     /// when `main` could not find it.
     program: Option<PathBuf>,
+    /// The variables of mxv's environment that deadband reads.
+    deadband: BTreeMap<String, OsString>,
 }
+
+/// The variables that deadband reads to find its daemon and to tell
+/// whether a job may ask for a place. [`VARIABLES`] lists the ones that
+/// are deadband's alone.
+const DEADBAND_VARIABLES: &[&str] = &[
+    "DEADBAND_SOCKET",
+    "TMPDIR",
+    "USER",
+    "DEADBAND_HELD",
+    "DEADBAND_BYPASS",
+    "HOME",
+    "XDG_CONFIG_HOME",
+];
 
 impl Environment {
     /// Returns the snapshot of `MXV_ROOT`, read with `read`, and `bases`.
@@ -134,7 +171,16 @@ impl Environment {
             current_dir: None,
             caller: CallerEnvironment::default(),
             program: None,
+            deadband: DEADBAND_VARIABLES
+                .iter()
+                .filter_map(|name| Some(((*name).to_owned(), read(name)?)))
+                .collect(),
         }
+    }
+
+    /// Returns the variables of mxv's environment that deadband reads.
+    pub(crate) const fn deadband_variables(&self) -> &BTreeMap<String, OsString> {
+        &self.deadband
     }
 
     /// Returns the base directories.

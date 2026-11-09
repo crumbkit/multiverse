@@ -215,6 +215,34 @@ fn an_empty_argv_fails_as_invalid_with_its_line() {
 }
 
 #[test]
+fn a_process_declares_its_build_as_separate_words() {
+    let manifest =
+        parse("[processes.a]\nargv = [\"./a\"]\nbuild = [\"cargo\", \"build\"]\n").unwrap();
+    let build = manifest.processes["a"].build.as_ref().unwrap();
+    assert_eq!(build.words(), ["cargo", "build"]);
+}
+
+#[test]
+fn a_process_without_a_build_has_none() {
+    let manifest = parse("[processes.a]\nargv = [\"./a\"]\n").unwrap();
+    assert_eq!(manifest.processes["a"].build, None);
+}
+
+#[test]
+fn an_empty_build_fails_as_invalid_with_its_line() {
+    let (line, problem) = problem("[processes.a]\nargv = [\"true\"]\nbuild = []\n");
+    assert_eq!(line, Some(3));
+    assert!(matches!(problem, ManifestProblem::Invalid { message } if message.contains("build")));
+}
+
+#[test]
+fn a_build_with_an_empty_program_fails_as_invalid_with_its_line() {
+    let (line, problem) = problem("[processes.a]\nargv = [\"true\"]\nbuild = [\"\"]\n");
+    assert_eq!(line, Some(3));
+    assert!(matches!(problem, ManifestProblem::Invalid { message } if message.contains("build")));
+}
+
+#[test]
 fn a_port_variable_that_names_an_undeclared_port_fails_with_its_line() {
     let (line, problem) = problem(
         "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nports = { PORT = \"web\" }\n",

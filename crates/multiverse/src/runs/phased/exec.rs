@@ -25,12 +25,13 @@ use crate::runs::{ProcessState, Runs};
 #[cfg(test)]
 mod tests;
 
-/// How long `exec` waits for an `up`, `down` or `restart` of the workspace
-/// to release phase's lifecycle lock, and for the unit's variables to
-/// resolve. When it passes, the command does not start and `exec` fails
-/// with phase's `phase::lock::busy` or `phase::environment`. The command
-/// itself runs without a deadline.
-const EXEC_WAIT: Duration = Duration::from_secs(600);
+/// How long `exec` and a build wait for an operation in progress to release
+/// phase's lifecycle lock, and for the unit's variables to resolve. When it
+/// passes, the command does not start and `exec` fails with phase's
+/// `phase::lock::busy` or `phase::environment`. It does not cover the
+/// running command: `exec` runs without a deadline, and a build's deadline
+/// is its own.
+pub(super) const EXEC_WAIT: Duration = Duration::from_secs(600);
 
 /// The outcome of [`Runs::exec_target`].
 #[derive(Debug)]

@@ -13,11 +13,13 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    DownOutcome, Error, Git, Lock, Manifest, ManifestError, ProcessStatus, Reclaimed, Runs, Store,
-    Unstoppable, UpOutcome, Volumes, Workspace, WorkspaceName,
+    BuildEnd, BuildStop, BuildsPassed, DownOutcome, Error, Git, Lock, Manifest, ManifestError,
+    ProcessStatus, Reclaimed, Runs, Store, Unstoppable, UpOutcome, Volumes, Workspace,
+    WorkspaceName,
 };
 use std::time::Duration;
 
+use crate::admission::Deadband;
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
@@ -221,12 +223,29 @@ fn manifest_or_error(workspace: &Workspace) -> (Option<Manifest>, Option<Manifes
     }
 }
 
+/// Returns the sentence for each process of `manifest` that compiles
+/// inside its `argv`, which would hold a place on the machine for the
+/// server's whole life if mxv gave it one, so mxv gives it none.
+fn cargo_run_warnings(manifest: &Manifest) -> impl Iterator<Item = String> + '_ {
+    manifest
+        .processes
+        .iter()
+        .filter(|(_, process)| process.argv.get(..2) == Some(&["cargo".to_owned(), "run".to_owned()]))
+        .map(|(name, _)| {
+            format!(
+                "the process `{name}` compiles inside its argv with `cargo run`, which deadband does not limit, so run the built program in argv and put `cargo build` in a `build` step"
+            )
+        })
+}
+
 /// Returns the warnings that `up` and `restart` print for `manifest`, the
 /// manifest of `workspace`: each table that mxv ignores although its name
-/// is close to one of its own, and a manifest that declares nothing to
-/// start. A manifest of services alone starts their backends.
+/// is close to one of its own, each process whose `argv` is `cargo run`,
+/// and a manifest that declares nothing to start. A manifest of services
+/// alone starts their backends.
 fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
     let mut warnings = manifest.warnings.clone();
+    warnings.extend(cargo_run_warnings(manifest));
     if manifest.processes.is_empty()
         && manifest.containers.is_empty()
         && manifest.services.is_empty()
@@ -270,11 +289,103 @@ pub(crate) fn required_manifest(workspace: &Workspace) -> Result<Manifest, crumb
     )
 }
 
-/// Starts the processes that `args` names, and their dependencies.
+/// The signal that interrupted a command's builds, which ends mxv with
+/// 128 plus its number and prints no document.
+#[derive(Debug)]
+pub(crate) struct Interrupted {
+    /// The signal's number.
+    signal: i32,
+}
+
+/// Prints `result` as [`crumbkit::finish`] does, or ends with 128 plus the
+/// signal that interrupted the command's builds, and returns the exit code.
+pub(crate) fn finish_interruptible(
+    output: Run,
+    document: Document<Vec<ProcessRow>>,
+    result: Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error>,
+) -> ExitCode {
+    match result {
+        Ok(Err(Interrupted { signal })) => {
+            crumbkit::events::interrupted();
+            crumbkit::events::ended(u8::try_from(128 + signal).unwrap_or(u8::MAX), None)
+        }
+        Ok(Ok(rows)) => crumbkit::finish(output, document, Ok::<_, crumbkit::Error>(rows)),
+        Err(error) => crumbkit::finish(output, document, Err::<Vec<ProcessRow>, _>(error)),
+    }
+}
+
+/// Runs the builds of the context's processes through deadband, and
+/// returns the proof that they passed, the signal that interrupted them,
+/// or the failure of the first one that did not pass. Nothing has stopped
+/// or started when it returns.
+fn build<'lock>(
+    environment: &Environment,
+    context: &mut Context,
+    lock: &'lock Lock,
+    manifest: &Manifest,
+) -> Result<Result<BuildsPassed<'lock>, Interrupted>, crumbkit::Error> {
+    // The warnings come first, so a long or failing build cannot hide them.
+    crate::warn(&start_warnings(&context.workspace, manifest));
+    let workspace = context.workspace.name.to_string();
+    let mut admission = Deadband::new(environment);
+    let end = context
+        .runs
+        .build(
+            lock,
+            &context.store,
+            &mut context.workspace,
+            manifest,
+            &context.processes,
+            &mut admission,
+        )
+        .map_err(MxvFailure::from)?;
+    match end {
+        BuildEnd::Passed(passed) => Ok(Ok(passed)),
+        BuildEnd::Stopped { process, why } => match why {
+            BuildStop::Failed { code, signal } => Err(RunFailure::BuildFailed {
+                workspace,
+                process,
+                code,
+                signal,
+            }
+            .into()),
+            BuildStop::Unstartable { reason } => Err(RunFailure::BuildUnstartable {
+                workspace,
+                process,
+                reason,
+            }
+            .into()),
+            BuildStop::TimedOut { waited } => Err(RunFailure::BuildTimedOut {
+                workspace,
+                process,
+                seconds: waited.as_secs(),
+            }
+            .into()),
+            BuildStop::Interrupted => Ok(Err(Interrupted {
+                // Only the signal thread sets the flag that ended the build,
+                // so a signal was caught. SIGINT stands in for an answer that
+                // cannot be missing.
+                signal: admission.caught().unwrap_or(2),
+            })),
+        },
+        BuildEnd::UnknownProcess(process) => {
+            Err(RunFailure::UnknownProcess { workspace, process }.into())
+        }
+        BuildEnd::Unrunnable(unrunnable) => Err(RunFailure::Unrunnable {
+            workspace,
+            unit: unrunnable.unit,
+            message: unrunnable.message,
+        }
+        .into()),
+    }
+}
+
+/// Starts the processes that `args` names, and their dependencies, after
+/// their builds pass.
 pub(crate) fn up(
     environment: &Environment,
     args: &ProcessesArgs,
-) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
     if context.processes.is_empty()
@@ -291,26 +402,31 @@ pub(crate) fn up(
             .cloned()
             .collect();
     }
-    start(&mut context, &lock, &args.processes)
+    let manifest = required_manifest(&context.workspace)?;
+    let passed = match build(environment, &mut context, &lock, &manifest)? {
+        Ok(passed) => passed,
+        Err(interrupted) => return Ok(Err(interrupted)),
+    };
+    start(&mut context, passed, &manifest, &args.processes).map(Ok)
 }
 
 /// Starts the context's processes, and returns their rows or the failure
-/// of the first one that does not start. `named` is what the command line
-/// named, which narrows the reclaim mark once they start.
+/// of the first one that does not start. `passed` proves that their builds
+/// passed. `named` is what the command line named, which narrows the
+/// reclaim mark once they start.
 fn start(
     context: &mut Context,
-    lock: &Lock,
+    passed: BuildsPassed<'_>,
+    manifest: &Manifest,
     named: &[String],
 ) -> Result<Vec<ProcessRow>, crumbkit::Error> {
-    let manifest = required_manifest(&context.workspace)?;
-    crate::warn(&start_warnings(&context.workspace, &manifest));
     let workspace = context.workspace.name.to_string();
     let mut earlier = Vec::new();
     let outcome = context.runs.up(
-        lock,
+        passed,
         &context.store,
         &mut context.workspace,
-        &manifest,
+        manifest,
         &context.processes,
         &mut earlier,
     );
@@ -491,11 +607,12 @@ pub(crate) fn down(
 }
 
 /// Stops the processes that `args` names, or every process, and starts
-/// them again with their dependencies.
+/// them again with their dependencies, once their builds have passed, so
+/// a build that fails leaves them running.
 pub(crate) fn restart(
     environment: &Environment,
     args: &ProcessesArgs,
-) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let manifest = required_manifest(&context.workspace)?;
     if let Err(unknown) = manifest.start_order(&context.processes) {
@@ -506,8 +623,25 @@ pub(crate) fn restart(
         .into());
     }
     let lock = context.lock()?;
-    stop_every(&context, &lock, Some(&manifest))?;
-    start(&mut context, &lock, &args.processes)
+    let passed = match build(environment, &mut context, &lock, &manifest)? {
+        Ok(passed) => passed,
+        Err(interrupted) => return Ok(Err(interrupted)),
+    };
+    replace(&mut context, &lock, passed, &manifest, &args.processes).map(Ok)
+}
+
+/// Stops the context's processes and starts them again. It is the only
+/// path that stops and then starts, and it takes `passed`, so a restart
+/// cannot stop a process before the builds have passed.
+fn replace(
+    context: &mut Context,
+    lock: &Lock,
+    passed: BuildsPassed<'_>,
+    manifest: &Manifest,
+    named: &[String],
+) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+    stop_every(context, lock, Some(manifest))?;
+    start(context, passed, manifest, named)
 }
 
 /// Returns each process of the workspace that `args` names and its state.

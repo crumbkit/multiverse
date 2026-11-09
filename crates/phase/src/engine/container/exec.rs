@@ -1,8 +1,11 @@
 //! The `docker exec` that runs a one-off command in the running container
 //! of a process for [`Phase::exec`](crate::Phase::exec). The container
 //! already holds the process's variables and secret files, so the command
-//! receives them from Docker, and phase passes no value of a variable on
-//! the command line or in the `docker` program's environment.
+//! receives them from Docker, and phase passes no value of the process's
+//! variables on the command line or in the `docker` program's environment.
+//! The only values on the command line are the caller's
+//! [`ExecRequest::variables`](crate::ExecRequest::variables), which hold no
+//! secret.
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -12,7 +15,7 @@ use crate::engine::container::names::{self, Identity, Scope};
 use crate::engine::container::objects::{ContainerState, inspect_id};
 use crate::engine::container::runner::docker_error;
 use crate::error::PhaseError;
-use crate::name::{AppName, ProcessName, WorkspaceId};
+use crate::name::{AppName, ProcessName, VariableName, WorkspaceId};
 use crate::record::run::EntryState;
 use crate::record::store::RunStore;
 
@@ -31,6 +34,8 @@ pub(crate) struct ContainerExec<'a> {
     pub(crate) process: &'a ProcessName,
     /// The command and its arguments, each a separate value.
     pub(crate) run: &'a [String],
+    /// The variables that the command receives beside the container's own.
+    pub(crate) variables: &'a [&'a (VariableName, String)],
     /// Whether the caller's standard input is a terminal, which gives the
     /// command a terminal in the container with `--tty`.
     pub(crate) terminal: bool,
@@ -132,6 +137,7 @@ pub(crate) fn exec_command(exec: &ContainerExec<'_>) -> Result<ContainerCommand,
     }
     command.args(exec_args(
         inspected.container.id().as_str(),
+        exec.variables,
         exec.run,
         exec.terminal,
     ));
@@ -145,13 +151,23 @@ pub(crate) fn exec_command(exec: &ContainerExec<'_>) -> Result<ContainerCommand,
     })
 }
 
-/// Returns the arguments of `docker` that run `run` in the container `id`,
-/// with `--tty` when `terminal` holds. The command's words follow the
-/// container's id, so docker reads none of them as its own flags.
-fn exec_args(id: &str, run: &[String], terminal: bool) -> Vec<String> {
+/// Returns the arguments of `docker` that run `run` in the container `id`
+/// with each of `variables`, and `--tty` when `terminal` holds. The
+/// command's words follow the container's id, so docker reads none of them
+/// as its own flags.
+fn exec_args(
+    id: &str,
+    variables: &[&(VariableName, String)],
+    run: &[String],
+    terminal: bool,
+) -> Vec<String> {
     let mut args = vec!["exec".to_owned(), "--interactive".to_owned()];
     if terminal {
         args.push("--tty".to_owned());
+    }
+    for (name, value) in variables {
+        args.push("--env".to_owned());
+        args.push(format!("{name}={value}"));
     }
     args.push("--".to_owned());
     args.push(id.to_owned());

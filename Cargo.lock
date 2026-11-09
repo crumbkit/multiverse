@@ -74,6 +74,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "basic-toml"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -254,6 +263,21 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crumbkit"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "745f4877c3d8feb29060f69dd616e046d612e63e13a28cdcf3315a6fdda95e19"
+dependencies = [
+ "clap",
+ "humantime",
+ "is-ai-agent",
+ "rustix",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "crumbkit"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a0a6c8d3ef6350af97967fd136e6833f6eb99ec8905ffa496ba47fcaa918f82"
@@ -273,7 +297,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389093080e087c805b67095b59215b1dc2cf00234495ac580ff9689b6cd0b293"
 dependencies = [
- "crumbkit",
+ "crumbkit 0.2.0",
  "serde",
  "serde_json",
 ]
@@ -285,7 +309,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a518081f0ca7857f03237046558b6257da7fb7f59f5a3fddd0439169b68cd27"
 dependencies = [
  "clap",
- "crumbkit",
+ "crumbkit 0.2.0",
  "crumbkit-markdown",
  "serde",
  "serde_json",
@@ -299,7 +323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "276446344defdaf05a97ea8a8d5b8ecfa3f003a0a10119f98e7928e561f6351f"
 dependencies = [
  "clap",
- "crumbkit",
+ "crumbkit 0.2.0",
  "etcetera",
  "getrandom 0.4.3",
  "humantime",
@@ -327,6 +351,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
  "cmov",
+]
+
+[[package]]
+name = "deadband"
+version = "0.1.0"
+source = "git+https://github.com/crumbkit/deadband?tag=v0.1.0#3111577f794b4ecd64e3ddeaf0a26d9aee9514d7"
+dependencies = [
+ "basic-toml",
+ "clap",
+ "crumbkit 0.1.0",
+ "humantime",
+ "libc",
+ "rustix",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -854,10 +894,12 @@ name = "mxv"
 version = "0.0.0"
 dependencies = [
  "clap",
- "crumbkit",
+ "crumbkit 0.2.0",
  "crumbkit-test",
  "crumbkit-usage",
+ "deadband",
  "etcetera",
+ "libc",
  "multiverse",
  "schemars 1.2.3",
  "serde",

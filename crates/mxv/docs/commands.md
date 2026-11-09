@@ -13,9 +13,9 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv list`](#mxv-list): List the workspaces
 - [`mxv show`](#mxv-show): Show workspaces by name, in the order given
 - [`mxv cd`](#mxv-cd): Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
-- [`mxv up`](#mxv-up): Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+- [`mxv up`](#mxv-up): Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
 - [`mxv down`](#mxv-down): Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
-- [`mxv restart`](#mxv-restart): Stop a workspace's units and start them again
+- [`mxv restart`](#mxv-restart): Build a workspace's units through deadband, then stop them and start them again
 - [`mxv status`](#mxv-status): Report whether each unit of a workspace is running, exited or stopped
 - [`mxv logs`](#mxv-logs): Print the last lines of a unit's log, and follow it with --follow
 - [`mxv exec`](#mxv-exec): Run a one-off command in the context of a running unit, and exit with its exit code
@@ -238,7 +238,7 @@ Effects: read-only, closed-world.
 
 ## `mxv up`
 
-Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
 
 ### Arguments
 
@@ -318,7 +318,7 @@ Children: one indented line under a unit for each note of `up` or `restart`, whi
 
 ## `mxv restart`
 
-Stop a workspace's units and start them again
+Build a workspace's units through deadband, then stop them and start them again
 
 ### Arguments
 

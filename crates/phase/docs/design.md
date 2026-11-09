@@ -1256,6 +1256,12 @@ sessions, so a sandboxed command cannot open the user's terminal by its
 `/dev/ttys*` path and read what the user types, as [The sandbox as
 built](#the-sandbox-as-built) says.
 
+A command with `ExecIo::Streams` is refused with
+`phase::exec::sandboxed_terminal` when it is sandboxed and any stream it is
+given is a terminal. Its own session takes away the controlling terminal
+but leaves the open descriptor, through which it could read what the user
+types.
+
 A command with `ExecIo::Inherit` shares the host program's standard
 streams. An unsandboxed command, and the `docker exec` of a container
 command, also share the host program's process group, so when the host
@@ -1284,6 +1290,16 @@ terminal in raw mode.
 be run, and 127 when the command is not found. After one of those, phase
 inspects the container again and reports `phase::exec::not_running` when
 the container stopped or went in the meantime, and the status otherwise.
+
+`ExecRequest::with_variables` adds variables to the command's environment,
+such as the thread counts that a machine-wide job limiter gives a build. A
+`VariableName` refuses an empty name, `=` and NUL. A host command receives them
+beside the process's environment, and a variable that the process's plan
+declares, or that phase sets itself, such as `PATH` or a sandbox's `TMPDIR`,
+keeps its value. A container command receives them as `docker exec --env`
+arguments, except a variable that the plan declares. A value on that command
+line is visible in the process table, so a caller adds no secret this way, and
+a variable that only the image sets is replaced by a value of the same name.
 
 `exec` is not a lifecycle operation. It writes nothing to the run record,
 and starts and stops no app. It takes the workspace's lifecycle lock,
