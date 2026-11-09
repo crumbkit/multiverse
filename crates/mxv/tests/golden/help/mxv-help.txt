@@ -10,9 +10,9 @@ Work in a workspace
   cd        Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
 
 Run a workspace's app
-  up        Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+  up        Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
   down      Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
-  restart   Stop a workspace's units and start them again
+  restart   Build a workspace's units through deadband, then stop them and start them again
   status    Report whether each unit of a workspace is running, exited or stopped
   logs      Print the last lines of a unit's log, and follow it with --follow
   exec      Run a one-off command in the context of a running unit, and exit with its exit code

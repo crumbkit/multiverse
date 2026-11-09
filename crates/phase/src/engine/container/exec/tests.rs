@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -154,6 +154,16 @@ impl World {
     /// Runs `script` in `sh` in the container of `api/server`, with its
     /// output in a file, and returns its status and output.
     fn exec(&self, script: &str) -> (Result<ExitStatus, PhaseError>, String) {
+        self.exec_with(script, Vec::new())
+    }
+
+    /// Runs `script` in the container with `variables` added, and returns
+    /// its status and its output.
+    fn exec_with(
+        &self,
+        script: &str,
+        variables: Vec<(crate::VariableName, String)>,
+    ) -> (Result<ExitStatus, PhaseError>, String) {
         let out = self.state.path().join("exec.out");
         #[expect(
             clippy::disallowed_methods,
@@ -165,11 +175,12 @@ impl World {
             "server".parse().unwrap(),
             vec!["sh".into(), "-c".into(), script.into()],
             ExecIo::Streams {
-                stdin: Stdio::null(),
-                stdout: Stdio::from(file.try_clone().unwrap()),
-                stderr: Stdio::from(file),
+                stdin: None,
+                stdout: Some(file.try_clone().unwrap().into()),
+                stderr: Some(file.into()),
             },
-        );
+        )
+        .with_variables(variables);
         let result = self.phase.exec(
             &self.plan,
             request,
@@ -214,13 +225,53 @@ impl Drop for World {
 #[test]
 fn the_arguments_of_docker_exec_put_the_commands_words_after_the_container() {
     assert_eq!(
-        exec_args("abc", &["sh".into(), "-c".into(), "--tty".into()], false),
+        exec_args(
+            "abc",
+            &[],
+            &["sh".into(), "-c".into(), "--tty".into()],
+            false
+        ),
         ["exec", "--interactive", "--", "abc", "sh", "-c", "--tty"]
     );
     assert_eq!(
-        exec_args("abc", &["true".into()], true),
+        exec_args("abc", &[], &["true".into()], true),
         ["exec", "--interactive", "--tty", "--", "abc", "true"]
     );
+}
+
+#[test]
+fn the_arguments_of_docker_exec_put_each_added_variable_before_the_container() {
+    let variable = ("CARGO_BUILD_JOBS".parse().unwrap(), "3".to_owned());
+    assert_eq!(
+        exec_args("abc", &[&variable], &["true".into()], false),
+        [
+            "exec",
+            "--interactive",
+            "--env",
+            "CARGO_BUILD_JOBS=3",
+            "--",
+            "abc",
+            "true"
+        ]
+    );
+}
+
+#[test]
+fn exec_into_a_running_container_adds_the_variables_and_a_declared_one_keeps_its_value() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    world.up();
+    let variables = vec![
+        ("CARGO_BUILD_JOBS".parse().unwrap(), "3".to_owned()),
+        ("MODE".parse().unwrap(), "the job's value".to_owned()),
+    ];
+
+    let (status, output) = world.exec_with("echo \"$CARGO_BUILD_JOBS $MODE\"", variables);
+
+    assert!(status.unwrap().success());
+    assert_eq!(output, format!("3 {MODE}\n"));
 }
 
 #[test]
@@ -336,9 +387,9 @@ fn a_command_that_docker_cannot_find_in_a_running_container_exits_127() {
         "server".parse().unwrap(),
         vec!["/no/such/program".into()],
         ExecIo::Streams {
-            stdin: Stdio::null(),
-            stdout: Stdio::from(file.try_clone().unwrap()),
-            stderr: Stdio::from(file),
+            stdin: None,
+            stdout: Some(file.try_clone().unwrap().into()),
+            stderr: Some(file.into()),
         },
     );
 

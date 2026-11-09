@@ -1,5 +1,6 @@
-//! The calls into macOS's `libproc` that read the process table, which are
-//! the only unsafe code in phase and in mxv (BASE-3). Each function copies
+//! The calls into macOS's `libproc` that read the process table. Beside this
+//! module, only phase's `sandbox::launch` and mxv's `admission` hold unsafe
+//! code in shipped code (BASE-3). Each function copies
 //! what the kernel writes into a byte buffer that it owns, and the safe
 //! code in [`super`] and in the host runner reads fields from those bytes
 //! at the offsets that `<sys/proc_info.h>` gives.

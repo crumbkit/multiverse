@@ -5,14 +5,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use super::{ExecIo, ExecRequest, Session, run};
 use crate::cancel::Cancel;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
-use crate::name::{AppName, ProcessName, WorkspaceId};
+use crate::name::{AppName, ProcessName, VariableName, WorkspaceId};
 use crate::phase::Phase;
 use crate::plan::{AppPlan, Permissions, Plan, ProcessPlan, RunnerKind};
 use crate::record::store::RunStore;
@@ -110,6 +112,19 @@ struct Ran {
 /// Runs `script` in `sh` in the context of `api/server` of `plan`, with
 /// `source` as the environment, its output in a file in `scratch`.
 fn exec_script(phase: &Phase, plan: &Plan, source: &Listed, script: &str, scratch: &Path) -> Ran {
+    exec_script_with(phase, plan, source, script, scratch, Vec::new())
+}
+
+/// Runs `script` as [`exec_script`] does, with `variables` added to its
+/// environment.
+fn exec_script_with(
+    phase: &Phase,
+    plan: &Plan,
+    source: &Listed,
+    script: &str,
+    scratch: &Path,
+    variables: Vec<(VariableName, String)>,
+) -> Ran {
     let out = scratch.join("exec.out");
     #[expect(
         clippy::disallowed_methods,
@@ -121,11 +136,12 @@ fn exec_script(phase: &Phase, plan: &Plan, source: &Listed, script: &str, scratc
         "server".parse().unwrap(),
         vec!["/bin/sh".into(), "-c".into(), script.into()],
         ExecIo::Streams {
-            stdin: Stdio::null(),
-            stdout: Stdio::from(file.try_clone().unwrap()),
-            stderr: Stdio::from(file),
+            stdin: None,
+            stdout: Some(file.try_clone().unwrap().into()),
+            stderr: Some(file.into()),
         },
-    );
+    )
+    .with_variables(variables);
     let result = phase.exec(
         plan,
         request,
@@ -193,6 +209,30 @@ fn a_host_command_receives_the_resolved_environment_and_nothing_else_of_the_call
         with.output,
         "hello lang=C path=/usr/bin:/bin manifest=unset tmp=unset\n"
     );
+}
+
+#[test]
+fn a_host_command_receives_the_added_variables_and_a_declared_variable_keeps_its_value() {
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let (phase, plan) = world(state.path(), checkout.path(), None);
+    let added = |name: &str, value: &str| (name.parse().unwrap(), value.to_owned());
+
+    let ran = exec_script_with(
+        &phase,
+        &plan,
+        &greeting(),
+        "echo \"$CARGO_BUILD_JOBS $GREETING $PATH\"",
+        state.path(),
+        vec![
+            added("CARGO_BUILD_JOBS", "3"),
+            added("GREETING", "the job's value"),
+            added("PATH", "/the/job/path"),
+        ],
+    );
+
+    assert!(ran.result.unwrap().success());
+    assert_eq!(ran.output, "3 hello /usr/bin:/bin\n");
 }
 
 #[test]
@@ -322,9 +362,9 @@ fn a_cancelled_command_is_stopped_with_term() {
         setter.cancel();
     });
     let io = ExecIo::Streams {
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
+        stdin: None,
+        stdout: None,
+        stderr: None,
     };
 
     let status = run(
@@ -614,6 +654,63 @@ fn a_sandboxed_apps_exec_without_a_keeper_program_is_refused_rather_than_run_uns
 }
 
 #[test]
+fn a_cancel_kills_a_group_member_that_ignores_term_after_the_leader_exits() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("member.pid");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test builds a command for the exec runner"
+    )]
+    let mut command = Command::new("/bin/sh");
+    command.args([
+        "-c",
+        &format!(
+            "sh -c 'trap \"\" TERM; echo $$ > \"{}\"; while :; do sleep 1; done' & wait",
+            pid_file.display()
+        ),
+    ]);
+    let cancel = Cancel::new();
+    let setter = cancel.clone();
+    let watched = pid_file.clone();
+    let canceller = std::thread::spawn(move || {
+        while std::fs::read_to_string(&watched).map_or(true, |text| !text.ends_with('\n')) {
+            crate::clock::pause(Duration::from_millis(20));
+        }
+        setter.cancel();
+    });
+    let io = ExecIo::Streams {
+        stdin: None,
+        stdout: None,
+        stderr: None,
+    };
+
+    run(
+        command,
+        Session::Caller,
+        io,
+        &cancel,
+        Duration::from_millis(300),
+    )
+    .unwrap();
+
+    canceller.join().unwrap();
+    let member: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let member = rustix::process::Pid::from_raw(member).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rustix::process::test_kill_process(member).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the member that ignores TERM outlived the run"
+        );
+        crate::clock::pause(Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn a_cancel_ends_the_whole_process_group_of_a_command_with_streams() {
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("child.pid");
@@ -636,9 +733,9 @@ fn a_cancel_ends_the_whole_process_group_of_a_command_with_streams() {
         setter.cancel();
     });
     let io = ExecIo::Streams {
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
+        stdin: None,
+        stdout: None,
+        stderr: None,
     };
 
     run(
@@ -1088,4 +1185,47 @@ fn exec_refuses_a_sandboxed_command_when_a_standard_stream_of_the_caller_is_a_te
     );
     assert!(!printed.contains("probe "), "{printed}");
     assert!(!echoed.contains('R'), "{echoed:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_refuses_a_sandboxed_command_when_a_stream_it_is_given_is_a_terminal() {
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+    for terminal_at in 0..3 {
+        let Pty { slave, reader, .. } = Pty::open();
+        let stream = |at: usize| (at == terminal_at).then(|| slave.try_clone().unwrap());
+        let (stdin, stdout, stderr) = (stream(0), stream(1), stream(2));
+        let (phase, plan, root) = workspace(true);
+        let marker = root.path().join("ran");
+        let request = ExecRequest::new(
+            "api".parse().unwrap(),
+            "server".parse().unwrap(),
+            vec!["/usr/bin/touch".into(), marker.display().to_string()],
+            ExecIo::Streams {
+                stdin,
+                stdout,
+                stderr,
+            },
+        );
+
+        let refused = phase.exec(
+            &plan,
+            request,
+            &greeting(),
+            Instant::now() + Duration::from_secs(10),
+            &Cancel::new(),
+        );
+
+        assert!(
+            matches!(refused, Err(PhaseError::ExecNeedsTerminal { .. })),
+            "stream {terminal_at}: {refused:?}"
+        );
+        assert!(!marker.exists(), "stream {terminal_at}");
+        drop(slave);
+        drop(reader.join().unwrap());
+    }
 }

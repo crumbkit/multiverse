@@ -111,6 +111,7 @@ fn a_new_workspace_writes_its_agents_file_outside_the_checkout_and_its_record() 
     let agents = fs::read_to_string(workspace.path.join("AGENTS.md")).unwrap();
     assert!(agents.contains("mxv remove reading-list"), "{agents}");
     assert!(agents.contains("on the branch `reading-list`"), "{agents}");
+    assert!(agents.contains("`deadband run --label"), "{agents}");
     assert!(git(&workspace.checkouts[0].path, &["status", "--porcelain"]).is_empty());
     let found = setup.workspaces.find(&name("reading-list")).unwrap();
     assert_eq!(found, Some(workspace));

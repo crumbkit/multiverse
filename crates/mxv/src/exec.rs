@@ -274,9 +274,10 @@ fn run(environment: &Environment, args: &ExecArgs) -> Result<(ExitStatus, bool),
 ///
 /// mxv tells crumbkit that a child holds the terminal, so the usage log's
 /// signal thread no longer ends mxv on `SIGINT`, and catches `SIGINT`,
-/// `SIGHUP` and `SIGQUIT` itself. A caught signal resets to its default
-/// action in the command, where an ignored one would stay ignored. An
-/// unsandboxed command shares mxv's process group, so the terminal's
+/// `SIGHUP` and `SIGQUIT` itself, except a signal that
+/// [`interrupts`](crate::admission::interrupts) leaves alone because it
+/// started out ignored, which stays ignored in the command. A caught signal
+/// resets to its default action in the command. An unsandboxed command shares mxv's process group, so the terminal's
 /// signals reach it directly, and mxv waits for it to end. A sandboxed
 /// command runs in a session of its own, which the terminal's signals do
 /// not reach, so mxv sets the cancel flag and phase stops the command's
@@ -304,19 +305,19 @@ fn hand_over(exec: Exec<'_>, command: Vec<String>) -> Result<(ExecEnd, bool), mu
     Ok((end, caught.load(Ordering::SeqCst)))
 }
 
-/// Catches `SIGINT`, `SIGHUP` and `SIGQUIT` for the rest of mxv's run,
-/// and sets `cancel` on each one when it is given. Returns a flag that
+/// Catches the signals of [`interrupts`](crate::admission::interrupts) for
+/// the rest of mxv's run, and sets `cancel` on each one when it is given. Returns a flag that
 /// each caught signal sets inside its handler, so the flag is set before
 /// mxv sees the command end. When the handlers cannot be installed, no
 /// signal cancels a sandboxed command, and the flag stays clear.
 fn catch_interrupts(cancel: Option<Cancel>) -> Arc<AtomicBool> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
     use signal_hook::iterator::Signals;
     let caught = Arc::new(AtomicBool::new(false));
-    let Ok(mut signals) = Signals::new([SIGINT, SIGHUP, SIGQUIT]) else {
+    let watched = crate::admission::interrupts();
+    let Ok(mut signals) = Signals::new(&watched) else {
         return caught;
     };
-    for signal in [SIGINT, SIGHUP, SIGQUIT] {
+    for signal in watched {
         // A flag that cannot be registered leaves the run counted as
         // uninterrupted in the usage log, and changes nothing else.
         drop(signal_hook::flag::register(signal, Arc::clone(&caught)));

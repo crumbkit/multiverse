@@ -64,8 +64,8 @@ hmac = { version = "0.13.0", default-features = false }
 # libc declares macOS's libproc calls, proc_pidinfo, proc_pidfdinfo and
 # proc_listpids, which read a process's start time to the microsecond and
 # the sockets of a process group. Only crates/phase/src/record/process/darwin.rs
-# calls them, and multiverse uses libc only for an errno. It needs no
-# features beyond `std`.
+# calls them, multiverse uses libc only for an errno, and mxv uses it only
+# for `sigaction`. It needs no features beyond `std`.
 libc = { version = "0.2.191", default-features = false, features = ["std"] }
 
 # reflink-copy clones a directory tree with clonefile(2) on macOS, which
@@ -122,7 +122,7 @@ rustls-native-certs = { version = "0.8.5", default-features = false }
 # fails on any warning, and every package inherits the table through
 # `[lints] workspace = true`.
 [workspace.lints.rust]
-unsafe_code = "deny"                   # BASE-3; only phase's record/process/darwin.rs expects it
+unsafe_code = "deny"                   # BASE-3; rust-standards.toml's unsafe-libproc decision names the modules that expect it: phase's record/process/darwin.rs and sandbox/launch.rs, mxv's admission.rs, and five test modules of phase
 unreachable_pub = "warn"               # BASE-8
 missing_debug_implementations = "warn"
 missing_docs = "deny"                  # LIB-2

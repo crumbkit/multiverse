@@ -389,6 +389,9 @@ pub fn agents_text(workspace: &Workspace, origins: &[String]) -> String {
          \x20 work on this workspace; elsewhere, `-w {name}` names it.\n\
          - `mxv remove {name}` removes the checkouts, their branches when they are\n\
          \x20 merged, and the record. {refuses}\n\
+         - Run a build or test suite that you type here with `deadband run --label\n\
+         \x20 <label> -- <command>`, which limits how many heavy jobs the machine runs\n\
+         \x20 at once. mxv already does this for a process's `build` step.\n\
          \n\
          This file sits above the checkouts, so git does not see it.\n"
     ));

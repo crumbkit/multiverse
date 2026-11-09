@@ -1,4 +1,4 @@
-Stop a workspace's units and start them again
+Build a workspace's units through deadband, then stop them and start them again
 
 Usage: mxv restart [OPTIONS] [UNIT]...
 

@@ -242,11 +242,11 @@ pub(crate) enum Verb {
     Show(ShowArgs),
     /// Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it.
     Cd(CdArgs),
-    /// Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready.
+    /// Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready.
     Up(ProcessesArgs),
     /// Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds.
     Down(ProcessesArgs),
-    /// Stop a workspace's units and start them again.
+    /// Build a workspace's units through deadband, then stop them and start them again.
     Restart(ProcessesArgs),
     /// Report whether each unit of a workspace is running, exited or stopped.
     Status(StatusArgs),
