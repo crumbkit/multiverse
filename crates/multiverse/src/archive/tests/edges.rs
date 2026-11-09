@@ -97,6 +97,10 @@ fn a_tracked_file_whose_name_differs_only_in_case_on_disk_is_not_reported_as_unl
     let checkout = setup.checkout();
     git(&checkout, &["config", "core.ignorecase", "true"]);
     write(checkout.join("Mixed.txt"), "tracked\n");
+    if !checkout.join("MIXED.TXT").exists() {
+        // Only a case-insensitive file system can hold this state.
+        return;
+    }
     git(&checkout, &["add", "Mixed.txt"]);
     git(&checkout, &["commit", "--quiet", "-m", "Mixed"]);
     git(&checkout, &["push", "--quiet", "origin", "HEAD"]);
