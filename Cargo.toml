@@ -20,9 +20,9 @@ clap = { version = "4.6.7", default-features = false, features = ["std"] }
 
 # crumbkit holds the command-line conventions of the `mxv` command (the cli
 # profile of the Rust standards): `parse` and `finish`, documents, failures
-# with codes and next steps, and the help guide. The workspace entry enables
+# with codes and next steps, and the tool record. The workspace entry enables
 # no feature, and mxv enables the ones it uses.
-crumbkit = { version = "0.1.0", default-features = false }
+crumbkit = { version = "0.2", default-features = false }
 
 # serde reads and writes the workspace records of the multiverse library,
 # and mxv derives `Serialize` for the documents it prints.
@@ -90,11 +90,11 @@ signal-hook = { version = "0.4.6", default-features = false, features = ["iterat
 
 # crumbkit-usage keeps the `mxv` command's local usage log and adds
 # `self usage` and `self figures list` (CLI-7).
-crumbkit-usage = "0.1.0"
+crumbkit-usage = "0.2"
 
 # crumbkit-test checks the `mxv` command against crumbkit's conventions
 # (CLI-6). Only tests use it.
-crumbkit-test = "0.1.0"
+crumbkit-test = "0.2"
 
 # snapbox runs the built `mxv` binary in the end-to-end tests. Only tests
 # use it.

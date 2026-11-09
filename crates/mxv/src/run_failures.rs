@@ -281,21 +281,6 @@ fn fmt_unstoppable(
     }
 }
 
-/// Returns `text` as one word of a POSIX shell command: unchanged when it
-/// holds only characters that the shell leaves alone, and in single quotes
-/// otherwise, with each single quote written as `'\''`.
-fn shell_quoted(text: &str) -> String {
-    let plain = !text.is_empty()
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@,+".contains(c));
-    if plain {
-        text.to_owned()
-    } else {
-        format!("'{}'", text.replace('\'', "'\\''"))
-    }
-}
-
 /// Returns `path` as text for a field or a hint.
 fn shown(path: &Path) -> String {
     path.display().to_string()
@@ -372,7 +357,7 @@ impl Failure for RunFailure {
                         volume
                             .labels
                             .iter()
-                            .map(|label| format!(" --label {}", shell_quoted(label)))
+                            .map(|label| format!(" --label {}", crumbkit::help::quote(label)))
                             .collect::<String>(),
                         new = volume.new,
                         old = volume.old,

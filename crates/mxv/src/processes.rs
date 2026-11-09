@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crumbkit::{Batch, Document, Listing, Output, Stream};
+use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
     DownOutcome, Error, Git, Lock, Manifest, ManifestError, ProcessStatus, Reclaimed, Runs, Store,
@@ -538,7 +538,7 @@ pub(crate) fn status(
 
 /// Prints the last lines of the log of the process that `args` names, and
 /// with `--follow` each later line until the reader stops.
-pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -> ExitCode {
+pub(crate) fn logs(output: Run, environment: &Environment, args: &LogsArgs) -> ExitCode {
     let mut streaming = match crumbkit::stream(output, LOGS) {
         Ok(streaming) => streaming,
         Err(code) => return code,

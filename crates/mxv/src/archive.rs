@@ -11,7 +11,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
-use crumbkit::{Document, DryRun, Listing, Output, Prose, Yes};
+use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
     Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveRecords,
@@ -531,7 +531,7 @@ fn finish(
 
 /// Archives the workspace that `args` names.
 pub(crate) fn archive(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &ArchiveArgs,
 ) -> Result<Prose<ArchiveResult>, crumbkit::Error> {
@@ -664,7 +664,7 @@ fn stale_volumes(
 
 /// Restores the workspace that `args` names.
 pub(crate) fn restore(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &RestoreArgs,
 ) -> Result<Prose<RestoreResult>, crumbkit::Error> {
@@ -823,7 +823,7 @@ pub(crate) fn mark_unfinished(
 
 /// Deletes the archive that `args` names.
 pub(crate) fn remove(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &RemoveArgs,
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {

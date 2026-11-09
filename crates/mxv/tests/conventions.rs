@@ -1,5 +1,5 @@
 //! The convention tests of the `mxv` command, which hold its command tree,
-//! guide, help pages, examples and failures to crumbkit's conventions with
+//! tool record, help pages, examples and failures to crumbkit's conventions with
 //! crumbkit-test (CLI-6).
 //!
 //! They live in an integration test so that the example check can run the
@@ -39,8 +39,8 @@
 
 use clap::CommandFactory as _;
 use crumbkit_test::{
-    Allow, Budgets, Examples, Failing, Pages, PathBudgets, Recoveries, Rule, RuntimeFailing, Twin,
-    Twins, Unprovoked,
+    Allow, Examples, Failing, PathBudgets, Recoveries, Rule, RuntimeFailing, Suite, Twin, Twins,
+    Unprovoked,
 };
 #[path = "support/git.rs"]
 mod support;
@@ -56,7 +56,7 @@ use mxv::{
     CODES, CONFIG_INVALID, CONFIG_NO_LIMIT, CONFIG_UNREADABLE, Cli, DIRECTORY_TAKEN,
     DOCKER_ADDRESS_POOLS_EXHAUSTED, DOCKER_COMPOSE_MISSING, DOCKER_FAILED, DOCKER_FOREIGN_OBJECT,
     DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, ENVIRONMENT_NO_DIRECTORY, ENVIRONMENT_RELATIVE_ROOT,
-    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, GUIDE, MANIFEST_INVALID,
+    FILE_UNWRITABLE, GIT_FAILED, GIT_NOT_FOUND, GIT_TIMED_OUT, MANIFEST_INVALID,
     MANIFEST_NAME_CLASH, MANIFEST_NEEDED, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED,
     MANIFEST_UNIT_NAME, MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE,
     MANIFEST_UNTRUSTED, MIRROR_FETCH_FAILED, MIRROR_LOCKED, PATH_INACCESSIBLE, PHASE_FAILED,
@@ -66,7 +66,7 @@ use mxv::{
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
     REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED,
     RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
-    RESTORE_UNFINISHED, RUN_CODES, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, VOLUME_RENAMED,
+    RESTORE_UNFINISHED, RUN_CODES, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED,
     WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
     WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
     WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
@@ -189,9 +189,6 @@ const NEWER_RECORD: Failing<'static> =
 const CORRUPT_RECORD: Failing<'static> =
     Failing::new(&RECORD_CORRUPT, &["show", "reading-list"]).xdg("tests/fixtures/xdg-corrupt");
 
-/// The budgets of the `-h` pages, which are crumbkit's defaults.
-const BUDGETS: Budgets = Budgets::new();
-
 /// The budgets of the paths through the help, which are crumbkit's
 /// defaults.
 const PATH_BUDGETS: PathBudgets<'_> = PathBudgets::new("tests/golden/examples");
@@ -255,114 +252,6 @@ fn examples(path: &str) -> Examples<'_> {
         .xdg("tests/fixtures/xdg")
         .fresh_dir(path)
         .allow(ALLOW)
-}
-
-#[test]
-fn every_command_and_argument_has_one_name() {
-    crumbkit_test::check_names(&Cli::command(), Pages::rendered(&GUIDE), ALLOW);
-}
-
-#[test]
-fn every_command_is_a_root_verb_or_a_resource_followed_by_its_verb() {
-    crumbkit_test::check_grammar(
-        &Cli::command(),
-        Pages::rendered(&GUIDE),
-        &["usage", "reset"],
-        ALLOW,
-    );
-}
-
-#[test]
-fn every_command_declares_its_effects() {
-    crumbkit_test::check_effects(&Cli::command(), &GUIDE, ALLOW);
-}
-
-#[test]
-fn every_list_command_pages_and_every_show_command_takes_up_to_100_names() {
-    crumbkit_test::check_listings(&Cli::command(), ALLOW);
-}
-
-#[test]
-fn every_option_with_many_values_accepts_repeats_and_commas() {
-    crumbkit_test::check_filters(&Cli::command(), ALLOW);
-}
-
-#[test]
-fn every_command_leaf_and_topic_meets_the_guide_rules() {
-    crumbkit_test::check_guide(&Cli::command(), &GUIDE, ALLOW);
-}
-
-#[test]
-fn every_exit_code_meets_the_exit_code_rules() {
-    crumbkit_test::check_exit_codes(&Cli::command(), &GUIDE, ALLOW);
-}
-
-#[test]
-fn every_failure_code_is_declared_once_and_spelled_by_the_rules() {
-    crumbkit_test::check_codes(&GUIDE, &[CODES, RUN_CODES, ARCHIVE_CODES]);
-}
-
-#[test]
-fn every_help_page_fits_its_size_budget() {
-    crumbkit_test::check_help_sizes(&Cli::command(), Pages::rendered(&GUIDE), &BUDGETS);
-}
-
-#[test]
-fn every_path_through_the_help_fits_its_weight_budget() {
-    crumbkit_test::check_path_weights(&Cli::command(), Pages::rendered(&GUIDE), &PATH_BUDGETS);
-}
-
-#[test]
-fn every_help_page_matches_its_golden_file() {
-    crumbkit_test::check_help_goldens(
-        &Cli::command(),
-        Pages::rendered(&GUIDE),
-        "tests/golden/help",
-    );
-}
-
-#[test]
-fn every_document_schema_matches_its_golden_file() {
-    crumbkit_test::check_schema_goldens(&Cli::command(), &GUIDE, "tests/golden/schemas");
-}
-
-#[test]
-fn every_document_is_named_after_the_path_of_the_command_that_prints_it() {
-    crumbkit_test::check_document_ids(&Cli::command(), &GUIDE, ALLOW);
-}
-
-#[test]
-fn every_crumbkit_command_sits_at_its_fixed_path() {
-    crumbkit_test::check_mounts(&Cli::command(), &GUIDE);
-}
-
-#[test]
-fn every_example_in_the_guide_runs_and_prints_its_golden_output() {
-    let repositories = repositories();
-    crumbkit_test::check_examples(&Cli::command(), &GUIDE, &examples(&repositories.path));
-}
-
-#[test]
-fn every_json_example_cuts_or_refuses_a_result_past_its_output_budget() {
-    let repositories = repositories();
-    crumbkit_test::check_output_budget(&Cli::command(), &GUIDE, &examples(&repositories.path));
-}
-
-#[test]
-fn every_command_matches_the_checked_in_command_reference() {
-    crumbkit_test::check_command_reference(env!("CARGO_BIN_EXE_mxv"), "docs/commands.md");
-}
-
-#[test]
-fn every_opt_out_matches_the_opt_out_report() {
-    crumbkit_test::check_opt_outs(
-        &Cli::command(),
-        &GUIDE,
-        ALLOW,
-        &BUDGETS,
-        Some(&PATH_BUDGETS),
-        "tests/golden",
-    );
 }
 
 /// `cd` of a name that no workspace has.
@@ -846,25 +735,6 @@ impl Live {
     }
 }
 
-#[test]
-fn every_recovery_leads_to_a_command_that_runs() {
-    let repositories = repositories();
-    let live = live_workspaces();
-    let mut starts = STARTS.to_vec();
-    starts.extend(
-        live.refusals()
-            .into_iter()
-            .map(RuntimeFailing::into_failing),
-    );
-    let recoveries = Recoveries::new(
-        examples(&repositories.path),
-        &[CODES, RUN_CODES, ARCHIVE_CODES],
-    )
-    .starts(&starts)
-    .unprovoked(UNPROVOKED);
-    crumbkit_test::check_recoveries(&Cli::command(), &GUIDE, &recoveries, "tests/golden");
-}
-
 /// One twin for each declared code that a command line provokes. Each twin
 /// differs from its refused line in one word or one variable (TEST-1).
 const PAIRS: &[Twin<'static>] = &[
@@ -905,21 +775,78 @@ const PAIRS: &[Twin<'static>] = &[
     Twin::new(CD_MISSING_CHECKOUT, &["cd", "reading-list", "app"]),
 ];
 
-#[test]
-fn every_declared_code_has_a_twin_that_the_command_accepts() {
+/// The settings of every check, built in a fresh set of fixtures that the
+/// checks' runs leave behind them when the value drops.
+///
+/// Each test that `conventions!` expands builds its own, so the recovery
+/// chains, which act on the live checkouts, never share a checkout with the
+/// twin check or with another test.
+struct Fixtures {
+    /// The suite, whose settings borrow the leaked paths and lists below.
+    suite: Suite<'static>,
+    /// The temporary directory of the repositories that each example starts
+    /// in a copy of, which the test deletes when it drops.
+    _repositories: Repositories,
+    /// The live workspaces of the recovery check.
+    _recovery: Live,
+    /// The live workspaces of the twin check.
+    _twin: Live,
+}
+
+impl std::ops::Deref for Fixtures {
+    type Target = Suite<'static>;
+
+    fn deref(&self) -> &Suite<'static> {
+        &self.suite
+    }
+}
+
+/// Returns `value` for the rest of the process. The suite borrows its path
+/// and lists, and a test process builds the suite once.
+fn leaked<T: ?Sized>(value: Box<T>) -> &'static T {
+    Box::leak(value)
+}
+
+/// Returns the suite of the `mxv` command and the fixtures it reads.
+fn suite() -> Fixtures {
     let repositories = repositories();
-    let live = live_workspaces();
+    let recovery = live_workspaces();
+    let twin = live_workspaces();
+    let path: &'static str = leaked(repositories.path.clone().into_boxed_str());
+    let examples = examples(path);
+    let mut starts = STARTS.to_vec();
+    starts.extend(
+        recovery
+            .refusals()
+            .into_iter()
+            .map(RuntimeFailing::into_failing),
+    );
     let mut pairs = PAIRS.to_vec();
     pairs.extend(
-        live.refusals()
+        twin.refusals()
             .into_iter()
             .map(|refused| refused.twin(["remove", "clean", "--dry-run"])),
     );
-    let twins = Twins::new(
-        examples(&repositories.path),
-        &[CODES, RUN_CODES, ARCHIVE_CODES],
-    )
-    .pairs(&pairs)
-    .unprovoked(UNPROVOKED);
-    crumbkit_test::check_twins(&Cli::command(), &GUIDE, &twins);
+    let codes: &[&[&crumbkit::Code]] = &[CODES, RUN_CODES, ARCHIVE_CODES];
+    let recoveries = Recoveries::new(examples, codes)
+        .starts(leaked(starts.into_boxed_slice()))
+        .unprovoked(UNPROVOKED);
+    let twins = Twins::new(examples, codes)
+        .pairs(leaked(pairs.into_boxed_slice()))
+        .unprovoked(UNPROVOKED);
+    let suite = Suite::new(|| (Cli::command(), TOOL))
+        .allow(ALLOW)
+        .verbs(&["usage", "reset"])
+        .path_budgets(PATH_BUDGETS)
+        .examples(examples)
+        .recoveries(recoveries)
+        .twins(twins);
+    Fixtures {
+        suite,
+        _repositories: repositories,
+        _recovery: recovery,
+        _twin: twin,
+    }
 }
+
+crumbkit_test::conventions!(suite());

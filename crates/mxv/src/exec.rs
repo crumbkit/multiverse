@@ -13,7 +13,7 @@ use std::process::{ExitCode, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crumbkit::{Call, Code, Failure, Field, Output, Recovery, Sink};
+use crumbkit::{Call, Code, Failure, Field, Recovery, Run, Sink};
 use multiverse::phase::Cancel;
 use multiverse::{Exec, ExecEnd, ExecTarget};
 
@@ -187,7 +187,7 @@ pub(crate) fn ended(
 
 /// Runs the command that `args` names in the context of its process, and
 /// returns mxv's exit code: the command's own, or that of mxv's failure.
-pub(crate) fn exec(mut output: Output, environment: &Environment, args: &ExecArgs) -> ExitCode {
+pub(crate) fn exec(mut output: Run, environment: &Environment, args: &ExecArgs) -> ExitCode {
     let mut sink = Sink::standard();
     if output.is_json() {
         return fail(&mut sink, &mut output, &ExecFailure::JsonRefused);
@@ -212,7 +212,7 @@ pub(crate) fn exec(mut output: Output, environment: &Environment, args: &ExecArg
 /// the observer, and returns it.
 fn fail<O: std::io::Write, W: std::io::Write>(
     sink: &mut Sink<O, W>,
-    output: &mut Output,
+    output: &mut Run,
     failure: &dyn Failure,
 ) -> ExitCode {
     output.print_failure(sink, failure);

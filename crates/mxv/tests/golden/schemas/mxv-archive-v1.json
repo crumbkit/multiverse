@@ -36,7 +36,7 @@
             "minimum": 0
           },
           "code": {
-            "description": "The failure's stable code in the tool's spelling, such as shelf::books::not_found. It is one or more printable ASCII characters without spaces, from ! to ~.",
+            "description": "The failure's stable code, such as shelf::books::not_found. It is one or more printable ASCII characters without spaces, from ! to ~.",
             "type": "string",
             "pattern": "^[!-~]+$"
           },

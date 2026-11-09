@@ -1,7 +1,7 @@
 //! The workspace verbs `new`, `list`, `show`, `cd` and `remove`, and the
 //! documents they print. `clean` lives in its own module.
 
-use crumbkit::{Batch, Call, Document, Listing, Output, Prose};
+use crumbkit::{Batch, Call, Document, Listing, Prose, Run};
 use std::path::PathBuf;
 
 use multiverse::{
@@ -287,7 +287,7 @@ fn clone_globs(
 
 /// Creates the workspace that `args` names, or plans it on a dry run.
 pub(crate) fn new(
-    output: &Output,
+    output: &Run,
     environment: &Environment,
     args: &NewArgs,
 ) -> Result<NewRow, crumbkit::Error> {
@@ -381,7 +381,7 @@ fn clone_into(
 /// refuses while the workspace's units run, because
 /// adding a second checkout renames the first checkout's units and ports.
 pub(crate) fn add(
-    output: &Output,
+    output: &Run,
     environment: &Environment,
     args: &AddArgs,
 ) -> Result<NewRow, crumbkit::Error> {
@@ -653,7 +653,7 @@ pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<Strin
 /// after the confirmation, and refuses when the workspace changed while
 /// mxv waited.
 pub(crate) fn remove(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &RemoveArgs,
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {
