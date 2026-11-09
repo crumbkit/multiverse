@@ -30,10 +30,11 @@ use crate::record::Workspace;
 use crate::service::PROVISION_APP;
 use crate::store::{self, Lock, Store};
 
-/// How long `up` gives phase to build each selected checkout. mxv's apps
-/// run from their checkouts without a build, so phase does not wait for
-/// it.
-const BUILD_WAIT: Duration = Duration::from_secs(3600);
+/// How long `up` gives phase to build each selected checkout, and how long
+/// [`Runs::build`] lets a command's `build` steps run. mxv's apps run from
+/// their checkouts with no phase build, so phase itself does not wait for
+/// the first of these.
+pub(super) const BUILD_WAIT: Duration = Duration::from_secs(3600);
 
 /// How long `up` gives phase beyond the selected units' readiness
 /// timeouts, which covers pulling an image and starting each keeper.
@@ -48,10 +49,12 @@ const STOP_MARGIN: Duration = Duration::from_secs(30);
 /// command for the volumes of a workspace without it.
 const CONTAINERS_RAN: &str = ".containers";
 
+mod build;
 mod exec;
 #[cfg(test)]
 mod tests;
 
+pub use build::{Admission, Asked, BuildEnd, BuildsPassed, Place};
 pub use exec::{Exec, ExecEnd, ExecTarget};
 
 /// Returns the checkout that holds `workspace`'s manifest. A workspace
@@ -637,25 +640,22 @@ impl Runs {
     /// running. An `up` that succeeds puts its notes on each status.
     pub fn up(
         &self,
-        _lock: &Lock,
+        passed: BuildsPassed<'_>,
         store: &Store,
         workspace: &mut Workspace,
         manifest: &Manifest,
         names: &[String],
         earlier: &mut Vec<ProcessNote>,
     ) -> Result<UpOutcome, Error> {
+        // The token says that the builds passed, and it borrows the lock
+        // that `up` holds until it returns.
+        drop(passed);
         let order = match manifest.start_order(names) {
             Ok(order) => order,
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
         };
-        let id = saved_workspace_id(store, &workspace.name)?;
-        workspace.id = Some(id.clone());
-        let held = self
-            .phase_rows(workspace, None)?
-            .values()
-            .any(|row| row.state.may_run());
-        self.assign_ports(store, workspace, manifest, &BTreeSet::new(), held)?;
-        let built = match phase_plan::build(&self.inputs(workspace, &id, manifest)) {
+        let (id, built) = self.prepared(store, workspace, manifest)?;
+        let built = match built {
             Ok(built) => built,
             Err(unrunnable) => return Ok(UpOutcome::Unrunnable(unrunnable)),
         };
@@ -729,6 +729,26 @@ impl Runs {
                 })
                 .collect(),
         ))
+    }
+
+    /// Gives `workspace` a stable id and a host port for each named port,
+    /// saves them in `store`, and returns the id and the plan of
+    /// `manifest`, which fails when phase cannot run the manifest.
+    fn prepared(
+        &self,
+        store: &Store,
+        workspace: &mut Workspace,
+        manifest: &Manifest,
+    ) -> Result<(WorkspaceId, Result<Built, phase_plan::Unrunnable>), Error> {
+        let id = saved_workspace_id(store, &workspace.name)?;
+        workspace.id = Some(id.clone());
+        let held = self
+            .phase_rows(workspace, None)?
+            .values()
+            .any(|row| row.state.may_run());
+        self.assign_ports(store, workspace, manifest, &BTreeSet::new(), held)?;
+        let built = phase_plan::build(&self.inputs(workspace, &id, manifest));
+        Ok((id, built))
     }
 
     /// Stops the apps that a failed `up` started from nothing, as its

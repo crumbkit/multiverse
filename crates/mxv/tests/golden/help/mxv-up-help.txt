@@ -1,4 +1,4 @@
-Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
 
 Usage: mxv up [OPTIONS] [UNIT]...
 

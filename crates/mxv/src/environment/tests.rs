@@ -62,7 +62,19 @@ fn the_snapshot_reads_mxv_root_and_the_catalog_names_every_variable_that_mxv_dep
         },
         None,
     );
-    assert_eq!(read, ["MXV_ROOT"]);
+    assert_eq!(
+        read,
+        [
+            "MXV_ROOT",
+            "DEADBAND_SOCKET",
+            "TMPDIR",
+            "USER",
+            "DEADBAND_HELD",
+            "DEADBAND_BYPASS",
+            "HOME",
+            "XDG_CONFIG_HOME",
+        ]
+    );
     let catalog: Vec<&str> = VARIABLES.iter().map(|variable| variable.name).collect();
     assert_eq!(
         catalog,
@@ -71,7 +83,12 @@ fn the_snapshot_reads_mxv_root_and_the_catalog_names_every_variable_that_mxv_dep
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
-            "MXV_ROOT"
+            "DEADBAND_SOCKET",
+            "TMPDIR",
+            "USER",
+            "DEADBAND_HELD",
+            "DEADBAND_BYPASS",
+            "MXV_ROOT",
         ]
     );
 }

@@ -54,6 +54,12 @@ pub const PROCESS_FOREIGN_LISTENER: Code = Code::new("mxv", "process", "foreign_
 pub const PROCESS_DETACHED_LISTENER: Code = Code::new("mxv", "process", "detached_listener");
 /// The code of a process group that outlived SIGKILL.
 pub const PROCESS_UNSTOPPABLE: Code = Code::new("mxv", "process", "unstoppable");
+/// The code of a `build` that ended with a status other than 0.
+pub const BUILD_FAILED: Code = Code::new("mxv", "build", "failed");
+/// The code of a `build` that could not start.
+pub const BUILD_UNSTARTABLE: Code = Code::new("mxv", "build", "unstartable");
+/// The code of a `build` that outlived its deadline.
+pub const BUILD_TIMED_OUT: Code = Code::new("mxv", "build", "timed_out");
 /// The code of a stored port that something outside the workspace holds.
 pub const PORT_TAKEN: Code = Code::new("mxv", "port", "taken");
 /// The code of a port name that the manifest does not declare.
@@ -80,6 +86,9 @@ pub(crate) const CODES: &[&Code] = &[
     &PROCESS_FOREIGN_LISTENER,
     &PROCESS_DETACHED_LISTENER,
     &PROCESS_UNSTOPPABLE,
+    &BUILD_FAILED,
+    &BUILD_UNSTARTABLE,
+    &BUILD_TIMED_OUT,
     &PORT_TAKEN,
     &PORT_NOT_FOUND,
 ];
@@ -105,6 +114,35 @@ pub(crate) enum RunFailure {
         workspace: String,
         /// The process's name.
         process: String,
+    },
+    /// A process's `build` ended with a status other than 0.
+    BuildFailed {
+        /// The workspace's name.
+        workspace: String,
+        /// The process.
+        process: String,
+        /// The build's exit code, or `None` when a signal ended it.
+        code: Option<i32>,
+        /// The signal that ended the build, or `None`.
+        signal: Option<i32>,
+    },
+    /// A process's `build` could not start.
+    BuildUnstartable {
+        /// The workspace's name.
+        workspace: String,
+        /// The process.
+        process: String,
+        /// Why, in phase's words.
+        reason: String,
+    },
+    /// A process's `build` outlived the deadline of the command's builds.
+    BuildTimedOut {
+        /// The workspace's name.
+        workspace: String,
+        /// The process.
+        process: String,
+        /// How many seconds the builds ran.
+        seconds: u64,
     },
     /// Something outside the workspace holds a port that a process
     /// receives.
@@ -349,6 +387,9 @@ impl Failure for RunFailure {
             Self::UnknownProcess { .. } => &PROCESS_NOT_FOUND,
             Self::Exited { .. } => &PROCESS_EXITED,
             Self::NotReady { .. } => &PROCESS_NOT_READY,
+            Self::BuildFailed { .. } => &BUILD_FAILED,
+            Self::BuildUnstartable { .. } => &BUILD_UNSTARTABLE,
+            Self::BuildTimedOut { .. } => &BUILD_TIMED_OUT,
             Self::ForeignListener { .. } => &PROCESS_FOREIGN_LISTENER,
             Self::DetachedListener { .. } => &PROCESS_DETACHED_LISTENER,
             Self::Unstoppable { .. } => &PROCESS_UNSTOPPABLE,
@@ -381,6 +422,15 @@ impl Failure for RunFailure {
                     .join("; ")
             )),
             Self::Unrunnable { .. } => hint("fix what the message names in the manifest"),
+            Self::BuildFailed { .. } => hint(
+                "read the build's output above and fix the build, then run the command again; every running unit is still running",
+            ),
+            Self::BuildUnstartable { process, .. } => Recovery::Hint(format!(
+                "check the `build` of {process} in the manifest, such as that its program exists on the PATH, and run the command again"
+            )),
+            Self::BuildTimedOut { process, .. } => Recovery::Hint(format!(
+                "find out why the `build` of {process} takes so long, or run it by hand under `deadband run`, and then run the command again"
+            )),
             Self::Volumes {
                 workspace, allow, ..
             } => hint(format!(
@@ -508,7 +558,11 @@ impl Failure for RunFailure {
                 Field::new("workspace", workspace),
                 Field::new("volumes", FieldValue::list(volumes.iter())),
             ],
-            Self::VolumeRenamed { .. } | Self::Unrunnable { .. } => self.transition_fields(),
+            Self::VolumeRenamed { .. }
+            | Self::Unrunnable { .. }
+            | Self::BuildFailed { .. }
+            | Self::BuildUnstartable { .. }
+            | Self::BuildTimedOut { .. } => self.transition_fields(),
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -674,7 +728,11 @@ impl fmt::Display for RunFailure {
                 "the workspace {workspace} has docker volumes, which may hold data: {}",
                 volumes.join(", ")
             ),
-            Self::VolumeRenamed { .. } | Self::Unrunnable { .. } => self.fmt_transition(formatter),
+            Self::VolumeRenamed { .. }
+            | Self::Unrunnable { .. }
+            | Self::BuildFailed { .. }
+            | Self::BuildUnstartable { .. }
+            | Self::BuildTimedOut { .. } => self.fmt_transition(formatter),
             Self::ManifestMissing {
                 checkout,
                 workspace,
@@ -821,6 +879,42 @@ impl RunFailure {
                 Field::new("unit", unit.as_deref()),
                 Field::new("message", message),
             ],
+            Self::BuildFailed {
+                workspace,
+                process,
+                code,
+                signal,
+            } => {
+                let mut fields = vec![
+                    Field::new("workspace", workspace),
+                    Field::new("process", process),
+                ];
+                if let Some(code) = code {
+                    fields.push(Field::new("code", i64::from(*code)));
+                }
+                if let Some(signal) = signal {
+                    fields.push(Field::new("signal", i64::from(*signal)));
+                }
+                fields
+            }
+            Self::BuildUnstartable {
+                workspace,
+                process,
+                reason,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("process", process),
+                Field::new("reason", reason),
+            ],
+            Self::BuildTimedOut {
+                workspace,
+                process,
+                seconds,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("process", process),
+                Field::new("seconds", *seconds),
+            ],
             _ => Vec::new(),
         }
     }
@@ -851,6 +945,37 @@ impl RunFailure {
                 message,
                 ..
             } => write!(formatter, "phase cannot run the manifest: {message}"),
+            Self::BuildFailed {
+                process,
+                code,
+                signal,
+                ..
+            } => match (code, signal) {
+                (Some(code), _) => write!(
+                    formatter,
+                    "the build of {process} exited with status {code}, so mxv stopped and started nothing"
+                ),
+                (None, Some(signal)) => write!(
+                    formatter,
+                    "signal {signal} ended the build of {process}, so mxv stopped and started nothing"
+                ),
+                (None, None) => write!(
+                    formatter,
+                    "the build of {process} ended without a status, so mxv stopped and started nothing"
+                ),
+            },
+            Self::BuildUnstartable {
+                process, reason, ..
+            } => write!(
+                formatter,
+                "the build of {process} could not start, so mxv stopped and started nothing: {reason}"
+            ),
+            Self::BuildTimedOut {
+                process, seconds, ..
+            } => write!(
+                formatter,
+                "the build of {process} was still running after {seconds} seconds, so mxv ended it and stopped and started nothing"
+            ),
             _ => Ok(()),
         }
     }

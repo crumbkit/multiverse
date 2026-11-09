@@ -227,6 +227,27 @@ impl Drop for Sandboxed {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_build_runs_under_its_processs_sandbox() {
+    let script = "echo built > out/file && if echo x > denied 2>/dev/null; then exit 9; fi";
+    let sandboxed = Sandboxed::new(&format!(
+        r#"[processes.writer]
+argv = ["/bin/sh", "-c", "echo ready; exec sleep 60"]
+build = ["/bin/sh", "-c", {script:?}]
+ready = {{ log = "^ready$" }}
+permissions = {{ write = ["out"] }}
+"#
+    ));
+    std::fs::create_dir(sandboxed.checkout().join("out")).unwrap();
+
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{up}");
+    assert!(sandboxed.checkout().join("out/file").exists());
+    assert!(!sandboxed.checkout().join("denied").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_process_whose_manifest_grants_permissions_runs_sandboxed_and_cannot_write_outside_its_grants()
 {
     let script = "echo granted > out/file && echo granted=written; \

@@ -73,6 +73,53 @@ enum Rule {
     Id,
 }
 
+/// The name of an environment variable that a caller adds to one command.
+/// It is not empty and holds neither `=` nor NUL, because the name goes
+/// into the environment block of a host command and onto a `docker exec
+/// --env` argument, where either character would change which variable is
+/// set.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VariableName(String);
+
+impl VariableName {
+    /// Returns the name as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for VariableName {
+    type Error = BadName;
+
+    fn try_from(text: String) -> Result<Self, BadName> {
+        if text.is_empty() {
+            return Err(BadName::Empty);
+        }
+        if let Some(bad) = text
+            .chars()
+            .find(|character| matches!(character, '=' | '\0'))
+        {
+            return Err(BadName::BadCharacter(bad));
+        }
+        Ok(Self(text))
+    }
+}
+
+impl FromStr for VariableName {
+    type Err = BadName;
+
+    fn from_str(text: &str) -> Result<Self, BadName> {
+        Self::try_from(text.to_owned())
+    }
+}
+
+impl fmt::Display for VariableName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 /// Reports whether `text` is a valid name of a manifest's process,
 /// container, volume or port: 1 to [`MOST_NAME_BYTES`] ASCII letters,
 /// digits, `-` and `_`, starting with a letter or a digit. Such a name

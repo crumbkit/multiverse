@@ -1,6 +1,6 @@
 use super::{
-    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
-    WorkspaceName,
+    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VariableName, VolumeName,
+    WorkspaceId, WorkspaceName,
 };
 
 #[test]
@@ -94,4 +94,21 @@ fn a_minted_workspace_id_is_32_lowercase_hex_digits_and_each_mint_differs() {
     assert_eq!(first.as_str().len(), 32);
     assert!(first.as_str().parse::<WorkspaceId>().is_ok());
     assert_ne!(first, second);
+}
+
+#[test]
+fn a_variable_name_refuses_an_empty_name_an_equals_sign_and_nul() {
+    assert_eq!("".parse::<VariableName>(), Err(BadName::Empty));
+    assert_eq!(
+        "A=B".parse::<VariableName>(),
+        Err(BadName::BadCharacter('='))
+    );
+    assert_eq!(
+        "A\0B".parse::<VariableName>(),
+        Err(BadName::BadCharacter('\0'))
+    );
+    assert_eq!(
+        "CARGO_BUILD_JOBS".parse::<VariableName>().unwrap().as_str(),
+        "CARGO_BUILD_JOBS"
+    );
 }

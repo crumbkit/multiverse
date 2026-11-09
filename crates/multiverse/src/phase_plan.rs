@@ -277,7 +277,7 @@ pub(crate) fn roots(workspace: &Workspace) -> Vec<PathBuf> {
 ///
 /// Returns [`Unrunnable`] when the process's `cwd` is absolute and lies in
 /// none of `inputs.roots`.
-fn placed(
+pub(crate) fn placed(
     inputs: &Inputs<'_>,
     name: &str,
     process: &Process,

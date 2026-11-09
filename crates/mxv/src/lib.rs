@@ -7,6 +7,7 @@
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
 
+mod admission;
 mod archive;
 mod clean;
 mod cli;
@@ -67,11 +68,12 @@ pub use crate::failures::{
 };
 #[doc(hidden)]
 pub use crate::run_failures::{
-    MANIFEST_INVALID, MANIFEST_NAME_CLASH, MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED,
-    MANIFEST_UNIT_NAME, MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE,
-    PORT_NOT_FOUND, PORT_TAKEN, PROCESS_DETACHED_LISTENER, PROCESS_EXITED,
-    PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_UNSTOPPABLE,
-    VOLUME_RENAMED, WORKSPACE_NOT_CURRENT, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    BUILD_FAILED, BUILD_TIMED_OUT, BUILD_UNSTARTABLE, MANIFEST_INVALID, MANIFEST_NAME_CLASH,
+    MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME,
+    MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, PORT_NOT_FOUND, PORT_TAKEN,
+    PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
+    PROCESS_NOT_READY, PROCESS_UNSTOPPABLE, VOLUME_RENAMED, WORKSPACE_NOT_CURRENT,
+    WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 
 /// Every failure code of `mxv archive`, `mxv restore` and `mxv remove
@@ -153,14 +155,15 @@ where
             crumbkit::finish(output, reclaim::UNPIN, result)
         }
         Verb::Up(args) => {
-            crumbkit::finish(output, processes::UP, processes::up(environment, &args))
+            let result = processes::up(environment, &args);
+            processes::finish_interruptible(output, processes::UP, result)
         }
         Verb::Down(args) => {
             crumbkit::finish(output, processes::DOWN, processes::down(environment, &args))
         }
         Verb::Restart(args) => {
             let result = processes::restart(environment, &args);
-            crumbkit::finish(output, processes::RESTART, result)
+            processes::finish_interruptible(output, processes::RESTART, result)
         }
         Verb::Status(args) => {
             let result = processes::status(environment, &args);
@@ -223,8 +226,6 @@ where
     }
 }
 
-/// Prints each of `warnings` on standard error as a line of its own, for
-/// a command such as `mxv up` whose result has no field for them.
 /// The words that follow the program on the command line of phase's
 /// keeper, which `run` never sees: `mxv phase keep ...`. The command is
 /// hidden from help, because only phase starts it.
@@ -394,6 +395,34 @@ pub(crate) fn stdout_is_terminal() -> bool {
     stdout.is_terminal()
 }
 
+/// Returns a stream that writes to mxv's standard error, for a command
+/// whose output goes there.
+pub(crate) fn stderr_stdio() -> std::io::Result<std::process::Stdio> {
+    use std::os::fd::AsFd as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and a build's output goes there beside the command's result"
+    )]
+    let stderr = std::io::stderr();
+    Ok(stderr.as_fd().try_clone_to_owned()?.into())
+}
+
+/// Prints `line`, which deadband wrote about a build's wait for a place,
+/// on standard error.
+pub(crate) fn notice(line: &str) {
+    use std::io::Write as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and this line goes there beside the command's result"
+    )]
+    let mut stderr = std::io::stderr();
+    // A line that cannot be written changes nothing the command does, so
+    // its failure is ignored.
+    drop(writeln!(stderr, "mxv: {line}."));
+}
+
+/// Prints each of `warnings` on standard error as a line of its own, for
+/// a command such as `mxv up` whose result has no field for them.
 pub(crate) fn warn(warnings: &[String]) {
     use std::io::Write as _;
     if warnings.is_empty() {

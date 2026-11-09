@@ -12,7 +12,7 @@ use super::{ExecIo, ExecRequest, Session, run};
 use crate::cancel::Cancel;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
-use crate::name::{AppName, ProcessName, WorkspaceId};
+use crate::name::{AppName, ProcessName, VariableName, WorkspaceId};
 use crate::phase::Phase;
 use crate::plan::{AppPlan, Permissions, Plan, ProcessPlan, RunnerKind};
 use crate::record::store::RunStore;
@@ -110,6 +110,19 @@ struct Ran {
 /// Runs `script` in `sh` in the context of `api/server` of `plan`, with
 /// `source` as the environment, its output in a file in `scratch`.
 fn exec_script(phase: &Phase, plan: &Plan, source: &Listed, script: &str, scratch: &Path) -> Ran {
+    exec_script_with(phase, plan, source, script, scratch, Vec::new())
+}
+
+/// Runs `script` as [`exec_script`] does, with `variables` added to its
+/// environment.
+fn exec_script_with(
+    phase: &Phase,
+    plan: &Plan,
+    source: &Listed,
+    script: &str,
+    scratch: &Path,
+    variables: Vec<(VariableName, String)>,
+) -> Ran {
     let out = scratch.join("exec.out");
     #[expect(
         clippy::disallowed_methods,
@@ -125,7 +138,8 @@ fn exec_script(phase: &Phase, plan: &Plan, source: &Listed, script: &str, scratc
             stdout: Stdio::from(file.try_clone().unwrap()),
             stderr: Stdio::from(file),
         },
-    );
+    )
+    .with_variables(variables);
     let result = phase.exec(
         plan,
         request,
@@ -193,6 +207,30 @@ fn a_host_command_receives_the_resolved_environment_and_nothing_else_of_the_call
         with.output,
         "hello lang=C path=/usr/bin:/bin manifest=unset tmp=unset\n"
     );
+}
+
+#[test]
+fn a_host_command_receives_the_added_variables_and_a_declared_variable_keeps_its_value() {
+    let state = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let (phase, plan) = world(state.path(), checkout.path(), None);
+    let added = |name: &str, value: &str| (name.parse().unwrap(), value.to_owned());
+
+    let ran = exec_script_with(
+        &phase,
+        &plan,
+        &greeting(),
+        "echo \"$CARGO_BUILD_JOBS $GREETING $PATH\"",
+        state.path(),
+        vec![
+            added("CARGO_BUILD_JOBS", "3"),
+            added("GREETING", "the job's value"),
+            added("PATH", "/the/job/path"),
+        ],
+    );
+
+    assert!(ran.result.unwrap().success());
+    assert_eq!(ran.output, "3 hello /usr/bin:/bin\n");
 }
 
 #[test]

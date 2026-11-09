@@ -41,8 +41,8 @@ pub use crate::env::{
 pub use crate::error::{NotRunnable, Operation, PhaseError, VolumeOwnerProblem};
 pub use crate::logs::{LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{
-    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VolumeName, WorkspaceId,
-    WorkspaceName, is_unit_name,
+    AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VariableName, VolumeName,
+    WorkspaceId, WorkspaceName, is_unit_name,
 };
 pub use crate::phase::{
     DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines,

@@ -259,6 +259,7 @@ The schema has these keys, and any other key fails with
 | `version` | The manifest version, which is 1. A higher version fails with `mxv::manifest::newer`. |
 | `ports` | The port names, each 1 to 64 letters, digits, `-` and `_`. |
 | `processes.<name>.argv` | The program and its arguments, as separate strings. It is required and not empty. |
+| `processes.<name>.build` | A command that builds the process, as separate strings that no shell reads. It is optional and not empty. See [Builds](#builds). |
 | `processes.<name>.cwd` | The starting directory, relative to the repository root, which defaults to `.`. It may not leave the repository, also through a symbolic link. |
 | `processes.<name>.env` | Variables that the process receives beside the ones that [The environment of a host process](#the-environment-of-a-host-process) lists. A value may name a host port as `{port.<name>}`, where the name is a port of `ports`, and writes a literal brace as `{{` or `}}`. Any other brace, or a placeholder of an undeclared port, fails with `mxv::manifest::invalid` and the value's line. `status` lists such a port as `{port.api}=<number>`. |
 | `processes.<name>.ports` | Variables that receive a host port, each naming a port of `ports`. |
@@ -282,6 +283,61 @@ process and fails with `mxv::process::not_ready`, whose `pattern` field
 holds the pattern in place of `port` and `number`. A process with neither counts as started once
 it has run for half a second; when it exits sooner, `up` fails with
 `mxv::process::exited`.
+
+### Builds
+
+A process's `build` is a command that `mxv up` and `mxv restart` run before
+they start or stop anything. The process's `argv` then runs the built program:
+
+```toml
+[processes.api]
+argv = ["./target/debug/api"]
+build = ["cargo", "build", "--bin", "api"]
+```
+
+Before the first build, mxv asks [deadband](https://github.com/crumbkit/deadband),
+the machine's limiter of heavy jobs, for one place, and prints deadband's line
+while it waits. All the builds of one command run in that place, one after
+another, in start order. The wait for a place has no deadline. Ctrl-C during
+the wait ends mxv and takes the job out of deadband's queue. When no daemon
+answers, the builds start at once with a default share of the machine's cores.
+
+Each selected process with a `build` is built, whether or not it runs, because
+phase decides which running units `up` replaces only once `up` runs. `up` and
+`restart` therefore ask for a place even when each build would do nothing, so an
+`up` of a running workspace can wait on a busy machine.
+
+A build runs in its process's directory, with its process's variables and
+sandbox, and with the thread counts that deadband gives it in
+`CARGO_BUILD_JOBS`, `NEXTEST_TEST_THREADS`, `RUST_TEST_THREADS`,
+`CMAKE_BUILD_PARALLEL_LEVEL` and `MAKEFLAGS`. It also gets `MISE_JOBS=1`, so a
+`mise run` cannot run tasks in parallel in one place. A variable that the
+process declares keeps its declared value. A sandboxed process's build has only
+that process's grants, so it needs `write = ["target"]` to write `target`, and
+it cannot download crates. A build reads no input, and its output goes to
+standard error, so `--json` still prints one document on standard output.
+
+A build that fails stops the command before it has stopped, started or replaced
+anything, so running units keep running:
+
+| Code | What happened |
+| --- | --- |
+| `mxv::build::failed` | A build ended with a status other than 0. The later builds did not run. |
+| `mxv::build::unstartable` | A build could not start, such as a program that does not exist. |
+| `mxv::build::timed_out` | The command's builds were still running one hour after their place was granted, so phase ended the running build's process group with `TERM` and then `KILL`. |
+
+Ctrl-C, `SIGHUP` or `SIGQUIT` during a build ends the build's process group, and
+mxv exits with 128 plus the signal. While the builds wait and run, mxv holds the
+workspace's lock, so other mxv commands that need it fail with
+`mxv::workspace::busy`, and `mxv reclaim` keeps the workspace.
+
+`build` is not part of phase's plan, so a change to `build` alone does not
+restart a running process. A keeper that restarts a crashed process does not
+build, and `mxv exec` does not ask for a place.
+
+An `argv` of `cargo run` compiles inside the process, which would hold a place
+for the server's whole life, so mxv gives it none and prints one warning for
+each such process.
 
 The sections `secrets` and `actions` are reserved for later versions and
 fail with `mxv::manifest::reserved`. A manifest larger than 64 KiB fails

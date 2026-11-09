@@ -28,6 +28,7 @@
 //! since they all take it exclusively.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
@@ -43,7 +44,7 @@ use crate::engine::keeper::{KeeperCommand, check_inherited, check_resolved};
 use crate::engine::run::{SandboxScope, Settings, app_ports, process_dir, process_sandbox};
 use crate::env::EnvironmentSource;
 use crate::error::{NotRunnable, PhaseError};
-use crate::name::{AppName, ProcessName};
+use crate::name::{AppName, ProcessName, VariableName};
 use crate::plan::{AppPlan, Plan, ProcessPlan, RunnerKind};
 use crate::record::store::RunStore;
 use crate::sandbox::{launcher_command, sandboxed_environment};
@@ -66,6 +67,12 @@ pub struct ExecRequest {
     pub run: Vec<String>,
     /// The command's standard streams.
     pub io: ExecIo,
+    /// The variables that the command receives beside the process's own,
+    /// such as the thread counts that a job gets from a machine-wide
+    /// scheduler. A variable that the process's plan already declares keeps
+    /// its declared value. A value here is passed on `docker exec`'s command
+    /// line for a container process, so it must hold no secret.
+    pub variables: Vec<(VariableName, String)>,
 }
 
 impl ExecRequest {
@@ -78,7 +85,16 @@ impl ExecRequest {
             process,
             run,
             io,
+            variables: Vec::new(),
         }
+    }
+
+    /// Returns the request with `variables` added to the command's
+    /// environment, as [`ExecRequest::variables`] describes.
+    #[must_use]
+    pub fn with_variables(mut self, variables: Vec<(VariableName, String)>) -> Self {
+        self.variables = variables;
+        self
     }
 }
 
@@ -202,7 +218,7 @@ pub(crate) fn exec(
     let failed = |error: io::Error| unstartable(app, process, error.to_string());
     match app.runner {
         RunnerKind::Host => {
-            let (command, session) = host_command(
+            let (mut command, session) = host_command(
                 &exec.settings,
                 plan,
                 app,
@@ -211,6 +227,7 @@ pub(crate) fn exec(
                 env,
                 deadline,
             )?;
+            add_variables(&mut command, &request.variables);
             run(
                 command,
                 session,
@@ -221,12 +238,22 @@ pub(crate) fn exec(
             .map_err(failed)
         }
         RunnerKind::Container => {
+            // The plan names every variable that mxv's own side declares. A
+            // variable that only the image sets is unknown here, so a job
+            // variable of that name replaces the image's value. Reading the
+            // image's `Env` before each `exec` would close this.
+            let variables: Vec<&(VariableName, String)> = request
+                .variables
+                .iter()
+                .filter(|(name, _)| !process.env.contains(name.as_str()))
+                .collect();
             let prepared = exec_command(&ContainerExec {
                 state_dir: exec.settings.state_dir,
                 workspace: plan.id(),
                 app: &app.name,
                 process: &process.name,
                 run: &request.run,
+                variables: &variables,
                 terminal: matches!(request.io, ExecIo::Inherit { terminal: true }),
                 docker_environment: exec.docker_environment,
             })?;
@@ -248,6 +275,23 @@ pub(crate) fn exec(
                 });
             }
             Ok(status)
+        }
+    }
+}
+
+/// Sets each of `variables` on `command`, except one that `command`'s
+/// environment already sets, so a variable that the process declares, or
+/// that phase sets itself, such as `PATH` or a sandbox's `TMPDIR`, keeps its
+/// value.
+fn add_variables(command: &mut Command, variables: &[(VariableName, String)]) {
+    let set: BTreeSet<OsString> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_some())
+        .map(|(name, _)| name.to_os_string())
+        .collect();
+    for (name, value) in variables {
+        if !set.contains(OsStr::new(name.as_str())) {
+            command.env(name.as_str(), value);
         }
     }
 }

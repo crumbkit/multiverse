@@ -41,9 +41,10 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [sources]
-# Every crate comes from crates.io. A crate from any other registry or from a
-# git repository fails the check.
+# Every crate comes from crates.io, except deadband, which is not published
+# and comes from its own repository. A crate from any other registry or from
+# any other git repository fails the check.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/crumbkit/deadband"]

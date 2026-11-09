@@ -31,7 +31,9 @@ mod phased;
 #[cfg(test)]
 mod tests;
 
-pub use phased::{Exec, ExecEnd, ExecTarget, LogOutput, Volumes};
+pub use phased::{
+    Admission, Asked, BuildEnd, BuildsPassed, Exec, ExecEnd, ExecTarget, LogOutput, Place, Volumes,
+};
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
 pub const STOP_GRACE: Duration = Duration::from_secs(10);
@@ -436,6 +438,9 @@ pub struct Runs {
     /// How long [`Runs::lock`] and port allocation wait for a lock that
     /// another command holds.
     lock_wait: Duration,
+    /// How long [`Runs::build`] lets a command's builds run, from the
+    /// moment they are admitted.
+    build_wait: Duration,
     /// The environment that mxv's `main` read, which phase's keepers and
     /// host processes receive part of.
     caller: CallerEnvironment,
@@ -458,6 +463,7 @@ impl Runs {
             grace: STOP_GRACE,
             port_range: DEFAULT_PORT_RANGE,
             lock_wait: LOCK_WAIT,
+            build_wait: phased::BUILD_WAIT,
             caller: CallerEnvironment::default(),
             provisioner: None,
         }
@@ -474,6 +480,15 @@ impl Runs {
         let mut command = vec![program.to_string_lossy().into_owned()];
         command.extend(leading.iter().map(|word| (*word).to_owned()));
         self.provisioner = Some(command);
+        self
+    }
+
+    /// Returns these run files with `wait` as how long [`Runs::build`]
+    /// lets a command's builds run. Only a test shortens it.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_build_wait(mut self, wait: Duration) -> Self {
+        self.build_wait = wait;
         self
     }
 

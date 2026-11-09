@@ -5,9 +5,9 @@ mxv add            Add a clone of a repository to a workspace, on the workspace'
 mxv list           List the workspaces
 mxv show           Show workspaces by name, in the order given
 mxv cd             Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
-mxv up             Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready
+mxv up             Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
 mxv down           Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
-mxv restart        Stop a workspace's units and start them again
+mxv restart        Build a workspace's units through deadband, then stop them and start them again
 mxv status         Report whether each unit of a workspace is running, exited or stopped
 mxv logs           Print the last lines of a unit's log, and follow it with --follow
 mxv exec           Run a one-off command in the context of a running unit, and exit with its exit code

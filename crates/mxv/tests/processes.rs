@@ -15,6 +15,7 @@ mod test_ports;
 
 use std::fs;
 use std::net::{Ipv4Addr, TcpListener};
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -153,6 +154,31 @@ impl Setup {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("MXV_ROOT", root.join("workspaces"))
+    }
+
+    /// Starts `mxv up` for the workspace `name` as a child process that the
+    /// test can signal, with its standard error discarded.
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the test starts mxv as a child so that it can signal it"
+    )]
+    fn spawn_up(&self, name: &str) -> std::process::Child {
+        let root = self.root();
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
+        command
+            .args(["up", "-w", name])
+            .current_dir(&root)
+            .env_clear()
+            .env("PATH", PATH)
+            .envs(GIT_ENV.iter().copied())
+            .env("HOME", &root)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("MXV_ROOT", root.join("workspaces"))
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
     }
 
     /// Runs `mxv` with `args` and `--json` in `dir`, and returns the exit
@@ -1689,4 +1715,344 @@ fn exec_keeps_running_after_sigint_to_mxv_alone_and_exits_with_the_commands_code
     };
     assert!(still, "mxv exec ended on SIGINT before the command did");
     assert_eq!(status.code(), Some(4), "{status:?}");
+}
+
+/// Waits until `path` exists, and fails the test when it does not appear.
+fn wait_for(path: &Path) {
+    for () in waiting() {
+        if path.exists() {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("{} did not appear", path.display());
+}
+
+/// Returns the pid of the unit `unit` that `mxv status` reports.
+fn pid_of(setup: &Setup, workspace: &str, unit: &str) -> u64 {
+    let (_, status) = setup.json(&["status", "-w", workspace]);
+    row(&status, unit)["pid"].as_u64().unwrap()
+}
+
+/// A process that stays up, whose `build` fails once the file `broken`
+/// exists in the checkout, with `more` added to its table.
+fn breakable(more: &str) -> String {
+    format!(
+        "[processes.api]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nbuild = [\"sh\", \"-c\", \"test ! -e broken\"]\nready = {{ log = \"^ready$\" }}\n{more}"
+    )
+}
+
+#[test]
+fn up_runs_the_build_before_it_starts_the_process_and_sends_its_output_to_standard_error() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sh\", \"-c\", \"cat built; exec sleep 60\"]\nbuild = [\"sh\", \"-c\", \"echo the-build-ran; echo made > built\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+
+    let (exit, stderr) = setup.errors(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(stderr.contains("the-build-ran"), "{stderr}");
+    assert!(checkout.join("built").exists());
+    let (_, logs) = setup.text(&["logs", "-w", "triage", "api"]);
+    assert_eq!(logs, "made\n");
+}
+
+#[test]
+fn a_build_receives_the_job_variables_and_a_variable_that_the_process_declares_keeps_its_value() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nenv = { MAKEFLAGS = \"-j1\" }\nbuild = [\"sh\", \"-c\", \"echo $CARGO_BUILD_JOBS $MISE_JOBS $MAKEFLAGS > seen\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{document}");
+    let seen = fs::read_to_string(checkout.join("seen")).unwrap();
+    let words: Vec<&str> = seen.split_whitespace().collect();
+    assert!(words[0].parse::<u32>().is_ok(), "{seen}");
+    assert_eq!(words[1..], ["1", "-j1"], "{seen}");
+}
+
+#[test]
+fn a_failing_build_leaves_a_running_process_with_the_same_pid_under_restart() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &breakable(""));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let before = pid_of(&setup, "triage", "api");
+    write(&checkout.join("broken"), "");
+
+    let (exit, failure) = setup.json(&["restart", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{failure}");
+    assert_eq!(failure["code"], "mxv::build::failed", "{failure}");
+    assert_eq!(pid_of(&setup, "triage", "api"), before);
+}
+
+#[test]
+fn a_failing_build_leaves_a_running_process_with_the_same_pid_when_up_would_replace_it() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &breakable(""));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let before = pid_of(&setup, "triage", "api");
+    write(&checkout.join("broken"), "");
+    // A process whose argv changes is one that `up` replaces.
+    setup.workspace_manifest(
+        "triage",
+        &breakable("").replace("exec sleep 60", "exec sleep 61"),
+    );
+
+    let (exit, failure) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{failure}");
+    assert_eq!(failure["code"], "mxv::build::failed", "{failure}");
+    assert_eq!(pid_of(&setup, "triage", "api"), before);
+}
+
+#[test]
+fn a_build_that_cannot_start_fails_up_with_the_reason_and_starts_nothing() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"/no/such/program\"]\n",
+    );
+
+    let (exit, failure) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{failure}");
+    assert_eq!(failure["code"], "mxv::build::unstartable", "{failure}");
+    assert!(!setup.started("api"));
+}
+
+#[test]
+fn the_ready_timeout_starts_after_the_build_ends() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nbuild = [\"sleep\", \"2\"]\nready = { log = \"^ready$\", timeout_seconds = 1 }\n",
+    );
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{document}");
+}
+
+#[test]
+fn up_warns_once_for_each_process_whose_argv_is_cargo_run() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"cargo\", \"run\"]\n\n[processes.web]\nargv = [\"sleep\", \"60\"]\n",
+    );
+
+    let (_, stderr) = setup.errors(&["up", "-w", "triage"]);
+
+    assert_eq!(stderr.matches("`cargo run`").count(), 1, "{stderr}");
+    assert!(stderr.contains("`api`"), "{stderr}");
+}
+
+#[test]
+fn an_interrupt_during_a_build_ends_its_group_starts_nothing_and_exits_with_130() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"sh\", \"-c\", \"echo $$ > group; touch started; sleep 60\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+    let mut up = setup.spawn_up("triage");
+    wait_for(&checkout.join("started"));
+    let group: u64 = fs::read_to_string(checkout.join("group"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    interrupt(up.id());
+    let ended = up.wait().unwrap();
+
+    assert_eq!(ended.code(), Some(130));
+    assert!(!group_exists(group));
+    assert!(!setup.started("api"));
+}
+
+#[test]
+fn an_interrupt_after_the_builds_ends_mxv_while_it_waits_for_a_process_to_be_ready() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sh\", \"-c\", \"touch running; exec sleep 60\"]\nbuild = [\"true\"]\nready = { log = \"^never$\", timeout_seconds = 60 }\n";
+    let checkout = setup.workspace("triage", manifest);
+    let mut up = setup.spawn_up("triage");
+    wait_for(&checkout.join("running"));
+
+    interrupt(up.id());
+    let ended = up.wait().unwrap();
+
+    assert_eq!(ended.signal().or(ended.code()), Some(2));
+}
+
+/// Sends `SIGINT` to the process `pid`, as Ctrl-C does.
+fn interrupt(pid: u32) {
+    let status = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+}
+
+/// A machine with plenty of room, so only the daemon's limit on jobs holds
+/// a build back.
+#[derive(Clone)]
+struct Calm;
+
+impl deadband::probe::Probe for Calm {
+    fn sample(&self) -> Result<deadband::probe::Sample, deadband::probe::Unreadable> {
+        Ok(deadband::probe::Sample {
+            load_1m: 0.0,
+            memory_pressure: deadband::probe::Pressure::Normal,
+            swap_used_bytes: 0,
+            swap_total_bytes: 1,
+        })
+    }
+
+    fn disk(&self, _path: &Path) -> std::io::Result<deadband::probe::Disk> {
+        Ok(deadband::probe::Disk {
+            free_bytes: u64::MAX / 2,
+            total_bytes: u64::MAX,
+        })
+    }
+}
+
+/// Starts a deadband daemon that runs one job at a time on the socket
+/// `socket`, in a thread that ends with the test's process.
+fn start_daemon(socket: &Path) {
+    let bound = deadband::daemon::bind(socket).unwrap();
+    let settings = deadband::daemon::Settings::new(
+        std::num::NonZeroUsize::MIN,
+        std::num::NonZeroUsize::new(8),
+        None,
+        None,
+    );
+    let log: deadband::daemon::Log = std::sync::Arc::new(std::sync::Mutex::new(std::io::sink()));
+    std::thread::spawn(move || {
+        let _ = deadband::daemon::serve(&bound.listener, Calm, settings, &log);
+    });
+}
+
+#[test]
+fn a_build_waits_for_a_place_from_a_real_daemon_and_then_gets_its_job_variables() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"sh\", \"-c\", \"echo $DEADBAND_HELD $CARGO_BUILD_JOBS > seen\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+    let socket = setup.root().join("d.sock");
+    start_daemon(&socket);
+    let job = deadband::protocol::Job {
+        label: "holder".to_owned(),
+        pid: std::process::id(),
+        command: "the job that holds the one place".to_owned(),
+        lane: deadband::admit::Lane::default(),
+    };
+    let deadband::client::Admission::Granted(lease) =
+        deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
+            panic!("the first job waits")
+        })
+    else {
+        panic!("the daemon did not grant the first job");
+    };
+
+    std::thread::scope(|scope| {
+        let up = scope.spawn(|| {
+            let output = setup
+                .command_in(&setup.root(), &["up", "-w", "triage", "--json"])
+                .env("DEADBAND_SOCKET", &socket)
+                .output()
+                .unwrap();
+            (
+                output.status.code().unwrap(),
+                String::from_utf8(output.stderr).unwrap(),
+            )
+        });
+        for () in waiting() {
+            let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
+            if !jobs.waiting.is_empty() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
+        assert_eq!(jobs.waiting.len(), 1, "{jobs:?}");
+        assert_eq!(jobs.waiting[0].label, "triage");
+        assert!(!checkout.join("seen").exists());
+
+        lease.end(Some(0));
+        let (exit, stderr) = up.join().unwrap();
+
+        assert_eq!(exit, 0, "{stderr}");
+        assert!(stderr.contains("the job waits"), "{stderr}");
+    });
+    let seen = fs::read_to_string(checkout.join("seen")).unwrap();
+    let words: Vec<&str> = seen.split_whitespace().collect();
+    assert_eq!(words[0], "1", "{seen}");
+    assert!(words[1].parse::<u32>().unwrap() >= 1, "{seen}");
+}
+
+/// An admission that grants at once and sends a build's output nowhere.
+struct Granting;
+
+/// The place of [`Granting`].
+struct Granted;
+
+impl multiverse::Place for Granted {
+    fn variables(&self) -> Vec<(multiverse::phase::VariableName, String)> {
+        Vec::new()
+    }
+
+    fn end(self: Box<Self>, _exit_code: Option<i32>) {}
+}
+
+impl multiverse::Admission for Granting {
+    fn admit(&mut self, _asked: &multiverse::Asked<'_>) -> Box<dyn multiverse::Place> {
+        Box::new(Granted)
+    }
+
+    fn output(&self) -> std::io::Result<std::process::Stdio> {
+        Ok(std::process::Stdio::null())
+    }
+}
+
+#[test]
+fn a_build_that_outlives_the_deadline_leaves_a_running_process_alone() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &breakable(""));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let before = pid_of(&setup, "triage", "api");
+    write(&checkout.join("broken"), "");
+    let root = setup.root();
+    let environment = mxv::Environment::read(
+        |name| (name == "MXV_ROOT").then(|| root.join("workspaces").into_os_string()),
+        Some(mxv::Bases {
+            home: root.clone(),
+            config: root.join("config"),
+            state: root.join("state"),
+            data: root.join("data"),
+        }),
+    );
+    let runs = environment
+        .runs_for_tests()
+        .unwrap()
+        .with_build_wait(Duration::from_millis(200));
+    let store = multiverse::Store::new(root.join("state/mxv/workspaces"));
+    let name: multiverse::WorkspaceName = "triage".parse().unwrap();
+    let mut workspace = store.read(&name).unwrap().unwrap();
+    let slow = breakable("").replace("test ! -e broken", "sleep 60");
+    let manifest = multiverse::Manifest::parse(&slow, Path::new("mxv.toml")).unwrap();
+    let lock = runs.lock(&name).unwrap();
+
+    let end = runs
+        .build(&lock, &store, &mut workspace, &manifest, &[], &mut Granting)
+        .unwrap();
+
+    assert!(
+        matches!(end, multiverse::BuildEnd::TimedOut { .. }),
+        "{end:?}"
+    );
+    drop(lock);
+    assert_eq!(pid_of(&setup, "triage", "api"), before);
 }
