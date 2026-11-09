@@ -2,7 +2,7 @@
 //! that span several git repositories.
 //!
 //! The library holds the whole command, and the `mxv` binary calls [`run`].
-//! It exports the parser, the guide and the failure codes, so the
+//! It exports the parser, the tool record and the failure codes, so the
 //! integration tests can pass them to crumbkit-test's checks beside the
 //! built binary. It is not an API for other crates, so each public item is
 //! hidden from the documentation and outside the semver promise.
@@ -27,7 +27,6 @@ mod verbs;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use clap::CommandFactory as _;
 use crumbkit::Code;
 
 #[doc(hidden)]
@@ -39,7 +38,7 @@ pub use crate::archive::{
     RESTORE_UNFINISHED,
 };
 #[doc(hidden)]
-pub use crate::cli::{Cli, GUIDE};
+pub use crate::cli::{Cli, TOOL};
 use crate::cli::{
     CommandsCommand, FiguresCommand, PortsCommand, SchemasCommand, SelfCommand, Verb,
 };
@@ -112,7 +111,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let (cli, mut output) = match crumbkit::parse_from::<Cli, _, _>(Cli::command(), &GUIDE, args) {
+    let (cli, mut output) = match crumbkit::parse_from::<Cli>(&TOOL, args) {
         Ok(parsed) => parsed,
         Err(stop) => return stop.exit_code(),
     };
@@ -196,30 +195,30 @@ where
         Verb::Commands {
             command: CommandsCommand::List(args),
         } => {
-            let result = crumbkit::commands::list(&mut output, &GUIDE, &args);
+            let result = crumbkit::commands::list(&mut output, &TOOL, &args);
             crumbkit::finish(output, crumbkit::commands::COMMANDS_LIST, result)
         }
         Verb::Schemas { command } => match command {
             SchemasCommand::List(args) => {
-                let result = crumbkit::schemas::list(&mut output, &GUIDE, &args);
+                let result = crumbkit::schemas::list(&mut output, &TOOL, &args);
                 crumbkit::finish(output, crumbkit::schemas::SCHEMAS_LIST, result)
             }
             SchemasCommand::Show(args) => {
-                let result = crumbkit::schemas::show(&mut output, &GUIDE, &args);
+                let result = crumbkit::schemas::show(&mut output, &TOOL, &args);
                 crumbkit::finish(output, crumbkit::schemas::SCHEMAS_SHOW, result)
             }
         },
         Verb::SelfCommand { command } => match command {
             SelfCommand::Usage(args) => {
                 let result =
-                    Ok::<_, crumbkit::Error>(crumbkit_usage::findings(&mut output, &GUIDE, &args));
+                    Ok::<_, crumbkit::Error>(crumbkit_usage::findings(&mut output, &TOOL, &args));
                 crumbkit::finish(output, crumbkit_usage::SELF_USAGE, result)
             }
             SelfCommand::Figures {
                 command: FiguresCommand::List(args),
             } => {
                 let result =
-                    Ok::<_, crumbkit::Error>(crumbkit_usage::figures(&mut output, &GUIDE, &args));
+                    Ok::<_, crumbkit::Error>(crumbkit_usage::figures(&mut output, &TOOL, &args));
                 crumbkit::finish(output, crumbkit_usage::SELF_FIGURES_LIST, result)
             }
         },

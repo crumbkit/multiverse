@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use crumbkit::{Age, Row};
+use crumbkit::{Age, Children, Row};
 use multiverse::Error;
 use multiverse::{
     Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
@@ -1162,10 +1162,9 @@ impl Row for ProcessRow {
         "name", "kind", "state", "ready", "pid", "code", "signal", "reason", "ports", "sandbox",
     ];
     const LONG_COLUMNS: &'static [&'static str] = &["log"];
-    const CHILDREN: Option<&'static str> = Some("notes");
-    const CHILDREN_HELP: Option<&'static str> = Some(
+    const CHILDREN: Option<Children> = Some(Children::field("notes").help(
         "one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.",
-    );
+    ));
     // A person copies the name into `mxv logs`.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 
@@ -1452,10 +1451,8 @@ impl StatusSummary {
                 .map(|path| path.display().to_string())
                 .collect(),
             manifest_error: error.map(ToString::to_string),
-            manifest_error_code: error.map(|error| {
-                let code = crumbkit::Failure::code(error);
-                format!("{}::{}::{}", code.component(), code.area(), code.reason())
-            }),
+            manifest_error_code: error
+                .map(|error| crumbkit::Spelling::COLONS.spell(crumbkit::Failure::code(error))),
             warnings: manifest
                 .map(|manifest| manifest.warnings.clone())
                 .unwrap_or_default(),

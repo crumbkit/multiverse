@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crumbkit::{Batch, Document, Listing, Output, Stream};
+use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
     BuildEnd, BuildStop, BuildsPassed, DownOutcome, Error, Git, Lock, Manifest, ManifestError,
@@ -300,7 +300,7 @@ pub(crate) struct Interrupted {
 /// Prints `result` as [`crumbkit::finish`] does, or ends with 128 plus the
 /// signal that interrupted the command's builds, and returns the exit code.
 pub(crate) fn finish_interruptible(
-    output: Output,
+    output: Run,
     document: Document<Vec<ProcessRow>>,
     result: Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error>,
 ) -> ExitCode {
@@ -672,7 +672,7 @@ pub(crate) fn status(
 
 /// Prints the last lines of the log of the process that `args` names, and
 /// with `--follow` each later line until the reader stops.
-pub(crate) fn logs(output: Output, environment: &Environment, args: &LogsArgs) -> ExitCode {
+pub(crate) fn logs(output: Run, environment: &Environment, args: &LogsArgs) -> ExitCode {
     let mut streaming = match crumbkit::stream(output, LOGS) {
         Ok(streaming) => streaming,
         Err(code) => return code,

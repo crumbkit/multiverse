@@ -15,7 +15,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crumbkit::{Age, Batch, Document, Output, Row};
+use crumbkit::{Age, Batch, Document, Row, Run};
 use multiverse::phase::host::TableEntry;
 use multiverse::{DisposablePath, DisposableSource, Error, Git, KeptPath, Workspace, Workspaces};
 use schemars::JsonSchema;
@@ -536,7 +536,7 @@ pub(crate) enum Limit {
 }
 
 /// What a run of [`run`] cleans, and how it asks.
-pub(crate) struct Run<'a> {
+pub(crate) struct Selection<'a> {
     /// The names of the workspaces to clean, or none for every workspace.
     pub(crate) names: &'a [String],
     /// How much it deletes.
@@ -570,7 +570,7 @@ pub(crate) struct Cleaned {
 /// a dry run. A workspace that mxv cannot find, read or clean becomes a
 /// failure of the batch, and the run goes on with the others.
 pub(crate) fn clean(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &CleanArgs,
 ) -> Result<Batch<CleanRow, MxvFailure>, crumbkit::Error> {
@@ -585,7 +585,7 @@ pub(crate) fn clean(
     let cleaned = run(
         output,
         environment,
-        &Run {
+        &Selection {
             names: &args.names,
             limit,
             idle: args.idle,
@@ -605,9 +605,9 @@ pub(crate) fn clean(
 /// selects, or reports what it would delete on a dry run, and returns what
 /// it did with each workspace it considered.
 pub(crate) fn run(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
-    plan: &Run<'_>,
+    plan: &Selection<'_>,
 ) -> Result<Cleaned, crumbkit::Error> {
     let config = environment.config()?;
     let idle = plan.idle.or(config.clean_idle).unwrap_or(DEFAULT_IDLE);

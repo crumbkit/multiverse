@@ -24,13 +24,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crumbkit::{Age, Batch, Document, Output, Prose, Row};
+use crumbkit::{Age, Batch, Document, Prose, Row, Run};
 use multiverse::phase::host::TableEntry;
 use multiverse::{Footprint, Git, Runs, Workspace, Workspaces};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::clean::{self, CleanState, Limit, Run};
+use crate::clean::{self, CleanState, Limit, Selection};
 use crate::cli::{PinArgs, ReclaimArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
@@ -602,7 +602,7 @@ impl fmt::Display for ReclaimSummary {
 /// measure, stop or clean becomes a failure of the batch, and the run goes
 /// on with the others.
 pub(crate) fn reclaim(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &ReclaimArgs,
 ) -> Result<Batch<ReclaimRow, crumbkit::Error>, crumbkit::Error> {
@@ -639,7 +639,7 @@ fn chosen(entries: &[Result<Measured, MxvFailure>], need: u64) -> Vec<usize> {
 
 /// Stops idle workspaces until their resident memory covers `need`.
 fn memory(
-    output: &Output,
+    output: &Run,
     environment: &Environment,
     args: &ReclaimArgs,
     need: u64,
@@ -743,7 +743,7 @@ fn stop(
 /// Cleans the build output of idle workspaces until it frees `need` bytes
 /// on disk, through the clean of `mxv clean --over-limit`.
 fn disk(
-    output: &mut Output,
+    output: &mut Run,
     environment: &Environment,
     args: &ReclaimArgs,
     need: u64,
@@ -751,7 +751,7 @@ fn disk(
     let cleaned = clean::run(
         output,
         environment,
-        &Run {
+        &Selection {
             names: &[],
             limit: Limit::Free(need),
             idle: args.idle,
