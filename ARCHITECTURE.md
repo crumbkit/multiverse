@@ -40,6 +40,12 @@ Three modules have a single job that the rest of `multiverse` goes through. `cra
 
 Later commands find the processes through the run record. The keeper's `Recorder` in `crates/phase/src/engine/keeper/recorder.rs` updates that record as the app restarts or ends.
 
+## `mxv run`
+
+1. `run::run` in `crates/mxv/src/run.rs` finds the task, which a manifest's `[tasks.<name>]` declares or `Runs::mise_tasks` lists.
+2. Under the workspace lock, `Runs::prepare_task` in `crates/multiverse/src/runs/phased/task.rs` assigns ports and builds the plan with one more app, `mxv-task`. The lock ends before the task starts.
+3. `PreparedTask::run` asks `Admission` for a place and runs the task through `Phase::exec`, with the caller's standard streams and no timer. No run record names the task.
+
 ## Key decisions
 
 Decision records in `crates/mxv/docs/decisions/`:

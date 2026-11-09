@@ -181,7 +181,7 @@ Four functions change the map. `Runs::assign_ports` allocates and drops. `ports_
 
 | Transition | Owner | Crash point | State left | Recovery | Fault test |
 | --- | --- | --- | --- | --- | --- |
-| Free to held | `Runs::assign_ports` | The process dies after allocation and before `Store::update`. | Nothing is written. The lock is released. | The next `up` allocates again. | None |
+| Free to held | `Runs::assign_ports` | The process dies after allocation and before `Store::update`. | Nothing is written. The lock is released. | The next `up` or `mxv run` allocates again. | None |
 | Held to free | `Runs::assign_ports`, when the manifest no longer names a port and no process holds it | The process dies before the write. | The old map stays. | The next `up` drops it. | None |
 | Held, renamed during `add` | `ports_after_add`, `Workspaces::finish_add` | The step fails. | `undo_add` restores the record. | The earlier map is back. | None. `a_failed_add_deletes_the_new_clone_and_restores_the_record` in `multiverse/src/workspaces/multi_tests.rs` fails earlier, before `ports_after_add` runs, and asserts nothing about ports. |
 | Held, replaced during restore | `Runs::restored_ports` | The process dies during the call. | No record exists yet, and the rebuild table above applies. | The rebuild table above applies. | None |
@@ -205,6 +205,15 @@ A port is free when no workspace record holds it and a bind test passes. A works
 | Transition | Owner | Crash point | State left | Recovery | Fault test |
 | --- | --- | --- | --- | --- | --- |
 | Disposable directory to deleted | `clean_one`, `disk::tree::remove` (`multiverse/src/disk/tree.rs`) | Deletion fails or the process dies partway. | The directory is partly deleted. | The next `mxv clean` deletes the rest. | `a_path_that_cannot_be_deleted_in_full_fails_its_workspace_and_names_the_entry` in `mxv/tests/disk.rs` fails the step with an unwritable directory. |
+
+## `mxv run`
+
+`mxv run` keeps no state of its own. `Runs::prepare_task` (`multiverse/src/runs/phased/task.rs`) gives the workspace its ports under the workspace lock, as `up` does, and the lock ends before the task starts. The task runs through `Phase::exec`, which writes nothing to the run record, so no later command can find a running task.
+
+| Transition | Owner | Crash point | State left | Recovery | Fault test |
+| --- | --- | --- | --- | --- | --- |
+| Task running | `PreparedTask::run` (`multiverse/src/runs/phased/task.rs`) | `SIGINT` reaches `mxv` alone. | The task runs on and `mxv` waits for it. | `mxv` exits with the task's code. | `sigint_to_mxv_alone_leaves_the_task_running_and_mxv_ends_with_its_exit_code` in `mxv/tests/run.rs` sends the signal. |
+| Task running | `PreparedTask::run` | `SIGTERM` or `SIGKILL` ends `mxv`. | The task runs on, and deadband frees its place, so the machine's job limiter no longer counts it. | Nothing recovers it. No record names the task. | None |
 
 ## Reports and configuration values
 

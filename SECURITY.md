@@ -6,14 +6,14 @@ mxv runs on one person's machine, as that person.
 
 | Condition | Holds | Evidence |
 | --- | --- | --- |
-| Holds tenant data | No | mxv has no tenants, server or shared store. |
-| Holds personal data | Only on the person's own machine | Described next. |
+| Holds tenant data | No | mxv has no tenants or server. |
+| Holds personal data | Only locally | Described next. |
 | Is deployed | No | `release.yml` publishes command-line archives. |
 
 ## What mxv stores
 
 - Workspace records hold names, paths (usually with the user name), branches, commits and ports.
-- Mirrors hold each origin's branches and tags, and archive pins, which can be unpushed or `--wip` commits. `AGENTS.md` holds origins without credentials.
+- Mirrors hold each origin's branches and tags, and archive pins, which can be unpushed or `--wip` commits.
 - Archives (mode 0700) hold workspace root files and origins, which keep an SSH user name.
 - Run records (0600) hold process ids and no environment values. `env-digest.key` keys digests of non-secret values.
 - App logs (0600) hold what apps print, unrotated. Keeper diagnostic logs (0600) hold the keeper's notes and standard error.
@@ -30,9 +30,9 @@ Host processes receive `PATH`, `HOME`, manifest-derived variables and the `PASSE
 
 ## What mxv trusts
 
-A repository's `mxv.toml` runs as code. `mxv up` and `restart` run its `argv` and `build`, run its container `image` with `command`, `env`, volumes and ports, and start its services' backends and the `mxv-provision` oneshot. `mxv new` copies ignored directories its `clone_on_new` globs name unprompted.
+A repository's `mxv.toml` runs as code. `mxv up` and `restart` run its `argv` and `build`, run its container `image` with `command`, `env`, volumes and ports, and start its services' backends and the `mxv-provision` oneshot. `mxv new` copies ignored directories its `clone_on_new` globs name unprompted. `mxv run` runs a task's `argv` without a shell, or `mise run <name>`, unsandboxed, untimed, on the caller's terminal. Listing runs `mise tasks ls --json` in each checkout, and mxv never trusts a mise config.
 
-- `check_manifest_source` refuses a `--manifest` file under the root of the workspaces or inside a git work tree. A template must be a regular file outside that root.
+- `check_manifest_source` refuses a `--manifest` file under the root of the workspaces or inside a git work tree. Templates must be regular files outside it.
 - Clones and mirrors start without hooks (`--template=`), but a global `core.hooksPath` still applies.
 - A workspace manifest is trusted only as a regular one-link file that no checkout holds.
 
@@ -50,12 +50,12 @@ Guards are in order.
 
 ## Sockets and ports
 
-mxv keeps no listener open. `ports.rs` and phase bind loopback ports briefly to test them. The ledger allocates from `ports_range`, by default 20000 to 29999, and fails when none is free. Containers publish on 127.0.0.1. `admission.rs` connects to deadband's Unix socket; with no daemon, builds start immediately.
+mxv keeps no listener open. The ledger allocates from `ports_range`, by default 20000 to 29999, and fails when none is free. Containers publish on 127.0.0.1. `admission.rs` connects to deadband's Unix socket; with no daemon, builds start immediately.
 
 ## Sandbox
 
-A process runs under nono only when it declares `[permissions]`. phase reports Seatbelt as partial and Landlock as unsandboxed.
+A process runs under nono only when it declares `[permissions]`.
 
 ## Reporting a problem
 
-Private vulnerability reporting is off. Open an issue at <https://github.com/crumbkit/multiverse/issues>, and leave out secrets.
+Private vulnerability reporting is off. Open an issue at <https://github.com/crumbkit/multiverse/issues> without secrets.
