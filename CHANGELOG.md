@@ -96,6 +96,11 @@ workspace may need to act on.
 
 ### Changed
 
+- A workspace with several checkouts now reports the parse error of a
+  checkout's `mxv.toml` when it reads the workspace manifest. Before this
+  change that read skipped the broken file and checked the workspace
+  manifest against the names of the other checkouts, so it could report a
+  clash or an undeclared name with a different message.
 - `up` of a container app that runs as another user than root and mounts a
   volume now gives the root directory of each such volume to that user,
   through a helper container. The helper runs busybox pinned by digest, so

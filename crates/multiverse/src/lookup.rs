@@ -464,9 +464,11 @@ impl Workspace {
         };
         let mut joined = Joined::default();
         if self.has_several_checkouts() {
-            // A checkout's file that does not parse adds no names, and
-            // fails on its own wherever the merged manifest is read.
-            for (_, renamed) in self.renamed_checkout_manifests().into_iter().flatten() {
+            // A checkout's file that does not parse fails this read with
+            // its own error, as it fails the merged manifest, so both reads
+            // check the workspace manifest against the same names.
+            for read in self.renamed_checkout_manifests() {
+                let (_, renamed) = read?;
                 joined.add(&renamed);
             }
             self.join_checkouts(&mut joined);
