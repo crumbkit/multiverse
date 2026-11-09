@@ -7,9 +7,10 @@
 //! `proc_pidinfo` on macOS. It is the one place in phase and mxv that reads
 //! a process's start: [`start_time`] gives it to `sweep` in microseconds,
 //! and mxv keeps it in the form that its run records hold. The calls into
-//! libproc are in the `darwin` module, which holds the only unsafe code of
-//! phase and mxv. This module also signals process groups and processes
-//! for `sweep` and for mxv.
+//! libproc are in the `darwin` module. Beside that module, only phase's
+//! `sandbox::launch` and mxv's `admission` hold unsafe code in shipped code.
+//! This module also signals process groups and processes for `sweep` and
+//! for mxv.
 
 use std::fmt;
 use std::io;
