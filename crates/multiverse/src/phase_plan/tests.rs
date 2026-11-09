@@ -10,7 +10,10 @@ use phase::{
 
 use crate::manifest::{Manifest, ManifestProblem};
 use crate::name::WorkspaceName;
-use crate::phase_plan::{Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, build, roots};
+use crate::phase_plan::{
+    Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, TASK_APP, TaskEntry, build,
+    build_with_task, roots,
+};
 use crate::record::{Checkout, Workspace};
 use crate::testing::write;
 
@@ -788,4 +791,104 @@ fn a_write_path_that_is_the_whole_checkout_its_process_runs_in_is_unrunnable_and
         "{message}"
     );
     assert!(!message.contains("outside"), "{message}");
+}
+
+const WITH_TASK: &str = "[processes.api]\nargv = [\"true\"]\n\n[tasks.test]\nargv = [\"true\"]\n";
+
+#[test]
+fn a_tasks_section_leaves_the_plan_that_up_runs_unchanged() {
+    let caller = CallerEnvironment::default();
+    let with = plan_of(&manifest(WITH_TASK), &caller);
+    let without = plan_of(&manifest("[processes.api]\nargv = [\"true\"]\n"), &caller);
+    assert_eq!(with.plan.apps().len(), 1);
+    assert_eq!(
+        serde_json::to_string(&with.plan).unwrap(),
+        serde_json::to_string(&without.plan).unwrap()
+    );
+}
+
+/// Returns the plan of `APP` with a task that needs the services
+/// `services`, run in the directory `dir` of `/work/triage/app`.
+fn task_plan(dir: &Path) -> Built {
+    task_plan_with(dir, &BTreeMap::new())
+}
+
+fn task_plan_with(dir: &Path, own_ports: &BTreeMap<String, String>) -> Built {
+    let manifest = manifest(APP);
+    let ports = BTreeMap::from([
+        ("api".to_owned(), 41_000),
+        ("web-ui".to_owned(), 41_001),
+        ("db".to_owned(), 41_002),
+    ]);
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::from_vars(vars(&[("PATH", "/bin"), ("TERM", "dumb")]));
+    build_with_task(
+        &Inputs {
+            manifest: &manifest,
+            workspace: &workspace,
+            id: &id,
+            checkout: Path::new("/work/triage/app"),
+            roots: Vec::new(),
+            ports: &ports,
+            workspace_dir: None,
+            grace: Duration::from_secs(5),
+            caller: &caller,
+            provisioner: None,
+        },
+        &TaskEntry {
+            root: Path::new("/work/triage/app"),
+            dir,
+            argv: vec!["mise".to_owned(), "run".to_owned(), "test".to_owned()],
+            services: Vec::new(),
+            own_ports,
+        },
+    )
+    .unwrap()
+    .built
+}
+
+#[test]
+fn a_task_receives_its_own_ports_under_the_names_in_its_own_file() {
+    let own = BTreeMap::from([("ui".to_owned(), "web-ui".to_owned())]);
+    let built = task_plan_with(Path::new("."), &own);
+    let task = built
+        .plan
+        .apps()
+        .iter()
+        .find(|plan| plan.name.as_str() == TASK_APP)
+        .unwrap();
+    assert!(task.processes[0].env.contains("MXV_PORT_UI"));
+    assert!(task.processes[0].env.contains("MXV_PORT_WEB_UI"));
+    assert!(task.processes[0].env.contains("MXV_PORT_API"));
+}
+
+#[test]
+fn a_task_enters_the_plan_under_the_reserved_app_with_no_sandbox() {
+    let built = task_plan(Path::new("."));
+    let task = built
+        .plan
+        .apps()
+        .iter()
+        .find(|plan| plan.name.as_str() == TASK_APP)
+        .unwrap();
+    assert_eq!(task.runner, RunnerKind::Host);
+    assert_eq!(task.permissions, None);
+    assert_eq!(task.processes[0].cwd, None);
+    assert_eq!(task.processes[0].run, ["mise", "run", "test"]);
+}
+
+#[test]
+fn a_task_runs_in_its_dir_and_names_each_port_as_a_variable() {
+    let built = task_plan(Path::new("server"));
+    let task = built
+        .plan
+        .apps()
+        .iter()
+        .find(|plan| plan.name.as_str() == TASK_APP)
+        .unwrap();
+    assert_eq!(task.processes[0].cwd.as_deref(), Some(Path::new("server")));
+    assert!(task.processes[0].env.contains("MXV_PORT_WEB_UI"));
+    assert!(task.processes[0].env.contains("MXV_PORT_API"));
+    assert!(task.processes[0].optional_env.contains("LANG"));
 }

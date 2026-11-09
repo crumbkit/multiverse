@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -425,4 +426,72 @@ fn a_checkout_folder_that_gives_its_names_the_mxv_prefix_fails_as_invalid() {
         matches!(&error.problem, ManifestProblem::Invalid { message } if message.contains("`mxv-api`")),
         "{error}"
     );
+}
+
+const TASK: &str = "[tasks.check]\nargv = [\"true\"]\n";
+
+fn two_checkouts(dir: &Path) -> Workspace {
+    let path = dir.join("reading-list");
+    let checkout = |folder: &str| {
+        fs::create_dir_all(path.join(folder)).unwrap();
+        Checkout::new(
+            folder.to_owned(),
+            &dir.join("source"),
+            path.join(folder),
+            "reading-list".to_owned(),
+            "refs/remotes/origin/main".to_owned(),
+        )
+    };
+    let checkouts = vec![checkout("api"), checkout("web")];
+    Workspace::new("reading-list".parse().unwrap(), path, checkouts)
+}
+
+#[test]
+fn one_checkout_has_one_task_home_from_the_manifest_it_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(workspace.path.join("app/mxv.toml"), TASK);
+    let homes = workspace.task_homes().unwrap();
+    assert_eq!(homes.len(), 1);
+    assert_eq!(homes[0].checkout.as_deref(), Some("app"));
+    assert_eq!(homes[0].root, workspace.path.join("app"));
+    assert_eq!(homes[0].tasks.len(), 1);
+}
+
+#[test]
+fn a_bare_checkout_still_has_a_task_home_so_mise_can_list_its_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let homes = workspace(dir.path()).task_homes().unwrap();
+    assert_eq!(homes.len(), 1);
+    assert!(homes[0].tasks.is_empty());
+}
+
+#[test]
+fn a_checkout_of_several_names_its_own_ports_and_their_merged_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = two_checkouts(dir.path());
+    write(workspace.path.join("api/mxv.toml"), "ports = [\"web\"]\n");
+    let homes = workspace.task_homes().unwrap();
+    let api = homes
+        .iter()
+        .find(|home| home.checkout.as_deref() == Some("api"))
+        .unwrap();
+    assert_eq!(
+        api.own_ports,
+        BTreeMap::from([("web".to_owned(), "api-web".to_owned())])
+    );
+}
+
+#[test]
+fn several_checkouts_keep_each_files_tasks_apart_and_the_merged_manifest_holds_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = two_checkouts(dir.path());
+    write(workspace.path.join("api/mxv.toml"), TASK);
+    write(workspace.path.join("web/mxv.toml"), TASK);
+    write(workspace.path.join("mxv.toml"), TASK);
+    let homes = workspace.task_homes().unwrap();
+    let places: Vec<Option<&str>> = homes.iter().map(|home| home.checkout.as_deref()).collect();
+    assert_eq!(places, [None, Some("api"), Some("web")]);
+    assert!(homes.iter().all(|home| home.tasks.len() == 1));
+    assert!(workspace.manifest().unwrap().unwrap().tasks.is_empty());
 }

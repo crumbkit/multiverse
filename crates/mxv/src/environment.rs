@@ -53,7 +53,7 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "DEADBAND_SOCKET",
-        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`. When it is unset or empty, mxv uses `deadband.sock` in `TMPDIR`. When no daemon answers, the build starts at once.",
+        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`, and `mxv run` before a task. When it is unset or empty, mxv uses `deadband.sock` in `TMPDIR`. When no daemon answers, the build or task starts at once.",
     },
     Variable {
         name: "TMPDIR",
@@ -65,11 +65,11 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "DEADBAND_HELD",
-        purpose: "Set by deadband for a job that it granted. When it is set, a `build` runs at once without asking for another place, because the job that started mxv already holds one. When it is unset or empty, mxv asks.",
+        purpose: "Set by deadband for a job that it granted. When it is set, a `build` or a task runs at once without asking for another place, because the job that started mxv already holds one. When it is unset or empty, mxv asks.",
     },
     Variable {
         name: "DEADBAND_BYPASS",
-        purpose: "When it is set to anything but 0, a `build` runs at once without asking deadband for a place. When it is unset, empty or 0, mxv asks.",
+        purpose: "When it is set to anything but 0, a `build` or a task runs at once without asking deadband for a place. When it is unset, empty or 0, mxv asks.",
     },
     Variable {
         name: "MXV_ROOT",

@@ -39,7 +39,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{Joined, MANIFEST_FILE, Manifest, ManifestError, ManifestProblem};
+use crate::manifest::{
+    Joined, MANIFEST_FILE, Manifest, ManifestError, ManifestProblem, Task, TaskName,
+};
 use crate::name::MOST_NAME_BYTES;
 use crate::record::{Checkout, Workspace};
 use crate::service::{RESERVED_PREFIX, Service};
@@ -126,6 +128,42 @@ impl ManifestInputs {
                 .collect()
         } else {
             self.chosen().into_iter().collect()
+        }
+    }
+}
+
+/// One place that holds tasks of a workspace: a checkout, or the workspace
+/// manifest of a workspace with several checkouts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TaskHome {
+    /// The checkout's folder, or `None` for the workspace manifest of a
+    /// workspace with several checkouts.
+    pub checkout: Option<String>,
+    /// The directory that each task's `dir` is relative to.
+    pub root: PathBuf,
+    /// The tasks that the manifest of this place declares.
+    pub tasks: BTreeMap<TaskName, Task>,
+    /// The ports of this checkout whose names differ in the merged
+    /// manifest: each name in the checkout's own file, with its name in the
+    /// merged manifest. It is empty when the names are the same, as in a
+    /// workspace with one checkout.
+    pub own_ports: BTreeMap<String, String>,
+}
+
+impl TaskHome {
+    /// Returns the place `checkout`, whose tasks `tasks` run below `root`.
+    #[must_use]
+    pub const fn new(
+        checkout: Option<String>,
+        root: PathBuf,
+        tasks: BTreeMap<TaskName, Task>,
+    ) -> Self {
+        Self {
+            checkout,
+            root,
+            tasks,
+            own_ports: BTreeMap::new(),
         }
     }
 }
@@ -451,6 +489,53 @@ impl Workspace {
         Manifest::read_file(path, root)
     }
 
+    /// Returns the places that hold the workspace's tasks, one for each
+    /// checkout. A workspace with one checkout reads its tasks from the one
+    /// manifest that [`Workspace::manifest`] reads. A workspace with several
+    /// keeps each file's tasks apart, because a merged manifest cannot hold
+    /// one name twice, and adds the workspace manifest first when it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ManifestError`] of a file.
+    pub fn task_homes(&self) -> Result<Vec<TaskHome>, ManifestError> {
+        let tasks_of = |manifest: Option<Manifest>| manifest.unwrap_or_default().tasks;
+        if !self.has_several_checkouts() {
+            return Ok(vec![TaskHome {
+                checkout: self
+                    .manifest_checkout()
+                    .map(|checkout| checkout.name.clone()),
+                root: self.manifest_root().to_path_buf(),
+                tasks: tasks_of(self.manifest()?),
+                own_ports: BTreeMap::new(),
+            }]);
+        }
+        let mut homes = Vec::new();
+        if let Some(manifest) = self.workspace_manifest()? {
+            homes.push(TaskHome {
+                checkout: None,
+                root: self.path.clone(),
+                tasks: manifest.tasks,
+                own_ports: BTreeMap::new(),
+            });
+        }
+        for checkout in &self.checkouts {
+            let manifest = Manifest::read(&checkout.path)?.unwrap_or_default();
+            let prefix = checkout_prefix(&checkout.name);
+            homes.push(TaskHome {
+                checkout: Some(checkout.name.clone()),
+                root: checkout.path.clone(),
+                own_ports: manifest
+                    .ports
+                    .iter()
+                    .map(|port| (port.clone(), prefixed(&prefix, port)))
+                    .collect(),
+                tasks: manifest.tasks,
+            });
+        }
+        Ok(homes)
+    }
+
     /// Returns the workspace manifest alone, with its paths checked
     /// against [`Workspace::manifest_root`], or `None` when it does not
     /// exist or a checkout holds it.
@@ -574,6 +659,7 @@ fn emptied(manifest: &Manifest) -> Manifest {
     empty.containers.clear();
     empty.ports.clear();
     empty.services.clear();
+    empty.tasks.clear();
     empty.warnings.clear();
     empty.disposable.clear();
     empty.clone_on_new.clear();
