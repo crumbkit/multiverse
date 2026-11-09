@@ -208,7 +208,7 @@ A port is free when no workspace record holds it and a bind test passes. A works
 
 ## `mxv run`
 
-`mxv run` keeps no state of its own. `Runs::prepare_task` (`multiverse/src/runs/phased/task.rs`) gives the workspace its ports under the workspace lock, as `up` does, and the lock ends before the task starts. The task runs through `Phase::exec`, which writes nothing to the run record, so no later command can find a running task.
+`mxv run` keeps no state of its own. `Runs::prepare_task` (`multiverse/src/runs/phased/task.rs`) gives the workspace its ports under the workspace lock, as `up` does, and the lock ends before the task starts. The task runs through `Phase::exec`, which writes nothing to the run record, so `status`, `down` and `sweep` cannot find a running task. `archive`, `clean` and `reclaim` see it through the process table, as a process inside the workspace.
 
 | Transition | Owner | Crash point | State left | Recovery | Fault test |
 | --- | --- | --- | --- | --- | --- |
