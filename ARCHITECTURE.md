@@ -20,9 +20,9 @@ Three modules have a single job that the rest of `multiverse` goes through. `cra
 
 1. `main` in `crates/mxv/src/main.rs` reads the environment once into an `Environment`, and `mxv::run` selects the verb.
 2. `verbs::new` in `crates/mxv/src/verbs.rs` parses the name, works out the manifest source through `copied`, and calls `Workspaces::create_repos`.
-3. `Workspaces::create_repos` in `crates/multiverse/src/workspaces.rs` calls `create_clone`, which writes the record first through `Store::create`, with no commit on any checkout. `Store::create` reports `Created::Taken` when the name is in use.
-4. `Workspaces::make_clones` makes the directory and calls `Workspaces::make_clone_at` for each checkout. It takes the mirror's lock, then calls `prepare_mirror`, `fetch_mirror` and `clone_mirror` on the `Backend`. `Git` in `git.rs` implements `Backend`.
-5. `create_clone` writes `AGENTS.md` and the workspace manifest, and `Store::update` records each commit.
+3. `Workspaces::create_repos` in `crates/multiverse/src/workspaces.rs` calls `create_clone`, which writes the record first through `Store::create`, with no commit on any checkout, and then calls `make_clones`. `Store::create` reports `Created::Taken` when the name is in use.
+4. `make_clones` makes the directory and calls `Workspaces::make_clone_at` for each checkout. It takes the mirror's lock, then calls `prepare_mirror`, `fetch_mirror` and `clone_mirror` on the `Backend`. `Git` in `git.rs` implements `Backend`.
+5. `make_clones` writes `AGENTS.md` and the workspace manifest, and `Store::update` records each commit.
 6. A failed step calls `Workspaces::undo`, which removes what this run made.
 7. `verbs::new` then calls `clone_into`, which copies ignored directories, and a failure there becomes a warning.
 
