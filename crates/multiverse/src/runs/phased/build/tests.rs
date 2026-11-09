@@ -3,15 +3,15 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
-use phase::VariableName;
+use phase::{Cancel, VariableName};
 
-use super::{Admission, Asked, BuildEnd, Place};
+use super::{Admission, Asked, BuildEnd, BuildStop, Place};
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
@@ -37,12 +37,49 @@ struct Recording {
     log: Rc<RefCell<Log>>,
     /// Whether it cancels the builds once it grants the place.
     interrupt: bool,
+    /// Whether it cancels the builds as the place ends.
+    interrupt_at_end: bool,
+    /// What the builds wrote.
+    written: Arc<Mutex<Vec<u8>>>,
+    /// Whether writing a build's output blocks until the test ends.
+    stuck: Option<Arc<Mutex<mpsc::Receiver<()>>>>,
+}
+
+/// A stream that keeps what it is given.
+struct Kept(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Kept {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A stream whose first write blocks until the sender of its receiver
+/// closes.
+struct Stuck(Arc<Mutex<mpsc::Receiver<()>>>);
+
+impl Write for Stuck {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let _ = self.0.lock().unwrap().recv();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A place that records its end.
 struct Recorded {
     /// What the admission saw.
     log: Rc<RefCell<Log>>,
+    /// The flag that the place sets as it ends.
+    cancel_at_end: Option<Cancel>,
 }
 
 impl Place for Recorded {
@@ -52,6 +89,9 @@ impl Place for Recorded {
 
     fn end(self: Box<Self>, exit_code: Option<i32>) {
         self.log.borrow_mut().ended.push(exit_code);
+        if let Some(cancel) = &self.cancel_at_end {
+            cancel.cancel();
+        }
     }
 }
 
@@ -66,11 +106,15 @@ impl Admission for Recording {
         }
         Box::new(Recorded {
             log: Rc::clone(&self.log),
+            cancel_at_end: self.interrupt_at_end.then(|| asked.cancel.clone()),
         })
     }
 
-    fn output(&self) -> io::Result<Stdio> {
-        Ok(Stdio::null())
+    fn output(&self) -> Box<dyn Write + Send> {
+        match &self.stuck {
+            Some(receiver) => Box::new(Stuck(Arc::clone(receiver))),
+            None => Box::new(Kept(Arc::clone(&self.written))),
+        }
     }
 }
 
@@ -127,10 +171,12 @@ impl World {
             .unwrap();
         match end {
             BuildEnd::Passed(_) => BuildEnded::Passed,
-            BuildEnd::Failed { process, code, .. } => BuildEnded::Failed(process, code),
-            BuildEnd::Unstartable { process, .. } => BuildEnded::Unstartable(process),
-            BuildEnd::TimedOut { process, .. } => BuildEnded::TimedOut(process),
-            BuildEnd::Interrupted { process } => BuildEnded::Interrupted(process),
+            BuildEnd::Stopped { process, why } => match why {
+                BuildStop::Failed { code, .. } => BuildEnded::Failed(process, code),
+                BuildStop::Unstartable { .. } => BuildEnded::Unstartable(process),
+                BuildStop::TimedOut { .. } => BuildEnded::TimedOut(process),
+                BuildStop::Interrupted => BuildEnded::Interrupted(process),
+            },
             BuildEnd::UnknownProcess(_) | BuildEnd::Unrunnable(_) => BuildEnded::Refused,
         }
     }
@@ -275,4 +321,84 @@ fn a_build_runs_in_its_processs_directory() {
         admission.log.borrow().asked[0].0,
         world.checkout().join("server")
     );
+}
+
+#[test]
+fn a_cancel_as_the_place_ends_stops_the_command_after_the_builds_passed() {
+    let mut world = World::new();
+    let mut admission = Recording {
+        interrupt_at_end: true,
+        ..Recording::default()
+    };
+    let runs = world.runs();
+
+    let ended = world.build(&runs, &process("api", "touch built", ""), &mut admission);
+
+    assert_eq!(ended, BuildEnded::Interrupted("api".to_owned()));
+    assert!(world.checkout().join("built").exists());
+    assert_eq!(admission.log.borrow().ended, [Some(0)]);
+}
+
+#[test]
+fn a_builds_output_and_errors_reach_the_admissions_stream_in_order() {
+    let mut world = World::new();
+    let mut admission = Recording::default();
+    let runs = world.runs();
+    let script = "echo first; echo second >&2; echo third";
+
+    let ended = world.build(&runs, &process("api", script, ""), &mut admission);
+
+    assert_eq!(ended, BuildEnded::Passed);
+    assert_eq!(
+        String::from_utf8_lossy(&admission.written.lock().unwrap()),
+        "first\nsecond\nthird\n"
+    );
+}
+
+/// Sends `SIGKILL` to the process whose id the file at `path` holds.
+fn kill(path: &Path) {
+    let pid: i32 = fs::read_to_string(path).unwrap().trim().parse().unwrap();
+    let pid = rustix::process::Pid::from_raw(pid).unwrap();
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+}
+
+#[test]
+fn a_process_left_holding_the_builds_output_does_not_hold_up_the_command() {
+    let mut world = World::new();
+    let mut admission = Recording::default();
+    let runs = world.runs();
+    let script = "sleep 40 & echo $! > left; echo the-last-line";
+    let started = Instant::now();
+
+    let ended = world.build(&runs, &process("api", script, ""), &mut admission);
+
+    let took = started.elapsed();
+    kill(&world.checkout().join("left"));
+    assert_eq!(ended, BuildEnded::Passed);
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&admission.written.lock().unwrap()),
+        "the-last-line\n"
+    );
+}
+
+#[test]
+fn the_deadline_ends_a_build_whose_output_nobody_reads() {
+    let mut world = World::new();
+    let (keep, receiver) = mpsc::channel::<()>();
+    let mut admission = Recording {
+        stuck: Some(Arc::new(Mutex::new(receiver))),
+        ..Recording::default()
+    };
+    let runs = world.runs().with_build_wait(Duration::from_millis(300));
+    let script = "while :; do echo the-pipe-fills; done";
+    let started = Instant::now();
+
+    let ended = world.build(&runs, &process("api", script, ""), &mut admission);
+
+    let took = started.elapsed();
+    drop(keep);
+    assert_eq!(ended, BuildEnded::TimedOut("api".to_owned()));
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    assert_eq!(admission.log.borrow().ended, [None]);
 }

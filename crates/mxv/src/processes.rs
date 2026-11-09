@@ -13,8 +13,9 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Output, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    BuildEnd, BuildsPassed, DownOutcome, Error, Git, Lock, Manifest, ManifestError, ProcessStatus,
-    Reclaimed, Runs, Store, Unstoppable, UpOutcome, Volumes, Workspace, WorkspaceName,
+    BuildEnd, BuildStop, BuildsPassed, DownOutcome, Error, Git, Lock, Manifest, ManifestError,
+    ProcessStatus, Reclaimed, Runs, Store, Unstoppable, UpOutcome, Volumes, Workspace,
+    WorkspaceName,
 };
 use std::time::Duration;
 
@@ -338,35 +339,33 @@ fn build<'lock>(
         .map_err(MxvFailure::from)?;
     match end {
         BuildEnd::Passed(passed) => Ok(Ok(passed)),
-        BuildEnd::Failed {
-            process,
-            code,
-            signal,
-        } => Err(RunFailure::BuildFailed {
-            workspace,
-            process,
-            code,
-            signal,
-        }
-        .into()),
-        BuildEnd::Unstartable { process, reason } => Err(RunFailure::BuildUnstartable {
-            workspace,
-            process,
-            reason,
-        }
-        .into()),
-        BuildEnd::TimedOut { process, waited } => Err(RunFailure::BuildTimedOut {
-            workspace,
-            process,
-            seconds: waited.as_secs(),
-        }
-        .into()),
-        BuildEnd::Interrupted { .. } => Ok(Err(Interrupted {
-            // Only the signal thread sets the flag that ended the build, so
-            // a signal was caught. SIGINT stands in for an answer that
-            // cannot be missing.
-            signal: admission.caught().unwrap_or(2),
-        })),
+        BuildEnd::Stopped { process, why } => match why {
+            BuildStop::Failed { code, signal } => Err(RunFailure::BuildFailed {
+                workspace,
+                process,
+                code,
+                signal,
+            }
+            .into()),
+            BuildStop::Unstartable { reason } => Err(RunFailure::BuildUnstartable {
+                workspace,
+                process,
+                reason,
+            }
+            .into()),
+            BuildStop::TimedOut { waited } => Err(RunFailure::BuildTimedOut {
+                workspace,
+                process,
+                seconds: waited.as_secs(),
+            }
+            .into()),
+            BuildStop::Interrupted => Ok(Err(Interrupted {
+                // Only the signal thread sets the flag that ended the build,
+                // so a signal was caught. SIGINT stands in for an answer that
+                // cannot be missing.
+                signal: admission.caught().unwrap_or(2),
+            })),
+        },
         BuildEnd::UnknownProcess(process) => {
             Err(RunFailure::UnknownProcess { workspace, process }.into())
         }

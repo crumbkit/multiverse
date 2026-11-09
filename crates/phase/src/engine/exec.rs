@@ -30,6 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -140,17 +141,24 @@ pub enum ExecIo {
         /// only whether each is a terminal before a sandboxed command.
         terminal: bool,
     },
-    /// The command reads and writes these streams, such as
-    /// [`Stdio::null`] or a file, and runs in a process group of its own,
-    /// which no terminal signals. A cancel ends the whole group. A
+    /// The command reads and writes these streams, such as a file or a
+    /// pipe, and `None` is the null device. It runs in a process group of
+    /// its own, which no terminal signals. A cancel ends the whole group. A
     /// sandboxed host command's group leads a session of its own.
+    ///
+    /// `exec` refuses a sandboxed host command with
+    /// [`PhaseError::ExecNeedsTerminal`] when any of these is a terminal.
+    /// Its own session takes away the controlling terminal but leaves the
+    /// open descriptor, through which the command could read what the user
+    /// types. The streams are descriptors because a [`Stdio`] cannot be
+    /// asked whether it is a terminal.
     Streams {
         /// The command's standard input.
-        stdin: Stdio,
+        stdin: Option<OwnedFd>,
         /// The command's standard output.
-        stdout: Stdio,
+        stdout: Option<OwnedFd>,
         /// The command's standard error.
-        stderr: Stdio,
+        stderr: Option<OwnedFd>,
     },
 }
 
@@ -200,10 +208,7 @@ pub(crate) fn exec(
     if request.run.is_empty() {
         return Err(unstartable(app, process, "the command is empty".to_owned()));
     }
-    if is_sandboxed(app)
-        && let ExecIo::Inherit { terminal } = request.io
-        && (terminal || caller_has_terminal())
-    {
+    if is_sandboxed(app) && reaches_terminal(&request.io) {
         return Err(PhaseError::ExecNeedsTerminal {
             app: app.name.clone(),
             process: process.name.clone(),
@@ -293,6 +298,22 @@ fn add_variables(command: &mut Command, variables: &[(VariableName, String)]) {
         if !set.contains(OsStr::new(name.as_str())) {
             command.env(name.as_str(), value);
         }
+    }
+}
+
+/// Reports whether a command with the streams `io` would hold a terminal.
+fn reaches_terminal(io: &ExecIo) -> bool {
+    use std::io::IsTerminal;
+    match io {
+        ExecIo::Inherit { terminal } => *terminal || caller_has_terminal(),
+        ExecIo::Streams {
+            stdin,
+            stdout,
+            stderr,
+        } => [stdin, stdout, stderr]
+            .into_iter()
+            .flatten()
+            .any(IsTerminal::is_terminal),
     }
 }
 
@@ -515,7 +536,11 @@ pub(crate) fn run(
             stdout,
             stderr,
         } => {
-            command.stdin(stdin).stdout(stdout).stderr(stderr);
+            let stream = |given: Option<OwnedFd>| given.map_or_else(Stdio::null, Stdio::from);
+            command
+                .stdin(stream(stdin))
+                .stdout(stream(stdout))
+                .stderr(stream(stderr));
             // A process that leads its group cannot start a session, so a
             // command that starts its own stays out of a group here.
             if session == Session::Caller {

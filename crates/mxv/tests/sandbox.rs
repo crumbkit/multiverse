@@ -183,8 +183,14 @@ impl Sandboxed {
     }
 
     fn command(&self, args: &[&str]) -> snapbox::cmd::Command {
+        self.program(env!("CARGO_BIN_EXE_mxv"), args)
+    }
+
+    /// Returns the command that runs `program` with `args` and mxv's
+    /// environment.
+    fn program(&self, program: &str, args: &[&str]) -> snapbox::cmd::Command {
         let root = self.root();
-        snapbox::cmd::Command::new(env!("CARGO_BIN_EXE_mxv"))
+        snapbox::cmd::Command::new(program)
             .args(args)
             .current_dir(&root)
             .env_clear()
@@ -244,6 +250,46 @@ permissions = {{ write = ["out"] }}
     assert_eq!(exit, 0, "{up}");
     assert!(sandboxed.checkout().join("out/file").exists());
     assert!(!sandboxed.checkout().join("denied").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_build_never_receives_the_terminal_that_mxv_runs_on() {
+    let script = "if [ -t 1 ] || [ -t 2 ]; then echo yes > out/terminal; else echo no > out/terminal; fi; echo the-build-ran";
+    let sandboxed = Sandboxed::new(&format!(
+        r#"[processes.writer]
+argv = ["/bin/sh", "-c", "echo ready; exec sleep 60"]
+build = ["/bin/sh", "-c", {script:?}]
+ready = {{ log = "^ready$" }}
+permissions = {{ write = ["out"] }}
+"#
+    ));
+    std::fs::create_dir(sandboxed.checkout().join("out")).unwrap();
+
+    // `script` runs mxv with a new pty as its standard streams.
+    let output = sandboxed
+        .program(
+            "/usr/bin/script",
+            &[
+                "-q",
+                "/dev/null",
+                env!("CARGO_BIN_EXE_mxv"),
+                "up",
+                "-w",
+                "triage",
+            ],
+        )
+        .output()
+        .unwrap();
+
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    assert_eq!(
+        std::fs::read_to_string(sandboxed.checkout().join("out/terminal")).unwrap(),
+        "no\n",
+        "{printed}"
+    );
+    assert!(printed.contains("the-build-ran"), "{printed}");
 }
 
 #[cfg(target_os = "macos")]

@@ -1256,6 +1256,12 @@ sessions, so a sandboxed command cannot open the user's terminal by its
 `/dev/ttys*` path and read what the user types, as [The sandbox as
 built](#the-sandbox-as-built) says.
 
+A command with `ExecIo::Streams` is refused with
+`phase::exec::sandboxed_terminal` when it is sandboxed and any stream it is
+given is a terminal. Its own session takes away the controlling terminal
+but leaves the open descriptor, through which it could read what the user
+types.
+
 A command with `ExecIo::Inherit` shares the host program's standard
 streams. An unsandboxed command, and the `docker exec` of a container
 command, also share the host program's process group, so when the host

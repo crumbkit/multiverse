@@ -159,11 +159,21 @@ impl Setup {
     /// Starts `mxv up` for the workspace `name` as a child process that the
     /// test can signal, with its standard error discarded.
     #[expect(
-        clippy::disallowed_methods,
         clippy::disallowed_types,
         reason = "the test starts mxv as a child so that it can signal it"
     )]
     fn spawn_up(&self, name: &str) -> std::process::Child {
+        self.spawn_up_on(name, Path::new("/nonexistent/deadband.sock"))
+    }
+
+    /// Starts `mxv up` as [`Setup::spawn_up`] does, with `socket` as the
+    /// deadband daemon's socket.
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the test starts mxv as a child so that it can signal it"
+    )]
+    fn spawn_up_on(&self, name: &str, socket: &Path) -> std::process::Child {
         let root = self.root();
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
         command
@@ -176,6 +186,7 @@ impl Setup {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("MXV_ROOT", root.join("workspaces"))
+            .env("DEADBAND_SOCKET", socket)
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap()
@@ -1872,6 +1883,77 @@ fn an_interrupt_during_a_build_ends_its_group_starts_nothing_and_exits_with_130(
     assert!(!setup.started("api"));
 }
 
+/// Sends `signal` to an `mxv up` during its build, and checks that the
+/// build's group ended, nothing started and mxv exited with `code`.
+fn a_signal_during_a_build_cancels_it(signal: &str, code: i32) {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"sh\", \"-c\", \"echo $$ > group; touch started; sleep 60\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+    let mut up = setup.spawn_up("triage");
+    wait_for(&checkout.join("started"));
+    let group: u64 = fs::read_to_string(checkout.join("group"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    send(signal, up.id());
+    let ended = up.wait().unwrap();
+
+    assert_eq!(ended.code(), Some(code), "{ended:?}");
+    assert!(!group_exists(group));
+    assert!(!setup.started("api"));
+}
+
+#[test]
+fn sighup_during_a_build_ends_its_group_and_exits_with_129() {
+    a_signal_during_a_build_cancels_it("HUP", 129);
+}
+
+#[test]
+fn sigquit_during_a_build_ends_its_group_and_exits_with_131() {
+    a_signal_during_a_build_cancels_it("QUIT", 131);
+}
+
+#[test]
+fn an_interrupt_during_the_wait_for_a_place_ends_mxv_with_nothing_run_and_leaves_the_queue() {
+    let setup = Setup::new();
+    let manifest = "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"touch\", \"built\"]\n";
+    let checkout = setup.workspace("triage", manifest);
+    let socket = setup.root().join("d.sock");
+    start_daemon(&socket);
+    let job = deadband::protocol::Job {
+        label: "holder".to_owned(),
+        pid: std::process::id(),
+        command: "the job that holds the one place".to_owned(),
+        lane: deadband::admit::Lane::default(),
+    };
+    let deadband::client::Admission::Granted(lease) =
+        deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
+            panic!("the first job waits")
+        })
+    else {
+        panic!("the daemon did not grant the first job");
+    };
+    let queued = |count: usize| {
+        waiting().any(|()| {
+            let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
+            jobs.waiting.len() == count
+        })
+    };
+    let mut up = setup.spawn_up_on("triage", &socket);
+    assert!(queued(1), "mxv never joined the queue");
+
+    interrupt(up.id());
+    let ended = up.wait().unwrap();
+
+    assert_eq!(ended.signal().or(ended.code()), Some(2), "{ended:?}");
+    assert!(queued(0), "mxv's job stayed in the queue");
+    assert!(!checkout.join("built").exists());
+    assert!(!setup.started("api"));
+    lease.end(Some(0));
+}
+
 #[test]
 fn an_interrupt_after_the_builds_ends_mxv_while_it_waits_for_a_process_to_be_ready() {
     let setup = Setup::new();
@@ -1888,8 +1970,13 @@ fn an_interrupt_after_the_builds_ends_mxv_while_it_waits_for_a_process_to_be_rea
 
 /// Sends `SIGINT` to the process `pid`, as Ctrl-C does.
 fn interrupt(pid: u32) {
+    send("INT", pid);
+}
+
+/// Sends the signal `name` to the process `pid`.
+fn send(name: &str, pid: u32) {
     let status = Command::new("kill")
-        .args(["-INT", &pid.to_string()])
+        .args([&format!("-{name}"), &pid.to_string()])
         .env("PATH", PATH)
         .output()
         .unwrap();
@@ -2011,8 +2098,8 @@ impl multiverse::Admission for Granting {
         Box::new(Granted)
     }
 
-    fn output(&self) -> std::io::Result<std::process::Stdio> {
-        Ok(std::process::Stdio::null())
+    fn output(&self) -> Box<dyn std::io::Write + Send> {
+        Box::new(std::io::sink())
     }
 }
 
@@ -2050,7 +2137,13 @@ fn a_build_that_outlives_the_deadline_leaves_a_running_process_alone() {
         .unwrap();
 
     assert!(
-        matches!(end, multiverse::BuildEnd::TimedOut { .. }),
+        matches!(
+            end,
+            multiverse::BuildEnd::Stopped {
+                why: multiverse::BuildStop::TimedOut { .. },
+                ..
+            }
+        ),
         "{end:?}"
     );
     drop(lock);

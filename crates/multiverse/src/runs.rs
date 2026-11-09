@@ -32,7 +32,8 @@ mod phased;
 mod tests;
 
 pub use phased::{
-    Admission, Asked, BuildEnd, BuildsPassed, Exec, ExecEnd, ExecTarget, LogOutput, Place, Volumes,
+    Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Exec, ExecEnd, ExecTarget, LogOutput,
+    Place, Volumes,
 };
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.

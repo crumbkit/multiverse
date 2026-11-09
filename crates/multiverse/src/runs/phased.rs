@@ -54,7 +54,7 @@ mod exec;
 #[cfg(test)]
 mod tests;
 
-pub use build::{Admission, Asked, BuildEnd, BuildsPassed, Place};
+pub use build::{Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Place};
 pub use exec::{Exec, ExecEnd, ExecTarget};
 
 /// Returns the checkout that holds `workspace`'s manifest. A workspace

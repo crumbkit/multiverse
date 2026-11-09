@@ -25,9 +25,8 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -86,12 +85,7 @@ impl Deadband {
 impl Admission for Deadband {
     fn admit(&mut self, asked: &Asked<'_>) -> Box<dyn Place> {
         let read = |name: &str| self.variables.get(name).cloned();
-        let mut environment = DeadbandEnvironment::read(read, Some(PathBuf::from(asked.cwd)));
-        // phase starts a build from an empty environment, so a variable that
-        // only mxv's own environment set never reaches the build. The build
-        // gets deadband's value of it, and phase leaves alone the value that
-        // the process declares.
-        environment.preset.clear();
+        let environment = DeadbandEnvironment::read(read, Some(PathBuf::from(asked.cwd)));
         let socket = deadband::socket::path(read);
         let admitted = admit(
             &DeadbandAsked {
@@ -108,8 +102,8 @@ impl Admission for Deadband {
         Box::new(Held { admitted, building })
     }
 
-    fn output(&self) -> io::Result<Stdio> {
-        crate::stderr_stdio()
+    fn output(&self) -> Box<dyn Write + Send> {
+        crate::stderr_writer()
     }
 }
 
@@ -131,8 +125,11 @@ impl Place for Held {
     fn end(self: Box<Self>, exit_code: Option<i32>) {
         let Self { admitted, building } = *self;
         if let Some(building) = building {
-            building.store(false, Ordering::SeqCst);
+            // In this order a `SIGINT` always has a handler: the usage log's
+            // thread ends mxv once it has the signal back, and until then
+            // this module's thread cancels.
             crumbkit::events::taken_back();
+            building.store(false, Ordering::SeqCst);
         }
         admitted.end(exit_code);
     }
@@ -168,6 +165,13 @@ fn cut(command: &str) -> &str {
 /// sets `cancel`. Once it is clear, a signal ends mxv as it would have
 /// without this handler. The usage log's thread still does that for
 /// `SIGINT`, so this thread leaves `SIGINT` to it.
+///
+/// `SIGTERM` is not caught here, because crumbkit's usage log ends mxv on it
+/// whether or not a child was handed over, as it does for `mxv exec`. A
+/// `SIGTERM` during a build therefore ends mxv and frees the place, while
+/// the build's process group runs on, uncounted by deadband, and the next
+/// `up` starts a second build. A `SIGTERM` rule in crumbkit's usage log like
+/// its `SIGINT` rule would replace this.
 fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<AtomicBool>> {
     use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT};
     use signal_hook::iterator::Signals;

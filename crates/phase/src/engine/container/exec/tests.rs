@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -175,9 +175,9 @@ impl World {
             "server".parse().unwrap(),
             vec!["sh".into(), "-c".into(), script.into()],
             ExecIo::Streams {
-                stdin: Stdio::null(),
-                stdout: Stdio::from(file.try_clone().unwrap()),
-                stderr: Stdio::from(file),
+                stdin: None,
+                stdout: Some(file.try_clone().unwrap().into()),
+                stderr: Some(file.into()),
             },
         )
         .with_variables(variables);
@@ -387,9 +387,9 @@ fn a_command_that_docker_cannot_find_in_a_running_container_exits_127() {
         "server".parse().unwrap(),
         vec!["/no/such/program".into()],
         ExecIo::Streams {
-            stdin: Stdio::null(),
-            stdout: Stdio::from(file.try_clone().unwrap()),
-            stderr: Stdio::from(file),
+            stdin: None,
+            stdout: Some(file.try_clone().unwrap().into()),
+            stderr: Some(file.into()),
         },
     );
 

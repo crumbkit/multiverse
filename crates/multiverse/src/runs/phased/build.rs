@@ -29,12 +29,17 @@
 //! - A build that survives a `SIGKILL` of mxv runs on, uncounted, because
 //!   macOS has no parent-death signal. A small supervising process that holds
 //!   the place and outlives mxv would replace this.
+//! - A process that outlives its build and keeps the build's output open,
+//!   such as a compiler's daemon, has its output copied for [`OUTPUT_GRACE`]
+//!   after the build ends and lost after that. Its next write then fails.
+//!   Without the limit, such a process would hold `up` until it exited.
+//!   Giving each build a log file of its own, which needs no copying, would
+//!   replace this.
 
-use std::io;
+use std::io::{self, PipeReader, Read as _, Write};
 use std::marker::PhantomData;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -58,6 +63,12 @@ mod tests;
 /// lifecycle lock, and for its variables to resolve. It does not cover the
 /// running command, which [`Timer`] bounds.
 const STEP_WAIT: Duration = Duration::from_secs(600);
+
+/// How long a build's output may take to reach its end once the build has
+/// exited. It passes only when a process that the build left behind holds
+/// the output open, or when the admission's stream has stopped accepting
+/// writes.
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
 
 /// What [`Admission::admit`] asks for: one place for all of a command's
 /// builds.
@@ -84,12 +95,10 @@ pub trait Admission {
     /// is busy for an hour holds the work for an hour.
     fn admit(&mut self, asked: &Asked<'_>) -> Box<dyn Place>;
 
-    /// Returns a stream for a build's standard output or error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of duplicating the stream.
-    fn output(&self) -> io::Result<Stdio>;
+    /// Returns where the output of one build is copied. A build always
+    /// writes to a pipe that this library copies from, so a stream that is
+    /// a terminal never reaches a sandboxed build.
+    fn output(&self) -> Box<dyn Write + Send>;
 }
 
 /// A place on the machine, which counts the work as running until it ends.
@@ -119,41 +128,53 @@ pub struct BuildsPassed<'lock> {
 pub enum BuildEnd<'lock> {
     /// Every build exited 0, or the selection declares none.
     Passed(BuildsPassed<'lock>),
-    /// A build ended with a status other than 0, and the builds after it
-    /// did not run.
-    Failed {
-        /// The process whose build failed.
+    /// A build did not pass, and the builds after it did not run.
+    Stopped {
+        /// The process whose build did not pass.
         process: String,
+        /// Why it did not pass.
+        why: BuildStop,
+    },
+    /// The manifest declares no process with the name.
+    UnknownProcess(String),
+    /// phase cannot run the manifest.
+    Unrunnable(Unrunnable),
+}
+
+/// Why a build did not pass.
+#[derive(Debug)]
+pub enum BuildStop {
+    /// The build ended with a status other than 0.
+    Failed {
         /// The build's exit code, or `None` when a signal ended it.
         code: Option<i32>,
         /// The signal that ended the build, or `None`.
         signal: Option<i32>,
     },
-    /// A build could not start.
+    /// The build could not start.
     Unstartable {
-        /// The process whose build could not start.
-        process: String,
         /// Why, in phase's words, which hold no variable's value.
         reason: String,
     },
     /// The builds outlived [`Runs::build`]'s deadline, so phase ended this
     /// one's process group.
     TimedOut {
-        /// The process whose build the deadline ended.
-        process: String,
         /// How long the builds ran.
         waited: Duration,
     },
-    /// The person interrupted the builds, so phase ended this one's
-    /// process group.
-    Interrupted {
-        /// The process whose build the interruption ended.
-        process: String,
-    },
-    /// The manifest declares no process with the name.
-    UnknownProcess(String),
-    /// phase cannot run the manifest.
-    Unrunnable(Unrunnable),
+    /// The person interrupted the builds, so phase ended this one's process
+    /// group.
+    Interrupted,
+}
+
+impl BuildStop {
+    /// Returns the exit code that the place ends with.
+    const fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::Failed { code, .. } => *code,
+            Self::Unstartable { .. } | Self::TimedOut { .. } | Self::Interrupted => None,
+        }
+    }
 }
 
 /// The timer that sets a command's [`Cancel`] when its builds' deadline
@@ -208,6 +229,71 @@ impl Drop for Timer {
     }
 }
 
+/// The thread that copies a build's output to the admission's stream.
+struct Copier {
+    /// Closes when the thread ends.
+    ended: mpsc::Receiver<()>,
+    /// Tells the thread to discard what it reads next and end.
+    abandoned: Arc<AtomicBool>,
+}
+
+impl Copier {
+    /// Starts the thread that copies `reader` to `writer` until the pipe's
+    /// write end has closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of spawning the thread.
+    fn start(reader: PipeReader, writer: Box<dyn Write + Send>) -> io::Result<Self> {
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&abandoned);
+        let (done, ended) = mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("mxv-build-output".to_owned())
+            .spawn(move || {
+                copy(reader, writer, &flag);
+                drop(done);
+            })?;
+        Ok(Self { ended, abandoned })
+    }
+
+    /// Waits for the output of a build that has exited to reach its end,
+    /// for at most [`OUTPUT_GRACE`].
+    ///
+    /// A process that the build left behind can hold the write end open for
+    /// as long as it lives, so the end may never come. The copier then stays
+    /// blocked in its read, and this returns without it. The copier ends at
+    /// its next read, or with mxv, and closing the read end makes the
+    /// process's next write fail. The build's cancel and deadline do not
+    /// depend on this, because phase watches them on the caller's thread
+    /// while the copier runs on its own.
+    fn finish(self) {
+        let _ = self.ended.recv_timeout(OUTPUT_GRACE);
+        self.abandoned.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Copies `reader` to `writer` until the write end has closed or `abandoned`
+/// is set. A write that fails is ignored, and the copy goes on reading, so a
+/// closed standard error does not end the build.
+fn copy(mut reader: PipeReader, mut writer: Box<dyn Write + Send>, abandoned: &AtomicBool) {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        };
+        if abandoned.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(bytes) = buffer.get(..read) {
+            drop(writer.write_all(bytes));
+        }
+    }
+}
+
 /// One build of a command.
 struct Step<'a> {
     /// The process that the build belongs to.
@@ -226,32 +312,14 @@ struct Builds<'a> {
     built: &'a Built,
     /// The variables of the place.
     variables: &'a [(VariableName, String)],
-    /// Where each build's output goes.
+    /// Where each build's output is copied.
     admission: &'a dyn Admission,
     /// The flag that stops the build that runs.
     cancel: &'a Cancel,
     /// The deadline of the builds.
     timer: &'a Timer,
-}
-
-/// The end of one build that did not pass.
-enum Stopped {
-    /// See [`BuildEnd::Failed`].
-    Failed {
-        /// The exit code, or `None` when a signal ended the build.
-        code: Option<i32>,
-        /// The signal that ended the build, or `None`.
-        signal: Option<i32>,
-    },
-    /// See [`BuildEnd::Unstartable`].
-    Unstartable {
-        /// Why, in phase's words.
-        reason: String,
-    },
-    /// See [`BuildEnd::TimedOut`].
-    TimedOut,
-    /// See [`BuildEnd::Interrupted`].
-    Interrupted,
+    /// When the deadline started.
+    started: Instant,
 }
 
 /// Returns the words of the job that the limiter shows for `steps`: each
@@ -266,24 +334,24 @@ fn job_text(steps: &[Step<'_>]) -> String {
 
 impl Builds<'_> {
     /// Runs the build `step`, and returns `None` when it passed.
-    fn run(&self, step: &Step<'_>) -> Result<Option<Stopped>, Error> {
+    fn run(&self, step: &Step<'_>) -> Result<Option<BuildStop>, Error> {
         if let Some(stopped) = self.stopped() {
             return Ok(Some(stopped));
         }
         let (Some(app), Some(process)) = (app(step.process), main_process()) else {
-            return Ok(Some(Stopped::Unstartable {
+            return Ok(Some(BuildStop::Unstartable {
                 reason: "the process's name is not one that phase can run".to_owned(),
             }));
         };
-        let output = match self.streams() {
-            Ok(output) => output,
+        let (streams, copier) = match self.streams() {
+            Ok(piped) => piped,
             Err(error) => {
-                return Ok(Some(Stopped::Unstartable {
+                return Ok(Some(BuildStop::Unstartable {
                     reason: format!("mxv cannot give the build its output streams: {error}"),
                 }));
             }
         };
-        let request = ExecRequest::new(app, process, step.command.words().to_vec(), output)
+        let request = ExecRequest::new(app, process, step.command.words().to_vec(), streams)
             .with_variables(self.variables.to_vec());
         let ended = self.runs.phase.exec(
             &self.built.plan,
@@ -292,66 +360,47 @@ impl Builds<'_> {
             Instant::now() + STEP_WAIT,
             self.cancel,
         );
+        copier.finish();
         match ended {
             Ok(status) if status.success() => Ok(self.stopped()),
-            Ok(status) => Ok(Some(self.stopped().unwrap_or(Stopped::Failed {
+            Ok(status) => Ok(Some(self.stopped().unwrap_or(BuildStop::Failed {
                 code: status.code(),
                 signal: status.signal(),
             }))),
             Err(PhaseError::ExecUnstartable { reason, .. }) => {
-                Ok(Some(Stopped::Unstartable { reason }))
+                Ok(Some(BuildStop::Unstartable { reason }))
             }
             Err(other) => Err(self.runs.phase_error(self.id, other)),
         }
     }
 
     /// Returns why the builds must stop now, or `None`.
-    fn stopped(&self) -> Option<Stopped> {
+    fn stopped(&self) -> Option<BuildStop> {
         if self.timer.fired() {
-            Some(Stopped::TimedOut)
+            Some(BuildStop::TimedOut {
+                waited: self.started.elapsed(),
+            })
         } else if self.cancel.is_cancelled() {
-            Some(Stopped::Interrupted)
+            Some(BuildStop::Interrupted)
         } else {
             None
         }
     }
 
-    /// Returns the streams of a build: empty standard input, and both
-    /// output streams going where the admission says. They are
-    /// [`ExecIo::Streams`], so the build runs in a process group of its
-    /// own and a cancel ends the whole group.
-    fn streams(&self) -> io::Result<ExecIo> {
-        Ok(ExecIo::Streams {
-            stdin: Stdio::null(),
-            stdout: self.admission.output()?,
-            stderr: self.admission.output()?,
-        })
-    }
-}
-
-impl Stopped {
-    /// Returns the exit code that the place ends with.
-    const fn exit_code(&self) -> Option<i32> {
-        match self {
-            Self::Failed { code, .. } => *code,
-            Self::Unstartable { .. } | Self::TimedOut | Self::Interrupted => None,
-        }
-    }
-
-    /// Returns how the builds ended, with this build, of `process`, as the
-    /// one that did not pass after `waited`.
-    fn into_end<'lock>(self, process: &str, waited: Duration) -> BuildEnd<'lock> {
-        let process = process.to_owned();
-        match self {
-            Self::Failed { code, signal } => BuildEnd::Failed {
-                process,
-                code,
-                signal,
-            },
-            Self::Unstartable { reason } => BuildEnd::Unstartable { process, reason },
-            Self::TimedOut => BuildEnd::TimedOut { process, waited },
-            Self::Interrupted => BuildEnd::Interrupted { process },
-        }
+    /// Returns the streams of a build, with the copier of its output: empty
+    /// standard input, and both output streams on one pipe, so their lines
+    /// stay in order. They are [`ExecIo::Streams`], so the build runs in a
+    /// process group of its own and a cancel ends the whole group.
+    fn streams(&self) -> io::Result<(ExecIo, Copier)> {
+        let (reader, stdout) = io::pipe()?;
+        let stderr = stdout.try_clone()?;
+        let copier = Copier::start(reader, self.admission.output())?;
+        let streams = ExecIo::Streams {
+            stdin: None,
+            stdout: Some(stdout.into()),
+            stderr: Some(stderr.into()),
+        };
+        Ok((streams, copier))
     }
 }
 
@@ -367,7 +416,7 @@ impl Runs {
     /// after the last build. With no `build` declared, `admission` is not
     /// asked. Each build runs in its process's context, with its sandbox
     /// and variables, and with the place's variables beside them. It reads
-    /// no input and writes to `admission`'s streams.
+    /// no input, and a pipe carries its output to `admission`'s stream.
     ///
     /// The builds' deadline starts after the place is granted. A build that
     /// outlives it, or that the person interrupts, ends with its process
@@ -427,7 +476,6 @@ impl Runs {
         });
         let variables = place.variables();
         let timer = Timer::start(self.build_wait, cancel.clone());
-        let started = Instant::now();
         let builds = Builds {
             runs: self,
             id: &id,
@@ -436,13 +484,17 @@ impl Runs {
             admission,
             cancel: &cancel,
             timer: &timer,
+            started: Instant::now(),
         };
         for step in &steps {
             match builds.run(step) {
                 Ok(None) => {}
-                Ok(Some(stopped)) => {
-                    place.end(stopped.exit_code());
-                    return Ok(stopped.into_end(step.process, started.elapsed()));
+                Ok(Some(why)) => {
+                    place.end(why.exit_code());
+                    return Ok(BuildEnd::Stopped {
+                        process: step.process.to_owned(),
+                        why,
+                    });
                 }
                 Err(error) => {
                     place.end(None);
@@ -451,6 +503,14 @@ impl Runs {
             }
         }
         place.end(Some(0));
+        // A signal handled after the last build's check only sets the flag,
+        // so this check keeps a late Ctrl-C from going on to replace units.
+        if let (Some(last), Some(why)) = (steps.last(), builds.stopped()) {
+            return Ok(BuildEnd::Stopped {
+                process: last.process.to_owned(),
+                why,
+            });
+        }
         Ok(BuildEnd::Passed(BuildsPassed { lock: PhantomData }))
     }
 }

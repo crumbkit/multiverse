@@ -395,16 +395,15 @@ pub(crate) fn stdout_is_terminal() -> bool {
     stdout.is_terminal()
 }
 
-/// Returns a stream that writes to mxv's standard error, for a command
-/// whose output goes there.
-pub(crate) fn stderr_stdio() -> std::io::Result<std::process::Stdio> {
-    use std::os::fd::AsFd as _;
+/// Returns a writer to mxv's standard error, which receives a build's
+/// output from the pipe that the build writes to.
+pub(crate) fn stderr_writer() -> Box<dyn std::io::Write + Send> {
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/mxv/src/lib.rs owns standard error, and a build's output goes there beside the command's result"
     )]
     let stderr = std::io::stderr();
-    Ok(stderr.as_fd().try_clone_to_owned()?.into())
+    Box::new(stderr)
 }
 
 /// Prints `line`, which deadband wrote about a build's wait for a place,

@@ -134,9 +134,9 @@ fn exec_script_with(
         "server".parse().unwrap(),
         vec!["/bin/sh".into(), "-c".into(), script.into()],
         ExecIo::Streams {
-            stdin: Stdio::null(),
-            stdout: Stdio::from(file.try_clone().unwrap()),
-            stderr: Stdio::from(file),
+            stdin: None,
+            stdout: Some(file.try_clone().unwrap().into()),
+            stderr: Some(file.into()),
         },
     )
     .with_variables(variables);
@@ -360,9 +360,9 @@ fn a_cancelled_command_is_stopped_with_term() {
         setter.cancel();
     });
     let io = ExecIo::Streams {
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
+        stdin: None,
+        stdout: None,
+        stderr: None,
     };
 
     let status = run(
@@ -674,9 +674,9 @@ fn a_cancel_ends_the_whole_process_group_of_a_command_with_streams() {
         setter.cancel();
     });
     let io = ExecIo::Streams {
-        stdin: Stdio::null(),
-        stdout: Stdio::null(),
-        stderr: Stdio::null(),
+        stdin: None,
+        stdout: None,
+        stderr: None,
     };
 
     run(
@@ -1126,4 +1126,47 @@ fn exec_refuses_a_sandboxed_command_when_a_standard_stream_of_the_caller_is_a_te
     );
     assert!(!printed.contains("probe "), "{printed}");
     assert!(!echoed.contains('R'), "{echoed:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_refuses_a_sandboxed_command_when_a_stream_it_is_given_is_a_terminal() {
+    use crate::sandbox::{Platform, platform};
+
+    if !matches!(platform(), Platform::Available(_)) {
+        return;
+    }
+    for terminal_at in 0..3 {
+        let Pty { slave, reader, .. } = Pty::open();
+        let stream = |at: usize| (at == terminal_at).then(|| slave.try_clone().unwrap());
+        let (stdin, stdout, stderr) = (stream(0), stream(1), stream(2));
+        let (phase, plan, root) = workspace(true);
+        let marker = root.path().join("ran");
+        let request = ExecRequest::new(
+            "api".parse().unwrap(),
+            "server".parse().unwrap(),
+            vec!["/usr/bin/touch".into(), marker.display().to_string()],
+            ExecIo::Streams {
+                stdin,
+                stdout,
+                stderr,
+            },
+        );
+
+        let refused = phase.exec(
+            &plan,
+            request,
+            &greeting(),
+            Instant::now() + Duration::from_secs(10),
+            &Cancel::new(),
+        );
+
+        assert!(
+            matches!(refused, Err(PhaseError::ExecNeedsTerminal { .. })),
+            "stream {terminal_at}: {refused:?}"
+        );
+        assert!(!marker.exists(), "stream {terminal_at}");
+        drop(slave);
+        drop(reader.join().unwrap());
+    }
 }
