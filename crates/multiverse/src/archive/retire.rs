@@ -265,10 +265,14 @@ impl<B: Backend> Workspaces<B> {
                 differences: vec![format!("--force would lose more than mxv showed: {new}")],
             }));
         }
-        for (planned, archived) in plan.removal.checkouts.iter().zip(&plan.checkouts) {
-            if planned.directory != Fate::Removed {
-                continue;
-            }
+        let retiring = || {
+            plan.removal
+                .checkouts
+                .iter()
+                .zip(&plan.checkouts)
+                .filter(|(planned, _)| planned.directory == Fate::Removed)
+        };
+        for (_, archived) in retiring() {
             let baseline = admitted
                 .get(&archived.folder)
                 .and_then(|snapshot| snapshot.head.commit.as_deref());
@@ -281,12 +285,18 @@ impl<B: Backend> Workspaces<B> {
                     )],
                 }));
             }
-            self.pin(planned, archived)?;
         }
-        (self.checkpoint)("pins")?;
+        // The record comes before the pins, so a run that stops between
+        // them leaves the archive's id, and the next run writes the same
+        // pins again instead of leaving these behind under an id nothing
+        // names.
         let mut archive = plan.record(&name);
         archives.write(&archive)?;
         (self.checkpoint)("record")?;
+        for (planned, archived) in retiring() {
+            self.pin(planned, archived)?;
+        }
+        (self.checkpoint)("pins")?;
         let generated = self.generated_agents(&plan.removal.workspace)?;
         root::copy_in(archives, &mut archive, &plan.removal.workspace, &generated)?;
         archives.write(&archive)?;
@@ -397,7 +407,10 @@ impl<B: Backend> Workspaces<B> {
         let concealed = self.backend.concealed(dir)?;
         let mut hidden = concealed.nested.clone();
         hidden.extend(concealed.hidden.iter().cloned());
-        hidden.extend(submodule_items(&concealed));
+        hidden.extend(submodule_items(dir, &concealed));
+        hidden.extend(concealed.unlisted.iter().cloned());
+        hidden.extend(concealed.paused.iter().cloned());
+        hidden.extend(concealed.referenced.iter().cloned());
         let (stashes, unpushed) = if kind == WorkspaceKind::Clone {
             (
                 self.backend.stashes(dir)?,

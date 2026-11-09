@@ -4,7 +4,7 @@
 use std::fmt;
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{ArchiveRefusal, RestoreRefusal, Unsaved, WorkspaceName};
+use multiverse::{ArchiveRefusal, ArchiveState, RestoreRefusal, Unsaved, WorkspaceName};
 
 /// The code of a name that no workspace or archive has.
 pub const ARCHIVE_NOT_FOUND: Code = Code::new("mxv", "archive", "not_found");
@@ -76,6 +76,8 @@ pub(crate) enum ArchiveFailure {
     NameTaken {
         /// The name.
         name: String,
+        /// Whether the archive that holds the name has not finished.
+        retiring: bool,
     },
     /// A checkout differs from what the archive admitted.
     SourceChanged {
@@ -202,13 +204,19 @@ fn hint(text: impl Into<String>) -> Recovery {
 pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFailure {
     let name = name.to_string();
     match refusal {
-        ArchiveRefusal::NameTaken(_) => ArchiveFailure::NameTaken { name },
+        ArchiveRefusal::NameTaken(archive) => ArchiveFailure::NameTaken {
+            name,
+            retiring: archive.state == ArchiveState::Retiring,
+        },
         ArchiveRefusal::MirrorMissing { folder, mirror } => ArchiveFailure::MirrorMissing {
             folder,
             mirror: mirror.display().to_string(),
         },
         ArchiveRefusal::Unusable { folder, reason } => ArchiveFailure::Unusable { folder, reason },
-        ArchiveRefusal::Unsaved(unsaved) => ArchiveFailure::UnsavedWork { name, unsaved },
+        ArchiveRefusal::Unsaved(unsaved) => ArchiveFailure::UnsavedWork {
+            name,
+            unsaved: *unsaved,
+        },
         ArchiveRefusal::SourceChanged {
             folder,
             differences,
@@ -284,7 +292,13 @@ impl Failure for ArchiveFailure {
             Self::NotFound { .. } | Self::RestoreNotFound { .. } => {
                 Recovery::Run(Call::new(&["list"]))
             }
-            Self::NameTaken { name } => hint(format!(
+            Self::NameTaken {
+                name,
+                retiring: true,
+            } => hint(format!(
+                "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv remove {name}` to remove the newer workspace, then `mxv archive -w {name}` finishes the earlier archive"
+            )),
+            Self::NameTaken { name, .. } => hint(format!(
                 "run `mxv restore {name}` to bring the archive back, or `mxv remove --archived {name}` to delete it"
             )),
             Self::SourceChanged { name, .. } => hint(format!(
@@ -300,7 +314,7 @@ impl Failure for ArchiveFailure {
                     ))
                 } else {
                     hint(format!(
-                        "save or delete the paths and commits that the failure lists, and archive again, or run `mxv archive -w {name} --force` to lose them; `--wip` does not save ignored files, stashes, other commits, nested repositories, submodules or hidden edits"
+                        "save or delete the paths and commits that the failure lists, and archive again, or run `mxv archive -w {name} --force` to lose them; `--wip` does not save ignored files, stashes, other commits, nested repositories, submodules, hidden edits, files that git does not list, or a paused git operation"
                     ))
                 }
             }
@@ -346,7 +360,7 @@ impl Failure for ArchiveFailure {
     fn fields(&self) -> Vec<Field<'_>> {
         match self {
             Self::NotFound { name }
-            | Self::NameTaken { name }
+            | Self::NameTaken { name, .. }
             | Self::Unfinished { name }
             | Self::RestoreNotFound { name }
             | Self::RestoreUnfinished { name } => vec![Field::new("name", name)],
@@ -372,6 +386,8 @@ impl Failure for ArchiveFailure {
                 Field::new("nested", FieldValue::list(unsaved.nested.iter())),
                 Field::new("hidden", FieldValue::list(unsaved.hidden.iter())),
                 Field::new("submodules", FieldValue::list(unsaved.submodules.iter())),
+                Field::new("unlisted", FieldValue::list(unsaved.unlisted.iter())),
+                Field::new("paused", FieldValue::list(unsaved.paused.iter())),
             ],
             Self::InUse { name, reason } => {
                 vec![Field::new("name", name), Field::new("reason", reason)]
@@ -427,7 +443,7 @@ impl fmt::Display for ArchiveFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { name } => write!(formatter, "no workspace or archive is named {name}"),
-            Self::NameTaken { name } => {
+            Self::NameTaken { name, .. } => {
                 write!(formatter, "an archive already holds the name {name}")
             }
             Self::SourceChanged {

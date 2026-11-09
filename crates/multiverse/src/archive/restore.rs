@@ -384,15 +384,16 @@ impl<B: Backend> Workspaces<B> {
         let start = if archived.detached {
             CloneStart::Detached(&archived.commit)
         } else {
-            CloneStart::Branch(&archived.commit)
+            CloneStart::Pinned(&archived.commit)
         };
         self.make_clone_at(checkout, &origin, start, false, &mut made.clones)?;
         if archived.origin.is_none() {
             self.backend.remove_origin(&checkout.path)?;
         }
         if let Some(tracked) = archived.upstream.as_ref().filter(|_| !archived.detached) {
+            let remote = archived.upstream_remote.as_deref().unwrap_or("origin");
             self.backend
-                .set_upstream(&checkout.path, &checkout.branch, tracked)?;
+                .set_upstream(&checkout.path, &checkout.branch, remote, tracked)?;
         }
         Ok(())
     }

@@ -671,7 +671,9 @@ pub(crate) fn restore(
     let name = parse_name(&args.name)?;
     let workspaces = configured(environment)?;
     let records = archives(environment)?;
-    let runs = environment.runs()?;
+    let runs = environment
+        .runs()?
+        .with_port_range(environment.port_range()?);
     let plan = match workspaces
         .plan_restore(&records, &name)
         .map_err(MxvFailure::from)?

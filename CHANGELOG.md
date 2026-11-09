@@ -16,8 +16,10 @@ workspace may need to act on.
   `mxv::command::unbuilt` no longer sees it. The JSON document of `mxv list`
   has the new fields `archived` and `local_only`, and the document of
   `mxv remove` has the new field `pins`. An archive refuses and names an
-  untracked nested repository, a submodule's unsaved work, and a
-  skip-worktree or assume-unchanged file with local edits. The new failure
+  untracked nested repository, a submodule's unsaved work, a
+  skip-worktree or assume-unchanged file with local edits, a file that git
+  does not list, a commit that only an unusual reference keeps, and a paused
+  git operation. The new failure
   codes `mxv::archive::record_too_large` and
   `mxv::archive::volumes_in_use` report an archive record over 1 MiB and
   docker volumes that a live workspace uses.

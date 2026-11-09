@@ -782,6 +782,10 @@ pub(crate) enum CloneStart<'a> {
     Branch(&'a str),
     /// On a detached `HEAD` at this commit.
     Detached(&'a str),
+    /// On the checkout's branch at this commit. The branch may be the one
+    /// that the new clone made from its mirror's `HEAD`, which holds nothing
+    /// yet, and it moves to the commit.
+    Pinned(&'a str),
 }
 
 /// Returns the name of the origin's branch that `base`, a remote branch
@@ -1769,6 +1773,25 @@ impl<B: Backend> Workspaces<B> {
             CloneStart::Detached(commit) => {
                 checkout.commit = Some(self.backend.detach_head(&checkout.path, commit)?);
                 return Ok(());
+            }
+            CloneStart::Pinned(commit) => {
+                if self
+                    .backend
+                    .branch_tip(&checkout.path, &checkout.branch)?
+                    .is_some()
+                {
+                    // `HEAD` leaves the branch first, so moving the
+                    // reference moves no files under a checked-out branch.
+                    self.backend.detach_head(&checkout.path, commit)?;
+                    let reference = format!("refs/heads/{}", checkout.branch);
+                    self.backend.write_ref(&checkout.path, &reference, commit)?;
+                    let tip = self
+                        .backend
+                        .switch_branch(&checkout.path, &checkout.branch)?;
+                    checkout.commit = Some(tip);
+                    return Ok(());
+                }
+                commit
             }
         };
         if self

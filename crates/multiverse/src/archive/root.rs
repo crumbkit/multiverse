@@ -90,7 +90,9 @@ impl Scanned {
 /// writes as `AGENTS.md`, so a file that differs from it is the person's.
 fn is_own(workspace: &Workspace, name: &str, path: &Path, generated: &str) -> bool {
     if name == AGENTS_FILE {
-        return fs::read(path).is_ok_and(|text| text == generated.as_bytes());
+        // Opening a FIFO blocks until something writes to it, so only a
+        // regular file is read.
+        return is_regular(path) && fs::read(path).is_ok_and(|text| text == generated.as_bytes());
     }
     // The workspace manifest is copied by itself only when it is a file. A
     // link stays a link, as any other entry does.

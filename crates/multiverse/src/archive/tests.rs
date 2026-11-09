@@ -19,6 +19,8 @@ use crate::store::Store;
 use crate::testing::{Fixture, fixture, fixture_named, git, write};
 use crate::workspaces::{Mode, NewOutcome, Repo, Workspaces};
 
+mod edges;
+
 type Hook = Box<dyn FnMut(&str) -> Result<(), Error>>;
 
 thread_local! {
@@ -996,7 +998,7 @@ fn a_commit_made_after_the_pin_refuses_the_archive_and_stays_in_the_checkout() {
     let at = checkout.clone();
     let plan = setup.plan(ArchiveOptions::default());
     set_hook(move |step| {
-        if step == "record" {
+        if step == "pins" {
             git(&at, &["commit", "--quiet", "--allow-empty", "-m", "Late"]);
         }
         Ok(())

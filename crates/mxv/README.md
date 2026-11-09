@@ -1323,6 +1323,21 @@ lists every item in these cases:
 - A file marked skip-worktree or assume-unchanged differs from git's index,
   which `git status` does not show. `--wip` does not save it. `--force` loses
   it.
+- A checkout holds a file that no listing of git accounts for, such as a file
+  in a submodule directory that is not initialised. mxv walks the checkout and
+  compares each file with the tracked, untracked and ignored paths that git
+  lists, so such a file is named whatever put it there. `--wip` does not save
+  it. `--force` loses it.
+- A submodule's git directory holds a stash or a commit that no remote holds
+  after `git submodule deinit` took its files. A disposable directory in a
+  submodule holds a repository. `--force` loses them.
+- A clone holds a commit that only a reference outside the branches, tags,
+  notes and remote branches keeps, such as `refs/backup/x` or a magit-wip
+  reference. The failure names the commit and the reference. `--force` loses
+  it. A worktree's references stay in its repository, so they do not count.
+- A rebase, merge, cherry-pick, revert or bisect stands paused. Its state lives
+  in the git directory that the archive deletes. `--wip` does not save it.
+  `--force` loses it.
 
 A restored clone does not initialise its submodules. A worktree with an
 initialised submodule refuses with `mxv::archive::checkout_unusable`, because
@@ -1339,9 +1354,12 @@ kept and restored as you left it. mxv writes a new one only in place of a file
 that still holds what mxv generated.
 
 A clone's local branches, tags that its mirror does not hold and remotes other
-than `origin` do not come back, and neither does its local git configuration.
-No commit is lost, because a commit that nothing else holds refuses the
-archive. The question and the result warn about each such name.
+than `origin` do not come back. Neither do its hooks, the keys of its local git
+configuration that a new clone does not write, and its `info/exclude` rules
+that your repository does not hold. No commit is lost, because a commit that
+nothing else holds refuses the archive. The question and the result warn about
+each such name, and they name a configuration key without its value. The
+branch that the checkout tracked comes back tracking the same remote's branch.
 
 The archive record lists what `--force` lost. The workspace's units stop
 after you confirm. A process outside phase whose working

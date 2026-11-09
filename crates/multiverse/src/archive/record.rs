@@ -10,7 +10,7 @@ use phase::WorkspaceId;
 use serde::{Deserialize, Serialize};
 
 use crate::archive::root::RootEntry;
-use crate::archive::{ARCHIVE_VERSION, RECORD_FILE};
+use crate::archive::{ARCHIVE_VERSION, PIN_NAMESPACE, RECORD_FILE};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
@@ -54,6 +54,10 @@ pub struct ArchivedCheckout {
     /// `refs/heads/triage`, or `None` when it tracked none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<String>,
+    /// The remote that `upstream` lies on, or `None` when the branch tracked
+    /// none or the record is older than this field, which means `origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_remote: Option<String>,
     /// The commit that the checkout's `HEAD` named.
     pub commit: String,
     /// The bare mirror that holds a clone's pin, or `None` for a worktree.
@@ -330,7 +334,38 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             entry.path
         ))));
     }
+    for checkout in &archive.checkouts {
+        if !inside_workspace(&archive.path, &checkout.path) {
+            return Err(corrupt(serde::de::Error::custom(format!(
+                "the checkout {} leaves the workspace's directory",
+                checkout.folder
+            ))));
+        }
+        if !is_pin(&checkout.pin) {
+            return Err(corrupt(serde::de::Error::custom(format!(
+                "the pin {} leaves {PIN_NAMESPACE}",
+                checkout.pin
+            ))));
+        }
+    }
     Ok(Some(archive))
+}
+
+/// Reports whether `path`, a checkout's path from a record, is the
+/// workspace's directory `workspace` or lies below it. An old workspace's
+/// checkout can be the directory itself.
+fn inside_workspace(workspace: &Path, path: &Path) -> bool {
+    path.strip_prefix(workspace).is_ok_and(|below| {
+        below
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    })
+}
+
+/// Reports whether `pin`, a reference from a record, lies below the
+/// namespace of the archives' pins.
+fn is_pin(pin: &str) -> bool {
+    pin.strip_prefix(PIN_NAMESPACE).is_some_and(stays_inside)
 }
 
 /// Reports whether `path`, a path from a record, names something below the

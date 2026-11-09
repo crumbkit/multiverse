@@ -826,8 +826,9 @@ impl Backend for Scripted {
         &self,
         checkout: &Path,
         mirror: &Path,
+        source: &Path,
     ) -> Result<crate::backend::LocalNames, Error> {
-        Git.local_names(checkout, mirror)
+        Git.local_names(checkout, mirror, source)
     }
     fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
         Git.remove_origin(checkout)
@@ -838,8 +839,17 @@ impl Backend for Scripted {
     fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
         Git.upstream(checkout, branch)
     }
-    fn set_upstream(&self, checkout: &Path, branch: &str, merge: &str) -> Result<(), Error> {
-        Git.set_upstream(checkout, branch, merge)
+    fn upstream_remote(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
+        Git.upstream_remote(checkout, branch)
+    }
+    fn set_upstream(
+        &self,
+        checkout: &Path,
+        branch: &str,
+        remote: &str,
+        merge: &str,
+    ) -> Result<(), Error> {
+        Git.set_upstream(checkout, branch, remote, merge)
     }
     fn repair_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error> {
         Git.repair_checkout(repository, checkout)

@@ -48,6 +48,19 @@ pub struct Concealed {
     /// Each initialised submodule, parents before the submodules inside
     /// them.
     pub submodules: Vec<SubmoduleWork>,
+    /// Each file below the checkout that no listing of git accounts for,
+    /// such as a file in a submodule directory that is not initialised.
+    pub unlisted: Vec<String>,
+    /// Each commit that only a reference outside the branches, tags, notes
+    /// and remote branches keeps, with the reference, such as
+    /// `<commit> (refs/backup/x)`.
+    pub referenced: Vec<String>,
+    /// Each git operation that stands paused, in a sentence.
+    pub paused: Vec<String>,
+    /// The stashes and commits of each git directory of a submodule whose
+    /// working files are gone, as after `git submodule deinit`, with the
+    /// submodule's name as its path.
+    pub orphaned: Vec<SubmoduleWork>,
 }
 
 /// The names in a clone that its mirror does not hold, which a rebuilt
@@ -61,6 +74,14 @@ pub struct LocalNames {
     pub tags: Vec<String>,
     /// Each remote other than `origin`.
     pub remotes: Vec<String>,
+    /// Each hook in the clone's git directory.
+    pub hooks: Vec<String>,
+    /// The name of each key of the clone's own configuration that a new
+    /// clone does not write. The values may be secrets, so they stay out.
+    pub config: Vec<String>,
+    /// Each rule of the clone's `info/exclude` that the person's repository
+    /// does not hold, which is where a rebuilt clone takes its rules from.
+    pub excludes: Vec<String>,
 }
 
 /// The changes in a checkout that removing it would delete.
@@ -429,13 +450,19 @@ pub trait Backend {
     /// Returns the failure of a listing.
     fn concealed(&self, checkout: &Path) -> Result<Concealed, Error>;
 
-    /// Returns the names in the clone at `checkout` that its mirror at
-    /// `mirror` does not hold.
+    /// Returns what the clone at `checkout` holds that a clone rebuilt from
+    /// its mirror at `mirror` and the person's repository at `source` would
+    /// not have.
     ///
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn local_names(&self, checkout: &Path, mirror: &Path) -> Result<LocalNames, Error>;
+    fn local_names(
+        &self,
+        checkout: &Path,
+        mirror: &Path,
+        source: &Path,
+    ) -> Result<LocalNames, Error>;
 
     /// Deletes the remote `origin` of `checkout`.
     ///
@@ -461,14 +488,28 @@ pub trait Backend {
     /// Returns the failure of the lookup.
     fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error>;
 
+    /// Returns the remote that `branch` of the checkout at `checkout`
+    /// tracks a branch of, such as `origin`, or `None` when it tracks none.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn upstream_remote(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error>;
+
     /// Makes `branch` of the checkout at `checkout` track the branch
-    /// `merge`, a reference on `origin` such as `refs/heads/main`. The
-    /// remote branch need not exist yet.
+    /// `merge` of `remote`, a reference on the remote such as
+    /// `refs/heads/main`. The remote branch need not exist yet.
     ///
     /// # Errors
     ///
     /// Returns the failure of the config command.
-    fn set_upstream(&self, checkout: &Path, branch: &str, merge: &str) -> Result<(), Error>;
+    fn set_upstream(
+        &self,
+        checkout: &Path,
+        branch: &str,
+        remote: &str,
+        merge: &str,
+    ) -> Result<(), Error>;
 
     /// Points the repository's entry of the worktree at `checkout` at that
     /// directory again, after the directory moved away and back.

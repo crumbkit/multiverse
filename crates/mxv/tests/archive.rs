@@ -698,3 +698,51 @@ fn the_pin_of_a_clone_is_written_with_its_reference_synced() {
         "the command that wrote the pin synced nothing: {writer}"
     );
 }
+
+#[test]
+fn a_restore_replaces_a_taken_port_from_the_configured_range_in_a_dry_run_and_a_real_run() {
+    let setup = Setup::new();
+    setup.archive();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let held = listener.local_addr().unwrap().port();
+    write(
+        &setup.root().join("config/mxv/config.toml"),
+        "ports_range = [31000, 31050]\n",
+    );
+    let path = setup.root().join("state/mxv/archives/triage/archive.json");
+    let record = fs::read_to_string(&path).unwrap().replace(
+        "\"version\": 1,",
+        &format!("\"version\": 1,\n  \"ports\": {{ \"web\": {held} }},"),
+    );
+    write(&path, &record);
+    for args in [
+        ["restore", "triage", "--dry-run"].as_slice(),
+        ["restore", "triage", "--yes"].as_slice(),
+    ] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 0, "{document}");
+        let port = document["data"]["ports"][0]["to"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{document}"));
+        assert!((31000..=31050).contains(&port), "{document}");
+    }
+}
+
+#[test]
+fn a_retiring_archive_that_meets_a_new_workspace_names_the_way_out() {
+    let setup = Setup::new();
+    setup.archive();
+    let path = setup.root().join("state/mxv/archives/triage/archive.json");
+    let record = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"state\": \"archived\"", "\"state\": \"retiring\"");
+    write(&path, &record);
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::name_taken");
+    let hint = document.to_string();
+    assert!(hint.contains("mxv remove triage"), "{document}");
+    assert!(!hint.contains("remove --archived"), "{document}");
+}

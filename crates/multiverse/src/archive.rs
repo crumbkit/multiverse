@@ -12,8 +12,8 @@
 //!
 //! [`Workspaces::plan_archive`] classifies the workspace as `mxv remove`
 //! classifies it, with [`Workspaces::plan_removal`], and names everything
-//! that an archive could not keep. [`Workspaces::archive`] then pins each
-//! `HEAD`, writes the record, copies the root files, and retires each
+//! that an archive could not keep. [`Workspaces::archive`] then writes the
+//! record, pins each `HEAD`, copies the root files, and retires each
 //! checkout. Retiring moves the checkout aside by one rename, reads its git
 //! state and path list again in the new place, and puts it back when
 //! anything differs from what the archive admitted. The stages are
@@ -68,6 +68,9 @@ const ROOT_DIR: &str = "root";
 /// the name that [`aside`] returns, so what stands under this name is whole.
 const QUARANTINE_SUFFIX: &str = ".mxv-archiving";
 
+/// The start of every pin's reference.
+const PIN_NAMESPACE: &str = "refs/mxv/archives/";
+
 /// The checkpoint of a run outside the tests, which does nothing. A test
 /// puts its own function in [`Workspaces`] to stop or change a run after the
 /// stage that `_step` names.
@@ -84,7 +87,7 @@ pub(crate) const fn no_checkpoint(_step: &str) -> Result<(), Error> {
 /// repository's name can hold bytes that a reference may not.
 fn pin_ref(id: &str, folder: &str) -> String {
     format!(
-        "refs/mxv/archives/{id}/{}",
+        "{PIN_NAMESPACE}{id}/{}",
         directory(folder).replace("..", ".%2E")
     )
 }

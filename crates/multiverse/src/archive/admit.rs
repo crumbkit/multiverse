@@ -73,12 +73,18 @@ pub struct Unsaved {
     /// The changes, ignored files, stashes and unpushed commits of each
     /// submodule, with the submodule's path after the folder.
     pub submodules: Vec<String>,
+    /// Each file below a checkout that no listing of git accounts for, such
+    /// as a file in a submodule directory that is not initialised.
+    pub unlisted: Vec<String>,
+    /// Each git operation that stands paused, such as a merge, whose state
+    /// the checkout's git directory holds.
+    pub paused: Vec<String>,
 }
 
 impl Unsaved {
-    /// Adds what `found` says about the checkout in `folder`. A nested
-    /// repository that `git status` also lists is named once.
-    fn add_concealed(&mut self, folder: &str, found: &Concealed) {
+    /// Adds what `found` says about the checkout at `checkout`, in `folder`.
+    /// A nested repository that `git status` also lists is named once.
+    fn add_concealed(&mut self, folder: &str, checkout: &Path, found: &Concealed) {
         let named = |item: &String| format!("{folder}: {item}");
         for path in &found.nested {
             let listed = format!("{folder}: ?? {path}");
@@ -87,7 +93,10 @@ impl Unsaved {
         self.nested.extend(found.nested.iter().map(named));
         self.hidden.extend(found.hidden.iter().map(named));
         self.submodules
-            .extend(submodule_items(found).iter().map(named));
+            .extend(submodule_items(checkout, found).iter().map(named));
+        self.unlisted.extend(found.unlisted.iter().map(named));
+        self.paused.extend(found.paused.iter().map(named));
+        self.commits.extend(found.referenced.iter().map(named));
     }
 
     /// Returns every item in one list.
@@ -101,12 +110,15 @@ impl Unsaved {
         all.extend(self.nested.iter().cloned());
         all.extend(self.hidden.iter().cloned());
         all.extend(self.submodules.iter().cloned());
+        all.extend(self.unlisted.iter().cloned());
+        all.extend(self.paused.iter().cloned());
         all
     }
 
     /// Reports whether `--wip` can save everything that is listed. A commit
     /// would store a nested repository or a submodule as a commit id without
-    /// its files, and it leaves a hidden edit out.
+    /// its files, it leaves a hidden edit and a file that git does not list
+    /// out, and it does not keep a paused git operation.
     #[must_use]
     pub fn wip_saves_all(&self) -> bool {
         self.ignored.is_empty()
@@ -116,6 +128,8 @@ impl Unsaved {
             && self.nested.is_empty()
             && self.hidden.is_empty()
             && self.submodules.is_empty()
+            && self.unlisted.is_empty()
+            && self.paused.is_empty()
     }
 
     /// Reports whether nothing is listed.
@@ -148,7 +162,7 @@ pub enum ArchiveRefusal {
         reason: String,
     },
     /// The workspace holds work that the archive cannot keep.
-    Unsaved(Unsaved),
+    Unsaved(Box<Unsaved>),
     /// A checkout differs from what the archive admitted. The checkout is
     /// back in its place and the record stays.
     SourceChanged {
@@ -212,19 +226,20 @@ enum Subject {
     Done(ArchivePlanned),
 }
 
-/// Returns the work of each submodule in `found`, one item for each, with
-/// the submodule's path in front. An ignored path that the built-in
-/// disposable set names is a build's output and does not count.
-pub(super) fn submodule_items(found: &Concealed) -> Vec<String> {
+/// Returns the work of each submodule in `found`, of the checkout at
+/// `checkout`, one item for each, with the submodule's path in front. An
+/// ignored path that the built-in disposable set names is a build's output
+/// and does not count, unless it holds what a build does not make, such as
+/// a repository.
+pub(super) fn submodule_items(checkout: &Path, found: &Concealed) -> Vec<String> {
     let disposable = DisposableSet::built_in();
     let mut items = Vec::new();
-    for work in &found.submodules {
+    for work in found.submodules.iter().chain(&found.orphaned) {
         let lists = [&work.changes.changed, &work.stashes, &work.commits];
-        let ignored = work
-            .changes
-            .ignored
-            .iter()
-            .filter(|path| disposable.source(path).is_none());
+        let root = checkout.join(&work.path);
+        let ignored = work.changes.ignored.iter().filter(|path| {
+            disposable.source(path).is_none() || crate::disk::keep_reason(&root, path).is_some()
+        });
         items.extend(
             lists
                 .into_iter()
@@ -397,7 +412,7 @@ impl<B: Backend> Workspaces<B> {
                     ),
                 ));
             }
-            unsaved.add_concealed(folder, &concealed);
+            unsaved.add_concealed(folder, &planned.checkout.path, &concealed);
             if refresh {
                 warnings.extend(self.unkept_names(planned, head.branch.as_deref())?);
             }
@@ -428,7 +443,9 @@ impl<B: Backend> Workspaces<B> {
             .root
             .extend(scanned.special.iter().map(root::lost_name));
         if !options.force && !unsaved.is_empty() && !(options.wip && unsaved.wip_saves_all()) {
-            return Ok(ArchivePlanned::Refused(ArchiveRefusal::Unsaved(unsaved)));
+            return Ok(ArchivePlanned::Refused(ArchiveRefusal::Unsaved(Box::new(
+                unsaved,
+            ))));
         }
         let (lost, wip) = if options.force {
             let mut lost = unsaved.all();
@@ -485,7 +502,9 @@ impl<B: Backend> Workspaces<B> {
         let Some(mirror) = &checkout.mirror else {
             return Ok(Vec::new());
         };
-        let names = self.backend.local_names(&checkout.path, mirror)?;
+        let names = self
+            .backend
+            .local_names(&checkout.path, mirror, &checkout.source)?;
         let branches: Vec<String> = names
             .branches
             .into_iter()
@@ -495,6 +514,9 @@ impl<B: Backend> Workspaces<B> {
             ("branches", branches),
             ("tags", names.tags),
             ("remotes", names.remotes),
+            ("hooks", names.hooks),
+            ("configuration keys", names.config),
+            ("exclude rules", names.excludes),
         ]
         .into_iter()
         .filter(|(_, listed)| !listed.is_empty())
@@ -600,6 +622,11 @@ impl<B: Backend> Workspaces<B> {
             Err(Error::NoOrigin { .. }) => None,
             Err(error) => return Err(error),
         };
+        let upstream_remote = if detached {
+            None
+        } else {
+            self.backend.upstream_remote(&checkout.path, &branch)?
+        };
         Ok(ArchivedCheckout {
             folder: checkout.name.clone(),
             path: checkout.path.clone(),
@@ -610,6 +637,7 @@ impl<B: Backend> Workspaces<B> {
             } else {
                 self.backend.upstream(&checkout.path, &branch)?
             },
+            upstream_remote,
             branch,
             detached,
             base: checkout.base.clone(),
@@ -626,11 +654,28 @@ impl ArchivePlan {
     /// state [`ArchiveState::Retiring`].
     pub(super) fn record(&self, name: &WorkspaceName) -> Archive {
         let workspace = &self.removal.workspace;
-        let mut lost = self
+        // An earlier run's item stays only when this run cannot read it
+        // again: the checkout that held it is gone. While any checkout
+        // stands, the workspace's directory is still whole too, so its items
+        // are read again.
+        let stands = |planned: &&CheckoutRemoval| planned.directory == Fate::Removed;
+        let all_gone = !self
+            .removal
+            .checkouts
+            .iter()
+            .any(|planned| stands(&planned));
+        let already_lost = |item: &String| {
+            all_gone
+                || self.removal.checkouts.iter().any(|planned| {
+                    !stands(&planned) && item.starts_with(&format!("{}: ", planned.checkout.name))
+                })
+        };
+        let mut lost: Vec<String> = self
             .resuming
-            .as_ref()
-            .map(|archive| archive.lost.clone())
-            .unwrap_or_default();
+            .iter()
+            .flat_map(|archive| archive.lost.iter().filter(|item| already_lost(item)))
+            .cloned()
+            .collect();
         for item in &self.lost {
             if !lost.contains(item) {
                 lost.push(item.clone());
