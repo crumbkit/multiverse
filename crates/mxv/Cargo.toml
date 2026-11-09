@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 include = ["src/**/*.rs", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 # The library holds the whole command, so the integration tests can pass its
-# parser and guide to crumbkit-test's checks beside the built binary. It is
+# parser and tool record to crumbkit-test's checks beside the built binary. It is
 # not an API for other crates, so it has no docs.
 [lib]
 name = "mxv"

@@ -108,6 +108,14 @@ workspace may need to act on.
   `--force` can then refuse because of ignored files that only those
   globs cover, and `clean` reclaims fewer paths. Fix the broken file to
   restore the globs.
+- mxv uses crumbkit 0.2.0, which changes some documents that a tool may
+  read. `mxv list --json` and `mxv list --archived --json` now print a
+  top-level `next` array of next steps when there are any, and the schemas
+  of `mxv list` and `mxv status` gain the `next` field, although `mxv status`
+  never prints it. `mxv commands list --json --full` gives the root row a
+  `goals` field that holds the headings of the help and the commands under
+  each. The descriptions in the schemas of the failure code and the output
+  budget no longer say "in the tool's spelling".
 - `up` of a container app that runs as another user than root and mounts a
   volume now gives the root directory of each such volume to that user,
   through a helper container. The helper runs busybox pinned by digest, so
