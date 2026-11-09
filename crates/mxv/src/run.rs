@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus};
 
-use crumbkit::{Call, Code, Document, Failure, Field, FieldValue, Output, Recovery, Row, Sink};
+use crumbkit::{Call, Code, Document, Failure, Field, FieldValue, Recovery, Row, Run, Sink};
 use multiverse::{MiseListing, MiseTaskName, Task, TaskEnd, TaskHome, TaskName, TaskServices};
 use multiverse::{Store, TaskStart, Workspace};
 use schemars::JsonSchema;
@@ -441,7 +441,7 @@ fn list(environment: &Environment, args: &RunArgs) -> Result<Vec<TaskRow>, crumb
 /// Runs the task `name` that `args` names. It returns the task's exit
 /// status and whether mxv caught a signal while it ran.
 fn run_task(
-    output: &Output,
+    output: &Run,
     environment: &Environment,
     args: &RunArgs,
     name: &str,
@@ -497,7 +497,7 @@ fn run_task(
 
 /// Runs the task that `args` names and returns its exit code, or prints
 /// the workspace's tasks when `args` names none.
-pub(crate) fn run(mut output: Output, environment: &Environment, args: &RunArgs) -> ExitCode {
+pub(crate) fn run(mut output: Run, environment: &Environment, args: &RunArgs) -> ExitCode {
     let Some(name) = args.task() else {
         return crumbkit::finish(output, RUN, list(environment, args));
     };
@@ -514,9 +514,6 @@ pub(crate) fn run(mut output: Output, environment: &Environment, args: &RunArgs)
             }
             crumbkit::events::ended(exit_number(status), None)
         }
-        Err(error) => {
-            output.print_failure(&mut sink, error.failure());
-            crumbkit::events::ended(output.failure_exit(error.failure().code()), None)
-        }
+        Err(error) => output.fail(&mut sink, error.failure()),
     }
 }

@@ -1,12 +1,12 @@
-//! The `mxv` command's command-line grammar and help guide.
+//! The `mxv` command's command-line grammar and tool record.
 
 use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use crumbkit::commands::{COMMANDS_LIST, CommandsList};
-use crumbkit::help::{Effects, Example, Goal, Group, Guide, Leaf};
+use crumbkit::help::{Effects, Example, Goal, Group, Help, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
-use crumbkit::{DryRun, NoInput, Page, ViewFlags, Yes};
+use crumbkit::{DryRun, NoInput, Page, Tool, ViewFlags, Yes};
 use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
 
 use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
@@ -35,10 +35,13 @@ pub struct Cli {
     pub(crate) no_input: NoInput,
 }
 
-/// The `mxv` command's root verbs, goal headings and leaves. The workspace
+/// The `mxv` command's tool record: its root verbs, goal headings and leaves. The workspace
 /// verbs sit directly under the root, and every other command keeps
 /// crumbkit's resource-verb form.
-pub const GUIDE: Guide = Guide::new()
+pub const TOOL: Tool = Tool::new().help(HELP);
+
+/// The help record of the `mxv` command.
+const HELP: Help = Help::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",

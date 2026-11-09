@@ -28,12 +28,64 @@
       "description": "True when the document leaves out rows that matched, because of the limit or the output budget, and false when data holds every row.",
       "type": "boolean"
     },
+    "next": {
+      "description": "The next steps, in the order the text prints them. It is absent when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "description": "The sentence or phrase that the text prints for the step.",
+            "type": "string"
+          },
+          "commands": {
+            "description": "The commands that carry out the step, in order.",
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "call": {
+                      "description": "A command line of this tool.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "call"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "description": "A command line of another program.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "run"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "text",
+          "commands"
+        ],
+        "additionalProperties": false
+      }
+    },
     "cut": {
       "description": "Present when the output budget cut the result short, so data holds only its first rows.",
       "type": "object",
       "properties": {
         "code": {
-          "description": "The over-budget code, in the tool's spelling.",
+          "description": "The over-budget code.",
           "type": "string"
         },
         "budget": {
