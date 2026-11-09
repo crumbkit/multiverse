@@ -359,6 +359,19 @@ pub(crate) struct TaskEntry<'a> {
     pub(crate) argv: Vec<String>,
     /// The services whose variables it receives.
     pub(crate) services: Vec<&'a Service>,
+    /// The ports of its own checkout whose names differ in the merged
+    /// manifest: each name in the checkout's file, with its merged name.
+    pub(crate) own_ports: &'a BTreeMap<String, String>,
+}
+
+/// The plan that [`build_with_task`] returns, and the task's place in it.
+pub(crate) struct BuiltTask {
+    /// The plan and the values of its variables.
+    pub(crate) built: Built,
+    /// The app that holds the task.
+    pub(crate) app: AppName,
+    /// The process that runs the task.
+    pub(crate) process: ProcessName,
 }
 
 /// Returns the plan that [`build`] returns, with the app [`TASK_APP`] added
@@ -370,8 +383,15 @@ pub(crate) struct TaskEntry<'a> {
 pub(crate) fn build_with_task(
     inputs: &Inputs<'_>,
     task: &TaskEntry<'_>,
-) -> Result<Built, Unrunnable> {
-    assemble(inputs, Some(task_app(inputs, task)?))
+) -> Result<BuiltTask, Unrunnable> {
+    let app = app_name(TASK_APP)?;
+    let process = main_process()?;
+    let entry = task_app(inputs, task, app.clone(), process.clone());
+    Ok(BuiltTask {
+        built: assemble(inputs, Some(entry))?,
+        app,
+        process,
+    })
 }
 
 /// Returns the name of the variable that gives a task the host port of the
@@ -389,13 +409,22 @@ fn port_variable(port: &str) -> String {
 }
 
 /// Returns the app of `task` and the values of its variables: those that
-/// pass through from the caller, one for each of the workspace's ports, and
-/// those of its services. The app declares no permissions, so it has no
+/// pass through from the caller, one for each of the workspace's ports,
+/// and those of its services. The app declares no permissions, so it has no
 /// sandbox.
+///
+/// A port's variable is named after its name in the merged manifest. In a
+/// workspace with several checkouts that name holds the checkout's prefix,
+/// so each of the task's own ports also gets a variable named after its
+/// name in the checkout's file. A task's script therefore keeps working when
+/// the workspace gains a checkout. The task's own ports are written last, so
+/// one wins a clash with another port's variable.
 fn task_app(
     inputs: &Inputs<'_>,
     task: &TaskEntry<'_>,
-) -> Result<(AppPlan, Vec<(String, Redacted)>), Unrunnable> {
+    app: AppName,
+    process: ProcessName,
+) -> (AppPlan, Vec<(String, Redacted)>) {
     let mut vars: BTreeMap<String, Redacted> = inputs
         .caller
         .passed()
@@ -407,6 +436,13 @@ fn task_app(
         vars.insert(variable.clone(), Redacted::new(number.to_string()));
         set.insert(variable);
     }
+    for (own, merged) in task.own_ports {
+        if let Some(number) = inputs.ports.get(merged) {
+            let variable = port_variable(own);
+            vars.insert(variable.clone(), Redacted::new(number.to_string()));
+            set.insert(variable);
+        }
+    }
     if !task.services.is_empty() {
         for (variable, value) in
             crate::service::variables(task.services.iter().copied(), inputs.ports)
@@ -416,11 +452,11 @@ fn task_app(
         }
     }
     let mut plan = AppPlan::new(
-        app_name(TASK_APP)?,
+        app,
         RunnerKind::Host,
         Source::checkout(task.root.to_path_buf(), None),
     );
-    let mut main = ProcessPlan::new(main_process()?, task.argv.clone());
+    let mut main = ProcessPlan::new(process, task.argv.clone());
     main.cwd =
         (task.dir != Path::new(".") && task.dir != Path::new("")).then(|| task.dir.to_path_buf());
     main.optional_env = PASSED_THROUGH
@@ -435,7 +471,7 @@ fn task_app(
         .collect();
     main.stop.grace = inputs.grace;
     plan.processes = vec![main];
-    Ok((plan, vars.into_iter().collect()))
+    (plan, vars.into_iter().collect())
 }
 
 /// Returns the plan of the units of `inputs.manifest` and `extra`, and the

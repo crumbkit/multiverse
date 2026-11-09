@@ -4,7 +4,7 @@ use std::path::Path;
 use clap::Parser as _;
 use multiverse::{Manifest, MiseListing, MiseTaskName, TaskHome, TaskName};
 
-use super::{Found, Home, TaskFailure, TaskRef, names, resolve};
+use super::{Home, TaskFailure, TaskRef, names, resolve};
 use crate::cli::{Cli, RunArgs, Verb};
 
 /// Parses `words` after `mxv` and returns the arguments of `run`.
@@ -35,10 +35,6 @@ fn home(checkout: Option<&str>, manifest: &str, listed: &[&str]) -> Home {
 
 const CHECK: &str = "[tasks.check]\nargv = [\"true\"]\n";
 
-fn reference(found: &Found<'_>) -> TaskRef {
-    found.reference.clone()
-}
-
 #[test]
 fn run_keeps_flags_after_the_task_for_the_task() {
     let args = parsed(&["run", "-w", "triage", "test", "--json", "-x"]);
@@ -56,10 +52,10 @@ fn run_takes_no_task_to_list_them() {
 fn a_declared_task_wins_over_a_mise_task_of_its_home_with_a_note() {
     let homes = [home(Some("app"), CHECK, &["check"])];
     let found = resolve("triage", &homes, "check").unwrap();
-    assert_eq!(
-        reference(&found),
-        TaskRef::Declared(TaskName::new("check").unwrap())
-    );
+    let TaskRef::Declared(name, _) = &found.reference else {
+        panic!("{:?}", found.reference);
+    };
+    assert_eq!(name, &TaskName::new("check").unwrap());
     assert!(found.note.is_some());
 }
 
@@ -68,7 +64,7 @@ fn a_name_that_only_mise_lists_may_hold_a_colon() {
     let homes = [home(Some("app"), "", &["lint:fix"])];
     let found = resolve("triage", &homes, "lint:fix").unwrap();
     assert_eq!(
-        reference(&found),
+        found.reference,
         TaskRef::Mise(MiseTaskName::new("lint:fix").unwrap())
     );
     assert_eq!(found.note, None);

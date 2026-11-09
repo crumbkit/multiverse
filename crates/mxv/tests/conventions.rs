@@ -435,7 +435,6 @@ const NEW_NO_GIT: Failing<'static> = Failing::new(
 const CLEAN_NO_LIMIT: Failing<'static> =
     Failing::new(&CONFIG_NO_LIMIT, &["clean", "--over-limit", "--dry-run"]);
 
-/// `status` outside every workspace, without a name.
 /// `mxv run` of a task that the fixture's workspace does not have. The
 /// checkout's directory does not exist, so mise cannot start there. `--json`
 /// comes before the task, because each word after the task is the task's.
@@ -444,6 +443,7 @@ const RUN_UNKNOWN: Failing<'static> = Failing::new(
     &["run", "--json", "-w", "reading-list", "missing"],
 );
 
+/// `status` outside every workspace, without a name.
 const STATUS_OUTSIDE: Failing<'static> = Failing::new(&WORKSPACE_NOT_CURRENT, &["status"]);
 
 /// `status` of a name that no workspace has.

@@ -406,15 +406,24 @@ cannot run several tasks in parallel under one place.
 
 A task runs with no sandbox and no time limit, in the workspace's own ports:
 each named port is a variable `MXV_PORT_<NAME>`, in upper case with `-` written
-as `_`, so the port `web-ui` is `MXV_PORT_WEB_UI`. A declared task receives the
+as `_`, so the port `web-ui` is `MXV_PORT_WEB_UI`. In a workspace with several
+checkouts, a task of a checkout still receives its own checkout's ports under
+those names, so a script keeps working after `mxv add`, and it receives the
+other checkouts' ports with the checkout's folder in front, as
+`MXV_PORT_<CHECKOUT>_<NAME>`. A task of the workspace manifest receives that
+manifest's ports as `MXV_PORT_<NAME>` and every checkout's ports in the longer
+form. A declared task receives the
 variables of the services it `needs`, and a mise task those of every service
 the manifest declares. mxv does not start the services or the units, so run
 `mxv up` first when a task talks to them. The other variables are those that
 a host process receives from your environment.
 
-Ctrl-C, `SIGHUP` and `SIGQUIT` cancel the task, end its place, and end mxv with
-128 plus the signal. When something sends `SIGTERM` or `SIGKILL` to mxv alone,
-the place is freed and the task runs on, no longer counted by deadband. mxv
+A Ctrl-C at a terminal reaches the task directly, because the task shares
+mxv's process group. mxv sends the task nothing more, waits for it to end, and
+exits with its exit code, as `mxv exec` does. `SIGINT`, `SIGHUP` and `SIGQUIT`
+sent to mxv alone do not stop the task, and mxv waits for it. When something
+sends `SIGTERM` or `SIGKILL` to mxv alone, the place is freed and the task runs
+on, no longer counted by deadband. mxv
 does not hold the workspace's lock while a task runs, so `mxv up` and
 `mxv down` still work.
 

@@ -2134,7 +2134,7 @@ fn wait_for_exit(mut child: std::process::Child) {
 #[test]
 fn a_gated_task_waits_for_a_place_and_a_task_with_gate_false_does_not() {
     let setup = Setup::new();
-    let manifest = "[tasks.free]\nargv = [\"sh\", \"-c\", \"echo ${DEADBAND_HELD:-none} > free\"]\ngate = false\n\n[tasks.held]\nargv = [\"sh\", \"-c\", \"echo $DEADBAND_HELD $MISE_JOBS > held\"]\n";
+    let manifest = "[tasks.free]\nargv = [\"sh\", \"-c\", \"echo ${DEADBAND_HELD:-none} > free\"]\ngate = false\n\n[tasks.held]\nargv = [\"sh\", \"-c\", \"ps -o nice= -p $$ > niceness; echo $DEADBAND_HELD $MISE_JOBS > held\"]\n";
     let checkout = setup.workspace("triage", manifest);
     let socket = setup.root().join("d.sock");
     start_daemon(&socket);
@@ -2172,6 +2172,70 @@ fn a_gated_task_waits_for_a_place_and_a_task_with_gate_false_does_not() {
     assert_eq!(
         fs::read_to_string(checkout.join("held")).unwrap().trim(),
         "1 1"
+    );
+    // A test run that deadband itself admitted already has nice 5, and then
+    // this cannot tell a lowered task from an unlowered one. A test run at
+    // nice 0, as in CI, can.
+    let niceness: i32 = fs::read_to_string(checkout.join("niceness"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(niceness, own_niceness().max(5));
+}
+
+/// Returns the nice value of this test's process.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads its own nice value with ps"
+)]
+fn own_niceness() -> i32 {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "nice=", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Grants the first job that asks at `socket`, in a thread, and returns what
+/// the job reported when it ended.
+fn daemon_that_reads_one_exit_code(
+    socket: &Path,
+) -> std::thread::JoinHandle<deadband::protocol::Request> {
+    use deadband::protocol::{Reply, Request, read_line, write_line};
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let asked: Request = read_line(&mut reader).unwrap().unwrap();
+        assert!(matches!(asked, Request::Ask(_)), "{asked:?}");
+        write_line(&mut stream, &Reply::Granted { jobs: 2 }).unwrap();
+        read_line(&mut reader).unwrap().unwrap()
+    })
+}
+
+#[test]
+fn the_place_of_a_task_ends_with_the_tasks_exit_code() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[tasks.fails]\nargv = [\"sh\", \"-c\", \"exit 6\"]\n",
+    );
+    let socket = setup.root().join("d.sock");
+    let daemon = daemon_that_reads_one_exit_code(&socket);
+
+    wait_for_exit(setup.spawn_through(
+        env!("CARGO_BIN_EXE_mxv"),
+        &["run", "-w", "triage", "fails"],
+        &socket,
+    ));
+
+    assert_eq!(
+        daemon.join().unwrap(),
+        deadband::protocol::Request::Done { exit_code: Some(6) }
     );
 }
 

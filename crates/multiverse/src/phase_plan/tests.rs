@@ -810,6 +810,10 @@ fn a_tasks_section_leaves_the_plan_that_up_runs_unchanged() {
 /// Returns the plan of `APP` with a task that needs the services
 /// `services`, run in the directory `dir` of `/work/triage/app`.
 fn task_plan(dir: &Path) -> Built {
+    task_plan_with(dir, &BTreeMap::new())
+}
+
+fn task_plan_with(dir: &Path, own_ports: &BTreeMap<String, String>) -> Built {
     let manifest = manifest(APP);
     let ports = BTreeMap::from([
         ("api".to_owned(), 41_000),
@@ -837,9 +841,26 @@ fn task_plan(dir: &Path) -> Built {
             dir,
             argv: vec!["mise".to_owned(), "run".to_owned(), "test".to_owned()],
             services: Vec::new(),
+            own_ports,
         },
     )
     .unwrap()
+    .built
+}
+
+#[test]
+fn a_task_receives_its_own_ports_under_the_names_in_its_own_file() {
+    let own = BTreeMap::from([("ui".to_owned(), "web-ui".to_owned())]);
+    let built = task_plan_with(Path::new("."), &own);
+    let task = built
+        .plan
+        .apps()
+        .iter()
+        .find(|plan| plan.name.as_str() == TASK_APP)
+        .unwrap();
+    assert!(task.processes[0].env.contains("MXV_PORT_UI"));
+    assert!(task.processes[0].env.contains("MXV_PORT_WEB_UI"));
+    assert!(task.processes[0].env.contains("MXV_PORT_API"));
 }
 
 #[test]

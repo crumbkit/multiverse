@@ -18,7 +18,9 @@
 //!
 //! `mxv run` does lower its priority, through [`Deadband::for_task`],
 //! because that process ends with its task. A task with `gate = false` asks
-//! the daemon nothing, and keeps the same handling of signals.
+//! the daemon nothing. A task shares mxv's process group and the terminal
+//! sends Ctrl-C to it directly, so a caught signal sets no cancel flag for
+//! a task, as for an unsandboxed `mxv exec`, and mxv waits for the task.
 //!
 //! When mxv itself runs inside a job that deadband granted, deadband's call
 //! asks nothing and returns no variables. phase starts a build from an empty
@@ -69,6 +71,8 @@ pub(crate) struct Deadband {
     asks: bool,
     /// Whether mxv lowers its own priority once it has a place.
     lowers: bool,
+    /// Whether a caught signal sets the cancel flag.
+    cancels: bool,
 }
 
 impl Deadband {
@@ -80,16 +84,19 @@ impl Deadband {
             caught: Arc::new(AtomicI32::new(NONE_CAUGHT)),
             asks: true,
             lowers: false,
+            cancels: true,
         }
     }
 
     /// Returns the admission of one `mxv run` task, which lowers mxv's
     /// priority once it has a place. When `gate` is false it asks the daemon
-    /// nothing, so the task gets no job variables.
+    /// nothing, so the task gets no job variables. A caught signal does not
+    /// cancel the task, which the terminal has signalled itself.
     pub(crate) fn for_task(environment: &Environment, gate: bool) -> Self {
         Self {
             asks: gate,
             lowers: true,
+            cancels: false,
             ..Self::new(environment)
         }
     }
@@ -111,7 +118,8 @@ impl Admission for Deadband {
         {
             admitted.lower_priority(&mut crate::notice);
         }
-        let building = catch_interrupts(asked.cancel.clone(), Arc::clone(&self.caught));
+        let cancel = self.cancels.then(|| asked.cancel.clone());
+        let building = catch_interrupts(cancel, Arc::clone(&self.caught));
         Box::new(Held { admitted, building })
     }
 
@@ -199,7 +207,7 @@ fn cut(command: &str) -> &str {
 /// leaves a signal ending mxv and the build running on.
 ///
 /// While the flag is set, each signal stores its number in `caught` and
-/// sets `cancel`. Once it is clear, a signal ends mxv as it would have
+/// sets `cancel` when it is given. Once it is clear, a signal ends mxv as it would have
 /// without this handler. The usage log's thread still does that for
 /// `SIGINT`, so this thread leaves `SIGINT` to it.
 ///
@@ -212,7 +220,7 @@ fn cut(command: &str) -> &str {
 /// the build's process group runs on, uncounted by deadband, and the next
 /// `up` starts a second build. A `SIGTERM` rule in crumbkit's usage log like
 /// its `SIGINT` rule would replace this.
-fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<AtomicBool>> {
+fn catch_interrupts(cancel: Option<Cancel>, caught: Arc<AtomicI32>) -> Option<Arc<AtomicBool>> {
     use signal_hook::consts::SIGINT;
     use signal_hook::iterator::Signals;
     let mut signals = Signals::new(interrupts()).ok()?;
@@ -224,7 +232,9 @@ fn catch_interrupts(cancel: Cancel, caught: Arc<AtomicI32>) -> Option<Arc<Atomic
             for signal in signals.forever() {
                 if flag.load(Ordering::SeqCst) {
                     caught.store(signal, Ordering::SeqCst);
-                    cancel.cancel();
+                    if let Some(cancel) = &cancel {
+                        cancel.cancel();
+                    }
                 } else if signal != SIGINT || !crumbkit::events::handles_interrupt() {
                     drop(signal_hook::low_level::emulate_default_handler(signal));
                 }

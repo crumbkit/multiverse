@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -463,6 +464,22 @@ fn a_bare_checkout_still_has_a_task_home_so_mise_can_list_its_tasks() {
     let homes = workspace(dir.path()).task_homes().unwrap();
     assert_eq!(homes.len(), 1);
     assert!(homes[0].tasks.is_empty());
+}
+
+#[test]
+fn a_checkout_of_several_names_its_own_ports_and_their_merged_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = two_checkouts(dir.path());
+    write(workspace.path.join("api/mxv.toml"), "ports = [\"web\"]\n");
+    let homes = workspace.task_homes().unwrap();
+    let api = homes
+        .iter()
+        .find(|home| home.checkout.as_deref() == Some("api"))
+        .unwrap();
+    assert_eq!(
+        api.own_ports,
+        BTreeMap::from([("web".to_owned(), "api-web".to_owned())])
+    );
 }
 
 #[test]

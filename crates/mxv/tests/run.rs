@@ -137,6 +137,10 @@ impl Setup {
     }
 }
 
+/// How long a test waits to see that a signal had no further effect. A
+/// wrong outcome shows at once, so a short wait is enough.
+const SIGNAL_SETTLES: Duration = Duration::from_millis(1000);
+
 /// Returns the text of `path` without its trailing line break.
 fn read(path: &Path) -> String {
     fs::read_to_string(path)
@@ -401,11 +405,14 @@ fn json_is_refused_for_a_task_because_the_task_owns_the_output() {
     clippy::disallowed_methods,
     reason = "the test starts mxv as a child so that it can signal it"
 )]
-fn sigint_cancels_a_task_and_mxv_exits_with_130() {
+fn sigint_to_mxv_alone_leaves_the_task_running_and_mxv_ends_with_its_exit_code() {
     let setup = Setup::new();
     let checkout = setup.workspace(
         "triage",
-        Some(&task("check", "touch started; sleep 30; touch finished")),
+        Some(&task(
+            "check",
+            "touch started; while [ ! -e finish ]; do sleep 0.05; done; exit 3",
+        )),
     );
     let root = setup.root();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"))
@@ -433,6 +440,12 @@ fn sigint_cancels_a_task_and_mxv_exits_with_130() {
         .status()
         .unwrap();
     assert!(killed.success());
+    std::thread::sleep(SIGNAL_SETTLES);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "mxv ended on SIGINT before the task did"
+    );
+    write_file(checkout.join("finish"), "").unwrap();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -440,8 +453,193 @@ fn sigint_cancels_a_task_and_mxv_exits_with_130() {
         assert!(started.elapsed() < MOST_WAIT, "mxv never ended");
         std::thread::yield_now();
     };
-    assert_eq!(status.code(), Some(130));
-    assert!(!checkout.join("finished").exists());
+    assert_eq!(status.code(), Some(3));
+}
+
+/// One Ctrl-C typed at a terminal. `script` gives the shell a new pty and
+/// copies this test's bytes to it, so the terminal itself turns the byte
+/// 0x03 into `SIGINT` for the foreground process group, which holds mxv and
+/// the task.
+///
+/// This misses Linux, whose `script` takes other arguments. A pty opened
+/// by the test would replace `script`, and would run on both systems.
+#[cfg(target_os = "macos")]
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test starts `script` as a child so that it can type Ctrl-C into its pty"
+)]
+fn one_ctrl_c_at_a_terminal_reaches_the_task_once_and_nothing_follows_it() {
+    use std::io::Write as _;
+
+    let setup = Setup::new();
+    let checkout = setup.workspace(
+        "triage",
+        Some(&task(
+            "check",
+            "trap 'echo INT >> signals' INT; trap 'echo TERM >> signals' TERM; \
+             touch started; while [ ! -e finish ]; do sleep 0.05; done; \
+             echo done >> signals; exit 7",
+        )),
+    );
+    let root = setup.root();
+    let exit_file = root.join("exit");
+    // The shell survives the Ctrl-C through its own trap, so it can record
+    // mxv's exit code. A trapped signal resets to its default in mxv.
+    let shell = format!(
+        "trap : INT; {} run -w triage check; echo $? > {}",
+        env!("CARGO_BIN_EXE_mxv"),
+        exit_file.display()
+    );
+    let mut script = std::process::Command::new("/usr/bin/script")
+        .args(["-q", "/dev/null", "/bin/sh", "-c", &shell])
+        .current_dir(&root)
+        .env_clear()
+        .env("PATH", PATH)
+        .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("MXV_ROOT", root.join("workspaces"))
+        .env("DEADBAND_SOCKET", MISSING_SOCKET)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let begun = Instant::now();
+    let wait_for = |what: &str, ready: &dyn Fn() -> bool| {
+        while !ready() {
+            assert!(begun.elapsed() < MOST_WAIT, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let signals = checkout.join("signals");
+    wait_for("the task never started", &|| {
+        checkout.join("started").exists()
+    });
+    let mut typed = script.stdin.take().unwrap();
+    typed.write_all(&[0x03]).unwrap();
+    typed.flush().unwrap();
+    wait_for("the task never saw the Ctrl-C", &|| signals.exists());
+
+    // A cancel makes phase send TERM at once, and KILL after its stop wait,
+    // so TERM is the first thing that this wait would show.
+    std::thread::sleep(SIGNAL_SETTLES);
+    assert_eq!(read(&signals), "INT");
+    write_file(checkout.join("finish"), "").unwrap();
+    wait_for("mxv never ended", &|| {
+        fs::read_to_string(&exit_file).is_ok_and(|text| text.ends_with('\n'))
+    });
+    drop(typed);
+    let _ = script.wait();
+
+    assert_eq!(read(&signals), "INT\ndone");
+    assert_eq!(read(&exit_file), "7");
+}
+
+/// A task of the checkout `app` and a task of the workspace manifest, in a
+/// workspace whose checkouts `app` and `second` declare the ports `web` and
+/// `api`.
+fn ports_of_two_checkouts(setup: &Setup) -> (PathBuf, PathBuf) {
+    let (first, second) = setup.two_checkouts("multi");
+    write_file(
+        first.join("mxv.toml"),
+        format!(
+            "ports = [\"web\"]\n\n{}",
+            task("own", "echo \"$MXV_PORT_WEB $MXV_PORT_SECOND_API\" > seen")
+        ),
+    )
+    .unwrap();
+    write_file(second.join("mxv.toml"), "ports = [\"api\"]\n").unwrap();
+    (first, second)
+}
+
+#[test]
+fn a_task_receives_its_own_checkouts_ports_unprefixed_and_the_others_with_their_prefix() {
+    let setup = Setup::new();
+    let (first, _) = ports_of_two_checkouts(&setup);
+
+    let (exit, _, stderr) = setup.run(&["run", "-w", "multi", "own"]);
+    assert_eq!(exit, 0, "{stderr}");
+
+    let seen = read(&first.join("seen"));
+    let numbers: Vec<u16> = seen
+        .split_whitespace()
+        .map(|word| word.parse().unwrap())
+        .collect();
+    assert_eq!(numbers.len(), 2, "{seen}");
+}
+
+#[test]
+fn a_task_of_the_workspace_manifest_receives_each_checkouts_ports_with_its_prefix() {
+    let setup = Setup::new();
+    ports_of_two_checkouts(&setup);
+    let workspace = setup.root().join("workspaces/multi");
+    write_file(
+        workspace.join("mxv.toml"),
+        task(
+            "all",
+            "echo \"${MXV_PORT_WEB:-none} $MXV_PORT_APP_WEB $MXV_PORT_SECOND_API\" > seen",
+        ),
+    )
+    .unwrap();
+
+    let (exit, _, stderr) = setup.run(&["run", "-w", "multi", "all"]);
+    assert_eq!(exit, 0, "{stderr}");
+
+    let seen = read(&workspace.join("seen"));
+    let words: Vec<&str> = seen.split_whitespace().collect();
+    assert_eq!(words.len(), 3, "{seen}");
+    assert_eq!(words[0], "none", "{seen}");
+    assert!(words[1].parse::<u16>().is_ok(), "{seen}");
+    assert!(words[2].parse::<u16>().is_ok(), "{seen}");
+}
+
+#[test]
+fn a_task_of_the_workspace_manifest_that_hides_a_checkouts_task_prints_a_note() {
+    let setup = Setup::new();
+    let (first, _) = setup.two_checkouts("multi");
+    write_file(first.join("mxv.toml"), task("check", "touch checkout")).unwrap();
+    let workspace = setup.root().join("workspaces/multi");
+    write_file(workspace.join("mxv.toml"), task("check", "touch shared")).unwrap();
+
+    let (exit, _, stderr) = setup.run(&["run", "-w", "multi", "check"]);
+
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(workspace.join("shared").exists());
+    assert!(!first.join("checkout").exists());
+    assert!(stderr.contains("workspace manifest"), "{stderr}");
+    assert!(stderr.contains("--repo"), "{stderr}");
+}
+
+#[test]
+fn an_unknown_task_says_so_when_mise_could_not_be_asked() {
+    let mut setup = Setup::new();
+    setup.path = PATH_WITHOUT_MISE.to_owned();
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let (exit, document) = setup.json(&["run", "-w", "triage", "lint"]);
+
+    assert_ne!(exit, 0);
+    assert_eq!(document["code"], "mxv::task::unknown");
+    assert!(document.to_string().contains("mise"), "{document}");
+}
+
+#[test]
+fn repo_asks_mise_about_the_chosen_checkout_alone() {
+    let mut setup = Setup::new();
+    let asked = setup.root().join("asked");
+    setup.fake_mise(&format!(
+        "pwd >> {}\necho '[{{\"name\":\"test\"}}]'",
+        asked.display()
+    ));
+    let (_, second) = setup.two_checkouts("multi");
+
+    let (exit, document) = setup.json(&["run", "-w", "multi", "--repo", "second"]);
+    assert_eq!(exit, 0, "{document}");
+
+    assert_eq!(read(&asked), second.display().to_string());
 }
 
 /// Reports whether mise is installed, and says that the test skips when it

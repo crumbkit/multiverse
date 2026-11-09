@@ -47,6 +47,9 @@ pub(crate) enum TaskFailure {
         task: String,
         /// The names of the tasks that the workspace has.
         names: Vec<String>,
+        /// Whether mise could not be asked about a checkout, so the names
+        /// may lack its tasks.
+        mise_unasked: bool,
     },
     /// Several checkouts hold a task with the name.
     Ambiguous {
@@ -95,6 +98,7 @@ impl Failure for TaskFailure {
                 workspace,
                 task,
                 names,
+                ..
             } => vec![
                 Field::new("workspace", workspace),
                 Field::new("task", task),
@@ -121,19 +125,24 @@ impl fmt::Display for TaskFailure {
                 workspace,
                 task,
                 names,
-            } if names.is_empty() => write!(
-                formatter,
-                "the workspace {workspace} has no task named {task}, and it has no tasks"
-            ),
-            Self::Unknown {
-                workspace,
-                task,
-                names,
-            } => write!(
-                formatter,
-                "the workspace {workspace} has no task named {task}; its tasks are {}",
-                names.join(", ")
-            ),
+                mise_unasked,
+            } => {
+                write!(
+                    formatter,
+                    "the workspace {workspace} has no task named {task}"
+                )?;
+                if names.is_empty() {
+                    formatter.write_str(", and it has no tasks")?;
+                } else {
+                    write!(formatter, "; its tasks are {}", names.join(", "))?;
+                }
+                if *mise_unasked {
+                    formatter.write_str(
+                        "; mxv could not ask mise for a checkout's tasks, because mise is not installed or the checkout's directory is gone",
+                    )?;
+                }
+                Ok(())
+            }
             Self::Ambiguous {
                 task, checkouts, ..
             } => write!(
@@ -182,9 +191,9 @@ impl Row for TaskRow {
 /// A task that the lookup found. It is the only key that the lookup
 /// returns.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TaskRef {
-    /// A task under `[tasks.<name>]` of a manifest.
-    Declared(TaskName),
+enum TaskRef<'a> {
+    /// A task under `[tasks.<name>]` of a manifest, with the task.
+    Declared(TaskName, &'a Task),
     /// A task that mise listed.
     Mise(MiseTaskName),
 }
@@ -202,13 +211,15 @@ struct Home {
 impl Home {
     /// Returns the name of the task in this place that `name` refers to, a
     /// declared one first, and whether mise lists the name as well.
-    fn find(&self, name: &str) -> Option<(TaskRef, bool)> {
+    fn find(&self, name: &str) -> Option<(TaskRef<'_>, bool)> {
         let mise = MiseTaskName::new(name).filter(|name| match &self.mise {
             MiseListing::Listed(names) => names.contains(name),
             MiseListing::Missing | MiseListing::Refused { .. } => false,
         });
-        match TaskName::new(name).filter(|name| self.tasks.tasks.contains_key(name)) {
-            Some(declared) => Some((TaskRef::Declared(declared), mise.is_some())),
+        match TaskName::new(name).and_then(|name| self.tasks.tasks.get_key_value(&name)) {
+            Some((declared, task)) => {
+                Some((TaskRef::Declared(declared.clone(), task), mise.is_some()))
+            }
             None => mise.map(|mise| (TaskRef::Mise(mise), false)),
         }
     }
@@ -259,13 +270,15 @@ fn refusal(home: &Home) -> Option<String> {
     ))
 }
 
-/// Returns every place that holds the workspace's tasks, asks mise about
-/// each checkout, and prints mise's refusals on standard error.
-fn homes(context: &Context) -> Result<Vec<Home>, crumbkit::Error> {
-    let homes: Vec<Home> = context
+/// Returns every place that holds the workspace's tasks, or the checkout
+/// that `repo` names when it names one, asks mise about each checkout among
+/// them, and prints mise's refusals on standard error.
+fn homes(context: &Context, repo: Option<&String>) -> Result<Vec<Home>, crumbkit::Error> {
+    let tasks = context
         .workspace
         .task_homes()
-        .map_err(RunFailure::Manifest)?
+        .map_err(RunFailure::Manifest)?;
+    let homes: Vec<Home> = narrowed(&context.workspace, tasks, repo)?
         .into_iter()
         .map(|tasks| {
             let mise = if tasks.checkout.is_some() {
@@ -284,15 +297,15 @@ fn homes(context: &Context) -> Result<Vec<Home>, crumbkit::Error> {
 /// Keeps the home of the checkout that `--repo` names, when it names one.
 fn narrowed(
     workspace: &Workspace,
-    homes: Vec<Home>,
+    homes: Vec<TaskHome>,
     repo: Option<&String>,
-) -> Result<Vec<Home>, MxvFailure> {
+) -> Result<Vec<TaskHome>, MxvFailure> {
     let Some(repo) = repo else {
         return Ok(homes);
     };
-    let kept: Vec<Home> = homes
+    let kept: Vec<TaskHome> = homes
         .into_iter()
-        .filter(|home| home.tasks.checkout.as_ref() == Some(repo))
+        .filter(|home| home.checkout.as_ref() == Some(repo))
         .collect();
     if kept.is_empty() {
         return Err(MxvFailure::CheckoutNotFound {
@@ -312,7 +325,7 @@ fn narrowed(
 #[derive(Debug)]
 struct Found<'a> {
     /// The task.
-    reference: TaskRef,
+    reference: TaskRef<'a>,
     /// The place.
     home: &'a Home,
     /// A sentence that says the lookup chose it over another.
@@ -323,10 +336,10 @@ struct Found<'a> {
 ///
 /// In one place a declared task wins a clash with a mise task, with a note.
 /// The workspace manifest of a workspace with several checkouts holds tasks
-/// for the whole workspace, so one of its tasks wins over a checkout's. A
-/// name that several checkouts hold is refused.
+/// for the whole workspace, so one of its tasks wins over a checkout's,
+/// with a note. A name that several checkouts hold is refused.
 fn resolve<'a>(workspace: &str, homes: &'a [Home], name: &str) -> Result<Found<'a>, TaskFailure> {
-    let hits: Vec<(&Home, TaskRef, bool)> = homes
+    let hits: Vec<(&Home, TaskRef<'a>, bool)> = homes
         .iter()
         .filter_map(|home| home.find(name).map(|(found, both)| (home, found, both)))
         .collect();
@@ -339,6 +352,9 @@ fn resolve<'a>(workspace: &str, homes: &'a [Home], name: &str) -> Result<Found<'
                 workspace: workspace.to_owned(),
                 task: name.to_owned(),
                 names: names(homes),
+                mise_unasked: homes
+                    .iter()
+                    .any(|home| matches!(home.mise, MiseListing::Missing)),
             });
         }
         (None, several) => {
@@ -353,11 +369,22 @@ fn resolve<'a>(workspace: &str, homes: &'a [Home], name: &str) -> Result<Found<'
         }
     };
     let (home, reference, both) = chosen;
-    let note = both.then(|| {
-        format!(
-            "{name} is declared in {DECLARED} and listed by mise, so mxv runs the one in {DECLARED}"
-        )
-    });
+    let hidden: Vec<&str> = hits
+        .iter()
+        .filter_map(|(home, ..)| home.tasks.checkout.as_deref())
+        .collect();
+    let note = if shared.is_some() && !hidden.is_empty() {
+        Some(format!(
+            "{name} is in the workspace manifest and in {}, so mxv runs the one in the workspace manifest; --repo runs a checkout's",
+            hidden.join(", ")
+        ))
+    } else {
+        both.then(|| {
+            format!(
+                "{name} is declared in {DECLARED} and listed by mise, so mxv runs the one in {DECLARED}"
+            )
+        })
+    };
     Ok(Found {
         reference: reference.clone(),
         home,
@@ -379,15 +406,14 @@ fn names(homes: &[Home]) -> Vec<String> {
 
 /// Returns what starts the task `found` with `args`, and whether it takes
 /// a place from deadband.
-fn start_of(found: &Found<'_>, args: &[String]) -> Option<(TaskStart, bool)> {
+fn start_of(found: &Found<'_>, args: &[String]) -> (TaskStart, bool) {
     let root: PathBuf = found.home.tasks.root.clone();
-    match &found.reference {
-        TaskRef::Mise(name) => Some((TaskStart::mise(root, name, args), true)),
-        TaskRef::Declared(name) => {
-            let task: &Task = found.home.tasks.tasks.get(name)?;
+    let (start, gate) = match &found.reference {
+        TaskRef::Mise(name) => (TaskStart::mise(root, name, args), true),
+        TaskRef::Declared(_, task) => {
             let mut argv = task.argv.words().to_vec();
             argv.extend_from_slice(args);
-            Some((
+            (
                 TaskStart::new(
                     root,
                     task.dir.clone(),
@@ -395,44 +421,41 @@ fn start_of(found: &Found<'_>, args: &[String]) -> Option<(TaskStart, bool)> {
                     TaskServices::Needs(task.needs.clone()),
                 ),
                 task.gate,
-            ))
+            )
         }
-    }
+    };
+    (
+        start.with_own_ports(found.home.tasks.own_ports.clone()),
+        gate,
+    )
 }
 
 /// Lists the tasks of the workspace that `args` names.
 fn list(environment: &Environment, args: &RunArgs) -> Result<Vec<TaskRow>, crumbkit::Error> {
     let context = processes::context(environment, args.workspace.as_ref(), &[])?;
     processes::refuse_unfinished(&context.workspace)?;
-    let homes = narrowed(&context.workspace, homes(&context)?, args.repo.as_ref())?;
+    let homes = homes(&context, args.repo.as_ref())?;
     Ok(homes.iter().flat_map(Home::rows).collect())
 }
 
 /// Runs the task `name` that `args` names. It returns the task's exit
-/// status and the signal that mxv caught while it ran, if any.
+/// status and whether mxv caught a signal while it ran.
 fn run_task(
     output: &Output,
     environment: &Environment,
     args: &RunArgs,
     name: &str,
-) -> Result<(ExitStatus, Option<i32>), crumbkit::Error> {
+) -> Result<(ExitStatus, bool), crumbkit::Error> {
     let mut context = processes::context(environment, args.workspace.as_ref(), &[])?;
     processes::refuse_unfinished(&context.workspace)?;
     let workspace = context.workspace.name.to_string();
-    let homes = narrowed(&context.workspace, homes(&context)?, args.repo.as_ref())?;
+    let homes = homes(&context, args.repo.as_ref())?;
     let found = resolve(&workspace, &homes, name)?;
     if output.is_json() {
         return Err(TaskFailure::JsonRefused.into());
     }
     crate::warn(&found.note.iter().cloned().collect::<Vec<_>>());
-    let Some((start, gate)) = start_of(&found, args.task_words()) else {
-        return Err(TaskFailure::Unknown {
-            workspace,
-            task: name.to_owned(),
-            names: Vec::new(),
-        }
-        .into());
-    };
+    let (start, gate) = start_of(&found, args.task_words());
     // The lock covers the ports and the plan. It ends before the task
     // starts, so a long test run never stops `up` or `down`.
     let lock = context.lock()?;
@@ -462,7 +485,7 @@ fn run_task(
         .run(&mut admission, terminal)
         .map_err(MxvFailure::from)?;
     match ended {
-        TaskEnd::Exited(status) => Ok((status, admission.caught())),
+        TaskEnd::Exited(status) => Ok((status, admission.caught().is_some())),
         TaskEnd::Unstartable { reason } => Err(ExecFailure::Unstartable {
             workspace,
             process: name.to_owned(),
@@ -483,13 +506,14 @@ pub(crate) fn run(mut output: Output, environment: &Environment, args: &RunArgs)
         return code;
     }
     match run_task(&output, environment, args, name) {
-        Ok((status, caught)) => match caught {
-            Some(signal) => {
+        Ok((status, caught)) => {
+            // Only a signal that mxv caught counts as an interruption, so a
+            // task that crashed with a signal of its own does not.
+            if caught {
                 crumbkit::events::interrupted();
-                crumbkit::events::ended(u8::try_from(128 + signal).unwrap_or(u8::MAX), None)
             }
-            None => crumbkit::events::ended(exit_number(status), None),
-        },
+            crumbkit::events::ended(exit_number(status), None)
+        }
         Err(error) => {
             output.print_failure(&mut sink, error.failure());
             crumbkit::events::ended(output.failure_exit(error.failure().code()), None)

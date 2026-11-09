@@ -144,6 +144,11 @@ pub struct TaskHome {
     pub root: PathBuf,
     /// The tasks that the manifest of this place declares.
     pub tasks: BTreeMap<TaskName, Task>,
+    /// The ports of this checkout whose names differ in the merged
+    /// manifest: each name in the checkout's own file, with its name in the
+    /// merged manifest. It is empty when the names are the same, as in a
+    /// workspace with one checkout.
+    pub own_ports: BTreeMap<String, String>,
 }
 
 impl TaskHome {
@@ -158,6 +163,7 @@ impl TaskHome {
             checkout,
             root,
             tasks,
+            own_ports: BTreeMap::new(),
         }
     }
 }
@@ -501,6 +507,7 @@ impl Workspace {
                     .map(|checkout| checkout.name.clone()),
                 root: self.manifest_root().to_path_buf(),
                 tasks: tasks_of(self.manifest()?),
+                own_ports: BTreeMap::new(),
             }]);
         }
         let mut homes = Vec::new();
@@ -509,13 +516,21 @@ impl Workspace {
                 checkout: None,
                 root: self.path.clone(),
                 tasks: manifest.tasks,
+                own_ports: BTreeMap::new(),
             });
         }
         for checkout in &self.checkouts {
+            let manifest = Manifest::read(&checkout.path)?.unwrap_or_default();
+            let prefix = checkout_prefix(&checkout.name);
             homes.push(TaskHome {
                 checkout: Some(checkout.name.clone()),
                 root: checkout.path.clone(),
-                tasks: tasks_of(Manifest::read(&checkout.path)?),
+                own_ports: manifest
+                    .ports
+                    .iter()
+                    .map(|port| (port.clone(), prefixed(&prefix, port)))
+                    .collect(),
+                tasks: manifest.tasks,
             });
         }
         Ok(homes)
