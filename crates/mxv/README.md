@@ -1666,7 +1666,7 @@ workspace whose every disposable path was kept has the state `kept`, and its
 total freed. `clean` asks before it deletes, and `--yes` answers for a
 script. With `--yes`, `clean` keeps each path that only the repository's
 `mxv.toml` declares disposable, because no person confirmed it, and
-`--force` deletes those paths too. `--over-limit --yes` keeps them in the
+`--disposable` deletes those paths too. `--over-limit --yes` keeps them in the
 same way, so they do not count toward the bytes that the run frees.
 
 Before it deletes anything in a workspace, `clean` takes the workspace's

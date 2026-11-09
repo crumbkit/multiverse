@@ -198,7 +198,7 @@ pub(crate) enum MxvFailure {
         allow: Allow,
     },
     /// The removal would delete paths that only the repository's own
-    /// `mxv.toml` declares disposable, and `--yes` without `--force` or `clean --disposable` gave
+    /// `mxv.toml` declares disposable, and `--yes` without `--force` gave
     /// no person a chance to confirm them.
     ManifestDisposable {
         /// The workspace's name.

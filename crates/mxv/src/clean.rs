@@ -172,8 +172,8 @@ struct Candidate {
 
 impl Candidate {
     /// Keeps each path that only the repository's own `mxv.toml` makes
-    /// disposable, because `--yes` without `--disposable` gave no person a
-    /// chance to confirm it.
+    /// disposable, because `--yes` without `--disposable`, or
+    /// `reclaim --need disk`, gave no person a chance to confirm it.
     fn hold_manifest_paths(&mut self) {
         let (held, paths): (Vec<DisposablePath>, Vec<DisposablePath>) = self
             .paths
@@ -185,7 +185,7 @@ impl Candidate {
             self.kept.push(KeptPath::new(
                 found.checkout,
                 found.path,
-                "only the repository's mxv.toml declares it disposable, and --yes alone does not delete such paths; answer the prompt without --yes, or pass --disposable".to_owned(),
+                "only the repository's mxv.toml declares it disposable, and no person confirmed it; answer the prompt of mxv clean, or run mxv clean --yes --disposable".to_owned(),
             ));
         }
     }

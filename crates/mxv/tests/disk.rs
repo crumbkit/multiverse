@@ -245,7 +245,7 @@ fn clean_keeps_a_workspace_that_changed_within_the_idle_age() {
 }
 
 #[test]
-fn the_config_file_sets_the_idle_age_and_idle_overrides_it() {
+fn the_config_file_sets_the_idle_age_and_unmodified_overrides_it() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
@@ -647,7 +647,7 @@ fn clean_with_yes_keeps_a_path_that_only_the_manifest_declares_disposable_unless
     );
     let skipped = row["skipped"][0].as_str().unwrap();
     assert!(skipped.contains("app: data/"), "{skipped}");
-    assert!(skipped.contains("--disposable"), "{skipped}");
+    assert!(skipped.contains("clean --yes --disposable"), "{skipped}");
     assert!(checkout.join("data/pg.db").exists());
     assert!(!checkout.join("target").exists());
 

@@ -349,6 +349,28 @@ fn a_disk_need_keeps_the_build_output_of_a_workspace_that_a_process_works_in() {
 }
 
 #[test]
+fn a_disk_need_keeps_a_manifest_only_path_and_names_the_clean_that_deletes_it() {
+    let setup = Setup::new();
+    setup.idle_age("0s");
+    let checkout = setup.workspace("built");
+    write(
+        &checkout.join("mxv.toml"),
+        &format!("disposable = [\"data/\"]\n{SLEEPER}"),
+    );
+    write(
+        &checkout.join(".git/info/exclude"),
+        ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
+    );
+    write(&checkout.join("data/pg.db"), "rows");
+    let (exit, document) = setup.json(&["reclaim", "--need", "disk=1K"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(checkout.join("data/pg.db").exists());
+    let reason = row(&document, "built")["reason"].as_str().unwrap();
+    assert!(reason.contains("clean --yes --disposable"), "{reason}");
+    assert!(!reason.contains("--yes alone"), "{reason}");
+}
+
+#[test]
 fn a_need_without_a_resource_or_a_size_is_refused() {
     let setup = Setup::new();
     let output = setup
