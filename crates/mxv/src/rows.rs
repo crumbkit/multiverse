@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use crumbkit::Row;
+use crumbkit::{Age, Row};
 use multiverse::Error;
 use multiverse::{
-    Allow, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage, DisposableSource,
-    Fate, Kind, MANIFEST_FILE, Manifest, ManifestSource, ProcessNote, ProcessState, ProcessStatus,
-    Removal, Workspace, WorkspaceKind,
+    Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
+    DisposableSource, Fate, Kind, MANIFEST_FILE, Manifest, ManifestSource, ProcessNote,
+    ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -69,6 +69,12 @@ pub(crate) struct WorkspaceRow {
     /// file that has several hard links counted once and no symbolic link
     /// followed, or null when `--sizes` was not given.
     size: Option<Size>,
+    /// How long ago the workspace was archived, or null in a row of a
+    /// workspace that is not archived.
+    archived: Option<Age>,
+    /// The number of commits of an archived workspace that exist only on
+    /// this machine, or null in a row of a workspace that is not archived.
+    local_only: Option<u32>,
     /// The bytes that the workspace's disposable directories take on disk,
     /// such as `target/` and `node_modules/`, which `mxv clean` deletes, or
     /// null when `--sizes` was not given.
@@ -242,6 +248,8 @@ impl Row for WorkspaceRow {
         "path",
         "size",
         "disposable",
+        "archived",
+        "local_only",
         "ports",
         "problem",
     ];
@@ -297,6 +305,8 @@ impl From<&Workspace> for WorkspaceRow {
             problem: String::new(),
             ports: workspace.ports.clone(),
             size: None,
+            archived: None,
+            local_only: None,
             disposable: None,
         }
     }
@@ -329,6 +339,8 @@ impl WorkspaceRow {
             problem: error.to_string(),
             ports: BTreeMap::new(),
             size: None,
+            archived: None,
+            local_only: None,
             disposable: None,
         }
     }
@@ -337,6 +349,19 @@ impl WorkspaceRow {
     pub(crate) const fn with_usage(mut self, usage: &DiskUsage) -> Self {
         self.size = Some(Size(usage.bytes));
         self.disposable = Some(Size(usage.disposable_bytes));
+        self
+    }
+
+    /// Returns the workspace's name.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the row of an archived workspace, archived `age` ago, with
+    /// `local_only` commits that exist only on this machine.
+    pub(crate) fn archived(mut self, age: Age, local_only: usize) -> Self {
+        self.archived = Some(age);
+        self.local_only = Some(u32::try_from(local_only).unwrap_or(u32::MAX));
         self
     }
 
@@ -646,6 +671,12 @@ pub(crate) struct RemovalResult {
     /// The workspace manifest that the removal deletes, which a person may
     /// have edited by hand, or null when the workspace has none.
     manifest_deleted: Option<String>,
+    /// The references that `mxv remove --archived` deleted, or empty for
+    /// the removal of a workspace.
+    pins: Vec<String>,
+    /// Whether the result reports the deletion of an archive.
+    #[serde(skip)]
+    of_archive: bool,
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
@@ -780,6 +811,40 @@ impl RemovalResult {
                 .workspace_manifest
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            pins: Vec::new(),
+            of_archive: false,
+            planned,
+        }
+    }
+
+    /// Returns the result of deleting `archive` and `volumes`, which a dry
+    /// run only planned when `planned` is set.
+    pub(crate) fn of_archive(
+        archive: &Archive,
+        volumes: Vec<String>,
+        warnings: Vec<String>,
+        planned: bool,
+    ) -> Self {
+        Self {
+            name: archive.name.to_string(),
+            path: archive.path.display().to_string(),
+            directory: DirectoryFate::Missing,
+            checkouts: Vec::new(),
+            force: false,
+            delete_unmerged: false,
+            disposable: Vec::new(),
+            discarded: Vec::new(),
+            containers: Vec::new(),
+            volumes,
+            manifest_paths: Vec::new(),
+            warnings,
+            manifest_deleted: None,
+            pins: archive
+                .checkouts
+                .iter()
+                .map(|checkout| checkout.pin.clone())
+                .collect(),
+            of_archive: true,
             planned,
         }
     }
@@ -809,6 +874,18 @@ impl fmt::Display for RemovalResult {
         };
         for warning in &self.warnings {
             writeln!(formatter, "Warning: {warning}.")?;
+        }
+        if self.of_archive {
+            for pin in &self.pins {
+                writeln!(formatter, "mxv {deletes} the pin {pin}.")?;
+            }
+            for volume in &self.volumes {
+                writeln!(
+                    formatter,
+                    "mxv {deletes} the docker volume {volume} and the data in it."
+                )?;
+            }
+            return write!(formatter, "mxv {deletes} the archive {}.", self.name);
         }
         for path in &self.discarded {
             writeln!(formatter, "mxv {discards} {path}.")?;

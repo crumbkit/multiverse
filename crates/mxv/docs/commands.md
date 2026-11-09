@@ -146,6 +146,7 @@ List the workspaces
 - `--limit <N>`: Print at most this many rows, up to 100. Default: `25`.
 - `--all`: Print every row
 - `--sizes`: Measure each workspace's size on disk and its disposable size, which reads every file of every workspace on the page
+- `--archived`: List the archived workspaces instead
 
 ### Examples
 
@@ -162,6 +163,8 @@ mxv list
 - `path`: The workspace's directory, which `mxv cd` prints.
 - `size`: The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed, or null when `--sizes` was not given.
 - `disposable`: The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes, or null when `--sizes` was not given.
+- `archived`: How long ago the workspace was archived, or null in a row of a workspace that is not archived.
+- `local_only`: The number of commits of an archived workspace that exist only on this machine, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
@@ -449,15 +452,19 @@ Archive a workspace, so restore can rebuild it at the same commits
 
 ### Arguments
 
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+- `--wip`: Commit uncommitted changes and untracked files onto the branch first; ignored files stay untouched
+- `--force`: Lose what the archive cannot keep, such as uncommitted changes, ignored files such as .env and stashes, and list it in the archive
+- `--delete-volumes`: Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 
 ### Examples
 
-Print what archiving would do.
+Print what archiving the workspace reading-list would do.
 
 ```sh
-mxv archive --dry-run
+mxv archive -w reading-list --dry-run
 ```
 
 Effects: destructive, not idempotent, closed-world.
@@ -468,15 +475,16 @@ Rebuild an archived workspace at its archived commits
 
 ### Arguments
 
+- `<NAME>`: The name of the archived workspace. Required.
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 
 ### Examples
 
-Print what restoring would do.
+Print what restoring the archived workspace sample would do.
 
 ```sh
-mxv restore --dry-run
+mxv restore sample --dry-run
 ```
 
 Effects: additive, not idempotent, open-world.
@@ -488,6 +496,7 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 ### Arguments
 
 - `<NAME>`: The name of the workspace to remove. Required.
+- `--archived`: Delete the archive of this name and its pins, instead of a workspace
 - `--force`: Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running units; an unmerged branch and the workspace's volumes are still kept
 - `--delete-volumes`: Delete the workspace's docker volumes and the data in them
 - `--delete-unmerged`: Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold

@@ -138,6 +138,25 @@ pub(crate) fn redacted(text: &str) -> String {
     out
 }
 
+/// Returns the form of the origin URL `url` that an archive records and a
+/// restore connects with. An SSH URL keeps its user name, which selects the
+/// account on the host and is no secret, and loses only a password. Every
+/// other URL is [`redacted`].
+pub(crate) fn recorded_origin(url: &str) -> String {
+    let is_ssh = ["ssh://", "git+ssh://", "ssh+git://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme));
+    let Some((scheme, rest)) = url.split_once("://").filter(|_| is_ssh) else {
+        return redacted(url);
+    };
+    let (authority, path) = rest.find('/').map_or((rest, ""), |end| rest.split_at(end));
+    let Some((credential, host)) = authority.rsplit_once('@') else {
+        return url.to_owned();
+    };
+    let user = credential.split(':').next().unwrap_or_default();
+    format!("{scheme}://{user}@{host}{path}")
+}
+
 /// Returns the host of `authority` in lower case, without its user name
 /// and password, and without its port when the port is `default`.
 fn host_of(authority: &str, default: Option<&str>) -> String {
@@ -173,7 +192,7 @@ fn resolved(path: &Path) -> Option<String> {
 /// [`encoded`] describes, with the last `.` of a `.git` or `.lock` ending
 /// encoded as well, so the directory is never a mirror or a mirror's
 /// lock.
-fn directory(component: &str) -> String {
+pub(crate) fn directory(component: &str) -> String {
     let text = encoded(component);
     for ending in [".git", ".lock"] {
         if let Some(stem) = text.strip_suffix(ending) {

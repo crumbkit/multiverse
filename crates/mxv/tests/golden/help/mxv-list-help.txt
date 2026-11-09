@@ -14,6 +14,9 @@ Options:
       --sizes
           Measure each workspace's size on disk and its disposable size, which reads every file of every workspace on the page
 
+      --archived
+          List the archived workspaces instead
+
       --json
           Print the result as a JSON document. The default prints text.
 
@@ -42,6 +45,8 @@ Columns:
   path        The workspace's directory, which `mxv cd` prints.
   size        The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed, or null when `--sizes` was not given.
   disposable  The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes, or null when `--sizes` was not given.
+  archived    How long ago the workspace was archived, or null in a row of a workspace that is not archived.
+  local_only  The number of commits of an archived workspace that exist only on this machine, or null in a row of a workspace that is not archived.
   ports       The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
   problem     Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 

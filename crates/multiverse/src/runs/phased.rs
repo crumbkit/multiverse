@@ -1124,6 +1124,42 @@ impl Runs {
         Ok(Volumes { apps })
     }
 
+    /// Reports whether any container of the workspace `name` has run, so
+    /// docker may hold volumes labelled with its stable id.
+    #[must_use]
+    pub fn containers_ran(&self, name: &WorkspaceName) -> bool {
+        self.workspace_dir(name).join(CONTAINERS_RAN).exists()
+    }
+
+    /// Notes that containers of the workspace `name` have run, for a
+    /// workspace that a restore rebuilt, so its volumes count again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when the note cannot be written.
+    pub fn remember_containers(&self, name: &WorkspaceName) -> Result<(), Error> {
+        let dir = self.workspace_dir(name);
+        fs::create_dir_all(&dir).map_err(|source| Error::Unwritable {
+            path: dir.clone(),
+            source,
+        })?;
+        store::replace_file(&dir.join(CONTAINERS_RAN), b"")
+    }
+
+    /// Returns the docker volumes of an archived workspace, which docker
+    /// labels with its stable id `id`. The archive deleted its run
+    /// directory, so this lookup does not need the note that containers ran.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
+    /// [`Error::DockerFailed`].
+    pub fn archived_volumes(&self, id: &WorkspaceId) -> Result<Volumes, Error> {
+        Ok(Volumes {
+            apps: app_volumes(&self.phase, id)?,
+        })
+    }
+
     /// Deletes `volumes`, which [`Runs::volumes`] returned for one
     /// workspace, after it checked each one again.
     ///

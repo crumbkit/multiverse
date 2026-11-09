@@ -6,6 +6,7 @@ Arguments:
   <NAME>  The name of the workspace to remove
 
 Options:
+      --archived         Delete the archive of this name and its pins, instead of a workspace
       --force            Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running units; an unmerged branch and the workspace's volumes are still kept
       --delete-volumes   Delete the workspace's docker volumes and the data in them
       --delete-unmerged  Delete branches with unmerged commits, commits on a detached HEAD, and a clone's commits that origin does not hold

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::error::Error;
@@ -336,10 +337,161 @@ fn write_temp(target: &Path, bytes: &[u8]) -> Result<PathBuf, Error> {
 /// Syncs the directory `dir`, so a rename or a removal in it survives a
 /// power loss. A platform that cannot open a directory as a file, such as
 /// Windows, skips the sync, because it has no other way to sync one.
-fn sync_dir(dir: &Path) {
+pub(crate) fn sync_dir(dir: &Path) {
     if let Ok(handle) = File::open(dir) {
         let _ = handle.sync_all();
     }
+}
+
+/// Copies the file at `from` to `to` in one step, with the permission bits
+/// `mode`: it streams the bytes to a temporary file beside `to`, syncs it,
+/// renames it over `to` and syncs the directory (DUR-1). It returns the
+/// file's SHA-256 digest in lowercase hex, computed from the bytes it
+/// wrote.
+///
+/// # Errors
+///
+/// Returns [`Error::StateUnreadable`] when `from` cannot be read, and
+/// [`Error::Unwritable`] when a step of the write fails. The temporary file
+/// is removed after a failure.
+pub(crate) fn copy_file(from: &Path, to: &Path, mode: u32) -> Result<String, Error> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let unreadable = |source| Error::StateUnreadable {
+        path: from.to_path_buf(),
+        source,
+    };
+    let name = to
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let temp = to.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let unwritable = |source| Error::Unwritable {
+        path: temp.clone(),
+        source,
+    };
+    let mut source = File::open(from).map_err(unreadable)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let opened = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temp);
+    let mut file = opened.map_err(unwritable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let copied: Result<(), Error> = loop {
+        let count = match source.read(&mut buffer) {
+            Ok(0) => break Ok(()),
+            Ok(count) => count,
+            Err(error) => break Err(unreadable(error)),
+        };
+        let chunk = buffer.get(..count).unwrap_or_default();
+        hasher.update(chunk);
+        if let Err(error) = file.write_all(chunk) {
+            break Err(unwritable(error));
+        }
+    };
+    let synced = copied.and_then(|()| {
+        // The umask may have narrowed `mode` when the file was created.
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .and_then(|()| file.sync_all())
+            .map_err(unwritable)
+    });
+    if let Err(error) = synced {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let renamed = fs::rename(&temp, to);
+    if let Err(source) = renamed {
+        let _ = fs::remove_file(&temp);
+        return Err(Error::Unwritable {
+            path: to.to_path_buf(),
+            source,
+        });
+    }
+    if let Some(dir) = to.parent() {
+        sync_dir(dir);
+    }
+    Ok(hex_digest(&hasher.finalize()))
+}
+
+/// Returns the SHA-256 digest of the file at `path` in lowercase hex.
+///
+/// # Errors
+///
+/// Returns [`Error::StateUnreadable`] when the file cannot be read.
+pub(crate) fn file_digest(path: &Path) -> Result<String, Error> {
+    let unreadable = |source| Error::StateUnreadable {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut file = File::open(path).map_err(unreadable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(unreadable)?;
+        if count == 0 {
+            return Ok(hex_digest(&hasher.finalize()));
+        }
+        hasher.update(buffer.get(..count).unwrap_or_default());
+    }
+}
+
+/// Returns `bytes` in lowercase hex.
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Makes the directory `path` and its parents when they do not exist, gives
+/// `path` the permission bits 0700, and syncs its parent, so the directory
+/// survives a power loss and only its owner can read it.
+///
+/// # Errors
+///
+/// Returns [`Error::Unwritable`] when the directory cannot be made or its
+/// permissions set.
+pub(crate) fn private_dir(path: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let unwritable = |source| Error::Unwritable {
+        path: path.to_path_buf(),
+        source,
+    };
+    fs::create_dir_all(path).map_err(unwritable)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(unwritable)?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent);
+    }
+    Ok(())
+}
+
+/// Moves the directory or link at `from` to `to` in one rename. The move
+/// writes no bytes of its own, so a power loss leaves it at one of the two
+/// names.
+///
+/// # Errors
+///
+/// Returns the failure of the rename, with the path it could not move.
+pub(crate) fn move_aside(from: &Path, to: &Path) -> Result<(), Error> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let moved = fs::rename(from, to);
+    moved.map_err(|source| Error::Unwritable {
+        path: from.to_path_buf(),
+        source,
+    })?;
+    if let Some(dir) = to.parent() {
+        sync_dir(dir);
+    }
+    Ok(())
 }
 
 /// Opens the file at `path` for appending, and creates it and its

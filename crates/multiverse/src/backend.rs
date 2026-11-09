@@ -21,6 +21,69 @@ pub struct Repository {
     pub name: String,
 }
 
+/// The work of one initialised submodule of a checkout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubmoduleWork {
+    /// The submodule's path, relative to the checkout.
+    pub path: String,
+    /// Its uncommitted changes, untracked paths and ignored paths.
+    pub changes: Changes,
+    /// The commit of each of its stash entries.
+    pub stashes: Vec<String>,
+    /// Each of its commits that no remote branch holds.
+    pub commits: Vec<String>,
+}
+
+/// What `git status` does not show about a checkout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Concealed {
+    /// Each repository inside the checkout that git does not track, which
+    /// `git add` would store as a commit id without its files.
+    pub nested: Vec<String>,
+    /// Each file marked skip-worktree or assume-unchanged that differs from
+    /// the index.
+    pub hidden: Vec<String>,
+    /// Each initialised submodule, parents before the submodules inside
+    /// them.
+    pub submodules: Vec<SubmoduleWork>,
+    /// Each file below the checkout that no listing of git accounts for,
+    /// such as a file in a submodule directory that is not initialised.
+    pub unlisted: Vec<String>,
+    /// Each commit that only a reference outside the branches, tags, notes
+    /// and remote branches keeps, with the reference, such as
+    /// `<commit> (refs/backup/x)`.
+    pub referenced: Vec<String>,
+    /// Each git operation that stands paused, in a sentence.
+    pub paused: Vec<String>,
+    /// The stashes and commits of each git directory of a submodule whose
+    /// working files are gone, as after `git submodule deinit`, with the
+    /// submodule's name as its path.
+    pub orphaned: Vec<SubmoduleWork>,
+}
+
+/// The names in a clone that its mirror does not hold, which a rebuilt
+/// clone does not have.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LocalNames {
+    /// Each local branch.
+    pub branches: Vec<String>,
+    /// Each tag.
+    pub tags: Vec<String>,
+    /// Each remote other than `origin`.
+    pub remotes: Vec<String>,
+    /// Each hook in the clone's git directory.
+    pub hooks: Vec<String>,
+    /// The name of each key of the clone's own configuration that a new
+    /// clone does not write. The values may be secrets, so they stay out.
+    pub config: Vec<String>,
+    /// Each rule of the clone's `info/exclude` that the person's repository
+    /// does not hold, which is where a rebuilt clone takes its rules from.
+    pub excludes: Vec<String>,
+}
+
 /// The changes in a checkout that removing it would delete.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -321,4 +384,159 @@ pub trait Backend {
     ///
     /// Returns the failure of the deletion, such as when the branch moved.
     fn delete_branch_at(&self, repository: &Path, branch: &str, commit: &str) -> Result<(), Error>;
+
+    /// Writes the reference `reference` at `commit` in the repository at
+    /// `repository`, replacing what it held. The reference keeps the commit
+    /// from garbage collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the update.
+    fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error>;
+
+    /// Fetches the `HEAD` of the clone at `checkout` into the bare `mirror`
+    /// under the reference `reference`, and returns the commit that the
+    /// reference then names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the fetch.
+    fn fetch_head_into_mirror(
+        &self,
+        mirror: &Path,
+        checkout: &Path,
+        reference: &str,
+    ) -> Result<String, Error>;
+
+    /// Deletes the reference `reference` of the repository at `repository`.
+    /// Deleting a reference that does not exist succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the deletion.
+    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error>;
+
+    /// Returns the commit that `revision` names in the repository at
+    /// `repository`, or `None` when it names no commit there.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup, such as a directory that is not a
+    /// repository.
+    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error>;
+
+    /// Stages every change and untracked file of `checkout` that the ignore
+    /// rules do not ignore, and commits them with `message`, without
+    /// running any hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the staging or the commit.
+    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error>;
+
+    /// Returns the failure when [`Backend::commit_all`] could not run in
+    /// `checkout`, such as a held index lock, and changes nothing that the
+    /// person can see.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason that the commit could not run.
+    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error>;
+
+    /// Returns what `git status` does not show about `checkout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error>;
+
+    /// Returns what the clone at `checkout` holds that a clone rebuilt from
+    /// its mirror at `mirror` and the person's repository at `source` would
+    /// not have.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn local_names(
+        &self,
+        checkout: &Path,
+        mirror: &Path,
+        source: &Path,
+    ) -> Result<LocalNames, Error>;
+
+    /// Deletes the remote `origin` of `checkout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the command.
+    fn remove_origin(&self, checkout: &Path) -> Result<(), Error>;
+
+    /// Returns the commits of `revision` that no remote branch of `origin`
+    /// holds, as the checkout or repository at `dir` last fetched them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error>;
+
+    /// Returns the remote branch that `branch` of the checkout at
+    /// `checkout` tracks, as a reference on the remote such as
+    /// `refs/heads/main`, or `None` when it tracks none.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error>;
+
+    /// Returns the remote that `branch` of the checkout at `checkout`
+    /// tracks a branch of, such as `origin`, or `None` when it tracks none.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn upstream_remote(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error>;
+
+    /// Makes `branch` of the checkout at `checkout` track the branch
+    /// `merge` of `remote`, a reference on the remote such as
+    /// `refs/heads/main`. The remote branch need not exist yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the config command.
+    fn set_upstream(
+        &self,
+        checkout: &Path,
+        branch: &str,
+        remote: &str,
+        merge: &str,
+    ) -> Result<(), Error>;
+
+    /// Points the repository's entry of the worktree at `checkout` at that
+    /// directory again, after the directory moved away and back.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the repair.
+    fn repair_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error>;
+
+    /// Creates a worktree of the repository at `checkout` on a detached
+    /// `HEAD` at `commit`, and returns the commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the command that creates the worktree.
+    fn add_detached_checkout(
+        &self,
+        repository: &Path,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<String, Error>;
+
+    /// Checks out `commit` on a detached `HEAD` in the clone at `checkout`,
+    /// writing its files, and returns the commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the checkout.
+    fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error>;
 }

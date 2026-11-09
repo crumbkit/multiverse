@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "0123456789abcdef0123456789abcdef",
+  "state": "archived",
+  "time": 1762560000,
+  "name": "sample",
+  "kind": "clone",
+  "path": "/home/agent/mxv/sample",
+  "checkouts": [
+    {
+      "folder": "app",
+      "path": "/home/agent/mxv/sample/app",
+      "source": "/home/agent/src/app",
+      "origin": "https://example.invalid/app.git",
+      "branch": "sample",
+      "base": "refs/remotes/origin/main",
+      "commit": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "mirror": "/home/agent/mirrors/app.git",
+      "pin": "refs/mxv/archives/0123456789abcdef0123456789abcdef/app"
+    }
+  ]
+}

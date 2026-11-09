@@ -144,6 +144,23 @@
           "format": "uint64",
           "minimum": 0
         },
+        "archived": {
+          "description": "How long ago the workspace was archived, or null in a row of a\nworkspace that is not archived.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "local_only": {
+          "description": "The number of commits of an archived workspace that exist only on\nthis machine, or null in a row of a workspace that is not archived.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "disposable": {
           "description": "The bytes that the workspace's disposable directories take on disk,\nsuch as `target/` and `node_modules/`, which `mxv clean` deletes, or\nnull when `--sizes` was not given.",
           "type": [
@@ -161,6 +178,8 @@
         "problem",
         "ports",
         "size",
+        "archived",
+        "local_only",
         "disposable"
       ]
     },

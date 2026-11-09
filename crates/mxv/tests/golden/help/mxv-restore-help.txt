@@ -1,6 +1,10 @@
 Rebuild an archived workspace at its archived commits
 
-Usage: mxv restore [OPTIONS]
+Usage: mxv restore [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          The name of the archived workspace
 
 Options:
       --dry-run
@@ -12,15 +16,6 @@ Options:
       --json
           Print the result as a JSON document. The default prints text.
 
-      --fields <FIELD>
-          Print only these comma-separated fields, in this order. The default prints the compact columns.
-
-      --long
-          Add the long columns after the compact ones. The default prints only the compact columns.
-
-      --full
-          With --json, print every field of every row. The default prints only the fields of the columns.
-
       --no-input
           Fail instead of asking a question
 
@@ -28,7 +23,7 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  mxv restore --dry-run
-          Print what restoring would do
+  mxv restore sample --dry-run
+          Print what restoring the archived workspace sample would do
 
 Effects: additive, not idempotent, open-world.

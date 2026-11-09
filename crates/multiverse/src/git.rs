@@ -35,10 +35,13 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::backend::{Backend, Changes, Head, Listed, Repository};
+use crate::backend::{Backend, Changes, Concealed, Head, Listed, LocalNames, Repository};
 use crate::error::Error;
 use crate::mirror::redacted;
 
+mod archive;
+mod concealed;
+mod detached;
 #[cfg(test)]
 mod tests;
 
@@ -56,6 +59,10 @@ pub const LOCAL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The most bytes of each output stream that a command keeps.
 pub const MOST_OUTPUT_BYTES: u64 = 1024 * 1024;
+
+/// The most bytes of output that a listing of every path of a checkout
+/// keeps, because a listing that stops early would hide work.
+const MOST_LISTING_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The program that this backend runs.
 const GIT: &str = "git";
@@ -107,11 +114,6 @@ const ORIGIN_NOTES: &str = "+refs/notes/*:refs/mxv/origin/notes/*";
 /// The pattern of the copies of the tags and notes of a clone's `origin`.
 const ORIGIN_REFS: &str = "--glob=refs/mxv/origin/*";
 
-/// How far before the oldest detached commit [`detached_commits`] looks for
-/// a copy of it, in seconds, so a clock that was a little wrong when the
-/// copy was made does not hide it.
-const COPY_MARGIN: i64 = 24 * 60 * 60;
-
 /// Returns the lines of `text` that are not empty.
 fn lines(text: &str) -> Vec<String> {
     text.lines()
@@ -120,222 +122,34 @@ fn lines(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Returns the commits made on a detached `HEAD` in the git directory
-/// `dir` that nothing else holds, which deleting the clone loses and git
-/// itself warns about when `HEAD` leaves them.
-///
-/// A commit counts when only the reflog of `HEAD` holds it: the reflog of
-/// no local branch holds it or a descendant of it, and no branch, tag,
-/// note or copy of `origin` holds it. A commit that was rewritten on a
-/// branch, by `git rebase`, `git commit --amend` or `git reset`, is in the
-/// branch's reflog and was given up on purpose, so it does not count. A
-/// commit whose patch matches a commit that `origin` or a local branch
-/// holds, such as one that was cherry-picked onto the branch, does not
-/// count either.
-fn detached_commits(dir: &Path) -> Result<Vec<String>, Error> {
-    let branches = run(
-        dir,
-        ["for-each-ref", "--format=%(refname)", "refs/heads"],
-        "for-each-ref",
-        LOCAL_DEADLINE,
-    )?
-    .ok("for-each-ref", dir)?;
-    let branches = lines(&branches);
-    let reflog = |refs: &[String]| -> Result<Vec<String>, Error> {
-        let mut args: Vec<String> = ["log", "-g", "--format=%H"].map(str::to_owned).to_vec();
-        args.extend(refs.iter().cloned());
-        args.push("--".to_owned());
-        let logged = run(dir, &args, "log -g", LOCAL_DEADLINE)?.ok("log -g", dir)?;
-        Ok(lines(&logged))
-    };
-    let on_branches = if branches.is_empty() {
-        Vec::new()
-    } else {
-        reflog(&branches)?
-    };
-    let mut only_head: Vec<String> = reflog(&["HEAD".to_owned()])?
-        .into_iter()
-        .filter(|commit| !on_branches.contains(commit))
-        .collect();
-    only_head.sort_unstable();
-    only_head.dedup();
-    if only_head.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut args: Vec<String> = ["rev-list", "--ignore-missing"].map(str::to_owned).to_vec();
-    args.extend(only_head);
-    args.extend(
-        [
-            "--not",
-            "--branches",
-            "--tags",
-            "--glob=refs/notes/*",
-            "--remotes=origin",
-            ORIGIN_REFS,
-        ]
-        .map(str::to_owned),
-    );
-    args.extend(on_branches);
-    args.push("--".to_owned());
-    let candidates = lines(&run(dir, &args, "rev-list", LOCAL_DEADLINE)?.ok("rev-list", dir)?);
-    if candidates.is_empty() {
-        return Ok(candidates);
-    }
-    let mut args: Vec<String> = ["log", "--no-walk", "--format=%ct"]
-        .map(str::to_owned)
-        .to_vec();
-    args.extend(candidates.iter().cloned());
-    args.push("--".to_owned());
-    let oldest = run(dir, &args, "log", LOCAL_DEADLINE)?
-        .ok("log", dir)?
-        .lines()
-        .filter_map(|line| line.trim().parse::<i64>().ok())
-        .min()
-        .unwrap_or(0);
-    let mut args: Vec<String> = vec!["--no-walk".to_owned()];
-    args.extend(candidates.iter().cloned());
-    let patches = patch_ids(dir, &args)?;
-    let known = patch_ids(
-        dir,
-        &[
-            format!("--max-age={}", oldest.saturating_sub(COPY_MARGIN).max(0)),
-            "--branches".to_owned(),
-            "--remotes=origin".to_owned(),
-            ORIGIN_REFS.to_owned(),
-        ],
-    )?;
-    let known: Vec<&String> = known.values().collect();
-    Ok(candidates
-        .into_iter()
-        .filter(|commit| {
-            patches
-                .get(commit)
-                .is_none_or(|patch| !known.contains(&patch))
-        })
-        .collect())
-}
-
-/// Returns the stable patch ID of each commit that `git log` lists with
-/// `revisions` in the git directory `dir`, by commit. A merge and a commit
-/// that changes nothing have no patch ID and are left out. `git log -p`
-/// writes straight into `git patch-id`, so no patch passes through mxv.
-fn patch_ids(
-    dir: &Path,
-    revisions: &[String],
-) -> Result<std::collections::HashMap<String, String>, Error> {
-    let git = || {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
-        )]
-        let mut command = Command::new(GIT);
-        command
-            .arg("-C")
-            .arg(dir)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C");
-        command
-    };
-    let mut log = git();
-    log.args([
-        "log",
-        "-p",
-        "--no-merges",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--pretty=medium",
-    ])
-    .args(revisions)
-    .arg("--")
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
-    let unstartable = |source| Error::ProgramMissing {
-        program: GIT,
-        source,
-    };
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
-    )]
-    let spawned = log.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/git.rs holds the child and owns its deadline and cleanup (PROC-1)"
-    )]
-    let mut producer: std::process::Child = spawned.map_err(unstartable)?;
-    let patches = producer.stdout.take().map_or_else(Stdio::null, Stdio::from);
-    let mut patch_id = git();
-    patch_id
-        .args(["patch-id", "--stable"])
-        .stdin(patches)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
-    )]
-    let spawned = patch_id.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/git.rs holds the child and owns its deadline and cleanup (PROC-1)"
-    )]
-    let mut consumer: std::process::Child = match spawned {
-        Ok(child) => child,
-        Err(source) => {
-            let _ = producer.kill();
-            let _ = producer.wait();
-            return Err(unstartable(source));
-        }
-    };
-    let stdout = consumer.stdout.take().map(drain);
-    let stderr = consumer.stderr.take().map(drain);
-    let waited = consumer.wait_timeout(LOCAL_DEADLINE);
-    let status = match waited {
-        Ok(Some(status)) => status,
-        Ok(None) | Err(_) => {
-            // Both children are killed and reaped whatever the wait
-            // reported, so no zombie remains.
-            let _ = consumer.kill();
-            let _ = consumer.wait();
-            let _ = producer.kill();
-            let _ = producer.wait();
-            return Err(Error::TimedOut {
-                operation: "patch-id",
-                dir: dir.to_path_buf(),
-                deadline: LOCAL_DEADLINE,
-            });
-        }
-    };
-    // `git patch-id` read the whole log, so the log has ended or ends now.
-    let _ = producer.wait();
-    let finished = Finished {
-        status,
-        stdout: joined(stdout),
-        stderr: joined(stderr),
-    };
-    let listed = finished.ok("patch-id", dir)?;
-    Ok(listed
-        .lines()
-        .filter_map(|line| {
-            let (patch, commit) = line.split_once(' ')?;
-            Some((commit.to_owned(), patch.to_owned()))
-        })
-        .collect())
-}
-
 /// Returns the git directory of the clone at `checkout`, followed by the
 /// git directory of each submodule that the clone has initialised, which
 /// git keeps below `.git/modules`, at any depth. A submodule's commits
 /// live only in its git directory, so deleting the clone loses them too.
+/// A worktree or a submodule has a file named `.git`, so its `.git/modules`
+/// is no directory and it adds no submodules here.
 fn git_dirs(checkout: &Path) -> Result<Vec<PathBuf>, Error> {
     let mut dirs = vec![checkout.to_path_buf()];
-    let mut pending = vec![checkout.join(".git").join("modules")];
+    dirs.extend(module_dirs(&checkout.join(".git").join("modules"))?);
+    Ok(dirs)
+}
+
+/// Returns the git directory of each submodule below `modules`, the
+/// `modules` directory of a git directory, at any depth.
+fn module_dirs(modules: &Path) -> Result<Vec<PathBuf>, Error> {
+    let mut dirs = Vec::new();
+    let mut pending = vec![modules.to_path_buf()];
     while let Some(dir) = pending.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
             Err(source) => return Err(Error::Inaccessible { path: dir, source }),
         };
         for entry in entries {
@@ -433,6 +247,22 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_keeping(dir, args, operation, deadline, MOST_OUTPUT_BYTES)
+}
+
+/// Runs `git -C <dir> <args>` as [`run`] does, and keeps the first `kept`
+/// bytes of its standard output.
+fn run_keeping<I, S>(
+    dir: &Path,
+    args: I,
+    operation: &'static str,
+    deadline: Duration,
+    kept: u64,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
@@ -460,8 +290,11 @@ where
         program: GIT,
         source,
     })?;
-    let stdout = child.stdout.take().map(drain);
-    let stderr = child.stderr.take().map(drain);
+    let stdout = child.stdout.take().map(|stream| drain(stream, kept));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|stream| drain(stream, MOST_OUTPUT_BYTES));
     let waited = child.wait_timeout(deadline);
     let status = match waited {
         Ok(Some(status)) => status,
@@ -485,13 +318,13 @@ where
     })
 }
 
-/// Reads `stream` on a thread of its own: the first [`MOST_OUTPUT_BYTES`]
-/// bytes into a buffer, and the rest into nothing, so the child never
-/// blocks on a full pipe.
-fn drain<R: Read + Send + 'static>(mut stream: R) -> thread::JoinHandle<Vec<u8>> {
+/// Reads `stream` on a thread of its own: the first `most` bytes into a
+/// buffer, and the rest into nothing, so the child never blocks on a full
+/// pipe.
+fn drain<R: Read + Send + 'static>(mut stream: R, most: u64) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut kept = Vec::new();
-        let _ = (&mut stream).take(MOST_OUTPUT_BYTES).read_to_end(&mut kept);
+        let _ = (&mut stream).take(most).read_to_end(&mut kept);
         let _ = io::copy(&mut stream, &mut io::sink());
         kept
     })
@@ -746,7 +579,7 @@ impl Backend for Git {
         // matches, and names a matched directory once, such as
         // `web/node_modules/`, so a large build directory costs one line
         // and keeps the name that marks it disposable.
-        let status = run(
+        let status = run_keeping(
             checkout,
             [
                 // A status refreshes the index when it can, which would
@@ -764,6 +597,7 @@ impl Backend for Git {
             ],
             "status",
             LOCAL_DEADLINE,
+            MOST_LISTING_BYTES,
         )?
         .ok("status", checkout)?;
         let mut changes = Changes::default();
@@ -1047,7 +881,7 @@ impl Backend for Git {
             )?
             .ok("rev-list", &dir)?;
             let held = lines(&held);
-            let detached = detached_commits(&dir)?;
+            let detached = detached::detached_commits(&dir)?;
             unpushed.extend(detached.into_iter().filter(|commit| !held.contains(commit)));
             unpushed.extend(held);
         }
@@ -1088,6 +922,91 @@ impl Backend for Git {
         )?
         .ok("update-ref -d", repository)
         .map(drop)
+    }
+
+    fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error> {
+        archive::write_ref(repository, reference, commit)
+    }
+
+    fn fetch_head_into_mirror(
+        &self,
+        mirror: &Path,
+        checkout: &Path,
+        reference: &str,
+    ) -> Result<String, Error> {
+        archive::fetch_head_into_mirror(mirror, checkout, reference)
+    }
+
+    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error> {
+        archive::delete_ref(repository, reference)
+    }
+
+    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error> {
+        archive::resolve_commit(repository, revision)
+    }
+
+    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
+        archive::commit_all(checkout, message)
+    }
+
+    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error> {
+        concealed::check_commit_all(checkout)
+    }
+
+    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error> {
+        concealed::concealed(checkout)
+    }
+
+    fn local_names(
+        &self,
+        checkout: &Path,
+        mirror: &Path,
+        source: &Path,
+    ) -> Result<LocalNames, Error> {
+        concealed::local_names(checkout, mirror, source)
+    }
+
+    fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
+        archive::remove_origin(checkout)
+    }
+
+    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
+        archive::local_only_commits(dir, revision)
+    }
+
+    fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
+        archive::upstream(checkout, branch)
+    }
+
+    fn upstream_remote(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
+        archive::upstream_remote(checkout, branch)
+    }
+
+    fn set_upstream(
+        &self,
+        checkout: &Path,
+        branch: &str,
+        remote: &str,
+        merge: &str,
+    ) -> Result<(), Error> {
+        archive::set_upstream(checkout, branch, remote, merge)
+    }
+
+    fn repair_checkout(&self, repository: &Path, checkout: &Path) -> Result<(), Error> {
+        archive::repair_checkout(repository, checkout)
+    }
+
+    fn add_detached_checkout(
+        &self,
+        repository: &Path,
+        checkout: &Path,
+        commit: &str,
+    ) -> Result<String, Error> {
+        archive::add_detached_checkout(repository, checkout, commit)
+    }
+
+    fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error> {
+        archive::detach_head(checkout, commit)
     }
 }
 

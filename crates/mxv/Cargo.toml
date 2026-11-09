@@ -27,9 +27,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-# `derive` writes the `Failure` impl of the unbuilt failure from its
-# `#[failure(...)]` attribute.
-crumbkit = { workspace = true, features = ["derive"] }
+crumbkit = { workspace = true }
 # mxv is a binary, so it chooses clap's user-facing features: help, usage
 # lines, error context, suggestions for mistyped commands, and colour when
 # the output goes to a terminal. These are clap's default features.

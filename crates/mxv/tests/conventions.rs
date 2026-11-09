@@ -34,11 +34,6 @@
 //! their records. Each chain of those checks reads the records from a copy
 //! of that fixture, and acts on the real checkouts, so each refusal has a
 //! workspace of its own.
-//!
-//! `archive` and `restore` are declared before they are built. Each
-//! one fails with `mxv::command::unbuilt`, so its examples cannot run and a
-//! write verb has no document yet. The opt-outs below name each verb and
-//! say so, and the pull request that builds a verb removes its opt-outs.
 
 #![cfg(test)]
 
@@ -52,6 +47,9 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
+    ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_CODES, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE,
+    ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_RECORD_TOO_LARGE,
+    ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED, ARCHIVE_UNSAVED_WORK, ARCHIVE_VOLUMES_IN_USE,
     BRANCH_EXISTS, CHECKOUT_INCOMPLETE, CHECKOUT_INVALID_NAME, CHECKOUT_LOCKED,
     CHECKOUT_NAME_TAKEN, CHECKOUT_NOT_FOUND, CHECKOUT_ORIGIN_UNREACHABLE, CHECKOUT_RESUME_BLOCKED,
     CHECKOUT_STASHES, CHECKOUT_UNOWNED, CHECKOUT_UNPUSHED_COMMITS, CHECKOUT_UNREACHABLE_COMMITS,
@@ -66,8 +64,9 @@ use mxv::{
     PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_TABLE_UNREADABLE,
     PROCESS_UNSTARTABLE, PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT,
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RUN_CODES,
-    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, UNBUILT, UNBUILT_CODES, VOLUME_RENAMED,
+    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED,
+    RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
+    RESTORE_UNFINISHED, RUN_CODES, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, VOLUME_RENAMED,
     WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
     WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
     WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
@@ -75,9 +74,6 @@ use mxv::{
 use tempfile::TempDir;
 
 use crate::support::{git, repository};
-
-/// The reason that an unbuilt verb's examples do not run.
-const NO_RUN: &str = "The verb is declared before it is built and fails with mxv::command::unbuilt, so its examples have no output to pin until the pull request that builds it.";
 
 /// The reason that a code of the container verbs is unprovoked here.
 const DOCKER: &str = "Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.";
@@ -88,8 +84,8 @@ const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a l
 /// The reason that `down` and `restart` ask no question.
 const NO_QUESTION: &str = "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";
 
-/// The reason that an unbuilt write verb declares no document.
-const NO_DOCUMENT: &str = "The verb is declared before it is built, and the pull request that builds it adds its document and the document's schema golden.";
+/// The reason that a code of `archive` and `restore` is unprovoked here.
+const ARCHIVE_STATE: &str = "Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.";
 
 /// The `mxv` command's opt-outs from crumbkit's conventions, which every
 /// check below reads.
@@ -108,8 +104,11 @@ const ALLOW: &[Allow] = &[
         "add",
         "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
     ),
-    Allow::new(Rule::Examples, "archive", NO_RUN),
-    Allow::new(Rule::Examples, "restore", NO_RUN),
+    Allow::new(
+        Rule::Examples,
+        "archive",
+        "The example archives a live workspace, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/archive.rs runs the verb.",
+    ),
     Allow::new(
         Rule::Examples,
         "self usage",
@@ -120,8 +119,6 @@ const ALLOW: &[Allow] = &[
         "self figures list",
         "The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.",
     ),
-    Allow::new(Rule::GuideDocument, "archive", NO_DOCUMENT),
-    Allow::new(Rule::GuideDocument, "restore", NO_DOCUMENT),
     Allow::new(Rule::Yes, "down", NO_QUESTION),
     Allow::new(Rule::Yes, "restart", NO_QUESTION),
     Allow::new(
@@ -135,10 +132,6 @@ const ALLOW: &[Allow] = &[
         "The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.",
     ),
     Allow::new(Rule::Examples, "ports reset", NO_LIVE_CHECKOUT),
-    Allow::untwinned(
-        Failing::new(&UNBUILT, &["archive"]),
-        "Every unbuilt verb fails with this code whatever its arguments, so no single word of the command line causes it.",
-    ),
     Allow::untwinned(
         NEWER_RECORD,
         "The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.",
@@ -164,6 +157,10 @@ const ALLOW: &[Allow] = &[
         "The directory at the config file's path causes the failure, and no word of the command line names the config file.",
     ),
 ];
+
+/// `restore` of a name that no archive has.
+const RESTORE_MISSING: Failing<'static> =
+    Failing::new(&RESTORE_NOT_FOUND, &["restore", "missing", "--dry-run"]);
 
 /// `show` of a record that holds another name than its file.
 const MISMATCHED_RECORD: Failing<'static> =
@@ -302,7 +299,7 @@ fn every_exit_code_meets_the_exit_code_rules() {
 
 #[test]
 fn every_failure_code_is_declared_once_and_spelled_by_the_rules() {
-    crumbkit_test::check_codes(&GUIDE, &[CODES, RUN_CODES, UNBUILT_CODES]);
+    crumbkit_test::check_codes(&GUIDE, &[CODES, RUN_CODES, ARCHIVE_CODES]);
 }
 
 #[test]
@@ -504,7 +501,7 @@ const STARTS: &[Failing<'static>] = &[
     BAD_CONFIG,
     UNREADABLE_CONFIG,
     Failing::new(&CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
-    Failing::new(&UNBUILT, &["archive"]),
+    RESTORE_MISSING,
     STATUS_OUTSIDE,
     STATUS_MISSING,
     CLEAN_NO_LIMIT,
@@ -517,6 +514,22 @@ const STARTS: &[Failing<'static>] = &[
 /// The declared codes that no command line in this test provokes, because
 /// each needs a state that a fixed fixture cannot hold.
 const UNPROVOKED: &[Unprovoked<'static>] = &[
+    Unprovoked::new(&ARCHIVE_NOT_FOUND, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_NAME_TAKEN, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_SOURCE_CHANGED, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_MIRROR_MISSING, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_UNSAVED_WORK, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_IN_USE, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_STATE),
+    Unprovoked::new(&ARCHIVE_VOLUMES_IN_USE, ARCHIVE_STATE),
+    Unprovoked::new(&RESTORE_NAME_TAKEN, ARCHIVE_STATE),
+    Unprovoked::new(&RESTORE_BRANCH_MOVED, ARCHIVE_STATE),
+    Unprovoked::new(&RESTORE_COMMIT_MISSING, ARCHIVE_STATE),
+    Unprovoked::new(&RESTORE_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(&RESTORE_ROOT_FILE_CHANGED, ARCHIVE_STATE),
     Unprovoked::new(
         &MIRROR_LOCKED,
         "Only a mirror whose lock another mxv command holds for longer than mxv waits provokes it, which is longer than the check waits for a run; the library's workspace tests provoke it with a short wait.",
@@ -845,7 +858,7 @@ fn every_recovery_leads_to_a_command_that_runs() {
     );
     let recoveries = Recoveries::new(
         examples(&repositories.path),
-        &[CODES, RUN_CODES, UNBUILT_CODES],
+        &[CODES, RUN_CODES, ARCHIVE_CODES],
     )
     .starts(&starts)
     .unprovoked(UNPROVOKED);
@@ -856,6 +869,7 @@ fn every_recovery_leads_to_a_command_that_runs() {
 /// differs from its refused line in one word or one variable (TEST-1).
 const PAIRS: &[Twin<'static>] = &[
     Twin::new(CD_MISSING, &["cd", "reading-list"]),
+    Twin::new(RESTORE_MISSING, &["restore", "sample", "--dry-run"]),
     Twin::new(NEW_TAKEN_NAME, NEW_TRIAGE),
     Twin::new(NEW_BAD_NAME, NEW_TRIAGE),
     Twin::new(NEW_TAKEN_BRANCH, NEW_TRIAGE),
@@ -903,7 +917,7 @@ fn every_declared_code_has_a_twin_that_the_command_accepts() {
     );
     let twins = Twins::new(
         examples(&repositories.path),
-        &[CODES, RUN_CODES, UNBUILT_CODES],
+        &[CODES, RUN_CODES, ARCHIVE_CODES],
     )
     .pairs(&pairs)
     .unprovoked(UNPROVOKED);

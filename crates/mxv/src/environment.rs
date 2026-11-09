@@ -47,7 +47,7 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "XDG_STATE_HOME",
-        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock and marks of each workspace in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
+        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock and marks of each workspace in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. Each archive is in `$XDG_STATE_HOME/mxv/archives/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
     },
     Variable {
         name: "MXV_ROOT",
@@ -203,6 +203,12 @@ impl Environment {
     /// and phase's state.
     pub(crate) fn state(&self) -> Result<PathBuf, MxvFailure> {
         Ok(self.bases()?.state.join("mxv"))
+    }
+
+    /// Returns the directory of the archives,
+    /// `$XDG_STATE_HOME/mxv/archives`.
+    pub(crate) fn archives(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.state()?.join("archives"))
     }
 
     /// Returns the directory of the workspace records,

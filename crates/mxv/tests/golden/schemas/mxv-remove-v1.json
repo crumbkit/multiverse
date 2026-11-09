@@ -475,6 +475,13 @@
             "string",
             "null"
           ]
+        },
+        "pins": {
+          "description": "The references that `mxv remove --archived` deleted, or empty for\nthe removal of a workspace.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -490,7 +497,8 @@
         "volumes",
         "manifest_paths",
         "warnings",
-        "manifest_deleted"
+        "manifest_deleted",
+        "pins"
       ]
     },
     "DirectoryFate": {

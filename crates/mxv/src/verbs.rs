@@ -538,6 +538,9 @@ pub(crate) fn list(
     environment: &Environment,
     args: &ListArgs,
 ) -> Result<Listing<WorkspaceRow>, MxvFailure> {
+    if args.archived {
+        return crate::archive::list(environment, args);
+    }
     let records = store(environment)?.list()?;
     let measure = if args.sizes {
         Some(configured(environment)?)
@@ -562,6 +565,7 @@ pub(crate) fn list(
             _ => row,
         });
     }
+    crate::archive::mark_unfinished(environment, &mut rows)?;
     Ok(args.page.first_of(rows).described("workspaces").next(
         Call::new(&["show"]).arg("names"),
         "takes up to 100 names in one call.",
@@ -653,6 +657,9 @@ pub(crate) fn remove(
     environment: &Environment,
     args: &RemoveArgs,
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {
+    if args.archived {
+        return crate::archive::remove(output, environment, args);
+    }
     let name = parse_name(&args.name)?;
     let workspaces = configured(environment)?;
     // Running processes stop the removal unless it is forced, and a forced
