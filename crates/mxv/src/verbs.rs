@@ -378,7 +378,7 @@ fn clone_into(
 
 /// Adds the checkout that `args` names to a workspace, or plans it on a
 /// dry run. It holds the workspace's lock, which `up` and `down` take, and
-/// refuses while the workspace's processes or containers run, because
+/// refuses while the workspace's units run, because
 /// adding a second checkout renames the first checkout's units and ports.
 pub(crate) fn add(
     output: &Output,

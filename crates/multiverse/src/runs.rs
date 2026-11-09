@@ -100,7 +100,7 @@ pub enum ProcessState {
     },
     /// docker is restarting the container under its restart policy.
     Restarting,
-    /// phase cannot tell what the process is doing, such as when docker
+    /// phase cannot tell what the unit is doing, such as when docker
     /// does not answer, and leaves it alone.
     Unknown {
         /// Why phase cannot tell, in a sentence.

@@ -82,7 +82,7 @@ const DOCKER: &str = "Only a live checkout whose mxv.toml declares containers, w
 const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.";
 
 /// The reason that `down` and `restart` ask no question.
-const NO_QUESTION: &str = "The command stops only processes that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";
+const NO_QUESTION: &str = "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";
 
 /// The reason that a code of `archive` and `restore` is unprovoked here.
 const ARCHIVE_STATE: &str = "Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.";
@@ -124,12 +124,12 @@ const ALLOW: &[Allow] = &[
     Allow::new(
         Rule::Yes,
         "reclaim",
-        "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the processes and containers that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
+        "A load manager runs the command when the machine runs short, and no person is there to answer. It stops only the units that mxv up started for idle workspaces, which mxv up starts again, and deletes only the disposable directories that mxv clean --yes deletes, so it asks no question first.",
     ),
     Allow::new(
         Rule::Yes,
         "ports reset",
-        "The command replaces only host ports that mxv allocated, refuses while the workspace's processes run, and deletes no file that the person wrote, so it asks no question first.",
+        "The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.",
     ),
     Allow::new(Rule::Examples, "ports reset", NO_LIVE_CHECKOUT),
     Allow::untwinned(

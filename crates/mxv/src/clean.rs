@@ -1,7 +1,7 @@
 //! The verb `clean`, which deletes the disposable directories of idle
 //! workspaces, and the document it prints.
 //!
-//! A workspace is idle when none of its processes or containers run, no
+//! A workspace is idle when none of its units run, no
 //! other process, such as a `cargo build`, a shell or an editor, has its
 //! working directory inside the workspace, and its checkouts have not
 //! changed for the idle age, as
@@ -293,10 +293,7 @@ pub(crate) fn busy(
     idle: Duration,
 ) -> Option<String> {
     if !running.is_empty() {
-        return Some(format!(
-            "its processes or containers run: {}",
-            running.join(", ")
-        ));
+        return Some(format!("its units run: {}", running.join(", ")));
     }
     if let Some(reason) = user_reason(users) {
         return Some(reason);

@@ -1281,7 +1281,7 @@ fn an_unreachable_origin_leaves_no_empty_mirror_behind() {
     fs::remove_dir_all(&mirror).unwrap();
     let origin = setup.fixture.origin.clone();
     let hidden = origin.with_extension("hidden");
-    fs::rename(&origin, &hidden).unwrap();
+    crate::store::move_aside(&origin, &hidden).unwrap();
     assert!(
         setup
             .workspaces
@@ -1292,7 +1292,7 @@ fn an_unreachable_origin_leaves_no_empty_mirror_behind() {
         !mirror.join("HEAD").exists(),
         "the failed run left a mirror"
     );
-    fs::rename(&hidden, &origin).unwrap();
+    crate::store::move_aside(&hidden, &origin).unwrap();
     setup.restore();
     assert_eq!(setup.head(), commit);
 }

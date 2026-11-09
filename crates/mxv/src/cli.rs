@@ -100,28 +100,28 @@ pub const GUIDE: Guide = Guide::new()
         Leaf::new(&["up"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "web"],
-                "Start the process web of the workspace reading-list and the processes it depends on",
+                "Start the unit web of the workspace reading-list and the units it depends on",
             )])
             .effects(Effects::additive().idempotent().open_world().all_or_none())
             .document(UP),
         Leaf::new(&["down"])
             .examples(&[Example::new(
                 &["-w", "reading-list"],
-                "Stop every process of the workspace reading-list",
+                "Stop every unit of the workspace reading-list",
             )])
             .effects(Effects::destructive().idempotent().per_item())
             .document(DOWN),
         Leaf::new(&["restart"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "web"],
-                "Stop the process web of the workspace reading-list and start it again",
+                "Stop the unit web of the workspace reading-list and start it again",
             )])
             .effects(Effects::destructive().open_world().all_or_none())
             .document(RESTART),
         Leaf::new(&["status"])
             .examples(&[Example::new(
                 &["-w", "reading-list"],
-                "Report the state of each process of the workspace reading-list",
+                "Report the state of each unit of the workspace reading-list",
             )])
             .effects(Effects::read_only())
             .document(STATUS),
@@ -234,7 +234,7 @@ pub(crate) enum Verb {
     New(NewArgs),
     /// Add a clone of a repository to a workspace, on the workspace's branch.
     ///
-    /// The clone lives in <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's processes, containers and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's processes or containers run, and moves the host ports that the workspace holds to the new names.
+    /// The clone lives in <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
     Add(AddArgs),
     /// List the workspaces.
     List(ListArgs),
@@ -242,17 +242,17 @@ pub(crate) enum Verb {
     Show(ShowArgs),
     /// Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it.
     Cd(CdArgs),
-    /// Start a workspace's processes from its mxv.toml, in dependency order, and wait until each is ready.
+    /// Start a workspace's units from its mxv.toml, in dependency order, and wait until each is ready.
     Up(ProcessesArgs),
-    /// Stop a workspace's processes with SIGTERM, then SIGKILL after 10 seconds.
+    /// Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds.
     Down(ProcessesArgs),
-    /// Stop a workspace's processes and start them again.
+    /// Stop a workspace's units and start them again.
     Restart(ProcessesArgs),
-    /// Report whether each process of a workspace is running, exited or stopped.
+    /// Report whether each unit of a workspace is running, exited or stopped.
     Status(StatusArgs),
-    /// Print the last lines of a process's log, and follow it with --follow.
+    /// Print the last lines of a unit's log, and follow it with --follow.
     Logs(LogsArgs),
-    /// Run a one-off command in the context of a running process or container, and exit with its exit code.
+    /// Run a one-off command in the context of a running unit, and exit with its exit code.
     ///
     /// A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
     Exec(ExecArgs),
@@ -267,11 +267,11 @@ pub(crate) enum Verb {
     Remove(RemoveArgs),
     /// Delete the disposable directories, such as target/ and node_modules/, of idle workspaces.
     ///
-    /// A workspace is idle when none of its processes or containers run, no other process, such as a cargo build, a shell or an editor, has its working directory inside the workspace, and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
+    /// A workspace is idle when none of its units run, no other process, such as a cargo build, a shell or an editor, has its working directory inside the workspace, and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
     Clean(CleanArgs),
     /// Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
     ///
-    /// With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same processes and containers again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
+    /// With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same units again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
     Reclaim(ReclaimArgs),
     /// Keep mxv reclaim from stopping a workspace.
     Pin(PinArgs),
@@ -531,7 +531,7 @@ pub(crate) struct RemoveArgs {
     #[arg(long, conflicts_with_all = ["force", "delete_unmerged"])]
     pub(crate) archived: bool,
 
-    /// Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running processes and containers; an unmerged branch and the workspace's volumes are still kept
+    /// Discard uncommitted changes, untracked files, ignored files such as .env and a clone's stashes, and stop running units; an unmerged branch and the workspace's volumes are still kept
     #[arg(long)]
     pub(crate) force: bool,
 
@@ -646,8 +646,8 @@ pub(crate) struct ProcessesArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// The processes, which default to every process
-    #[arg(value_name = "PROCESS")]
+    /// The units, which default to every unit
+    #[arg(value_name = "UNIT")]
     pub(crate) processes: Vec<String>,
 }
 
@@ -666,8 +666,8 @@ pub(crate) struct ExecArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// The running process or container in whose context the command runs
-    #[arg(value_name = "PROCESS")]
+    /// The running unit in whose context the command runs
+    #[arg(value_name = "UNIT")]
     pub(crate) process: String,
 
     /// The command's program and its arguments, after `--`
@@ -682,11 +682,11 @@ pub(crate) struct LogsArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// The process whose log to print
-    #[arg(value_name = "PROCESS")]
+    /// The unit whose log to print
+    #[arg(value_name = "UNIT")]
     pub(crate) process: String,
 
-    /// Keep printing each line that the process writes, until interrupted
+    /// Keep printing each line that the unit writes, until interrupted
     #[arg(short, long)]
     pub(crate) follow: bool,
 

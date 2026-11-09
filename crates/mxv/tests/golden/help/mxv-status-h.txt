@@ -1,4 +1,4 @@
-Report whether each process of a workspace is running, exited or stopped
+Report whether each unit of a workspace is running, exited or stopped
 
 Usage: mxv status [OPTIONS]
 
@@ -10,6 +10,6 @@ Examples:
   mxv status -w reading-list
 
 Effects: read-only, closed-world.
-Children: one indented line under a process for each note of `up` or `restart`, which starts with `warning:` or `info:`.
+Children: one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv status --help` describes them.
 Next: mxv status --help explains each column.

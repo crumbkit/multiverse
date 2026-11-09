@@ -134,7 +134,7 @@ pub(crate) struct ArchiveResult {
     wip: Vec<String>,
     /// What `--force` lost, or would lose.
     lost: Vec<String>,
-    /// The workspace's processes that the run stopped, or would stop.
+    /// The workspace's units that the run stopped, or would stop.
     stopped: Vec<String>,
     /// The ignored build directories that the run deleted, or would delete,
     /// because a build makes them again.
@@ -183,7 +183,7 @@ impl fmt::Display for ArchiveResult {
             )
         };
         for process in &self.stopped {
-            writeln!(formatter, "mxv {stops} the process {process}.")?;
+            writeln!(formatter, "mxv {stops} the unit {process}.")?;
         }
         for path in &self.wip {
             writeln!(formatter, "mxv {commits} {path}.")?;
@@ -376,7 +376,7 @@ fn cd_target(environment: &Environment, path: &std::path::Path) -> Option<String
 /// What an archive did beyond the record, for its result.
 #[derive(Default)]
 struct Done {
-    /// The processes that the run stopped.
+    /// The units that the run stopped.
     stopped: Vec<String>,
     /// The disposable paths.
     disposable: Vec<String>,

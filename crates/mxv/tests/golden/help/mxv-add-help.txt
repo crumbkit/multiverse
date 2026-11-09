@@ -1,6 +1,6 @@
 Add a clone of a repository to a workspace, on the workspace's branch.
 
-The clone lives in <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's processes, containers and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's processes or containers run, and moves the host ports that the workspace holds to the new names.
+The clone lives in <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
 
 Usage: mxv add [OPTIONS] --repo <PATH>
 

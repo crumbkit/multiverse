@@ -437,7 +437,7 @@
           }
         },
         "stopped": {
-          "description": "The workspace's processes that the run stopped, or would stop.",
+          "description": "The workspace's units that the run stopped, or would stop.",
           "type": "array",
           "items": {
             "type": "string"

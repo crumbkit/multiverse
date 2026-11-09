@@ -10,7 +10,7 @@ mod support;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::process::{ChildStdin, ChildStdout, Stdio};
 
 use serde_json::Value;
 use snapbox::cmd::Command;
@@ -561,7 +561,11 @@ fn a_record_over_the_limit_refuses_with_its_code_before_anything_changes() {
 /// A run of `mxv archive` that waits at its question in a terminal, which
 /// the `script` program provides, because mxv asks only a terminal.
 struct Prompted {
-    child: Child,
+    #[expect(
+        clippy::disallowed_types,
+        reason = "the test talks to the terminal program while it runs, which the snapshot harness cannot do"
+    )]
+    child: std::process::Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
     /// What the terminal showed up to the end of the question.

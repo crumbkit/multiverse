@@ -227,8 +227,8 @@ holds.
 
 ### Phase plans
 
-Each unit of the merged manifest is one phase app, named by its merged
-name, and each port is one phase port, named by its merged name. Because
+The plan names each unit's phase app and each phase port by the merged
+name, and `phase_plan.rs` describes how a unit becomes an app. Because
 the merge refuses equal names, no two apps and no two ports of the plan
 share a name. The merge makes each process's `cwd` absolute, and the
 plan turns it back into a source and a relative `cwd`: the source is the
