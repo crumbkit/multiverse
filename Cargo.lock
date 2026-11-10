@@ -158,6 +158,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
+dependencies = [
+ "clap",
+ "clap_lex",
+ "is_executable",
+ "shlex",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -278,11 +290,12 @@ dependencies = [
 
 [[package]]
 name = "crumbkit"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b194b29e94baff2b1af2bbf8a2bce329243e33db2b7a7a5b02554ff24e77184d"
+checksum = "5da6bfc867208a12940c7e9f356e47ea04dc026eb2dddf2542160fa6b51268f3"
 dependencies = [
  "clap",
+ "clap_complete",
  "humantime",
  "is-ai-agent",
  "rustix",
@@ -297,7 +310,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a412357d2a5a502bf4be116a79fd6cb10a4313fd923b976dd895f0c279b09fa8"
 dependencies = [
- "crumbkit 0.3.0",
+ "crumbkit 0.3.1",
  "serde",
  "serde_json",
 ]
@@ -309,7 +322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d6b184f9079e0a2a2c268eb231283e0322cea551bee1f47e7d6d99a19e11f96"
 dependencies = [
  "clap",
- "crumbkit 0.3.0",
+ "crumbkit 0.3.1",
  "schemars 1.2.3",
  "serde",
 ]
@@ -321,7 +334,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53fca87575d9dc39c9e16813c3ddb25cb61c4b3ec9f3b39b7f9d20b96040408a"
 dependencies = [
  "clap",
- "crumbkit 0.3.0",
+ "crumbkit 0.3.1",
  "crumbkit-markdown",
  "serde",
  "serde_json",
@@ -335,7 +348,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a4b2a1adde09a095e014b8360a96129b579ed01266a4f537921a6b07d802e8a"
 dependencies = [
  "clap",
- "crumbkit 0.3.0",
+ "crumbkit 0.3.1",
  "etcetera",
  "getrandom 0.4.3",
  "humantime",
@@ -778,6 +791,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ce34f96fe3c153249008a32aa047b8ccdfadae74615af6eea7ac877c6b3df05"
 
 [[package]]
+name = "is_executable"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -906,7 +928,7 @@ name = "mxv"
 version = "0.0.0"
 dependencies = [
  "clap",
- "crumbkit 0.3.0",
+ "crumbkit 0.3.1",
  "crumbkit-skills",
  "crumbkit-test",
  "crumbkit-usage",

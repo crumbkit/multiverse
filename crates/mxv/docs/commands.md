@@ -32,6 +32,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
 - [`mxv self`](#mxv-self): Review mxv's own use
 - [`mxv skills`](#mxv-skills): Give coding agents mxv's skill
+- [`mxv completion`](#mxv-completion): Set up mxv's completion in a shell
 
 ### Arguments
 
@@ -1023,6 +1024,91 @@ Print mxv's skill.
 
 ```sh
 mxv skills print
+```
+
+Effects: read-only, closed-world.
+
+## `mxv completion`
+
+Set up mxv's completion in a shell
+
+### Commands
+
+- [`mxv completion install`](#mxv-completion-install): Install mxv's completion where the shell loads it
+- [`mxv completion check`](#mxv-completion-check): Check that mxv's installed completion file matches this mxv
+- [`mxv completion print`](#mxv-completion-print): Print mxv's completion registration script for a shell
+
+## `mxv completion install`
+
+Install mxv's completion where the shell loads it
+
+### Arguments
+
+- `--shell <SHELL>`: Install for this shell in place of the one that SHELL names. One of `bash`, `elvish`, `fish`, `powershell`, `zsh`.
+- `--force`: Replace a file or a link that install did not write; a link's target stays as it is
+
+### Examples
+
+Install mxv's completion for fish.
+
+```sh
+mxv completion install --shell fish
+```
+
+Install it for zsh, replacing a file or a link that install did not write.
+
+```sh
+mxv completion install --shell zsh --force
+```
+
+### Columns
+
+- `state`: What install did: failed, skipped, written or unchanged.
+- `shell`: The shell: bash, elvish, fish, powershell or zsh.
+- `path`: The completion file that install wrote or left. When the file is a link to a file that install wrote, the path of that file.
+- `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/shelf.fish`, or null.
+
+Effects: additive, idempotent, closed-world.
+
+## `mxv completion check`
+
+Check that mxv's installed completion file matches this mxv
+
+### Arguments
+
+- `--shell <SHELL>`: Check the file of this shell in place of the one that SHELL names. One of `bash`, `elvish`, `fish`, `powershell`, `zsh`.
+
+### Examples
+
+Report zsh's completion file when it is missing or differs.
+
+```sh
+mxv completion check --shell zsh
+```
+
+### Columns
+
+- `state`: Whether the file holds the script that install writes: missing, differs, unreadable, linked or current.
+- `shell`: The shell: bash, elvish, fish, powershell or zsh.
+- `path`: The completion file that was checked. When the file is a link to a file that install wrote, the path of that file.
+- `reason`: Why the file differs, cannot be read or is linked, such as `linked to /src/shelf/shelf.fish`, or null.
+
+Effects: read-only, closed-world.
+
+## `mxv completion print`
+
+Print mxv's completion registration script for a shell
+
+### Arguments
+
+- `--shell <SHELL>`: Print the script of this shell in place of the one that SHELL names. One of `bash`, `elvish`, `fish`, `powershell`, `zsh`.
+
+### Examples
+
+Print the registration script for fish.
+
+```sh
+mxv completion print --shell fish
 ```
 
 Effects: read-only, closed-world.

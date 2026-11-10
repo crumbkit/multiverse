@@ -47,6 +47,11 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
   directory and its record. It refuses while a checkout holds unpushed or
   uncommitted work, so push that work first.
 
+## Complete mxv's commands in a shell
+
+`mxv completion install` writes the shell completion for mxv's commands where
+your shell loads it, with `--shell bash|zsh|fish` when `SHELL` does not name it.
+
 ## Run heavy jobs through deadband
 
 `mxv up`, `mxv restart`, `mxv run` and `mxv exec -- COMMAND` ask deadband for a

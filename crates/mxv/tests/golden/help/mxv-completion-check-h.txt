@@ -1,0 +1,15 @@
+Check that mxv's installed completion file matches this mxv
+
+Usage: mxv completion check [OPTIONS]
+
+Options:
+      --shell <SHELL>  Check the file of this shell in place of the one that SHELL names [possible values: bash, elvish, fish, powershell, zsh]
+  -h, --help           Print help (see more with '--help')
+
+Examples:
+  mxv completion check --shell zsh
+
+Effects: read-only, closed-world.
+Rows: the default text lists only the rows that report a problem, and --long, --fields or --json lists every row.
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv completion check --help` describes them.
+Next: mxv completion check --help explains each column.

@@ -1,0 +1,13 @@
+Print mxv's completion registration script for a shell
+
+Usage: mxv completion print [OPTIONS]
+
+Options:
+      --shell <SHELL>  Print the script of this shell in place of the one that SHELL names [possible values: bash, elvish, fish, powershell, zsh]
+  -h, --help           Print help (see more with '--help')
+
+Examples:
+  mxv completion print --shell fish
+
+Effects: read-only, closed-world.
+Global flags: --json, --no-input. `mxv completion print --help` describes them.

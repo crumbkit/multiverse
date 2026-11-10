@@ -7,6 +7,13 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv completion install` writes mxv's shell completion where the shell loads
+  it, for bash, zsh and fish, with `--shell` naming the shell when `SHELL`
+  does not. `mxv completion check` exits with 1 when the installed file is
+  missing or differs, and `mxv completion print` prints the registration
+  script. mxv also answers a shell's completion request, which a shell makes
+  by running mxv with `COMPLETE` set to its name. mxv now builds on crumbkit
+  0.3.1 with its `complete` feature.
 - `mxv skills install` writes mxv's agent skill into each agent skills
   directory that exists, `~/.claude/skills`, `~/.agents/skills` and
   `$CODEX_HOME/skills`, or into the directory that `--dir` names.

@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use crumbkit::commands::{COMMANDS_LIST, CommandsList};
+use crumbkit::completion::{
+    COMPLETION_CHECK, COMPLETION_INSTALL, COMPLETION_PRINT, CompletionCheck, CompletionInstall,
+    CompletionPrint,
+};
 use crumbkit::help::{Effects, Example, Goal, Group, Help, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, Tool, ViewFlags, Yes};
@@ -68,6 +72,7 @@ const HELP: Help = Help::new()
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
             Goal::new("Install mxv's skill", &["skills"]),
+            Goal::new("Set up shell completion", &["completion"]),
         ],
     )
     .compact()])
@@ -275,6 +280,30 @@ const HELP: Help = Help::new()
             .examples(&[Example::new(&[], "Print mxv's skill")])
             .effects(Effects::read_only())
             .document(SKILLS_PRINT),
+        Leaf::new(&["completion", "install"])
+            .examples(&[
+                Example::new(&["--shell", "fish"], "Install mxv's completion for fish"),
+                Example::new(
+                    &["--shell", "zsh", "--force"],
+                    "Install it for zsh, replacing a file or a link that install did not write",
+                ),
+            ])
+            .effects(Effects::additive().idempotent())
+            .document(COMPLETION_INSTALL),
+        Leaf::new(&["completion", "check"])
+            .examples(&[Example::new(
+                &["--shell", "zsh"],
+                "Report zsh's completion file when it is missing or differs",
+            )])
+            .effects(Effects::read_only())
+            .document(COMPLETION_CHECK),
+        Leaf::new(&["completion", "print"])
+            .examples(&[Example::new(
+                &["--shell", "fish"],
+                "Print the registration script for fish",
+            )])
+            .effects(Effects::read_only())
+            .document(COMPLETION_PRINT),
     ]);
 
 /// mxv's agent skill, which `mxv skills install` writes into the agent
@@ -378,6 +407,12 @@ pub(crate) enum Verb {
         #[command(subcommand)]
         command: SkillsCommand,
     },
+    /// Set up mxv's completion in a shell.
+    Completion {
+        /// What to do with the completion.
+        #[command(subcommand)]
+        command: CompletionCommand,
+    },
 }
 
 /// The commands for mxv's own commands.
@@ -450,6 +485,17 @@ pub(crate) enum SkillsCommand {
     Check(SkillsCheck),
     /// Print mxv's skill.
     Print,
+}
+
+/// The commands for mxv's shell completion.
+#[derive(Debug, Subcommand)]
+pub(crate) enum CompletionCommand {
+    /// Install mxv's completion where the shell loads it.
+    Install(CompletionInstall),
+    /// Check that mxv's installed completion file matches this mxv.
+    Check(CompletionCheck),
+    /// Print mxv's completion registration script for a shell.
+    Print(CompletionPrint),
 }
 
 /// The commands for the runs in mxv's usage log.

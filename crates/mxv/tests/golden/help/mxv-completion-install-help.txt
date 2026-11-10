@@ -1,0 +1,47 @@
+Install mxv's completion where the shell loads it
+
+Usage: mxv completion install [OPTIONS]
+
+Options:
+      --shell <SHELL>
+          Install for this shell in place of the one that SHELL names
+
+          Possible values:
+          - bash:       Bash, which loads a completion file from bash-completion's user directory
+          - elvish:     Elvish, which has no completion directory
+          - fish:       Fish, which loads a completion file from its completions directory
+          - powershell: PowerShell, which has no completion directory
+          - zsh:        Zsh, which loads a completion function from a directory on `fpath`
+
+      --force
+          Replace a file or a link that install did not write; a link's target stays as it is
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv completion install --shell fish
+          Install mxv's completion for fish
+
+  mxv completion install --shell zsh --force
+          Install it for zsh, replacing a file or a link that install did not write
+
+Columns:
+  state   What install did: failed, skipped, written or unchanged.
+  shell   The shell: bash, elvish, fish, powershell or zsh.
+  path    The completion file that install wrote or left. When the file is a link to a file that install wrote, the path of that file.
+  reason  Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/shelf.fish`, or null.
+
+Effects: additive, idempotent, closed-world.
