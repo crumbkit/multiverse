@@ -75,7 +75,7 @@ impl Setup {
     }
 
     /// Writes the config file with `age` as both idle ages, which may be
-    /// shorter than the shortest age that `--unused` accepts.
+    /// shorter than the shortest age that `--idle` accepts.
     fn idle_age(&self, age: &str) {
         write(
             &self.root().join("config/mxv/config.toml"),
@@ -391,7 +391,7 @@ fn a_need_without_a_resource_or_a_size_is_refused() {
 fn an_idle_age_under_ten_minutes_on_the_command_line_is_refused() {
     let setup = Setup::new();
     let output = setup
-        .command(&["reclaim", "--need", "memory=1K", "--unused", "5m"])
+        .command(&["reclaim", "--need", "memory=1K", "--idle", "5m"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));

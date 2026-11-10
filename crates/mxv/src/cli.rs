@@ -606,9 +606,9 @@ pub(crate) struct CleanArgs {
     #[arg(long, conflicts_with = "names")]
     pub(crate) over_limit: bool,
 
-    /// How long a checkout must go unmodified to count as idle; it defaults to the config file's clean_idle, or else 7d
+    /// How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean_idle, or else 7d
     #[arg(long, value_name = "AGE", value_parser = parse_age)]
-    pub(crate) unmodified: Option<std::time::Duration>,
+    pub(crate) idle: Option<std::time::Duration>,
 
     /// With --yes, also delete the paths that only mxv.toml declares disposable
     ///
@@ -634,7 +634,7 @@ pub(crate) struct ReclaimArgs {
 
     /// How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
     #[arg(long, value_name = "AGE", value_parser = parse_idle)]
-    pub(crate) unused: Option<std::time::Duration>,
+    pub(crate) idle: Option<std::time::Duration>,
 
     /// Print what the command would stop or delete, and change nothing.
     #[command(flatten)]

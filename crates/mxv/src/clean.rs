@@ -6,7 +6,7 @@
 //! working directory inside the workspace, and its checkouts have not
 //! changed for the idle age, as
 //! [`multiverse::DiskUsage::modified`] measures it. The idle age is
-//! `--unmodified`, or else the config file's `clean_idle`, or else
+//! `--idle`, or else the config file's `clean_idle`, or else
 //! [`DEFAULT_IDLE`]. `clean` measures every workspace it considers, which
 //! reads each file of each one, so it is meant for an occasional run, such
 //! as from a cron job. Nothing runs in the background.
@@ -33,7 +33,7 @@ use crate::verbs::{configured, parse_name};
 #[cfg(test)]
 mod tests;
 
-/// The idle age when neither `--unmodified` nor the config file's `clean_idle`
+/// The idle age when neither `--idle` nor the config file's `clean_idle`
 /// sets one: seven days.
 pub(crate) const DEFAULT_IDLE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -588,7 +588,7 @@ pub(crate) fn clean(
         &Selection {
             names: &args.names,
             limit,
-            idle: args.unmodified,
+            idle: args.idle,
             // `Yes` hides its flag, and only its default holds no `--yes`.
             hold: args.yes != crumbkit::Yes::default() && !args.disposable,
             ask: Some(args.yes),

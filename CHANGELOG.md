@@ -96,11 +96,11 @@ workspace may need to act on.
 
 ### Changed
 
-- The flags of `mxv clean` and `mxv reclaim` now name what they select.
-  `mxv clean --idle` is `--unmodified`, `mxv reclaim --idle` is `--unused`,
-  and `mxv clean --force` is `--disposable`. The old spellings are gone and
-  are not accepted, so update any script or cron job that passes them. The
-  `--force` flags of `remove` and `archive` keep their names.
+- `mxv clean --force` is now `mxv clean --disposable`. It deletes, with
+  `--yes`, the paths that only a repository's `mxv.toml` declares
+  disposable. The old spelling is gone and is not accepted, so update any
+  script or cron job that passes it. The `--force` flags of `remove` and
+  `archive` keep their names.
 - A workspace with several checkouts now reads its workspace manifest
   strictly: while one checkout's `mxv.toml` cannot be parsed, the read
   fails with that file's error. Before this change the read skipped the

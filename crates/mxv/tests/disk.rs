@@ -212,7 +212,7 @@ fn clean_deletes_the_disposable_directories_of_an_idle_workspace_and_keeps_every
     write_bytes(&checkout.join("web/node_modules/left-pad/index.js"), 4096);
     write_text(&checkout.join(".env"), "TOKEN=x");
     write_text(&checkout.join("notes.md"), "notes");
-    let (exit, document) = setup.json(&["clean", "reading-list", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "reading-list", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     let row = &document["data"][0];
     assert_eq!(row["state"], "cleaned", "{document}");
@@ -238,19 +238,19 @@ fn clean_keeps_a_workspace_that_changed_within_the_idle_age() {
     let reason = document["data"][0]["reason"].as_str().unwrap();
     assert!(reason.contains("within the idle age of 1w"), "{reason}");
     assert!(checkout.join("target").exists());
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"][0]["state"], "cleaned");
     assert!(!checkout.join("target").exists());
 }
 
 #[test]
-fn the_config_file_sets_the_idle_age_and_unmodified_overrides_it() {
+fn the_config_file_sets_the_idle_age_and_idle_overrides_it() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
     setup.config("clean_idle = \"0s\"\n");
-    let (_, document) = setup.json(&["clean", "--all", "--unmodified", "4d", "--dry-run"]);
+    let (_, document) = setup.json(&["clean", "--all", "--idle", "4d", "--dry-run"]);
     assert_eq!(document["data"][0]["state"], "kept", "{document}");
     let (_, document) = setup.json(&["clean", "--all", "--dry-run"]);
     assert_eq!(document["data"][0]["state"], "would_clean", "{document}");
@@ -261,7 +261,7 @@ fn a_dry_run_of_clean_deletes_nothing_and_reports_what_it_would_free() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 64 * 1024);
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--dry-run"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--dry-run"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["dry_run"], true);
     assert_eq!(document["data"][0]["state"], "would_clean");
@@ -274,7 +274,7 @@ fn clean_without_yes_and_without_a_terminal_asks_for_yes() {
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::confirmation::needs_yes");
     assert!(checkout.join("target").exists());
@@ -285,14 +285,8 @@ fn clean_of_a_name_that_no_workspace_has_fails_for_that_name_and_cleans_the_othe
     let setup = Setup::new();
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
-    let (exit, document) = setup.json(&[
-        "clean",
-        "missing",
-        "reading-list",
-        "--unmodified",
-        "0s",
-        "--yes",
-    ]);
+    let (exit, document) =
+        setup.json(&["clean", "missing", "reading-list", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["data"][0]["name"], "reading-list", "{document}");
     assert_eq!(document["data"][0]["state"], "cleaned", "{document}");
@@ -314,7 +308,7 @@ fn clean_all_goes_on_past_a_workspace_that_it_cannot_measure() {
     break_checkout(&setup, "broken");
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["data"][0]["name"], "reading-list", "{document}");
     assert_eq!(document["data"][0]["state"], "cleaned", "{document}");
@@ -366,7 +360,7 @@ fn a_manifest_that_declares_every_path_disposable_is_refused_and_nothing_else_is
     let (_, shown) = setup.json(&["show", "reading-list"]);
     let warning = shown["data"][0]["warnings"].as_str().unwrap();
     assert!(warning.contains("mxv.toml"), "{shown}");
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(
         document["data"][0]["paths"][0], "app: target/",
@@ -390,7 +384,7 @@ fn clean_keeps_a_disposable_directory_that_holds_a_nested_repository() {
     let checkout = setup.created("reading-list");
     write_bytes(&checkout.join("target/debug/app"), 1024);
     git(&checkout, &["init", "--quiet", "node_modules/fork"]);
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     let row = &document["data"][0];
     assert_eq!(row["paths"][0], "app: target/", "{document}");
@@ -532,7 +526,7 @@ fn a_path_that_cannot_be_deleted_in_full_fails_its_workspace_and_names_the_entry
     write_bytes(&checkout.join("web/node_modules/left-pad/index.js"), 1024);
     let locked = checkout.join("target/locked");
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(exit, 1, "{document}");
     let failure = &document["failures"][0];
@@ -612,13 +606,13 @@ fn show_and_clean_mark_a_path_that_only_the_manifest_declares_disposable() {
     };
     assert_eq!(source("data/"), "manifest", "{shown}");
     assert_eq!(source("target/"), "built_in", "{shown}");
-    let (_, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--dry-run"]);
+    let (_, document) = setup.json(&["clean", "--all", "--idle", "0s", "--dry-run"]);
     assert_eq!(
         document["data"][0]["manifest_paths"][0], "app: data/",
         "{document}"
     );
     let output = setup
-        .command(&["clean", "--all", "--unmodified", "0s"])
+        .command(&["clean", "--all", "--idle", "0s"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -636,7 +630,7 @@ fn clean_with_yes_keeps_a_manifest_only_disposable_path_and_deletes_it_with_disp
     );
     write_text(&checkout.join("data/pg.db"), "rows");
     write_bytes(&checkout.join("target/debug/app"), 1024);
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     let row = &document["data"][0];
     assert_eq!(row["state"], "cleaned", "{document}");
@@ -654,14 +648,7 @@ fn clean_with_yes_keeps_a_manifest_only_disposable_path_and_deletes_it_with_disp
     assert!(checkout.join("data/pg.db").exists());
     assert!(!checkout.join("target").exists());
 
-    let (exit, document) = setup.json(&[
-        "clean",
-        "--all",
-        "--unmodified",
-        "0s",
-        "--yes",
-        "--disposable",
-    ]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes", "--disposable"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(
         document["data"][0]["manifest_paths"][0], "app: data/",
@@ -680,7 +667,7 @@ fn a_workspace_whose_every_disposable_path_is_kept_names_them_in_its_reason() {
         ".env\ntarget/\nnode_modules/\ndata/\nmxv.toml\n",
     );
     write_text(&checkout.join("data/pg.db"), "rows");
-    let (exit, document) = setup.json(&["clean", "--all", "--unmodified", "0s", "--yes"]);
+    let (exit, document) = setup.json(&["clean", "--all", "--idle", "0s", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     let row = &document["data"][0];
     assert_eq!(row["state"], "kept", "{document}");

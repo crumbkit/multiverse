@@ -8,7 +8,7 @@ Options:
       --need <NEED>
           What to free: memory=SIZE or disk=SIZE, such as memory=2GiB
 
-      --unused <AGE>
+      --idle <AGE>
           How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
 
       --dry-run

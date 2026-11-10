@@ -1650,8 +1650,8 @@ tool restored still counts as changed. A directory's times change when an
 entry in it is created, renamed or deleted, so a deleted file counts as a
 change. A commit, a staged change and a checkout of another branch count
 too. A time later than the current time makes the workspace busy, because
-mxv cannot tell how long it has been idle. The idle age is `--unmodified`, such
-as `--unmodified 3d`, or else the config file's `clean_idle`, or else 7 days. An
+mxv cannot tell how long it has been idle. The idle age is `--idle`, such
+as `--idle 3d`, or else the config file's `clean_idle`, or else 7 days. An
 age is a whole number followed by `w`, `d`, `h`, `m` or `s`. Measuring a
 workspace changes none of its times, because mxv runs `git status` with
 `--no-optional-locks`, which keeps git from rewriting the index.
@@ -1749,8 +1749,8 @@ A running workspace is idle when all of these hold:
   workspace's run directory. `exec` and `logs --follow` record it again
   every 5 minutes while they run. `clean` and `reclaim` do not record it.
 
-The idle age is `--unused`, or else the config file's `stop_idle`, or else 2
-hours. `--unused` refuses an age under 10 minutes, so a workspace that a
+The idle age is `--idle`, or else the config file's `stop_idle`, or else 2
+hours. `--idle` refuses an age under 10 minutes, so a workspace that a
 person left for a few minutes is never stopped; `stop_idle` can set a
 shorter age, for tests. A workspace whose units all
 stopped is not considered. mxv reads `.touched` first, and skips reading
