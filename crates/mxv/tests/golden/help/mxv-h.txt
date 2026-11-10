@@ -9,6 +9,7 @@ Free disk space:         clean
 Free memory:             reclaim, pin, unpin
 Explore the commands:    commands, schemas
 Review how mxv is used:  self
+Install mxv's skill:     skills
 
 Options:
   -h, --help     Print help (see more with '--help')

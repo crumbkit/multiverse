@@ -39,6 +39,9 @@ Explore the commands
 Review how mxv is used
   self      Review mxv's own use
 
+Install mxv's skill
+  skills    Give coding agents mxv's skill
+
 Options:
       --json
           Print the result as a JSON document. The default prints text.

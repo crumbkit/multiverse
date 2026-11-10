@@ -303,6 +303,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crumbkit-skills"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6b184f9079e0a2a2c268eb231283e0322cea551bee1f47e7d6d99a19e11f96"
+dependencies = [
+ "clap",
+ "crumbkit 0.3.0",
+ "schemars 1.2.3",
+ "serde",
+]
+
+[[package]]
 name = "crumbkit-test"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,6 +907,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "crumbkit 0.3.0",
+ "crumbkit-skills",
  "crumbkit-test",
  "crumbkit-usage",
  "deadband",

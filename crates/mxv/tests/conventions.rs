@@ -911,7 +911,7 @@ impl Fixtures {
             .unprovoked(UNPROVOKED);
         Suite::new(|| (Cli::command(), TOOL))
             .allow(ALLOW)
-            .verbs(&["usage", "reset"])
+            .verbs(&["usage", "reset", "install", "check", "print"])
             .path_budgets(PATH_BUDGETS)
             .examples(examples)
             .recoveries(recoveries)

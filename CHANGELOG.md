@@ -7,6 +7,12 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv skills install` writes mxv's agent skill into each agent skills
+  directory that exists, `~/.claude/skills`, `~/.agents/skills` and
+  `$CODEX_HOME/skills`, or into the directory that `--dir` names.
+  `mxv skills check` exits with 1 when an installed copy is missing or
+  differs from the installed mxv's, and `mxv skills print` prints the skill.
+  The skill is crates/mxv/skill/SKILL.md, embedded in the binary.
 - `mxv self runs list` prints each run in mxv's usage log, grouped by
   session, as the `mxv/self-runs-list/v1` document. mxv now builds on
   crumbkit 0.3, so the figures of `mxv self figures list` also give each

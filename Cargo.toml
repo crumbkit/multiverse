@@ -92,6 +92,11 @@ signal-hook = { version = "0.4.6", default-features = false, features = ["iterat
 # `self usage`, `self figures list` and `self runs list` (CLI-7).
 crumbkit-usage = "0.3"
 
+# crumbkit-skills gives the `mxv` command `skills install`, `skills check`
+# and `skills print`, which install the agent skill that mxv embeds into the
+# agent skills directories and check the installed copies.
+crumbkit-skills = "0.3"
+
 # crumbkit-test checks the `mxv` command against crumbkit's conventions
 # (CLI-6). Only tests use it.
 crumbkit-test = "0.3"
