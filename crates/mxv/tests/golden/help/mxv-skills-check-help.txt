@@ -1,0 +1,40 @@
+Check that each installed copy of mxv's skill matches this mxv
+
+Usage: mxv skills check [OPTIONS]
+
+Options:
+      --dir <DIR>
+          Check this skills directory in place of the agent skills directories
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv skills check
+          Report each agent skills directory whose copy is missing or differs
+
+Columns:
+  state   Whether the copy is the binary's: missing, differs, unreadable, linked or current.
+  dirs    The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
+  reason  Why the copy differs, cannot be read or is linked, such as `written by shelf 0.2.0` or `linked to /src/shelf/skill`, or null.
+
+Columns that --long adds:
+  path  The SKILL.md file that was checked, at its real path.
+
+Effects: read-only, closed-world.
+Rows: the default text lists only the rows that report a problem, and --long, --fields or --json lists every row.

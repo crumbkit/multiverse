@@ -31,6 +31,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
 - [`mxv self`](#mxv-self): Review mxv's own use
+- [`mxv skills`](#mxv-skills): Give coding agents mxv's skill
 
 ### Arguments
 
@@ -936,5 +937,92 @@ mxv self runs list
 - `trace`: The id of the W3C trace that the run belongs to, as 32 lowercase hex digits.
 - `run`: The run's own span id, as 16 lowercase hex digits, which its child runs name as their parent.
 - `parent`: The span id of the run's caller, as 16 lowercase hex digits, or null when the run started a new trace.
+
+Effects: read-only, closed-world.
+
+## `mxv skills`
+
+Give coding agents mxv's skill
+
+### Commands
+
+- [`mxv skills install`](#mxv-skills-install): Install mxv's skill into each agent skills directory that exists
+- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of mxv's skill matches this mxv
+- [`mxv skills print`](#mxv-skills-print): Print mxv's skill
+
+## `mxv skills install`
+
+Install mxv's skill into each agent skills directory that exists
+
+### Arguments
+
+- `--dir <DIR>`: Install into this skills directory in place of the agent skills directories
+- `--force`: Replace a file or a link that install did not write with the skill's own folder
+
+### Examples
+
+Install mxv's skill into each agent skills directory that exists.
+
+```sh
+mxv skills install
+```
+
+Install it, replacing a file or a link that install did not write.
+
+```sh
+mxv skills install --force
+```
+
+### Columns
+
+- `state`: What install did: failed, skipped, written or unchanged.
+- `dirs`: The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
+- `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/skill`, or null.
+
+### Columns that `--long` adds
+
+- `path`: The SKILL.md file that install wrote or left, at its real path.
+
+Effects: additive, idempotent, closed-world.
+
+## `mxv skills check`
+
+Check that each installed copy of mxv's skill matches this mxv
+
+### Arguments
+
+- `--dir <DIR>`: Check this skills directory in place of the agent skills directories
+
+### Examples
+
+Report each agent skills directory whose copy is missing or differs.
+
+```sh
+mxv skills check
+```
+
+### Columns
+
+- `state`: Whether the copy is the binary's: missing, differs, unreadable, linked or current.
+- `dirs`: The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
+- `reason`: Why the copy differs, cannot be read or is linked, such as `written by shelf 0.2.0` or `linked to /src/shelf/skill`, or null.
+
+### Columns that `--long` adds
+
+- `path`: The SKILL.md file that was checked, at its real path.
+
+Effects: read-only, closed-world.
+
+## `mxv skills print`
+
+Print mxv's skill
+
+### Examples
+
+Print mxv's skill.
+
+```sh
+mxv skills print
+```
 
 Effects: read-only, closed-world.

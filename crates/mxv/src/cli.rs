@@ -7,6 +7,9 @@ use crumbkit::commands::{COMMANDS_LIST, CommandsList};
 use crumbkit::help::{Effects, Example, Goal, Group, Help, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, Tool, ViewFlags, Yes};
+use crumbkit_skills::{
+    SKILLS_CHECK, SKILLS_INSTALL, SKILLS_PRINT, Skill, SkillsCheck, SkillsInstall,
+};
 use crumbkit_usage::{
     SELF_FIGURES_LIST, SELF_RUNS_LIST, SELF_USAGE, SelfFigures, SelfRuns, SelfUsage,
 };
@@ -64,6 +67,7 @@ const HELP: Help = Help::new()
             Goal::new("Free memory", &["reclaim", "pin", "unpin"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
+            Goal::new("Install mxv's skill", &["skills"]),
         ],
     )
     .compact()])
@@ -247,7 +251,39 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::read_only())
             .document(SELF_RUNS_LIST),
+        Leaf::new(&["skills", "install"])
+            .examples(&[
+                Example::new(
+                    &[],
+                    "Install mxv's skill into each agent skills directory that exists",
+                ),
+                Example::new(
+                    &["--force"],
+                    "Install it, replacing a file or a link that install did not write",
+                ),
+            ])
+            .effects(Effects::additive().idempotent())
+            .document(SKILLS_INSTALL),
+        Leaf::new(&["skills", "check"])
+            .examples(&[Example::new(
+                &[],
+                "Report each agent skills directory whose copy is missing or differs",
+            )])
+            .effects(Effects::read_only())
+            .document(SKILLS_CHECK),
+        Leaf::new(&["skills", "print"])
+            .examples(&[Example::new(&[], "Print mxv's skill")])
+            .effects(Effects::read_only())
+            .document(SKILLS_PRINT),
     ]);
+
+/// mxv's agent skill, which `mxv skills install` writes into the agent
+/// skills directories.
+pub(crate) const SKILL: Skill = Skill::new(
+    "mxv",
+    env!("CARGO_PKG_VERSION"),
+    include_str!("../skill/SKILL.md"),
+);
 
 /// The commands of `mxv`.
 #[derive(Debug, Subcommand)]
@@ -336,6 +372,12 @@ pub(crate) enum Verb {
         #[command(subcommand)]
         command: SelfCommand,
     },
+    /// Give coding agents mxv's skill.
+    Skills {
+        /// What to do with the skill.
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
 }
 
 /// The commands for mxv's own commands.
@@ -397,6 +439,17 @@ pub(crate) enum SelfCommand {
 pub(crate) enum FiguresCommand {
     /// List the figures of each command in mxv's usage log.
     List(SelfFigures),
+}
+
+/// The commands for mxv's agent skill.
+#[derive(Debug, Subcommand)]
+pub(crate) enum SkillsCommand {
+    /// Install mxv's skill into each agent skills directory that exists.
+    Install(SkillsInstall),
+    /// Check that each installed copy of mxv's skill matches this mxv.
+    Check(SkillsCheck),
+    /// Print mxv's skill.
+    Print,
 }
 
 /// The commands for the runs in mxv's usage log.

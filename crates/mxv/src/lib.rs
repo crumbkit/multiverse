@@ -41,7 +41,8 @@ pub use crate::archive::{
 #[doc(hidden)]
 pub use crate::cli::{Cli, TOOL};
 use crate::cli::{
-    CommandsCommand, FiguresCommand, PortsCommand, RunsCommand, SchemasCommand, SelfCommand, Verb,
+    CommandsCommand, FiguresCommand, PortsCommand, RunsCommand, SKILL, SchemasCommand, SelfCommand,
+    SkillsCommand, Verb,
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
@@ -231,6 +232,20 @@ where
                 let result =
                     Ok::<_, crumbkit::Error>(crumbkit_usage::runs(&mut output, &TOOL, &args));
                 crumbkit::finish(output, crumbkit_usage::SELF_RUNS_LIST, result)
+            }
+        },
+        Verb::Skills { command } => match command {
+            SkillsCommand::Install(args) => {
+                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::install(&SKILL, &args));
+                crumbkit::finish(output, crumbkit_skills::SKILLS_INSTALL, result)
+            }
+            SkillsCommand::Check(args) => {
+                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::check(&SKILL, &args));
+                crumbkit::finish(output, crumbkit_skills::SKILLS_CHECK, result)
+            }
+            SkillsCommand::Print => {
+                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::print(&SKILL));
+                crumbkit::finish(output, crumbkit_skills::SKILLS_PRINT, result)
             }
         },
     }
