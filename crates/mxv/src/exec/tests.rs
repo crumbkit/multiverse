@@ -164,8 +164,17 @@ fn exec_with_no_unit_refuses_a_command_line_without_a_command() {
 
 #[test]
 fn exec_refuses_repo_and_no_gate_beside_a_unit() {
-    assert!(parsed(&["exec", "--repo", "api", "web", "--", "env"]).is_err());
-    assert!(parsed(&["exec", "--no-gate", "web", "--", "env"]).is_err());
+    for words in [
+        &["exec", "--repo", "api", "web", "--", "env"][..],
+        &["exec", "--no-gate", "web", "--", "env"][..],
+    ] {
+        let error = parsed(words).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{words:?}"
+        );
+    }
 }
 
 #[test]
@@ -217,6 +226,24 @@ fn a_directory_inside_a_checkout_runs_there_with_that_checkouts_short_ports() {
             own_ports: BTreeMap::from([("web".to_owned(), "app-web".to_owned())]),
         }
     );
+}
+
+#[test]
+fn a_checkout_whose_name_starts_with_another_checkouts_name_is_told_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().canonicalize().unwrap().join("multi");
+    fs::create_dir_all(workspace.join("app")).unwrap();
+    fs::create_dir_all(workspace.join("app2/sub")).unwrap();
+    let app2 = workspace.join("app2");
+    let homes = [
+        checkout_home("app", &workspace.join("app")),
+        checkout_home("app2", &app2),
+    ];
+
+    let place = place_of(&homes, &workspace, Some(&app2.join("sub")));
+
+    assert_eq!(place.root, app2);
+    assert_eq!(place.dir, PathBuf::from("sub"));
 }
 
 #[test]

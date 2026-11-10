@@ -1478,12 +1478,7 @@ fn down_of_a_named_process_of_a_workspace_that_never_ran_reports_it_stopped() {
 /// Runs `mxv` with `args` in the temporary directory, and returns the exit
 /// code, standard output and standard error.
 fn exec_output(setup: &Setup, args: &[&str]) -> (i32, String, String) {
-    let output = setup.command_in(&setup.root(), args).output().unwrap();
-    (
-        output.status.code().unwrap(),
-        String::from_utf8(output.stdout).unwrap(),
-        String::from_utf8(output.stderr).unwrap(),
-    )
+    exec_output_in(setup, &setup.root(), args)
 }
 
 /// A manifest whose process `api` runs in the checkout's `sub` directory
@@ -2647,8 +2642,7 @@ fn exec_with_no_unit_does_not_pass_a_variable_outside_the_allowlist() {
 #[test]
 fn exec_with_a_unit_still_fails_when_the_unit_is_stopped() {
     let setup = Setup::new();
-    let checkout = setup.workspace("triage", EXEC_MANIFEST);
-    fs::create_dir(checkout.join("sub")).unwrap();
+    setup.workspace("triage", EXEC_MANIFEST);
 
     let (exit, _, err) = exec_output(&setup, &["exec", "-w", "triage", "api", "--", "true"]);
 
