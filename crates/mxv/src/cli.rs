@@ -621,7 +621,7 @@ pub(crate) struct CleanArgs {
     ///
     /// --yes alone keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it.
     #[arg(long)]
-    pub(crate) force: bool,
+    pub(crate) disposable: bool,
 
     /// Print what the command would delete, and delete nothing.
     #[command(flatten)]
@@ -642,6 +642,12 @@ pub(crate) struct ReclaimArgs {
     /// How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop_idle, or else 2h, for memory, and to clean_idle, or else 7d, for disk
     #[arg(long, value_name = "AGE", value_parser = parse_idle)]
     pub(crate) idle: Option<std::time::Duration>,
+
+    /// With a disk need, also delete the paths that only mxv.toml declares disposable
+    ///
+    /// Without it, reclaim keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it. A memory need deletes nothing, so it ignores this flag.
+    #[arg(long)]
+    pub(crate) disposable: bool,
 
     /// Print what the command would stop or delete, and change nothing.
     #[command(flatten)]

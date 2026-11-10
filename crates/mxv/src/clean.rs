@@ -172,9 +172,11 @@ struct Candidate {
 
 impl Candidate {
     /// Keeps each path that only the repository's own `mxv.toml` makes
-    /// disposable, because `--yes` without `--force` gave no person a
-    /// chance to confirm it.
-    fn hold_manifest_paths(&mut self) {
+    /// disposable, because `--yes` without `--disposable`, or
+    /// `reclaim --need disk` without `--disposable`, gave no person a
+    /// chance to confirm it. The reason of each kept path names the repair
+    /// that `holder`, the command that kept it, offers.
+    fn hold_manifest_paths(&mut self, holder: Holder) {
         let (held, paths): (Vec<DisposablePath>, Vec<DisposablePath>) = self
             .paths
             .drain(..)
@@ -185,7 +187,10 @@ impl Candidate {
             self.kept.push(KeptPath::new(
                 found.checkout,
                 found.path,
-                "only the repository's mxv.toml declares it disposable, and --yes alone does not delete such paths; answer the prompt without --yes, or pass --force".to_owned(),
+                format!(
+                    "only the repository's mxv.toml declares it disposable, and no person confirmed it; {}",
+                    holder.repair()
+                ),
             ));
         }
     }
@@ -535,6 +540,29 @@ pub(crate) enum Limit {
     Free(u64),
 }
 
+/// The command that keeps the paths that only a repository's own
+/// `mxv.toml` declares disposable, which decides the repair that a kept
+/// path's reason names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Holder {
+    /// `mxv clean --yes` without `--disposable`.
+    Clean,
+    /// `mxv reclaim --need disk=<SIZE>` without `--disposable`.
+    Reclaim,
+}
+
+impl Holder {
+    /// Returns how a person deletes a path that this command kept.
+    const fn repair(self) -> &'static str {
+        match self {
+            Self::Clean => {
+                "answer the prompt of mxv clean, or run mxv clean <NAME> --yes --disposable"
+            }
+            Self::Reclaim => "rerun mxv reclaim --need disk=<SIZE> with --disposable",
+        }
+    }
+}
+
 /// What a run of [`run`] cleans, and how it asks.
 pub(crate) struct Selection<'a> {
     /// The names of the workspaces to clean, or none for every workspace.
@@ -544,9 +572,10 @@ pub(crate) struct Selection<'a> {
     /// The idle age, or `None` for the config file's `clean_idle`, or else
     /// [`DEFAULT_IDLE`].
     pub(crate) idle: Option<Duration>,
-    /// Whether it keeps each path that only a repository's own `mxv.toml`
-    /// declares disposable, because no person confirms it.
-    pub(crate) hold: bool,
+    /// The command that keeps each path that only a repository's own
+    /// `mxv.toml` declares disposable, because no person confirms it, or
+    /// `None` when the run deletes those paths too.
+    pub(crate) hold: Option<Holder>,
     /// The `--yes` that answers the question before it deletes, or `None`
     /// when it asks no question.
     pub(crate) ask: Option<crumbkit::Yes>,
@@ -590,7 +619,8 @@ pub(crate) fn clean(
             limit,
             idle: args.idle,
             // `Yes` hides its flag, and only its default holds no `--yes`.
-            hold: args.yes != crumbkit::Yes::default() && !args.force,
+            hold: (args.yes != crumbkit::Yes::default() && !args.disposable)
+                .then_some(Holder::Clean),
             ask: Some(args.yes),
         },
     )?;
@@ -620,10 +650,10 @@ pub(crate) fn run(
         keys.push(key);
         let mut entry = found
             .and_then(|workspace| measure(environment, &workspaces, workspace, &table, now, idle));
-        if plan.hold
+        if let Some(holder) = plan.hold
             && let Ok(candidate) = &mut entry
         {
-            candidate.hold_manifest_paths();
+            candidate.hold_manifest_paths(holder);
         }
         entries.push(entry);
     }

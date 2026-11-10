@@ -82,13 +82,13 @@ impl Failure for TaskFailure {
                 workspace,
                 task,
                 checkouts,
-            } => Recovery::Hint(format!(
+            } => Recovery::hint(format!(
                 "choose a checkout with --repo, such as `mxv run -w {workspace} --repo {} {task}`",
                 checkouts.first().map_or("CHECKOUT", String::as_str)
             )),
-            Self::JsonRefused => Recovery::Hint(
-                "run the command without --json to read the task's output".to_owned(),
-            ),
+            Self::JsonRefused => {
+                Recovery::hint("run the command without --json to read the task's output")
+            }
         }
     }
 

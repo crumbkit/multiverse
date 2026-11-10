@@ -200,11 +200,11 @@ A port is free when no workspace record holds it and a bind test passes. A works
 
 ## Clean
 
-`mxv clean` keeps no state. `clean_one` (`mxv/src/clean.rs`) holds the workspace lock, and `Workspaces::clean` (`multiverse/src/disk.rs`) measures again and calls `undeletable`.
+`mxv clean` keeps no state, and `mxv reclaim --need disk` runs the same clean through `clean::run`. `clean_one` (`mxv/src/clean.rs`) holds the workspace lock, and `Workspaces::clean` (`multiverse/src/disk.rs`) measures again and calls `undeletable`. Before the pick, `hold_manifest_paths` keeps each path that only a repository's `mxv.toml` declares disposable, unless `clean --yes --disposable`, `reclaim --disposable` or a confirmed prompt lets the run delete it.
 
 | Transition | Owner | Crash point | State left | Recovery | Fault test |
 | --- | --- | --- | --- | --- | --- |
-| Disposable directory to deleted | `clean_one`, `disk::tree::remove` (`multiverse/src/disk/tree.rs`) | Deletion fails or the process dies partway. | The directory is partly deleted. | The next `mxv clean` deletes the rest. | `a_path_that_cannot_be_deleted_in_full_fails_its_workspace_and_names_the_entry` in `mxv/tests/disk.rs` fails the step with an unwritable directory. |
+| Disposable directory to deleted | `clean_one`, `disk::tree::remove` (`multiverse/src/disk/tree.rs`) | Deletion fails or the process dies partway. | The directory is partly deleted. | The next `mxv clean` or `mxv reclaim --need disk` deletes the rest. | `a_path_that_cannot_be_deleted_in_full_fails_its_workspace_and_names_the_entry` in `mxv/tests/disk.rs` fails the step with an unwritable directory. |
 
 ## `mxv run`
 

@@ -18,7 +18,7 @@ Options:
       --idle <AGE>
           How long a checkout must go unmodified to count as idle, such as 7d, 36h or 0s; it defaults to the config file's clean_idle, or else 7d
 
-      --force
+      --disposable
           With --yes, also delete the paths that only mxv.toml declares disposable
           
           --yes alone keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it.

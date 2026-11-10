@@ -104,6 +104,16 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv clean --force` is now `mxv clean --disposable`. It deletes, with
+  `--yes`, the paths that only a repository's `mxv.toml` declares
+  disposable. The old spelling is gone and is not accepted, so update any
+  script or cron job that passes it. The `--force` flags of `remove` and
+  `archive` keep their names. `mxv reclaim --need disk=<SIZE>` takes the
+  same `--disposable` flag and deletes those paths too when it is given.
+  Without the flag, reclaim keeps them, as before. The `reason` of a row
+  that kept such a path now names the command that deletes it: rerunning
+  reclaim with `--disposable`, or for `clean`, answering its prompt or
+  running `mxv clean <NAME> --yes --disposable`.
 - A workspace with several checkouts now reads its workspace manifest
   strictly: while one checkout's `mxv.toml` cannot be parsed, the read
   fails with that file's error. Before this change the read skipped the
@@ -114,7 +124,9 @@ workspace may need to act on.
   and use no `disposable` globs of the workspace manifest in any checkout
   while one checkout's manifest is broken. `remove` and `archive` without
   `--force` can then refuse because of ignored files that only those
-  globs cover, and `clean` reclaims fewer paths. Fix the broken file to
+  globs cover, and `clean` reclaims fewer paths. `list` and `show` reach the
+  same read through `disk_usage`, so their disposable byte figures shrink
+  too, and `show` carries the same warning. Fix the broken file to
   restore the globs.
 - mxv uses crumbkit 0.2.0, which changes some documents that a tool may
   read. `mxv list --json` and `mxv list --archived --json` now print a

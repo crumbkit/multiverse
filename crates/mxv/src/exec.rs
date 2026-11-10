@@ -108,17 +108,17 @@ impl Failure for ExecFailure {
                     .value("workspace", workspace)
                     .value("processes", process),
             ),
-            Self::Unstartable { process, .. } => Recovery::Hint(format!(
+            Self::Unstartable { process, .. } => Recovery::hint(format!(
                 "check that the command's program exists on the PATH of {process}, or give its full path, and run the command again"
             )),
-            Self::UnstartableInWorkspace { .. } => Recovery::Hint(
-                "check that the command's program exists on the PATH that mxv gives it, or give its full path, and run the command again".to_owned(),
+            Self::UnstartableInWorkspace { .. } => Recovery::hint(
+                "check that the command's program exists on the PATH that mxv gives it, or give its full path, and run the command again",
             ),
-            Self::SandboxedTerminal { workspace, process } => Recovery::Hint(format!(
+            Self::SandboxedTerminal { workspace, process } => Recovery::hint(format!(
                 "run the command with no terminal on its standard input, output and error, such as `mxv exec -w {workspace} {process} -- COMMAND </dev/null 2>&1 | cat`, or run it in the context of a process whose manifest gives it no permissions table"
             )),
             Self::JsonRefused => {
-                Recovery::Hint("run the command without --json to read its output".to_owned())
+                Recovery::hint("run the command without --json to read its output")
             }
         }
     }
