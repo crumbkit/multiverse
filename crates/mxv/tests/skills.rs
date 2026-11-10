@@ -2,6 +2,8 @@
 //! binary with `HOME` set to a temporary directory of its own, so no test
 //! installs into the real home directory.
 
+// clippy allows `unwrap` only in code under `cfg(test)`, and an integration
+// test's helper functions are not under it without this attribute.
 #![cfg(test)]
 
 use std::fs;

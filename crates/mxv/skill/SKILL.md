@@ -38,11 +38,21 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
 - `mxv logs UNIT` prints a unit's last 50 log lines, and
   `mxv logs UNIT --follow` keeps printing new ones.
 
+## Finish with a workspace
+
+- `mxv archive -w NAME` puts a finished workspace away and keeps each
+  checkout's commit, and `mxv restore NAME` rebuilds it at those commits.
+  `mxv list --archived` lists the archives.
+- `mxv remove NAME` removes a workspace's checkouts, its merged branches, its
+  directory and its record. It refuses while a checkout holds unpushed or
+  uncommitted work, so push that work first.
+
 ## Run heavy jobs through deadband
 
 `mxv up`, `mxv restart`, `mxv run` and `mxv exec -- COMMAND` ask deadband for a
-place themselves, so never wrap them in `deadband run`. Inside `deadband run`,
-deadband gives the command no thread limits. `mxv exec --no-gate -- COMMAND`
+place themselves, so never wrap them in `deadband run`. When mxv runs inside
+`deadband run`, its builds lose deadband's thread limits and can use every
+core. `mxv exec --no-gate -- COMMAND`
 asks deadband nothing, for a light or interactive command.
 `mxv exec UNIT -- COMMAND` does not ask deadband, so run a heavy command with
 `mxv exec -- COMMAND` instead. On a machine that runs deadband, start every
