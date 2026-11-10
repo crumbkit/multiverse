@@ -125,6 +125,11 @@ const ALLOW: &[Allow] = &[
         "self figures list",
         "The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.",
     ),
+    Allow::new(
+        Rule::Examples,
+        "self runs list",
+        "The runs come from the usage log of the machine that runs the test, and tests/usage.rs checks the runs of a usage log that it writes.",
+    ),
     Allow::new(Rule::Yes, "down", NO_QUESTION),
     Allow::new(Rule::Yes, "restart", NO_QUESTION),
     Allow::new(

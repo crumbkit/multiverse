@@ -7,7 +7,9 @@ use crumbkit::commands::{COMMANDS_LIST, CommandsList};
 use crumbkit::help::{Effects, Example, Goal, Group, Help, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, Tool, ViewFlags, Yes};
-use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
+use crumbkit_usage::{
+    SELF_FIGURES_LIST, SELF_RUNS_LIST, SELF_USAGE, SelfFigures, SelfRuns, SelfUsage,
+};
 
 use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
@@ -238,6 +240,13 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::read_only())
             .document(SELF_FIGURES_LIST),
+        Leaf::new(&["self", "runs", "list"])
+            .examples(&[Example::new(
+                &[],
+                "Print each run of the last 7 days, grouped by session",
+            )])
+            .effects(Effects::read_only())
+            .document(SELF_RUNS_LIST),
     ]);
 
 /// The commands of `mxv`.
@@ -375,6 +384,12 @@ pub(crate) enum SelfCommand {
         #[command(subcommand)]
         command: FiguresCommand,
     },
+    /// Work with each run in mxv's usage log.
+    Runs {
+        /// What to do with the runs.
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
 }
 
 /// The commands for the figures in mxv's usage log.
@@ -382,6 +397,13 @@ pub(crate) enum SelfCommand {
 pub(crate) enum FiguresCommand {
     /// List the figures of each command in mxv's usage log.
     List(SelfFigures),
+}
+
+/// The commands for the runs in mxv's usage log.
+#[derive(Debug, Subcommand)]
+pub(crate) enum RunsCommand {
+    /// List each run in mxv's usage log, grouped by session.
+    List(SelfRuns),
 }
 
 /// The arguments of `mxv new`.
