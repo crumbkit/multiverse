@@ -7,6 +7,18 @@ workspace may need to act on.
 
 ### Added
 
+- `deadband status` and `deadband top` show the workspace of each job that
+  mxv admits and of each job that a person runs by hand inside a workspace.
+  mxv names the workspace in every build and task it asks deadband for, and
+  `mxv new`, `mxv add` and `mxv restore` write an empty file
+  `.deadband-workspace` in the workspace's directory, which deadband finds
+  by walking up from a job's directory. `mxv up`, `mxv restart`, `mxv run`
+  and `mxv exec` write the file when it is missing, so a workspace made
+  earlier gains it, and warn when they cannot. `mxv remove` and
+  `mxv archive` delete an empty marker, and `mxv restore` writes it again.
+  `.deadband-workspace` is no longer allowed as a checkout's folder. mxv
+  now needs the deadband commit that names workspaces, crumbkit/deadband#19.
+
 - `mxv completion install` writes mxv's shell completion where the shell loads
   it, for bash, zsh and fish, with `--shell` naming the shell when `SHELL`
   does not. `mxv completion check` exits with 1 when the installed file is

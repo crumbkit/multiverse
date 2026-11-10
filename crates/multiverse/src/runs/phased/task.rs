@@ -52,6 +52,7 @@ use wait_timeout::ChildExt as _;
 use super::exec::EXEC_WAIT;
 use crate::error::Error;
 use crate::manifest::Manifest;
+use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, BuiltTask, TaskEntry, Unrunnable};
 use crate::record::Workspace;
 use crate::runs::{Admission, Asked, Runs};
@@ -314,8 +315,9 @@ pub struct PreparedTask<'a> {
     argv: Vec<String>,
     /// The directory that the task runs in.
     directory: PathBuf,
-    /// The workspace's name, which the limiter shows for the job.
-    label: String,
+    /// The workspace's name, which the limiter shows for the job as its
+    /// label and as its workspace.
+    workspace: WorkspaceName,
 }
 
 impl std::fmt::Debug for PreparedTask<'_> {
@@ -344,7 +346,8 @@ impl PreparedTask<'_> {
         let cancel = Cancel::new();
         let place = admission.admit(&Asked {
             cwd: &self.directory,
-            label: &self.label,
+            label: self.workspace.as_str(),
+            workspace: &self.workspace,
             command: &self.argv.join(" "),
             cancel: &cancel,
         });
@@ -454,7 +457,7 @@ impl Runs {
             process,
             directory: task.root.join(&task.dir),
             argv: task.argv,
-            label: workspace.name.as_str().to_owned(),
+            workspace: workspace.name.clone(),
         }))
     }
 }

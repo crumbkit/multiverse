@@ -275,11 +275,12 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crumbkit"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "745f4877c3d8feb29060f69dd616e046d612e63e13a28cdcf3315a6fdda95e19"
+checksum = "9a0a6c8d3ef6350af97967fd136e6833f6eb99ec8905ffa496ba47fcaa918f82"
 dependencies = [
  "clap",
+ "crumbkit-derive",
  "humantime",
  "is-ai-agent",
  "rustix",
@@ -302,6 +303,17 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "crumbkit-derive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a02ad91a5b1b083815225837ed177ae882aef3bec85c15310023c32072a4b4a8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -381,13 +393,14 @@ dependencies = [
 [[package]]
 name = "deadband"
 version = "0.1.0"
-source = "git+https://github.com/crumbkit/deadband?tag=v0.1.0#3111577f794b4ecd64e3ddeaf0a26d9aee9514d7"
+source = "git+https://github.com/crumbkit/deadband?rev=054d4c9c3e4ecd484d32c2a4e4dd6b0c1d67aced#054d4c9c3e4ecd484d32c2a4e4dd6b0c1d67aced"
 dependencies = [
  "basic-toml",
  "clap",
- "crumbkit 0.1.0",
+ "crumbkit 0.2.0",
  "humantime",
  "libc",
+ "regex-lite",
  "rustix",
  "schemars 1.2.3",
  "serde",
@@ -1175,6 +1188,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"

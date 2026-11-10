@@ -362,6 +362,9 @@ impl<B: Backend> Workspaces<B> {
         made.manifest = archive.manifest.is_some();
         root::write_back(archives, archive, &archive.path, &workspace.manifest_file())?;
         (self.checkpoint)("root")?;
+        // The archive leaves the marker out, so the run writes it again,
+        // after the root entries in case an older archive holds one.
+        self.write_marker(workspace, made)?;
         runs.restored_ports(workspace, &self.store, |workspace, store| {
             Ok(store.create(workspace)? == Created::Written)
         })

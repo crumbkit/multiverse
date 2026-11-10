@@ -29,6 +29,7 @@ mod error;
 mod git;
 mod lookup;
 mod manifest;
+mod marker;
 mod mirror;
 mod name;
 mod phase_plan;
@@ -66,6 +67,7 @@ pub use crate::manifest::{
     MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
     ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Task, TaskName, Unit,
 };
+pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;

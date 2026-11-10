@@ -105,6 +105,80 @@ fn a_new_workspace_checks_out_the_latest_origin_main_below_the_workspace_directo
 }
 
 #[test]
+fn a_new_workspace_writes_an_empty_deadband_workspace_marker_in_its_directory() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let metadata = fs::symlink_metadata(workspace.path.join(".deadband-workspace")).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 0);
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o777,
+        0o644
+    );
+}
+
+/// Fails the step named `marker`, as a marker write that fails would.
+fn fail_at_marker(step: &str) -> Result<(), Error> {
+    if step == "marker" {
+        return Err(Error::Unwritable {
+            path: PathBuf::from(step),
+            source: std::io::Error::other("stopped by the test"),
+        });
+    }
+    Ok(())
+}
+
+#[test]
+fn a_failed_marker_write_during_new_takes_the_undo_path() {
+    let mut setup = setup();
+    setup.workspaces.checkpoint = fail_at_marker;
+    let result = setup.workspaces.create(
+        &setup.root,
+        &name("reading-list"),
+        &setup.fixture.clone,
+        Mode::Change,
+    );
+    assert!(result.is_err(), "{result:?}");
+    assert!(!setup.root.join("reading-list").exists());
+    assert_eq!(setup.workspaces.find(&name("reading-list")).unwrap(), None);
+    assert!(
+        git(&setup.fixture.clone, &["branch", "--list", "reading-list"]).is_empty(),
+        "the undo leaves the branch it created"
+    );
+}
+
+#[test]
+fn removing_a_workspace_deletes_its_marker_with_its_directory() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let removal = done(
+        setup
+            .workspaces
+            .remove(ready(&setup, "reading-list", NOTHING))
+            .unwrap(),
+    );
+    assert_eq!(removal.directory, Fate::Removed);
+    assert!(!workspace.path.exists());
+}
+
+#[test]
+fn removing_a_workspace_keeps_a_directory_of_the_markers_name() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    let marker = workspace.path.join(".deadband-workspace");
+    fs::remove_file(&marker).unwrap();
+    fs::create_dir(&marker).unwrap();
+    let removal = done(
+        setup
+            .workspaces
+            .remove(ready(&setup, "reading-list", NOTHING))
+            .unwrap(),
+    );
+    assert_eq!(removal.directory, Fate::Kept);
+    assert!(marker.is_dir());
+}
+
+#[test]
 fn a_new_workspace_writes_its_agents_file_outside_the_checkout_and_its_record() {
     let setup = setup();
     let workspace = created(&setup, "reading-list");
