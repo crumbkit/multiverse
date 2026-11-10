@@ -341,7 +341,8 @@ workspace's lock, so other mxv commands that need it fail with
 
 `build` is not part of phase's plan, so a change to `build` alone does not
 restart a running process. A keeper that restarts a crashed process does not
-build, and `mxv exec` does not ask for a place.
+build. `mxv exec UNIT` does not ask for a place, and `mxv exec` with no unit
+takes one unless `--no-gate` is given.
 
 An `argv` of `cargo run` compiles inside the process, which would hold a place
 for the server's whole life, so mxv gives it none and prints one warning for
@@ -711,7 +712,7 @@ the one that holds the current directory when it names none. Its positional
 words name units: `mxv up [-w WORKSPACE] [UNIT]...`, `mxv down`,
 `mxv restart`, `mxv status [-w WORKSPACE]`,
 `mxv logs [-w WORKSPACE] UNIT` and
-`mxv exec [-w WORKSPACE] UNIT -- COMMAND [ARGS]...`.
+`mxv exec [-w WORKSPACE] [--repo CHECKOUT] [--no-gate] [UNIT] -- COMMAND [ARGS]...`.
 
 - `mxv up` starts the named units, or every unit, with their
   dependencies first. It skips a unit that already runs. phase starts
@@ -774,11 +775,40 @@ words name units: `mxv up [-w WORKSPACE] [UNIT]...`, `mxv down`,
   lines, and `-f` prints it once it is finished, also with `--lines 0`. An
   unfinished last line longer than 64 KiB loses its start, so `-f`, even
   with `--lines 0`, starts in the middle of it.
-- `mxv exec` runs a one-off command in the context of a running unit,
-  and exits with the command's exit code, or with 128 plus
-  the number of the signal that ended it. The command is the words after
-  `--`, which no shell reads, so `mxv exec api -- env` prints the
-  variables that `api` receives.
+- `mxv exec` runs a one-off command, and exits with the command's exit
+  code, or with 128 plus the number of the signal that ended it. The
+  command is the words after `--`, which no shell reads, so write
+  `mxv exec -- sh -c '...'` for a shell. With a UNIT the command runs in the
+  context of that running unit, so `mxv exec api -- env` prints the
+  variables that `api` receives. `--repo` and `--no-gate` are refused
+  beside a UNIT.
+  - With no UNIT the command runs on the host in the workspace, with no
+    running unit and no `mxv.toml` needed. mxv runs it at the top of the
+    checkout that `--repo` names. Without `--repo` it runs in the current
+    directory when that is inside a checkout of the workspace, and otherwise
+    at the top of a workspace's only checkout, or in the directory of a
+    workspace with several checkouts.
+  - A command with no UNIT receives what a mise task of `mxv run` receives:
+    the workspace's ports as `MXV_PORT_<NAME>`, with the ports of the checkout
+    it runs in short and the others as `MXV_PORT_<CHECKOUT>_<NAME>`, the
+    variables of every service that the manifest declares, and the variables
+    that a host process receives from your environment. A variable outside
+    that list does not reach the command, so `FOO=1 mxv exec -- cmd` does not
+    set `FOO`, and `mxv exec -- env FOO=1 cmd` does. mxv starts no services
+    and no units, so run `mxv up` first when the command talks to them. The
+    command has no sandbox and no time limit.
+  - A command with no UNIT takes one place from deadband, and `--no-gate`
+    asks deadband nothing. When mxv already runs inside a deadband job,
+    deadband asks nothing and returns no variables, so
+    `deadband run -- mxv exec -- cargo test` holds one place while cargo uses
+    every core. Write `mxv exec -- cargo test` and let it take the place.
+  - A Ctrl-C at a terminal reaches a command with no UNIT directly, and mxv
+    waits for it to end. mxv holds the workspace's lock only until the
+    command starts, so `mxv up` and `mxv down` still work, and `mxv down`
+    does not stop the command. `mxv remove` and `mxv archive` do not wait
+    for the command and take its directory away, so end it before you run
+    them.
+  - A program that cannot start fails with `mxv::exec::unstartable`.
   - A host process's command runs in the process's directory, with the
     variables that the process receives, under its sandbox. It is not one
     of the workspace's processes, so `mxv down` does not stop it.

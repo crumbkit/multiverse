@@ -137,9 +137,14 @@ const HELP: Help = Help::new()
             .effects(Effects::read_only())
             .stream(LOGS),
         Leaf::new(&["exec"])
-            .examples(&[Example::new(
+            .examples(&[
+            Example::new(
                 &["-w", "reading-list", "web", "--", "env"],
                 "Print the variables that a command receives in the context of web",
+            ),
+            Example::new(
+                &["-w", "reading-list", "--", "env"],
+                "Print the variables that a command receives in the workspace, with no unit running",
             )])
             .effects(Effects::destructive().open_world().all_or_none())
             .passes_on_exit("the command"),
@@ -264,9 +269,11 @@ pub(crate) enum Verb {
     Status(StatusArgs),
     /// Print the last lines of a unit's log, and follow it with --follow.
     Logs(LogsArgs),
-    /// Run a one-off command in the context of a running unit, and exit with its exit code.
+    /// Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code.
     ///
-    /// A host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
+    /// With no UNIT, the command runs on the host in the workspace, and it needs no running unit and no mxv.toml. It runs at the top of the checkout that --repo names; or else in the current directory when that is inside a checkout; or else at the top of a workspace's only checkout; or else in the workspace's directory. It receives what a mise task of `mxv run` receives: the workspace's ports as MXV_PORT_<NAME>, with those of the checkout it runs in short and the others as MXV_PORT_<CHECKOUT>_<NAME>, the variables of every service that the manifest declares, and the variables that a host process receives from your environment. A variable outside that list does not reach the command, so write `mxv exec -- env NAME=value COMMAND` to set one. mxv starts no services and no units, so run `mxv up` first when the command talks to them. The command has no sandbox and no time limit. It takes one place from deadband, and --no-gate asks deadband nothing. Inside `deadband run`, deadband gives the command no thread limits, so let `mxv exec` take the place itself. A Ctrl-C at a terminal reaches the command itself, and mxv waits for it to end. mxv holds the workspace's lock only until the command starts, so `mxv up` and `mxv down` still work, and `mxv down` does not stop the command. `mxv remove` and `mxv archive` do not wait for the command, so end it before you run them.
+    ///
+    /// With a UNIT, a host process's command runs in the process's directory, with the variables that the process receives and under its sandbox, as `mxv up` starts the process. A container's command runs inside the container through `docker exec`, with a terminal of its own when mxv's standard input and output are both terminals. The command is the words after `--`, which no shell reads. mxv exits with the command's exit code, or with 128 plus the number of the signal that ended it. A sandboxed command exits with 78 when its sandbox cannot be applied. A sandboxed command runs in a session of its own and cannot have the terminal, so mxv refuses it while its standard input, output or error is a terminal, and on Ctrl-C mxv stops the command's process group. The command keeps running when something sends SIGTERM to mxv alone. A host command is not one of the workspace's processes, so `mxv down` does not stop it.
     Exec(ExecArgs),
     /// Run a task of a workspace through deadband, or list its tasks.
     ///
@@ -690,9 +697,17 @@ pub(crate) struct ExecArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// The running unit in whose context the command runs
+    /// The folder of the checkout to run the command at the top of, when the command line names no UNIT
+    #[arg(long, value_name = "CHECKOUT", conflicts_with = "process")]
+    pub(crate) repo: Option<String>,
+
+    /// Ask deadband for no place, when the command line names no UNIT
+    #[arg(long, conflicts_with = "process")]
+    pub(crate) no_gate: bool,
+
+    /// The running unit in whose context the command runs, which defaults to running it on the host in the workspace
     #[arg(value_name = "UNIT")]
-    pub(crate) process: String,
+    pub(crate) process: Option<String>,
 
     /// The command's program and its arguments, after `--`
     #[arg(value_name = "COMMAND", last = true, required = true, num_args = 1..)]

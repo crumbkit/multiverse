@@ -44,6 +44,13 @@ fn run_keeps_flags_after_the_task_for_the_task() {
 }
 
 #[test]
+fn a_double_dash_before_the_task_leaves_the_task_named() {
+    let args = parsed(&["run", "--", "test", "--all"]);
+    assert_eq!(args.task().map(String::as_str), Some("test"));
+    assert_eq!(args.task_words(), ["--all"]);
+}
+
+#[test]
 fn run_takes_no_task_to_list_them() {
     assert_eq!(parsed(&["run"]).task(), None);
 }
