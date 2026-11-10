@@ -68,6 +68,10 @@ pub const TASK_AMBIGUOUS: Code = Code::new("mxv", "task", "ambiguous");
 pub const PORT_TAKEN: Code = Code::new("mxv", "port", "taken");
 /// The code of a port name that the manifest does not declare.
 pub const PORT_NOT_FOUND: Code = Code::new("mxv", "port", "not_found");
+/// The code of a unit whose permissions no person granted.
+pub const PERMISSIONS_NOT_GRANTED: Code = Code::new("mxv", "permissions", "not_granted");
+/// The code of a unit that `mxv down` kept, because running units need it.
+pub const PROCESS_STILL_NEEDED: Code = Code::new("mxv", "process", "still_needed");
 
 /// Every code that a [`RunFailure`] or a `mxv run` failure returns.
 pub(crate) const CODES: &[&Code] = &[
@@ -97,6 +101,8 @@ pub(crate) const CODES: &[&Code] = &[
     &TASK_AMBIGUOUS,
     &PORT_TAKEN,
     &PORT_NOT_FOUND,
+    &PERMISSIONS_NOT_GRANTED,
+    &PROCESS_STILL_NEEDED,
 ];
 
 /// A failure of a process verb.
@@ -272,6 +278,34 @@ pub(crate) enum RunFailure {
         /// What phase refused.
         message: String,
     },
+    /// A selected host unit is new or asks for more than the grant of the
+    /// workspace's repository, and no person at a terminal granted it, so
+    /// the command built, stopped, started and ran nothing.
+    PermissionsNotGranted {
+        /// The workspace's name.
+        workspace: String,
+        /// The repository's name, such as its folder.
+        repository: String,
+        /// The repository's source directories.
+        paths: Vec<PathBuf>,
+        /// One sentence for each unit that asks for more, in plain words.
+        asks: Vec<String>,
+        /// Whether a person at a terminal answered something other than
+        /// yes, rather than no person being able to answer.
+        declined: bool,
+    },
+    /// `mxv down` kept a named unit running, because running units that it
+    /// does not stop depend on it.
+    StillNeeded {
+        /// The workspace's name.
+        workspace: String,
+        /// The kept unit.
+        unit: String,
+        /// The running units that need it.
+        by: Vec<String>,
+        /// Those of `by` whose state phase cannot tell.
+        unknown: Vec<String>,
+    },
     /// The workspace has docker volumes, which may hold data, so `remove`
     /// keeps the workspace unless `--delete-volumes` allows deleting them.
     Volumes {
@@ -381,6 +415,8 @@ impl Failure for RunFailure {
             Self::Unstoppable { .. } => &PROCESS_UNSTOPPABLE,
             Self::PortTaken { .. } => &PORT_TAKEN,
             Self::UnknownPort { .. } => &PORT_NOT_FOUND,
+            Self::PermissionsNotGranted { .. } => &PERMISSIONS_NOT_GRANTED,
+            Self::StillNeeded { .. } => &PROCESS_STILL_NEEDED,
         }
     }
 
@@ -525,6 +561,14 @@ impl Failure for RunFailure {
             Self::UnknownPort { workspace, .. } => {
                 Recovery::Run(Call::new(&["show"]).value("names", workspace))
             }
+            // Only a person at a terminal can grant, because `up` asks there
+            // and no flag or variable approves a grant.
+            Self::PermissionsNotGranted { workspace, .. } => {
+                Recovery::Terminal(Call::new(&["up"]).value("workspace", workspace))
+            }
+            Self::StillNeeded {
+                workspace, unit, by, ..
+            } => down_all(workspace, unit, by),
         }
     }
 
@@ -660,6 +704,49 @@ impl Failure for RunFailure {
             Self::UnknownPort { workspace, port } => {
                 vec![Field::new("workspace", workspace), Field::new("port", port)]
             }
+            Self::PermissionsNotGranted { .. } | Self::StillNeeded { .. } => self.grant_fields(),
+        }
+    }
+}
+
+impl RunFailure {
+    /// Returns the fields of [`RunFailure::PermissionsNotGranted`] and
+    /// [`RunFailure::StillNeeded`], and none for any other failure.
+    fn grant_fields(&self) -> Vec<Field<'_>> {
+        match self {
+            Self::PermissionsNotGranted {
+                workspace,
+                repository,
+                paths,
+                asks,
+                declined,
+            } => vec![
+                Field::new("workspace", workspace),
+                Field::new("repository", repository),
+                Field::new(
+                    "paths",
+                    FieldValue::list(paths.iter().map(|path| shown(path))),
+                ),
+                Field::new("asks", FieldValue::list(asks.iter())),
+                Field::new("declined", *declined),
+            ],
+            Self::StillNeeded {
+                workspace,
+                unit,
+                by,
+                unknown,
+            } => {
+                let mut fields = vec![
+                    Field::new("workspace", workspace),
+                    Field::new("process", unit),
+                    Field::new("needed_by", FieldValue::list(by.iter())),
+                ];
+                if !unknown.is_empty() {
+                    fields.push(Field::new("unknown", FieldValue::list(unknown.iter())));
+                }
+                fields
+            }
+            _ => Vec::new(),
         }
     }
 }
@@ -832,11 +919,101 @@ impl fmt::Display for RunFailure {
                 formatter,
                 "the manifest of the workspace {workspace} declares no port named {port}"
             ),
+            Self::PermissionsNotGranted {
+                repository,
+                paths,
+                asks,
+                declined,
+                ..
+            } => fmt_not_granted(formatter, repository, paths, asks, *declined),
+            Self::StillNeeded {
+                unit, by, unknown, ..
+            } => fmt_still_needed(formatter, unit, by, unknown),
         }
     }
 }
 
+/// Returns the recovery of [`RunFailure::StillNeeded`]: the `mxv down` of
+/// the workspace `workspace` that stops `unit` with the units `by` that
+/// need it.
+fn down_all(workspace: &str, unit: &str, by: &[String]) -> Recovery {
+    Recovery::Run(
+        by.iter()
+            .map(String::as_str)
+            .chain(std::iter::once(unit))
+            .fold(
+                Call::new(&["down"]).value("workspace", workspace),
+                |call, name| call.value("processes", name),
+            ),
+    )
+}
+
+/// Writes the message of [`RunFailure::PermissionsNotGranted`].
+fn fmt_not_granted(
+    formatter: &mut fmt::Formatter<'_>,
+    repository: &str,
+    paths: &[PathBuf],
+    asks: &[String],
+    declined: bool,
+) -> fmt::Result {
+    let paths: Vec<String> = paths.iter().map(|path| shown(path)).collect();
+    if declined {
+        write!(
+            formatter,
+            "the answer was not yes, so mxv granted nothing to the repository {repository} ({}) and started, stopped and ran nothing",
+            paths.join(", ")
+        )
+    } else {
+        write!(
+            formatter,
+            "the repository {repository} ({}) asks for permissions that no person has granted, so mxv started, stopped and ran nothing: {}",
+            paths.join(", "),
+            asks.join("; ")
+        )
+    }
+}
+
+/// Writes the message of [`RunFailure::StillNeeded`].
+fn fmt_still_needed(
+    formatter: &mut fmt::Formatter<'_>,
+    unit: &str,
+    by: &[String],
+    unknown: &[String],
+) -> fmt::Result {
+    write!(
+        formatter,
+        "the running units {} depend on {unit}, so `mxv down` kept it running",
+        by.join(", ")
+    )?;
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        write!(
+            formatter,
+            "; phase cannot tell the state of {}, so it counts them as running",
+            unknown.join(", ")
+        )
+    }
+}
+
 impl RunFailure {
+    /// Returns the failure of the workspace `workspace`, whose units ask
+    /// for what `ask` names, which no person granted. `declined` says that
+    /// a person at a terminal answered something other than yes.
+    pub(crate) fn not_granted(
+        workspace: &str,
+        ask: &multiverse::PermissionAsk,
+        declined: bool,
+    ) -> Self {
+        Self::PermissionsNotGranted {
+            workspace: workspace.to_owned(),
+            repository: ask.repository().to_owned(),
+            paths: ask.paths().to_vec(),
+            asks: ask.growth().sentences(),
+            declined,
+        }
+    }
+
     /// Returns the fields of a failure that phase's running of the
     /// workspace's apps added.
     fn transition_fields(&self) -> Vec<Field<'_>> {

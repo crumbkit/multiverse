@@ -1,6 +1,6 @@
 //! The operations that mxv and other hosts call.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -13,6 +13,7 @@ use crate::engine::keeper::KeeperCommand;
 use crate::engine::run::{Engine, Settings};
 use crate::env::EnvironmentSource;
 use crate::error::PhaseError;
+use crate::grants::{GrantScope, Grants, Growth};
 use crate::logs::{LineSink, LogRequest};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::Plan;
@@ -337,6 +338,86 @@ impl Phase {
     ) -> Result<Report, PhaseError> {
         self.engine(&self.containers())
             .down(workspace, select, deadline)
+    }
+
+    /// Returns what a person granted the apps of `scope`, or `None` when
+    /// the scope has no grant file. A host compares it with a plan's
+    /// permissions through [`Grants::growth`] before it calls
+    /// [`Phase::up`], and a scope with no file compares as an empty grant.
+    /// It takes no lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::GrantsUnreadable`] when the file cannot be
+    /// read or names other repositories, and [`PhaseError::NewerGrants`]
+    /// when a newer phase wrote it.
+    pub fn granted(&self, scope: &GrantScope) -> Result<Option<Grants>, PhaseError> {
+        crate::grants::read(&self.state_dir, scope)
+    }
+
+    /// Adds `growth` to the grant of `scope`, which a host calls only after
+    /// a person agreed to it, and returns the grant as written. It holds the
+    /// grant file's lock, waiting up to the lock wait, reads the file again
+    /// and writes the union, so a grant only grows and two grants at once
+    /// keep both additions. The file is written to a temporary file that is
+    /// renamed over it, so a crash leaves the old grant or the new one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Phase::granted`], [`PhaseError::GrantsBusy`]
+    /// when another grant holds the lock for all of the lock wait, and
+    /// [`PhaseError::StateUnwritable`] when the file cannot be written.
+    pub fn grant(&self, scope: &GrantScope, growth: &Growth) -> Result<Grants, PhaseError> {
+        crate::grants::grant(&self.state_dir, scope, growth, self.lock_wait)
+    }
+
+    /// Returns, for each app of the run record of the workspace whose
+    /// stable id is `workspace`, the apps of `running` that depend on it,
+    /// directly or through a chain of other apps, from the dependencies that
+    /// the record holds. A host keeps an app running while such an app does.
+    /// A record that holds no dependencies, such as one an older phase
+    /// wrote, gives no app a dependant. It stops nothing and takes no lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::RecordUnreadable`] or
+    /// [`PhaseError::NewerRecord`] when the record cannot be used.
+    pub fn needed_by(
+        &self,
+        workspace: &WorkspaceId,
+        running: &BTreeSet<AppName>,
+    ) -> Result<BTreeMap<AppName, Vec<AppName>>, PhaseError> {
+        let Some(record) = RunStore::new(&self.state_dir).read(workspace)? else {
+            return Ok(BTreeMap::new());
+        };
+        let depends: BTreeMap<&AppName, &[AppName]> = record
+            .apps
+            .iter()
+            .map(|app| (&app.name, app.depends.as_slice()))
+            .collect();
+        let mut needed: BTreeMap<AppName, Vec<AppName>> = BTreeMap::new();
+        for dependant in running {
+            // Each app that `dependant` reaches through its dependencies
+            // is needed by it.
+            let mut seen: BTreeSet<&AppName> = BTreeSet::new();
+            let mut next: Vec<&AppName> = depends
+                .get(dependant)
+                .map(|direct| direct.iter().collect())
+                .unwrap_or_default();
+            while let Some(app) = next.pop() {
+                if app == dependant || !seen.insert(app) {
+                    continue;
+                }
+                needed
+                    .entry(app.clone())
+                    .or_default()
+                    .push(dependant.clone());
+                if let Some(further) = depends.get(app) {
+                    next.extend(further.iter());
+                }
+            }
+        }
+        Ok(needed)
     }
 
     /// Returns the runner of container apps on this machine.

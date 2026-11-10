@@ -368,6 +368,9 @@ fn run_in_process(
             }
             .into());
         }
+        ExecTarget::NotGranted(ask) => {
+            return Err(RunFailure::not_granted(&workspace, &ask, false).into());
+        }
     };
     // A person who runs a command in a workspace is using it, so mxv
     // touches it while the command runs.

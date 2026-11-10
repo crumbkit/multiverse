@@ -659,6 +659,45 @@ fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connecti
 }
 
 #[test]
+fn the_requested_permissions_of_host_units_need_no_ports_and_match_the_plan() {
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let manifest = manifest(SANDBOXED_SERVER);
+    let no_ports = BTreeMap::new();
+    let units = manifest.start_order(&[]).unwrap();
+
+    let requested = crate::phase_plan::permissions(
+        &Inputs {
+            manifest: &manifest,
+            workspace: &name,
+            id: &id,
+            checkout: Path::new("/work/triage/app"),
+            roots: Vec::new(),
+            ports: &no_ports,
+            workspace_dir: None,
+            grace: Duration::from_secs(5),
+            caller: &caller,
+            provisioner: None,
+        },
+        &units,
+    )
+    .unwrap();
+
+    let mut server = phase::Permissions::default();
+    server.write = strings(["target"]);
+    server.listen = BTreeSet::from([PortName::try_from("http".to_owned()).unwrap()]);
+    server.connect = strings(["db"]);
+    assert_eq!(
+        requested,
+        BTreeMap::from([
+            (app("server"), phase::Grant::Sandboxed(server)),
+            (app("tool"), phase::Grant::Unsandboxed),
+        ])
+    );
+}
+
+#[test]
 fn a_process_without_permissions_and_a_container_give_their_apps_none() {
     let built = plan_of(&manifest(APP), &CallerEnvironment::default());
     assert_eq!(built.plan.app(&app("api")).unwrap().permissions, None);

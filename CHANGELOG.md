@@ -120,8 +120,33 @@ workspace may need to act on.
   `mxv::volume::not_moved` and the `group_alive` field of the documents of
   the unit verbs are gone. The field was null for every unit that phase
   runs.
+- mxv-phase's `AppOutcome::AwaitingGrant`, `UpReport::awaiting_grant` and
+  the code `phase::grant::awaiting` are gone. The permission check runs
+  before `Phase::up`, so nothing could return them.
 
 ### Changed
+
+- `mxv up` and `mxv restart` compare the permissions of the selected host
+  units and their dependencies with what a person has granted to the
+  repository, before anything builds, stops or starts. A unit that is new,
+  that holds a permission entry the grant lacks, or that would leave the
+  sandbox asks for more. At a terminal, mxv lists what each unit asks for
+  and asks `Grant them? [y/N]`. Without a terminal, or with `--no-input`,
+  the command fails with `mxv::permissions::not_granted`, whose recovery is
+  `mxv up` run by a person in a terminal, and every running unit keeps
+  running. `mxv exec UNIT` refuses with the same code and never asks. No
+  flag or variable approves a grant. Each repository already in use asks
+  once after the upgrade, so an agent's `mxv up` there refuses until a
+  person answers in a terminal. The grant lives in
+  `$XDG_STATE_HOME/mxv/phase/grants/`, is shared by every workspace of the
+  repository, only grows, and is never deleted by mxv. Move its file away
+  to be asked about every unit again.
+- `mxv down` with names keeps a named unit that a running unit outside the
+  stopped set depends on, and what that unit depends on in turn. Each kept
+  unit fails the command with `mxv::process::still_needed`, which names the
+  units that need it and the `mxv down` that stops them all. The other
+  named units stop, and the command exits 1. `mxv down` with no names and
+  `mxv restart` stop what they stopped before.
 
 - `mxv clean --force` is now `mxv clean --disposable`. It deletes, with
   `--yes`, the paths that only a repository's `mxv.toml` declares

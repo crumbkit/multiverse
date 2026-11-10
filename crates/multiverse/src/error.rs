@@ -591,6 +591,7 @@ impl Error {
         let code = error.code();
         match error {
             P::Busy { .. } => Self::Busy { path: run_record },
+            P::GrantsBusy { path, .. } => Self::Busy { path },
             P::RecordUnreadable { path, reason, .. } => Self::StateUnreadable {
                 path,
                 source: io::Error::other(reason),

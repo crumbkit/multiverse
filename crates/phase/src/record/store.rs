@@ -178,45 +178,13 @@ impl RunStore {
         let mut bytes = serde_json::to_vec_pretty(record)
             .map_err(|error| unwritable(&target, io::Error::other(error)))?;
         bytes.push(b'\n');
-        self.create_dir()?;
+        secure_dir(&self.dir)?;
         let temp = self.dir.join(format!(
             ".{}.json.{}.tmp",
             record.workspace,
             std::process::id()
         ));
-        // A temporary file that a crashed write of this process id left is
-        // removed, so `create_new` below never meets it.
-        match fs::remove_file(&temp) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(unwritable(&temp, error)),
-        }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
-        )]
-        let opened = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .custom_flags(no_follow())
-            .mode(0o600)
-            .open(&temp);
-        let written =
-            opened.and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()));
-        if let Err(error) = written {
-            let _ = fs::remove_file(&temp);
-            return Err(unwritable(&temp, error));
-        }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
-        )]
-        let renamed = fs::rename(&temp, &target);
-        if let Err(error) = renamed {
-            let _ = fs::remove_file(&temp);
-            return Err(unwritable(&target, error));
-        }
-        Ok(())
+        replace_file(&temp, &target, &bytes)
     }
 
     /// Deletes the record of `workspace`. Deleting a record that does not
@@ -268,93 +236,172 @@ impl RunStore {
         wait: Duration,
         give_up: &dyn Fn() -> bool,
     ) -> Result<LifecycleLock, PhaseError> {
-        let path = self.lock_path(workspace);
-        self.create_dir()?;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
-        )]
-        let opened = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&path);
-        let file = opened.map_err(|source| PhaseError::StateUnwritable {
-            path: path.clone(),
-            source,
-        })?;
-        let deadline = now() + wait;
-        // Another process releases a `flock` with no event that this
-        // process can wait on, so the lock polls (BASE-11).
-        loop {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "crates/phase/src/record/store.rs owns phase's file locks and their deadline (DUR-2)"
-            )]
-            let attempt = file.try_lock();
-            match attempt {
-                Ok(()) => return Ok(LifecycleLock { _file: file }),
-                Err(TryLockError::WouldBlock) => {}
-                Err(TryLockError::Error(source)) => {
-                    return Err(PhaseError::StateUnwritable { path, source });
-                }
-            }
-            if now() >= deadline || give_up() {
-                return Err(PhaseError::Busy {
-                    workspace: workspace.clone(),
-                    waited: wait,
-                });
-            }
-            pause(POLL_INTERVAL);
-        }
-    }
-
-    /// Creates the records directory with mode 0700 when it does not
-    /// exist, and narrows the mode of one that grants its group or others
-    /// any access to 0700. It refuses a records directory that is a
-    /// symbolic link or no directory.
-    fn create_dir(&self) -> Result<(), PhaseError> {
-        let unwritable = |source| PhaseError::StateUnwritable {
-            path: self.dir.clone(),
-            source,
-        };
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.dir)
-            .map_err(unwritable)?;
-        let metadata = fs::symlink_metadata(&self.dir).map_err(unwritable)?;
-        if !metadata.is_dir() {
-            return Err(unwritable(io::Error::other(
-                "the records directory is a symbolic link or no directory",
-            )));
-        }
-        if metadata.permissions().mode() & 0o077 != 0 {
-            fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))
-                .map_err(unwritable)?;
-        }
-        Ok(())
-    }
-
-    /// Syncs the records directory, so a rename or a removal in it
-    /// survives a power loss. Some file systems cannot sync a directory and
-    /// fail with EINVAL or ENOTSUP, and there the sync is skipped, because
-    /// the rename itself has succeeded.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
-    /// opened or synced for another reason.
-    fn sync_dir(&self) -> Result<(), PhaseError> {
-        let synced = File::open(&self.dir).and_then(|handle| handle.sync_all());
-        match synced {
-            Ok(()) => Ok(()),
-            Err(error) if cannot_sync_directory(&error) => Ok(()),
-            Err(source) => Err(PhaseError::StateUnwritable {
-                path: self.dir.clone(),
-                source,
+        secure_dir(&self.dir)?;
+        match take_lock(&self.lock_path(workspace), wait, give_up)? {
+            Some(file) => Ok(LifecycleLock { _file: file }),
+            None => Err(PhaseError::Busy {
+                workspace: workspace.clone(),
+                waited: wait,
             }),
         }
+    }
+
+    /// Syncs the records directory, as [`sync_directory`] does.
+    fn sync_dir(&self) -> Result<(), PhaseError> {
+        sync_directory(&self.dir)
+    }
+}
+
+/// Writes `bytes` to the temporary file `temp` and renames it over
+/// `target`, without syncing the directory, so a reader sees the old file
+/// or the new one and never part of one. The file has mode 0600, and the
+/// write never follows a symbolic link that stands where `temp` goes.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::StateUnwritable`] when a step fails. The
+/// temporary file is removed after a failed step.
+pub(crate) fn replace_file(temp: &Path, target: &Path, bytes: &[u8]) -> Result<(), PhaseError> {
+    let unwritable = |path: &Path, source| PhaseError::StateUnwritable {
+        path: path.to_path_buf(),
+        source,
+    };
+    // A temporary file that a crashed write of this process id left is
+    // removed, so `create_new` below never meets it.
+    match fs::remove_file(temp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(unwritable(temp, error)),
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
+    )]
+    let opened = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(no_follow())
+        .mode(0o600)
+        .open(temp);
+    let written = opened.and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()));
+    if let Err(error) = written {
+        let _ = fs::remove_file(temp);
+        return Err(unwritable(temp, error));
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
+    )]
+    let renamed = fs::rename(temp, target);
+    if let Err(error) = renamed {
+        let _ = fs::remove_file(temp);
+        return Err(unwritable(target, error));
+    }
+    Ok(())
+}
+
+/// Takes an exclusive `flock` on the file `path`, which it creates with
+/// mode 0600 when it does not exist. When another holder has it, it tries
+/// again every [`POLL_INTERVAL`] until `wait` passes, and stops after the
+/// first failed try once `give_up` holds. It returns `None` when the lock
+/// stayed held. The operating system releases the lock when the returned
+/// file closes or its process ends.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::StateUnwritable`] when the file cannot be opened
+/// or locked.
+pub(crate) fn take_lock(
+    path: &Path,
+    wait: Duration,
+    give_up: &dyn Fn() -> bool,
+) -> Result<Option<File>, PhaseError> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
+    )]
+    let opened = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path);
+    let file = opened.map_err(|source| PhaseError::StateUnwritable {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let deadline = now() + wait;
+    // Another process releases a `flock` with no event that this process
+    // can wait on, so the lock polls (BASE-11).
+    loop {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "crates/phase/src/record/store.rs owns phase's file locks and their deadline (DUR-2)"
+        )]
+        let attempt = file.try_lock();
+        match attempt {
+            Ok(()) => return Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(source)) => {
+                return Err(PhaseError::StateUnwritable {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        if now() >= deadline || give_up() {
+            return Ok(None);
+        }
+        pause(POLL_INTERVAL);
+    }
+}
+
+/// Creates the directory `dir` with mode 0700 when it does not exist, and
+/// narrows the mode of one that grants its group or others any access to
+/// 0700. It refuses a directory that is a symbolic link or no directory.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::StateUnwritable`] when a step fails.
+pub(crate) fn secure_dir(dir: &Path) -> Result<(), PhaseError> {
+    let unwritable = |source| PhaseError::StateUnwritable {
+        path: dir.to_path_buf(),
+        source,
+    };
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(unwritable)?;
+    let metadata = fs::symlink_metadata(dir).map_err(unwritable)?;
+    if !metadata.is_dir() {
+        return Err(unwritable(io::Error::other(
+            "the directory is a symbolic link or no directory",
+        )));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(unwritable)?;
+    }
+    Ok(())
+}
+
+/// Syncs the directory `dir`, so a rename or a removal in it survives a
+/// power loss. Some file systems cannot sync a directory and fail with
+/// EINVAL or ENOTSUP, and there the sync is skipped, because the rename
+/// itself has succeeded.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
+/// opened or synced for another reason.
+pub(crate) fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
+    let synced = File::open(dir).and_then(|handle| handle.sync_all());
+    match synced {
+        Ok(()) => Ok(()),
+        Err(error) if cannot_sync_directory(&error) => Ok(()),
+        Err(source) => Err(PhaseError::StateUnwritable {
+            path: dir.to_path_buf(),
+            source,
+        }),
     }
 }
 

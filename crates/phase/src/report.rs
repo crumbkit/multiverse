@@ -5,7 +5,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, PortName, ProcessName};
-use crate::plan::Permissions;
 use crate::record::{DockerCause, DockerContext};
 
 #[cfg(test)]
@@ -325,13 +324,6 @@ pub enum AppOutcome {
     /// phase did not start the app because an app it depends on did not
     /// start, or because another app failed to start.
     NotStarted,
-    /// phase did not start the app because its permissions grew beyond what
-    /// was granted. Trust grants are not built, so no `up` returns this yet.
-    #[non_exhaustive]
-    AwaitingGrant {
-        /// The permissions the app asks for beyond its grant.
-        asked: Permissions,
-    },
     /// A process of the app failed to start, so phase stopped what it had
     /// started of the app.
     #[non_exhaustive]
@@ -390,12 +382,6 @@ pub enum AppOutcome {
 }
 
 impl AppOutcome {
-    /// Returns the outcome of an app whose permissions grew by `asked`.
-    #[must_use]
-    pub const fn awaiting_grant(asked: Permissions) -> Self {
-        Self::AwaitingGrant { asked }
-    }
-
     /// Returns the outcome of an app whose `process` failed to start
     /// because of `problem`.
     #[must_use]

@@ -1,4 +1,6 @@
-Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
+Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds.
+
+A named unit that a running unit outside the stopped set depends on keeps running, and so does what it depends on. Each kept unit fails the command with mxv::process::still_needed, which names the units that need it, and the other named units stop. Name the dependants too to stop them all.
 
 Usage: mxv down [OPTIONS] [UNIT]...
 

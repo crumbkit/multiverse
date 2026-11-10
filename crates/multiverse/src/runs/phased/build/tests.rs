@@ -15,7 +15,7 @@ use super::{Admission, Asked, BuildEnd, BuildStop, Place};
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
-use crate::runs::Runs;
+use crate::runs::{Granting, Runs};
 use crate::store::{Created, Store};
 use crate::testing::write;
 
@@ -124,6 +124,9 @@ struct World {
     dir: tempfile::TempDir,
     /// The workspace.
     workspace: Workspace,
+    /// Whether [`World::build`] leaves the units' permissions ungranted,
+    /// as when no person answered.
+    ungranted: bool,
 }
 
 impl World {
@@ -142,7 +145,11 @@ impl World {
         let mut workspace = Workspace::new(name, path, vec![checkout]);
         let store = Store::new(dir.path().join("workspaces"));
         assert_eq!(store.create(&mut workspace).unwrap(), Created::Written);
-        Self { dir, workspace }
+        Self {
+            dir,
+            workspace,
+            ungranted: false,
+        }
     }
 
     fn runs(&self) -> Runs {
@@ -158,6 +165,15 @@ impl World {
     fn build(&mut self, runs: &Runs, manifest: &str, admission: &mut Recording) -> BuildEnded {
         let manifest = Manifest::parse(manifest, Path::new("mxv.toml")).unwrap();
         let store = Store::new(self.dir.path().join("workspaces"));
+        // A person at a terminal grants the units' permissions, as `mxv up`
+        // asks before it takes the lock.
+        if !self.ungranted
+            && let Granting::Asks(ask) = runs
+                .granting(&store, &self.workspace, &manifest, &[])
+                .unwrap()
+        {
+            runs.grant(&ask).unwrap();
+        }
         let lock = runs.lock(&self.workspace.name).unwrap();
         let end = runs
             .build(
@@ -178,6 +194,7 @@ impl World {
                 BuildStop::Interrupted => BuildEnded::Interrupted(process),
             },
             BuildEnd::UnknownProcess(_) | BuildEnd::Unrunnable(_) => BuildEnded::Refused,
+            BuildEnd::NotGranted(_) => BuildEnded::NotGranted,
         }
     }
 }
@@ -191,6 +208,7 @@ enum BuildEnded {
     TimedOut(String),
     Interrupted(String),
     Refused,
+    NotGranted,
 }
 
 fn process(name: &str, script: &str, more: &str) -> String {
@@ -233,6 +251,54 @@ fn every_build_runs_under_one_place_in_start_order_with_the_places_variables() {
     assert!(log.admitted[0].starts_with("api: sh -c"));
     assert_eq!(log.asked, [(world.checkout(), "triage".to_owned())]);
     assert_eq!(log.ended, [Some(0)]);
+}
+
+#[test]
+fn a_unit_whose_permissions_no_person_granted_runs_no_build_and_asks_for_no_place() {
+    let mut world = World::new();
+    world.ungranted = true;
+    let mut admission = Recording::default();
+    let runs = world.runs();
+    let manifest = process("api", "touch built", "");
+
+    let ended = world.build(&runs, &manifest, &mut admission);
+
+    assert_eq!(ended, BuildEnded::NotGranted);
+    assert!(!world.checkout().join("built").exists());
+    assert!(admission.log.borrow().admitted.is_empty());
+}
+
+#[test]
+fn a_selection_without_build_steps_is_still_checked_against_the_grant() {
+    let mut world = World::new();
+    world.ungranted = true;
+    let mut admission = Recording::default();
+    let runs = world.runs();
+
+    let ended = world.build(
+        &runs,
+        "[processes.api]\nargv = [\"true\"]\n",
+        &mut admission,
+    );
+
+    assert_eq!(ended, BuildEnded::NotGranted);
+}
+
+#[test]
+fn a_selection_of_containers_alone_asks_for_nothing() {
+    let mut world = World::new();
+    world.ungranted = true;
+    let mut admission = Recording::default();
+    let runs = world.runs();
+
+    let ended = world.build(
+        &runs,
+        "[containers.db]\nimage = \"postgres:17.2\"\n",
+        &mut admission,
+    );
+
+    assert_eq!(ended, BuildEnded::Passed);
+    assert!(!world.dir.path().join("phase").join("grants").exists());
 }
 
 #[test]

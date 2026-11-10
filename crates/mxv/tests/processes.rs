@@ -8,6 +8,8 @@
 
 #![cfg(test)]
 
+#[path = "support/grants.rs"]
+mod grants;
 #[path = "support/git.rs"]
 mod support;
 #[path = "support/ports.rs"]
@@ -17,6 +19,7 @@ use std::fs;
 use std::net::{Ipv4Addr, TcpListener};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -95,6 +98,9 @@ struct Setup {
     dir: TempDir,
     /// The block of ports that the config file names.
     ports: PortBlock,
+    /// Whether `up`, `restart` and `exec` run without the grant that a
+    /// person would give, so they meet the refusal.
+    ungranted: AtomicBool,
 }
 
 impl Setup {
@@ -102,7 +108,11 @@ impl Setup {
         let dir = tempfile::tempdir().unwrap();
         repository(&dir.path().canonicalize().unwrap());
         let ports = PortBlock::claim();
-        let setup = Self { dir, ports };
+        let setup = Self {
+            dir,
+            ports,
+            ungranted: AtomicBool::new(false),
+        };
         setup.write_config(&setup.ports.config_line());
         setup
     }
@@ -146,8 +156,17 @@ impl Setup {
         write(&checkout.join("mxv.toml"), manifest);
     }
 
+    /// Grants what every workspace's units ask for before `args` run, as a
+    /// person at a terminal would, when `args` start or run units.
+    fn grant_before(&self, args: &[&str]) {
+        if !self.ungranted.load(Ordering::Relaxed) {
+            grants::before(&self.root().join("state/mxv"), args);
+        }
+    }
+
     fn command_in(&self, dir: &Path, args: &[&str]) -> Command {
         let root = self.root();
+        self.grant_before(args);
         Command::new(env!("CARGO_BIN_EXE_mxv"))
             .args(args)
             .current_dir(dir)
@@ -192,6 +211,10 @@ impl Setup {
     )]
     fn spawn_through(&self, program: &str, args: &[&str], socket: &Path) -> std::process::Child {
         let root = self.root();
+        // A wrapper such as `deadband run -- mxv up` puts the verb later.
+        if args.contains(&"up") {
+            self.grant_before(&["up"]);
+        }
         let mut command = std::process::Command::new(program);
         command
             .args(args)
@@ -2712,4 +2735,229 @@ fn remove_during_an_ad_hoc_command_removes_the_workspace_and_the_command_runs_on
     }
     let _ = child.kill();
     panic!("mxv did not end within the test's limit");
+}
+
+impl Setup {
+    /// Runs `up`, `restart` and `exec` from now on without the grant that a
+    /// person at a terminal would give.
+    fn without_grants(&self) {
+        self.ungranted.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns the names of the files in phase's grants directory.
+    fn grant_files(&self) -> Vec<String> {
+        fs::read_dir(self.root().join("state/mxv/phase/grants")).map_or_else(
+            |_| Vec::new(),
+            |entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.ends_with(".json"))
+                    .collect()
+            },
+        )
+    }
+}
+
+/// Returns the `asks` field of the failure `document`, as strings.
+fn asks(document: &Value) -> Vec<String> {
+    document["fields"]["asks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no asks in {document}"))
+        .iter()
+        .map(|ask| ask.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn the_first_up_of_a_repository_without_a_terminal_lists_every_host_unit_and_starts_nothing() {
+    let setup = Setup::new();
+    setup.workspace("triage", &server_and_worker());
+    setup.without_grants();
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::permissions::not_granted");
+    assert_eq!(document["fields"]["workspace"], "triage");
+    assert_eq!(document["fields"]["repository"], "app");
+    assert_eq!(document["fields"]["declined"], false);
+    assert_eq!(
+        asks(&document),
+        [
+            "server, a new unit, asks to run outside the sandbox, with everything your account can reach",
+            "worker, a new unit, asks to run outside the sandbox, with everything your account can reach",
+        ]
+    );
+    assert_eq!(document["recovery"]["kind"], "terminal", "{document}");
+    assert!(
+        document["recovery"]
+            .to_string()
+            .contains("mxv up --workspace triage"),
+        "{document}"
+    );
+    assert!(setup.grant_files().is_empty(), "{:?}", setup.grant_files());
+    assert!(!setup.started("server"));
+    assert!(!setup.started("worker"));
+}
+
+#[test]
+fn restart_without_a_grant_refuses_and_runs_no_build() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &breakable(""));
+    setup.without_grants();
+
+    let (exit, document) = setup.json(&["restart", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::permissions::not_granted");
+    assert!(!setup.started("api"));
+    write(&checkout.join("broken"), "");
+    let (exit, document) = setup.json(&["restart", "-w", "triage"]);
+    assert_eq!(document["code"], "mxv::permissions::not_granted");
+    assert_eq!(exit, 1, "{document}");
+}
+
+#[test]
+fn a_grant_given_for_one_workspace_lets_another_workspace_of_the_repository_start() {
+    let setup = Setup::new();
+    setup.workspace("triage", &server_and_worker());
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.grant_files().len(), 1, "{:?}", setup.grant_files());
+    setup.workspace("second", &server_and_worker());
+    setup.without_grants();
+
+    let (exit, document) = setup.json(&["up", "-w", "second"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.grant_files().len(), 1, "{:?}", setup.grant_files());
+}
+
+#[test]
+fn a_unit_new_to_the_manifest_asks_alone_and_the_running_units_keep_their_pids() {
+    let setup = Setup::new();
+    let manifest = pair("echo ready; exec sleep 60", "echo ready; exec sleep 60");
+    setup.workspace("triage", &manifest);
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let first = pid_of(&setup, "triage", "first");
+    let second = pid_of(&setup, "triage", "second");
+    setup.workspace_manifest(
+        "triage",
+        &format!("{manifest}\n[processes.third]\nargv = [\"sh\", \"-c\", \"exec sleep 60\"]\n"),
+    );
+    setup.without_grants();
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        asks(&document),
+        [
+            "third, a new unit, asks to run outside the sandbox, with everything your account can reach"
+        ]
+    );
+    assert!(!setup.started("third"));
+    assert_eq!(pid_of(&setup, "triage", "first"), first);
+    assert_eq!(pid_of(&setup, "triage", "second"), second);
+    // A unit that the grant already covers starts, because `up` of it
+    // asks for nothing.
+    let (exit, document) = setup.json(&["up", "-w", "triage", "second"]);
+    assert_eq!(exit, 0, "{document}");
+}
+
+/// A manifest whose `api` depends on `store`, and whose `lone` depends on
+/// nothing. `api` runs `api_script`.
+fn store_and_api(api_script: &str) -> String {
+    format!(
+        "[processes.store]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = {{ log = \"^ready$\" }}\n\n[processes.api]\nargv = [\"sh\", \"-c\", \"{api_script}\"]\nready = {{ log = \"^ready$\" }}\ndepends_on = [\"store\"]\n\n[processes.lone]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = {{ log = \"^ready$\" }}\n"
+    )
+}
+
+/// Returns the state of the unit `unit` that `mxv status` reports.
+fn state_of(setup: &Setup, unit: &str) -> String {
+    setup
+        .states("triage")
+        .into_iter()
+        .find(|(name, _)| name == unit)
+        .map(|(_, state)| state)
+        .unwrap_or_else(|| panic!("no unit {unit}"))
+}
+
+#[test]
+fn down_keeps_a_named_unit_that_a_running_unit_needs_and_stops_one_that_nothing_needs() {
+    let setup = Setup::new();
+    setup.workspace("triage", &store_and_api("echo ready; exec sleep 60"));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let store = pid_of(&setup, "triage", "store");
+
+    let (exit, document) = setup.json(&["down", "-w", "triage", "store", "lone"]);
+
+    assert_eq!(exit, 1, "{document}");
+    let text = document.to_string();
+    assert!(text.contains("mxv::process::still_needed"), "{text}");
+    assert!(text.contains("\"needed_by\":[\"api\"]"), "{text}");
+    assert_eq!(state_of(&setup, "store"), "running");
+    assert_eq!(pid_of(&setup, "triage", "store"), store);
+    assert_eq!(state_of(&setup, "api"), "running");
+    assert_eq!(state_of(&setup, "lone"), "stopped");
+}
+
+#[test]
+fn down_of_a_unit_with_its_dependants_stops_both_and_restart_of_a_needed_unit_restarts_it() {
+    let setup = Setup::new();
+    setup.workspace("triage", &store_and_api("echo ready; exec sleep 60"));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let store = pid_of(&setup, "triage", "store");
+
+    let (restarted, restart) = setup.json(&["restart", "-w", "triage", "store"]);
+    let (exit, document) = setup.json(&["down", "-w", "triage", "api", "store"]);
+
+    assert_eq!(restarted, 0, "{restart}");
+    assert_ne!(row(&restart, "store")["pid"], store, "{restart}");
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(state_of(&setup, "store"), "stopped");
+    assert_eq!(state_of(&setup, "api"), "stopped");
+    assert_eq!(state_of(&setup, "lone"), "running");
+}
+
+#[test]
+fn down_stops_a_unit_whose_only_dependant_has_exited() {
+    let setup = Setup::new();
+    setup.workspace("triage", &store_and_api("echo ready; sleep 1; exit 0"));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    for () in waiting() {
+        if state_of(&setup, "api") != "running" {
+            break;
+        }
+    }
+    assert_ne!(state_of(&setup, "api"), "running");
+
+    let (exit, document) = setup.json(&["down", "-w", "triage", "store"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(state_of(&setup, "store"), "stopped");
+}
+
+#[test]
+fn down_keeps_a_needed_unit_when_the_manifest_no_longer_parses() {
+    let setup = Setup::new();
+    setup.workspace("triage", &store_and_api("echo ready; exec sleep 60"));
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    setup.workspace_manifest("triage", "[processes.store\n");
+
+    let (exit, document) = setup.json(&["down", "-w", "triage", "store"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document.to_string().contains("mxv::process::still_needed"),
+        "{document}"
+    );
+    let (exit, document) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
 }
