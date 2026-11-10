@@ -295,7 +295,7 @@ fn homes(context: &Context, repo: Option<&String>) -> Result<Vec<Home>, crumbkit
 }
 
 /// Keeps the home of the checkout that `--repo` names, when it names one.
-fn narrowed(
+pub(crate) fn narrowed(
     workspace: &Workspace,
     homes: Vec<TaskHome>,
     repo: Option<&String>,
@@ -456,6 +456,26 @@ fn run_task(
     }
     crate::warn(&found.note.iter().cloned().collect::<Vec<_>>());
     let (start, gate) = start_of(&found, args.task_words());
+    match run_start(&mut context, environment, start, gate)? {
+        (TaskEnd::Exited(status), caught) => Ok((status, caught)),
+        (TaskEnd::Unstartable { reason }, _) => Err(ExecFailure::Unstartable {
+            workspace,
+            process: name.to_owned(),
+            reason,
+        }
+        .into()),
+    }
+}
+
+/// Gives the workspace of `context` its ports, runs `start` on the host,
+/// through deadband when `gate` is true, and returns how it ended and
+/// whether mxv caught a signal while it ran.
+pub(crate) fn run_start(
+    context: &mut Context,
+    environment: &Environment,
+    start: TaskStart,
+    gate: bool,
+) -> Result<(TaskEnd, bool), crumbkit::Error> {
     // The lock covers the ports and the plan. It ends before the task
     // starts, so a long test run never stops `up` or `down`.
     let lock = context.lock()?;
@@ -472,7 +492,7 @@ fn run_task(
         .map_err(MxvFailure::from)?;
     drop(lock);
     let prepared = prepared.map_err(|unrunnable| RunFailure::Unrunnable {
-        workspace: workspace.clone(),
+        workspace: record.name.to_string(),
         unit: unrunnable.unit,
         message: unrunnable.message,
     })?;
@@ -484,15 +504,7 @@ fn run_task(
     let ended = prepared
         .run(&mut admission, terminal)
         .map_err(MxvFailure::from)?;
-    match ended {
-        TaskEnd::Exited(status) => Ok((status, admission.caught().is_some())),
-        TaskEnd::Unstartable { reason } => Err(ExecFailure::Unstartable {
-            workspace,
-            process: name.to_owned(),
-            reason,
-        }
-        .into()),
-    }
+    Ok((ended, admission.caught().is_some()))
 }
 
 /// Runs the task that `args` names and returns its exit code, or prints

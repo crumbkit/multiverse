@@ -7,6 +7,14 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv exec` takes no UNIT to run a one-off command on the host in a
+  workspace, as `mxv exec -- COMMAND`. The command needs no running unit and
+  no `mxv.toml`. It receives the workspace's ports and every service's
+  variables, and mxv starts no services or units. `--repo CHECKOUT` chooses
+  the checkout it runs at the top of, and otherwise it runs in the current
+  directory when that is inside a checkout. It takes one place from deadband,
+  and `--no-gate` asks deadband nothing. `mxv exec UNIT` behaves as before and
+  refuses both flags.
 - `mxv archive` removes a workspace's directory and name and keeps each
   checkout's commit in a reference under `refs/mxv/archives/`, and
   `mxv restore` rebuilds the workspace at those commits with the same stable
