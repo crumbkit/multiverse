@@ -603,6 +603,9 @@ With --need memory=SIZE, a running workspace is idle when it is not pinned, no p
 
 - `--need <NEED>`: What to free: memory=SIZE or disk=SIZE, such as memory=2GiB. Required.
 - `--idle <AGE>`: How long a workspace must go unused to count as idle, at least 10m, such as 2h; it defaults to the config file's stop\_idle, or else 2h, for memory, and to clean\_idle, or else 7d, for disk
+- `--disposable`: With a disk need, also delete the paths that only mxv.toml declares disposable
+
+  Without it, reclaim keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it. A memory need deletes nothing, so it ignores this flag.
 - `--dry-run`: Report what the command would change, and change nothing
 
 ### Examples

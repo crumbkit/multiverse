@@ -1152,8 +1152,9 @@ prints one line for each checkout below the manifest's lines.
 ### Trusting the workspace manifest
 
 The globs in the workspace manifest's `disposable` count as the person's
-own, as the config file's do. `remove` and `clean` delete the paths they
-match without `--force`, and `show` gives them the source `workspace`. They
+own, as the config file's do. `remove --yes` and `clean --yes` delete the
+paths they match without `remove --force` or `clean --disposable`, and
+`show` gives them the source `workspace`. They
 follow the manifest's rules for globs, so each names a directory, such as
 `data/`, and none may name `.git`. The globs of the repository's `mxv.toml`
 keep the rule that [Disposable paths](#disposable-paths) describes, but only
@@ -1173,7 +1174,8 @@ mxv checks the rest itself:
 - A workspace manifest that is a symbolic link, or a hard link of another
   file, could be the repository's own `mxv.toml`. mxv still reads it, but
   its `disposable` globs count as the repository's, so their paths wait
-  for a confirmation at the prompt or `--force`, and `remove` and `show`
+  for a confirmation at the prompt, `remove --force`, `clean --disposable`
+  or `reclaim --disposable`, and `remove` and `show`
   warn about the link.
 - `--manifest` refuses a file that lies, once symbolic links are resolved,
   inside a git work tree or under the workspace root, with
@@ -1622,7 +1624,8 @@ mxv marks each path that only the manifest makes disposable. `show` gives
 it the source `manifest`, the prompts of `clean` and `remove` name it and
 say that it comes from the repository's `mxv.toml`, `remove --yes`
 refuses it without `--force`, and `clean --yes` keeps it without `--disposable`
-and lists it in `skipped`. Any glob that is empty, starts
+and lists it in `skipped`, and `reclaim --need disk` keeps it without
+`--disposable`. Any glob that is empty, starts
 with `/`, holds a `..`, `.` or empty component, or names `.git` in any
 case, as in `**/.git/`, fails, with
 `mxv::manifest::invalid` in `mxv.toml` or `mxv::config::invalid` in the
@@ -1800,7 +1803,10 @@ workspaces as `mxv clean --over-limit --yes` does, the workspace unchanged
 longest first, until the bytes it frees cover the need. It uses `clean`'s
 idle rule, including its check for processes that work in the workspace,
 and idle age, and keeps each path that only a repository's own
-`mxv.toml` declares disposable. Its rows read `cleaned` or `would_clean`.
+`mxv.toml` declares disposable, because no person confirms it. The row's
+`reason` names each kept path and says to rerun `reclaim` with
+`--disposable`, which deletes those paths too, as `mxv clean --yes
+--disposable` does. Its rows read `cleaned` or `would_clean`.
 
 `mxv pin -w <workspace>` keeps `reclaim` from stopping a workspace, and
 `mxv unpin -w <workspace>` lets it stop the workspace again. The pin and the

@@ -17,7 +17,8 @@
 //! `mxv reclaim --need disk=<SIZE>` runs the clean of `mxv clean
 //! --over-limit` with a target of freeing the need, and keeps each path
 //! that only a repository's own `mxv.toml` declares disposable, because no
-//! person confirms it.
+//! person confirms it. `--disposable` deletes those paths too, as it does
+//! for `mxv clean --yes`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -30,7 +31,7 @@ use multiverse::{Footprint, Git, Runs, Workspace, Workspaces};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::clean::{self, CleanState, Limit, Selection};
+use crate::clean::{self, CleanState, Holder, Limit, Selection};
 use crate::cli::{PinArgs, ReclaimArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
@@ -741,7 +742,9 @@ fn stop(
 }
 
 /// Cleans the build output of idle workspaces until it frees `need` bytes
-/// on disk, through the clean of `mxv clean --over-limit`.
+/// on disk, through the clean of `mxv clean --over-limit`, and with
+/// `--disposable` also the paths that only a repository's own `mxv.toml`
+/// declares disposable.
 fn disk(
     output: &mut Run,
     environment: &Environment,
@@ -755,7 +758,7 @@ fn disk(
             names: &[],
             limit: Limit::Free(need),
             idle: args.idle,
-            hold: true,
+            hold: (!args.disposable).then_some(Holder::Reclaim),
             ask: None,
         },
     )?;

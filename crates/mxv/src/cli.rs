@@ -636,6 +636,12 @@ pub(crate) struct ReclaimArgs {
     #[arg(long, value_name = "AGE", value_parser = parse_idle)]
     pub(crate) idle: Option<std::time::Duration>,
 
+    /// With a disk need, also delete the paths that only mxv.toml declares disposable
+    ///
+    /// Without it, reclaim keeps each path that only a repository's own mxv.toml declares disposable, because no person confirmed it. A memory need deletes nothing, so it ignores this flag.
+    #[arg(long)]
+    pub(crate) disposable: bool,
+
     /// Print what the command would stop or delete, and change nothing.
     #[command(flatten)]
     pub(crate) dry_run: DryRun,

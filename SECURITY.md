@@ -36,7 +36,7 @@ A repository's `mxv.toml` runs as code. `mxv up` and `restart` run its `argv` an
 - Clones and mirrors start without hooks (`--template=`), but a global `core.hooksPath` still applies.
 - A workspace manifest is trusted only as a regular one-link file that no checkout holds.
 
-Built-in, config-file and trusted workspace-manifest disposable globs need only the prompt or `--yes`. A repository manifest's glob needs the prompt or `--force` (`clean --disposable`): `clean --yes` holds it back; `remove --yes` and `archive --yes` refuse. `reclaim --need disk` asks nothing, holds it back.
+Built-in, config-file and trusted workspace-manifest disposable globs need only the prompt or `--yes`. A repository manifest's glob needs the prompt or `--force` (`--disposable` for `clean` and `reclaim`): `clean --yes` and `reclaim --need disk` hold it back; `remove --yes` and `archive --yes` refuse.
 
 ## What mxv deletes
 
