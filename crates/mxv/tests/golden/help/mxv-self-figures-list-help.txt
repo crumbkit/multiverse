@@ -47,11 +47,14 @@ Columns:
   help_pages     The runs that printed the command's help page.
   help_before    The help pages that each run's session read since its last run that printed no help page, summed over the runs.
   failed         The runs that failed.
+  p50_out_bytes  The median of the bytes that the runs wrote to standard output, by the nearest-rank method, or null when no run printed a result.
   p95_out_bytes  The 95th percentile of the bytes that the runs wrote to standard output, or null when no run printed a result.
 
 Columns that --long adds:
   refused     The runs whose command line was refused.
+  p50_ms      The median of the runs' wall time in milliseconds, by the nearest-rank method, or null when every run printed help.
   p95_ms      The 95th percentile of the runs' wall time in milliseconds, or null when every run printed help.
+  cut_short   The runs whose output a listing or stream cut short, because it showed fewer rows than its total or the output budget stopped it.
   typed_full  The runs that typed `--full`.
   typed_all   The runs that typed `--all`.
   typed_long  The runs that typed `--long`.

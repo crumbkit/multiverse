@@ -41,7 +41,7 @@ pub use crate::archive::{
 #[doc(hidden)]
 pub use crate::cli::{Cli, TOOL};
 use crate::cli::{
-    CommandsCommand, FiguresCommand, PortsCommand, SchemasCommand, SelfCommand, Verb,
+    CommandsCommand, FiguresCommand, PortsCommand, RunsCommand, SchemasCommand, SelfCommand, Verb,
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
@@ -224,6 +224,13 @@ where
                 let result =
                     Ok::<_, crumbkit::Error>(crumbkit_usage::figures(&mut output, &TOOL, &args));
                 crumbkit::finish(output, crumbkit_usage::SELF_FIGURES_LIST, result)
+            }
+            SelfCommand::Runs {
+                command: RunsCommand::List(args),
+            } => {
+                let result =
+                    Ok::<_, crumbkit::Error>(crumbkit_usage::runs(&mut output, &TOOL, &args));
+                crumbkit::finish(output, crumbkit_usage::SELF_RUNS_LIST, result)
             }
         },
     }

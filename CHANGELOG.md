@@ -7,6 +7,12 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv self runs list` prints each run in mxv's usage log, grouped by
+  session, as the `mxv/self-runs-list/v1` document. mxv now builds on
+  crumbkit 0.3, so the figures of `mxv self figures list` also give each
+  command `p50_ms`, `p50_out_bytes` and `cut_short`, and a failure's JSON
+  recovery can have the kind `terminal`, which names a command that a person
+  must run in a terminal.
 - `mxv exec` takes no UNIT to run a one-off command on the host in a
   workspace, as `mxv exec -- COMMAND`. The command needs no running unit and
   no `mxv.toml`. It receives the workspace's ports and every service's

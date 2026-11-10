@@ -5,6 +5,7 @@ Usage: mxv self [OPTIONS] <COMMAND>
 Commands:
   usage    Report the patterns in mxv's usage log where callers waste effort
   figures  Work with the figures of each command in mxv's usage log
+  runs     Work with each run in mxv's usage log
 
 Options:
   -h, --help  Print help (see more with '--help')
