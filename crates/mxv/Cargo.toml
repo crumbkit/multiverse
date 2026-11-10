@@ -27,7 +27,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-crumbkit = { workspace = true }
+# The `complete` feature answers a shell's completion request and gives
+# `mxv completion install`, `mxv completion check` and `mxv completion print`.
+crumbkit = { workspace = true, features = ["complete"] }
 # mxv is a binary, so it chooses clap's user-facing features: help, usage
 # lines, error context, suggestions for mistyped commands, and colour when
 # the output goes to a terminal. These are clap's default features.

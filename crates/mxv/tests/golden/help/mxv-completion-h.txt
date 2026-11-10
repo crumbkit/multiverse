@@ -1,0 +1,14 @@
+Set up mxv's completion in a shell
+
+Usage: mxv completion [OPTIONS] <COMMAND>
+
+Commands:
+  install  Install mxv's completion where the shell loads it
+  check    Check that mxv's installed completion file matches this mxv
+  print    Print mxv's completion registration script for a shell
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv completion --help` describes them.
+Next: mxv completion <COMMAND> -h

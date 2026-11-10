@@ -28,6 +28,7 @@ mod verbs;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+use clap::CommandFactory as _;
 use crumbkit::Code;
 
 #[doc(hidden)]
@@ -41,8 +42,8 @@ pub use crate::archive::{
 #[doc(hidden)]
 pub use crate::cli::{Cli, TOOL};
 use crate::cli::{
-    CommandsCommand, FiguresCommand, PortsCommand, RunsCommand, SKILL, SchemasCommand, SelfCommand,
-    SkillsCommand, Verb,
+    CommandsCommand, CompletionCommand, FiguresCommand, PortsCommand, RunsCommand, SKILL,
+    SchemasCommand, SelfCommand, SkillsCommand, Verb,
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
@@ -246,6 +247,20 @@ where
             SkillsCommand::Print => {
                 let result = Ok::<_, crumbkit::Error>(crumbkit_skills::print(&SKILL));
                 crumbkit::finish(output, crumbkit_skills::SKILLS_PRINT, result)
+            }
+        },
+        Verb::Completion { command } => match command {
+            CompletionCommand::Install(args) => {
+                let result = crumbkit::completion::install(Cli::command, &args);
+                crumbkit::finish(output, crumbkit::completion::COMPLETION_INSTALL, result)
+            }
+            CompletionCommand::Check(args) => {
+                let result = crumbkit::completion::check(Cli::command, &args);
+                crumbkit::finish(output, crumbkit::completion::COMPLETION_CHECK, result)
+            }
+            CompletionCommand::Print(args) => {
+                let result = crumbkit::completion::print(Cli::command, &args);
+                crumbkit::finish(output, crumbkit::completion::COMPLETION_PRINT, result)
             }
         },
     }

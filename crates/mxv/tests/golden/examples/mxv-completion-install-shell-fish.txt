@@ -1,0 +1,2 @@
+STATE    SHELL  PATH
+written  fish   [XDG_CONFIG_HOME]/fish/completions/mxv.fish
