@@ -399,6 +399,49 @@ fn add_refuses_a_given_workspace_manifest_that_the_merged_manifest_rejects_and_c
 }
 
 #[test]
+fn a_checkout_folder_named_deadband_workspace_is_refused() {
+    let setup = setup();
+    created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
+    assert!(crate::workspaces::folder_name(".deadband-workspace").is_err());
+    assert!(Repo::named(&setup.web.clone, ".deadband-workspace").is_err());
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo {
+                path: setup.web.clone.clone(),
+                folder: Some(".deadband-workspace".to_owned()),
+            },
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, AddOutcome::BadFolder { ref folder, .. } if folder == ".deadband-workspace"),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn add_writes_the_marker_that_a_workspace_made_before_markers_lacks() {
+    let setup = setup();
+    let workspace = created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
+    let marker = workspace.path.join(".deadband-workspace");
+    fs::remove_file(&marker).unwrap();
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(matches!(outcome, AddOutcome::Added(_)), "{outcome:?}");
+    assert!(marker.is_file());
+}
+
+#[test]
 fn add_refuses_a_default_folder_that_is_not_a_folder_name() {
     let setup = setup();
     created(&setup, "triage", &[Repo::new(&setup.api.clone)]);

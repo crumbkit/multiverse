@@ -1,8 +1,9 @@
 //! The extra entries of a workspace's directory, which `mxv archive` copies
 //! into the archive and `mxv restore` writes back. mxv writes each
-//! checkout's folder and an `AGENTS.md` that nobody edited, and the
-//! workspace manifest has a place of its own in the archive, so an extra
-//! entry is anything else, including an edited `AGENTS.md`.
+//! checkout's folder, an `AGENTS.md` that nobody edited and an empty
+//! `.deadband-workspace`, and the workspace manifest has a place of its own
+//! in the archive, so an extra entry is anything else, including an edited
+//! `AGENTS.md`.
 
 use std::fs;
 use std::io;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::archive::{Archive, Archives, MANIFEST_COPY, QUARANTINE_SUFFIX, ROOT_DIR, quarantine};
 use crate::error::Error;
 use crate::manifest::MANIFEST_FILE;
+use crate::marker::MARKER_FILE;
 use crate::record::{AGENTS_FILE, Workspace};
 use crate::store;
 use crate::workspaces::{Entry, aside};
@@ -93,6 +95,11 @@ fn is_own(workspace: &Workspace, name: &str, path: &Path, generated: &str) -> bo
         // Opening a FIFO blocks until something writes to it, so only a
         // regular file is read.
         return is_regular(path) && fs::read(path).is_ok_and(|text| text == generated.as_bytes());
+    }
+    // `mxv restore` writes the marker again. One that holds bytes, a
+    // directory or a link of its name is the person's, and is copied.
+    if name == MARKER_FILE {
+        return crate::marker::is_own(path);
     }
     // The workspace manifest is copied by itself only when it is a file. A
     // link stays a link, as any other entry does.

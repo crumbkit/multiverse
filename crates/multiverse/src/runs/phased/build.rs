@@ -57,6 +57,7 @@ use super::exec::EXEC_WAIT;
 use super::{app, main_process};
 use crate::error::Error;
 use crate::manifest::{Command, Manifest};
+use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Unrunnable};
 use crate::record::Workspace;
 use crate::runs::Runs;
@@ -81,6 +82,9 @@ pub struct Asked<'a> {
     pub cwd: &'a Path,
     /// The name that the limiter shows for the job.
     pub label: &'a str,
+    /// The workspace that the job runs in, which the limiter shows beside
+    /// the job, so the limiter need not find it from `cwd`.
+    pub workspace: &'a WorkspaceName,
     /// The command text that the limiter shows for the job.
     pub command: &'a str,
     /// The flag that the admission sets when the person interrupts the
@@ -477,6 +481,7 @@ impl Runs {
         let place = admission.admit(&Asked {
             cwd: &directory,
             label: workspace.name.as_str(),
+            workspace: &workspace.name,
             command: &job_text(&steps),
             cancel: &cancel,
         });

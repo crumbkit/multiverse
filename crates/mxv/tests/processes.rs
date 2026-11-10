@@ -2010,12 +2010,7 @@ fn an_interrupt_during_the_wait_for_a_place_ends_mxv_with_nothing_run_and_leaves
     let checkout = setup.workspace("triage", manifest);
     let socket = setup.root().join("d.sock");
     start_daemon(&socket);
-    let job = deadband::protocol::Job {
-        label: "holder".to_owned(),
-        pid: std::process::id(),
-        command: "the job that holds the one place".to_owned(),
-        lane: deadband::admit::Lane::default(),
-    };
+    let job = holder();
     let deadband::client::Admission::Granted(lease) =
         deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
             panic!("the first job waits")
@@ -2094,6 +2089,20 @@ impl deadband::probe::Probe for Calm {
     }
 }
 
+/// Returns the job that a test asks for to hold the daemon's one place.
+fn holder() -> deadband::protocol::Job {
+    deadband::protocol::Job {
+        label: "holder".to_owned(),
+        pid: std::process::id(),
+        command: "the job that holds the one place".to_owned(),
+        lane: deadband::admit::Lane::default(),
+        watched: false,
+        cwd: None,
+        workspace: None,
+        short: None,
+    }
+}
+
 /// Starts a deadband daemon that runs one job at a time on the socket
 /// `socket`, in a thread that ends with the test's process.
 fn start_daemon(socket: &Path) {
@@ -2133,12 +2142,7 @@ fn a_gated_task_waits_for_a_place_and_a_task_with_gate_false_does_not() {
     let checkout = setup.workspace("triage", manifest);
     let socket = setup.root().join("d.sock");
     start_daemon(&socket);
-    let job = deadband::protocol::Job {
-        label: "holder".to_owned(),
-        pid: std::process::id(),
-        command: "the job that holds the one place".to_owned(),
-        lane: deadband::admit::Lane::default(),
-    };
+    let job = holder();
     let deadband::client::Admission::Granted(lease) =
         deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
             panic!("the first job waits")
@@ -2195,20 +2199,22 @@ fn own_niceness() -> i32 {
         .unwrap()
 }
 
-/// Grants the first job that asks at `socket`, in a thread, and returns what
-/// the job reported when it ended.
-fn daemon_that_reads_one_exit_code(
+/// Grants the first job that asks at `socket`, in a thread, and returns the
+/// job as it asked and what it reported when it ended.
+fn daemon_that_reads_one_job(
     socket: &Path,
-) -> std::thread::JoinHandle<deadband::protocol::Request> {
+) -> std::thread::JoinHandle<(deadband::protocol::Job, deadband::protocol::Request)> {
     use deadband::protocol::{Reply, Request, read_line, write_line};
     let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
         let asked: Request = read_line(&mut reader).unwrap().unwrap();
-        assert!(matches!(asked, Request::Ask(_)), "{asked:?}");
+        let Request::Ask(job) = asked else {
+            panic!("{asked:?}");
+        };
         write_line(&mut stream, &Reply::Granted { jobs: 2 }).unwrap();
-        read_line(&mut reader).unwrap().unwrap()
+        (job, read_line(&mut reader).unwrap().unwrap())
     })
 }
 
@@ -2220,7 +2226,7 @@ fn the_place_of_a_task_ends_with_the_tasks_exit_code() {
         "[tasks.fails]\nargv = [\"sh\", \"-c\", \"exit 6\"]\n",
     );
     let socket = setup.root().join("d.sock");
-    let daemon = daemon_that_reads_one_exit_code(&socket);
+    let daemon = daemon_that_reads_one_job(&socket);
 
     wait_for_exit(setup.spawn_through(
         env!("CARGO_BIN_EXE_mxv"),
@@ -2229,9 +2235,129 @@ fn the_place_of_a_task_ends_with_the_tasks_exit_code() {
     ));
 
     assert_eq!(
-        daemon.join().unwrap(),
-        deadband::protocol::Request::Done { exit_code: Some(6) }
+        daemon.join().unwrap().1,
+        deadband::protocol::Request::Done {
+            exit_code: Some(6),
+            signal: None,
+            usage: None,
+        }
     );
+}
+
+#[test]
+fn a_task_that_mxv_run_admits_asks_deadband_with_the_workspace_name() {
+    let setup = Setup::new();
+    setup.workspace("triage", "[tasks.check]\nargv = [\"true\"]\n");
+    let socket = setup.root().join("d.sock");
+    let daemon = daemon_that_reads_one_job(&socket);
+
+    wait_for_exit(setup.spawn_through(
+        env!("CARGO_BIN_EXE_mxv"),
+        &["run", "-w", "triage", "check"],
+        &socket,
+    ));
+
+    let (job, _) = daemon.join().unwrap();
+    assert_eq!(
+        job.workspace.as_ref().map(|name| name.as_str()),
+        Some("triage")
+    );
+}
+
+#[test]
+fn a_build_that_mxv_admits_asks_deadband_with_the_workspace_name() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.api]\nargv = [\"sleep\", \"60\"]\nbuild = [\"true\"]\n",
+    );
+    let socket = setup.root().join("d.sock");
+    let daemon = daemon_that_reads_one_job(&socket);
+
+    let output = setup
+        .command_in(&setup.root(), &["up", "-w", "triage", "--json"])
+        .env("DEADBAND_SOCKET", &socket)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let (job, _) = daemon.join().unwrap();
+    assert_eq!(
+        job.workspace.as_ref().map(|name| name.as_str()),
+        Some("triage")
+    );
+    setup.json(&["down", "-w", "triage"]);
+}
+
+#[test]
+fn a_job_run_by_hand_in_a_checkout_shows_the_workspace_that_mxv_marked() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", "");
+    let deep = checkout.join("src");
+    fs::create_dir_all(&deep).unwrap();
+    let socket = setup.root().join("d.sock");
+    start_daemon(&socket);
+    let job = deadband::protocol::Job {
+        label: "cargo".to_owned(),
+        command: "cargo test".to_owned(),
+        cwd: Some(deep.display().to_string()),
+        ..holder()
+    };
+
+    let deadband::client::Admission::Granted(lease) =
+        deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
+            panic!("the job waits")
+        })
+    else {
+        panic!("the daemon did not grant the job");
+    };
+
+    let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
+    assert_eq!(jobs.running.len(), 1, "{jobs:?}");
+    assert_eq!(
+        jobs.running[0].workspace.as_ref().map(|name| name.as_str()),
+        Some("triage")
+    );
+    lease.end(Some(0));
+}
+
+#[test]
+fn mxv_up_writes_a_missing_marker_and_leaves_a_directory_of_that_name_alone() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", "[processes.api]\nargv = [\"sleep\", \"60\"]\n");
+    let marker = checkout.parent().unwrap().join(".deadband-workspace");
+    fs::remove_file(&marker).unwrap();
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(marker.is_file());
+    setup.json(&["down", "-w", "triage"]);
+
+    fs::remove_file(&marker).unwrap();
+    fs::create_dir(&marker).unwrap();
+    let (exit, stderr) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(marker.is_dir());
+    assert!(stderr.contains(".deadband-workspace"), "{stderr}");
+    setup.json(&["down", "-w", "triage"]);
+}
+
+#[test]
+fn a_failed_marker_write_warns_and_up_continues() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", "[processes.api]\nargv = [\"sleep\", \"60\"]\n");
+    let directory = checkout.parent().unwrap().to_path_buf();
+    fs::remove_file(directory.join(".deadband-workspace")).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (exit, stderr) = setup.errors(&["up", "-w", "triage"]);
+
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(stderr.contains(".deadband-workspace"), "{stderr}");
+    assert!(!directory.join(".deadband-workspace").exists());
+    setup.json(&["down", "-w", "triage"]);
 }
 
 #[test]
@@ -2241,12 +2367,7 @@ fn a_build_waits_for_a_place_from_a_real_daemon_and_then_gets_its_job_variables(
     let checkout = setup.workspace("triage", manifest);
     let socket = setup.root().join("d.sock");
     start_daemon(&socket);
-    let job = deadband::protocol::Job {
-        label: "holder".to_owned(),
-        pid: std::process::id(),
-        command: "the job that holds the one place".to_owned(),
-        lane: deadband::admit::Lane::default(),
-    };
+    let job = holder();
     let deadband::client::Admission::Granted(lease) =
         deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
             panic!("the first job waits")
@@ -2543,12 +2664,7 @@ fn exec_with_no_unit_takes_one_place_and_no_gate_asks_nothing() {
     let checkout = setup.workspace("triage", "");
     let socket = setup.root().join("d.sock");
     start_daemon(&socket);
-    let job = deadband::protocol::Job {
-        label: "holder".to_owned(),
-        pid: std::process::id(),
-        command: "the job that holds the one place".to_owned(),
-        lane: deadband::admit::Lane::default(),
-    };
+    let job = holder();
     let deadband::client::Admission::Granted(lease) =
         deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
             panic!("the first job waits")

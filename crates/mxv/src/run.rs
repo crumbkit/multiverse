@@ -479,6 +479,7 @@ pub(crate) fn run_start(
     // The lock covers the ports and the plan. It ends before the task
     // starts, so a long test run never stops `up` or `down`.
     let lock = context.lock()?;
+    context.mark(&lock);
     let manifest = context
         .workspace
         .manifest()

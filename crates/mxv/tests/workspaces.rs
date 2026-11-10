@@ -179,6 +179,17 @@ fn new_checks_out_the_repository_inside_the_workspace_directory_on_a_branch_of_t
 }
 
 #[test]
+fn mxv_new_writes_an_empty_deadband_workspace_marker_in_the_workspace_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let setup = Setup::new();
+    let workspace = created(&setup, "reading-list");
+    let metadata = fs::symlink_metadata(workspace.join(".deadband-workspace")).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 0);
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
+}
+
+#[test]
 fn new_makes_and_reuses_a_mirror_when_git_refuses_to_discover_bare_repositories() {
     let setup = Setup::new();
     let config = setup.root().join("explicit.gitconfig");

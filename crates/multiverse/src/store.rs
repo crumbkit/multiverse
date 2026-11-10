@@ -545,6 +545,44 @@ pub(crate) fn touch_file(path: &Path) -> Result<(), Error> {
         .map_err(unwritable)
 }
 
+/// Creates the empty file at `path` with the permission bits `mode`, and
+/// syncs its directory. It never replaces an entry: it returns `false` and
+/// changes nothing when something already has the name, which may be a
+/// directory or a link.
+///
+/// # Errors
+///
+/// Returns [`Error::Unwritable`] when the file cannot be created or its
+/// permission bits cannot be set. A file that was created before the
+/// failure is removed.
+pub(crate) fn create_empty(path: &Path, mode: u32) -> Result<bool, Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let unwritable = |source| Error::Unwritable {
+        path: path.to_path_buf(),
+        source,
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let opened = OpenOptions::new().write(true).create_new(true).open(path);
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(unwritable(error)),
+    };
+    // The umask may narrow the bits that `open` gives, so they are set
+    // after the file exists.
+    if let Err(error) = file.set_permissions(fs::Permissions::from_mode(mode)) {
+        let _ = fs::remove_file(path);
+        return Err(unwritable(error));
+    }
+    if let Some(dir) = path.parent() {
+        sync_dir(dir);
+    }
+    Ok(true)
+}
+
 /// How long a command waits for a lock that another command holds before
 /// it fails with [`Error::Busy`].
 pub const LOCK_WAIT: Duration = Duration::from_secs(5);

@@ -14,7 +14,7 @@ use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::WorkspaceId;
 use multiverse::{
     BuildEnd, BuildStop, BuildsPassed, DownOutcome, Error, Git, Lock, Manifest, ManifestError,
-    ProcessStatus, Reclaimed, Runs, Store, Unstoppable, UpOutcome, Volumes, Workspace,
+    Marker, ProcessStatus, Reclaimed, Runs, Store, Unstoppable, UpOutcome, Volumes, Workspace,
     WorkspaceName,
 };
 use std::time::Duration;
@@ -117,6 +117,28 @@ impl Context {
             self.workspace = fresh;
         }
         Ok(lock)
+    }
+
+    /// Writes the marker `.deadband-workspace` in the workspace's directory
+    /// when it is missing, so a job that a person runs by hand in the
+    /// workspace shows its name in `deadband status`. `up`, `restart`,
+    /// `run` and `exec` call it while they hold the workspace's lock
+    /// (`_lock`), so a workspace made before mxv wrote markers gains one.
+    /// A marker that cannot be written, or an entry of its name that is not
+    /// a file, gives a warning and the verb carries on, because mxv's own
+    /// jobs name their workspace to deadband without the marker.
+    pub(crate) fn mark(&self, _lock: &Lock) {
+        let warning = match multiverse::ensure_marker(&self.workspace.path) {
+            Ok(Marker::Written | Marker::Present) => return,
+            Ok(Marker::Blocked(path)) => format!(
+                "{} is not a file, so deadband cannot show the workspace of a job run by hand in it",
+                path.display()
+            ),
+            Err(error) => format!(
+                "mxv {error}, so deadband cannot show the workspace of a job run by hand in it"
+            ),
+        };
+        crate::warn(&[warning]);
     }
 }
 
@@ -388,6 +410,7 @@ pub(crate) fn up(
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
+    context.mark(&lock);
     if context.processes.is_empty()
         && let Some(reclaimed) = &context.workspace.reclaimed
         && let Ok(Some(manifest)) = context.workspace.manifest()
@@ -623,6 +646,7 @@ pub(crate) fn restart(
         .into());
     }
     let lock = context.lock()?;
+    context.mark(&lock);
     let passed = match build(environment, &mut context, &lock, &manifest)? {
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
