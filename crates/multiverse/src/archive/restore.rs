@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::archive::{Archive, ArchiveState, ArchivedCheckout, Archives, root};
-use crate::backend::Backend;
+use crate::backend::{Backend, RefHolder};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
@@ -166,7 +166,7 @@ impl<B: Backend> Workspaces<B> {
                 }
                 if self
                     .backend
-                    .resolve_commit(mirror, &checkout.commit)?
+                    .resolve_commit(RefHolder::Mirror(mirror), &checkout.commit)?
                     .is_none()
                 {
                     return refused(missing_commit(checkout));
@@ -180,7 +180,7 @@ impl<B: Backend> Workspaces<B> {
             }
             if self
                 .backend
-                .resolve_commit(&checkout.source, &checkout.commit)?
+                .resolve_commit(RefHolder::Repository(&checkout.source), &checkout.commit)?
                 .is_none()
             {
                 return refused(missing_commit(checkout));
@@ -320,7 +320,7 @@ impl<B: Backend> Workspaces<B> {
         }
         if self
             .backend
-            .resolve_commit(mirror, &checkout.commit)?
+            .resolve_commit(RefHolder::Mirror(mirror), &checkout.commit)?
             .is_none()
         {
             return Ok(Some(missing_commit(checkout)));
@@ -448,7 +448,10 @@ impl<B: Backend> Workspaces<B> {
             if !repository.is_dir() {
                 continue;
             }
-            if let Err(error) = self.backend.delete_ref(repository, &checkout.pin) {
+            if let Err(error) = self
+                .backend
+                .delete_ref(checkout.pin_holder(), &checkout.pin)
+            {
                 warnings.push(format!(
                     "mxv could not delete the pin {} in {}: {error}",
                     checkout.pin,

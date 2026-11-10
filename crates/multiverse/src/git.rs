@@ -8,6 +8,12 @@
 //!   caller's paths, branch names and remote branch names as single
 //!   values. No shell runs. A branch name comes from a
 //!   [`WorkspaceName`](crate::WorkspaceName), so it never starts with `-`.
+//!   A command on a bare mirror names the mirror with `--git-dir`, because
+//!   git refuses to discover a bare repository when its
+//!   `safe.bareRepository` setting is `explicit`. The caller says which
+//!   commands are on a mirror. mxv does not infer it from the directory's
+//!   contents, because a checkout's tracked files could imitate a git
+//!   directory.
 //! - Environment: the caller's environment, plus `GIT_TERMINAL_PROMPT=0`,
 //!   so a fetch that needs a password fails instead of waiting for an
 //!   answer that nobody gives, and `LC_ALL=C`, so the messages that the
@@ -25,7 +31,7 @@
 //!   which git reports on the next fetch. A checkout that `worktree add`
 //!   leaves half made is reported by git's own error.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -35,7 +41,9 @@ use std::time::Duration;
 
 use wait_timeout::ChildExt as _;
 
-use crate::backend::{Backend, Changes, Concealed, Head, Listed, LocalNames, Repository};
+use crate::backend::{
+    Backend, Changes, Concealed, Head, Listed, LocalNames, RefHolder, Repository,
+};
 use crate::error::Error;
 use crate::mirror::redacted;
 
@@ -248,6 +256,47 @@ where
     S: AsRef<OsStr>,
 {
     run_keeping(dir, args, operation, deadline, MOST_OUTPUT_BYTES)
+}
+
+/// Runs `git -C <mirror> --git-dir=. <args>` as [`run`] does. A bare mirror
+/// has no working tree to discover it from, and git refuses that discovery
+/// when its `safe.bareRepository` setting is `explicit`, so the command names
+/// the mirror as its git directory.
+fn run_in_mirror<I, S>(
+    mirror: &Path,
+    args: I,
+    operation: &'static str,
+    deadline: Duration,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = args.into_iter().map(|arg| arg.as_ref().to_os_string());
+    run(
+        mirror,
+        std::iter::once(OsString::from("--git-dir=.")).chain(args),
+        operation,
+        deadline,
+    )
+}
+
+/// Runs `args` in `holder`, with [`run_in_mirror`] when the holder is a
+/// mirror and with [`run`] otherwise.
+fn run_in_holder<I, S>(
+    holder: RefHolder<'_>,
+    args: I,
+    operation: &'static str,
+    deadline: Duration,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    match holder {
+        RefHolder::Mirror(mirror) => run_in_mirror(mirror, args, operation, deadline),
+        RefHolder::Repository(repository) => run(repository, args, operation, deadline),
+    }
 }
 
 /// Runs `git -C <dir> <args>` as [`run`] does, and keeps the first `kept`
@@ -727,7 +776,7 @@ impl Backend for Git {
         if !mirror.join("HEAD").is_file() {
             // An empty `--template=` copies no template, so the mirror has
             // no hooks.
-            run(
+            run_in_mirror(
                 mirror,
                 ["init", "--quiet", "--bare", "--template="],
                 "init --bare",
@@ -740,13 +789,14 @@ impl Backend for Git {
             ("gc.pruneExpire", "never"),
             ("maintenance.auto", "false"),
         ] {
-            run(mirror, ["config", key, value], "config", LOCAL_DEADLINE)?.ok("config", mirror)?;
+            run_in_mirror(mirror, ["config", key, value], "config", LOCAL_DEADLINE)?
+                .ok("config", mirror)?;
         }
         Ok(())
     }
 
     fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error> {
-        let fetched = run(
+        let fetched = run_in_mirror(
             mirror,
             [
                 "fetch",
@@ -768,7 +818,7 @@ impl Backend for Git {
             });
         }
         let head = format!("refs/heads/{default}");
-        run(
+        run_in_mirror(
             mirror,
             ["symbolic-ref", "HEAD", head.as_str()],
             "symbolic-ref",
@@ -937,12 +987,16 @@ impl Backend for Git {
         archive::fetch_head_into_mirror(mirror, checkout, reference)
     }
 
-    fn delete_ref(&self, repository: &Path, reference: &str) -> Result<(), Error> {
-        archive::delete_ref(repository, reference)
+    fn delete_ref(&self, holder: RefHolder<'_>, reference: &str) -> Result<(), Error> {
+        archive::delete_ref(holder, reference)
     }
 
-    fn resolve_commit(&self, repository: &Path, revision: &str) -> Result<Option<String>, Error> {
-        archive::resolve_commit(repository, revision)
+    fn resolve_commit(
+        &self,
+        holder: RefHolder<'_>,
+        revision: &str,
+    ) -> Result<Option<String>, Error> {
+        archive::resolve_commit(holder, revision)
     }
 
     fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {

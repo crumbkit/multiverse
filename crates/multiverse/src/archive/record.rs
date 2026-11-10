@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::root::RootEntry;
 use crate::archive::{ARCHIVE_VERSION, PIN_NAMESPACE, RECORD_FILE};
+use crate::backend::RefHolder;
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
@@ -76,7 +77,16 @@ impl ArchivedCheckout {
     /// its source for a worktree.
     #[must_use]
     pub fn pin_repository(&self) -> &Path {
-        self.mirror.as_deref().unwrap_or(&self.source)
+        self.pin_holder().path()
+    }
+
+    /// Returns the repository that holds the checkout's pin, and says
+    /// whether it is a mirror.
+    #[must_use]
+    pub fn pin_holder(&self) -> RefHolder<'_> {
+        self.mirror
+            .as_deref()
+            .map_or(RefHolder::Repository(&self.source), RefHolder::Mirror)
     }
 }
 

@@ -4,8 +4,10 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use super::{
-    CHECKOUT_DEADLINE, FETCH_DEADLINE, LOCAL_DEADLINE, ORIGIN_REFS, concealed, lines, run, trimmed,
+    CHECKOUT_DEADLINE, FETCH_DEADLINE, LOCAL_DEADLINE, ORIGIN_REFS, concealed, lines, run,
+    run_in_holder, run_in_mirror, trimmed,
 };
+use crate::backend::RefHolder;
 use crate::error::Error;
 
 /// The configuration that makes git sync references and loose objects before
@@ -35,7 +37,7 @@ pub(super) fn fetch_head_into_mirror(
     reference: &str,
 ) -> Result<String, Error> {
     let refspec = format!("+HEAD:{reference}");
-    run(
+    run_in_mirror(
         mirror,
         [
             OsStr::new("-c"),
@@ -52,7 +54,7 @@ pub(super) fn fetch_head_into_mirror(
         FETCH_DEADLINE,
     )?
     .ok("fetch into mirror", mirror)?;
-    let commit = run(
+    let commit = run_in_mirror(
         mirror,
         ["rev-parse", "--verify", reference],
         "rev-parse",
@@ -62,24 +64,27 @@ pub(super) fn fetch_head_into_mirror(
     Ok(trimmed(&commit))
 }
 
-/// Deletes `reference` of `repository`.
-pub(super) fn delete_ref(repository: &Path, reference: &str) -> Result<(), Error> {
-    run(
-        repository,
+/// Deletes `reference` of the repository that `holder` names.
+pub(super) fn delete_ref(holder: RefHolder<'_>, reference: &str) -> Result<(), Error> {
+    run_in_holder(
+        holder,
         ["update-ref", "-d", reference],
         "update-ref -d",
         LOCAL_DEADLINE,
     )?
-    .ok("update-ref -d", repository)
+    .ok("update-ref -d", holder.path())
     .map(drop)
 }
 
-/// Returns the commit that `revision` names in `repository`, or `None`
-/// when it names none.
-pub(super) fn resolve_commit(repository: &Path, revision: &str) -> Result<Option<String>, Error> {
+/// Returns the commit that `revision` names in the repository that
+/// `holder` names, or `None` when it names none.
+pub(super) fn resolve_commit(
+    holder: RefHolder<'_>,
+    revision: &str,
+) -> Result<Option<String>, Error> {
     let target = format!("{revision}^{{commit}}");
-    let found = run(
-        repository,
+    let found = run_in_holder(
+        holder,
         ["rev-parse", "--verify", "--quiet", target.as_str()],
         "rev-parse",
         LOCAL_DEADLINE,
