@@ -1,17 +1,20 @@
-Run a one-off command in the context of a running unit, and exit with its exit code
+Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code
 
-Usage: mxv exec [OPTIONS] <UNIT> -- <COMMAND>...
+Usage: mxv exec [OPTIONS] [UNIT] -- <COMMAND>...
 
 Arguments:
-  <UNIT>        The running unit in whose context the command runs
+  [UNIT]        The running unit in whose context the command runs, which defaults to running it on the host in the workspace
   <COMMAND>...  The command's program and its arguments, after `--`
 
 Options:
   -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+      --repo <CHECKOUT>        The folder of the checkout to run the command at the top of, when the command line names no UNIT
+      --no-gate                Ask deadband for no place, when the command line names no UNIT
   -h, --help                   Print help (see more with '--help')
 
 Examples:
   mxv exec -w reading-list web -- env
+  mxv exec -w reading-list -- env
 
 Effects: destructive, not idempotent, open-world.
 Writes: applies all items or none.

@@ -21,6 +21,7 @@
 //! the daemon nothing. A task shares mxv's process group and the terminal
 //! sends Ctrl-C to it directly, so a caught signal sets no cancel flag for
 //! a task, as for an unsandboxed `mxv exec`, and mxv waits for the task.
+//! `mxv exec` with no unit takes its place through the same call.
 //!
 //! When mxv itself runs inside a job that deadband granted, deadband's call
 //! asks nothing and returns no variables. phase starts a build from an empty

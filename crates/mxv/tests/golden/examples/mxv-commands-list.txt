@@ -10,7 +10,7 @@ mxv down           Stop a workspace's units with SIGTERM, then SIGKILL after 10 
 mxv restart        Build a workspace's units through deadband, then stop them and start them again
 mxv status         Report whether each unit of a workspace is running, exited or stopped
 mxv logs           Print the last lines of a unit's log, and follow it with --follow
-mxv exec           Run a one-off command in the context of a running unit, and exit with its exit code
+mxv exec           Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code
 mxv run            Run a task of a workspace through deadband, or list its tasks
 mxv archive        Archive a workspace, so restore can rebuild it at the same commits
 mxv restore        Rebuild an archived workspace at its archived commits

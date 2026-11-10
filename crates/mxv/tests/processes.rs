@@ -2366,3 +2366,356 @@ fn a_build_that_outlives_the_deadline_leaves_a_running_process_alone() {
     drop(lock);
     assert_eq!(pid_of(&setup, "triage", "api"), before);
 }
+
+/// Runs `mxv` with `args` in `dir`, and returns the exit code, standard
+/// output and standard error.
+fn exec_output_in(setup: &Setup, dir: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = setup.command_in(dir, args).output().unwrap();
+    (
+        output.status.code().unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
+}
+
+/// Creates the workspace `multi` with the checkouts `app` and `second`,
+/// which declare the ports `web` and `api`, and returns its directory.
+fn two_checkouts_with_ports(setup: &Setup) -> PathBuf {
+    let (exit, document) = setup.json(&[
+        "new", "multi", "--repo", "app", "--repo", "app", "--as", "second",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let workspace = setup.root().join("workspaces/multi");
+    write(&workspace.join("app/mxv.toml"), "ports = [\"web\"]\n");
+    write(&workspace.join("second/mxv.toml"), "ports = [\"api\"]\n");
+    workspace
+}
+
+#[test]
+fn exec_with_no_unit_runs_the_command_in_a_workspace_with_no_manifest() {
+    let setup = Setup::new();
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let checkout = setup.root().join("workspaces/triage/app");
+
+    let (exit, out, err) = exec_output(&setup, &["exec", "-w", "triage", "--", "pwd"]);
+
+    assert_eq!(exit, 0, "{err}");
+    assert_eq!(out.trim(), checkout.display().to_string());
+}
+
+#[test]
+fn exec_with_no_unit_gives_the_command_the_ports_and_every_services_variables() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "ports = [\"web\"]\n\n\
+         [service.queues]\nkind = \"sqs\"\nqueues.jobs = {}\nenv = { JOBS_QUEUE = \"jobs\" }\n\n\
+         [service.events]\nkind = \"sqs\"\nqueues.events = {}\nenv = { EVENTS_QUEUE = \"events\" }\n\n\
+         [processes.api]\nargv = [\"sleep\", \"60\"]\n",
+    );
+
+    let (exit, out, err) = exec_output(
+        &setup,
+        &[
+            "exec",
+            "-w",
+            "triage",
+            "--",
+            "sh",
+            "-c",
+            "echo $MXV_PORT_WEB $JOBS_QUEUE $EVENTS_QUEUE",
+        ],
+    );
+
+    assert_eq!(exit, 0, "{err}");
+    let words: Vec<&str> = out.split_whitespace().collect();
+    assert_eq!(words.len(), 3, "{out}");
+    assert!(words[0].parse::<u16>().is_ok(), "{out}");
+    assert_eq!(words[1..], ["jobs", "events"]);
+    assert!(!setup.started("api"), "mxv started a unit");
+}
+
+#[test]
+fn exec_with_no_unit_runs_in_the_current_directory_inside_a_checkout() {
+    let setup = Setup::new();
+    let workspace = two_checkouts_with_ports(&setup);
+    let sub = workspace.join("app/sub");
+    fs::create_dir(&sub).unwrap();
+
+    let (exit, out, err) = exec_output_in(
+        &setup,
+        &sub,
+        &[
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "pwd; echo $MXV_PORT_WEB $MXV_PORT_SECOND_API",
+        ],
+    );
+
+    assert_eq!(exit, 0, "{err}");
+    let mut lines = out.lines();
+    assert_eq!(lines.next(), Some(sub.display().to_string().as_str()));
+    let ports: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+    assert_eq!(ports.len(), 2, "{out}");
+}
+
+#[test]
+fn exec_with_repo_runs_at_the_top_of_that_checkout() {
+    let setup = Setup::new();
+    let workspace = two_checkouts_with_ports(&setup);
+
+    let (exit, out, err) = exec_output_in(
+        &setup,
+        &workspace.join("app"),
+        &[
+            "exec",
+            "--repo",
+            "second",
+            "--",
+            "sh",
+            "-c",
+            "pwd; echo ${MXV_PORT_API:-none}",
+        ],
+    );
+
+    assert_eq!(exit, 0, "{err}");
+    let mut lines = out.lines();
+    assert_eq!(
+        lines.next(),
+        Some(workspace.join("second").display().to_string().as_str())
+    );
+    assert!(lines.next().unwrap().parse::<u16>().is_ok(), "{out}");
+}
+
+#[test]
+fn exec_with_repo_that_names_no_checkout_fails_with_checkout_not_found() {
+    let setup = Setup::new();
+    two_checkouts_with_ports(&setup);
+
+    let (exit, _, err) = exec_output(
+        &setup,
+        &["exec", "-w", "multi", "--repo", "other", "--", "true"],
+    );
+
+    assert_ne!(exit, 0);
+    assert!(err.contains("mxv::checkout::not_found"), "{err}");
+}
+
+#[test]
+fn exec_outside_a_workspace_with_several_checkouts_runs_in_the_workspace_directory() {
+    let setup = Setup::new();
+    let workspace = two_checkouts_with_ports(&setup);
+
+    let (exit, out, err) = exec_output(
+        &setup,
+        &[
+            "exec",
+            "-w",
+            "multi",
+            "--",
+            "sh",
+            "-c",
+            "pwd; echo ${MXV_PORT_WEB:-none} $MXV_PORT_APP_WEB",
+        ],
+    );
+
+    assert_eq!(exit, 0, "{err}");
+    let mut lines = out.lines();
+    assert_eq!(lines.next(), Some(workspace.display().to_string().as_str()));
+    let ports: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+    assert_eq!(ports[0], "none", "{out}");
+    assert!(ports[1].parse::<u16>().is_ok(), "{out}");
+}
+
+#[test]
+fn exec_with_no_unit_exits_with_the_commands_code_and_with_128_plus_its_signal() {
+    let setup = Setup::new();
+    setup.workspace("triage", "");
+
+    let run =
+        |script: &str| exec_output(&setup, &["exec", "-w", "triage", "--", "sh", "-c", script]).0;
+
+    assert_eq!(run("exit 7"), 7);
+    assert_eq!(run("kill -9 $$"), 137);
+}
+
+#[test]
+fn exec_with_no_unit_takes_one_place_and_no_gate_asks_nothing() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", "");
+    let socket = setup.root().join("d.sock");
+    start_daemon(&socket);
+    let job = deadband::protocol::Job {
+        label: "holder".to_owned(),
+        pid: std::process::id(),
+        command: "the job that holds the one place".to_owned(),
+        lane: deadband::admit::Lane::default(),
+    };
+    let deadband::client::Admission::Granted(lease) =
+        deadband::client::ask(&socket, &job, Duration::from_secs(10), |_, _| {
+            panic!("the first job waits")
+        })
+    else {
+        panic!("the daemon did not grant the first job");
+    };
+    let mxv = env!("CARGO_BIN_EXE_mxv");
+
+    // The only place is held, so this command ends only because it never
+    // asks.
+    let free = "echo ${DEADBAND_HELD:-none} > free";
+    wait_for_exit(setup.spawn_through(
+        mxv,
+        &["exec", "-w", "triage", "--no-gate", "--", "sh", "-c", free],
+        &socket,
+    ));
+    assert_eq!(
+        fs::read_to_string(checkout.join("free")).unwrap().trim(),
+        "none"
+    );
+
+    let held = "echo $DEADBAND_HELD $MISE_JOBS > held";
+    let waiting_job = setup.spawn_through(
+        mxv,
+        &["exec", "-w", "triage", "--", "sh", "-c", held],
+        &socket,
+    );
+    let queued = waiting().any(|()| {
+        let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
+        jobs.waiting.len() == 1
+    });
+    assert!(queued, "mxv never joined the queue");
+    assert!(!checkout.join("held").exists());
+    lease.end(Some(0));
+    wait_for_exit(waiting_job);
+    assert_eq!(
+        fs::read_to_string(checkout.join("held")).unwrap().trim(),
+        "1 1"
+    );
+}
+
+#[test]
+fn exec_with_no_unit_runs_with_no_place_when_the_daemon_cannot_be_reached() {
+    let setup = Setup::new();
+    setup.workspace("triage", "");
+
+    let (exit, out, err) = exec_output(
+        &setup,
+        &[
+            "exec",
+            "-w",
+            "triage",
+            "--",
+            "sh",
+            "-c",
+            "echo ${DEADBAND_HELD:-none}",
+        ],
+    );
+
+    assert_eq!(exit, 0, "{err}");
+    assert_eq!(out.trim(), "none");
+}
+
+#[test]
+fn exec_with_no_unit_does_not_pass_a_variable_outside_the_allowlist() {
+    let setup = Setup::new();
+    setup.workspace("triage", "");
+
+    let output = setup
+        .command_in(
+            &setup.root(),
+            &[
+                "exec",
+                "-w",
+                "triage",
+                "--",
+                "sh",
+                "-c",
+                "echo ${OUTSIDE_THE_ALLOWLIST:-none}",
+            ],
+        )
+        .env("OUTSIDE_THE_ALLOWLIST", "1")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "none");
+}
+
+#[test]
+fn exec_with_a_unit_still_fails_when_the_unit_is_stopped() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", EXEC_MANIFEST);
+    fs::create_dir(checkout.join("sub")).unwrap();
+
+    let (exit, _, err) = exec_output(&setup, &["exec", "-w", "triage", "api", "--", "true"]);
+
+    assert_eq!(exit, 1, "{err}");
+    assert!(err.contains("mxv::process::not_running"), "{err}");
+}
+
+#[test]
+fn a_missing_program_with_no_unit_fails_with_unstartable_and_names_the_workspace() {
+    let setup = Setup::new();
+    setup.workspace("triage", "");
+
+    let (exit, _, err) = exec_output(
+        &setup,
+        &["exec", "-w", "triage", "--", "/nonexistent/program"],
+    );
+
+    assert_eq!(exit, 1, "{err}");
+    assert!(err.contains("mxv::exec::unstartable"), "{err}");
+    assert!(err.contains("in the workspace triage"), "{err}");
+    assert!(!err.contains("in the context of"), "{err}");
+}
+
+#[test]
+fn remove_during_an_ad_hoc_command_removes_the_workspace_and_the_command_runs_on() {
+    let setup = Setup::new();
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let root = setup.root();
+    let script = format!(
+        "touch {root}/started; while [ ! -e {root}/finish ]; do sleep 0.05; done; exit 3",
+        root = root.display()
+    );
+    let mut child = setup.spawn_through(
+        env!("CARGO_BIN_EXE_mxv"),
+        &[
+            "exec",
+            "-w",
+            "triage",
+            "--no-gate",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ],
+        Path::new(MISSING_SOCKET),
+    );
+    assert!(
+        waiting().any(|()| root.join("started").exists()),
+        "the command never started"
+    );
+
+    let (exit, document) = setup.json(&["remove", "triage", "--yes"]);
+    let ran_on = child.try_wait().unwrap().is_none();
+    // The command ends here whatever the assertions find, so a failure
+    // leaves no process behind.
+    write(&root.join("finish"), "");
+
+    assert_eq!(exit, 0, "{document}");
+    assert!(!root.join("workspaces/triage").exists());
+    assert!(ran_on, "the command ended when the workspace was removed");
+    for () in waiting() {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert_eq!(status.code(), Some(3));
+            return;
+        }
+    }
+    let _ = child.kill();
+    panic!("mxv did not end within the test's limit");
+}
