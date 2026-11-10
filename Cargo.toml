@@ -22,7 +22,7 @@ clap = { version = "4.6.7", default-features = false, features = ["std"] }
 # profile of the Rust standards): `parse` and `finish`, documents, failures
 # with codes and next steps, and the tool record. The workspace entry enables
 # no feature, and mxv enables the ones it uses.
-crumbkit = { version = "0.2", default-features = false }
+crumbkit = { version = "0.3.1", default-features = false }
 
 # serde reads and writes the workspace records of the multiverse library,
 # and mxv derives `Serialize` for the documents it prints.
@@ -89,12 +89,17 @@ rustix = { version = "1.1.6", default-features = false, features = ["std", "proc
 signal-hook = { version = "0.4.6", default-features = false, features = ["iterator"] }
 
 # crumbkit-usage keeps the `mxv` command's local usage log and adds
-# `self usage` and `self figures list` (CLI-7).
-crumbkit-usage = "0.2"
+# `self usage`, `self figures list` and `self runs list` (CLI-7).
+crumbkit-usage = "0.3"
+
+# crumbkit-skills gives the `mxv` command `skills install`, `skills check`
+# and `skills print`, which install the agent skill that mxv embeds into the
+# agent skills directories and check the installed copies.
+crumbkit-skills = "0.3"
 
 # crumbkit-test checks the `mxv` command against crumbkit's conventions
 # (CLI-6). Only tests use it.
-crumbkit-test = "0.2"
+crumbkit-test = "0.3"
 
 # snapbox runs the built `mxv` binary in the end-to-end tests. Only tests
 # use it.

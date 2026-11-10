@@ -3,41 +3,47 @@ Create, archive and restore task workspaces that span several git repositories
 Usage: mxv [OPTIONS] <COMMAND>
 
 Work in a workspace
-  new       Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin
-  add       Add a clone of a repository to a workspace, on the workspace's branch
-  list      List the workspaces
-  show      Show workspaces by name, in the order given
-  cd        Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
+  new         Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin
+  add         Add a clone of a repository to a workspace, on the workspace's branch
+  list        List the workspaces
+  show        Show workspaces by name, in the order given
+  cd          Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
 
 Run a workspace's app
-  up        Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
-  down      Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
-  restart   Build a workspace's units through deadband, then stop them and start them again
-  status    Report whether each unit of a workspace is running, exited or stopped
-  logs      Print the last lines of a unit's log, and follow it with --follow
-  exec      Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code
-  run       Run a task of a workspace through deadband, or list its tasks
-  ports     Manage the host ports that a workspace holds
+  up          Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
+  down        Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
+  restart     Build a workspace's units through deadband, then stop them and start them again
+  status      Report whether each unit of a workspace is running, exited or stopped
+  logs        Print the last lines of a unit's log, and follow it with --follow
+  exec        Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code
+  run         Run a task of a workspace through deadband, or list its tasks
+  ports       Manage the host ports that a workspace holds
 
 Put a workspace away
-  archive   Archive a workspace, so restore can rebuild it at the same commits
-  restore   Rebuild an archived workspace at its archived commits
-  remove    Remove a workspace's checkouts, its merged branches, its directory and its record
+  archive     Archive a workspace, so restore can rebuild it at the same commits
+  restore     Rebuild an archived workspace at its archived commits
+  remove      Remove a workspace's checkouts, its merged branches, its directory and its record
 
 Free disk space
-  clean     Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+  clean       Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
 
 Free memory
-  reclaim   Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
-  pin       Keep mxv reclaim from stopping a workspace
-  unpin     Let mxv reclaim stop a workspace again while it is idle
+  reclaim     Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+  pin         Keep mxv reclaim from stopping a workspace
+  unpin       Let mxv reclaim stop a workspace again while it is idle
 
 Explore the commands
-  commands  Explore mxv's commands
-  schemas   Explore the JSON documents that mxv prints
+  commands    Explore mxv's commands
+  schemas     Explore the JSON documents that mxv prints
 
 Review how mxv is used
-  self      Review mxv's own use
+  self        Review mxv's own use
+
+Install mxv's skill
+  skills      Give coding agents mxv's skill
+
+Set up shell completion
+  completion  Set up mxv's completion in a shell
 
 Options:
       --json

@@ -1,0 +1,1 @@
+complete --keep-order --exclusive --command mxv --arguments "(COMPLETE=fish mxv -- (commandline --current-process --tokenize --cut-at-cursor) (commandline --current-token))"

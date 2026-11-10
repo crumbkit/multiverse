@@ -4,10 +4,19 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 use crumbkit::commands::{COMMANDS_LIST, CommandsList};
+use crumbkit::completion::{
+    COMPLETION_CHECK, COMPLETION_INSTALL, COMPLETION_PRINT, CompletionCheck, CompletionInstall,
+    CompletionPrint,
+};
 use crumbkit::help::{Effects, Example, Goal, Group, Help, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, Tool, ViewFlags, Yes};
-use crumbkit_usage::{SELF_FIGURES_LIST, SELF_USAGE, SelfFigures, SelfUsage};
+use crumbkit_skills::{
+    SKILLS_CHECK, SKILLS_INSTALL, SKILLS_PRINT, Skill, SkillsCheck, SkillsInstall,
+};
+use crumbkit_usage::{
+    SELF_FIGURES_LIST, SELF_RUNS_LIST, SELF_USAGE, SelfFigures, SelfRuns, SelfUsage,
+};
 
 use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
@@ -62,6 +71,8 @@ const HELP: Help = Help::new()
             Goal::new("Free memory", &["reclaim", "pin", "unpin"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
+            Goal::new("Install mxv's skill", &["skills"]),
+            Goal::new("Set up shell completion", &["completion"]),
         ],
     )
     .compact()])
@@ -238,7 +249,70 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::read_only())
             .document(SELF_FIGURES_LIST),
+        Leaf::new(&["self", "runs", "list"])
+            .examples(&[Example::new(
+                &[],
+                "Print each run of the last 7 days, grouped by session",
+            )])
+            .effects(Effects::read_only())
+            .document(SELF_RUNS_LIST),
+        Leaf::new(&["skills", "install"])
+            .examples(&[
+                Example::new(
+                    &[],
+                    "Install mxv's skill into each agent skills directory that exists",
+                ),
+                Example::new(
+                    &["--force"],
+                    "Install it, replacing a file or a link that install did not write",
+                ),
+            ])
+            .effects(Effects::additive().idempotent())
+            .document(SKILLS_INSTALL),
+        Leaf::new(&["skills", "check"])
+            .examples(&[Example::new(
+                &[],
+                "Report each agent skills directory whose copy is missing or differs",
+            )])
+            .effects(Effects::read_only())
+            .document(SKILLS_CHECK),
+        Leaf::new(&["skills", "print"])
+            .examples(&[Example::new(&[], "Print mxv's skill")])
+            .effects(Effects::read_only())
+            .document(SKILLS_PRINT),
+        Leaf::new(&["completion", "install"])
+            .examples(&[
+                Example::new(&["--shell", "fish"], "Install mxv's completion for fish"),
+                Example::new(
+                    &["--shell", "zsh", "--force"],
+                    "Install it for zsh, replacing a file or a link that install did not write",
+                ),
+            ])
+            .effects(Effects::additive().idempotent())
+            .document(COMPLETION_INSTALL),
+        Leaf::new(&["completion", "check"])
+            .examples(&[Example::new(
+                &["--shell", "zsh"],
+                "Report zsh's completion file when it is missing or differs",
+            )])
+            .effects(Effects::read_only())
+            .document(COMPLETION_CHECK),
+        Leaf::new(&["completion", "print"])
+            .examples(&[Example::new(
+                &["--shell", "fish"],
+                "Print the registration script for fish",
+            )])
+            .effects(Effects::read_only())
+            .document(COMPLETION_PRINT),
     ]);
+
+/// mxv's agent skill, which `mxv skills install` writes into the agent
+/// skills directories.
+pub(crate) const SKILL: Skill = Skill::new(
+    "mxv",
+    env!("CARGO_PKG_VERSION"),
+    include_str!("../skill/SKILL.md"),
+);
 
 /// The commands of `mxv`.
 #[derive(Debug, Subcommand)]
@@ -327,6 +401,18 @@ pub(crate) enum Verb {
         #[command(subcommand)]
         command: SelfCommand,
     },
+    /// Give coding agents mxv's skill.
+    Skills {
+        /// What to do with the skill.
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
+    /// Set up mxv's completion in a shell.
+    Completion {
+        /// What to do with the completion.
+        #[command(subcommand)]
+        command: CompletionCommand,
+    },
 }
 
 /// The commands for mxv's own commands.
@@ -375,6 +461,12 @@ pub(crate) enum SelfCommand {
         #[command(subcommand)]
         command: FiguresCommand,
     },
+    /// Work with each run in mxv's usage log.
+    Runs {
+        /// What to do with the runs.
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
 }
 
 /// The commands for the figures in mxv's usage log.
@@ -382,6 +474,35 @@ pub(crate) enum SelfCommand {
 pub(crate) enum FiguresCommand {
     /// List the figures of each command in mxv's usage log.
     List(SelfFigures),
+}
+
+/// The commands for mxv's agent skill.
+#[derive(Debug, Subcommand)]
+pub(crate) enum SkillsCommand {
+    /// Install mxv's skill into each agent skills directory that exists.
+    Install(SkillsInstall),
+    /// Check that each installed copy of mxv's skill matches this mxv.
+    Check(SkillsCheck),
+    /// Print mxv's skill.
+    Print,
+}
+
+/// The commands for mxv's shell completion.
+#[derive(Debug, Subcommand)]
+pub(crate) enum CompletionCommand {
+    /// Install mxv's completion where the shell loads it.
+    Install(CompletionInstall),
+    /// Check that mxv's installed completion file matches this mxv.
+    Check(CompletionCheck),
+    /// Print mxv's completion registration script for a shell.
+    Print(CompletionPrint),
+}
+
+/// The commands for the runs in mxv's usage log.
+#[derive(Debug, Subcommand)]
+pub(crate) enum RunsCommand {
+    /// List each run in mxv's usage log, grouped by session.
+    List(SelfRuns),
 }
 
 /// The arguments of `mxv new`.

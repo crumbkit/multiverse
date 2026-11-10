@@ -7,6 +7,12 @@ repository.
 `mxv commands list` lists every command, and `mxv <command> --help`
 describes each one. [docs/commands.md](docs/commands.md) is the reference.
 
+mxv embeds an agent skill, [skill/SKILL.md](skill/SKILL.md), that tells a
+coding agent how to work in mxv workspaces. `mxv skills install` writes it
+into each agent skills directory that exists, such as `~/.claude/skills`
+and `~/.agents/skills`, and `mxv skills check` reports a copy that is
+missing or differs from the installed mxv's.
+
 ## Layout
 
 `mxv new reading-list --repo ~/src/app` fetches the origin of `~/src/app`

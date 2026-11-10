@@ -100,6 +100,16 @@
       "budget": null
     },
     {
+      "rule": "examples/run",
+      "applies_to": "mxv self runs list",
+      "reason": "The runs come from the usage log of the machine that runs the test, and tests/usage.rs checks the runs of a usage log that it writes.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
       "rule": "effects/yes",
       "applies_to": "mxv down",
       "reason": "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.",

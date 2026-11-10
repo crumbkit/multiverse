@@ -1,4 +1,4 @@
-mxv has 21 opt-outs from the conventions.
+mxv has 22 opt-outs from the conventions.
 
 examples/run: mxv up
   Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
@@ -45,6 +45,11 @@ examples/run: mxv self usage
 
 examples/run: mxv self figures list
   Reason: The figures come from the usage log of the machine that runs the test, and tests/usage.rs checks the usage log instead.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+examples/run: mxv self runs list
+  Reason: The runs come from the usage log of the machine that runs the test, and tests/usage.rs checks the runs of a usage log that it writes.
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
 

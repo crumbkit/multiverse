@@ -1,0 +1,45 @@
+Install mxv's skill into each agent skills directory that exists
+
+Usage: mxv skills install [OPTIONS]
+
+Options:
+      --dir <DIR>
+          Install into this skills directory in place of the agent skills directories
+
+      --force
+          Replace a file or a link that install did not write with the skill's own folder
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv skills install
+          Install mxv's skill into each agent skills directory that exists
+
+  mxv skills install --force
+          Install it, replacing a file or a link that install did not write
+
+Columns:
+  state   What install did: failed, skipped, written or unchanged.
+  dirs    The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
+  reason  Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/skill`, or null.
+
+Columns that --long adds:
+  path  The SKILL.md file that install wrote or left, at its real path.
+
+Effects: additive, idempotent, closed-world.

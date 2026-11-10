@@ -18,6 +18,12 @@ fn main() -> ExitCode {
     )]
     let vars: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // A shell's completion request ends the run here, before the usage log
+    // starts, so a Tab press writes no line. mxv parses against
+    // `Cli::command()`, so completion offers what parsing accepts.
+    if let Some(code) = crumbkit::complete(<mxv::Cli as clap::CommandFactory>::command) {
+        return code;
+    }
     // phase starts its keeper as `mxv phase keep`, which writes no usage
     // line and reads nothing else.
     if mxv::is_keeper(&args) {

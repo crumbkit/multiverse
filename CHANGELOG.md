@@ -19,6 +19,25 @@ workspace may need to act on.
   `.deadband-workspace` is no longer allowed as a checkout's folder. mxv
   now needs the deadband commit that names workspaces, crumbkit/deadband#19.
 
+- `mxv completion install` writes mxv's shell completion where the shell loads
+  it, for bash, zsh and fish, with `--shell` naming the shell when `SHELL`
+  does not. `mxv completion check` exits with 1 when the installed file is
+  missing or differs, and `mxv completion print` prints the registration
+  script. mxv also answers a shell's completion request, which a shell makes
+  by running mxv with `COMPLETE` set to its name. mxv now builds on crumbkit
+  0.3.1 with its `complete` feature.
+- `mxv skills install` writes mxv's agent skill into each agent skills
+  directory that exists, `~/.claude/skills`, `~/.agents/skills` and
+  `$CODEX_HOME/skills`, or into the directory that `--dir` names.
+  `mxv skills check` exits with 1 when an installed copy is missing or
+  differs from the installed mxv's, and `mxv skills print` prints the skill.
+  The skill is crates/mxv/skill/SKILL.md, embedded in the binary.
+- `mxv self runs list` prints each run in mxv's usage log, grouped by
+  session, as the `mxv/self-runs-list/v1` document. mxv now builds on
+  crumbkit 0.3, so the figures of `mxv self figures list` also give each
+  command `p50_ms`, `p50_out_bytes` and `cut_short`, and a failure's JSON
+  recovery can have the kind `terminal`, which names a command that a person
+  must run in a terminal.
 - `mxv exec` takes no UNIT to run a one-off command on the host in a
   workspace, as `mxv exec -- COMMAND`. The command needs no running unit and
   no `mxv.toml`. It receives the workspace's ports and every service's

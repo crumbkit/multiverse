@@ -1,0 +1,12 @@
+Print mxv's skill
+
+Usage: mxv skills print [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv skills print
+
+Effects: read-only, closed-world.
+Global flags: --json, --no-input. `mxv skills print --help` describes them.

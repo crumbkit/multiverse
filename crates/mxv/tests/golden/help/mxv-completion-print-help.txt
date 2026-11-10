@@ -1,0 +1,29 @@
+Print mxv's completion registration script for a shell
+
+Usage: mxv completion print [OPTIONS]
+
+Options:
+      --shell <SHELL>
+          Print the script of this shell in place of the one that SHELL names
+
+          Possible values:
+          - bash:       Bash, which loads a completion file from bash-completion's user directory
+          - elvish:     Elvish, which has no completion directory
+          - fish:       Fish, which loads a completion file from its completions directory
+          - powershell: PowerShell, which has no completion directory
+          - zsh:        Zsh, which loads a completion function from a directory on `fpath`
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv completion print --shell fish
+          Print the registration script for fish
+
+Effects: read-only, closed-world.

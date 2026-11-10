@@ -31,6 +31,8 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
 - [`mxv self`](#mxv-self): Review mxv's own use
+- [`mxv skills`](#mxv-skills): Give coding agents mxv's skill
+- [`mxv completion`](#mxv-completion): Set up mxv's completion in a shell
 
 ### Arguments
 
@@ -812,6 +814,7 @@ Review mxv's own use
 
 - [`mxv self usage`](#mxv-self-usage): Report the patterns in mxv's usage log where callers waste effort
 - [`mxv self figures`](#mxv-self-figures): Work with the figures of each command in mxv's usage log
+- [`mxv self runs`](#mxv-self-runs): Work with each run in mxv's usage log
 
 ## `mxv self usage`
 
@@ -873,14 +876,239 @@ mxv self figures list
 - `help_pages`: The runs that printed the command's help page.
 - `help_before`: The help pages that each run's session read since its last run that printed no help page, summed over the runs.
 - `failed`: The runs that failed.
+- `p50_out_bytes`: The median of the bytes that the runs wrote to standard output, by the nearest-rank method, or null when no run printed a result.
 - `p95_out_bytes`: The 95th percentile of the bytes that the runs wrote to standard output, or null when no run printed a result.
 
 ### Columns that `--long` adds
 
 - `refused`: The runs whose command line was refused.
+- `p50_ms`: The median of the runs' wall time in milliseconds, by the nearest-rank method, or null when every run printed help.
 - `p95_ms`: The 95th percentile of the runs' wall time in milliseconds, or null when every run printed help.
+- `cut_short`: The runs whose output a listing or stream cut short, because it showed fewer rows than its total or the output budget stopped it.
 - `typed_full`: The runs that typed `--full`.
 - `typed_all`: The runs that typed `--all`.
 - `typed_long`: The runs that typed `--long`.
+
+Effects: read-only, closed-world.
+
+## `mxv self runs`
+
+Work with each run in mxv's usage log
+
+### Commands
+
+- [`mxv self runs list`](#mxv-self-runs-list): List each run in mxv's usage log, grouped by session
+
+## `mxv self runs list`
+
+List each run in mxv's usage log, grouped by session
+
+### Arguments
+
+- `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
+- `--log <FILE>`: Read this usage log instead of the tool's own
+- `--limit <N>`: Print at most this many rows. Default: `25`.
+- `--all`: Print every row
+
+### Examples
+
+Print each run of the last 7 days, grouped by session.
+
+```sh
+mxv self runs list
+```
+
+### Columns
+
+- `session`: The run's session, numbered from 1 in the order of each session's first run in the listing's window.
+- `step`: The run's place in its session, from 1.
+- `command`: The command path below the tool's name, such as `books show`, or the tool's name for its root command.
+- `exit`: The run's exit code, or null when the run ended before it exited.
+- `code`: The code of the run's failure or refusal, such as `shelf::books::not_found`, or null when the run recorded none.
+- `ms`: The run's wall time in milliseconds.
+- `out_bytes`: The bytes that the run wrote to standard output, or null when the run did not reach `finish`.
+
+### Columns that `--long` adds
+
+- `at`: When the run ended, in RFC 3339 to the second in UTC, such as `2026-10-11T11:56:40Z`.
+- `caller`: The coding agent's id, such as claude-code, person or unknown.
+- `flags`: The names of the flags that the caller typed, never their values.
+- `help`: Whether the run printed a help page.
+- `truncated`: Whether a listing or stream cut the run's output short.
+- `trace`: The id of the W3C trace that the run belongs to, as 32 lowercase hex digits.
+- `run`: The run's own span id, as 16 lowercase hex digits, which its child runs name as their parent.
+- `parent`: The span id of the run's caller, as 16 lowercase hex digits, or null when the run started a new trace.
+
+Effects: read-only, closed-world.
+
+## `mxv skills`
+
+Give coding agents mxv's skill
+
+### Commands
+
+- [`mxv skills install`](#mxv-skills-install): Install mxv's skill into each agent skills directory that exists
+- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of mxv's skill matches this mxv
+- [`mxv skills print`](#mxv-skills-print): Print mxv's skill
+
+## `mxv skills install`
+
+Install mxv's skill into each agent skills directory that exists
+
+### Arguments
+
+- `--dir <DIR>`: Install into this skills directory in place of the agent skills directories
+- `--force`: Replace a file or a link that install did not write with the skill's own folder
+
+### Examples
+
+Install mxv's skill into each agent skills directory that exists.
+
+```sh
+mxv skills install
+```
+
+Install it, replacing a file or a link that install did not write.
+
+```sh
+mxv skills install --force
+```
+
+### Columns
+
+- `state`: What install did: failed, skipped, written or unchanged.
+- `dirs`: The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
+- `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/skill`, or null.
+
+### Columns that `--long` adds
+
+- `path`: The SKILL.md file that install wrote or left, at its real path.
+
+Effects: additive, idempotent, closed-world.
+
+## `mxv skills check`
+
+Check that each installed copy of mxv's skill matches this mxv
+
+### Arguments
+
+- `--dir <DIR>`: Check this skills directory in place of the agent skills directories
+
+### Examples
+
+Report each agent skills directory whose copy is missing or differs.
+
+```sh
+mxv skills check
+```
+
+### Columns
+
+- `state`: Whether the copy is the binary's: missing, differs, unreadable, linked or current.
+- `dirs`: The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
+- `reason`: Why the copy differs, cannot be read or is linked, such as `written by shelf 0.2.0` or `linked to /src/shelf/skill`, or null.
+
+### Columns that `--long` adds
+
+- `path`: The SKILL.md file that was checked, at its real path.
+
+Effects: read-only, closed-world.
+
+## `mxv skills print`
+
+Print mxv's skill
+
+### Examples
+
+Print mxv's skill.
+
+```sh
+mxv skills print
+```
+
+Effects: read-only, closed-world.
+
+## `mxv completion`
+
+Set up mxv's completion in a shell
+
+### Commands
+
+- [`mxv completion install`](#mxv-completion-install): Install mxv's completion where the shell loads it
+- [`mxv completion check`](#mxv-completion-check): Check that mxv's installed completion file matches this mxv
+- [`mxv completion print`](#mxv-completion-print): Print mxv's completion registration script for a shell
+
+## `mxv completion install`
+
+Install mxv's completion where the shell loads it
+
+### Arguments
+
+- `--shell <SHELL>`: Install for this shell in place of the one that SHELL names. One of `bash`, `elvish`, `fish`, `powershell`, `zsh`.
+- `--force`: Replace a file or a link that install did not write; a link's target stays as it is
+
+### Examples
+
+Install mxv's completion for fish.
+
+```sh
+mxv completion install --shell fish
+```
+
+Install it for zsh, replacing a file or a link that install did not write.
+
+```sh
+mxv completion install --shell zsh --force
+```
+
+### Columns
+
+- `state`: What install did: failed, skipped, written or unchanged.
+- `shell`: The shell: bash, elvish, fish, powershell or zsh.
+- `path`: The completion file that install wrote or left. When the file is a link to a file that install wrote, the path of that file.
+- `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/shelf.fish`, or null.
+
+Effects: additive, idempotent, closed-world.
+
+## `mxv completion check`
+
+Check that mxv's installed completion file matches this mxv
+
+### Arguments
+
+- `--shell <SHELL>`: Check the file of this shell in place of the one that SHELL names. One of `bash`, `elvish`, `fish`, `powershell`, `zsh`.
+
+### Examples
+
+Report zsh's completion file when it is missing or differs.
+
+```sh
+mxv completion check --shell zsh
+```
+
+### Columns
+
+- `state`: Whether the file holds the script that install writes: missing, differs, unreadable, linked or current.
+- `shell`: The shell: bash, elvish, fish, powershell or zsh.
+- `path`: The completion file that was checked. When the file is a link to a file that install wrote, the path of that file.
+- `reason`: Why the file differs, cannot be read or is linked, such as `linked to /src/shelf/shelf.fish`, or null.
+
+Effects: read-only, closed-world.
+
+## `mxv completion print`
+
+Print mxv's completion registration script for a shell
+
+### Arguments
+
+- `--shell <SHELL>`: Print the script of this shell in place of the one that SHELL names. One of `bash`, `elvish`, `fish`, `powershell`, `zsh`.
+
+### Examples
+
+Print the registration script for fish.
+
+```sh
+mxv completion print --shell fish
+```
 
 Effects: read-only, closed-world.

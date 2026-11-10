@@ -1,0 +1,16 @@
+Install mxv's completion where the shell loads it
+
+Usage: mxv completion install [OPTIONS]
+
+Options:
+      --shell <SHELL>  Install for this shell in place of the one that SHELL names [possible values: bash, elvish, fish, powershell, zsh]
+      --force          Replace a file or a link that install did not write; a link's target stays as it is
+  -h, --help           Print help (see more with '--help')
+
+Examples:
+  mxv completion install --shell fish
+  mxv completion install --shell zsh --force
+
+Effects: additive, idempotent, closed-world.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv completion install --help` describes them.
+Next: mxv completion install --help explains each column.

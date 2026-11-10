@@ -9,7 +9,7 @@ repository.workspace = true
 readme = "README.md"
 keywords = ["workspace", "git", "worktree", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["src/**/*.rs", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+include = ["src/**/*.rs", "skill/SKILL.md", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 # The library holds the whole command, so the integration tests can pass its
 # parser and tool record to crumbkit-test's checks beside the built binary. It is
@@ -27,7 +27,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-crumbkit = { workspace = true }
+# The `complete` feature answers a shell's completion request and gives
+# `mxv completion install`, `mxv completion check` and `mxv completion print`.
+crumbkit = { workspace = true, features = ["complete"] }
 # mxv is a binary, so it chooses clap's user-facing features: help, usage
 # lines, error context, suggestions for mistyped commands, and colour when
 # the output goes to a terminal. These are clap's default features.
@@ -40,6 +42,9 @@ clap = { workspace = true, features = [
     "color",
 ] }
 crumbkit-usage = { workspace = true }
+# crumbkit-skills installs mxv's embedded agent skill with `mxv skills
+# install` and checks the installed copies with `mxv skills check`.
+crumbkit-skills = { workspace = true }
 # etcetera finds the XDG base directories, as crumbkit does (ADR-0027,
 # ADR-0029): the state directory of the records, the config directory of
 # the config file, and the data directory of the default workspace root.
