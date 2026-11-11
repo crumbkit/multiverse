@@ -5,8 +5,9 @@ It was drafted on 4 November 2026, and the table at the end still lists each
 decision, and says which are decided and what the draft assumes for the
 rest. phase runs an app from a checkout that has no build step or from an
 image. `up` refuses an app from a release, and a checkout with a build step,
-with `PhaseError::NotRunnable`. `logs` with `since` and the trust grants are
-not built.
+with `PhaseError::NotRunnable`. The permission grants of [Trust](#trust) are
+built, and `logs` with `since` and the check of a program's publisher are
+not.
 
 ## What phase does
 
@@ -218,9 +219,14 @@ the same access, and phase provisions nothing.
 - `mxv up` starts the services an app needs before it starts the app.
 - `mxv down` with process names stops the apps that they name, and
   `mxv down` with no names stops every app and then the services. `down`
-  does not look at which running apps need a service, so it stops a service
-  that a running app needs. The designed behaviour, which is not built, is
-  that `down` leaves a service running while another running app needs it.
+  with names keeps a named unit while a running unit outside the stopped
+  set depends on it, and keeps what a kept unit depends on in turn. Each
+  kept unit fails the command with `mxv::process::still_needed`, which
+  names the units that need it, and the other named units stop. A
+  dependant counts as running unless phase knows it has stopped or exited,
+  and the edges come from the run record's `apps[].depends`, so a broken
+  manifest does not change the result. `Phase::needed_by` returns those
+  edges. `mxv restart` of a needed unit still stops and starts it.
 - A service's data lives in a Docker volume labelled with the workspace and
   service. It survives `down` and restarts. The designed verb
   `reset SERVICE`, which does not exist yet, would remove it after asking,
@@ -239,11 +245,13 @@ the same access, and phase provisions nothing.
    a content-addressed cache, and that it runs the build command in a
    checkout. If a release is pinned but has no asset for this machine,
    phase stops with an error that names the app and the missing asset.
-3. The design is that phase checks each app's permissions against what you
-   have granted (see [Trust](#trust)), and that apps whose permissions grew
-   wait for your answer while the rest continue. This check is not built.
-   `up` compares no permissions, and an app whose manifest widens its
-   permissions starts with the wider permissions.
+3. Before it builds, stops or starts anything, the host compares each
+   selected host unit's permissions with what a person has granted to the
+   repository (see [Trust](#trust)). When any unit asks for more, nothing
+   starts or stops: a person at a terminal is asked first, and without one
+   the command fails with `mxv::permissions::not_granted`. `Phase::up`
+   itself does not check, because mxv is its only host (decision P5) and
+   mxv runs the check in `Runs::build`, the only way to `Runs::up`.
 4. phase starts the apps in dependency order. For each process it resolves
    the app's environment, generates the sandbox profile, starts a keeper,
    and waits for the readiness probe.
@@ -1817,9 +1825,8 @@ the denials show: as "Operation not permitted" in its log, and on macOS in
 
 ## Trust
 
-The trust check is not built. `up` compares no granted permissions, an app
-whose manifest widens its permissions starts with the wider permissions,
-and phase checks no publisher. This section is the design.
+The permission check below is built. The publisher check is not, because
+phase runs no release yet.
 
 phase asks you two questions, and only when the answer could change what
 runs.
@@ -1830,20 +1837,67 @@ a build attestation that ties it to a trusted repository's CI. A new
 version from a trusted publisher needs no prompt. A program built from your
 own checkout needs none, because you are its publisher.
 
-**What may the app do?** phase stores the permissions you granted to each
-app. When an app's manifest asks for more than you granted, phase stops
-that app and shows the difference in plain terms:
+**What may the app do?** phase stores, for each repository on the machine,
+what each of its host units may do: the sets `write`, `listen`, `connect`
+and `secrets` (names only), or that the unit may run outside the sandbox.
+Before `mxv up` or `mxv restart` builds, stops or starts anything, mxv
+compares the permissions of the selected units and their dependencies with
+that grant. A unit asks for more when its permissions hold an entry that
+the grant lacks, when the grant says sandboxed and the manifest has no
+`permissions` table, or when the grant has no entry for it because it is
+new. At a terminal, mxv asks before it takes the workspace's lock:
 
 ```text
-api asks for new permissions:
-  read the secret STRIPE_KEY
-  connect to api.stripe.com
+Repository multiverse (~/Code/crumbverse/multiverse) asks for these permissions:
+  api, a new unit:
+    write to target in its checkout
+    listen on the port api
+    connect to store
+    receive the secret STRIPE_KEY
+  worker, a new unit:
+    run outside the sandbox, with everything your account can reach
+  web, more than it was granted:
+    write to /tmp/cache
 Grant them? [y/N]
 ```
 
+A yes adds what the list names to the grant, and the command goes on. Any
+other answer ends the command with nothing changed. Without a terminal, or
+with `--no-input`, the command fails with `mxv::permissions::not_granted`,
+which carries the same list and whose recovery is `mxv up` run by a person
+in a terminal. No flag, verb or environment variable approves a grant.
+`up` is all or nothing: when any selected unit asks for more, no unit
+starts or stops, so the design's "the rest continue" is dropped. The check
+under the workspace's lock is the one that decides, so a manifest that
+changes again after the yes is refused there. `mxv exec` refuses with the
+same code when the grant does not cover its unit, and it never asks.
+
 A manifest change that keeps permissions the same, or reduces them, needs
-no prompt. Edits to code, lockfiles or build scripts need no prompt either,
-because the sandbox limits what any of that code can do.
+no prompt, and the grant keeps its wider value, so two branches of one
+repository do not ask in turn. Edits to code, lockfiles or build scripts
+need no prompt either, because the sandbox limits what any of that code can
+do. Container units and mxv's own reserved units ask nothing, because the
+`permissions` table applies only to host processes. A selection with no
+host unit asks nothing and writes no file.
+
+The grant lives in `<phase state>/grants/<label>-<hex>.json`, with the
+schema `phase/grants/v1` and a `.lock` file beside it. The label is the
+repository's folder name reduced to letters, digits and hyphens, and the
+hex is 16 digits of the sha256 of the sorted source paths of the
+workspace's checkouts, which the file also records. A workspace with no
+checkout uses its own name and stable id. Every workspace of the same
+repositories on the machine shares the file. Nothing deletes it: `mxv
+remove` and `mxv archive` leave it, and moving it away makes the next `up`
+ask about every unit again. A grant only grows. `Phase::grant` takes the
+union with the file under its lock and writes it through a rename, so two
+grants at once keep both additions. A corrupt file fails with
+`phase::grants::unreadable` and one from a newer phase with
+`phase::grants::newer`. A sandboxed app cannot read or write it, because
+the sandbox denies phase's whole state directory.
+
+The check makes a widening visible to a person. It does not stop a process
+that already runs with the person's own access, outside the sandbox, from
+editing the file. [SECURITY.md](../../../SECURITY.md) says so.
 
 The aim is that every prompt names exactly what you are agreeing to, and
 that prompts are rare enough to be read.
@@ -1868,9 +1922,10 @@ links the library and calls it for each process verb:
 
 These designed verbs do not exist yet: `reset SERVICE`, which removes a
 shared service's data after asking, `plan check FILE`, which validates a
-plan without running it, `grants [APP]`, which shows and revokes granted
-permissions, and `grants approve APP`, which grants an app's pending
-permission growth.
+plan without running it, and `grants`, which lists a repository's grant
+and revokes parts of it. Until `grants` exists, a person undoes a grant by
+editing its file. No verb approves a grant, because only the question that
+`mxv up` and `mxv restart` ask at a terminal grants anything.
 
 `mxv` has two hidden entry points that only phase starts: `mxv phase keep`,
 which is the keeper and, with `--sandboxed`, the launcher, and
@@ -2176,10 +2231,12 @@ still refused with `NotRunnable::Oneshot`.
 
 ### Unattended runs
 
-- The design is that `up` refuses an app whose permissions grew, when
-  nobody is at a terminal, with a stable error code and the permission
-  difference, and that `grants approve APP` grants them. None of this is
-  built: `up` does not compare permissions, and the verb does not exist.
+- `up`, `restart` and `exec` refuse a unit whose permissions the grant
+  does not cover, when nobody is at a terminal or `--no-input` is given,
+  with `mxv::permissions::not_granted` and the permission difference. They
+  build, stop and start nothing. A person grants by running `mxv up` in a
+  terminal and answering yes. A repository already in use before the check
+  was built asks once.
 - The design is that `up --env KEY=VALUE` sets a value that is not a secret
   for one run, needs no grant, and is recorded in the plan by name only.
   This is not built: `mxv up` takes only `-w` and process names, and
@@ -2204,8 +2261,9 @@ run everything they run today. It contains:
 
 Later releases add, in this order (decision P8): release sources with
 verification, shared services with a database and role per app, the
-sandbox, and trust grants. The sandbox's first stage is built ahead of
-that order, and runs only an app from its checkout.
+sandbox, and trust grants. The sandbox's first stage and the permission
+grants are built ahead of that order, and run only an app from its
+checkout.
 
 
 Each decision states what this draft assumes until it is decided.

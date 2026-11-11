@@ -81,10 +81,11 @@ pub use crate::record::{
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
-    Admission, Asked, BuildEnd, BuildStop, BuildsPassed, DownOutcome, Exec, ExecEnd, ExecTarget,
-    ExitReason, Footprint, Kind, LogOutput, MiseListing, MiseTaskName, Place, PreparedTask,
-    ProcessNote, ProcessState, ProcessStatus, RenamedVolume, Runs, STOP_GRACE, TaskEnd,
-    TaskServices, TaskStart, Toucher, Unstoppable, UpOutcome, Volumes, Waited,
+    Admission, Asked, BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Exec, ExecEnd,
+    ExecTarget, ExitReason, Footprint, Granting, Kind, LogOutput, MiseListing, MiseTaskName,
+    Needed, PermissionAsk, Place, PreparedTask, ProcessNote, ProcessState, ProcessStatus,
+    RenamedVolume, Runs, STOP_GRACE, StillNeeded, TaskEnd, TaskServices, TaskStart, Toucher,
+    Unstoppable, UpOutcome, Volumes, Waited,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,

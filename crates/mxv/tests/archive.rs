@@ -4,6 +4,8 @@
 
 #![cfg(test)]
 
+#[path = "support/grants.rs"]
+mod grants;
 #[path = "support/git.rs"]
 mod support;
 
@@ -96,6 +98,7 @@ impl Setup {
     }
 
     fn run_in(&self, dir: &Path, args: &[&str]) -> (i32, Value) {
+        grants::before(&self.root().join("state/mxv"), args);
         Self::finished(self.command(dir), args)
     }
 

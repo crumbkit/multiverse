@@ -8,6 +8,8 @@
 
 #![cfg(test)]
 
+#[path = "support/grants.rs"]
+mod grants;
 #[path = "support/git.rs"]
 mod support;
 #[path = "support/ports.rs"]
@@ -119,6 +121,7 @@ impl Setup {
     /// of the workspace may receive.
     fn command(&self, args: &[&str]) -> Command {
         let root = self.root();
+        grants::before(&root.join("state/mxv"), args);
         Command::new(env!("CARGO_BIN_EXE_mxv"))
             .args(args)
             .current_dir(&root)

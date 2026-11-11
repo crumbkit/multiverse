@@ -544,6 +544,20 @@ A change to a process's `permissions` takes effect at the next `mxv up`.
 describes for any change to a host
 process's part of the plan.
 
+A change that widens a process's permissions needs a person's yes first.
+mxv keeps, for each repository, what a person has granted to each host
+process, in `$XDG_STATE_HOME/mxv/phase/grants/`. Before `mxv up` or
+`mxv restart` builds, stops or starts anything, it compares the selected
+host processes and their dependencies with that grant. A process that is
+new, that adds a `write`, `listen` or `connect` entry, or that loses its
+`permissions` table asks for more. At a terminal, mxv lists what each one
+asks for and asks `Grant them? [y/N]`, and a yes widens the grant for
+every workspace of the repository. Without a terminal, or with
+`--no-input`, the command fails with `mxv::permissions::not_granted` and
+changes nothing, and `mxv exec` refuses the same way. No flag or variable
+approves a grant. A change that keeps or narrows permissions asks nothing,
+and the grant keeps its wider value.
+
 This manifest runs four sandboxed processes beside two containers:
 
 ```toml

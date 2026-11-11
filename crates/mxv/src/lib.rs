@@ -72,10 +72,11 @@ pub use crate::failures::{
 pub use crate::run_failures::{
     BUILD_FAILED, BUILD_TIMED_OUT, BUILD_UNSTARTABLE, MANIFEST_INVALID, MANIFEST_NAME_CLASH,
     MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME,
-    MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, PORT_NOT_FOUND, PORT_TAKEN,
-    PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
-    PROCESS_NOT_READY, PROCESS_UNSTOPPABLE, TASK_AMBIGUOUS, TASK_UNKNOWN, VOLUME_RENAMED,
-    WORKSPACE_NOT_CURRENT, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    MANIFEST_UNKNOWN_KEY, MANIFEST_UNREADABLE, MANIFEST_UNRUNNABLE, PERMISSIONS_NOT_GRANTED,
+    PORT_NOT_FOUND, PORT_TAKEN, PROCESS_DETACHED_LISTENER, PROCESS_EXITED,
+    PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND, PROCESS_NOT_READY, PROCESS_STILL_NEEDED,
+    PROCESS_UNSTOPPABLE, TASK_AMBIGUOUS, TASK_UNKNOWN, VOLUME_RENAMED, WORKSPACE_NOT_CURRENT,
+    WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
 };
 
 /// Every failure code of `mxv archive`, `mxv restore` and `mxv remove
@@ -156,15 +157,17 @@ where
             let result = reclaim::pin(environment, &args, false);
             crumbkit::finish(output, reclaim::UNPIN, result)
         }
+        // `up` and `restart` read `--no-input` through `&output` before they
+        // ask for wider permissions, so each runs before `finish`.
         Verb::Up(args) => {
-            let result = processes::up(environment, &args);
+            let result = processes::up(&output, environment, &args);
             processes::finish_interruptible(output, processes::UP, result)
         }
         Verb::Down(args) => {
             crumbkit::finish(output, processes::DOWN, processes::down(environment, &args))
         }
         Verb::Restart(args) => {
-            let result = processes::restart(environment, &args);
+            let result = processes::restart(&output, environment, &args);
             processes::finish_interruptible(output, processes::RESTART, result)
         }
         Verb::Status(args) => {
@@ -433,6 +436,30 @@ pub(crate) fn stdout_is_terminal() -> bool {
     )]
     let stdout = std::io::stdout();
     stdout.is_terminal()
+}
+
+/// Reports whether a person can answer a question: mxv's standard input
+/// and standard error are both terminals. `mxv up` and `mxv restart` ask
+/// for wider permissions only then.
+pub(crate) fn person_can_answer() -> bool {
+    use std::io::IsTerminal as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and `mxv up` asks only whether it is a terminal"
+    )]
+    let stderr = std::io::stderr();
+    stdin_is_terminal() && stderr.is_terminal()
+}
+
+/// Returns a reader of mxv's standard input, where a person answers the
+/// question of `mxv up` about wider permissions.
+pub(crate) fn stdin_reader() -> std::io::StdinLock<'static> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard input, where a person answers the question of `mxv up`"
+    )]
+    let stdin = std::io::stdin();
+    stdin.lock()
 }
 
 /// Returns a writer to mxv's standard error, which receives a build's

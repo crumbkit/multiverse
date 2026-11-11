@@ -19,6 +19,7 @@ mxv runs locally as one person.
 - Run records (0600) hold process ids and no environment values. `env-digest.key` keys digests of non-secret values.
 - App logs (0600) hold what apps print, unrotated. Keeper diagnostic logs hold the keeper's notes and standard error.
 - Docker volumes hold what containers wrote.
+- Grants (`<phase state>/grants/*.json`) hold each repository's checkout paths and what its host units may do, with secret names and never values. Nothing deletes them.
 
 ## Credentials
 
@@ -55,6 +56,8 @@ mxv keeps no listener open. The ledger allocates from `ports_range`, by default 
 ## Sandbox
 
 A process runs under nono only when it declares `[permissions]`. Seatbelt is partial, and Linux reports Landlock as unsandboxed. On an older kernel or a build without the `sandbox` feature, a declaring app runs unsandboxed.
+
+`up`, `restart` and `exec` refuse a host unit whose permissions exceed its repository's grant, with `mxv::permissions::not_granted`, and change nothing. Only a person who answers yes at a terminal widens a grant; no flag or variable does. The check makes a widening visible. It does not stop a process that runs with the person's own access, outside the sandbox, from editing a grant file. The sandbox denies phase's state, so a sandboxed process cannot.
 
 ## Reporting a problem
 

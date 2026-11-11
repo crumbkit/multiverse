@@ -241,7 +241,9 @@ Effects: read-only, closed-world.
 
 ## `mxv up`
 
-Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
+Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready.
+
+Before anything builds, stops or starts, mxv compares the permissions of the selected host units and the units they depend on with what a person has granted to the repository. A unit asks for more when it is new, when its permissions hold an entry that the grant lacks, or when it would run outside the sandbox and its grant is sandboxed. At a terminal, mxv lists what each unit asks for and asks before it goes on, and a yes adds it to the grant that every workspace of the repository shares. Without a terminal, or with --no-input, it fails with mxv::permissions::not\_granted and builds, stops and starts nothing. No flag or variable approves a grant.
 
 ### Arguments
 
@@ -281,7 +283,9 @@ Children: one indented line under a unit for each note of `up` or `restart`, whi
 
 ## `mxv down`
 
-Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
+Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds.
+
+A named unit that a running unit outside the stopped set depends on keeps running, and so does what it depends on. Each kept unit fails the command with mxv::process::still\_needed, which names the units that need it, and the other named units stop. Name the dependants too to stop them all.
 
 ### Arguments
 
@@ -321,7 +325,9 @@ Children: one indented line under a unit for each note of `up` or `restart`, whi
 
 ## `mxv restart`
 
-Build a workspace's units through deadband, then stop them and start them again
+Build a workspace's units through deadband, then stop them and start them again.
+
+Before anything builds, stops or starts, mxv checks the selected host units' permissions against the repository's grant and asks at a terminal, as `mxv up` does. A unit that a running unit depends on still restarts.
 
 ### Arguments
 

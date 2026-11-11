@@ -11,12 +11,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crumbkit::{Batch, Document, Listing, Run, Stream};
+use multiverse::phase::Growth;
 use multiverse::phase::WorkspaceId;
 use multiverse::{
-    BuildEnd, BuildStop, BuildsPassed, DownOutcome, Error, Git, Lock, Manifest, ManifestError,
-    Marker, ProcessStatus, Reclaimed, Runs, Store, Unstoppable, UpOutcome, Volumes, Workspace,
+    BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Lock,
+    Manifest, ManifestError, Marker, Needed, Reclaimed, Runs, Store, UpOutcome, Volumes, Workspace,
     WorkspaceName,
 };
+use std::io::{BufRead, Write};
 use std::time::Duration;
 
 use crate::admission::Deadband;
@@ -26,6 +28,9 @@ use crate::failures::MxvFailure;
 use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
 use crate::run_failures::RunFailure;
 use crate::verbs;
+
+#[cfg(test)]
+mod tests;
 
 /// The document that `mxv up` prints.
 pub(crate) const UP: Document<Vec<ProcessRow>> = Document::new(
@@ -399,16 +404,95 @@ fn build<'lock>(
             message: unrunnable.message,
         }
         .into()),
+        BuildEnd::NotGranted(ask) => Err(RunFailure::not_granted(&workspace, &ask, false).into()),
     }
+}
+
+/// Asks the person at the terminal to grant the permissions that the
+/// context's units ask for beyond the grant of the workspace's repository,
+/// and adds them to the grant on yes. It runs before the workspace's lock,
+/// so a person who walks away from the question keeps no other command of
+/// the workspace waiting. Without a terminal, or with `--no-input`, it asks
+/// nothing, and the check under the lock refuses.
+///
+/// # Errors
+///
+/// Returns [`RunFailure::PermissionsNotGranted`] when the answer is not
+/// yes, and the failures of reading or writing the grant.
+fn ask_first(output: &Run, context: &Context) -> Result<(), crumbkit::Error> {
+    if output.no_input() || !crate::person_can_answer() {
+        return Ok(());
+    }
+    // A manifest that cannot be read fails under the lock, as before.
+    let Ok(manifest) = required_manifest(&context.workspace) else {
+        return Ok(());
+    };
+    let granting = context
+        .runs
+        .granting(
+            &context.store,
+            &context.workspace,
+            &manifest,
+            &context.processes,
+        )
+        .map_err(MxvFailure::from)?;
+    let Granting::Asks(ask) = granting else {
+        return Ok(());
+    };
+    let text = question(ask.repository(), ask.paths(), ask.growth());
+    if answer(
+        &text,
+        &mut crate::stderr_writer(),
+        &mut crate::stdin_reader(),
+    ) {
+        context.runs.grant(&ask).map_err(MxvFailure::from)?;
+        Ok(())
+    } else {
+        Err(RunFailure::not_granted(context.workspace.name.as_str(), &ask, true).into())
+    }
+}
+
+/// Returns the question that asks a person to grant `growth` to the
+/// repository `repository` at `paths`: the repository, each unit and what
+/// it asks for in plain words, and `Grant them? [y/N] `. It shows no hash.
+fn question(repository: &str, paths: &[PathBuf], growth: &Growth) -> String {
+    let paths: Vec<String> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    let mut text = format!(
+        "Repository {repository} ({}) asks for these permissions:\n",
+        paths.join(", ")
+    );
+    for line in growth.lines() {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text.push_str("Grant them? [y/N] ");
+    text
+}
+
+/// Writes `text`, a question, to `prompt`, reads one line from `input`,
+/// and reports whether the answer is `y` or `yes`, in any case and with
+/// any surrounding spaces. An answer that cannot be read is no.
+fn answer(text: &str, prompt: &mut dyn Write, input: &mut dyn BufRead) -> bool {
+    let _ = prompt.write_all(text.as_bytes());
+    let _ = prompt.flush();
+    let mut reply = String::new();
+    let _ = input.read_line(&mut reply);
+    let reply = reply.trim();
+    reply.eq_ignore_ascii_case("y") || reply.eq_ignore_ascii_case("yes")
 }
 
 /// Starts the processes that `args` names, and their dependencies, after
 /// their builds pass.
 pub(crate) fn up(
+    output: &Run,
     environment: &Environment,
     args: &ProcessesArgs,
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
+    ask_first(output, &context)?;
     let lock = context.lock()?;
     context.mark(&lock);
     if context.processes.is_empty()
@@ -555,15 +639,23 @@ fn start(
 }
 
 /// Stops the context's processes, and returns one result for each, in
-/// the order they stopped.
+/// the order they stopped. `needed` says whether a named unit that a
+/// running unit outside the stopped set needs is kept.
 fn stop(
     context: &Context,
     lock: &Lock,
     manifest: Option<&Manifest>,
-) -> Result<Vec<Result<ProcessStatus, Unstoppable>>, crumbkit::Error> {
+    needed: Needed,
+) -> Result<Vec<DownResult>, crumbkit::Error> {
     let outcome = context
         .runs
-        .down(lock, &context.workspace, manifest, &context.processes)
+        .down(
+            lock,
+            &context.workspace,
+            manifest,
+            &context.processes,
+            needed,
+        )
         .map_err(MxvFailure::from)?;
     match outcome {
         DownOutcome::Down(results) => Ok(results),
@@ -575,15 +667,15 @@ fn stop(
     }
 }
 
-/// Stops the context's processes, and fails with the first process group
-/// that outlived SIGKILL.
+/// Stops the context's processes, whether or not running units need them,
+/// and fails with the first process group that outlived SIGKILL.
 fn stop_every(
     context: &Context,
     lock: &Lock,
     manifest: Option<&Manifest>,
 ) -> Result<(), crumbkit::Error> {
-    for result in stop(context, lock, manifest)? {
-        if let Err(unstoppable) = result {
+    for result in stop(context, lock, manifest, Needed::Stop)? {
+        if let DownResult::Unstoppable(unstoppable) = result {
             return Err(RunFailure::Unstoppable {
                 process: unstoppable.process,
                 pid: unstoppable.pid,
@@ -597,7 +689,9 @@ fn stop_every(
 }
 
 /// Stops the processes that `args` names, or every process, and returns
-/// one row or failure for each.
+/// one row or failure for each. A named unit that a running unit outside
+/// the named ones depends on keeps running, and its failure names the
+/// units that need it.
 pub(crate) fn down(
     environment: &Environment,
     args: &ProcessesArgs,
@@ -605,24 +699,47 @@ pub(crate) fn down(
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
     let manifest = lenient_manifest(&context.workspace);
-    let results = stop(&context, &lock, manifest.as_ref())?;
-    context.forget_reclaim(&args.processes)?;
+    let results = stop(&context, &lock, manifest.as_ref(), Needed::Keep)?;
+    // A kept unit still runs, so it stays in the reclaim mark.
+    if args.processes.is_empty() {
+        context.forget_reclaim(&[])?;
+    } else {
+        let stopped: Vec<String> = results
+            .iter()
+            .filter_map(|result| match result {
+                DownResult::Stopped(status) => Some(status.name.clone()),
+                DownResult::Unstoppable(unstoppable) => Some(unstoppable.process.clone()),
+                DownResult::StillNeeded(_) => None,
+            })
+            .collect();
+        if !stopped.is_empty() {
+            context.forget_reclaim(&stopped)?;
+        }
+    }
+    let workspace = context.workspace.name.to_string();
     let keys: Vec<&str> = results
         .iter()
         .map(|result| match result {
-            Ok(status) => status.name.as_str(),
-            Err(unstoppable) => unstoppable.process.as_str(),
+            DownResult::Stopped(status) => status.name.as_str(),
+            DownResult::Unstoppable(unstoppable) => unstoppable.process.as_str(),
+            DownResult::StillNeeded(still) => still.unit.as_str(),
         })
         .collect();
     let mut batch = Batch::new(&["down"], "processes", &keys);
     for result in &results {
         batch.push(match result {
-            Ok(status) => Ok(ProcessRow::from(status)),
-            Err(unstoppable) => Err(RunFailure::Unstoppable {
+            DownResult::Stopped(status) => Ok(ProcessRow::from(status)),
+            DownResult::Unstoppable(unstoppable) => Err(RunFailure::Unstoppable {
                 process: unstoppable.process.clone(),
                 pid: unstoppable.pid,
                 unverified: unstoppable.unverified,
                 not_started: Vec::new(),
+            }),
+            DownResult::StillNeeded(still) => Err(RunFailure::StillNeeded {
+                workspace: workspace.clone(),
+                unit: still.unit.clone(),
+                by: still.by.clone(),
+                unknown: still.unknown.clone(),
             }),
         });
     }
@@ -633,6 +750,7 @@ pub(crate) fn down(
 /// them again with their dependencies, once their builds have passed, so
 /// a build that fails leaves them running.
 pub(crate) fn restart(
+    output: &Run,
     environment: &Environment,
     args: &ProcessesArgs,
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
@@ -645,6 +763,7 @@ pub(crate) fn restart(
         }
         .into());
     }
+    ask_first(output, &context)?;
     let lock = context.lock()?;
     context.mark(&lock);
     let passed = match build(environment, &mut context, &lock, &manifest)? {

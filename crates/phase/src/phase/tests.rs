@@ -751,3 +751,54 @@ fn up_restarts_a_running_unsandboxed_process_under_seatbelt_once_its_app_declare
     );
     assert_eq!(pid(&last), pid(&after));
 }
+
+/// Writes a run record of [`id`] whose apps depend on each other as
+/// `apps` says, under `state`.
+fn record_with_apps(state: &Path, apps: &[(&str, &[&str])]) {
+    use crate::record::testing::{app, empty_record};
+    let store = RunStore::new(state);
+    let mut record = empty_record();
+    for (name, depends) in apps {
+        let depends: Vec<AppName> = depends.iter().map(|name| app(name)).collect();
+        record = record.app(&app(name), &depends);
+    }
+    let lock = store.lock(&id(), DEFAULT_LOCK_WAIT).unwrap();
+    store.write(&record, &lock).unwrap();
+}
+
+#[test]
+fn needed_by_follows_chains_to_the_running_apps_that_depend_on_each_app() {
+    let state = tempfile::tempdir().unwrap();
+    record_with_apps(
+        state.path(),
+        &[
+            ("store", &[]),
+            ("api", &["store"]),
+            ("web", &["api"]),
+            ("cron", &["store"]),
+        ],
+    );
+    let phase = Phase::new(state.path().to_path_buf());
+    let name = |name: &str| -> AppName { name.parse().unwrap() };
+    let running = std::collections::BTreeSet::from([name("web"), name("cron"), name("store")]);
+
+    let needed = phase.needed_by(&id(), &running).unwrap();
+
+    assert_eq!(
+        needed.get(&name("store")),
+        Some(&vec![name("cron"), name("web")])
+    );
+    assert_eq!(needed.get(&name("api")), Some(&vec![name("web")]));
+    assert_eq!(needed.get(&name("web")), None);
+}
+
+#[test]
+fn needed_by_gives_no_dependants_for_a_record_without_apps_or_no_record() {
+    let state = tempfile::tempdir().unwrap();
+    let phase = Phase::new(state.path().to_path_buf());
+    let running = std::collections::BTreeSet::from(["api".parse::<AppName>().unwrap()]);
+
+    assert!(phase.needed_by(&id(), &running).unwrap().is_empty());
+    record_with_apps(state.path(), &[]);
+    assert!(phase.needed_by(&id(), &running).unwrap().is_empty());
+}
