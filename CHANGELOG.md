@@ -141,7 +141,7 @@ workspace may need to act on.
   `mxv::volume::not_moved` and the `group_alive` field of the documents of
   the unit verbs are gone. The field was null for every unit that phase
   runs.
-- mxv-phase's `AppOutcome::AwaitingGrant`, `UpReport::awaiting_grant` and
+- mxv-phase's `AppOutcome::AwaitingGrant`, `AppOutcome::awaiting_grant` and
   the code `phase::grant::awaiting` are gone. The permission check runs
   before `Phase::up`, so nothing could return them.
 
