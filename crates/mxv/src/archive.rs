@@ -963,6 +963,7 @@ fn dry_result(plan: &ArchivePlan, running: Vec<String>, cd: Option<String>) -> A
         lost: plan.lost.clone(),
         stopped: running,
         disposable: DisposableRow::of(&plan.disposable),
+        late: Vec::new(),
         root_files: plan.root.clone(),
         volumes: Vec::new(),
         warnings: plan.warnings.clone(),
