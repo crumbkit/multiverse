@@ -417,7 +417,7 @@ fn an_entry_of_a_checkout_that_is_the_workspace_comes_back_at_the_checkouts_own_
 fn an_entry_of_a_checkout_that_is_the_workspace_is_refused_when_its_own_path_is_taken() {
     let scene = scene();
     let (kept, rebuilt) = kept_of_a_checkout_that_is_the_workspace(&scene);
-    write(&rebuilt.join(".env"), "TOKEN=committed\n");
+    write(rebuilt.join(".env"), "TOKEN=committed\n");
     let checkouts = [("app", rebuilt.as_path())];
 
     let refused = super::restore(&scene.archive, &kept, &checkouts, false).unwrap();
