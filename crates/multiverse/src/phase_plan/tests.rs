@@ -659,6 +659,38 @@ fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connecti
 }
 
 #[test]
+fn the_plan_of_an_existing_manifest_and_so_its_digest_are_unchanged() {
+    let ports = BTreeMap::from([("http".to_owned(), 41_000), ("db".to_owned(), 41_001)]);
+    let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let caller = CallerEnvironment::default();
+    let manifest = manifest(SANDBOXED_SERVER);
+
+    let built = build(&Inputs {
+        manifest: &manifest,
+        workspace: &name,
+        id: &id,
+        checkout: Path::new("/work/triage/app"),
+        roots: Vec::new(),
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &caller,
+        provisioner: None,
+    })
+    .unwrap();
+
+    // Phase's plan digest, which the run record keeps to tell that a plan
+    // changed, is a hash of these JSON bytes. The file holds the bytes that
+    // multiverse 0.1.1 built for this manifest, so equal bytes mean an
+    // unchanged digest and no restart of a running unit.
+    assert_eq!(
+        serde_json::to_string(&built.plan).unwrap(),
+        include_str!("sandboxed-server-plan.json").trim_end(),
+    );
+}
+
+#[test]
 fn the_requested_permissions_of_host_units_need_no_ports_and_match_the_plan() {
     let name = WorkspaceName::try_from("triage".to_owned()).unwrap();
     let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
