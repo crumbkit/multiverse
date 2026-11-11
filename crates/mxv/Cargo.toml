@@ -51,7 +51,7 @@ crumbkit-skills = { workspace = true }
 etcetera = { workspace = true }
 # multiverse holds the workspace operations, their records and the git
 # backend that the verbs run.
-multiverse = { path = "../multiverse", version = "0.1.0" }
+multiverse = { path = "../multiverse", version = "0.1.1" }
 # schemars and serde describe and write the JSON documents that the verbs
 # print.
 schemars = { workspace = true }
@@ -64,14 +64,13 @@ toml = { workspace = true, features = ["parse"] }
 # it for a place before a process's `build`. Only this crate links it, and
 # the multiverse library reaches it through its `Admission` trait. deadband
 # is not on crates.io, so it comes from its repository, which deny.toml
-# allows. The rev is the merge commit of crumbkit/deadband#19, which gives
-# `Asked` its `workspace` field. deadband has no tag after v0.1.0, and the
-# next tag replaces the rev. The version keeps cargo-deny's wildcard check
+# allows. The tag is deadband's v0.2.0, which gives `Asked` its `workspace`
+# field and parses its configuration with toml. The version keeps cargo-deny's wildcard check
 # passing. `cargo publish` would use that version and look for it on
 # crates.io, so publishing mxv fails until deadband is published there and
 # this line names only the version. Without default features mxv leaves
 # out `deadband top` and the terminal libraries it draws with.
-deadband = { version = "0.1.0", git = "https://github.com/crumbkit/deadband", rev = "054d4c9c3e4ecd484d32c2a4e4dd6b0c1d67aced", default-features = false }
+deadband = { version = "0.2.0", git = "https://github.com/crumbkit/deadband", tag = "v0.2.0", default-features = false }
 # signal-hook catches SIGINT while `mxv exec` runs a command, so Ctrl-C
 # leaves mxv running until the command ends, and stops a sandboxed command
 # that Ctrl-C does not reach. phase and crumbkit-usage already depend on it.

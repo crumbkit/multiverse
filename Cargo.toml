@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/multiverse", "crates/mxv", "crates/phase"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # nono, which applies phase's sandbox, needs Rust 1.95, so the workspace's
 # MSRV is 1.95.
@@ -48,7 +48,7 @@ etcetera = { version = "0.11.0", default-features = false }
 # toml parses the person's mxv config file and the application manifest
 # `mxv.toml`. The workspace entry enables no feature, and each crate enables
 # the features its own code needs.
-toml = { version = "1.2.0", default-features = false }
+toml = { version = "1.2.1", default-features = false }
 
 # regex matches the log lines of a process against the pattern of its
 # `ready = { log = "..." }` check. Its default features hold Unicode
