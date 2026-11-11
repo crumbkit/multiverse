@@ -355,6 +355,28 @@ pub(crate) fn sync_dir(dir: &Path) {
 /// [`Error::Unwritable`] when a step of the write fails. The temporary file
 /// is removed after a failure.
 pub(crate) fn copy_file(from: &Path, to: &Path, mode: u32) -> Result<String, Error> {
+    let mut source = File::open(from).map_err(|source| Error::StateUnreadable {
+        path: from.to_path_buf(),
+        source,
+    })?;
+    write_from(&mut source, from, to, mode)
+}
+
+/// Writes the bytes that `source` reads to `to` in one step, with the
+/// permission bits `mode`, as [`copy_file`] does, and returns their SHA-256
+/// digest in lowercase hex. `from` names the source in an error.
+///
+/// # Errors
+///
+/// Returns [`Error::StateUnreadable`] with `from` when `source` fails, and
+/// [`Error::Unwritable`] when a step of the write fails. The temporary file
+/// is removed after a failure.
+pub(crate) fn write_from(
+    source: &mut impl io::Read,
+    from: &Path,
+    to: &Path,
+    mode: u32,
+) -> Result<String, Error> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let unreadable = |source| Error::StateUnreadable {
         path: from.to_path_buf(),
@@ -369,7 +391,6 @@ pub(crate) fn copy_file(from: &Path, to: &Path, mode: u32) -> Result<String, Err
         path: temp.clone(),
         source,
     };
-    let mut source = File::open(from).map_err(unreadable)?;
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
@@ -422,6 +443,102 @@ pub(crate) fn copy_file(from: &Path, to: &Path, mode: u32) -> Result<String, Err
     Ok(hex_digest(&hasher.finalize()))
 }
 
+/// Writes a new file at `to` in one step, with the permission bits `mode`:
+/// `fill` writes the bytes into a temporary file `.<name>.<pid>.tmp` beside
+/// `to`, which is synced and renamed over `to`, and then the directory is
+/// synced (DUR-1). It first removes each temporary file of `to` that an
+/// earlier run left when it stopped partway, whatever its process id.
+///
+/// # Errors
+///
+/// Returns the failure of `fill`, and [`Error::Unwritable`] when a step of
+/// the write fails. The temporary file is removed after a failure.
+pub(crate) fn write_file_with(
+    to: &Path,
+    mode: u32,
+    fill: impl FnOnce(&mut File) -> Result<(), Error>,
+) -> Result<(), Error> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let name = to
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = to.parent().unwrap_or_else(|| Path::new("."));
+    remove_stale_temps(dir, &name)?;
+    let temp = to.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let unwritable = |source| Error::Unwritable {
+        path: temp.clone(),
+        source,
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let opened = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temp);
+    let mut file = opened.map_err(unwritable)?;
+    let written = fill(&mut file).and_then(|()| {
+        // The umask may have narrowed `mode` when the file was created.
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .and_then(|()| file.sync_all())
+            .map_err(unwritable)
+    });
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
+    )]
+    let renamed = fs::rename(&temp, to);
+    if let Err(source) = renamed {
+        let _ = fs::remove_file(&temp);
+        return Err(Error::Unwritable {
+            path: to.to_path_buf(),
+            source,
+        });
+    }
+    sync_dir(dir);
+    Ok(())
+}
+
+/// Removes each temporary file `.<name>.<pid>.tmp` in `dir`.
+fn remove_stale_temps(dir: &Path, name: &str) -> Result<(), Error> {
+    let prefix = format!(".{name}.");
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::StateUnreadable {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    for entry in entries.flatten() {
+        let found = entry.file_name();
+        let Some(found) = found.to_str() else {
+            continue;
+        };
+        let pid = found
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".tmp"));
+        if pid.is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())) {
+            let path = entry.path();
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(Error::Unwritable { path, source }),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Returns the SHA-256 digest of the file at `path` in lowercase hex.
 ///
 /// # Errors
@@ -445,7 +562,7 @@ pub(crate) fn file_digest(path: &Path) -> Result<String, Error> {
 }
 
 /// Returns `bytes` in lowercase hex.
-fn hex_digest(bytes: &[u8]) -> String {
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

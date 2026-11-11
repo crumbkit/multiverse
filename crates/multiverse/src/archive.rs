@@ -27,6 +27,15 @@ use crate::error::Error;
 use crate::mirror::directory;
 
 mod admit;
+// Soft limit: the tar of ignored files is built and tested here, and
+// archive and restore start to call it when admit splits what an archive
+// keeps from what it refuses. Until then nothing outside the module's
+// tests calls it, and archive still refuses ignored files.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "archive and restore do not call it yet")
+)]
+mod ignored;
 mod record;
 mod restore;
 mod retire;
