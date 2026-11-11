@@ -342,13 +342,6 @@ impl<R: Read> Read for Hashing<R> {
 /// # Errors
 ///
 /// Returns [`Error::StateUnreadable`] when an original cannot be read.
-// Soft limit: the compare after a checkout moves aside does not call this
-// yet; the retire step that compares the moved checkout's ignored files
-// with the tar replaces this attribute.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the quarantine compare does not call it yet")
-)]
 pub(crate) fn changed(
     kept: &[IgnoredEntry],
     sources: &[(String, PathBuf)],
@@ -407,9 +400,6 @@ fn matches(entry: &IgnoredEntry, on_disk: &Path) -> Result<bool, Error> {
 ///
 /// Returns [`Error::StateUnreadable`] when the tar cannot be read, and
 /// [`Error::Unwritable`] when an entry cannot be written.
-// Soft limit: `mxv restore` does not call this yet; the restore step that
-// writes the ignored files back replaces this attribute.
-#[cfg_attr(not(test), expect(dead_code, reason = "restore does not call it yet"))]
 pub(crate) fn restore(
     dir: &Path,
     kept: &[IgnoredEntry],

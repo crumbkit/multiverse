@@ -11,6 +11,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::backend::{Backend, RefHolder};
+use crate::disk::DisposablePath;
 use crate::git::Git;
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
@@ -164,9 +165,13 @@ impl Setup {
     }
 
     fn restore_plan(&self) -> RestorePlan {
+        self.restore_plan_with(false)
+    }
+
+    fn restore_plan_with(&self, force: bool) -> RestorePlan {
         match self
             .workspaces
-            .plan_restore(&self.archives, &name())
+            .plan_restore(&self.archives, &name(), force)
             .unwrap()
         {
             RestorePlanned::Ready(plan) => *plan,
@@ -175,20 +180,26 @@ impl Setup {
     }
 
     fn restore(&self) -> Restored {
-        match self
-            .workspaces
-            .restore(&self.archives, self.restore_plan(), &self.runs)
-            .unwrap()
-        {
+        self.restore_with(false)
+    }
+
+    fn restore_with(&self, force: bool) -> Restored {
+        match self.restore_outcome(force) {
             RestoreOutcome::Restored(restored) => *restored,
             RestoreOutcome::Refused(refusal) => panic!("{refusal:?}"),
         }
     }
 
+    fn restore_outcome(&self, force: bool) -> RestoreOutcome {
+        self.workspaces
+            .restore(&self.archives, self.restore_plan_with(force), &self.runs)
+            .unwrap()
+    }
+
     fn restore_refusal(&self) -> RestoreRefusal {
         match self
             .workspaces
-            .plan_restore(&self.archives, &name())
+            .plan_restore(&self.archives, &name(), false)
             .unwrap()
         {
             RestorePlanned::Refused(refusal) => refusal,
@@ -441,7 +452,7 @@ fn write_with_mode(path: &Path, text: &str, mode: u32) {
 }
 
 #[test]
-fn an_archive_keeps_a_dot_env_in_a_private_tarball_and_lists_it_in_the_record() {
+fn an_archive_keeps_a_dot_env_in_a_private_tarball_and_restore_writes_it_back_with_its_mode() {
     let setup = setup(Kind::Clone);
     setup.create();
     setup.ignore_env();
@@ -470,12 +481,110 @@ fn an_archive_keeps_a_dot_env_in_a_private_tarball_and_lists_it_in_the_record() 
     );
     assert!(setup.ignored_tar(&archive).is_file());
     assert!(!setup.root.join("triage").exists());
-    setup.restore();
+
+    let restored = setup.restore();
+
+    assert_eq!(
+        fs::read_to_string(checkout.join(".env")).unwrap(),
+        "SECRET=1\n"
+    );
+    assert_eq!(mode_of(&checkout.join(".env")), 0o640);
+    assert_eq!(
+        fs::read_to_string(checkout.join("draft.txt")).unwrap(),
+        "draft\n"
+    );
+    assert_eq!(restored.put_back[0].ignored, ["app/.env"]);
+    assert!(restored.lost.is_empty(), "{:?}", restored.lost);
     assert!(
         !setup.archives.data_of(&archive.id).exists(),
         "the restore deletes the tar and its directory with the archive"
     );
     assert!(setup.record().is_none());
+}
+
+#[test]
+fn a_damaged_tarball_refuses_restore_and_names_the_entries() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    let checkout = setup.checkout();
+    write(checkout.join(".env"), "SECRET=1\n");
+    write(checkout.join("draft.txt"), "draft\n");
+    let archive = setup.archive();
+    let tar = setup.ignored_tar(&archive);
+    let mut bytes = fs::read(&tar).unwrap();
+    let secret = bytes
+        .windows(8)
+        .position(|window| window == b"SECRET=1")
+        .expect("the tar holds the bytes of .env");
+    bytes[secret + 7] = b'2';
+    write(&tar, &bytes);
+
+    assert_eq!(
+        refused(setup.restore_outcome(false)),
+        RestoreRefusal::IgnoredDamaged {
+            paths: vec!["app/.env".to_owned()]
+        }
+    );
+    assert!(
+        !setup.root.join("triage").exists(),
+        "the refused restore left its files"
+    );
+    assert_eq!(setup.record().as_ref(), Some(&archive));
+
+    let restored = setup.restore_with(true);
+
+    assert_eq!(restored.lost, ["app/.env"]);
+    assert!(restored.put_back[0].ignored.is_empty());
+    assert!(
+        !checkout.join(".env").exists(),
+        "the forced restore wrote the damaged entry"
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("draft.txt")).unwrap(),
+        "draft\n"
+    );
+    assert!(!setup.archives.data_of(&archive.id).exists());
+}
+
+#[test]
+fn restore_refuses_to_overwrite_an_ignored_path_the_checkout_already_holds() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    let checkout = setup.checkout();
+    write(checkout.join(".env"), "SECRET=1\n");
+    let archive = setup.archive();
+    let planted = checkout.join(".env");
+    set_hook(move |step| {
+        if step == "apply" {
+            write(&planted, "PLANTED=1\n");
+        }
+        Ok(())
+    });
+    let outcome = setup.restore_outcome(false);
+    clear_hook();
+
+    assert_eq!(
+        refused(outcome),
+        RestoreRefusal::IgnoredTaken {
+            paths: vec!["app/.env".to_owned()]
+        }
+    );
+    assert_eq!(setup.record().as_ref(), Some(&archive), "the archive stays");
+    assert!(setup.ignored_tar(&archive).is_file());
+    assert!(
+        !setup.root.join("triage").exists(),
+        "the refused restore left its files"
+    );
+}
+
+/// Returns the refusal of `outcome`.
+fn refused(outcome: RestoreOutcome) -> RestoreRefusal {
+    match outcome {
+        RestoreOutcome::Refused(refusal) => refusal,
+        RestoreOutcome::Restored(restored) => panic!("{restored:?}"),
+    }
 }
 
 #[test]
@@ -597,6 +706,199 @@ fn an_ignored_symbolic_link_is_kept_as_a_link() {
         vec![("app/link", IgnoredKind::Link)]
     );
     assert!(setup.ignored_tar(&archive).is_file());
+
+    let restored = setup.restore();
+
+    assert_eq!(
+        fs::read_link(checkout.join("link")).unwrap(),
+        Path::new("draft.txt")
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("link")).unwrap(),
+        "draft\n",
+        "the link reads through to the untracked file"
+    );
+    assert_eq!(restored.put_back[0].ignored, ["app/link"]);
+}
+
+/// Commits a `.gitignore` that names `target/` and `node_modules/` in the
+/// checkout and writes a file into each.
+fn leave_build_output(checkout: &Path) {
+    write(checkout.join(".gitignore"), "target/\nnode_modules/\n");
+    git(checkout, &["add", ".gitignore"]);
+    git(
+        checkout,
+        &["commit", "--quiet", "-m", "Ignore build output"],
+    );
+    fs::create_dir_all(checkout.join("target")).unwrap();
+    fs::create_dir_all(checkout.join("node_modules/x")).unwrap();
+    write(checkout.join("target/out.bin"), "object code\n");
+    write(
+        checkout.join("node_modules/x/index.js"),
+        "module.exports = 1\n",
+    );
+}
+
+/// Returns each disposable path of `found` as its checkout and path, in
+/// order of the two.
+fn named(found: &[DisposablePath]) -> Vec<(&str, &str)> {
+    let mut names: Vec<(&str, &str)> = found
+        .iter()
+        .map(|path| (path.checkout.as_str(), path.path.as_str()))
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+#[test]
+fn an_archive_deletes_target_and_node_modules_and_names_each_directory_it_deleted() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    leave_build_output(&setup.checkout());
+
+    let plan = setup.plan(ArchiveOptions::default());
+
+    assert_eq!(
+        named(&plan.disposable),
+        [("app", "node_modules/"), ("app", "target/")]
+    );
+    assert!(
+        plan.disposable.iter().all(|path| path.bytes > 0),
+        "{:?}",
+        plan.disposable
+    );
+    assert!(plan.ignored.is_empty(), "{:?}", plan.ignored);
+
+    let outcome = setup.workspaces.archive(&setup.archives, plan).unwrap();
+
+    let ArchiveOutcome::Retired {
+        archive,
+        disposable,
+        ..
+    } = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(
+        named(&disposable),
+        [("app", "node_modules/"), ("app", "target/")],
+        "the result names what the archive deleted"
+    );
+    assert!(disposable.iter().all(|path| path.bytes > 0));
+    assert!(archive.ignored.is_empty(), "{:?}", archive.ignored);
+    assert!(!setup.root.join("triage").exists());
+}
+
+#[test]
+fn a_file_written_into_target_after_the_move_is_named_as_deleted() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    leave_build_output(&checkout);
+    let late = quarantine(&checkout).unwrap().join("target/late.o");
+    set_hook(move |step| {
+        if step == "moved:app" {
+            write(&late, "late\n");
+        }
+        Ok(())
+    });
+    let plan = setup.plan(ArchiveOptions::default());
+    let outcome = setup.workspaces.archive(&setup.archives, plan).unwrap();
+    clear_hook();
+
+    let ArchiveOutcome::Retired { disposable, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(
+        disposable
+            .iter()
+            .any(|path| path.checkout == "app" && path.path == "target/"),
+        "{disposable:?}"
+    );
+    assert!(!setup.root.join("triage").exists());
+}
+
+#[test]
+fn a_disposable_directory_deleted_after_the_move_puts_the_checkout_back_and_refuses() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    leave_build_output(&checkout);
+    let target = quarantine(&checkout).unwrap().join("target");
+    set_hook(move |step| {
+        if step == "moved:app" {
+            fs::remove_dir_all(&target).unwrap();
+        }
+        Ok(())
+    });
+    let plan = setup.plan(ArchiveOptions::default());
+    let outcome = setup.workspaces.archive(&setup.archives, plan).unwrap();
+    clear_hook();
+
+    let ArchiveOutcome::Refused(ArchiveRefusal::SourceChanged {
+        folder,
+        differences,
+    }) = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(folder, "app");
+    assert!(
+        differences.iter().any(|item| item.contains("target")),
+        "{differences:?}"
+    );
+    assert!(checkout.join("node_modules/x/index.js").is_file());
+    assert_eq!(setup.record().unwrap().state, ArchiveState::Retiring);
+}
+
+#[test]
+fn an_ignored_file_edited_after_the_tar_puts_the_checkout_back_and_refuses() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    let checkout = setup.checkout();
+    write(checkout.join(".env"), "SECRET=1\n");
+    let edited = quarantine(&checkout).unwrap().join(".env");
+    set_hook(move |step| {
+        if step == "moved:app" {
+            write(&edited, "SECRET=2\n");
+        }
+        Ok(())
+    });
+    let plan = setup.plan(ArchiveOptions::default());
+    let outcome = setup.workspaces.archive(&setup.archives, plan).unwrap();
+    clear_hook();
+
+    assert_eq!(
+        refusal_of(outcome),
+        ArchiveRefusal::SourceChanged {
+            folder: "app".to_owned(),
+            differences: vec!["the ignored file .env changed after the archive kept it".to_owned()],
+        }
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join(".env")).unwrap(),
+        "SECRET=2\n",
+        "the checkout is back with the edited file"
+    );
+    assert_eq!(setup.record().unwrap().state, ArchiveState::Retiring);
+
+    let archive = setup.archive();
+
+    assert_eq!(archive.ignored.len(), 1, "{:?}", archive.ignored);
+    setup.restore();
+    assert_eq!(
+        fs::read_to_string(checkout.join(".env")).unwrap(),
+        "SECRET=2\n"
+    );
+}
+
+/// Returns the refusal of `outcome`.
+fn refusal_of(outcome: ArchiveOutcome) -> ArchiveRefusal {
+    match outcome {
+        ArchiveOutcome::Refused(refusal) => refusal,
+        ArchiveOutcome::Retired { archive, .. } => panic!("{archive:?}"),
+    }
 }
 
 fn keeps_uncommitted_work(kind: Kind) {
@@ -1027,6 +1329,11 @@ fn resumes_after(kind: Kind, step: &'static str) {
     assert_eq!(setup.head(), commit, "{step}");
     assert_eq!(status(&setup.checkout()), before, "{step}");
     assert_eq!(
+        fs::read_to_string(setup.checkout().join(".env")).unwrap(),
+        "SECRET=1\n",
+        "{step}"
+    );
+    assert_eq!(
         fs::read_to_string(setup.root.join("triage/notes.md")).unwrap(),
         "keep me\n",
         "{step}"
@@ -1117,6 +1424,8 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
     let setup = setup(kind);
     setup.create();
     let commit = setup.commit_locally();
+    setup.ignore_env();
+    write(setup.checkout().join(".env"), "SECRET=1\n");
     write(setup.root.join("triage/notes.md"), "keep me\n");
     let detached = leave_detached_commit(&setup.checkout());
     leave_uncommitted_work(&setup.checkout());
@@ -1125,6 +1434,7 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
     let before = status(&setup.checkout());
     let archive = setup.archive();
     assert_eq!(archive.checkouts[0].kept.orphans, vec![detached.clone()]);
+    assert_eq!(archive.ignored.len(), 1, "{step}: {:?}", archive.ignored);
     let kept = format!("{KEPT_NAMESPACE}{detached}");
     stop_at(step);
     let result = setup
@@ -1133,6 +1443,10 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
     clear_hook();
     assert!(result.is_err(), "{step}: the run did not stop");
     assert_eq!(setup.record().as_ref(), Some(&archive), "{step}");
+    assert!(
+        setup.ignored_tar(&archive).is_file(),
+        "{step}: the failed run took the tar"
+    );
     assert!(
         !setup.root.join("triage").exists(),
         "{step}: the failed run left its files"
@@ -1143,16 +1457,27 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
         None,
         "{step}: the failed run left {kept} in the repository"
     );
-    setup.restore();
+    let restored = setup.restore();
     assert_eq!(setup.head(), commit, "{step}");
     assert_eq!(status(&setup.checkout()), before, "{step}");
+    assert_eq!(
+        fs::read_to_string(setup.checkout().join(".env")).unwrap(),
+        "SECRET=1\n",
+        "{step}"
+    );
+    assert_eq!(restored.put_back[0].ignored, ["app/.env"], "{step}");
+    assert!(
+        !setup.archives.data_of(&archive.id).exists(),
+        "{step}: the restore left the tar"
+    );
 }
 
-const RESTORE_STEPS: [&str; 7] = [
+const RESTORE_STEPS: [&str; 8] = [
     "mirrors",
     "directory",
     "checkout:app",
     "apply",
+    "ignored",
     "kept",
     "root",
     "marker",
@@ -1413,7 +1738,9 @@ fn a_record_from_a_newer_version_is_refused_with_its_version() {
     let mut archive = setup.archive();
     archive.version = ARCHIVE_VERSION + 1;
     setup.archives.write(&archive).unwrap();
-    let refused = setup.workspaces.plan_restore(&setup.archives, &name());
+    let refused = setup
+        .workspaces
+        .plan_restore(&setup.archives, &name(), false);
     assert!(
         matches!(refused, Err(Error::NewerRecord { version, .. }) if version == ARCHIVE_VERSION + 1)
     );

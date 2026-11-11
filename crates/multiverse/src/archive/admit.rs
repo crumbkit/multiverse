@@ -18,6 +18,7 @@ use crate::archive::{
     DIGEST_LENGTH, Kept, KeptStash, RECORD_FILE, pin_ref,
 };
 use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
+use crate::disk::DisposablePath;
 use crate::disposable::DisposableSet;
 use crate::error::Error;
 use crate::mirror::recorded_origin;
@@ -345,6 +346,9 @@ pub struct ArchivePlan {
     /// Each ignored file or link that the archive keeps, in the order of
     /// the checkouts.
     pub ignored: Vec<IgnoredSource>,
+    /// Each disposable directory that the archive deletes, with its size
+    /// measured before the checkouts move.
+    pub disposable: Vec<DisposablePath>,
     /// The extra entries of the workspace's directory that the archive
     /// copies, without digests.
     pub root: Vec<String>,
@@ -575,6 +579,10 @@ impl<B: Backend> Workspaces<B> {
             Ok(removal) => removal,
             Err(refused) => return Ok(refused),
         };
+        // The removal plans the disposable directories again after the
+        // checkouts are gone and finds none, so the result takes what this
+        // plan measures while they stand.
+        let disposable = self.disk_usage(&workspace)?.disposable;
         let id = match id.or_else(|| resuming.as_ref().map(|archive| archive.id.clone())) {
             Some(id) => id,
             None => WorkspaceId::mint()
@@ -676,6 +684,7 @@ impl<B: Backend> Workspaces<B> {
             lost,
             uncommitted,
             ignored,
+            disposable,
             root: scanned.paths(),
             warnings,
         };
@@ -1040,15 +1049,21 @@ impl ArchivePlan {
             .iter()
             .filter(|planned| planned.directory == Fate::Removed)
             .flat_map(|planned| {
-                let folder = planned.checkout.name.as_str();
-                let own: Vec<IgnoredSource> = self
-                    .ignored
-                    .iter()
-                    .filter(|source| source.folder == folder)
-                    .cloned()
-                    .collect();
-                ignored::on_disk(&own, &planned.checkout.path)
+                ignored::on_disk(
+                    &self.ignored_in(&planned.checkout.name),
+                    &planned.checkout.path,
+                )
             })
+            .collect()
+    }
+
+    /// Returns each ignored entry that the archive keeps of the checkout
+    /// `folder`.
+    pub(super) fn ignored_in(&self, folder: &str) -> Vec<IgnoredSource> {
+        self.ignored
+            .iter()
+            .filter(|source| source.folder == folder)
+            .cloned()
             .collect()
     }
 
