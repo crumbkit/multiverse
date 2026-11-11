@@ -524,6 +524,12 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
         });
     }
     let archive: Archive = serde_json::from_slice(&bytes).map_err(corrupt)?;
+    if !is_archive_id(&archive.id) {
+        return Err(corrupt(serde::de::Error::custom(format!(
+            "the archive id {:?} is not 32 lowercase hex digits",
+            archive.id
+        ))));
+    }
     if let Some(entry) = archive.root.iter().find(|entry| !stays_inside(&entry.path)) {
         return Err(corrupt(serde::de::Error::custom(format!(
             "the root entry {} leaves the workspace's directory",
@@ -572,6 +578,16 @@ fn inside_workspace(workspace: &Path, path: &Path) -> bool {
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
     })
+}
+
+/// Reports whether `id`, an archive id from a record, is 32 lowercase hex
+/// digits, so that the data directory it names lies below the archives'
+/// data directory.
+fn is_archive_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Reports whether `pin`, a reference from a record, lies below the
