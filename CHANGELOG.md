@@ -5,6 +5,13 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.1.1] - 2026-11-11
+
+### Fixed
+
+- The release binaries build again, because mxv no longer depends on an
+  unmaintained TOML crate. Version 0.1.0 was tagged but never released.
+
 ## [0.1.0] - 2026-11-11
 
 ### Added
