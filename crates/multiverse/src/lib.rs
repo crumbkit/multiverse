@@ -45,14 +45,15 @@ mod template;
 mod workspaces;
 
 pub use crate::archive::{
-    ARCHIVE_VERSION, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
-    ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout, ArchivedRemoval, Archives,
-    PortChange, RestoreOutcome, RestorePlan, RestorePlanned, RestoreRefusal, Restored, RootEntry,
-    RootKind, Unsaved, WIP_MESSAGE,
+    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan,
+    ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout,
+    ArchivedRemoval, Archives, KEPT_NAMESPACE, Kept, KeptStash, KeptWip, PortChange, PutBack,
+    RestoreOutcome, RestorePlan, RestorePlanned, RestoreRefusal, Restored, RootEntry, RootKind,
+    Uncommitted, Unkeepable, Unkept, UnkeptKind, WIP_MESSAGE,
 };
 pub use crate::backend::{
-    Backend, Changes, Concealed, Head, INITIALIZING, Listed, LocalNames, RefHolder, Repository,
-    SubmoduleWork,
+    Backend, Changes, Concealed, Head, Hidden, INITIALIZING, LargeFile, Listed, LocalNames,
+    Operation, Paused, RefHolder, Repository, StashEntry, SubmoduleWork, WipCommits, WipTrees,
 };
 pub use crate::clone::{Cloned, UNSUPPORTED};
 pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};

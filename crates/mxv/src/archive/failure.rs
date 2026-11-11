@@ -4,7 +4,9 @@
 use std::fmt;
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{ArchiveRefusal, ArchiveState, RestoreRefusal, Unsaved, WorkspaceName};
+use multiverse::{
+    ArchiveRefusal, ArchiveState, Operation, RestoreRefusal, Unkept, UnkeptKind, WorkspaceName,
+};
 
 /// The code of a name that no workspace or archive has.
 pub const ARCHIVE_NOT_FOUND: Code = Code::new("mxv", "archive", "not_found");
@@ -15,7 +17,7 @@ pub const ARCHIVE_SOURCE_CHANGED: Code = Code::new("mxv", "archive", "source_cha
 /// The code of a clone whose mirror is gone, so nothing could hold its pin.
 pub const ARCHIVE_MIRROR_MISSING: Code = Code::new("mxv", "archive", "mirror_missing");
 /// The code of a workspace with work that an archive cannot keep.
-pub const ARCHIVE_UNSAVED_WORK: Code = Code::new("mxv", "archive", "unsaved_work");
+pub const ARCHIVE_UNKEEPABLE: Code = Code::new("mxv", "archive", "unkeepable");
 /// The code of a workspace that a process outside phase works in.
 pub const ARCHIVE_IN_USE: Code = Code::new("mxv", "archive", "in_use");
 /// The code of a checkout that an archive cannot read.
@@ -49,7 +51,7 @@ pub(crate) const CODES: &[&Code] = &[
     &ARCHIVE_NAME_TAKEN,
     &ARCHIVE_SOURCE_CHANGED,
     &ARCHIVE_MIRROR_MISSING,
-    &ARCHIVE_UNSAVED_WORK,
+    &ARCHIVE_UNKEEPABLE,
     &ARCHIVE_IN_USE,
     &ARCHIVE_CHECKOUT_UNUSABLE,
     &ARCHIVE_UNFINISHED,
@@ -96,11 +98,11 @@ pub(crate) enum ArchiveFailure {
         mirror: String,
     },
     /// The workspace holds work that the archive cannot keep.
-    UnsavedWork {
+    Unkeepable {
         /// The workspace's name.
         name: String,
-        /// The work.
-        unsaved: Unsaved,
+        /// Each thing that the archive cannot keep.
+        items: Vec<Unkept>,
     },
     /// A process outside phase works in the workspace.
     InUse {
@@ -208,9 +210,9 @@ pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> 
             mirror: mirror.display().to_string(),
         },
         ArchiveRefusal::Unusable { folder, reason } => ArchiveFailure::Unusable { folder, reason },
-        ArchiveRefusal::Unsaved(unsaved) => ArchiveFailure::UnsavedWork {
+        ArchiveRefusal::Unkeepable(found) => ArchiveFailure::Unkeepable {
             name,
-            unsaved: *unsaved,
+            items: found.items,
         },
         ArchiveRefusal::SourceChanged {
             folder,
@@ -266,7 +268,7 @@ impl Failure for ArchiveFailure {
             Self::NameTaken { .. } => &ARCHIVE_NAME_TAKEN,
             Self::SourceChanged { .. } => &ARCHIVE_SOURCE_CHANGED,
             Self::MirrorMissing { .. } => &ARCHIVE_MIRROR_MISSING,
-            Self::UnsavedWork { .. } => &ARCHIVE_UNSAVED_WORK,
+            Self::Unkeepable { .. } => &ARCHIVE_UNKEEPABLE,
             Self::InUse { .. } => &ARCHIVE_IN_USE,
             Self::Unusable { .. } => &ARCHIVE_CHECKOUT_UNUSABLE,
             Self::Unfinished { .. } => &ARCHIVE_UNFINISHED,
@@ -302,17 +304,9 @@ impl Failure for ArchiveFailure {
             Self::MirrorMissing { .. } => Recovery::hint(
                 "run `mxv new` for the same repository, which clones the mirror again, then archive the workspace again",
             ),
-            Self::UnsavedWork { name, unsaved } => {
-                if unsaved.wip_saves_all() {
-                    Recovery::hint(format!(
-                        "commit the work, or run `mxv archive -w {name} --wip` to commit it onto the branch, or `--force` to lose it"
-                    ))
-                } else {
-                    Recovery::hint(format!(
-                        "save or delete the paths and commits that the failure lists, and archive again, or run `mxv archive -w {name} --force` to lose them; `--wip` does not save ignored files, stashes, other commits, nested repositories, submodules, hidden edits, files that git does not list, or a paused git operation"
-                    ))
-                }
-            }
+            Self::Unkeepable { name, .. } => Recovery::hint(format!(
+                "Everything else in the workspace would be kept. `mxv archive -w {name} --force` archives it and loses only the items above."
+            )),
             Self::InUse { name, .. } => Recovery::hint(format!(
                 "stop that process or move it out of the workspace, then run `mxv archive -w {name}` again"
             )),
@@ -371,18 +365,9 @@ impl Failure for ArchiveFailure {
             Self::MirrorMissing { folder, mirror } => {
                 vec![Field::new("folder", folder), Field::new("mirror", mirror)]
             }
-            Self::UnsavedWork { name, unsaved } => vec![
+            Self::Unkeepable { name, items } => vec![
                 Field::new("name", name),
-                Field::new("changes", FieldValue::list(unsaved.changes.iter())),
-                Field::new("ignored", FieldValue::list(unsaved.ignored.iter())),
-                Field::new("stashes", FieldValue::list(unsaved.stashes.iter())),
-                Field::new("commits", FieldValue::list(unsaved.commits.iter())),
-                Field::new("root", FieldValue::list(unsaved.root.iter())),
-                Field::new("nested", FieldValue::list(unsaved.nested.iter())),
-                Field::new("hidden", FieldValue::list(unsaved.hidden.iter())),
-                Field::new("submodules", FieldValue::list(unsaved.submodules.iter())),
-                Field::new("unlisted", FieldValue::list(unsaved.unlisted.iter())),
-                Field::new("paused", FieldValue::list(unsaved.paused.iter())),
+                Field::new("items", FieldValue::list(items.iter().map(item_line))),
             ],
             Self::InUse { name, reason } => {
                 vec![Field::new("name", name), Field::new("reason", reason)]
@@ -454,11 +439,16 @@ impl fmt::Display for ArchiveFailure {
                 formatter,
                 "the mirror {mirror} of the checkout {folder} is gone, so nothing could keep its commit"
             ),
-            Self::UnsavedWork { name, unsaved } => write!(
-                formatter,
-                "the workspace {name} holds work that an archive cannot keep: {}",
-                unsaved.all().join(", ")
-            ),
+            Self::Unkeepable { name, items } => {
+                write!(
+                    formatter,
+                    "mxv cannot archive {name}, because it holds work an archive cannot keep:"
+                )?;
+                for item in items {
+                    write!(formatter, "\n- {}", item_line(item))?;
+                }
+                Ok(())
+            }
             Self::InUse { name, reason } => {
                 write!(formatter, "the workspace {name} is in use: {reason}")
             }
@@ -515,3 +505,92 @@ impl fmt::Display for ArchiveFailure {
 }
 
 impl std::error::Error for ArchiveFailure {}
+
+/// Returns `bytes` in the largest binary unit that it reaches, such as
+/// `412 MiB`, rounded down.
+pub(crate) fn size(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")];
+    UNITS.iter().find(|(unit, _)| bytes >= *unit).map_or_else(
+        || format!("{bytes} bytes"),
+        |(unit, name)| format!("{} {name}", bytes / unit),
+    )
+}
+
+/// Returns the line of the refusal that names `item`, with what the
+/// person can do about it.
+fn item_line(item: &Unkept) -> String {
+    let path = item.dir.display();
+    let folder = &item.folder;
+    match &item.kind {
+        UnkeptKind::Paused { at, operation } => {
+            let dir = if at.is_empty() {
+                path.to_string()
+            } else {
+                item.dir
+                    .join(at.trim_end_matches('/'))
+                    .display()
+                    .to_string()
+            };
+            let remedy = match operation {
+                Operation::Merge => format!(
+                    "Finish it with `git -C {dir} commit`, or abort it with `git -C {dir} merge --abort`."
+                ),
+                Operation::Rebase => format!(
+                    "Finish it with `git -C {dir} rebase --continue`, or abort it with `git -C {dir} rebase --abort`."
+                ),
+                Operation::CherryPick | Operation::Sequence => format!(
+                    "Finish it with `git -C {dir} cherry-pick --continue`, or abort it with `git -C {dir} cherry-pick --abort`."
+                ),
+                Operation::Revert => format!(
+                    "Finish it with `git -C {dir} revert --continue`, or abort it with `git -C {dir} revert --abort`."
+                ),
+                Operation::Bisect => format!("End it with `git -C {dir} bisect reset`."),
+                _ => format!("Finish or abort it in {dir}."),
+            };
+            format!("{item}. {remedy}")
+        }
+        UnkeptKind::TooLarge {
+            path: file,
+            bytes,
+            most,
+            untracked,
+        } => {
+            let what = if *untracked {
+                "the untracked file"
+            } else {
+                "the file"
+            };
+            format!(
+                "{folder}: {what} {file} is {}, over archive_max_file ({}). Move it out of the workspace or delete it.",
+                size(*bytes),
+                size(*most)
+            )
+        }
+        UnkeptKind::Nested { .. } => format!(
+            "{item}. Push it to a remote of its own and move it out of the workspace, or add it as a submodule."
+        ),
+        UnkeptKind::Submodule { .. } => {
+            format!("{item}. Commit and push that work in the submodule, or discard it.")
+        }
+        UnkeptKind::Hidden {
+            path: file,
+            skip_worktree,
+        } => {
+            let flag = if *skip_worktree {
+                "--no-skip-worktree"
+            } else {
+                "--no-assume-unchanged"
+            };
+            format!(
+                "{item}. Clear the mark with `git -C {path} update-index {flag} {file}`, then archive again."
+            )
+        }
+        UnkeptKind::Ignored { .. } | UnkeptKind::Unlisted { .. } => {
+            format!("{item}. Move it out of the workspace or delete it.")
+        }
+        UnkeptKind::Root { entry } => format!(
+            "root: {entry} is an entry that mxv cannot copy, such as a socket. Delete it, or stop what made it."
+        ),
+        _ => item.to_string(),
+    }
+}

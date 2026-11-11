@@ -447,6 +447,13 @@
             "$ref": "#/$defs/RestoredCheckout"
           }
         },
+        "put_back": {
+          "description": "What the restore put back into each checkout besides its commit, or\nwould put back, for each checkout that has something.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PutBackRow"
+          }
+        },
         "ports": {
           "description": "Each port that the restore gave a new number.",
           "type": "array",
@@ -473,6 +480,7 @@
         "name",
         "path",
         "checkouts",
+        "put_back",
         "ports",
         "missing_mirrors",
         "warnings"
@@ -507,6 +515,97 @@
         "path",
         "branch",
         "commit"
+      ]
+    },
+    "PutBackRow": {
+      "description": "What a restore put back into one checkout besides its commit.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The checkout's folder.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The checkout's directory.",
+          "type": "string"
+        },
+        "uncommitted": {
+          "description": "Whether the restore put back uncommitted work.",
+          "type": "boolean"
+        },
+        "staged": {
+          "description": "The number of files with staged changes, which a dry run does not\ncount.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unstaged": {
+          "description": "The number of files with unstaged changes, which a dry run does not\ncount.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "untracked": {
+          "description": "The number of untracked paths, which a dry run does not count.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "stashes": {
+          "description": "The number of stash entries.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "branches": {
+          "description": "Each local branch besides the checkout's own.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tags": {
+          "description": "Each tag that origin does not hold.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "worktree": {
+          "description": "Each per-worktree reference, by its name below `refs/worktree/`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "kept": {
+          "description": "Each reference below `refs/mxv/kept/` that keeps a commit no branch\nreaches.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "submodules": {
+          "description": "Each submodule that comes back uninitialised, which a dry run does\nnot list.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "folder",
+        "path",
+        "uncommitted",
+        "staged",
+        "unstaged",
+        "untracked",
+        "stashes",
+        "branches",
+        "tags",
+        "worktree",
+        "kept",
+        "submodules"
       ]
     },
     "PortRow": {

@@ -159,6 +159,7 @@ clone_on_new = ["node_modules/"]    # the ignored directories that `mxv new` clo
 clean_idle = "7d"                   # the idle age that `mxv clean` waits for
 max_disposable = "50GiB"            # the limit that `mxv clean --over-limit` cleans down to
 stop_idle = "2h"                    # the idle age that `mxv reclaim` waits for before it stops a workspace
+archive_max_file = "100MiB"         # the largest uncommitted file that `mxv archive` keeps
 ```
 
 `root` is a string that holds an absolute path, or a path that starts with
@@ -174,8 +175,10 @@ every port of the range is held by a workspace or taken, `mxv up` fails
 with `mxv::port::exhausted`; a wider range fixes it.
 
 [Disk space](#disk-space) describes `disposable`, `clone_on_new`,
-`clean_idle` and `max_disposable`, and
-[Freeing memory](#freeing-memory) describes `stop_idle`.
+`clean_idle` and `max_disposable`,
+[Freeing memory](#freeing-memory) describes `stop_idle`, and
+[What refuses an archive](#what-refuses-an-archive) describes
+`archive_max_file`.
 
 mxv reads the file strictly. Any other key, a value of another type, a
 relative path or text that is not TOML fails with `mxv::config::invalid`,
@@ -1455,9 +1458,30 @@ keeps what `mxv restore NAME` needs to rebuild it at the same commits, on the
 same branches, with the same stable id. Use it for work that you may want
 back; `mxv remove` is for work that you do not.
 
-An archive keeps three things. Each checkout's `HEAD` commit stays reachable
-through a reference, `refs/mxv/archives/<archive id>/<folder>`, in the
-worktree's repository or the clone's mirror. The directory
+An archive keeps three things. Each checkout's git state stays reachable
+through references below `refs/mxv/archives/<archive id>/<folder>/`, called
+pins, in the worktree's repository or the clone's mirror:
+
+- `head` keeps the commit of `HEAD`.
+- `wip-index` and `wip` keep the uncommitted work as two commits: the index,
+  and the working files with the untracked files. mxv writes them through a
+  temporary index, so the branch and the index never move, and `mxv restore`
+  puts the work back uncommitted, staged where it was staged. When git has
+  no identity for you, the commits' author is `mxv <mxv@localhost.invalid>`.
+- `stash/<n>` keeps each stash entry of a clone, and the restore gives back
+  the same stash list.
+- `branches/<name>` keeps each other local branch of a clone that differs
+  from origin's branch of the same name, and `tags/<name>` each tag that
+  origin does not hold.
+- `worktree/<name>` keeps each per-worktree reference, such as
+  `refs/worktree/bisect-good`.
+- `orphans/<commit>` keeps each commit that no branch reaches, such as a
+  commit on a detached `HEAD` that only its reflog holds, or one that only
+  `refs/backup/x` holds. The restore names it `refs/mxv/kept/<commit>`.
+
+A worktree's branches, tags and stashes stay in its repository, so an archive
+of a worktree keeps only `head`, the uncommitted work, the per-worktree
+references and the commits that no branch reaches. The directory
 `$XDG_STATE_HOME/mxv/archives/<name>`, which only you can read, holds the
 record `archive.json`, the workspace manifest and a copy of each extra file
 in the workspace's directory. Docker volumes stay under the workspace's stable
@@ -1478,47 +1502,38 @@ you push them.
 
 ### What refuses an archive
 
-`mxv archive` refuses with `mxv::archive::unsaved_work`, changes nothing and
-lists every item in these cases:
+`mxv archive` refuses with `mxv::archive::unkeepable`, changes nothing and
+lists every item that an archive cannot keep, each with what to do about it.
+Everything else in the workspace is kept, and `--force` archives it and loses
+only the listed items. These refuse:
 
-- A checkout holds uncommitted changes or untracked files. `--wip` commits
-  them onto the branch with the message `wip: archived by mxv`, skipping
-  hooks. When git has no identity for you, the commit's author is
-  `mxv <mxv@localhost.invalid>`. mxv checks that the commit can run before it
-  stops any unit. `--force` loses the changes.
 - A checkout holds an ignored file outside the disposable set, such as a
-  `.env`. `--wip` does not touch ignored files, so a secret never enters an
-  archive. Move the file or pass `--force`, which loses it.
-- A clone holds a stash, or a commit that `origin` does not hold and `HEAD`
-  does not reach. `--force` loses it.
-- The workspace's directory holds a file that mxv cannot copy, such as a
-  socket. `--force` loses it.
-- A checkout holds a git repository that it does not track. A commit would
-  store that repository as a commit id without its files, so `--wip` does not
-  save it. `--force` loses it.
-- An initialised submodule holds changes, ignored files outside the built-in
-  disposable set, stashes or commits that no remote holds. `--wip` does not
-  save them. `--force` loses them.
-- A file marked skip-worktree or assume-unchanged differs from git's index,
-  which `git status` does not show. `--wip` does not save it. `--force` loses
+  `.env`, so a secret never enters an archive. Move the file or delete it.
+- A file of the uncommitted work is larger than `archive_max_file` in the
+  config file, which is 100 MiB unless you set it. Move the file or delete
   it.
+- The workspace's directory holds a file that mxv cannot copy, such as a
+  socket.
+- A checkout holds a git repository that it does not track. A commit would
+  store that repository as a commit id without its files.
+- An initialised submodule holds changes, ignored files outside the built-in
+  disposable set, stashes or commits that no remote holds.
+- A file marked skip-worktree or assume-unchanged differs from git's index,
+  which `git status` does not show.
 - A checkout holds a file that no listing of git accounts for, such as a file
   in a submodule directory that is not initialised. mxv walks the checkout and
   compares each file with the tracked, untracked and ignored paths that git
-  lists, so such a file is named whatever put it there. `--wip` does not save
-  it. `--force` loses it.
+  lists, so such a file is named whatever put it there.
 - A submodule's git directory holds a stash or a commit that no remote holds
-  after `git submodule deinit` took its files. A disposable directory in a
-  submodule holds a repository. `--force` loses them.
-- A clone holds a commit that only a reference outside the branches, tags,
-  notes and remote branches keeps, such as `refs/backup/x` or a magit-wip
-  reference. The failure names the commit and the reference. `--force` loses
-  it. A worktree's references stay in its repository, so they do not count.
+  after `git submodule deinit` took its files, or a commit that only another
+  reference of that git directory keeps. A disposable directory in a
+  submodule holds a repository.
 - A rebase, merge, cherry-pick, revert or bisect stands paused. Its state lives
-  in the git directory that the archive deletes. `--wip` does not save it.
-  `--force` loses it.
+  in the git directory that the archive deletes. The failure names the git
+  command that finishes it and the one that aborts it.
 
-A restored clone does not initialise its submodules. A worktree with an
+A restored clone does not initialise its submodules, and the restore warns
+about each one with the command that initialises it. A worktree with an
 initialised submodule refuses with `mxv::archive::checkout_unusable`, because
 moving the worktree aside breaks the submodule's paths. So does a directory in
 the workspace that mxv cannot read or empty or whose name is not UTF-8, a file
@@ -1532,13 +1547,13 @@ so move or delete some of its extra files. An `AGENTS.md` that you edited is
 kept and restored as you left it. mxv writes a new one only in place of a file
 that still holds what mxv generated.
 
-A clone's local branches, tags that its mirror does not hold and remotes other
-than `origin` do not come back. Neither do its hooks, the keys of its local git
-configuration that a new clone does not write, and its `info/exclude` rules
-that your repository does not hold. No commit is lost, because a commit that
-nothing else holds refuses the archive. The question and the result warn about
-each such name, and they name a configuration key without its value. The
-branch that the checkout tracked comes back tracking the same remote's branch.
+A clone's remotes other than `origin` do not come back. Neither do its hooks,
+the keys of its local git configuration that a new clone does not write, and
+its `info/exclude` rules that your repository does not hold. A worktree that
+`git worktree add` made from a clone stops working when the archive deletes the
+clone. The question and the result warn about each such name, and they name a
+configuration key without its value. The branch that the checkout tracked
+comes back tracking the same remote's branch.
 
 The archive record lists what `--force` lost. The workspace's units stop
 after you confirm. A process outside phase whose working

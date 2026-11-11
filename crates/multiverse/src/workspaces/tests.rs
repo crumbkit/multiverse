@@ -874,13 +874,71 @@ impl Backend for Scripted {
     fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error> {
         Git.write_ref(repository, reference, commit)
     }
-    fn fetch_head_into_mirror(
+    fn fetch_into_mirror(
         &self,
         mirror: &Path,
         checkout: &Path,
-        reference: &str,
-    ) -> Result<String, Error> {
-        Git.fetch_head_into_mirror(mirror, checkout, reference)
+        refs: &[(String, String)],
+    ) -> Result<(), Error> {
+        Git.fetch_into_mirror(mirror, checkout, refs)
+    }
+    fn refs_under(
+        &self,
+        holder: RefHolder<'_>,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, Error> {
+        Git.refs_under(holder, prefix)
+    }
+    fn stash_entries(&self, checkout: &Path) -> Result<Vec<crate::backend::StashEntry>, Error> {
+        Git.stash_entries(checkout)
+    }
+    fn orphans(
+        &self,
+        checkout: &Path,
+        kept: &[String],
+        shared: bool,
+    ) -> Result<Vec<String>, Error> {
+        Git.orphans(checkout, kept, shared)
+    }
+    fn large_files(
+        &self,
+        checkout: &Path,
+        most: u64,
+    ) -> Result<Vec<crate::backend::LargeFile>, Error> {
+        Git.large_files(checkout, most)
+    }
+    fn wip_trees(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+    ) -> Result<crate::backend::WipTrees, Error> {
+        Git.wip_trees(checkout, index, left_out)
+    }
+    fn write_wip(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+        time: u64,
+        message: &str,
+    ) -> Result<crate::backend::WipCommits, Error> {
+        Git.write_wip(checkout, index, left_out, time, message)
+    }
+    fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error> {
+        Git.tree_of(dir, commit)
+    }
+    fn apply_wip(&self, checkout: &Path, wip: &crate::backend::WipCommits) -> Result<(), Error> {
+        Git.apply_wip(checkout, wip)
+    }
+    fn store_stash(&self, checkout: &Path, commit: &str, message: &str) -> Result<(), Error> {
+        Git.store_stash(checkout, commit, message)
+    }
+    fn create_ref(&self, dir: &Path, reference: &str, object: &str) -> Result<bool, Error> {
+        Git.create_ref(dir, reference, object)
+    }
+    fn submodule_paths(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+        Git.submodule_paths(checkout)
     }
     fn delete_ref(&self, holder: RefHolder<'_>, reference: &str) -> Result<(), Error> {
         Git.delete_ref(holder, reference)
@@ -892,22 +950,15 @@ impl Backend for Scripted {
     ) -> Result<Option<String>, Error> {
         Git.resolve_commit(holder, revision)
     }
-    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
-        Git.commit_all(checkout, message)
-    }
-    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error> {
-        Git.check_commit_all(checkout)
-    }
     fn concealed(&self, checkout: &Path) -> Result<crate::backend::Concealed, Error> {
         Git.concealed(checkout)
     }
     fn local_names(
         &self,
         checkout: &Path,
-        mirror: &Path,
         source: &Path,
     ) -> Result<crate::backend::LocalNames, Error> {
-        Git.local_names(checkout, mirror, source)
+        Git.local_names(checkout, source)
     }
     fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
         Git.remove_origin(checkout)

@@ -10,7 +10,7 @@ use phase::WorkspaceId;
 use serde::{Deserialize, Serialize};
 
 use crate::archive::root::RootEntry;
-use crate::archive::{ARCHIVE_VERSION, PIN_NAMESPACE, RECORD_FILE};
+use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, PIN_NAMESPACE, RECORD_FILE, WIP_INDEX};
 use crate::backend::RefHolder;
 use crate::error::Error;
 use crate::name::WorkspaceName;
@@ -70,9 +70,165 @@ pub struct ArchivedCheckout {
     /// workspace was archived, which exist only on this machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_only: Vec<String>,
+    /// The git state besides `HEAD` that the archive keeps on pins below
+    /// the checkout's pin directory. A record of version 1 has none.
+    #[serde(default, skip_serializing_if = "Kept::is_empty")]
+    pub kept: Kept,
+}
+
+/// The uncommitted work of a checkout, as two commits that only the
+/// archive's pins name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct KeptWip {
+    /// The commit of the index, pinned as `wip-index`, whose parent is
+    /// `HEAD`.
+    pub index: String,
+    /// The commit of the working files, pinned as `wip`, whose parents are
+    /// `HEAD` and `index`.
+    pub worktree: String,
+}
+
+/// A stash entry that an archive keeps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct KeptStash {
+    /// The stash's commit.
+    pub commit: String,
+    /// The message of its entry, which the restore gives it again.
+    pub message: String,
+}
+
+/// The git state of a checkout that an archive keeps besides `HEAD`, each
+/// piece on a pin of its own below the checkout's pin directory.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Kept {
+    /// The uncommitted work, or `None` when the checkout had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip: Option<KeptWip>,
+    /// Each stash entry, oldest first, pinned as `stash/<n>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stashes: Vec<KeptStash>,
+    /// Each local branch besides the checkout's own, by name, with its
+    /// commit, pinned as `branches/<name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branches: BTreeMap<String, String>,
+    /// Each tag that `origin` does not hold, by name, with the object it
+    /// names, pinned as `tags/<name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
+    /// Each per-worktree reference, by its name below `refs/worktree/`,
+    /// with the object it names, pinned as `worktree/<name>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub worktree: BTreeMap<String, String>,
+    /// Each commit that `origin` does not hold and no other kept reference
+    /// reaches, pinned as `orphans/<commit>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphans: Vec<String>,
+}
+
+impl Kept {
+    /// Reports whether the archive keeps nothing besides `HEAD`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Returns each pin of what is kept, below `dir`, the checkout's pin
+    /// directory, as its reference and the object that it names.
+    #[must_use]
+    pub fn pins(&self, dir: &str) -> Vec<(String, String)> {
+        let mut pins = Vec::new();
+        if let Some(wip) = &self.wip {
+            pins.push((format!("{dir}/wip-index"), wip.index.clone()));
+            pins.push((format!("{dir}/wip"), wip.worktree.clone()));
+        }
+        for (place, stash) in self.stashes.iter().enumerate() {
+            pins.push((format!("{dir}/stash/{place}"), stash.commit.clone()));
+        }
+        let named = [
+            ("branches", &self.branches),
+            ("tags", &self.tags),
+            ("worktree", &self.worktree),
+        ];
+        for (kind, names) in named {
+            pins.extend(
+                names
+                    .iter()
+                    .map(|(name, object)| (format!("{dir}/{kind}/{name}"), object.clone())),
+            );
+        }
+        pins.extend(
+            self.orphans
+                .iter()
+                .map(|commit| (format!("{dir}/orphans/{commit}"), commit.clone())),
+        );
+        pins
+    }
+
+    /// Returns every object that a pin of what is kept names, besides the
+    /// uncommitted work.
+    #[must_use]
+    pub fn references(&self) -> Vec<String> {
+        let mut objects: Vec<String> = self
+            .stashes
+            .iter()
+            .map(|stash| stash.commit.clone())
+            .collect();
+        for names in [&self.branches, &self.tags, &self.worktree] {
+            objects.extend(names.values().cloned());
+        }
+        objects
+    }
+
+    /// Returns every commit that a restore needs: the commits of the
+    /// uncommitted work, of each stash, branch and per-worktree reference,
+    /// and each orphan. A tag can name an object other than a commit, so
+    /// tags are left out.
+    #[must_use]
+    pub fn commits(&self) -> Vec<String> {
+        let mut commits: Vec<String> = self
+            .wip
+            .iter()
+            .flat_map(|wip| [wip.index.clone(), wip.worktree.clone()])
+            .collect();
+        commits.extend(self.stashes.iter().map(|stash| stash.commit.clone()));
+        for names in [&self.branches, &self.worktree] {
+            commits.extend(names.values().cloned());
+        }
+        commits.extend(self.orphans.iter().cloned());
+        commits
+    }
+
+    /// Returns the first name of a branch, a tag or a per-worktree
+    /// reference that would not stay below the reference it is joined to.
+    fn escaping_name(&self) -> Option<&str> {
+        [&self.branches, &self.tags, &self.worktree]
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .map(String::as_str)
+            .find(|name| !stays_inside(name))
+    }
 }
 
 impl ArchivedCheckout {
+    /// Returns the directory below which the pins of what the archive keeps
+    /// lie. A record of version 2 names the pin of `HEAD` `<dir>/head`.
+    #[must_use]
+    pub fn pin_dir(&self) -> &str {
+        self.pin.strip_suffix(HEAD_PIN).unwrap_or(&self.pin)
+    }
+
+    /// Returns every pin of the checkout, the pin of `HEAD` first, each
+    /// with the object that it names.
+    #[must_use]
+    pub fn pins(&self) -> Vec<(String, String)> {
+        let mut pins = vec![(self.pin.clone(), self.commit.clone())];
+        pins.extend(self.kept.pins(self.pin_dir()));
+        pins
+    }
+
     /// Returns the repository that holds the checkout's pin: its mirror, or
     /// its source for a worktree.
     #[must_use]
@@ -303,6 +459,16 @@ impl Archives {
         store::replace_file(&target, &bytes)
     }
 
+    /// Returns the path of the temporary index in the directory of the
+    /// archive of `name`, through which the archive reads and commits a
+    /// checkout's uncommitted work, and makes the directory when it is
+    /// missing. The directory is private to the person.
+    pub(super) fn wip_index(&self, name: &WorkspaceName) -> Result<PathBuf, Error> {
+        let dir = self.dir_of(name);
+        store::private_dir(&dir)?;
+        Ok(dir.join(WIP_INDEX))
+    }
+
     /// Deletes the directory of the archive of `name` and everything in it.
     pub(super) fn delete(&self, name: &WorkspaceName) -> Result<(), Error> {
         delete_directory(&self.dir_of(name))?;
@@ -355,6 +521,12 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             return Err(corrupt(serde::de::Error::custom(format!(
                 "the pin {} leaves {PIN_NAMESPACE}",
                 checkout.pin
+            ))));
+        }
+        if let Some(name) = checkout.kept.escaping_name() {
+            return Err(corrupt(serde::de::Error::custom(format!(
+                "the kept reference {name} of the checkout {} leaves its namespace",
+                checkout.folder
             ))));
         }
     }

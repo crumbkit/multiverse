@@ -1,5 +1,6 @@
-//! Carrying out an archive: pinning each commit, writing the record, copying
-//! the root files, and retiring each checkout.
+//! Carrying out an archive: writing the record, committing the uncommitted
+//! work, pinning what the archive keeps, copying the root files, and
+//! retiring each checkout.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -8,8 +9,10 @@ use std::path::Path;
 
 use crate::archive::admit::{ArchivePlan, ArchivePlanned, ArchiveRefusal, submodule_items};
 use crate::archive::root;
-use crate::archive::{Archive, ArchiveState, ArchivedCheckout, Archives, WIP_MESSAGE, quarantine};
-use crate::backend::{Backend, Head};
+use crate::archive::{
+    Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, WIP_MESSAGE, quarantine,
+};
+use crate::backend::{Backend, Head, RefHolder, WipTrees};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
@@ -51,6 +54,12 @@ struct Snapshot {
     unpushed: Vec<String>,
     /// What `git status` does not show, one item for each.
     concealed: Vec<String>,
+    /// Each reference that the archive reads, with the object it names: a
+    /// clone's every reference, and a worktree's per-worktree references.
+    refs: Vec<String>,
+    /// The trees of the index and of the working files, which the commits
+    /// of the uncommitted work hold.
+    wip: WipTrees,
     /// Each path below the checkout, outside `.git` and the disposable
     /// directories.
     paths: BTreeSet<String>,
@@ -67,12 +76,19 @@ impl Snapshot {
                 self.head.commit, later.head.commit
             ));
         }
+        if self.wip != later.wip {
+            found.push(format!(
+                "the uncommitted work changed from the trees {} and {} to {} and {}",
+                self.wip.index, self.wip.worktree, later.wip.index, later.wip.worktree
+            ));
+        }
         let lists = [
             ("change", &self.changed, &later.changed),
             ("ignored path", &self.ignored, &later.ignored),
             ("stash", &self.stashes, &later.stashes),
             ("commit", &self.unpushed, &later.unpushed),
             ("hidden work", &self.concealed, &later.concealed),
+            ("reference", &self.refs, &later.refs),
         ];
         for (what, before, after) in lists {
             found.extend(
@@ -101,6 +117,19 @@ impl Snapshot {
         );
         found
     }
+}
+
+/// Returns each checkout that `plan` retires, with its entry in `archive`,
+/// whose checkouts are in the plan's order.
+fn retiring_in<'a>(
+    plan: &'a ArchivePlan,
+    archive: &'a Archive,
+) -> impl Iterator<Item = (&'a CheckoutRemoval, &'a ArchivedCheckout)> {
+    plan.removal
+        .checkouts
+        .iter()
+        .zip(&archive.checkouts)
+        .filter(|(planned, _)| planned.directory == Fate::Removed)
 }
 
 /// Adds to `paths` each path below `dir`, relative to `root`, that neither
@@ -169,41 +198,14 @@ impl<B: Backend> Workspaces<B> {
         Ok(())
     }
 
-    /// Returns the failure when the commit that `--wip` makes in `plan`
-    /// could not run. The caller calls this before it stops any process.
-    ///
-    /// # Errors
-    ///
-    /// Returns the reason that a commit could not run.
-    pub fn check_wip(&self, plan: &ArchivePlan) -> Result<(), Error> {
-        if !plan.options.wip {
-            return Ok(());
-        }
-        for planned in &plan.removal.checkouts {
-            let path = &planned.checkout.path;
-            if planned.directory == Fate::Removed && !self.backend.changes(path)?.changed.is_empty()
-            {
-                self.backend.check_commit_all(path)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Commits the changes of each checkout that `confirmed` retires.
-    fn commit_wip(&self, confirmed: &ArchivePlan) -> Result<(), Error> {
-        for planned in &confirmed.removal.checkouts {
-            let path = &planned.checkout.path;
-            if planned.directory == Fate::Removed && !self.backend.changes(path)?.changed.is_empty()
-            {
-                self.backend.commit_all(path, WIP_MESSAGE)?;
-            }
-        }
-        (self.checkpoint)("wip")
-    }
-
     /// Returns what each checkout that `confirmed` retires holds now, by
-    /// folder, which later states of the checkout are compared with.
-    fn baselines(&self, confirmed: &ArchivePlan) -> Result<BTreeMap<String, Snapshot>, Error> {
+    /// folder, which later states of the checkout are compared with. The
+    /// uncommitted work is read through `index`.
+    fn baselines(
+        &self,
+        confirmed: &ArchivePlan,
+        index: &Path,
+    ) -> Result<BTreeMap<String, Snapshot>, Error> {
         let mut found = BTreeMap::new();
         for planned in &confirmed.removal.checkouts {
             if planned.directory == Fate::Removed {
@@ -213,6 +215,8 @@ impl<B: Backend> Workspaces<B> {
                         confirmed.removal.workspace.kind,
                         &planned.checkout.path,
                         planned,
+                        confirmed.left_out(&planned.checkout.name),
+                        index,
                     )?,
                 );
             }
@@ -234,21 +238,17 @@ impl<B: Backend> Workspaces<B> {
         confirmed: ArchivePlan,
     ) -> Result<ArchiveOutcome, Error> {
         let name = confirmed.removal.workspace.name.clone();
-        let mut options = confirmed.options;
-        if options.wip {
-            self.commit_wip(&confirmed)?;
-            options.wip = false;
-        }
+        let index = archives.wip_index(&name)?;
         // What counts is what the checkouts hold from here on: anything that
         // appears later, even between the pin and the rename, refuses.
-        let admitted = self.baselines(&confirmed)?;
+        let admitted = self.baselines(&confirmed, &index)?;
         // The workspace may have changed while the caller confirmed, and
         // the processes that the caller stopped may have written files, so
         // what counts is what is there now.
         let plan = match self.admit(
             archives,
             &name,
-            options,
+            confirmed.options,
             Mode::Change,
             Some(confirmed.id.clone()),
             false,
@@ -293,7 +293,10 @@ impl<B: Backend> Workspaces<B> {
         let mut archive = plan.record(&name);
         archives.write(&archive)?;
         (self.checkpoint)("record")?;
-        for (planned, archived) in retiring() {
+        self.commit_wip(&plan, &mut archive, &index)?;
+        archives.write(&archive)?;
+        (self.checkpoint)("wip")?;
+        for (planned, archived) in retiring_in(&plan, &archive) {
             self.pin(planned, archived)?;
         }
         (self.checkpoint)("pins")?;
@@ -301,10 +304,16 @@ impl<B: Backend> Workspaces<B> {
         root::copy_in(archives, &mut archive, &plan.removal.workspace, &generated)?;
         archives.write(&archive)?;
         (self.checkpoint)("root")?;
-        for planned in &plan.removal.checkouts {
+        for (planned, archived) in retiring_in(&plan, &archive) {
             if let Some(admitted) = admitted.get(&planned.checkout.name)
-                && planned.directory == Fate::Removed
-                && let Some(refusal) = self.retire(&plan.removal, planned, admitted)?
+                && let Some(refusal) = self.retire(
+                    &plan.removal,
+                    planned,
+                    archived,
+                    admitted,
+                    plan.left_out(&planned.checkout.name),
+                    &index,
+                )?
             {
                 return Ok(ArchiveOutcome::Refused(refusal));
             }
@@ -319,6 +328,44 @@ impl<B: Backend> Workspaces<B> {
         root::delete_originals(&archive, &plan.removal.workspace, &generated)?;
         (self.checkpoint)("delete")?;
         self.finish_removal(&name, archive, plan.removal)
+    }
+
+    /// Writes the commits of the uncommitted work of each checkout that
+    /// `plan` retires and that has any, and names them in `archive`. The
+    /// commits take the archive's time, so a later run writes the same
+    /// commits for the same work.
+    fn commit_wip(
+        &self,
+        plan: &ArchivePlan,
+        archive: &mut Archive,
+        index: &Path,
+    ) -> Result<(), Error> {
+        let time = archive.time;
+        for (planned, archived) in plan.removal.checkouts.iter().zip(&mut archive.checkouts) {
+            if planned.directory != Fate::Removed {
+                continue;
+            }
+            let has_work = plan
+                .uncommitted
+                .iter()
+                .any(|work| work.folder == planned.checkout.name && !work.changes.is_empty());
+            archived.kept.wip = if has_work {
+                let written = self.backend.write_wip(
+                    &planned.checkout.path,
+                    index,
+                    plan.left_out(&planned.checkout.name),
+                    time,
+                    WIP_MESSAGE,
+                )?;
+                Some(KeptWip {
+                    index: written.index,
+                    worktree: written.worktree,
+                })
+            } else {
+                None
+            };
+        }
+        Ok(())
     }
 
     /// Removes the workspace whose checkouts are retired and whose extra
@@ -364,41 +411,53 @@ impl<B: Backend> Workspaces<B> {
         archives.write(archive)
     }
 
-    /// Writes the pin of `archived`, the checkout that `planned` retires,
-    /// and checks that it names the checkout's commit. The commit of a
-    /// clone may exist only in the clone, so it is fetched into the mirror
-    /// first, while the mirror's lock is held.
+    /// Writes every pin of `archived`, the checkout that `planned` retires,
+    /// and deletes a pin below its pin directory that an earlier run wrote
+    /// and the record no longer names. The objects of a clone may exist
+    /// only in the clone, so they are fetched into the mirror, while the
+    /// mirror's lock is held, and the fetch checks what each pin names.
     fn pin(&self, planned: &CheckoutRemoval, archived: &ArchivedCheckout) -> Result<(), Error> {
-        let Some(mirror) = &archived.mirror else {
-            return self
-                .backend
-                .write_ref(&archived.source, &archived.pin, &archived.commit);
+        let pins = archived.pins();
+        let holder = archived.pin_holder();
+        let _lock = match &archived.mirror {
+            Some(mirror) => Some(self.lock_mirror(mirror)?),
+            None => None,
         };
-        let _lock = self.lock_mirror(mirror)?;
-        let pinned =
-            self.backend
-                .fetch_head_into_mirror(mirror, &planned.checkout.path, &archived.pin)?;
-        if pinned == archived.commit {
-            return Ok(());
+        // git matches the directory as a whole component, so this lists the
+        // pins below it and a pin of version 1 at the directory itself,
+        // which an earlier run of an older multiverse wrote and which would
+        // stop git from writing any pin below it.
+        let dir = archived.pin_dir();
+        for (rest, _) in self.backend.refs_under(holder, dir)? {
+            let reference = format!("{dir}{rest}");
+            if !pins.iter().any(|(pin, _)| *pin == reference) {
+                self.backend.delete_ref(holder, &reference)?;
+            }
         }
-        Err(Error::CommandFailed {
-            operation: "fetch into mirror",
-            dir: mirror.clone(),
-            code: None,
-            message: format!(
-                "the pin {} names {pinned}, and the checkout's HEAD was {}",
-                archived.pin, archived.commit
-            ),
-        })
+        match holder {
+            RefHolder::Mirror(mirror) => {
+                self.backend
+                    .fetch_into_mirror(mirror, &planned.checkout.path, &pins)
+            }
+            RefHolder::Repository(source) => {
+                for (reference, object) in &pins {
+                    self.backend.write_ref(source, reference, object)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Reads the git state and the path list of a checkout at `dir`, which
-    /// `planned` describes.
+    /// `planned` describes, reading the uncommitted work without
+    /// `left_out` through `index`.
     fn snapshot(
         &self,
         kind: WorkspaceKind,
         dir: &Path,
         planned: &CheckoutRemoval,
+        left_out: &[String],
+        index: &Path,
     ) -> Result<Snapshot, Error> {
         let mut head = self.backend.head(dir)?;
         // The top level is the directory itself, which moves.
@@ -406,19 +465,34 @@ impl<B: Backend> Workspaces<B> {
         let changes = self.backend.changes(dir)?;
         let concealed = self.backend.concealed(dir)?;
         let mut hidden = concealed.nested.clone();
-        hidden.extend(concealed.hidden.iter().cloned());
-        hidden.extend(submodule_items(dir, &concealed));
+        hidden.extend(concealed.hidden.iter().map(|item| item.path.clone()));
+        hidden.extend(
+            submodule_items(dir, &concealed)
+                .into_iter()
+                .map(|(path, work)| format!("{path}: {work}")),
+        );
         hidden.extend(concealed.unlisted.iter().cloned());
-        hidden.extend(concealed.paused.iter().cloned());
-        hidden.extend(concealed.referenced.iter().cloned());
-        let (stashes, unpushed) = if kind == WorkspaceKind::Clone {
+        hidden.extend(
+            concealed
+                .paused
+                .iter()
+                .map(|paused| format!("{}{:?}", paused.at, paused.operation)),
+        );
+        let own = RefHolder::Repository(dir);
+        let (stashes, unpushed, refs) = if kind == WorkspaceKind::Clone {
             (
                 self.backend.stashes(dir)?,
                 self.backend.unpushed_commits(dir)?,
+                self.backend.refs_under(own, "refs/")?,
             )
         } else {
-            (Vec::new(), Vec::new())
+            (
+                Vec::new(),
+                Vec::new(),
+                self.backend.refs_under(own, "refs/worktree/")?,
+            )
         };
+        let wip = self.backend.wip_trees(dir, index, left_out)?;
         let trimmed: Vec<&str> = planned
             .disposable
             .iter()
@@ -434,18 +508,65 @@ impl<B: Backend> Workspaces<B> {
             stashes,
             unpushed,
             concealed: hidden,
+            refs: refs
+                .into_iter()
+                .map(|(name, object)| format!("{name} {object}"))
+                .collect(),
+            wip,
             paths,
         })
     }
 
+    /// Returns what differs between the uncommitted work of the checkout
+    /// at `dir`, whose snapshot is `moved`, and the commits that `archived`
+    /// keeps of it, one sentence for each difference. A checkout without
+    /// kept work must have none: its index and working files hold the tree
+    /// of `HEAD`.
+    fn kept_work_differences(
+        &self,
+        dir: &Path,
+        archived: &ArchivedCheckout,
+        moved: &Snapshot,
+    ) -> Result<Vec<String>, Error> {
+        let (index, worktree) = match &archived.kept.wip {
+            Some(wip) => (
+                self.backend.tree_of(dir, &wip.index)?,
+                self.backend.tree_of(dir, &wip.worktree)?,
+            ),
+            None => {
+                let head = self.backend.tree_of(dir, &archived.commit)?;
+                (head.clone(), head)
+            }
+        };
+        let mut found = Vec::new();
+        if moved.wip.index != index {
+            found.push(format!(
+                "the index holds the tree {}, and the archive kept {index}",
+                moved.wip.index
+            ));
+        }
+        if moved.wip.worktree != worktree {
+            found.push(format!(
+                "the working files hold the tree {}, and the archive kept {worktree}",
+                moved.wip.worktree
+            ));
+        }
+        Ok(found)
+    }
+
     /// Moves the checkout that `planned` describes aside, compares it with
-    /// `admitted`, and deletes it. It puts a checkout that differs back in
-    /// its place and returns the refusal.
+    /// `admitted` and with what `archived` keeps of it, and deletes it. It
+    /// puts a checkout that differs back in its place and returns the
+    /// refusal. The uncommitted work is read without `left_out` through
+    /// `index`.
     fn retire(
         &self,
         removal: &Removal,
         planned: &CheckoutRemoval,
+        archived: &ArchivedCheckout,
         admitted: &Snapshot,
+        left_out: &[String],
+        index: &Path,
     ) -> Result<Option<ArchiveRefusal>, Error> {
         let checkout = &planned.checkout;
         let invalid = || Error::Unwritable {
@@ -462,14 +583,20 @@ impl<B: Backend> Workspaces<B> {
         (self.checkpoint)(&format!("before-move:{}", checkout.name))?;
         store::move_aside(&checkout.path, &held)?;
         (self.checkpoint)(&format!("moved:{}", checkout.name))?;
-        let moved = match self.snapshot(removal.workspace.kind, &held, planned) {
-            Ok(moved) => moved,
+        let compared = self
+            .snapshot(removal.workspace.kind, &held, planned, left_out, index)
+            .and_then(|moved| {
+                let mut differences = admitted.differences(&moved);
+                differences.extend(self.kept_work_differences(&held, archived, &moved)?);
+                Ok(differences)
+            });
+        let differences = match compared {
+            Ok(differences) => differences,
             Err(error) => {
                 self.move_back(&removal.workspace, checkout, &held)?;
                 return Err(error);
             }
         };
-        let differences = admitted.differences(&moved);
         if !differences.is_empty() {
             self.move_back(&removal.workspace, checkout, &held)?;
             return Ok(Some(ArchiveRefusal::SourceChanged {

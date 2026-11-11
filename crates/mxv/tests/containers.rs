@@ -416,7 +416,7 @@ fn a_restored_workspace_keeps_its_stable_id_and_finds_its_volume_again() {
         "echo kept > /data/marker",
     ]);
     assert!(wrote);
-    let (exit, document) = setup.json(&["archive", "-w", name, "--wip", "--yes"]);
+    let (exit, document) = setup.json(&["archive", "-w", name, "--yes"]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(document["data"]["stopped"][0], "web", "{document}");
     let (kept, _) = docker(&["volume", "inspect", &volume]);

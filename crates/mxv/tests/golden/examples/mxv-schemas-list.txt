@@ -12,7 +12,7 @@ mxv/status/v1             output  document  Each unit of the workspace's manifes
 mxv/logs/v1               output  stream    The last lines of a unit's log, then with --follow each line that the unit writes.
 mxv/run/v1                output  document  Each task of the workspace: those that a manifest declares, then those that mise lists, by checkout.
 mxv/ports-reset/v1        output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
-mxv/archive/v1            output  document  What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.
+mxv/archive/v2            output  document  What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.
 mxv/restore/v1            output  document  The workspace that the restore rebuilt and each port that changed, or what it would do on a dry run.
 mxv/remove/v1             output  document  What the run removed, deleted and kept, or would on a dry run.
 mxv/clean/v1              output  document  Each workspace that the run considered, with the disposable directories it deleted, or would delete on a dry run, and the bytes they took, or why it kept them, and a failure for each workspace whose directories could not be deleted.
