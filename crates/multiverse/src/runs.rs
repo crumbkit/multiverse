@@ -32,8 +32,9 @@ mod phased;
 mod tests;
 
 pub use phased::{
-    Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Exec, ExecEnd, ExecTarget, LogOutput,
-    MiseListing, MiseTaskName, Place, PreparedTask, TaskEnd, TaskServices, TaskStart, Volumes,
+    Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Exec, ExecEnd, ExecTarget, Granting,
+    LogOutput, MiseListing, MiseTaskName, PermissionAsk, Place, PreparedTask, TaskEnd,
+    TaskServices, TaskStart, Volumes,
 };
 
 /// How long `mxv down` waits after SIGTERM before it sends SIGKILL.
@@ -369,12 +370,50 @@ pub enum Waited {
 /// The outcome of [`Runs::down`].
 #[derive(Debug)]
 pub enum DownOutcome {
-    /// One result for each selected process, in the order `down` stopped
-    /// them: the stopped process, or the group that outlived SIGKILL.
-    Down(Vec<Result<ProcessStatus, Unstoppable>>),
+    /// One result for each selected process, in the reverse of their start
+    /// order.
+    Down(Vec<DownResult>),
     /// Neither the manifest nor a run record knows a process with the
     /// name.
     UnknownProcess(String),
+}
+
+/// What [`Runs::down`] did to one selected unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownResult {
+    /// The unit stopped, or was not running.
+    Stopped(ProcessStatus),
+    /// The unit's process group outlived SIGKILL, or `down` could not prove
+    /// it its own.
+    Unstoppable(Unstoppable),
+    /// `down` kept the unit running, because a running unit that `down`
+    /// does not stop depends on it.
+    StillNeeded(StillNeeded),
+}
+
+/// Whether [`Runs::down`] keeps a named unit that a running unit outside the
+/// stopped set depends on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Needed {
+    /// Keep it, and report it as [`DownResult::StillNeeded`]. `mxv down`
+    /// passes it.
+    Keep,
+    /// Stop it anyway, as a restart, a removal and a reclaim do.
+    Stop,
+}
+
+/// A unit that `down` kept running, and the running units that need it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StillNeeded {
+    /// The unit.
+    pub unit: String,
+    /// The running units outside the stopped set that depend on it,
+    /// directly or through other units, in name order.
+    pub by: Vec<String>,
+    /// Those of `by` whose state phase cannot tell, which `down` counts as
+    /// running.
+    pub unknown: Vec<String>,
 }
 
 /// A process whose group outlived SIGKILL and phase's kill wait, or whose

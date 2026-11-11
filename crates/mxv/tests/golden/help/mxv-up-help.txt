@@ -1,4 +1,6 @@
-Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
+Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready.
+
+Before anything builds, stops or starts, mxv compares the permissions of the selected host units and the units they depend on with what a person has granted to the repository. A unit asks for more when it is new, when its permissions hold an entry that the grant lacks, or when it would run outside the sandbox and its grant is sandboxed. At a terminal, mxv lists what each unit asks for and asks before it goes on, and a yes adds it to the grant that every workspace of the repository shares. Without a terminal, or with --no-input, it fails with mxv::permissions::not_granted and builds, stops and starts nothing. No flag or variable approves a grant.
 
 Usage: mxv up [OPTIONS] [UNIT]...
 

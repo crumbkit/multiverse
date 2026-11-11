@@ -60,6 +60,33 @@ pub enum PhaseError {
         /// The record's schema, such as `phase/run/v2`.
         schema: String,
     },
+    /// A grant file cannot be read, so phase compares no permissions with
+    /// it and the host starts nothing that the grant covers.
+    #[non_exhaustive]
+    GrantsUnreadable {
+        /// The grant file.
+        path: PathBuf,
+        /// Why it cannot be read.
+        reason: String,
+    },
+    /// A newer phase wrote a grant file, so this phase does not use it
+    /// until it is upgraded.
+    #[non_exhaustive]
+    NewerGrants {
+        /// The grant file.
+        path: PathBuf,
+        /// The file's schema, such as `phase/grants/v2`.
+        schema: String,
+    },
+    /// Another grant held the lock of a grant file for all of the lock
+    /// wait, so this grant wrote nothing.
+    #[non_exhaustive]
+    GrantsBusy {
+        /// The lock file.
+        path: PathBuf,
+        /// How long the grant waited for the lock.
+        waited: Duration,
+    },
     /// phase cannot write a file of its state directory.
     #[non_exhaustive]
     StateUnwritable {
@@ -213,6 +240,9 @@ impl PhaseError {
             Self::Busy { .. } => "phase::lock::busy",
             Self::RecordUnreadable { .. } => "phase::record::unreadable",
             Self::NewerRecord { .. } => "phase::record::newer",
+            Self::GrantsUnreadable { .. } => "phase::grants::unreadable",
+            Self::NewerGrants { .. } => "phase::grants::newer",
+            Self::GrantsBusy { .. } => "phase::lock::busy",
             Self::StateUnwritable { .. } => "phase::state::unwritable",
             Self::LogUnreadable { .. } => "phase::log::unreadable",
             Self::ProcessTable { .. } => "phase::process_table",
@@ -367,6 +397,22 @@ impl fmt::Display for PhaseError {
                 formatter,
                 "a newer phase wrote the run record of the workspace {workspace} as {schema}; upgrade phase to manage it"
             ),
+            Self::GrantsUnreadable { path, reason } => write!(
+                formatter,
+                "the grant file {} cannot be read: {reason}; repair it, or move it away so that the next up asks about every unit again",
+                path.display()
+            ),
+            Self::NewerGrants { path, schema } => write!(
+                formatter,
+                "a newer phase wrote the grant file {} as {schema}; upgrade phase to use it",
+                path.display()
+            ),
+            Self::GrantsBusy { path, waited } => write!(
+                formatter,
+                "another grant held the lock {} for {} ms",
+                path.display(),
+                waited.as_millis()
+            ),
             Self::StateUnwritable { path, .. } => {
                 write!(formatter, "phase cannot write {}", path.display())
             }
@@ -485,6 +531,9 @@ impl std::error::Error for PhaseError {
             | Self::Busy { .. }
             | Self::RecordUnreadable { .. }
             | Self::NewerRecord { .. }
+            | Self::GrantsUnreadable { .. }
+            | Self::NewerGrants { .. }
+            | Self::GrantsBusy { .. }
             | Self::ProcessTable { .. }
             | Self::Docker { .. }
             | Self::KeeperUnstartable { .. }

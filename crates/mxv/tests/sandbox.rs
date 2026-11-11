@@ -11,6 +11,9 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
 #[cfg(target_os = "macos")]
+#[path = "support/grants.rs"]
+mod grants;
+#[cfg(target_os = "macos")]
 #[path = "support/git.rs"]
 mod support;
 
@@ -183,13 +186,19 @@ impl Sandboxed {
     }
 
     fn command(&self, args: &[&str]) -> snapbox::cmd::Command {
+        grants::before(&self.root().join("state/mxv"), args);
         self.program(env!("CARGO_BIN_EXE_mxv"), args)
     }
 
     /// Returns the command that runs `program` with `args` and mxv's
-    /// environment.
+    /// environment. A program that wraps mxv, such as `script`, may run
+    /// `mxv up` on a terminal, where mxv would ask, so every workspace's
+    /// grant is written first.
     fn program(&self, program: &str, args: &[&str]) -> snapbox::cmd::Command {
         let root = self.root();
+        if program != env!("CARGO_BIN_EXE_mxv") {
+            grants::grant_all(&root.join("state/mxv"));
+        }
         snapbox::cmd::Command::new(program)
             .args(args)
             .current_dir(&root)
@@ -208,7 +217,20 @@ impl Sandboxed {
     /// Runs `mxv` with `args` and `--json`, and returns the exit code and
     /// the JSON document.
     fn json(&self, args: &[&str]) -> (i32, serde_json::Value) {
-        let output = self.command(args).arg("--json").output().unwrap();
+        Self::document(self.command(args), args)
+    }
+
+    /// Runs `mxv` with `args` and `--json` without the grant that a person
+    /// at a terminal would give, and returns the exit code and the JSON
+    /// document.
+    fn json_ungranted(&self, args: &[&str]) -> (i32, serde_json::Value) {
+        Self::document(self.program(env!("CARGO_BIN_EXE_mxv"), args), args)
+    }
+
+    /// Runs `command`, the mxv command with `args`, with `--json`, and
+    /// returns the exit code and the JSON document.
+    fn document(command: snapbox::cmd::Command, args: &[&str]) -> (i32, serde_json::Value) {
+        let output = command.arg("--json").output().unwrap();
         let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "{args:?} printed no JSON ({error}): {}{}",
@@ -615,4 +637,100 @@ fn a_sandboxed_process_reaches_the_unit_its_connect_names_and_not_a_dependency_i
         String::from_utf8_lossy(&output.stdout),
         "named=reached\nunnamed=denied\n"
     );
+}
+
+/// A sandboxed `writer` that writes `write`, and whose build adds a line to
+/// `out/builds`, with `more` added to the manifest.
+#[cfg(target_os = "macos")]
+fn counted_writer(write: &str, more: &str) -> String {
+    format!(
+        "[processes.writer]\nargv = [\"/bin/sh\", \"-c\", \"echo ready; exec sleep 60\"]\nbuild = [\"/bin/sh\", \"-c\", \"echo built >> out/builds\"]\nready = {{ log = \"^ready$\" }}\npermissions = {{ write = {write} }}\n{more}"
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_manifest_that_widens_a_running_unit_is_refused_without_a_terminal_and_changes_nothing() {
+    let sandboxed = Sandboxed::new(&counted_writer(r#"["out"]"#, ""));
+    std::fs::create_dir(sandboxed.checkout().join("out")).unwrap();
+    let (exit, first) = sandboxed.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{first}");
+    let pid = Sandboxed::row(&first, "writer")["pid"].clone();
+    sandboxed.write_manifest(&counted_writer(
+        r#"["out", "more"]"#,
+        "[processes.other]\nargv = [\"/bin/sh\", \"-c\", \"exec sleep 60\"]\n",
+    ));
+
+    let (up, refused) = sandboxed.json_ungranted(&["up", "-w", "triage"]);
+    let (restart, restart_refused) = sandboxed.json_ungranted(&["restart", "-w", "triage"]);
+    let output = sandboxed
+        .program(
+            env!("CARGO_BIN_EXE_mxv"),
+            &[
+                "exec",
+                "-w",
+                "triage",
+                "writer",
+                "--",
+                "/usr/bin/touch",
+                "out/ran",
+            ],
+        )
+        .output()
+        .unwrap();
+    let (_, status) = sandboxed.json(&["status", "-w", "triage"]);
+
+    assert_eq!(up, 1, "{refused}");
+    assert_eq!(
+        refused["code"], "mxv::permissions::not_granted",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["fields"]["asks"],
+        serde_json::json!([
+            "other, a new unit, asks to run outside the sandbox, with everything your account can reach",
+            "writer, more than it was granted, asks to write to more in its checkout",
+        ]),
+        "{refused}"
+    );
+    assert_eq!(restart, 1, "{restart_refused}");
+    assert_eq!(restart_refused["code"], "mxv::permissions::not_granted");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mxv::permissions::not_granted"),
+        "{output:?}"
+    );
+    assert!(!sandboxed.checkout().join("out/ran").exists());
+    assert_eq!(Sandboxed::row(&status, "writer")["pid"], pid, "{status}");
+    assert_ne!(Sandboxed::row(&status, "other")["state"], "running");
+    assert_eq!(
+        std::fs::read_to_string(sandboxed.checkout().join("out/builds")).unwrap(),
+        "built\n"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_process_can_neither_read_nor_write_the_grant_file() {
+    let sandboxed = Sandboxed::new("");
+    let grants = sandboxed.root().join("state/mxv/phase/grants");
+    sandboxed.write_manifest(&format!(
+        "[processes.reader]\nargv = [\"/bin/sh\", \"-c\", \"cat {dir}/*.json > out/leak 2>/dev/null; for f in {dir}/*.json; do echo '{{}}' > \\\"$f\\\" 2>/dev/null; done; echo '{{}}' > {dir}/planted.json 2>/dev/null; echo ready; exec sleep 60\"]\nready = {{ log = \"^ready$\" }}\npermissions = {{ write = [\"out\"] }}\n",
+        dir = grants.display()
+    ));
+    std::fs::create_dir(sandboxed.checkout().join("out")).unwrap();
+
+    let (exit, up) = sandboxed.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{up}");
+    let files: Vec<_> = std::fs::read_dir(&grants)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let grant = std::fs::read_to_string(files[0].path()).unwrap();
+    assert!(grant.contains("phase/grants/v1"), "{grant}");
+    let leak = std::fs::read_to_string(sandboxed.checkout().join("out/leak")).unwrap();
+    assert!(!leak.contains("phase/grants/v1"), "{leak}");
 }

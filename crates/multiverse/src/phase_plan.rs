@@ -525,6 +525,44 @@ fn assemble(
     })
 }
 
+/// Returns what each host process of `units`, unit names of
+/// `inputs.manifest`, asks the sandbox for: its permissions as [`build`]
+/// puts them in the plan, or that it runs outside the sandbox when it
+/// declares none. It needs no ports, so it runs before `up` gives the
+/// workspace any. Containers are left out, because the permissions table
+/// applies to host processes alone, and so are mxv's own apps, such as
+/// `mxv-provision`, which mxv writes itself.
+///
+/// # Errors
+///
+/// Returns [`Unrunnable`] as [`build`] does for a unit whose name, `cwd` or
+/// permissions phase cannot run.
+pub(crate) fn permissions(
+    inputs: &Inputs<'_>,
+    units: &[String],
+) -> Result<BTreeMap<AppName, phase::Grant>, Unrunnable> {
+    let mut requested = BTreeMap::new();
+    for name in units {
+        let Some(process) = inputs.manifest.processes.get(name) else {
+            continue;
+        };
+        let (source, _) = placed(inputs, name, process)?;
+        let permissions = process
+            .permissions
+            .as_ref()
+            .map(|permissions| {
+                let mut granted = app_permissions(name, permissions, &source)?;
+                granted
+                    .connect
+                    .extend(service_connects(inputs.manifest, process));
+                Ok(granted)
+            })
+            .transpose()?;
+        requested.insert(app_name(name)?, phase::Grant::of(permissions.as_ref()));
+    }
+    Ok(requested)
+}
+
 /// Returns the app name of the unit `name`.
 ///
 /// # Errors

@@ -9,6 +9,11 @@
 //! [`Phase::sweep`] can stop it after a crash, and reports state as JSON
 //! documents such as [`Status`].
 //!
+//! [`Phase::granted`] and [`Phase::grant`] keep what a person granted the
+//! host apps of a repository, and [`Grants::growth`] says what a plan asks
+//! for beyond it. The host program asks the person and calls the check
+//! before [`Phase::up`]; `up` itself compares no grant.
+//!
 //! The library reads no environment variable and writes to no standard
 //! stream. The `mxv` command links it.
 
@@ -17,6 +22,7 @@ mod clock;
 mod engine;
 mod env;
 mod error;
+mod grants;
 mod logs;
 mod millis;
 mod name;
@@ -39,6 +45,7 @@ pub use crate::env::{
     AppliedEnvironment, DigestKey, EnvDigest, EnvironmentError, EnvironmentSource,
 };
 pub use crate::error::{NotRunnable, Operation, PhaseError, VolumeOwnerProblem};
+pub use crate::grants::{Asked, Grant, GrantScope, Grants, Growth};
 pub use crate::logs::{LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VariableName, VolumeName,

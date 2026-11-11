@@ -1,4 +1,6 @@
-Build a workspace's units through deadband, then stop them and start them again
+Build a workspace's units through deadband, then stop them and start them again.
+
+Before anything builds, stops or starts, mxv checks the selected host units' permissions against the repository's grant and asks at a terminal, as `mxv up` does. A unit that a running unit depends on still restarts.
 
 Usage: mxv restart [OPTIONS] [UNIT]...
 

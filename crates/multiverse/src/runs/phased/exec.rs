@@ -44,6 +44,10 @@ pub enum ExecTarget<'a> {
     NotRunning,
     /// phase cannot run the manifest.
     Unrunnable(Unrunnable),
+    /// The unit is a host process whose permissions the grant of the
+    /// workspace's repository does not cover, so `exec` runs nothing and
+    /// asks no question.
+    NotGranted(super::PermissionAsk),
 }
 
 /// A command's context: the running unit of a workspace and the plan that
@@ -159,6 +163,15 @@ impl Runs {
             Ok(built) => built,
             Err(unrunnable) => return Ok(ExecTarget::Unrunnable(unrunnable)),
         };
+        // A command runs with its unit's permissions, so a unit whose
+        // permissions grew since a person granted them runs no command.
+        if manifest.processes.contains_key(unit) {
+            match self.ask_of(workspace, &id, manifest, &[unit.to_owned()])? {
+                Ok(None) => {}
+                Ok(Some(ask)) => return Ok(ExecTarget::NotGranted(ask)),
+                Err(unrunnable) => return Ok(ExecTarget::Unrunnable(unrunnable)),
+            }
+        }
         // A unit that only phase's run record names, and the manifest no
         // longer declares, is in no plan, so no command can run in its
         // context, and `up` would not start it either.

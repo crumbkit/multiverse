@@ -78,6 +78,7 @@ fn down_of_a_name_that_no_process_has_returns_the_name() {
             &workspace,
             None,
             &["web".to_owned()],
+            crate::runs::Needed::Keep,
         )
         .unwrap();
     assert!(matches!(outcome, DownOutcome::UnknownProcess(name) if name == "web"));

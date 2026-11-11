@@ -13,19 +13,19 @@ use phase::container::{
     delete_app_volumes, volume_exists,
 };
 use phase::{
-    AppName, AppOutcome, Cancel, Handle, LineSink, LogLine, LogNote, LogRequest, Note, PhaseError,
-    ProcessName, Report, RunnerKind, Selection, StartProblem, StatusRow, Target, UnknownReason,
-    UpDeadlines, WorkspaceId,
+    AppName, AppOutcome, Cancel, GrantScope, Growth, Handle, LineSink, LogLine, LogNote,
+    LogRequest, Note, PhaseError, ProcessName, Report, RunnerKind, Selection, StartProblem,
+    StatusRow, Target, UnknownReason, UpDeadlines, WorkspaceId,
 };
 
 use super::{
-    DownOutcome, ExitReason, Footprint, Kind, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, Unstoppable, UpOutcome, Waited, received,
+    DownOutcome, DownResult, ExitReason, Footprint, Kind, Needed, ProcessNote, ProcessState,
+    ProcessStatus, RenamedVolume, Runs, StillNeeded, Unstoppable, UpOutcome, Waited, received,
 };
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
-use crate::phase_plan::{self, Built, Inputs, MAIN};
+use crate::phase_plan::{self, Built, Inputs, MAIN, Unrunnable};
 use crate::record::Workspace;
 use crate::service::PROVISION_APP;
 use crate::store::{self, Lock, Store};
@@ -334,7 +334,175 @@ impl Volumes {
     }
 }
 
+/// Permissions that the host units of a repository ask for and a person
+/// has not granted, which [`Runs::granting`] returns. Only
+/// [`Runs::grant`] adds them to the repository's grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionAsk {
+    /// The repositories whose grant the units share.
+    scope: GrantScope,
+    /// What each unit asks for beyond the grant.
+    growth: Growth,
+    /// The repository's name as a person knows it, such as its folder.
+    repository: String,
+}
+
+impl PermissionAsk {
+    /// Returns the repository's name, such as its folder name, or the
+    /// folder names of a workspace's several checkouts joined by `+`.
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    /// Returns the source directories of the repositories, sorted.
+    #[must_use]
+    pub fn paths(&self) -> &[PathBuf] {
+        self.scope.paths()
+    }
+
+    /// Returns what each unit asks for, whose [`Growth::lines`] a question
+    /// and a refusal print.
+    #[must_use]
+    pub const fn growth(&self) -> &Growth {
+        &self.growth
+    }
+}
+
+/// Whether the grant of a workspace's repository covers the permissions of
+/// the units that a command selects, as [`Runs::granting`] finds it.
+#[derive(Debug)]
+pub enum Granting {
+    /// The grant covers every selected host unit, or the selection has
+    /// none.
+    Covered,
+    /// Some selected host unit is new or asks for more than its grant.
+    Asks(PermissionAsk),
+    /// The manifest declares no unit with the name.
+    UnknownProcess(String),
+    /// phase cannot run the manifest.
+    Unrunnable(Unrunnable),
+}
+
+/// Returns the grant scope of `workspace`, whose stable id is `id`: the
+/// sorted source directories of its checkouts, labelled with their folder
+/// names, or its own stable id when it has no checkout. Every workspace of
+/// the same repositories shares the scope, and so its grant.
+fn grant_scope(workspace: &Workspace, id: &WorkspaceId) -> (GrantScope, String) {
+    let mut sources: Vec<&Path> = workspace
+        .checkouts
+        .iter()
+        .map(|checkout| checkout.source.as_path())
+        .collect();
+    sources.sort();
+    sources.dedup();
+    if sources.is_empty() {
+        let name = workspace.name.as_str().to_owned();
+        return (GrantScope::new(&name, [PathBuf::from(id.as_str())]), name);
+    }
+    let names: Vec<String> = sources
+        .iter()
+        .map(|source| {
+            source.file_name().map_or_else(
+                || source.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    (
+        GrantScope::new(
+            &names.join("-"),
+            sources.iter().map(|source| source.to_path_buf()),
+        ),
+        names.join("+"),
+    )
+}
+
 impl Runs {
+    /// Returns what the host units `units` of `workspace`'s `manifest`, by
+    /// name, ask for beyond the grant of the workspace's repository, whose
+    /// stable id is `id`, or `None` when the grant covers them. A
+    /// repository with no grant compares as one that granted nothing.
+    fn ask_of(
+        &self,
+        workspace: &Workspace,
+        id: &WorkspaceId,
+        manifest: &Manifest,
+        units: &[String],
+    ) -> Result<Result<Option<PermissionAsk>, Unrunnable>, Error> {
+        let requested = match phase_plan::permissions(&self.inputs(workspace, id, manifest), units)
+        {
+            Ok(requested) => requested,
+            Err(unrunnable) => return Ok(Err(unrunnable)),
+        };
+        if requested.is_empty() {
+            return Ok(Ok(None));
+        }
+        let (scope, repository) = grant_scope(workspace, id);
+        let growth = self
+            .phase
+            .granted(&scope)
+            .map_err(|error| self.phase_error(id, error))?
+            .unwrap_or_default()
+            .growth(&requested);
+        Ok(Ok((!growth.is_empty()).then_some(PermissionAsk {
+            scope,
+            growth,
+            repository,
+        })))
+    }
+
+    /// Returns whether the grant of `workspace`'s repository covers the
+    /// permissions of the host units that `names` select in `manifest`,
+    /// with their dependencies, or of every unit when `names` is empty. A
+    /// unit asks for more when its permissions hold an entry that the grant
+    /// lacks, when it would run outside the sandbox and its grant is
+    /// sandboxed, or when the grant has no entry for it. Permissions that
+    /// stay the same or shrink ask for nothing. It writes nothing, except
+    /// the workspace's stable id into `store` when the record holds none.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Store::update`], and [`Error::Phase`] when
+    /// the grant file cannot be read.
+    pub fn granting(
+        &self,
+        store: &Store,
+        workspace: &Workspace,
+        manifest: &Manifest,
+        names: &[String],
+    ) -> Result<Granting, Error> {
+        let order = match manifest.start_order(names) {
+            Ok(order) => order,
+            Err(unknown) => return Ok(Granting::UnknownProcess(unknown)),
+        };
+        let id = match &workspace.id {
+            Some(id) => id.clone(),
+            None => saved_workspace_id(store, &workspace.name)?,
+        };
+        Ok(match self.ask_of(workspace, &id, manifest, &order)? {
+            Ok(None) => Granting::Covered,
+            Ok(Some(ask)) => Granting::Asks(ask),
+            Err(unrunnable) => Granting::Unrunnable(unrunnable),
+        })
+    }
+
+    /// Adds what `ask` names to the grant of its repository, which mxv
+    /// calls only after a person at a terminal answered yes. The grant only
+    /// grows, and every workspace of the repository shares it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another grant holds the grant file's
+    /// lock, [`Error::Unwritable`] when it cannot be written, and
+    /// [`Error::Phase`] when it cannot be read.
+    pub fn grant(&self, ask: &PermissionAsk) -> Result<(), Error> {
+        self.phase
+            .grant(&ask.scope, &ask.growth)
+            .map(drop)
+            .map_err(|error| Error::of_phase(error, PathBuf::new()))
+    }
+
     /// Returns the failure of `error`, which phase reported for the
     /// workspace whose stable id is `id`.
     fn phase_error(&self, id: &WorkspaceId, error: PhaseError) -> Error {
@@ -813,12 +981,6 @@ impl Runs {
                         ),
                     });
                 }
-                AppOutcome::AwaitingGrant { .. } => {
-                    return Err(Error::Phase {
-                        code: "phase::grant::awaiting",
-                        message: format!("phase waits for a grant of {unit}'s permissions"),
-                    });
-                }
                 AppOutcome::Left => {
                     let rows = self.phase_rows(workspace, Some(manifest))?;
                     return Ok(Some(UpOutcome::Left {
@@ -935,6 +1097,15 @@ impl Runs {
     /// signals a group that it cannot prove its own. A process that phase
     /// left running does not stop the others, and its result says so.
     ///
+    /// With [`Needed::Keep`] and named units, `down` keeps each named unit
+    /// that a running unit outside the stopped set depends on, directly or
+    /// through other units, and returns it as [`DownResult::StillNeeded`].
+    /// A kept unit still needs what it depends on, so the rule runs until
+    /// nothing more is kept. A unit whose state phase cannot tell counts as
+    /// running. The dependencies come from phase's run record, so a broken
+    /// manifest does not change them. With no names, or with
+    /// [`Needed::Stop`], `down` stops every selected unit.
+    ///
     /// # Errors
     ///
     /// Returns the errors of [`Runs::status`], [`Error::Unwritable`] when a
@@ -946,6 +1117,7 @@ impl Runs {
         workspace: &Workspace,
         manifest: Option<&Manifest>,
         names: &[String],
+        needed: Needed,
     ) -> Result<DownOutcome, Error> {
         let rows = self.phase_rows(workspace, manifest)?;
         let known = Self::phase_known(manifest, &rows);
@@ -960,52 +1132,135 @@ impl Runs {
                     .iter()
                     .rev()
                     .filter(|name| names.contains(name))
-                    .map(|name| Ok(Self::phase_unit_status(workspace, manifest, name, None)))
+                    .map(|name| {
+                        DownResult::Stopped(Self::phase_unit_status(
+                            workspace, manifest, name, None,
+                        ))
+                    })
                     .collect(),
             ));
         };
-        let count = if names.is_empty() {
-            known.len()
+        let kept = if needed == Needed::Keep && !names.is_empty() {
+            self.still_needed(id, &rows, names)?
         } else {
-            names.len()
+            BTreeMap::new()
         };
-        let deadline = Instant::now() + self.stop_wait(count);
-        let report = self
-            .phase
-            .down(id, &selection(names), deadline)
-            .map_err(|error| self.phase_error(id, error))?;
-        let mut by_app: BTreeMap<String, &phase::AppReport> = report
-            .apps
+        let stopping: Vec<String> = names
             .iter()
-            .map(|app| (app.app.as_str().to_owned(), app))
+            .filter(|name| !kept.contains_key(*name))
+            .cloned()
             .collect();
+        let mut results: BTreeMap<String, DownResult> = kept
+            .into_iter()
+            .map(|(name, still)| (name, DownResult::StillNeeded(still)))
+            .collect();
+        // Every named unit may be kept, and then `down` stops nothing.
+        if names.is_empty() || !stopping.is_empty() {
+            let count = if names.is_empty() {
+                known.len()
+            } else {
+                stopping.len()
+            };
+            let deadline = Instant::now() + self.stop_wait(count);
+            let report = self
+                .phase
+                .down(id, &selection(&stopping), deadline)
+                .map_err(|error| self.phase_error(id, error))?;
+            for app in &report.apps {
+                let name = app.app.as_str();
+                let result = Self::stopped(workspace, manifest, name, app, rows.get(name))?;
+                results.insert(name.to_owned(), result);
+            }
+        }
         let mut order: Vec<String> = known
             .iter()
-            .filter(|name| by_app.contains_key(*name))
+            .filter(|name| results.contains_key(*name))
             .cloned()
             .collect();
         order.reverse();
         order.extend(
-            by_app
+            results
                 .keys()
                 .filter(|name| !known.contains(name))
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        let mut results = Vec::new();
-        for name in order {
-            let Some(app) = by_app.remove(&name) else {
-                continue;
-            };
-            results.push(Self::stopped(
-                workspace,
-                manifest,
-                &name,
-                app,
-                rows.get(&name),
-            )?);
+        Ok(DownOutcome::Down(
+            order
+                .iter()
+                .filter_map(|name| results.remove(name))
+                .collect(),
+        ))
+    }
+
+    /// Returns each of the units `names` that `down` keeps, because a
+    /// running unit outside the stopped set depends on it, by name, from
+    /// phase's status rows `rows` of the workspace whose stable id is `id`
+    /// and the dependencies of its run record. A kept unit leaves the
+    /// stopped set and still needs what it depends on, so the rule runs
+    /// until nothing more is kept.
+    fn still_needed(
+        &self,
+        id: &WorkspaceId,
+        rows: &BTreeMap<String, StatusRow>,
+        names: &[String],
+    ) -> Result<BTreeMap<String, StillNeeded>, Error> {
+        let running: BTreeSet<AppName> = rows
+            .iter()
+            .filter(|(_, row)| row.state.may_run())
+            .filter_map(|(name, _)| app(name))
+            .collect();
+        let needed = self
+            .phase
+            .needed_by(id, &running)
+            .map_err(|error| self.phase_error(id, error))?;
+        let named: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        // The running units that need `name` and that `down` does not stop
+        // while it keeps `kept`.
+        let needing = |name: &str, kept: &BTreeSet<String>| -> Vec<String> {
+            app(name)
+                .and_then(|app| needed.get(&app))
+                .into_iter()
+                .flatten()
+                .map(|dependant| dependant.as_str().to_owned())
+                .filter(|dependant| !named.contains(dependant.as_str()) || kept.contains(dependant))
+                .collect()
+        };
+        let mut kept: BTreeSet<String> = BTreeSet::new();
+        loop {
+            let more: Vec<String> = names
+                .iter()
+                .filter(|name| !kept.contains(*name) && !needing(name, &kept).is_empty())
+                .cloned()
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            kept.extend(more);
         }
-        Ok(DownOutcome::Down(results))
+        Ok(kept
+            .iter()
+            .map(|name| {
+                let by = needing(name, &kept);
+                let unknown = by
+                    .iter()
+                    .filter(|dependant| {
+                        rows.get(*dependant).is_some_and(|row| {
+                            matches!(row.state, phase::ProcessState::Unknown { .. })
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                (
+                    name.clone(),
+                    StillNeeded {
+                        unit: name.clone(),
+                        by,
+                        unknown,
+                    },
+                )
+            })
+            .collect())
     }
 
     /// Returns the result of `down` for the unit `name`, whose app phase
@@ -1016,9 +1271,9 @@ impl Runs {
         name: &str,
         app: &phase::AppReport,
         row: Option<&StatusRow>,
-    ) -> Result<Result<ProcessStatus, Unstoppable>, Error> {
+    ) -> Result<DownResult, Error> {
         match &app.outcome {
-            AppOutcome::Left => Ok(Err(left(name, app, row))),
+            AppOutcome::Left => Ok(DownResult::Unstoppable(left(name, app, row))),
             AppOutcome::StopUncertain => Err(Error::Phase {
                 code: "phase::stop::uncertain",
                 message: format!(
@@ -1035,7 +1290,7 @@ impl Runs {
             _ => {
                 let mut status = Self::phase_unit_status(workspace, manifest, name, None);
                 status.log = row.and_then(|row| row.log.clone());
-                Ok(Ok(status))
+                Ok(DownResult::Stopped(status))
             }
         }
     }

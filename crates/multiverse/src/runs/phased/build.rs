@@ -144,6 +144,9 @@ pub enum BuildEnd<'lock> {
     UnknownProcess(String),
     /// phase cannot run the manifest.
     Unrunnable(Unrunnable),
+    /// A selected host unit is new or asks for more than the grant of the
+    /// workspace's repository, so nothing was built, stopped or started.
+    NotGranted(super::PermissionAsk),
 }
 
 /// Why a build did not pass.
@@ -452,6 +455,15 @@ impl Runs {
             Ok(order) => order,
             Err(unknown) => return Ok(BuildEnd::UnknownProcess(unknown)),
         };
+        // The check comes before every build, stop and start, so a unit
+        // whose permissions grew beyond its grant runs nothing.
+        let id = super::saved_workspace_id(store, &workspace.name)?;
+        workspace.id = Some(id.clone());
+        match self.ask_of(workspace, &id, manifest, &order)? {
+            Ok(None) => {}
+            Ok(Some(ask)) => return Ok(BuildEnd::NotGranted(ask)),
+            Err(unrunnable) => return Ok(BuildEnd::Unrunnable(unrunnable)),
+        }
         let steps: Vec<Step<'_>> = order
             .iter()
             .filter_map(|name| {

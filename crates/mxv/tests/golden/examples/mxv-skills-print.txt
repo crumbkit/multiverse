@@ -63,6 +63,16 @@ asks deadband nothing, for a light or interactive command.
 `mxv exec -- COMMAND` instead. On a machine that runs deadband, start every
 other heavy job with `deadband run --label <label> -- <command>`.
 
+## When mxv up asks for permissions
+
+`mxv up` and `mxv restart` refuse with `mxv::permissions::not_granted` when a
+unit is new or asks for more permissions than a person has granted to the
+repository, and they change nothing. Only a person can grant, by running
+`mxv up` in a terminal and answering yes, so hand that step to the person and
+quote the permissions the failure lists. `mxv exec UNIT` refuses the same way.
+`mxv down UNIT` fails with `mxv::process::still_needed` when a running unit
+depends on UNIT; name the dependants too to stop them all.
+
 ## Keep this skill current
 
 mxv embeds this skill, so the installed copy matches the mxv that wrote it.
