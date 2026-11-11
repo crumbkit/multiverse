@@ -51,6 +51,19 @@ impl Scene {
     }
 }
 
+/// Restores `kept` into the rebuilt workspace `root`, whose checkouts `app`
+/// and `web` lie at `<root>/app` and `<root>/web`. It stands in for
+/// [`super::restore`] in the tests of a workspace of that layout.
+fn restore(
+    dir: &Path,
+    kept: &[IgnoredEntry],
+    root: &Path,
+    force: bool,
+) -> Result<Result<IgnoredRestored, IgnoredRefusal>, Error> {
+    let (app, web) = (root.join("app"), root.join("web"));
+    super::restore(dir, kept, &[("app", app.as_path()), ("web", web.as_path())], force)
+}
+
 fn mode_of(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
 }
@@ -359,6 +372,55 @@ fn a_recorded_path_that_leaves_the_workspace_is_refused_as_damaged() {
     assert_eq!(
         refused.unwrap_err(),
         IgnoredRefusal::Damaged(vec!["../outside".to_owned()])
+    );
+}
+
+/// Keeps `.env` of an old workspace whose one checkout, `app`, is the
+/// workspace's directory itself, as the archive reads it, and returns the
+/// entries with a fresh directory for the rebuilt checkout.
+fn kept_of_a_checkout_that_is_the_workspace(scene: &Scene) -> (Vec<IgnoredEntry>, PathBuf) {
+    scene.file(".env", "TOKEN=old\n", 0o600);
+    let source = IgnoredSource::new("app".to_owned(), ".env".to_owned(), 10);
+    let kept = keep(&scene.archive, &on_disk(&[source], &scene.workspace)).unwrap();
+    let rebuilt = scene.dir.path().canonicalize().unwrap().join("rebuilt");
+    fs::create_dir_all(&rebuilt).unwrap();
+    (kept, rebuilt)
+}
+
+#[test]
+fn an_entry_of_a_checkout_that_is_the_workspace_comes_back_at_the_checkouts_own_path() {
+    let scene = scene();
+    let (kept, rebuilt) = kept_of_a_checkout_that_is_the_workspace(&scene);
+    assert_eq!(kept[0].path, "app/.env");
+
+    let checkouts = [("app", rebuilt.as_path())];
+
+    let restored = put_back(super::restore(&scene.archive, &kept, &checkouts, false));
+
+    assert_eq!(restored.written, ["app/.env"]);
+    assert_eq!(
+        fs::read_to_string(rebuilt.join(".env")).unwrap(),
+        "TOKEN=old\n"
+    );
+    assert!(!rebuilt.join("app").exists(), "restore wrote below the folder");
+}
+
+#[test]
+fn an_entry_of_a_checkout_that_is_the_workspace_is_refused_when_its_own_path_is_taken() {
+    let scene = scene();
+    let (kept, rebuilt) = kept_of_a_checkout_that_is_the_workspace(&scene);
+    write(&rebuilt.join(".env"), "TOKEN=committed\n");
+    let checkouts = [("app", rebuilt.as_path())];
+
+    let refused = super::restore(&scene.archive, &kept, &checkouts, false).unwrap();
+
+    assert_eq!(
+        refused.unwrap_err(),
+        IgnoredRefusal::Taken(vec!["app/.env".to_owned()])
+    );
+    assert_eq!(
+        fs::read_to_string(rebuilt.join(".env")).unwrap(),
+        "TOKEN=committed\n"
     );
 }
 

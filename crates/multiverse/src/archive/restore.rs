@@ -474,7 +474,12 @@ impl<B: Backend> Workspaces<B> {
         let mut written = Vec::new();
         if !archive.ignored.is_empty() {
             let data = archives.data_of(&archive.id);
-            match ignored::restore(&data, &archive.ignored, &archive.path, force)? {
+            let checkouts: Vec<(&str, &Path)> = workspace
+                .checkouts
+                .iter()
+                .map(|checkout| (checkout.name.as_str(), checkout.path.as_path()))
+                .collect();
+            match ignored::restore(&data, &archive.ignored, &checkouts, force)? {
                 Ok(restored) => {
                     written = restored.written;
                     lost.extend(restored.lost);

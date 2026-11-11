@@ -392,13 +392,18 @@ fn matches(entry: &IgnoredEntry, on_disk: &Path) -> Result<bool, Error> {
     Ok(digest == entry.digest)
 }
 
-/// Writes each of `kept` from the tar file in `dir` back below the
-/// workspace's directory `root`, with its permission bits, and makes the
-/// directories above it that do not exist. It checks every entry against
-/// the tar and the rebuilt workspace before it writes any. It refuses when
-/// the rebuilt workspace already holds a path, and when an entry is
-/// damaged, unless `force` is set, in which case it writes the whole
-/// entries and names the damaged ones as lost.
+/// Writes each of `kept` from the tar file in `dir` back into the rebuilt
+/// checkout that it was kept from, with its permission bits, and makes the
+/// directories above it that do not exist. `checkouts` names each rebuilt
+/// checkout's folder with its path. An entry's archived path is
+/// `<folder>/<path>`, and it is written at the path of the checkout
+/// `folder` joined with `<path>`, the place the archive read it from, which
+/// for an old workspace whose checkout is the workspace's directory itself
+/// is not below `<folder>`. It checks every entry against the tar and the
+/// rebuilt checkouts before it writes any. It refuses when a rebuilt
+/// checkout already holds a path, and when an entry is damaged or names no
+/// checkout, unless `force` is set, in which case it writes the whole
+/// entries and names the others as lost.
 ///
 /// # Errors
 ///
@@ -407,7 +412,7 @@ fn matches(entry: &IgnoredEntry, on_disk: &Path) -> Result<bool, Error> {
 pub(crate) fn restore(
     dir: &Path,
     kept: &[IgnoredEntry],
-    root: &Path,
+    checkouts: &[(&str, &Path)],
     force: bool,
 ) -> Result<Result<IgnoredRestored, IgnoredRefusal>, Error> {
     let tar = dir.join(IGNORED_TAR);
@@ -416,14 +421,14 @@ pub(crate) fn restore(
     let mut taken = Vec::new();
     let mut ready = Vec::new();
     for entry in kept {
-        let Some(relative) = safe_relative(&entry.path) else {
+        let Some((checkout, relative)) = resolve(checkouts, &entry.path) else {
             damaged.push(entry.path.clone());
             continue;
         };
-        if is_taken(root, &relative) {
+        if is_taken(checkout, &relative) {
             taken.push(entry.path.clone());
         } else if whole.contains(&entry.path) {
-            ready.push(entry);
+            ready.push((entry, checkout.join(&relative)));
         } else {
             damaged.push(entry.path.clone());
         }
@@ -434,11 +439,22 @@ pub(crate) fn restore(
     if !damaged.is_empty() && !force {
         return Ok(Err(IgnoredRefusal::Damaged(damaged)));
     }
-    write_back(&tar, &ready, root)?;
+    write_back(&tar, &ready)?;
     Ok(Ok(IgnoredRestored {
-        written: ready.iter().map(|entry| entry.path.clone()).collect(),
+        written: ready.iter().map(|(entry, _)| entry.path.clone()).collect(),
         lost: damaged,
     }))
+}
+
+/// Returns the path of the checkout among `checkouts` that the archived
+/// path `archived`, `<folder>/<path>`, names, with `<path>` as a relative
+/// path of plain names, or `None` when no checkout has its folder or
+/// `<path>` could leave the checkout.
+fn resolve<'a>(checkouts: &[(&str, &'a Path)], archived: &str) -> Option<(&'a Path, PathBuf)> {
+    checkouts.iter().find_map(|(folder, path)| {
+        let below = archived.strip_prefix(folder)?.strip_prefix('/')?;
+        safe_relative(below).map(|relative| (*path, relative))
+    })
 }
 
 /// Calls `visit` with each entry of the tar at `tar` that one of `kept`
@@ -513,18 +529,21 @@ fn whole_entries(
     Ok(whole)
 }
 
-/// Writes each of `ready`, whose entries in the tar at `tar` are whole,
-/// below `root`.
-fn write_back(tar: &Path, ready: &[&IgnoredEntry], root: &Path) -> Result<(), Error> {
-    let mut left: Vec<&str> = ready.iter().map(|entry| entry.path.as_str()).collect();
+/// Writes each of `ready`, whose entries in the tar at `tar` are whole, at
+/// the path it is paired with.
+fn write_back(tar: &Path, ready: &[(&IgnoredEntry, PathBuf)]) -> Result<(), Error> {
+    let mut left: Vec<(&str, &Path)> = ready
+        .iter()
+        .map(|(entry, to)| (entry.path.as_str(), to.as_path()))
+        .collect();
     each_entry(tar, kept_of(ready).as_slice(), |entry, found| {
-        let Some(at) = left.iter().position(|path| *path == entry.path) else {
+        let Some(at) = left.iter().position(|(path, _)| *path == entry.path) else {
             return Ok(());
         };
-        left.swap_remove(at);
-        write_entry(entry, &root.join(&entry.path), found)
+        let (_, to) = left.swap_remove(at);
+        write_entry(entry, to, found)
     })?;
-    if let Some(path) = left.first() {
+    if let Some((path, _)) = left.first() {
         // The tar changed between the check and the write.
         return Err(Error::StateUnreadable {
             path: tar.to_path_buf(),
@@ -537,9 +556,9 @@ fn write_back(tar: &Path, ready: &[&IgnoredEntry], root: &Path) -> Result<(), Er
     Ok(())
 }
 
-/// Returns a copy of each of `ready`.
-fn kept_of(ready: &[&IgnoredEntry]) -> Vec<IgnoredEntry> {
-    ready.iter().map(|entry| (*entry).clone()).collect()
+/// Returns a copy of the entry of each of `ready`.
+fn kept_of(ready: &[(&IgnoredEntry, PathBuf)]) -> Vec<IgnoredEntry> {
+    ready.iter().map(|(entry, _)| (*entry).clone()).collect()
 }
 
 /// Returns `path` as a relative path of plain names, or `None` when it is
