@@ -26,6 +26,8 @@ struct Log {
     admitted: Vec<String>,
     /// The directory and the label of each admission.
     asked: Vec<(PathBuf, String)>,
+    /// The workspace name of each admission.
+    workspaces: Vec<String>,
     /// The exit code of each end of a place.
     ended: Vec<Option<i32>>,
 }
@@ -101,6 +103,7 @@ impl Admission for Recording {
         log.admitted.push(asked.command.to_owned());
         log.asked
             .push((asked.cwd.to_path_buf(), asked.label.to_owned()));
+        log.workspaces.push(asked.workspace.to_string());
         if self.interrupt {
             asked.cancel.cancel();
         }
@@ -299,6 +302,18 @@ fn a_selection_of_containers_alone_asks_for_nothing() {
 
     assert_eq!(ended, BuildEnded::Passed);
     assert!(!world.dir.path().join("phase").join("grants").exists());
+}
+
+#[test]
+fn a_build_asks_the_admission_with_the_workspaces_name() {
+    let mut world = World::new();
+    let mut admission = Recording::default();
+    let runs = world.runs();
+
+    let ended = world.build(&runs, &process("api", "true", ""), &mut admission);
+
+    assert_eq!(ended, BuildEnded::Passed);
+    assert_eq!(admission.log.borrow().workspaces, ["triage"]);
 }
 
 #[test]

@@ -74,15 +74,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "basic-toml"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -275,11 +266,13 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crumbkit"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "745f4877c3d8feb29060f69dd616e046d612e63e13a28cdcf3315a6fdda95e19"
+checksum = "5da6bfc867208a12940c7e9f356e47ea04dc026eb2dddf2542160fa6b51268f3"
 dependencies = [
  "clap",
+ "clap_complete",
+ "crumbkit-derive",
  "humantime",
  "is-ai-agent",
  "rustix",
@@ -289,19 +282,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "crumbkit"
-version = "0.3.1"
+name = "crumbkit-derive"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5da6bfc867208a12940c7e9f356e47ea04dc026eb2dddf2542160fa6b51268f3"
+checksum = "4add976cc04a7ee23ffb377bf672fcc65c8ba9903bfa4a520ab531ac141f4935"
 dependencies = [
- "clap",
- "clap_complete",
- "humantime",
- "is-ai-agent",
- "rustix",
- "schemars 1.2.3",
- "serde",
- "serde_json",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -310,19 +298,19 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a412357d2a5a502bf4be116a79fd6cb10a4313fd923b976dd895f0c279b09fa8"
 dependencies = [
- "crumbkit 0.3.1",
+ "crumbkit",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "crumbkit-skills"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6b184f9079e0a2a2c268eb231283e0322cea551bee1f47e7d6d99a19e11f96"
+checksum = "504fa88ddbe2b21399f5468ef68b28ee0096e10f7644ba936aea83423f1939b2"
 dependencies = [
  "clap",
- "crumbkit 0.3.1",
+ "crumbkit",
  "schemars 1.2.3",
  "serde",
 ]
@@ -334,7 +322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53fca87575d9dc39c9e16813c3ddb25cb61c4b3ec9f3b39b7f9d20b96040408a"
 dependencies = [
  "clap",
- "crumbkit 0.3.1",
+ "crumbkit",
  "crumbkit-markdown",
  "serde",
  "serde_json",
@@ -348,7 +336,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a4b2a1adde09a095e014b8360a96129b579ed01266a4f537921a6b07d802e8a"
 dependencies = [
  "clap",
- "crumbkit 0.3.1",
+ "crumbkit",
  "etcetera",
  "getrandom 0.4.3",
  "humantime",
@@ -380,18 +368,20 @@ dependencies = [
 
 [[package]]
 name = "deadband"
-version = "0.1.0"
-source = "git+https://github.com/crumbkit/deadband?tag=v0.1.0#3111577f794b4ecd64e3ddeaf0a26d9aee9514d7"
+version = "0.2.0"
+source = "git+https://github.com/crumbkit/deadband?tag=v0.2.0#48beff30ca8e1555c47931b756a20a6aed03f424"
 dependencies = [
- "basic-toml",
  "clap",
- "crumbkit 0.1.0",
+ "crumbkit",
+ "crumbkit-skills",
  "humantime",
  "libc",
+ "regex-lite",
  "rustix",
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -908,7 +898,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "multiverse"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "mxv-phase",
@@ -925,10 +915,10 @@ dependencies = [
 
 [[package]]
 name = "mxv"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "clap",
- "crumbkit 0.3.1",
+ "crumbkit",
  "crumbkit-skills",
  "crumbkit-test",
  "crumbkit-usage",
@@ -947,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "mxv-phase"
-version = "0.0.0"
+version = "0.1.1"
 dependencies = [
  "hmac",
  "libc",
@@ -1175,6 +1165,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"
@@ -1432,9 +1428,9 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
-version = "1.1.2"
+version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7523beb55eece201a2356bee0bbca0d1ab466c14c07703b2e0ee6d42cb0c2c"
+checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
 dependencies = [
  "serde_core",
 ]
@@ -1784,9 +1780,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.2.0+spec-1.1.0"
+version = "1.2.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5ffcdf8f50436dbbfd675c1fe1b8e0854f42b7defea8584bdebe1aee900e561"
+checksum = "d5755c51863cdac711f1956baf8eb9588e060755f7d3c4c979e70ea1e1f32cd7"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -1799,9 +1795,9 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
+checksum = "173f25c883cd2176a2d8212155638c0a60d484a9d84546d270866f40f56b6e49"
 dependencies = [
  "serde_core",
 ]

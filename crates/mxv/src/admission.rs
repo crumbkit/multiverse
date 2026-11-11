@@ -142,7 +142,11 @@ impl Deadband {
                 cores: std::thread::available_parallelism().ok(),
                 label: asked.label,
                 command: cut(asked.command),
+                workspace: Some(asked.workspace.as_str()),
                 lane: None,
+                // The daemon does not watch the job's process tree for
+                // stuck jobs. Passing mxv's notices would turn that on.
+                notices: None,
             },
             &mut crate::notice,
         )

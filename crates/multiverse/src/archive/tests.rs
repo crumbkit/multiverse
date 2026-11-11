@@ -606,7 +606,40 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
     assert_eq!(setup.head(), commit, "{step}");
 }
 
-const RESTORE_STEPS: [&str; 4] = ["mirrors", "directory", "checkout:app", "root"];
+const RESTORE_STEPS: [&str; 5] = ["mirrors", "directory", "checkout:app", "root", "marker"];
+
+#[test]
+fn archive_does_not_count_the_marker_as_an_extra_entry_and_restore_writes_it_again() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let setup = setup(kind);
+        setup.create();
+        let marker = setup.root.join("triage").join(crate::marker::MARKER_FILE);
+        assert!(marker.is_file(), "{kind:?}: new wrote no marker");
+
+        let archive = setup.archive();
+
+        assert_eq!(archive.root, [], "{kind:?}");
+        assert!(!setup.root.join("triage").exists(), "{kind:?}");
+        setup.restore();
+        let metadata = fs::symlink_metadata(&marker).unwrap();
+        assert!(metadata.is_file(), "{kind:?}");
+        assert_eq!(metadata.len(), 0, "{kind:?}");
+    }
+}
+
+#[test]
+fn a_marker_that_holds_bytes_is_archived_as_the_persons_file_and_comes_back() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let marker = setup.root.join("triage").join(crate::marker::MARKER_FILE);
+    write(&marker, "a person's note\n");
+
+    let archive = setup.archive();
+
+    assert_eq!(archive.root.len(), 1, "{:?}", archive.root);
+    setup.restore();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "a person's note\n");
+}
 
 #[test]
 fn a_worktree_restore_stopped_after_each_step_leaves_the_archive_whole() {

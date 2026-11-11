@@ -337,7 +337,9 @@ fn run_in_process(
     // takes it and lets it go at once, so it waits for them here, where
     // Ctrl-C still ends mxv, and builds the plan from the ports that they
     // stored.
-    drop(context.lock()?);
+    let lock = context.lock()?;
+    context.mark(&lock);
+    drop(lock);
     let manifest = processes::required_manifest(&context.workspace)?;
     let workspace = context.workspace.name.to_string();
     let target = context

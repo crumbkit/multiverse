@@ -111,13 +111,18 @@ impl Repo {
 /// The names in a workspace's directory that mxv writes itself, which no
 /// checkout's folder may take. File systems such as macOS's default ignore
 /// case, so they are compared without it.
-const RESERVED_FOLDERS: &[&str] = &[crate::record::AGENTS_FILE, crate::manifest::MANIFEST_FILE];
+const RESERVED_FOLDERS: &[&str] = &[
+    crate::record::AGENTS_FILE,
+    crate::manifest::MANIFEST_FILE,
+    crate::marker::MARKER_FILE,
+];
 
 /// Checks `text`, a folder name that the person gives a checkout, and
 /// returns it. A folder name follows the rule of a workspace name: 1 to
 /// [`crate::MOST_NAME_BYTES`] lowercase ASCII letters, digits, `-`, `_`
 /// and `.`, starting with a letter or a digit, without `..`, and not
-/// ending with `.` or `.lock`. It may not be `AGENTS.md` or `mxv.toml`.
+/// ending with `.` or `.lock`. It may not be `AGENTS.md`, `mxv.toml` or
+/// `.deadband-workspace`.
 ///
 /// # Errors
 ///
@@ -810,6 +815,8 @@ pub(crate) struct Made {
     pub(crate) branches: Vec<Option<String>>,
     /// Whether the run wrote `AGENTS.md`.
     pub(crate) agents: bool,
+    /// Whether the run wrote the marker `.deadband-workspace`.
+    pub(crate) marker: bool,
     /// Whether the run wrote the workspace manifest.
     pub(crate) manifest: bool,
     /// The number of checkouts, in the record's order, whose clone the run
@@ -1556,6 +1563,9 @@ impl<B: Backend> Workspaces<B> {
         };
         workspace.ports = ports_after_add(before, merged.as_ref());
         self.write_agents(workspace)?;
+        // A workspace made before mxv wrote markers gains one here. The
+        // undo of a failed `add` keeps it, because the workspace stays.
+        crate::marker::ensure(&workspace.path)?;
         let path = workspace.manifest_file();
         let previous = manifest.map(|_| fs::read(&path).ok());
         if let Some(text) = manifest {
@@ -1734,9 +1744,19 @@ impl<B: Backend> Workspaces<B> {
         }
         made.agents = true;
         self.write_agents(workspace)?;
+        self.write_marker(workspace, made)?;
         write_manifest(workspace, manifest, made)?;
         self.store.update(workspace)?;
         Ok(Ok(()))
+    }
+
+    /// Writes the marker `.deadband-workspace` in the directory of
+    /// `workspace`, which the run made, and notes it in `made`, so
+    /// [`Workspaces::undo`] deletes it with the directory.
+    pub(crate) fn write_marker(&self, workspace: &Workspace, made: &mut Made) -> Result<(), Error> {
+        made.marker = true;
+        crate::marker::ensure(&workspace.path)?;
+        (self.checkpoint)("marker")
     }
 
     /// Makes the clone of `checkout` from its mirror, fetched from `url`,
@@ -1938,6 +1958,7 @@ impl<B: Backend> Workspaces<B> {
         }
         made.agents = true;
         self.write_agents(workspace)?;
+        self.write_marker(workspace, made)?;
         write_manifest(workspace, manifest, made)?;
         self.store.update(workspace)?;
         Ok(Making::Done)
@@ -1946,8 +1967,8 @@ impl<B: Backend> Workspaces<B> {
     /// Deletes what a failed [`Workspaces::make`] created, as `made`
     /// records it: each checkout it started, even one that `worktree add`
     /// left locked or half made, each branch it created while that branch
-    /// still points where the run created it, its `AGENTS.md` and its
-    /// directory. A branch that another process created is never touched.
+    /// still points where the run created it, its `AGENTS.md`, its marker
+    /// and its directory. A branch that another process created is never touched.
     /// Each step is best effort, because the caller reports the failure
     /// that stopped the creation. The record is deleted only when every
     /// step succeeded, so `mxv remove` can finish a cleanup that failed.
@@ -1992,6 +2013,9 @@ impl<B: Backend> Workspaces<B> {
                 Ok(()) => true,
                 Err(error) => error.kind() == io::ErrorKind::NotFound,
             };
+        }
+        if made.marker {
+            clean &= crate::marker::delete(&workspace.path).is_ok();
         }
         if made.directory {
             clean &= fs::remove_dir(&workspace.path).is_ok();
@@ -2449,6 +2473,7 @@ impl<B: Backend> Workspaces<B> {
                 });
             }
         }
+        crate::marker::delete(&removal.workspace.path)?;
         removal.directory = match fs::remove_dir(&removal.workspace.path) {
             Ok(()) => Fate::Removed,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Fate::Missing,
