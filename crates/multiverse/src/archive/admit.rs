@@ -1,7 +1,8 @@
-//! Deciding whether a workspace can be archived, and what the archive would
-//! keep and lose.
+//! Deciding whether a workspace can be archived, what the archive keeps,
+//! and what it cannot represent.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,10 +12,10 @@ use phase::random::RANDOM_DEVICE;
 use crate::archive::record::now;
 use crate::archive::root::{self, RootEntry, RootKind, Scanned};
 use crate::archive::{
-    ARCHIVE_VERSION, Archive, ArchiveState, ArchivedCheckout, Archives, DIGEST_LENGTH, RECORD_FILE,
-    pin_ref,
+    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveState, ArchivedCheckout, Archives,
+    DIGEST_LENGTH, Kept, KeptStash, RECORD_FILE, pin_ref,
 };
-use crate::backend::{Backend, Concealed, Head};
+use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disposable::DisposableSet;
 use crate::error::Error;
 use crate::mirror::recorded_origin;
@@ -24,118 +25,250 @@ use crate::store::MOST_RECORD_BYTES;
 use crate::workspaces::{Allow, CheckoutRemoval, Fate, Mode, Removal, RemovalPlan, Workspaces};
 
 /// What the person lets `mxv archive` do.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ArchiveOptions {
-    /// Commit the uncommitted changes and untracked files onto the branch
-    /// first.
-    pub wip: bool,
     /// Lose what the archive cannot keep, and list it in the record.
     pub force: bool,
     /// Whether any of the workspace's containers has run.
     pub containers_ran: bool,
+    /// The largest file of a checkout's uncommitted work that the archive
+    /// keeps, in bytes. A larger file cannot be kept.
+    pub max_file: u64,
+}
+
+impl Default for ArchiveOptions {
+    fn default() -> Self {
+        Self::new(false, false)
+    }
 }
 
 impl ArchiveOptions {
-    /// Returns the options with `--wip` and `--force` as given.
+    /// Returns the options with `--force` as given, and the largest file
+    /// [`ARCHIVE_MAX_FILE`].
     #[must_use]
-    pub const fn new(wip: bool, force: bool, containers_ran: bool) -> Self {
+    pub const fn new(force: bool, containers_ran: bool) -> Self {
         Self {
-            wip,
             force,
             containers_ran,
+            max_file: ARCHIVE_MAX_FILE,
+        }
+    }
+
+    /// Returns the options with the largest file that the archive keeps
+    /// set to `bytes`.
+    #[must_use]
+    pub const fn with_max_file(mut self, bytes: u64) -> Self {
+        self.max_file = bytes;
+        self
+    }
+}
+
+/// What a checkout or the workspace's directory holds that an archive
+/// cannot represent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnkeptKind {
+    /// A git operation stands paused, in the checkout or in a submodule.
+    Paused {
+        /// The submodule's path with `/` after it, or empty for the
+        /// checkout itself.
+        at: String,
+        /// The operation.
+        operation: Operation,
+    },
+    /// A repository inside the checkout that git does not track.
+    Nested {
+        /// Its path, relative to the checkout, with `/` after it.
+        path: String,
+    },
+    /// Work of an initialised submodule, or of the git directory of a
+    /// submodule whose files are gone: a change, an ignored path, a stash
+    /// or an unpushed commit.
+    Submodule {
+        /// The submodule's path, relative to the checkout.
+        path: String,
+        /// The work, as `git status` prints a change, or a commit.
+        work: String,
+    },
+    /// A file of the uncommitted work that is larger than the limit.
+    TooLarge {
+        /// The file, relative to the checkout.
+        path: String,
+        /// Its size in bytes.
+        bytes: u64,
+        /// The limit in bytes.
+        most: u64,
+        /// Whether git does not track the file.
+        untracked: bool,
+    },
+    /// A file marked skip-worktree or assume-unchanged with local edits.
+    Hidden {
+        /// The file, relative to the checkout.
+        path: String,
+        /// Whether it is marked skip-worktree, or else assume-unchanged.
+        skip_worktree: bool,
+    },
+    /// A file below the checkout that no listing of git accounts for, such
+    /// as a file in a submodule directory that is not initialised.
+    Unlisted {
+        /// The file, relative to the checkout.
+        path: String,
+    },
+    /// An ignored path outside the disposable set, such as `.env`.
+    Ignored {
+        /// The path, relative to the checkout.
+        path: String,
+    },
+    /// An entry of the workspace's directory that mxv cannot copy, such as
+    /// a socket.
+    Root {
+        /// The entry, relative to the workspace's directory.
+        entry: String,
+    },
+}
+
+/// One thing that an archive cannot keep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Unkept {
+    /// The checkout's folder, or `root` for the workspace's directory.
+    pub folder: String,
+    /// The checkout's directory, or the workspace's directory for `root`.
+    pub dir: PathBuf,
+    /// What it is.
+    pub kind: UnkeptKind,
+}
+
+impl fmt::Display for Unkept {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: ", self.folder)?;
+        match &self.kind {
+            UnkeptKind::Paused { at, operation } => {
+                let what = match operation {
+                    Operation::Merge => "a merge",
+                    Operation::Rebase => "a rebase",
+                    Operation::CherryPick => "a cherry-pick",
+                    Operation::Revert => "a revert",
+                    Operation::Sequence => "a sequence of cherry-picks or reverts",
+                    Operation::Bisect => "a bisect",
+                };
+                match at.trim_end_matches('/') {
+                    "" => write!(formatter, "{what} is paused"),
+                    submodule => {
+                        write!(formatter, "{what} is paused in the submodule {submodule}")
+                    }
+                }
+            }
+            UnkeptKind::Nested { path } => {
+                write!(formatter, "the repository {path}, which git does not track")
+            }
+            UnkeptKind::Submodule { path, work } => {
+                write!(formatter, "the submodule {path} holds {work}")
+            }
+            UnkeptKind::TooLarge {
+                path, bytes, most, ..
+            } => write!(
+                formatter,
+                "the file {path} is {bytes} bytes, over the limit of {most} bytes"
+            ),
+            UnkeptKind::Hidden {
+                path,
+                skip_worktree,
+            } => {
+                let flag = if *skip_worktree {
+                    "skip-worktree"
+                } else {
+                    "assume-unchanged"
+                };
+                write!(
+                    formatter,
+                    "the file {path} is marked {flag} and has local edits"
+                )
+            }
+            UnkeptKind::Unlisted { path } => {
+                write!(formatter, "git does not list the file {path}")
+            }
+            UnkeptKind::Ignored { path } => write!(formatter, "the ignored path {path}"),
+            UnkeptKind::Root { entry } => write!(formatter, "{entry}"),
         }
     }
 }
 
-/// Everything in a workspace that an archive cannot keep, unless the person
-/// says what to do about it. Each item has the checkout's folder in front.
+/// Everything in a workspace that an archive cannot represent, which
+/// refuses the archive unless the person passes `--force` to lose it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Unsaved {
-    /// Each uncommitted change or untracked path, as `git status` prints it.
-    pub changes: Vec<String>,
-    /// Each ignored path outside the disposable set, such as `.env`.
-    pub ignored: Vec<String>,
-    /// The commit of each stash entry of a clone.
-    pub stashes: Vec<String>,
-    /// Each commit of a clone that `origin` does not hold and `HEAD` does
-    /// not reach, which no pin would keep.
-    pub commits: Vec<String>,
-    /// Each entry of the workspace's directory that mxv cannot copy, such
-    /// as a socket.
-    pub root: Vec<String>,
-    /// Each repository inside a checkout that git does not track.
-    pub nested: Vec<String>,
-    /// Each file marked skip-worktree or assume-unchanged that has local
-    /// edits, which `git status` does not show.
-    pub hidden: Vec<String>,
-    /// The changes, ignored files, stashes and unpushed commits of each
-    /// submodule, with the submodule's path after the folder.
-    pub submodules: Vec<String>,
-    /// Each file below a checkout that no listing of git accounts for, such
-    /// as a file in a submodule directory that is not initialised.
-    pub unlisted: Vec<String>,
-    /// Each git operation that stands paused, such as a merge, whose state
-    /// the checkout's git directory holds.
-    pub paused: Vec<String>,
+pub struct Unkeepable {
+    /// Each thing, in the order of the checkouts.
+    pub items: Vec<Unkept>,
 }
 
-impl Unsaved {
-    /// Adds what `found` says about the checkout at `checkout`, in `folder`.
-    /// A nested repository that `git status` also lists is named once.
+impl Unkeepable {
+    /// Adds `kind` of the checkout in `folder` at `dir`.
+    fn push(&mut self, folder: &str, dir: &Path, kind: UnkeptKind) {
+        self.items.push(Unkept {
+            folder: folder.to_owned(),
+            dir: dir.to_path_buf(),
+            kind,
+        });
+    }
+
+    /// Adds what `found` says about the checkout at `checkout`, in
+    /// `folder`.
     fn add_concealed(&mut self, folder: &str, checkout: &Path, found: &Concealed) {
-        let named = |item: &String| format!("{folder}: {item}");
         for path in &found.nested {
-            let listed = format!("{folder}: ?? {path}");
-            self.changes.retain(|item| *item != listed);
+            self.push(folder, checkout, UnkeptKind::Nested { path: path.clone() });
         }
-        self.nested.extend(found.nested.iter().map(named));
-        self.hidden.extend(found.hidden.iter().map(named));
-        self.submodules
-            .extend(submodule_items(checkout, found).iter().map(named));
-        self.unlisted.extend(found.unlisted.iter().map(named));
-        self.paused.extend(found.paused.iter().map(named));
-        self.commits.extend(found.referenced.iter().map(named));
-    }
-
-    /// Returns every item in one list.
-    #[must_use]
-    pub fn all(&self) -> Vec<String> {
-        let mut all = self.changes.clone();
-        all.extend(self.ignored.iter().cloned());
-        all.extend(self.stashes.iter().cloned());
-        all.extend(self.commits.iter().cloned());
-        all.extend(self.root.iter().cloned());
-        all.extend(self.nested.iter().cloned());
-        all.extend(self.hidden.iter().cloned());
-        all.extend(self.submodules.iter().cloned());
-        all.extend(self.unlisted.iter().cloned());
-        all.extend(self.paused.iter().cloned());
-        all
-    }
-
-    /// Reports whether `--wip` can save everything that is listed. A commit
-    /// would store a nested repository or a submodule as a commit id without
-    /// its files, it leaves a hidden edit and a file that git does not list
-    /// out, and it does not keep a paused git operation.
-    #[must_use]
-    pub fn wip_saves_all(&self) -> bool {
-        self.ignored.is_empty()
-            && self.stashes.is_empty()
-            && self.commits.is_empty()
-            && self.root.is_empty()
-            && self.nested.is_empty()
-            && self.hidden.is_empty()
-            && self.submodules.is_empty()
-            && self.unlisted.is_empty()
-            && self.paused.is_empty()
+        for hidden in &found.hidden {
+            self.push(
+                folder,
+                checkout,
+                UnkeptKind::Hidden {
+                    path: hidden.path.clone(),
+                    skip_worktree: hidden.skip_worktree,
+                },
+            );
+        }
+        for (path, work) in submodule_items(checkout, found) {
+            self.push(folder, checkout, UnkeptKind::Submodule { path, work });
+        }
+        for path in &found.unlisted {
+            self.push(
+                folder,
+                checkout,
+                UnkeptKind::Unlisted { path: path.clone() },
+            );
+        }
+        for paused in &found.paused {
+            self.push(
+                folder,
+                checkout,
+                UnkeptKind::Paused {
+                    at: paused.at.clone(),
+                    operation: paused.operation,
+                },
+            );
+        }
     }
 
     /// Reports whether nothing is listed.
-    fn is_empty(&self) -> bool {
-        self.changes.is_empty() && self.wip_saves_all()
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
+}
+
+/// The uncommitted work of one checkout, which an archive keeps as the
+/// commits `wip-index` and `wip`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Uncommitted {
+    /// The checkout's folder.
+    pub folder: String,
+    /// Each change and untracked path, as `git status --porcelain` prints
+    /// it, such as `?? notes.md`.
+    pub changes: Vec<String>,
 }
 
 /// Why `mxv archive` left a workspace as it was.
@@ -161,8 +294,8 @@ pub enum ArchiveRefusal {
         /// Why, in a sentence.
         reason: String,
     },
-    /// The workspace holds work that the archive cannot keep.
-    Unsaved(Box<Unsaved>),
+    /// The workspace holds work that the archive cannot represent.
+    Unkeepable(Box<Unkeepable>),
     /// A checkout differs from what the archive admitted. The checkout is
     /// back in its place and the record stays.
     SourceChanged {
@@ -192,17 +325,21 @@ pub struct ArchivePlan {
     pub id: String,
     /// An earlier run's record, when this run finishes that archive.
     pub resuming: Option<Archive>,
-    /// Each checkout as the archive would record it.
+    /// Each checkout as the archive would record it. The commits of the
+    /// uncommitted work are written later, so a checkout that the archive
+    /// still retires has none yet.
     pub checkouts: Vec<ArchivedCheckout>,
     /// What the archive would lose, with `--force`.
     pub lost: Vec<String>,
-    /// What `--wip` would commit.
-    pub wip: Vec<String>,
+    /// The uncommitted work of each checkout that the archive retires and
+    /// keeps, in the order of the checkouts.
+    pub uncommitted: Vec<Uncommitted>,
     /// The extra entries of the workspace's directory that the archive
     /// copies, without digests.
     pub root: Vec<String>,
     /// Why the list of commits on this machine may be incomplete, such as
-    /// an origin that could not be fetched.
+    /// an origin that could not be fetched, and what the archive loses
+    /// without refusing, such as a clone's hooks.
     pub warnings: Vec<String>,
 }
 
@@ -227,11 +364,12 @@ enum Subject {
 }
 
 /// Returns the work of each submodule in `found`, of the checkout at
-/// `checkout`, one item for each, with the submodule's path in front. An
-/// ignored path that the built-in disposable set names is a build's output
-/// and does not count, unless it holds what a build does not make, such as
-/// a repository.
-pub(super) fn submodule_items(checkout: &Path, found: &Concealed) -> Vec<String> {
+/// `checkout`, as the submodule's path and the work, one item for each.
+/// An ignored path that the built-in disposable set names is a build's
+/// output and does not count, unless it holds what a build does not make,
+/// such as a repository. A commit that only another reference of a
+/// submodule's git directory keeps counts as work of `.git/modules`.
+pub(super) fn submodule_items(checkout: &Path, found: &Concealed) -> Vec<(String, String)> {
     let disposable = DisposableSet::built_in();
     let mut items = Vec::new();
     for work in found.submodules.iter().chain(&found.orphaned) {
@@ -245,9 +383,15 @@ pub(super) fn submodule_items(checkout: &Path, found: &Concealed) -> Vec<String>
                 .into_iter()
                 .flatten()
                 .chain(ignored)
-                .map(|item| format!("{}: {item}", work.path)),
+                .map(|item| (work.path.clone(), item.clone())),
         );
     }
+    items.extend(
+        found
+            .module_referenced
+            .iter()
+            .map(|item| (".git/modules".to_owned(), item.clone())),
+    );
     items
 }
 
@@ -297,6 +441,15 @@ fn folder_of(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default()
+}
+
+/// Returns the items of `listed`, each `<folder>: <item>`, whose folder is
+/// `folder`, without the folder.
+fn of_folder<'a>(listed: &'a [String], folder: &'a str) -> impl Iterator<Item = &'a str> {
+    listed.iter().filter_map(move |item| {
+        item.strip_prefix(folder)
+            .and_then(|rest| rest.strip_prefix(": "))
+    })
 }
 
 impl<B: Backend> Workspaces<B> {
@@ -365,19 +518,12 @@ impl<B: Backend> Workspaces<B> {
                 .as_str()
                 .to_owned(),
         };
-        let mut unsaved = Unsaved {
-            changes: removal
-                .discarded
-                .iter()
-                .filter(|item| !removal.ignored.contains(item))
-                .cloned()
-                .collect(),
-            ignored: removal.ignored.clone(),
-            ..Unsaved::default()
-        };
+        let mut unkeepable = Unkeepable::default();
+        let mut uncommitted = Vec::new();
         let mut checkouts = Vec::new();
         for planned in &removal.checkouts {
             let folder = planned.checkout.name.as_str();
+            let path = &planned.checkout.path;
             let earlier = resuming
                 .as_ref()
                 .and_then(|archive| archive.checkouts.iter().find(|kept| kept.folder == folder));
@@ -396,11 +542,11 @@ impl<B: Backend> Workspaces<B> {
                     "it has no .git, because an earlier removal stopped partway",
                 ));
             }
-            let head = self.backend.head(&planned.checkout.path)?;
+            let head = self.backend.head(path)?;
             let Some(commit) = head.commit.clone() else {
                 return Ok(unusable(folder, "its HEAD names no commit"));
             };
-            let concealed = self.backend.concealed(&planned.checkout.path)?;
+            let concealed = self.backend.concealed(path)?;
             if workspace.kind == WorkspaceKind::Worktree
                 && let Some(submodule) = concealed.submodules.first()
             {
@@ -412,47 +558,45 @@ impl<B: Backend> Workspaces<B> {
                     ),
                 ));
             }
-            unsaved.add_concealed(folder, &planned.checkout.path, &concealed);
+            uncommitted.push(self.scan_checkout(
+                &removal,
+                planned,
+                &concealed,
+                options.max_file,
+                &mut unkeepable,
+            )?);
             if refresh {
-                warnings.extend(self.unkept_names(planned, head.branch.as_deref())?);
+                warnings.extend(self.unkept_names(planned)?);
             }
-            let local_only = self
-                .backend
-                .local_only_commits(&planned.checkout.path, "HEAD")?;
-            unsaved.commits.extend(
-                planned
-                    .lost
-                    .iter()
-                    .filter(|commit| !local_only.contains(commit))
-                    .map(|commit| format!("{folder}: {commit}")),
-            );
-            unsaved.stashes.extend(
-                planned
-                    .stashes
-                    .iter()
-                    .map(|commit| format!("{folder}: {commit}")),
-            );
-            checkouts.push(self.archived(planned, head, commit, local_only, &id)?);
+            let local_only = self.backend.local_only_commits(path, "HEAD")?;
+            let kept = self.kept(workspace.kind, planned, head.branch.as_deref())?;
+            checkouts.push(self.archived(planned, head, commit, local_only, kept, &id)?);
         }
         let generated = self.generated_agents(&workspace)?;
         let scanned = root::scan(&workspace, &generated)?;
         if let Some(refused) = refuse_root(&workspace, &scanned) {
             return Ok(refused);
         }
-        unsaved
-            .root
-            .extend(scanned.special.iter().map(root::lost_name));
-        if !options.force && !unsaved.is_empty() && !(options.wip && unsaved.wip_saves_all()) {
-            return Ok(ArchivePlanned::Refused(ArchiveRefusal::Unsaved(Box::new(
-                unsaved,
-            ))));
+        for special in &scanned.special {
+            unkeepable.push(
+                "root",
+                &workspace.path,
+                UnkeptKind::Root {
+                    entry: special.name.clone(),
+                },
+            );
         }
-        let (lost, wip) = if options.force {
-            let mut lost = unsaved.all();
+        if !options.force && !unkeepable.is_empty() {
+            return Ok(ArchivePlanned::Refused(ArchiveRefusal::Unkeepable(
+                Box::new(unkeepable),
+            )));
+        }
+        let lost = if options.force {
+            let mut lost: Vec<String> = unkeepable.items.iter().map(Unkept::to_string).collect();
             lost.extend(removal.manifest.iter().cloned());
-            (lost, Vec::new())
+            lost
         } else {
-            (Vec::new(), unsaved.changes)
+            Vec::new()
         };
         let plan = ArchivePlan {
             removal,
@@ -461,7 +605,7 @@ impl<B: Backend> Workspaces<B> {
             resuming,
             checkouts,
             lost,
-            wip,
+            uncommitted,
             root: scanned.paths(),
             warnings,
         };
@@ -473,6 +617,127 @@ impl<B: Backend> Workspaces<B> {
             }));
         }
         Ok(ArchivePlanned::Ready(Box::new(plan)))
+    }
+
+    /// Adds to `unkeepable` what the checkout that `planned` retires holds
+    /// and an archive cannot keep: its ignored files, what `concealed`
+    /// found, and each file over `max_file` bytes. Returns the checkout's
+    /// uncommitted changes that the archive keeps, which leave out the
+    /// ignored files and the nested repositories.
+    fn scan_checkout(
+        &self,
+        removal: &Removal,
+        planned: &CheckoutRemoval,
+        concealed: &Concealed,
+        max_file: u64,
+        unkeepable: &mut Unkeepable,
+    ) -> Result<Uncommitted, Error> {
+        let folder = planned.checkout.name.as_str();
+        let path = &planned.checkout.path;
+        for ignored in of_folder(&removal.ignored, folder) {
+            unkeepable.push(
+                folder,
+                path,
+                UnkeptKind::Ignored {
+                    path: ignored.to_owned(),
+                },
+            );
+        }
+        unkeepable.add_concealed(folder, path, concealed);
+        for large in self.backend.large_files(path, max_file)? {
+            unkeepable.push(
+                folder,
+                path,
+                UnkeptKind::TooLarge {
+                    path: large.path,
+                    bytes: large.bytes,
+                    most: max_file,
+                    untracked: large.untracked,
+                },
+            );
+        }
+        let ignored: Vec<&str> = of_folder(&removal.ignored, folder).collect();
+        let nested: Vec<String> = concealed
+            .nested
+            .iter()
+            .map(|path| format!("?? {path}"))
+            .collect();
+        Ok(Uncommitted {
+            folder: folder.to_owned(),
+            changes: of_folder(&removal.discarded, folder)
+                .filter(|item| !ignored.contains(item) && !nested.iter().any(|n| n == item))
+                .map(str::to_owned)
+                .collect(),
+        })
+    }
+
+    /// Returns what the archive keeps of the checkout that `planned`
+    /// retires besides `HEAD`, whose branch is `current`, without its
+    /// uncommitted work, which the archive commits later. A worktree's
+    /// stashes, branches and tags stay in its repository, so only its
+    /// per-worktree references and the commits that only the reflog of its
+    /// detached `HEAD` holds are kept.
+    fn kept(
+        &self,
+        kind: WorkspaceKind,
+        planned: &CheckoutRemoval,
+        current: Option<&str>,
+    ) -> Result<Kept, Error> {
+        let path = &planned.checkout.path;
+        let own = RefHolder::Repository(path);
+        let mut kept = Kept {
+            worktree: self
+                .backend
+                .refs_under(own, "refs/worktree/")?
+                .into_iter()
+                .collect(),
+            ..Kept::default()
+        };
+        if kind == WorkspaceKind::Clone {
+            kept.stashes = self
+                .backend
+                .stash_entries(path)?
+                .into_iter()
+                .rev()
+                .map(|entry| KeptStash {
+                    commit: entry.commit,
+                    message: entry.message,
+                })
+                .collect();
+            // A branch that names what origin's branch of the same name
+            // names, such as the default branch that the clone started
+            // with, comes back with a rebuilt clone, so only the others are
+            // kept.
+            let mut held_heads = self.backend.refs_under(own, "refs/remotes/origin/")?;
+            let mut held: Vec<(String, String)> =
+                self.backend.refs_under(own, "refs/mxv/origin/tags/")?;
+            if let Some(mirror) = planned
+                .checkout
+                .mirror
+                .as_deref()
+                .filter(|dir| dir.is_dir())
+            {
+                let mirror = RefHolder::Mirror(mirror);
+                held_heads.extend(self.backend.refs_under(mirror, "refs/heads/")?);
+                held.extend(self.backend.refs_under(mirror, "refs/tags/")?);
+            }
+            kept.branches = self
+                .backend
+                .refs_under(own, "refs/heads/")?
+                .into_iter()
+                .filter(|branch| Some(branch.0.as_str()) != current && !held_heads.contains(branch))
+                .collect();
+            kept.tags = self
+                .backend
+                .refs_under(own, "refs/tags/")?
+                .into_iter()
+                .filter(|tag| !held.contains(tag))
+                .collect();
+        }
+        kept.orphans =
+            self.backend
+                .orphans(path, &kept.references(), kind == WorkspaceKind::Worktree)?;
+        Ok(kept)
     }
 
     /// Returns the refusal of a checkout of `workspace` whose `HEAD` names
@@ -490,29 +755,15 @@ impl<B: Backend> Workspaces<B> {
             .map(|checkout| unusable(&checkout.name, "its HEAD names no commit"))
     }
 
-    /// Returns a warning for each kind of name in the clone that `planned`
-    /// retires which its mirror does not hold, so a rebuilt clone lacks it.
-    /// `current` is the branch that the record keeps.
-    fn unkept_names(
-        &self,
-        planned: &CheckoutRemoval,
-        current: Option<&str>,
-    ) -> Result<Vec<String>, Error> {
+    /// Returns a warning for each kind of thing in the clone that `planned`
+    /// retires which neither the archive keeps nor a rebuilt clone has.
+    fn unkept_names(&self, planned: &CheckoutRemoval) -> Result<Vec<String>, Error> {
         let checkout = &planned.checkout;
-        let Some(mirror) = &checkout.mirror else {
+        if checkout.mirror.is_none() {
             return Ok(Vec::new());
-        };
-        let names = self
-            .backend
-            .local_names(&checkout.path, mirror, &checkout.source)?;
-        let branches: Vec<String> = names
-            .branches
-            .into_iter()
-            .filter(|branch| Some(branch.as_str()) != current)
-            .collect();
-        Ok([
-            ("branches", branches),
-            ("tags", names.tags),
+        }
+        let names = self.backend.local_names(&checkout.path, &checkout.source)?;
+        let mut warnings: Vec<String> = [
             ("remotes", names.remotes),
             ("hooks", names.hooks),
             ("configuration keys", names.config),
@@ -527,7 +778,14 @@ impl<B: Backend> Workspaces<B> {
                 listed.join(", ")
             )
         })
-        .collect())
+        .collect();
+        warnings.extend(names.worktrees.iter().map(|worktree| {
+            format!(
+                "the worktree {worktree} was made from the clone {}, and it stops working when mxv deletes the clone",
+                checkout.name
+            )
+        }));
+        Ok(warnings)
     }
 
     /// Returns what the record of the workspace `name` and its archive say
@@ -605,13 +863,15 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Returns the record of the checkout that `planned` retires, at
-    /// `commit`, the commit of its `head`, with the pin of the archive `id`.
+    /// `commit`, the commit of its `head`, with the pin of the archive `id`
+    /// and what the archive `kept` besides.
     fn archived(
         &self,
         planned: &CheckoutRemoval,
         head: Head,
         commit: String,
         local_only: Vec<String>,
+        kept: Kept,
         id: &str,
     ) -> Result<ArchivedCheckout, Error> {
         let checkout = &planned.checkout;
@@ -645,6 +905,7 @@ impl<B: Backend> Workspaces<B> {
             mirror: checkout.mirror.clone(),
             pin: pin_ref(id, &checkout.name),
             local_only,
+            kept,
         })
     }
 }
@@ -707,7 +968,8 @@ impl ArchivePlan {
 
     /// Returns the size that the record of this plan would have, in bytes,
     /// with the digests of the files that `scanned` found, which nothing has
-    /// read yet, counted at their full length.
+    /// read yet, and the commits of the uncommitted work, which nothing has
+    /// written yet, counted at their full length.
     fn predicted_bytes(&self, name: &WorkspaceName, scanned: Scanned) -> Result<u64, Error> {
         let mut archive = self.record(name);
         let mut merged: BTreeMap<String, RootEntry> = archive
@@ -724,6 +986,14 @@ impl ArchivePlan {
         archive.root = merged.into_values().collect();
         archive.manifest = Some("0".repeat(DIGEST_LENGTH));
         archive.manifest_mode = Some(0o7777);
+        for checkout in &mut archive.checkouts {
+            if checkout.kept.wip.is_none() {
+                checkout.kept.wip = Some(crate::archive::KeptWip {
+                    index: "0".repeat(DIGEST_LENGTH),
+                    worktree: "0".repeat(DIGEST_LENGTH),
+                });
+            }
+        }
         let bytes = serde_json::to_vec_pretty(&archive).map_err(|source| Error::CorruptRecord {
             path: PathBuf::from(RECORD_FILE),
             source,

@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::backend::{Backend, INITIALIZING};
+use crate::backend::{Backend, INITIALIZING, RefHolder};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
 use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
@@ -488,8 +488,7 @@ pub struct Removal {
     /// [`RemovalPlan::Dirty`] and [`RemovalPlan::IgnoredFiles`].
     pub discarded: Vec<String>,
     /// The paths of `discarded` that git ignores, in the form of
-    /// [`RemovalPlan::IgnoredFiles`], which `mxv archive --wip` leaves
-    /// alone.
+    /// [`RemovalPlan::IgnoredFiles`], which `mxv archive` refuses to keep.
     pub ignored: Vec<String>,
     /// The paths of `disposable` that only a glob of the repository's own
     /// `mxv.toml` makes disposable, which a caller deletes only after the
@@ -822,6 +821,10 @@ pub(crate) struct Made {
     /// The number of checkouts, in the record's order, whose clone the run
     /// started, which may have left a directory behind.
     pub(crate) clones: usize,
+    /// Each reference that the run created in a repository that outlives
+    /// the workspace, such as a worktree's source, with that repository.
+    /// A reference inside a clone goes with the clone.
+    pub(crate) refs: Vec<(PathBuf, String)>,
     /// Whether the record belongs to someone else, because the run did not
     /// write it. A restore writes the record last, so [`Workspaces::undo`]
     /// leaves whatever record has the name alone.
@@ -1974,6 +1977,12 @@ impl<B: Backend> Workspaces<B> {
     /// step succeeded, so `mxv remove` can finish a cleanup that failed.
     pub(crate) fn undo(&self, workspace: &Workspace, made: &Made) {
         let mut clean = true;
+        for (repository, reference) in &made.refs {
+            clean &= self
+                .backend
+                .delete_ref(RefHolder::Repository(repository), reference)
+                .is_ok();
+        }
         for checkout in workspace.checkouts.iter().take(made.clones) {
             clean &= delete_clone(&checkout.path).is_ok();
         }

@@ -19,10 +19,8 @@ fn refuses_and_names_a_file_in_a_submodule_directory_that_is_not_initialised(kin
     setup.create();
     deinitialised_submodule(&setup);
     write(setup.checkout().join("sub/notes.txt"), "mine\n");
-    for options in [ArchiveOptions::default(), wip()] {
-        let text = refusal_text(setup.planned(options));
-        assert!(text.contains("sub/notes.txt"), "{text}");
-    }
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("sub/notes.txt"), "{text}");
     assert!(setup.checkout().join("sub/notes.txt").is_file());
 }
 
@@ -122,25 +120,18 @@ fn commit_only_a_backup_reference_keeps(setup: &Setup) -> String {
 }
 
 #[test]
-fn a_commit_only_another_reference_keeps_refuses_the_archive_and_is_named() {
+fn a_commit_only_another_reference_keeps_comes_back_as_a_kept_reference() {
     let setup = setup(Kind::Clone);
     setup.create();
     let commit = commit_only_a_backup_reference_keeps(&setup);
-    let text = refusal_text(setup.planned(ArchiveOptions::default()));
-    assert!(text.contains(&commit), "{text}");
-    assert!(text.contains("refs/backup/x"), "{text}");
-}
-
-#[test]
-fn force_lists_a_commit_only_another_reference_keeps_as_lost() {
-    let setup = setup(Kind::Clone);
-    setup.create();
-    let commit = commit_only_a_backup_reference_keeps(&setup);
-    let archive = setup.archive_with(force());
-    assert!(
-        archive.lost.iter().any(|item| item.contains(&commit)),
-        "{:?}",
-        archive.lost
+    let archive = setup.archive();
+    assert_eq!(archive.checkouts[0].kept.orphans, vec![commit.clone()]);
+    assert!(archive.lost.is_empty(), "{:?}", archive.lost);
+    setup.restore();
+    let reference = format!("{KEPT_NAMESPACE}{commit}");
+    assert_eq!(
+        git(&setup.checkout(), &["rev-parse", &reference]).trim(),
+        commit
     );
 }
 
@@ -218,8 +209,6 @@ fn a_clone_in_a_paused_merge_refuses_the_archive_and_is_named() {
     let head = setup.head();
     write(checkout.join(".git/MERGE_HEAD"), format!("{head}\n"));
     let text = refusal_text(setup.planned(ArchiveOptions::default()));
-    assert!(text.contains("merge is paused"), "{text}");
-    let text = refusal_text(setup.planned(wip()));
     assert!(text.contains("merge is paused"), "{text}");
 }
 
@@ -365,14 +354,15 @@ fn what_an_earlier_forced_run_listed_and_the_rerun_kept_is_not_recorded_as_lost(
 fn what_a_forced_run_lost_with_a_checkout_it_retired_stays_recorded_as_lost() {
     let setup = setup(Kind::Clone);
     setup.create();
-    write(setup.checkout().join("scratch.txt"), "doomed\n");
+    setup.ignore_env();
+    write(setup.checkout().join(".env"), "doomed\n");
     let plan = setup.plan(force());
     stop_at("retired:app");
     assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
     clear_hook();
     let archive = setup.archive_with(ArchiveOptions::default());
     assert!(
-        archive.lost.iter().any(|item| item.contains("scratch.txt")),
+        archive.lost.iter().any(|item| item.contains(".env")),
         "{:?}",
         archive.lost
     );

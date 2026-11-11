@@ -1,10 +1,13 @@
-//! Rebuilding an archived workspace at its archived commits, and deleting
-//! an archive that nobody wants back.
+//! Rebuilding an archived workspace at its archived commits with the git
+//! state that the archive kept, and deleting an archive that nobody wants
+//! back.
 
 use std::path::{Path, PathBuf};
 
-use crate::archive::{Archive, ArchiveState, ArchivedCheckout, Archives, root};
-use crate::backend::{Backend, RefHolder};
+use crate::archive::{
+    Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, root,
+};
+use crate::backend::{Backend, WipCommits};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
@@ -95,6 +98,47 @@ impl PortChange {
     }
 }
 
+/// The git state besides `HEAD` that a restore put back into one checkout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PutBack {
+    /// The checkout's folder.
+    pub folder: String,
+    /// The number of files with staged changes.
+    pub staged: usize,
+    /// The number of files with unstaged changes.
+    pub unstaged: usize,
+    /// The number of untracked paths.
+    pub untracked: usize,
+    /// The number of stash entries.
+    pub stashes: usize,
+    /// Each local branch besides the checkout's own.
+    pub branches: Vec<String>,
+    /// Each tag that `origin` does not hold.
+    pub tags: Vec<String>,
+    /// Each per-worktree reference, by its name below `refs/worktree/`.
+    pub worktree: Vec<String>,
+    /// Each reference below [`KEPT_NAMESPACE`] that keeps a commit no other
+    /// reference reaches.
+    pub kept: Vec<String>,
+    /// Each submodule that the checkout's index names, which the restore
+    /// leaves uninitialised.
+    pub submodules: Vec<String>,
+}
+
+impl PutBack {
+    /// Reports whether the restore put back nothing besides `HEAD` and
+    /// found no submodule.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self
+            == Self {
+                folder: self.folder.clone(),
+                ..Self::default()
+            }
+    }
+}
+
 /// What [`Workspaces::restore`] rebuilt.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -103,6 +147,9 @@ pub struct Restored {
     pub workspace: Workspace,
     /// The ports that changed.
     pub ports: Vec<PortChange>,
+    /// What the restore put back into each checkout, in the record's
+    /// order.
+    pub put_back: Vec<PutBack>,
     /// What the restore could not finish after it wrote the record, such
     /// as a pin that it could not delete.
     pub warnings: Vec<String>,
@@ -164,12 +211,8 @@ impl<B: Backend> Workspaces<B> {
                     missing_mirrors.push(checkout.folder.clone());
                     continue;
                 }
-                if self
-                    .backend
-                    .resolve_commit(RefHolder::Mirror(mirror), &checkout.commit)?
-                    .is_none()
-                {
-                    return refused(missing_commit(checkout));
+                if let Some(refusal) = self.missing(checkout)? {
+                    return refused(refusal);
                 }
                 continue;
             }
@@ -178,12 +221,8 @@ impl<B: Backend> Workspaces<B> {
                     path: checkout.source.clone(),
                 });
             }
-            if self
-                .backend
-                .resolve_commit(RefHolder::Repository(&checkout.source), &checkout.commit)?
-                .is_none()
-            {
-                return refused(missing_commit(checkout));
+            if let Some(refusal) = self.missing(checkout)? {
+                return refused(refusal);
             }
             if checkout.detached {
                 continue;
@@ -242,7 +281,15 @@ impl<B: Backend> Workspaces<B> {
             record_not_ours: true,
             ..Made::default()
         };
-        let built = self.rebuild(archives, &archive, &mut workspace, &mut made, runs);
+        let mut put_back = Vec::new();
+        let built = self.rebuild(
+            archives,
+            &archive,
+            &mut workspace,
+            &mut made,
+            &mut put_back,
+            runs,
+        );
         let ports = match built {
             Ok(Some(ports)) => ports,
             Ok(None) => {
@@ -271,6 +318,7 @@ impl<B: Backend> Workspaces<B> {
         Ok(RestoreOutcome::Restored(Box::new(Restored {
             workspace,
             ports,
+            put_back,
             warnings,
         })))
     }
@@ -318,17 +366,31 @@ impl<B: Backend> Workspaces<B> {
                 }
             }
         }
-        if self
-            .backend
-            .resolve_commit(RefHolder::Mirror(mirror), &checkout.commit)?
-            .is_none()
-        {
-            return Ok(Some(missing_commit(checkout)));
+        self.missing(checkout)
+    }
+
+    /// Returns the refusal of `checkout` when the repository that holds its
+    /// pins lacks its commit or a commit that the archive kept.
+    fn missing(&self, checkout: &ArchivedCheckout) -> Result<Option<RestoreRefusal>, Error> {
+        let mut commits = vec![checkout.commit.clone()];
+        commits.extend(checkout.kept.commits());
+        for commit in commits {
+            if self
+                .backend
+                .resolve_commit(checkout.pin_holder(), &commit)?
+                .is_none()
+            {
+                return Ok(Some(RestoreRefusal::CommitMissing {
+                    folder: checkout.folder.clone(),
+                    commit,
+                }));
+            }
         }
         Ok(None)
     }
 
-    /// Makes the workspace's directory and checkouts, writes the root files
+    /// Makes the workspace's directory and checkouts, puts back what the
+    /// archive kept of each checkout into `put_back`, writes the root files
     /// and the workspace's record, and returns the ports that changed, or
     /// `None` when another record took the name first.
     fn rebuild(
@@ -337,6 +399,7 @@ impl<B: Backend> Workspaces<B> {
         archive: &Archive,
         workspace: &mut Workspace,
         made: &mut Made,
+        put_back: &mut Vec<PutBack>,
         runs: &Runs,
     ) -> Result<Option<Vec<PortChange>>, Error> {
         let unwritable = |path: &Path| {
@@ -357,6 +420,22 @@ impl<B: Backend> Workspaces<B> {
             }
             (self.checkpoint)(&format!("checkout:{}", checkout.name))?;
         }
+        for (checkout, archived) in workspace.checkouts.iter().zip(&archive.checkouts) {
+            if let Some(wip) = &archived.kept.wip {
+                self.backend.apply_wip(
+                    &checkout.path,
+                    &WipCommits {
+                        index: wip.index.clone(),
+                        worktree: wip.worktree.clone(),
+                    },
+                )?;
+            }
+        }
+        (self.checkpoint)("apply")?;
+        for (checkout, archived) in workspace.checkouts.iter().zip(&archive.checkouts) {
+            put_back.push(self.put_back_kept(archive.kind, checkout, &archived.kept, made)?);
+        }
+        (self.checkpoint)("kept")?;
         made.agents = true;
         self.write_agents(workspace)?;
         made.manifest = archive.manifest.is_some();
@@ -442,8 +521,73 @@ impl<B: Backend> Workspaces<B> {
         Ok(())
     }
 
-    /// Deletes the pins of `archive`, and returns why one could not be
-    /// deleted, for each one.
+    /// Puts back what `kept` holds into `checkout`, a checkout of a
+    /// workspace of `kind` whose uncommitted work is back already, and
+    /// returns what it put back. A clone's references go with the clone, so
+    /// a reference that the clone already holds, such as a branch that the
+    /// clone started with, takes the kept value. A reference that it makes
+    /// in a worktree's shared repository is recorded in `made`, so a failed
+    /// restore deletes it.
+    fn put_back_kept(
+        &self,
+        kind: WorkspaceKind,
+        checkout: &Checkout,
+        kept: &Kept,
+        made: &mut Made,
+    ) -> Result<PutBack, Error> {
+        let path = &checkout.path;
+        let mut put_back = PutBack {
+            folder: checkout.name.clone(),
+            stashes: kept.stashes.len(),
+            branches: kept.branches.keys().cloned().collect(),
+            tags: kept.tags.keys().cloned().collect(),
+            worktree: kept.worktree.keys().cloned().collect(),
+            ..PutBack::default()
+        };
+        if kept.wip.is_some() {
+            for change in self.backend.changes(path)?.changed {
+                let mut marks = change.chars();
+                let (staged, unstaged) = (marks.next(), marks.next());
+                if staged == Some('?') {
+                    put_back.untracked += 1;
+                    continue;
+                }
+                put_back.staged += usize::from(staged.is_some_and(|mark| mark != ' '));
+                put_back.unstaged += usize::from(unstaged.is_some_and(|mark| mark != ' '));
+            }
+        }
+        // `stash store` makes each entry the newest, so the oldest goes
+        // first and the stash list reads as it did.
+        for stash in &kept.stashes {
+            self.backend
+                .store_stash(path, &stash.commit, &stash.message)?;
+        }
+        let named = [
+            ("refs/heads/", &kept.branches),
+            ("refs/tags/", &kept.tags),
+            ("refs/worktree/", &kept.worktree),
+        ];
+        for (prefix, names) in named {
+            for (name, object) in names {
+                self.backend
+                    .write_ref(path, &format!("{prefix}{name}"), object)?;
+            }
+        }
+        for commit in &kept.orphans {
+            let reference = format!("{KEPT_NAMESPACE}{commit}");
+            let created = self.backend.create_ref(path, &reference, commit)?;
+            if created && kind == WorkspaceKind::Worktree {
+                made.refs.push((checkout.source.clone(), reference.clone()));
+            }
+            put_back.kept.push(reference);
+        }
+        put_back.submodules = self.backend.submodule_paths(path)?;
+        Ok(put_back)
+    }
+
+    /// Deletes every pin of `archive`, those that its record names and any
+    /// other below each checkout's pin directory, and returns why one could
+    /// not be deleted, for each one.
     fn delete_pins(&self, archive: &Archive) -> Vec<String> {
         let mut warnings = Vec::new();
         for checkout in &archive.checkouts {
@@ -451,15 +595,30 @@ impl<B: Backend> Workspaces<B> {
             if !repository.is_dir() {
                 continue;
             }
-            if let Err(error) = self
-                .backend
-                .delete_ref(checkout.pin_holder(), &checkout.pin)
-            {
-                warnings.push(format!(
-                    "mxv could not delete the pin {} in {}: {error}",
-                    checkout.pin,
+            let holder = checkout.pin_holder();
+            let dir = checkout.pin_dir();
+            let mut pins: Vec<String> = checkout.pins().into_iter().map(|(pin, _)| pin).collect();
+            match self.backend.refs_under(holder, dir) {
+                Ok(found) => {
+                    for (rest, _) in found {
+                        let pin = format!("{dir}{rest}");
+                        if !pins.contains(&pin) {
+                            pins.push(pin);
+                        }
+                    }
+                }
+                Err(error) => warnings.push(format!(
+                    "mxv could not list the pins below {dir} in {}: {error}",
                     repository.display()
-                ));
+                )),
+            }
+            for pin in pins {
+                if let Err(error) = self.backend.delete_ref(holder, &pin) {
+                    warnings.push(format!(
+                        "mxv could not delete the pin {pin} in {}: {error}",
+                        repository.display()
+                    ));
+                }
             }
         }
         warnings

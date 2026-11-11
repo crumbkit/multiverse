@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::*;
-use crate::backend::Backend;
+use crate::backend::{Backend, RefHolder};
 use crate::git::Git;
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
@@ -215,12 +215,51 @@ fn branch(checkout: &Path) -> String {
         .to_owned()
 }
 
-fn wip() -> ArchiveOptions {
-    ArchiveOptions::new(true, false, false)
+fn force() -> ArchiveOptions {
+    ArchiveOptions::new(true, false)
 }
 
-fn force() -> ArchiveOptions {
-    ArchiveOptions::new(false, true, false)
+/// Returns the staged changes of `checkout`, as `git diff --cached` names
+/// them with their status.
+fn staged(checkout: &Path) -> String {
+    git(checkout, &["diff", "--cached", "--name-status"])
+}
+
+/// Returns each line of `git status --porcelain` of `checkout`, sorted.
+fn status(checkout: &Path) -> Vec<String> {
+    let mut lines: Vec<String> = git(checkout, &["status", "--porcelain"])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// Stages a change to a committed file, leaves an unstaged change to
+/// another, and writes an untracked file, in `checkout`.
+fn leave_uncommitted_work(checkout: &Path) {
+    write(checkout.join("staged.txt"), "one\n");
+    write(checkout.join("edited.txt"), "one\n");
+    git(checkout, &["add", "staged.txt", "edited.txt"]);
+    git(checkout, &["commit", "--quiet", "-m", "Two files"]);
+    write(checkout.join("staged.txt"), "staged\n");
+    git(checkout, &["add", "staged.txt"]);
+    write(checkout.join("edited.txt"), "unstaged\n");
+    fs::create_dir_all(checkout.join("notes")).unwrap();
+    write(checkout.join("notes/todo.md"), "untracked\n");
+}
+
+/// Makes a commit on a detached `HEAD` of `checkout` and goes back to the
+/// branch `triage`, so only the reflog of `HEAD` holds the commit.
+fn leave_detached_commit(checkout: &Path) -> String {
+    git(checkout, &["switch", "--quiet", "--detach"]);
+    git(
+        checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Detached"],
+    );
+    let commit = git(checkout, &["rev-parse", "HEAD"]).trim().to_owned();
+    git(checkout, &["switch", "--quiet", "triage"]);
+    commit
 }
 
 fn archives_and_restores_at_the_same_commit_and_branch(kind: Kind) {
@@ -351,44 +390,31 @@ fn a_detached_checkout_comes_back_detached_at_its_commit() {
 }
 
 #[test]
-fn each_kind_of_unsaved_work_refuses_the_archive_and_names_itself() {
+fn an_ignored_file_and_a_socket_refuse_the_archive_and_each_names_itself() {
     let setup = setup(Kind::Clone);
     setup.create();
     setup.ignore_env();
     let checkout = setup.checkout();
-    write(checkout.join("stashed.txt"), "stash\n");
-    git(&checkout, &["add", "stashed.txt"]);
-    git(&checkout, &["stash", "--quiet"]);
-    git(&checkout, &["switch", "--quiet", "-c", "side"]);
-    git(
-        &checkout,
-        &["commit", "--quiet", "--allow-empty", "-m", "Side"],
-    );
-    let side = git(&checkout, &["rev-parse", "HEAD"]).trim().to_owned();
-    git(&checkout, &["switch", "--quiet", "triage"]);
     write(checkout.join("draft.txt"), "draft\n");
     write(checkout.join(".env"), "SECRET=1\n");
     let _socket = UnixListener::bind(setup.root.join("triage/s")).unwrap();
-    let ArchiveRefusal::Unsaved(unsaved) = setup.refusal(ArchiveOptions::default()) else {
-        panic!("the archive was not refused for unsaved work");
+    let ArchiveRefusal::Unkeepable(found) = setup.refusal(ArchiveOptions::default()) else {
+        panic!("the archive was not refused for work it cannot keep");
     };
-    assert!(
-        unsaved
-            .changes
-            .iter()
-            .any(|item| item.contains("draft.txt")),
-        "{unsaved:?}"
+    let kinds: Vec<&UnkeptKind> = found.items.iter().map(|item| &item.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            &UnkeptKind::Ignored {
+                path: ".env".to_owned()
+            },
+            &UnkeptKind::Root {
+                entry: "s".to_owned()
+            },
+        ],
+        "an archive keeps draft.txt, so only these refuse"
     );
-    assert!(
-        unsaved.ignored.iter().any(|item| item.contains(".env")),
-        "{unsaved:?}"
-    );
-    assert_eq!(unsaved.stashes.len(), 1, "{unsaved:?}");
-    assert!(
-        unsaved.commits.iter().any(|item| item.contains(&side)),
-        "{unsaved:?}"
-    );
-    assert_eq!(unsaved.root, vec!["root: s".to_owned()]);
+    assert_eq!(found.items[0].to_string(), "app: the ignored path .env");
     assert!(checkout.join("draft.txt").exists());
     assert!(
         setup.record().is_none(),
@@ -396,71 +422,290 @@ fn each_kind_of_unsaved_work_refuses_the_archive_and_names_itself() {
     );
 }
 
+fn keeps_uncommitted_work(kind: Kind) {
+    let setup = setup(kind);
+    setup.create();
+    let checkout = setup.checkout();
+    leave_uncommitted_work(&checkout);
+    let head = setup.head();
+    let before = status(&checkout);
+    let plan = setup.plan(ArchiveOptions::default());
+    assert_eq!(plan.uncommitted.len(), 1);
+    assert_eq!(
+        plan.uncommitted[0].changes.len(),
+        3,
+        "{:?}",
+        plan.uncommitted
+    );
+    let archive = setup.archive();
+    assert!(archive.lost.is_empty());
+    let wip = archive.checkouts[0].kept.wip.clone().expect("no work kept");
+    let restored = setup.restore();
+    assert_eq!(setup.head(), head, "the work comes back uncommitted");
+    assert_eq!(status(&checkout), before);
+    assert_eq!(
+        fs::read_to_string(checkout.join("edited.txt")).unwrap(),
+        "unstaged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("notes/todo.md")).unwrap(),
+        "untracked\n"
+    );
+    assert_eq!(staged(&checkout), "M\tstaged.txt\n");
+    let put_back = &restored.put_back[0];
+    assert_eq!(
+        (put_back.staged, put_back.unstaged, put_back.untracked),
+        (1, 1, 1),
+        "{put_back:?}"
+    );
+    let holder = archive.checkouts[0].pin_holder();
+    for commit in [&wip.index, &wip.worktree] {
+        assert!(
+            Git.resolve_commit(holder, commit).unwrap().is_some(),
+            "the restore keeps the objects of the work"
+        );
+    }
+    let pins = Git.refs_under(holder, PIN_NAMESPACE).unwrap();
+    assert!(pins.is_empty(), "the restore deletes every pin: {pins:?}");
+}
+
 #[test]
-fn wip_commits_the_changes_on_the_branch_and_the_restore_brings_them_back() {
+fn an_archive_keeps_staged_unstaged_and_untracked_changes_and_restore_brings_them_back_uncommitted()
+{
+    keeps_uncommitted_work(Kind::Worktree);
+    keeps_uncommitted_work(Kind::Clone);
+}
+
+#[test]
+fn an_archive_never_moves_the_workspace_branch_or_its_index() {
     for kind in [Kind::Worktree, Kind::Clone] {
         let setup = setup(kind);
         setup.create();
-        write(setup.checkout().join("draft.txt"), "draft\n");
-        let refused = setup.refusal(ArchiveOptions::default());
-        assert!(matches!(refused, ArchiveRefusal::Unsaved(_)), "{refused:?}");
-        let archive = setup.archive_with(wip());
-        assert!(archive.lost.is_empty());
+        let checkout = setup.checkout();
+        leave_uncommitted_work(&checkout);
+        let head = setup.head();
+        let index = staged(&checkout);
+        let plan = setup.plan(ArchiveOptions::default());
+        let ArchiveOutcome::Retired { archive, .. } =
+            setup.workspaces.archive(&setup.archives, plan).unwrap()
+        else {
+            panic!("the archive was refused");
+        };
+        assert_eq!(archive.checkouts[0].commit, head);
+        if kind == Kind::Worktree {
+            let tip = Git
+                .branch_tip(&setup.fixture.clone, "triage")
+                .unwrap()
+                .unwrap();
+            assert_eq!(tip, head, "the branch stays at HEAD");
+        }
+        let mut archive = *archive;
+        setup
+            .workspaces
+            .finish_archive(&setup.archives, &mut archive)
+            .unwrap();
+        setup.restore();
+        assert_eq!(setup.head(), head);
+        assert_eq!(branch(&checkout), "triage");
+        assert_eq!(staged(&checkout), index);
+    }
+}
+
+#[test]
+fn an_archive_keeps_each_stash_and_restore_gives_back_the_same_stash_list() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    for (file, message) in [("first.txt", "first stash"), ("second.txt", "second stash")] {
+        write(checkout.join(file), "stash\n");
+        git(&checkout, &["add", file]);
+        git(&checkout, &["stash", "push", "--quiet", "-m", message]);
+    }
+    let list = |checkout: &Path| git(checkout, &["stash", "list", "--format=%H %gs"]);
+    let before = list(&checkout);
+    let archive = setup.archive();
+    assert_eq!(archive.checkouts[0].kept.stashes.len(), 2);
+    let restored = setup.restore();
+    assert_eq!(list(&checkout), before);
+    assert_eq!(restored.put_back[0].stashes, 2);
+}
+
+#[test]
+fn an_archive_keeps_other_local_branches_and_tags_that_origin_lacks() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    git(&checkout, &["switch", "--quiet", "-c", "spike-cache"]);
+    git(
+        &checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Spike"],
+    );
+    let spike = setup.head();
+    git(&checkout, &["tag", "-a", "-m", "Candidate", "v0.3.0-rc1"]);
+    let tag = git(&checkout, &["rev-parse", "v0.3.0-rc1"])
+        .trim()
+        .to_owned();
+    git(&checkout, &["switch", "--quiet", "triage"]);
+    let archive = setup.archive();
+    let kept = &archive.checkouts[0].kept;
+    assert_eq!(kept.branches.get("spike-cache"), Some(&spike));
+    assert_eq!(kept.tags.get("v0.3.0-rc1"), Some(&tag));
+    assert!(
+        !kept.branches.contains_key("triage"),
+        "the checkout's own branch is the pin of HEAD"
+    );
+    let restored = setup.restore();
+    assert_eq!(git(&checkout, &["rev-parse", "spike-cache"]).trim(), spike);
+    assert_eq!(git(&checkout, &["rev-parse", "v0.3.0-rc1"]).trim(), tag);
+    assert_eq!(
+        restored.put_back[0].branches,
+        vec!["spike-cache".to_owned()]
+    );
+    assert_eq!(restored.put_back[0].tags, vec!["v0.3.0-rc1".to_owned()]);
+}
+
+#[test]
+fn an_archive_keeps_a_per_worktree_reference() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let setup = setup(kind);
+        setup.create();
+        let checkout = setup.checkout();
+        let head = setup.head();
+        git(
+            &checkout,
+            &["update-ref", "refs/worktree/bisect-good", &head],
+        );
+        let archive = setup.archive();
+        assert_eq!(
+            archive.checkouts[0].kept.worktree.get("bisect-good"),
+            Some(&head),
+            "{kind:?}"
+        );
         setup.restore();
         assert_eq!(
-            fs::read_to_string(setup.checkout().join("draft.txt")).unwrap(),
-            "draft\n"
-        );
-        assert_eq!(
-            git(&setup.checkout(), &["log", "-1", "--format=%s"]).trim(),
-            WIP_MESSAGE
+            git(&checkout, &["rev-parse", "refs/worktree/bisect-good"]).trim(),
+            head,
+            "{kind:?}"
         );
     }
 }
 
 #[test]
-fn wip_leaves_an_ignored_file_alone_and_the_archive_still_refuses() {
-    let setup = setup(Kind::Worktree);
+fn an_archive_keeps_a_reflog_commit_that_no_ref_reaches_as_a_kept_reference() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let setup = setup(kind);
+        setup.create();
+        let checkout = setup.checkout();
+        let detached = leave_detached_commit(&checkout);
+        let archive = setup.archive();
+        assert_eq!(
+            archive.checkouts[0].kept.orphans,
+            vec![detached.clone()],
+            "{kind:?}"
+        );
+        let restored = setup.restore();
+        let reference = format!("{KEPT_NAMESPACE}{detached}");
+        assert_eq!(
+            git(&checkout, &["rev-parse", &reference]).trim(),
+            detached,
+            "{kind:?}"
+        );
+        assert_eq!(restored.put_back[0].kept, vec![reference], "{kind:?}");
+    }
+}
+
+#[test]
+fn a_paused_merge_is_refused_and_the_refusal_names_merge_abort() {
+    let setup = setup(Kind::Clone);
     setup.create();
-    setup.ignore_env();
+    let checkout = setup.checkout();
     let head = setup.head();
-    write(setup.checkout().join(".env"), "SECRET=1\n");
-    write(setup.checkout().join("draft.txt"), "draft\n");
-    let ArchiveRefusal::Unsaved(unsaved) = setup.refusal(wip()) else {
+    write(checkout.join(".git/MERGE_HEAD"), format!("{head}\n"));
+    let ArchiveRefusal::Unkeepable(found) = setup.refusal(ArchiveOptions::default()) else {
         panic!("the archive was not refused");
     };
-    assert!(unsaved.ignored.iter().any(|item| item.contains(".env")));
-    assert_eq!(setup.head(), head, "a refused --wip commits nothing");
+    assert_eq!(
+        found.items[0].kind,
+        UnkeptKind::Paused {
+            at: String::new(),
+            operation: crate::backend::Operation::Merge,
+        }
+    );
+    assert_eq!(found.items[0].to_string(), "app: a merge is paused");
+    assert_eq!(found.items[0].dir, checkout);
+}
+
+#[test]
+fn a_file_over_archive_max_file_is_refused_and_named() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let checkout = setup.checkout();
+    write(checkout.join("dump.sql"), vec![b'x'; 2048]);
+    write(checkout.join("small.txt"), "small\n");
+    let options = ArchiveOptions::default().with_max_file(1024);
+    let ArchiveRefusal::Unkeepable(found) = setup.refusal(options) else {
+        panic!("the archive was not refused");
+    };
+    assert_eq!(
+        found
+            .items
+            .iter()
+            .map(|item| &item.kind)
+            .collect::<Vec<_>>(),
+        vec![&UnkeptKind::TooLarge {
+            path: "dump.sql".to_owned(),
+            bytes: 2048,
+            most: 1024,
+            untracked: true,
+        }]
+    );
+    let archive = setup.archive_with(force().with_max_file(1024));
+    assert!(
+        archive.lost.iter().any(|item| item.contains("dump.sql")),
+        "{:?}",
+        archive.lost
+    );
 }
 
 #[test]
 fn force_loses_what_the_archive_cannot_keep_and_lists_it_in_the_record() {
     let setup = setup(Kind::Worktree);
     setup.create();
+    setup.ignore_env();
+    write(setup.checkout().join(".env"), "SECRET=1\n");
     write(setup.checkout().join("draft.txt"), "draft\n");
     let archive = setup.archive_with(force());
-    assert!(
-        archive.lost.iter().any(|item| item.contains("draft.txt")),
-        "{:?}",
-        archive.lost
+    assert_eq!(
+        archive.lost,
+        vec!["app: the ignored path .env".to_owned()],
+        "an archive keeps draft.txt"
     );
     assert!(setup.record().unwrap().lost == archive.lost);
     setup.restore();
-    assert!(!setup.checkout().join("draft.txt").exists());
+    assert!(!setup.checkout().join(".env").exists());
+    assert!(setup.checkout().join("draft.txt").is_file());
 }
 
 #[test]
-fn a_file_written_after_the_plan_refuses_the_archive_and_keeps_the_checkout() {
+fn a_file_written_after_the_plan_is_kept_with_the_uncommitted_work() {
     let setup = setup(Kind::Worktree);
     setup.create();
     let plan = setup.plan(ArchiveOptions::default());
     write(setup.checkout().join("late.txt"), "late\n");
-    let outcome = setup.workspaces.archive(&setup.archives, plan).unwrap();
-    assert!(
-        matches!(outcome, ArchiveOutcome::Refused(ArchiveRefusal::Unsaved(_))),
-        "{outcome:?}"
+    let ArchiveOutcome::Retired { mut archive, .. } =
+        setup.workspaces.archive(&setup.archives, plan).unwrap()
+    else {
+        panic!("the archive was refused");
+    };
+    setup
+        .workspaces
+        .finish_archive(&setup.archives, &mut archive)
+        .unwrap();
+    setup.restore();
+    assert_eq!(
+        fs::read_to_string(setup.checkout().join("late.txt")).unwrap(),
+        "late\n"
     );
-    assert!(setup.checkout().join("late.txt").is_file());
 }
 
 fn a_file_written_during_retirement_comes_back_in_place(kind: Kind) {
@@ -516,6 +761,10 @@ fn resumes_after(kind: Kind, step: &'static str) {
     setup.create();
     let commit = setup.commit_locally();
     write(setup.root.join("triage/notes.md"), "keep me\n");
+    leave_uncommitted_work(&setup.checkout());
+    assert_ne!(setup.head(), commit);
+    let commit = setup.head();
+    let before = status(&setup.checkout());
     stop_at(step);
     let plan = setup.plan(ArchiveOptions::default());
     let stopped = setup.workspaces.archive(&setup.archives, plan);
@@ -538,6 +787,7 @@ fn resumes_after(kind: Kind, step: &'static str) {
     assert!(!setup.root.join("triage").exists(), "{step}");
     setup.restore();
     assert_eq!(setup.head(), commit, "{step}");
+    assert_eq!(status(&setup.checkout()), before, "{step}");
     assert_eq!(
         fs::read_to_string(setup.root.join("triage/notes.md")).unwrap(),
         "keep me\n",
@@ -545,9 +795,10 @@ fn resumes_after(kind: Kind, step: &'static str) {
     );
 }
 
-const ARCHIVE_STEPS: [&str; 9] = [
-    "pins",
+const ARCHIVE_STEPS: [&str; 10] = [
     "record",
+    "wip",
+    "pins",
     "root",
     "before-move:app",
     "moved:app",
@@ -572,17 +823,55 @@ fn a_clone_archive_stopped_after_each_step_finishes_when_it_runs_again() {
 }
 
 #[test]
-fn a_wip_archive_stopped_after_its_commit_finishes_when_it_runs_again() {
+fn a_rerun_after_the_wip_pins_rewrites_them_and_finishes() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let setup = setup(kind);
+        setup.create();
+        let checkout = setup.checkout();
+        write(checkout.join("draft.txt"), "first\n");
+        stop_at("pins");
+        let plan = setup.plan(ArchiveOptions::default());
+        assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
+        clear_hook();
+        let stopped = setup.record().unwrap().checkouts[0].clone();
+        let first = stopped
+            .kept
+            .wip
+            .clone()
+            .expect("the first run kept no work");
+        write(checkout.join("draft.txt"), "second\n");
+        let archive = setup.archive();
+        let second = archive.checkouts[0].kept.wip.clone().unwrap();
+        assert_ne!(first, second, "{kind:?}: the rerun writes the new work");
+        let pinned = Git
+            .resolve_commit(
+                archive.checkouts[0].pin_holder(),
+                &format!("{}/wip", archive.checkouts[0].pin_dir()),
+            )
+            .unwrap();
+        assert_eq!(pinned.as_ref(), Some(&second.worktree), "{kind:?}");
+        setup.restore();
+        assert_eq!(
+            fs::read_to_string(checkout.join("draft.txt")).unwrap(),
+            "second\n",
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn the_same_work_gives_the_same_commits_on_a_rerun() {
     let setup = setup(Kind::Worktree);
     setup.create();
-    write(setup.checkout().join("draft.txt"), "draft\n");
+    leave_uncommitted_work(&setup.checkout());
     stop_at("wip");
-    let plan = setup.plan(wip());
+    let plan = setup.plan(ArchiveOptions::default());
     assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
     clear_hook();
-    setup.archive();
-    setup.restore();
-    assert!(setup.checkout().join("draft.txt").is_file());
+    let first = setup.record().unwrap().checkouts[0].kept.wip.clone();
+    let archive = setup.archive();
+    assert!(first.is_some());
+    assert_eq!(archive.checkouts[0].kept.wip, first);
 }
 
 fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
@@ -590,7 +879,14 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
     setup.create();
     let commit = setup.commit_locally();
     write(setup.root.join("triage/notes.md"), "keep me\n");
+    let detached = leave_detached_commit(&setup.checkout());
+    leave_uncommitted_work(&setup.checkout());
+    assert_ne!(setup.head(), commit);
+    let commit = setup.head();
+    let before = status(&setup.checkout());
     let archive = setup.archive();
+    assert_eq!(archive.checkouts[0].kept.orphans, vec![detached.clone()]);
+    let kept = format!("{KEPT_NAMESPACE}{detached}");
     stop_at(step);
     let result = setup
         .workspaces
@@ -602,11 +898,26 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
         !setup.root.join("triage").exists(),
         "{step}: the failed run left its files"
     );
+    let source = RefHolder::Repository(&setup.fixture.clone);
+    assert_eq!(
+        Git.resolve_commit(source, &kept).unwrap(),
+        None,
+        "{step}: the failed run left {kept} in the repository"
+    );
     setup.restore();
     assert_eq!(setup.head(), commit, "{step}");
+    assert_eq!(status(&setup.checkout()), before, "{step}");
 }
 
-const RESTORE_STEPS: [&str; 5] = ["mirrors", "directory", "checkout:app", "root", "marker"];
+const RESTORE_STEPS: [&str; 7] = [
+    "mirrors",
+    "directory",
+    "checkout:app",
+    "apply",
+    "kept",
+    "root",
+    "marker",
+];
 
 #[test]
 fn archive_does_not_count_the_marker_as_an_extra_entry_and_restore_writes_it_again() {
@@ -966,13 +1277,20 @@ fn a_pin_name_stays_one_reference_component_for_an_odd_folder() {
     let pin = pin_ref("abc", "a..b/c d");
     assert!(pin.starts_with("refs/mxv/archives/abc/"));
     assert!(!pin.contains(".."), "{pin}");
-    assert_eq!(pin.matches('/').count(), 4, "{pin}");
+    assert_eq!(pin.matches('/').count(), 5, "{pin}");
+    assert!(pin.ends_with("/head"), "{pin}");
 }
 
 /// Returns the text of the refusal of `planned`, and fails when the archive
 /// was not refused.
 fn refusal_text(planned: ArchivePlanned) -> String {
     match planned {
+        ArchivePlanned::Refused(ArchiveRefusal::Unkeepable(found)) => found
+            .items
+            .iter()
+            .map(|item| format!("{item} {item:?}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         ArchivePlanned::Refused(refusal) => format!("{refusal:?}"),
         other => panic!("the archive was not refused: {other:?}"),
     }
@@ -1067,15 +1385,15 @@ fn add_nested_repository(setup: &Setup) {
 }
 
 #[test]
-fn an_untracked_nested_repository_refuses_a_wip_archive_and_is_named() {
+fn an_untracked_nested_repository_refuses_the_archive_and_is_named() {
     let setup = setup(Kind::Clone);
     setup.create();
     add_nested_repository(&setup);
     let head = setup.head();
-    let text = refusal_text(setup.planned(wip()));
-    assert!(text.contains("nested"), "{text}");
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("the repository nested/"), "{text}");
     assert!(setup.checkout().join("nested/work.txt").is_file());
-    assert_eq!(setup.head(), head, "a refused --wip commits nothing");
+    assert_eq!(setup.head(), head, "a refused archive commits nothing");
 }
 
 #[test]
@@ -1136,13 +1454,38 @@ fn a_stash_in_a_submodule_refuses_the_archive_and_is_named() {
 }
 
 #[test]
-fn a_change_in_a_submodule_refuses_a_wip_archive_and_is_named() {
+fn a_change_in_a_submodule_refuses_the_archive_and_is_named() {
     let setup = setup(Kind::Clone);
     setup.create();
     add_submodule(&setup);
     write(setup.checkout().join("sub/draft.txt"), "draft\n");
-    let text = refusal_text(setup.planned(wip()));
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(text.contains("the submodule sub holds"), "{text}");
     assert!(text.contains("draft.txt"), "{text}");
+}
+
+#[test]
+fn a_clone_that_removed_a_submodule_with_git_rm_is_archived() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_submodule(&setup);
+    let checkout = setup.checkout();
+    git(&checkout, &["rm", "--quiet", "sub"]);
+    git(&checkout, &["commit", "--quiet", "-m", "Drop sub"]);
+    let commit = setup.head();
+    setup.archive();
+    setup.restore();
+    assert_eq!(setup.head(), commit);
+}
+
+#[test]
+fn a_restored_clone_names_each_submodule_that_comes_back_uninitialised() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    add_submodule(&setup);
+    setup.archive();
+    let restored = setup.restore();
+    assert_eq!(restored.put_back[0].submodules, vec!["sub".to_owned()]);
 }
 
 #[test]
@@ -1176,10 +1519,11 @@ fn hides_local_edit(flag: &str) {
     git(&checkout, &["commit", "--quiet", "-m", "Config"]);
     git(&checkout, &["update-index", flag, "config.txt"]);
     write(checkout.join("config.txt"), "local override\n");
-    for options in [ArchiveOptions::default(), wip()] {
-        let text = refusal_text(setup.planned(options));
-        assert!(text.contains("config.txt"), "{flag}: {text}");
-    }
+    let text = refusal_text(setup.planned(ArchiveOptions::default()));
+    assert!(
+        text.contains("the file config.txt is marked"),
+        "{flag}: {text}"
+    );
     assert_eq!(
         fs::read_to_string(checkout.join("config.txt")).unwrap(),
         "local override\n"
@@ -1536,7 +1880,7 @@ fn a_record_whose_root_path_leaves_the_workspace_is_refused_as_corrupt() {
 }
 
 #[test]
-fn a_clone_branch_and_extra_remote_that_the_archive_drops_are_named_in_a_warning() {
+fn a_clone_remote_that_the_archive_drops_is_named_in_a_warning_and_a_branch_is_kept() {
     let setup = setup(Kind::Clone);
     setup.create();
     let checkout = setup.checkout();
@@ -1547,8 +1891,63 @@ fn a_clone_branch_and_extra_remote_that_the_archive_drops_are_named_in_a_warning
     );
     let plan = setup.plan(ArchiveOptions::default());
     let warnings = plan.warnings.join("\n");
-    assert!(warnings.contains("side"), "{warnings}");
+    assert!(!warnings.contains("side"), "{warnings}");
     assert!(warnings.contains("fork"), "{warnings}");
+    assert!(plan.checkouts[0].kept.branches.contains_key("side"));
+}
+
+#[test]
+fn a_worktree_made_from_a_clone_is_named_in_a_warning() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let linked = setup.base.join("linked");
+    git(
+        &setup.checkout(),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let plan = setup.plan(ArchiveOptions::default());
+    let warnings = plan.warnings.join("\n");
+    assert!(
+        warnings.contains("made from the clone app") && warnings.contains("linked"),
+        "{warnings}"
+    );
+}
+
+#[test]
+fn a_version_one_archive_still_restores() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let commit = setup.commit_locally();
+    let archive = setup.archive();
+    // A record of version 1 names the pin of HEAD by the folder alone and
+    // keeps nothing else.
+    let checkout = &archive.checkouts[0];
+    let holder = checkout.pin_holder();
+    let old_pin = checkout.pin_dir().to_owned();
+    Git.delete_ref(holder, &checkout.pin).unwrap();
+    git(
+        checkout.pin_repository(),
+        &["update-ref", &old_pin, &checkout.commit],
+    );
+    let path = setup.archives.dir_of(&name()).join(RECORD_FILE);
+    let text = fs::read_to_string(&path).unwrap();
+    let old = text
+        .replace("\"version\": 2", "\"version\": 1")
+        .replace(&checkout.pin, &old_pin);
+    write(&path, old);
+    let read = setup.record().unwrap();
+    assert_eq!(read.version, 1);
+    assert!(read.checkouts[0].kept.is_empty());
+    setup.restore();
+    assert_eq!(setup.head(), commit);
+    assert_eq!(Git.resolve_commit(holder, &old_pin).unwrap(), None);
 }
 
 #[test]

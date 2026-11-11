@@ -17,7 +17,12 @@
 //! - Environment: the caller's environment, plus `GIT_TERMINAL_PROMPT=0`,
 //!   so a fetch that needs a password fails instead of waiting for an
 //!   answer that nobody gives, and `LC_ALL=C`, so the messages that the
-//!   errors quote are in English.
+//!   errors quote are in English. The commands that write the commits of
+//!   an archive's uncommitted work also get `GIT_INDEX_FILE`, a temporary
+//!   index under the archive's directory, so the checkout's own index
+//!   stays as it is, and `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE`, the
+//!   time of the archive's record, so the same work gives the same
+//!   commits.
 //! - Streams and deadline: standard input is empty. The module keeps the
 //!   first [`MOST_OUTPUT_BYTES`] bytes of standard output and of standard
 //!   error and discards the rest. A fetch has [`FETCH_DEADLINE`],
@@ -42,7 +47,8 @@ use std::time::Duration;
 use wait_timeout::ChildExt as _;
 
 use crate::backend::{
-    Backend, Changes, Concealed, Head, Listed, LocalNames, RefHolder, Repository,
+    Backend, Changes, Concealed, Head, LargeFile, Listed, LocalNames, RefHolder, Repository,
+    StashEntry, WipCommits, WipTrees,
 };
 use crate::error::Error;
 use crate::mirror::redacted;
@@ -140,6 +146,18 @@ fn git_dirs(checkout: &Path) -> Result<Vec<PathBuf>, Error> {
     let mut dirs = vec![checkout.to_path_buf()];
     dirs.extend(module_dirs(&checkout.join(".git").join("modules"))?);
     Ok(dirs)
+}
+
+/// Reports whether `dir` is the git directory of a submodule: a directory
+/// with a `HEAD` file below a `modules` directory of a git directory.
+fn is_module_git_dir(dir: &Path) -> bool {
+    dir.join("HEAD").is_file()
+        && dir.ancestors().skip(1).any(|ancestor| {
+            ancestor.file_name() == Some(OsStr::new("modules"))
+                && ancestor
+                    .parent()
+                    .is_some_and(|parent| parent.join("HEAD").is_file())
+        })
 }
 
 /// Returns the git directory of each submodule below `modules`, the
@@ -312,17 +330,42 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_with(dir, args, &[], operation, deadline, kept)
+}
+
+/// Runs `git -C <dir> <args>` as [`run_keeping`] does, with each variable
+/// of `env` added to its environment.
+fn run_with<I, S>(
+    dir: &Path,
+    args: I,
+    env: &[(&str, &OsStr)],
+    operation: &'static str,
+    deadline: Duration,
+    kept: u64,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
     )]
     let mut command = Command::new(GIT);
+    command.arg("-C").arg(dir);
+    if is_module_git_dir(dir) {
+        // A submodule's git directory names its work tree in
+        // `core.worktree`. After `git rm` deletes the submodule, that
+        // directory is gone and git refuses to start, so the git
+        // directory stands in as the work tree. The commands that read a
+        // submodule's git directory read only its references and objects.
+        command.arg("--work-tree=.");
+    }
     command
-        .arg("-C")
-        .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -978,13 +1021,72 @@ impl Backend for Git {
         archive::write_ref(repository, reference, commit)
     }
 
-    fn fetch_head_into_mirror(
+    fn fetch_into_mirror(
         &self,
         mirror: &Path,
         checkout: &Path,
-        reference: &str,
-    ) -> Result<String, Error> {
-        archive::fetch_head_into_mirror(mirror, checkout, reference)
+        refs: &[(String, String)],
+    ) -> Result<(), Error> {
+        archive::fetch_into_mirror(mirror, checkout, refs)
+    }
+
+    fn refs_under(
+        &self,
+        holder: RefHolder<'_>,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, Error> {
+        archive::refs_under(holder, prefix)
+    }
+
+    fn stash_entries(&self, checkout: &Path) -> Result<Vec<StashEntry>, Error> {
+        archive::stash_entries(checkout)
+    }
+
+    fn orphans(
+        &self,
+        checkout: &Path,
+        kept: &[String],
+        shared: bool,
+    ) -> Result<Vec<String>, Error> {
+        archive::orphans(checkout, kept, shared)
+    }
+
+    fn large_files(&self, checkout: &Path, most: u64) -> Result<Vec<LargeFile>, Error> {
+        concealed::large_files(checkout, most)
+    }
+
+    fn wip_trees(&self, checkout: &Path, index: &Path) -> Result<WipTrees, Error> {
+        archive::wip_trees(checkout, index)
+    }
+
+    fn write_wip(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        time: u64,
+        message: &str,
+    ) -> Result<WipCommits, Error> {
+        archive::write_wip(checkout, index, time, message)
+    }
+
+    fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error> {
+        archive::tree_of(dir, commit)
+    }
+
+    fn apply_wip(&self, checkout: &Path, wip: &WipCommits) -> Result<(), Error> {
+        archive::apply_wip(checkout, wip)
+    }
+
+    fn store_stash(&self, checkout: &Path, commit: &str, message: &str) -> Result<(), Error> {
+        archive::store_stash(checkout, commit, message)
+    }
+
+    fn create_ref(&self, dir: &Path, reference: &str, object: &str) -> Result<bool, Error> {
+        archive::create_ref(dir, reference, object)
+    }
+
+    fn submodule_paths(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+        concealed::submodule_paths(checkout)
     }
 
     fn delete_ref(&self, holder: RefHolder<'_>, reference: &str) -> Result<(), Error> {
@@ -999,25 +1101,12 @@ impl Backend for Git {
         archive::resolve_commit(holder, revision)
     }
 
-    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error> {
-        archive::commit_all(checkout, message)
-    }
-
-    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error> {
-        concealed::check_commit_all(checkout)
-    }
-
     fn concealed(&self, checkout: &Path) -> Result<Concealed, Error> {
         concealed::concealed(checkout)
     }
 
-    fn local_names(
-        &self,
-        checkout: &Path,
-        mirror: &Path,
-        source: &Path,
-    ) -> Result<LocalNames, Error> {
-        concealed::local_names(checkout, mirror, source)
+    fn local_names(&self, checkout: &Path, source: &Path) -> Result<LocalNames, Error> {
+        concealed::local_names(checkout, source)
     }
 
     fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
