@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "mxv/archive/v1",
+  "title": "mxv/archive/v2",
   "description": "What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.",
   "type": "object",
   "properties": {
     "schema": {
       "description": "The id of this document.",
-      "const": "mxv/archive/v1"
+      "const": "mxv/archive/v2"
     },
     "dry_run": {
       "description": "Present, and true, when the run was a dry run that changed nothing.",
@@ -454,11 +454,11 @@
             "type": "string"
           }
         },
-        "wip": {
-          "description": "The paths that `--wip` committed, or would commit.",
+        "kept": {
+          "description": "What the archive kept of each checkout besides its commit, or would\nkeep, for each checkout that keeps something.",
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/KeptRow"
           }
         },
         "lost": {
@@ -520,7 +520,7 @@
         "path",
         "pins",
         "local_only",
-        "wip",
+        "kept",
         "lost",
         "stopped",
         "disposable",
@@ -565,6 +565,87 @@
         "commit",
         "repository",
         "reference"
+      ]
+    },
+    "KeptRow": {
+      "description": "What an archive kept of one checkout besides the commit of its `HEAD`.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The checkout's folder.",
+          "type": "string"
+        },
+        "branch": {
+          "description": "The branch of the checkout, or null for a detached `HEAD`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uncommitted": {
+          "description": "Whether the archive kept uncommitted work, which restore puts back\nuncommitted.",
+          "type": "boolean"
+        },
+        "changes": {
+          "description": "Each staged or unstaged change of a tracked file, as\n`git status --porcelain` prints it, such as ` M src/lib.rs`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "untracked": {
+          "description": "Each untracked path, relative to the checkout. A directory ends\nwith `/`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stashes": {
+          "description": "The number of stash entries.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "branches": {
+          "description": "Each local branch besides the checkout's own.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tags": {
+          "description": "Each tag that origin does not hold.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "worktree": {
+          "description": "Each per-worktree reference, by its name below `refs/worktree/`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "orphans": {
+          "description": "Each commit that no branch reaches, which restore keeps under\n`refs/mxv/kept/`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "folder",
+        "branch",
+        "uncommitted",
+        "changes",
+        "untracked",
+        "stashes",
+        "branches",
+        "tags",
+        "worktree",
+        "orphans"
       ]
     }
   }

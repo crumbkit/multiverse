@@ -14,7 +14,7 @@ mxv runs locally as one person.
 ## What mxv stores
 
 - Workspace records hold names, paths (usually with the user name), branches, commits and ports.
-- Mirrors hold each origin's branches and tags, and archive pins, which can be unpushed or `--wip` commits.
+- Mirrors hold each origin's branches and tags, and archive pins, which can be unpushed commits, stashes, or commits of a checkout's uncommitted and untracked files. An ignored file such as `.env` never enters a pin, because it refuses the archive.
 - Archives (mode 0700) hold workspace root files and origins, which keep an SSH user name.
 - Run records (0600) hold process ids and no environment values. `env-digest.key` keys digests of non-secret values.
 - App logs (0600) hold what apps print, unrotated. Keeper diagnostic logs hold the keeper's notes and standard error.

@@ -43,7 +43,9 @@ variables it reads.
 multiverse is under construction. A workspace holds one or more
 repositories, and `mxv new --repo api --repo web` or `mxv add` gives it
 several. `mxv archive` puts a workspace away and `mxv restore` rebuilds it
-at the same commits.
+at the same commits, with the uncommitted work, the stashes, the other
+local branches, the tags that origin lacks and the commits that no branch
+reaches put back as they were.
 
 ## Licence
 

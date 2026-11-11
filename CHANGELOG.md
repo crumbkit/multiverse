@@ -5,6 +5,41 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Changed
+
+- `mxv archive` keeps a checkout's git state instead of refusing it. It
+  keeps the staged and unstaged changes and the untracked files as two
+  commits that only its pins name, so the branch and the index never move,
+  and `mxv restore` puts them back uncommitted. It also keeps each stash,
+  the other local branches of a clone, the tags that origin does not hold,
+  the per-worktree references, and each commit that no branch reaches,
+  which comes back as `refs/mxv/kept/<commit>`. The pin of `HEAD` is now
+  `refs/mxv/archives/<id>/<folder>/head`, and an archive record of version
+  1 still restores.
+- An archive refuses only what it cannot keep: a paused merge, rebase,
+  cherry-pick, revert or bisect, a repository that git does not track, the
+  work of a submodule, a file marked skip-worktree or assume-unchanged with
+  local edits, a file that git does not list, an ignored file, an entry of
+  the workspace's directory such as a socket, and a file over
+  `archive_max_file`. The failure code is `mxv::archive::unkeepable`, which
+  replaces `mxv::archive::unsaved_work`, and each line says what to do.
+  `--force` loses only those items.
+- The `mxv archive` document is version 2. It replaces `wip` with `kept`,
+  which lists what the archive kept of each checkout. The `mxv restore`
+  document gains `put_back`, which lists what the restore put back, and
+  warns about each submodule that comes back uninitialised.
+
+### Added
+
+- The config key `archive_max_file` sets the largest file of a checkout's
+  uncommitted work that `mxv archive` keeps, such as `"1GiB"`. It defaults
+  to 100 MiB.
+
+### Removed
+
+- `mxv archive --wip` is gone, because an archive keeps uncommitted work
+  without a commit on the branch.
+
 ## [0.1.1] - 2026-11-11
 
 ### Fixed
