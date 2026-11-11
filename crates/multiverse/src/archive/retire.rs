@@ -1,6 +1,6 @@
 //! Carrying out an archive: writing the record, committing the uncommitted
-//! work, pinning what the archive keeps, copying the root files, and
-//! retiring each checkout.
+//! work, pinning what the archive keeps, keeping the ignored files, copying
+//! the root files, and retiring each checkout.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -8,10 +8,10 @@ use std::io;
 use std::path::Path;
 
 use crate::archive::admit::{ArchivePlan, ArchivePlanned, ArchiveRefusal, submodule_items};
-use crate::archive::root;
 use crate::archive::{
     Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, WIP_MESSAGE, quarantine,
 };
+use crate::archive::{ignored, root};
 use crate::backend::{Backend, Head, RefHolder, WipTrees};
 use crate::error::Error;
 use crate::name::WorkspaceName;
@@ -300,6 +300,17 @@ impl<B: Backend> Workspaces<B> {
             self.pin(planned, archived)?;
         }
         (self.checkpoint)("pins")?;
+        // The record already carries the entries of the checkouts that an
+        // earlier run retired, which only the tar holds now; the standing
+        // checkouts' files are written again and the carried ones copied.
+        let sources = plan.ignored_sources();
+        if !sources.is_empty() {
+            let carried = archive.ignored.clone();
+            archive.ignored =
+                ignored::keep_carrying(&archives.data_of(&archive.id), &sources, &carried)?;
+            archives.write(&archive)?;
+        }
+        (self.checkpoint)("ignored")?;
         let generated = self.generated_agents(&plan.removal.workspace)?;
         root::copy_in(archives, &mut archive, &plan.removal.workspace, &generated)?;
         archives.write(&archive)?;

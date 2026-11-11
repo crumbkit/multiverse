@@ -43,6 +43,11 @@ fn clear_hook() {
     HOOK.with(|hook| *hook.borrow_mut() = None);
 }
 
+/// Returns the permission bits of `path` itself, without following a symlink.
+fn mode_of(path: &Path) -> u32 {
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
 /// Makes the run fail at `wanted`, as a run that stopped there would.
 fn stop_at(wanted: &'static str) {
     set_hook(move |step| {
@@ -84,7 +89,7 @@ fn setup(kind: Kind) -> Setup {
     Setup {
         fixture: fixture(),
         root: base.join("mxv"),
-        archives: Archives::new(base.join("archives")),
+        archives: Archives::new(base.join("archives"), base.join("data/archives")),
         runs: Runs::new(&base.join("runs")),
         base,
         _dir: dir,
@@ -193,6 +198,11 @@ impl Setup {
 
     fn record(&self) -> Option<Archive> {
         self.archives.read(&name()).unwrap()
+    }
+
+    /// Returns the tar file of ignored entries of the archive `archive`.
+    fn ignored_tar(&self, archive: &Archive) -> PathBuf {
+        self.archives.data_of(&archive.id).join("ignored.tar")
     }
 
     fn ignore_env(&self) {
@@ -390,36 +400,203 @@ fn a_detached_checkout_comes_back_detached_at_its_commit() {
 }
 
 #[test]
-fn an_ignored_file_and_a_socket_refuse_the_archive_and_each_names_itself() {
+fn a_socket_in_the_workspace_root_refuses_the_archive_and_names_itself() {
     let setup = setup(Kind::Clone);
     setup.create();
     setup.ignore_env();
     let checkout = setup.checkout();
     write(checkout.join("draft.txt"), "draft\n");
     write(checkout.join(".env"), "SECRET=1\n");
-    let _socket = UnixListener::bind(setup.root.join("triage/s")).unwrap();
+    let socket = UnixListener::bind(setup.root.join("triage/s")).unwrap();
     let ArchiveRefusal::Unkeepable(found) = setup.refusal(ArchiveOptions::default()) else {
         panic!("the archive was not refused for work it cannot keep");
     };
     let kinds: Vec<&UnkeptKind> = found.items.iter().map(|item| &item.kind).collect();
     assert_eq!(
         kinds,
-        vec![
-            &UnkeptKind::Ignored {
-                path: ".env".to_owned()
-            },
-            &UnkeptKind::Root {
-                entry: "s".to_owned()
-            },
-        ],
-        "an archive keeps draft.txt, so only these refuse"
+        vec![&UnkeptKind::Root {
+            entry: "s".to_owned()
+        }],
+        "an archive keeps draft.txt and .env, so only the socket refuses"
     );
-    assert_eq!(found.items[0].to_string(), "app: the ignored path .env");
+    assert_eq!(found.items[0].to_string(), "root: s");
     assert!(checkout.join("draft.txt").exists());
     assert!(
         setup.record().is_none(),
         "a refused archive writes no record"
     );
+    drop(socket);
+    fs::remove_file(setup.root.join("triage/s")).unwrap();
+    assert_eq!(
+        setup.plan(ArchiveOptions::default()).ignored,
+        vec![IgnoredSource::new("app".to_owned(), ".env".to_owned(), 9)],
+        "without the socket the archive goes ahead and keeps .env"
+    );
+}
+
+/// Writes `text` at `path` with the permission bits `mode`.
+fn write_with_mode(path: &Path, text: &str, mode: u32) {
+    write(path, text);
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn an_archive_keeps_a_dot_env_in_a_private_tarball_and_lists_it_in_the_record() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    let checkout = setup.checkout();
+    write_with_mode(&checkout.join(".env"), "SECRET=1\n", 0o640);
+    write(checkout.join("draft.txt"), "draft\n");
+    let digest = crate::store::file_digest(&checkout.join(".env")).unwrap();
+
+    let archive = setup.archive();
+
+    assert_eq!(
+        archive.ignored,
+        vec![IgnoredEntry {
+            path: "app/.env".to_owned(),
+            kind: IgnoredKind::File,
+            size: 9,
+            mode: 0o640,
+            digest,
+        }]
+    );
+    assert_eq!(archive.ignored[0].folder(), "app");
+    assert_eq!(
+        setup.record().as_ref().map(|record| &record.ignored),
+        Some(&archive.ignored),
+        "the record lists the entry"
+    );
+    assert!(setup.ignored_tar(&archive).is_file());
+    assert!(!setup.root.join("triage").exists());
+    setup.restore();
+    assert!(
+        !setup.archives.data_of(&archive.id).exists(),
+        "the restore deletes the tar and its directory with the archive"
+    );
+    assert!(setup.record().is_none());
+}
+
+#[test]
+fn the_ignored_tarball_and_its_directory_are_readable_only_by_the_user() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    write(setup.checkout().join(".env"), "SECRET=1\n");
+
+    let archive = setup.archive();
+
+    assert_eq!(mode_of(&setup.archives.data_of(&archive.id)), 0o700);
+    assert_eq!(mode_of(&setup.ignored_tar(&archive)), 0o600);
+}
+
+#[test]
+fn an_ignored_file_over_archive_max_file_is_refused_and_named() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    let checkout = setup.checkout();
+    write(checkout.join(".env"), "x".repeat(2048));
+    write(checkout.join("draft.txt"), "draft\n");
+
+    let ArchiveRefusal::Unkeepable(found) =
+        setup.refusal(ArchiveOptions::default().with_max_file(1024))
+    else {
+        panic!("the archive was not refused for the large ignored file");
+    };
+    assert_eq!(
+        found.items.first().map(|item| &item.kind),
+        Some(&UnkeptKind::TooLarge {
+            path: ".env".to_owned(),
+            bytes: 2048,
+            most: 1024,
+            untracked: true,
+        }),
+        "{:?}",
+        found.items
+    );
+    assert_eq!(
+        found.items[0].to_string(),
+        "app: the file .env is 2048 bytes, over the limit of 1024 bytes"
+    );
+
+    let archive = setup.archive_with(force().with_max_file(1024));
+
+    assert_eq!(
+        archive.lost,
+        vec!["app: the file .env is 2048 bytes, over the limit of 1024 bytes".to_owned()]
+    );
+    assert!(archive.ignored.is_empty(), "{:?}", archive.ignored);
+    setup.restore();
+    assert!(
+        !checkout.join(".env").exists(),
+        "the forced archive lost .env"
+    );
+    assert!(checkout.join("draft.txt").exists());
+}
+
+#[test]
+fn a_rerun_after_a_partial_tar_writes_it_again_and_finishes() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    setup.ignore_env();
+    write(setup.checkout().join(".env"), "SECRET=1\n");
+    stop_at("ignored");
+    let plan = setup.plan(ArchiveOptions::default());
+    let stopped = setup.workspaces.archive(&setup.archives, plan);
+    clear_hook();
+    assert!(stopped.is_err(), "the run did not stop after the tar");
+    let archive = setup.record().expect("the record stays");
+    let tar = setup.ignored_tar(&archive);
+    let whole = fs::read(&tar).unwrap();
+    write(&tar, &whole[..whole.len() / 2]);
+
+    let mut archive = match setup.planned(ArchiveOptions::default()) {
+        ArchivePlanned::Ready(plan) => {
+            match setup.workspaces.archive(&setup.archives, *plan).unwrap() {
+                ArchiveOutcome::Retired { archive, .. } => *archive,
+                ArchiveOutcome::Refused(refusal) => panic!("{refusal:?}"),
+            }
+        }
+        other => panic!("{other:?}"),
+    };
+    setup
+        .workspaces
+        .finish_archive(&setup.archives, &mut archive)
+        .unwrap();
+
+    assert_eq!(
+        fs::read(&tar).unwrap(),
+        whole,
+        "the rerun writes the tar again"
+    );
+    assert_eq!(archive.ignored.len(), 1, "{:?}", archive.ignored);
+    assert!(!setup.root.join("triage").exists());
+}
+
+#[test]
+fn an_ignored_symbolic_link_is_kept_as_a_link() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    write(checkout.join(".gitignore"), "link\n");
+    git(&checkout, &["add", ".gitignore"]);
+    git(&checkout, &["commit", "--quiet", "-m", "Ignore"]);
+    write(checkout.join("draft.txt"), "draft\n");
+    std::os::unix::fs::symlink("draft.txt", checkout.join("link")).unwrap();
+
+    let archive = setup.archive();
+
+    assert_eq!(
+        archive
+            .ignored
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.kind))
+            .collect::<Vec<_>>(),
+        vec![("app/link", IgnoredKind::Link)]
+    );
+    assert!(setup.ignored_tar(&archive).is_file());
 }
 
 fn keeps_uncommitted_work(kind: Kind) {
@@ -729,15 +906,17 @@ fn force_loses_what_the_archive_cannot_keep_and_lists_it_in_the_record() {
     setup.ignore_env();
     write(setup.checkout().join(".env"), "SECRET=1\n");
     write(setup.checkout().join("draft.txt"), "draft\n");
+    let _socket = UnixListener::bind(setup.root.join("triage/s")).unwrap();
     let archive = setup.archive_with(force());
     assert_eq!(
         archive.lost,
-        vec!["app: the ignored path .env".to_owned()],
-        "an archive keeps draft.txt"
+        vec!["root: s".to_owned()],
+        "an archive keeps draft.txt and .env, so only the socket is lost"
     );
     assert!(setup.record().unwrap().lost == archive.lost);
+    assert_eq!(archive.ignored.len(), 1, "{:?}", archive.ignored);
     setup.restore();
-    assert!(!setup.checkout().join(".env").exists());
+    assert!(!setup.root.join("triage/s").exists());
     assert!(setup.checkout().join("draft.txt").is_file());
 }
 
@@ -815,6 +994,8 @@ fn resumes_after(kind: Kind, step: &'static str) {
     let setup = setup(kind);
     setup.create();
     let commit = setup.commit_locally();
+    setup.ignore_env();
+    write(setup.checkout().join(".env"), "SECRET=1\n");
     write(setup.root.join("triage/notes.md"), "keep me\n");
     leave_uncommitted_work(&setup.checkout());
     assert_ne!(setup.head(), commit);
@@ -840,6 +1021,8 @@ fn resumes_after(kind: Kind, step: &'static str) {
         .finish_archive(&setup.archives, &mut archive)
         .unwrap();
     assert!(!setup.root.join("triage").exists(), "{step}");
+    assert_eq!(archive.ignored.len(), 1, "{step}: {:?}", archive.ignored);
+    assert!(setup.ignored_tar(&archive).is_file(), "{step}");
     setup.restore();
     assert_eq!(setup.head(), commit, "{step}");
     assert_eq!(status(&setup.checkout()), before, "{step}");
@@ -850,10 +1033,11 @@ fn resumes_after(kind: Kind, step: &'static str) {
     );
 }
 
-const ARCHIVE_STEPS: [&str; 10] = [
+const ARCHIVE_STEPS: [&str; 11] = [
     "record",
     "wip",
     "pins",
+    "ignored",
     "root",
     "before-move:app",
     "moved:app",

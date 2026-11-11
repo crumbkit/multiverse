@@ -4,11 +4,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use phase::WorkspaceId;
 use phase::random::RANDOM_DEVICE;
 
+use crate::archive::ignored::{self, IgnoredEntry, IgnoredKind, IgnoredSource};
 use crate::archive::record::now;
 use crate::archive::root::{self, RootEntry, RootKind, Scanned};
 use crate::archive::{
@@ -115,7 +117,9 @@ pub enum UnkeptKind {
         /// The file, relative to the checkout.
         path: String,
     },
-    /// An ignored path outside the disposable set, such as `.env`.
+    /// An ignored path outside the disposable set that the archive cannot
+    /// keep: one that holds a repository, or that is neither a file, a link
+    /// nor a directory, such as a socket.
     Ignored {
         /// The path, relative to the checkout.
         path: String,
@@ -338,6 +342,9 @@ pub struct ArchivePlan {
     /// The uncommitted work of each checkout that the archive retires and
     /// keeps, in the order of the checkouts.
     pub uncommitted: Vec<Uncommitted>,
+    /// Each ignored file or link that the archive keeps, in the order of
+    /// the checkouts.
+    pub ignored: Vec<IgnoredSource>,
     /// The extra entries of the workspace's directory that the archive
     /// copies, without digests.
     pub root: Vec<String>,
@@ -456,6 +463,62 @@ fn of_folder<'a>(listed: &'a [String], folder: &'a str) -> impl Iterator<Item = 
     })
 }
 
+/// One entry below an ignored path, by its path relative to the checkout.
+enum Found {
+    /// A file of so many bytes, or a link with 0, that the archive keeps.
+    Kept(String, u64),
+    /// A file of so many bytes, over the limit.
+    TooLarge(String, u64),
+    /// Neither a file, a link nor a directory, such as a socket.
+    Other(String),
+}
+
+/// Calls `visit` with each file and link at or below `relative` in the
+/// checkout at `checkout`, without following links, a directory's entries
+/// in name order. A file over `max_file` bytes is too large.
+fn walk_ignored(
+    checkout: &Path,
+    relative: &str,
+    max_file: u64,
+    visit: &mut dyn FnMut(Found),
+) -> Result<(), Error> {
+    let on_disk = checkout.join(relative);
+    let unreadable = |source| Error::StateUnreadable {
+        path: on_disk.clone(),
+        source,
+    };
+    let metadata = fs::symlink_metadata(&on_disk).map_err(unreadable)?;
+    let kind = metadata.file_type();
+    if kind.is_symlink() {
+        visit(Found::Kept(relative.to_owned(), 0));
+    } else if kind.is_file() {
+        let bytes = metadata.len();
+        if bytes > max_file {
+            visit(Found::TooLarge(relative.to_owned(), bytes));
+        } else {
+            visit(Found::Kept(relative.to_owned(), bytes));
+        }
+    } else if kind.is_dir() {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&on_disk).map_err(unreadable)? {
+            names.push(entry.map_err(unreadable)?.file_name());
+        }
+        names.sort();
+        for name in names {
+            let Some(name) = name.to_str() else {
+                return Err(unreadable(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the name {name:?} is not UTF-8"),
+                )));
+            };
+            walk_ignored(checkout, &format!("{relative}/{name}"), max_file, visit)?;
+        }
+    } else {
+        visit(Found::Other(relative.to_owned()));
+    }
+    Ok(())
+}
+
 impl<B: Backend> Workspaces<B> {
     /// Returns what archiving the workspace `name` would do, or why it
     /// cannot be archived, and changes nothing but the remote branches that
@@ -524,6 +587,7 @@ impl<B: Backend> Workspaces<B> {
         };
         let mut unkeepable = Unkeepable::default();
         let mut uncommitted = Vec::new();
+        let mut ignored = Vec::new();
         let mut checkouts = Vec::new();
         for planned in &removal.checkouts {
             let folder = planned.checkout.name.as_str();
@@ -568,6 +632,7 @@ impl<B: Backend> Workspaces<B> {
                 &concealed,
                 options.max_file,
                 &mut unkeepable,
+                &mut ignored,
             )?);
             if refresh {
                 warnings.extend(self.unkept_names(planned)?);
@@ -610,6 +675,7 @@ impl<B: Backend> Workspaces<B> {
             checkouts,
             lost,
             uncommitted,
+            ignored,
             root: scanned.paths(),
             warnings,
         };
@@ -623,11 +689,15 @@ impl<B: Backend> Workspaces<B> {
         Ok(ArchivePlanned::Ready(Box::new(plan)))
     }
 
-    /// Adds to `unkeepable` what the checkout that `planned` retires holds
-    /// and an archive cannot keep: its ignored files, what `concealed`
-    /// found, and each file over `max_file` bytes. Returns the checkout's
-    /// uncommitted changes that the archive keeps, which leave out the
-    /// ignored files and the nested repositories.
+    /// Adds to `ignored` each ignored file and link outside the disposable
+    /// set that the checkout that `planned` retires holds and the archive
+    /// keeps, and to `unkeepable` what it holds and an archive cannot keep:
+    /// an ignored path that holds a repository or is neither a file, a link
+    /// nor a directory, an ignored file over `max_file` bytes, what
+    /// `concealed` found, and each file of the uncommitted work over
+    /// `max_file` bytes. Returns the checkout's uncommitted changes that the
+    /// archive keeps, which leave out the ignored files and the nested
+    /// repositories.
     fn scan_checkout(
         &self,
         removal: &Removal,
@@ -635,17 +705,44 @@ impl<B: Backend> Workspaces<B> {
         concealed: &Concealed,
         max_file: u64,
         unkeepable: &mut Unkeepable,
+        ignored: &mut Vec<IgnoredSource>,
     ) -> Result<Uncommitted, Error> {
         let folder = planned.checkout.name.as_str();
         let path = &planned.checkout.path;
-        for ignored in of_folder(&removal.ignored, folder) {
-            unkeepable.push(
-                folder,
+        for item in of_folder(&removal.ignored, folder) {
+            if crate::disk::keep_reason(path, item).is_some() {
+                unkeepable.push(
+                    folder,
+                    path,
+                    UnkeptKind::Ignored {
+                        path: item.to_owned(),
+                    },
+                );
+                continue;
+            }
+            walk_ignored(
                 path,
-                UnkeptKind::Ignored {
-                    path: ignored.to_owned(),
+                item.trim_end_matches('/'),
+                max_file,
+                &mut |found| match found {
+                    Found::Kept(relative, bytes) => {
+                        ignored.push(IgnoredSource::new(folder.to_owned(), relative, bytes));
+                    }
+                    Found::TooLarge(relative, bytes) => unkeepable.push(
+                        folder,
+                        path,
+                        UnkeptKind::TooLarge {
+                            path: relative,
+                            bytes,
+                            most: max_file,
+                            untracked: true,
+                        },
+                    ),
+                    Found::Other(relative) => {
+                        unkeepable.push(folder, path, UnkeptKind::Ignored { path: relative })
+                    }
                 },
-            );
+            )?;
         }
         unkeepable.add_concealed(folder, path, concealed);
         let mut left_out = Vec::new();
@@ -662,7 +759,7 @@ impl<B: Backend> Workspaces<B> {
                 },
             );
         }
-        let ignored: Vec<&str> = of_folder(&removal.ignored, folder).collect();
+        let ignored_items: Vec<&str> = of_folder(&removal.ignored, folder).collect();
         let nested: Vec<String> = concealed
             .nested
             .iter()
@@ -672,7 +769,7 @@ impl<B: Backend> Workspaces<B> {
             folder: folder.to_owned(),
             changes: of_folder(&removal.discarded, folder)
                 .filter(|item| {
-                    !ignored.contains(item)
+                    !ignored_items.contains(item)
                         && !nested.iter().any(|n| n == item)
                         && !left_out
                             .iter()
@@ -934,6 +1031,27 @@ impl ArchivePlan {
             .map_or(&[], |work| work.left_out.as_slice())
     }
 
+    /// Returns each ignored entry that the archive keeps from the checkouts
+    /// that still stand, as its archived path and where it lies on the disk,
+    /// in the order of the checkouts.
+    pub(super) fn ignored_sources(&self) -> Vec<(String, PathBuf)> {
+        self.removal
+            .checkouts
+            .iter()
+            .filter(|planned| planned.directory == Fate::Removed)
+            .flat_map(|planned| {
+                let folder = planned.checkout.name.as_str();
+                let own: Vec<IgnoredSource> = self
+                    .ignored
+                    .iter()
+                    .filter(|source| source.folder == folder)
+                    .cloned()
+                    .collect();
+                ignored::on_disk(&own, &planned.checkout.path)
+            })
+            .collect()
+    }
+
     /// Returns the record of the archive of the workspace `name`, in the
     /// state [`ArchiveState::Retiring`].
     pub(super) fn record(&self, name: &WorkspaceName) -> Archive {
@@ -986,6 +1104,22 @@ impl ArchivePlan {
                 .unwrap_or_default(),
             manifest: earlier.and_then(|archive| archive.manifest.clone()),
             manifest_mode: earlier.and_then(|archive| archive.manifest_mode),
+            // The entries of a checkout that an earlier run retired exist
+            // only in the tar now; a standing checkout's are read again.
+            ignored: earlier
+                .map(|archive| {
+                    archive
+                        .ignored
+                        .iter()
+                        .filter(|entry| {
+                            !self.removal.checkouts.iter().any(|planned| {
+                                stands(&planned) && planned.checkout.name == entry.folder()
+                            })
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -1009,6 +1143,15 @@ impl ArchivePlan {
         archive.root = merged.into_values().collect();
         archive.manifest = Some("0".repeat(DIGEST_LENGTH));
         archive.manifest_mode = Some(0o7777);
+        archive
+            .ignored
+            .extend(self.ignored.iter().map(|source| IgnoredEntry {
+                path: source.archived(),
+                kind: IgnoredKind::File,
+                size: source.bytes,
+                mode: 0o7777,
+                digest: "0".repeat(DIGEST_LENGTH),
+            }));
         for checkout in &mut archive.checkouts {
             if checkout.kept.wip.is_none() {
                 checkout.kept.wip = Some(crate::archive::KeptWip {

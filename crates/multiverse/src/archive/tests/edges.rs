@@ -380,12 +380,12 @@ fn what_a_forced_run_lost_with_a_checkout_it_retired_stays_recorded_as_lost() {
     let setup = setup(Kind::Clone);
     setup.create();
     setup.ignore_env();
-    write(setup.checkout().join(".env"), "doomed\n");
-    let plan = setup.plan(force());
+    write(setup.checkout().join(".env"), "x".repeat(2048));
+    let plan = setup.plan(force().with_max_file(1024));
     stop_at("retired:app");
     assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
     clear_hook();
-    let archive = setup.archive_with(ArchiveOptions::default());
+    let archive = setup.archive_with(ArchiveOptions::default().with_max_file(1024));
     assert!(
         archive.lost.iter().any(|item| item.contains(".env")),
         "{:?}",

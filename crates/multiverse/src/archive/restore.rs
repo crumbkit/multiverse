@@ -309,7 +309,7 @@ impl<B: Backend> Workspaces<B> {
             runs.remember_containers(&archive.name)?;
         }
         warnings.extend(self.delete_pins(&archive));
-        if let Err(error) = archives.delete(&archive.name) {
+        if let Err(error) = archives.delete(&archive) {
             warnings.push(format!(
                 "mxv rebuilt the workspace and could not delete its archive; `mxv remove --archived {}` deletes it: {error}",
                 archive.name
@@ -644,7 +644,7 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         let warnings = self.delete_pins(&archive);
-        archives.delete(&archive.name)?;
+        archives.delete(&archive)?;
         Ok(ArchivedRemoval { archive, warnings })
     }
 }

@@ -158,6 +158,48 @@ fn a_rerun_after_a_partial_tar_writes_it_again_and_finishes() {
 }
 
 #[test]
+fn a_rerun_carries_the_whole_entries_of_a_retired_checkout_into_the_new_tar() {
+    let scene = scene();
+    scene.file("app/.env", "TOKEN=abc\n", 0o640);
+    scene.file("app/config/master.key", "0123456789", 0o600);
+    let first = keep(
+        &scene.archive,
+        &scene.sources(&["app/.env", "app/config/master.key"]),
+    )
+    .unwrap();
+    // The checkout app is retired, so its files exist only in the tar. The
+    // record of master.key no longer matches the tar, as a damaged entry.
+    let mut carried = first.clone();
+    carried[1].digest = "0".repeat(64);
+    fs::remove_dir_all(scene.workspace.join("app")).unwrap();
+    fs::create_dir_all(scene.workspace.join("web")).unwrap();
+    scene.file("web/.env", "TOKEN=web\n", 0o600);
+
+    let kept = keep_carrying(&scene.archive, &scene.sources(&["web/.env"]), &carried).unwrap();
+
+    assert_eq!(
+        kept.iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["web/.env", "app/.env"],
+        "the sources come first, then the carried entries that are whole"
+    );
+    assert_eq!(kept[1], first[0]);
+    let rebuilt = scene.rebuilt();
+    let restored = put_back(restore(&scene.archive, &kept, &rebuilt, false));
+    assert_eq!(restored.written, ["web/.env", "app/.env"]);
+    assert_eq!(
+        fs::read_to_string(rebuilt.join("app/.env")).unwrap(),
+        "TOKEN=abc\n"
+    );
+    assert_eq!(mode_of(&rebuilt.join("app/.env")), 0o640);
+    assert_eq!(
+        fs::read_to_string(rebuilt.join("web/.env")).unwrap(),
+        "TOKEN=web\n"
+    );
+}
+
+#[test]
 fn an_ignored_file_edited_after_the_tar_is_named_as_changed() {
     let scene = scene();
     scene.file("app/.env", "TOKEN=abc\n", 0o600);

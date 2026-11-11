@@ -4,7 +4,10 @@
 //! An archive lives in `<archives>/<name>`, in the state directory, private
 //! to the person. `archive.json` holds its [`Archive`] record, `manifest`
 //! the bytes of the workspace manifest when the workspace has one, and
-//! `root/` the extra files of the workspace's directory. Each checkout's
+//! `root/` the extra files of the workspace's directory. The ignored files
+//! of its checkouts that lie outside the disposable set, such as `.env`,
+//! are kept in one tar, `ignored.tar`, in the data directory under the
+//! archive's id, which the record lists as [`IgnoredEntry`]. Each checkout's
 //! git state stays reachable through pins, references below
 //! `refs/mxv/archives/<archive id>/<folder>/` in the worktree's repository
 //! or the clone's mirror: `head` keeps the commit of `HEAD`, and the others
@@ -32,14 +35,6 @@ use crate::error::Error;
 use crate::mirror::directory;
 
 mod admit;
-// Soft limit: the tar of ignored files is built and tested here, and
-// archive and restore start to call it when admit splits what an archive
-// keeps from what it refuses. Until then nothing outside the module's
-// tests calls it, and archive still refuses ignored files.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "archive and restore do not call it yet")
-)]
 mod ignored;
 mod record;
 mod restore;
@@ -52,6 +47,7 @@ pub use admit::{
     ArchiveOptions, ArchivePlan, ArchivePlanned, ArchiveRefusal, Uncommitted, Unkeepable, Unkept,
     UnkeptKind,
 };
+pub use ignored::{IgnoredEntry, IgnoredKind, IgnoredSource};
 pub use record::{
     Archive, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash, KeptWip,
 };
@@ -71,9 +67,9 @@ pub const ARCHIVE_VERSION: u32 = 2;
 /// The message of the commits that keep a checkout's uncommitted work.
 pub const WIP_MESSAGE: &str = "wip: archived by mxv";
 
-/// The largest file of a checkout's uncommitted work that an archive keeps
-/// unless the person sets another limit, in bytes: 100 MiB. A larger file
-/// refuses the archive.
+/// The largest file of a checkout's uncommitted work, and the largest
+/// ignored file, that an archive keeps unless the person sets another
+/// limit, in bytes: 100 MiB. A larger file refuses the archive.
 pub const ARCHIVE_MAX_FILE: u64 = 100 * 1024 * 1024;
 
 /// The name of an archive's record in its directory.

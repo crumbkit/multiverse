@@ -41,7 +41,7 @@ const TAR_MODE: u32 = 0o600;
 /// What one kept ignored entry is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum IgnoredKind {
+pub enum IgnoredKind {
     /// A regular file, whose bytes the tar holds.
     File,
     /// A symbolic link, whose target the tar holds.
@@ -52,19 +52,69 @@ pub(crate) enum IgnoredKind {
 /// names it and holds none of its contents.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub(crate) struct IgnoredEntry {
+pub struct IgnoredEntry {
     /// The entry's path, relative to the workspace's directory, such as
     /// `app/.env`.
-    pub(crate) path: String,
+    pub path: String,
     /// Whether the entry is a file or a link.
-    pub(crate) kind: IgnoredKind,
+    pub kind: IgnoredKind,
     /// The number of bytes of a file, or of a link's target.
-    pub(crate) size: u64,
+    pub size: u64,
     /// The permission bits.
-    pub(crate) mode: u32,
+    pub mode: u32,
     /// The SHA-256 digest of a file's bytes, or of a link's target, in
     /// lowercase hex.
-    pub(crate) digest: String,
+    pub digest: String,
+}
+
+impl IgnoredEntry {
+    /// Returns the folder of the checkout that held the entry: the first
+    /// name of its path, such as `app` of `app/.env`.
+    #[must_use]
+    pub fn folder(&self) -> &str {
+        self.path.split('/').next().unwrap_or_default()
+    }
+}
+
+/// One ignored file or symbolic link of a checkout that an archive plans
+/// to keep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IgnoredSource {
+    /// The checkout's folder.
+    pub folder: String,
+    /// The entry's path, relative to the checkout, such as `.env`.
+    pub path: String,
+    /// The number of bytes of a file, or 0 for a link.
+    pub bytes: u64,
+}
+
+impl IgnoredSource {
+    /// Returns the entry at `path` in the checkout `folder`, of `bytes`.
+    #[must_use]
+    pub const fn new(folder: String, path: String, bytes: u64) -> Self {
+        Self {
+            folder,
+            path,
+            bytes,
+        }
+    }
+
+    /// Returns the path under which the archive keeps the entry, relative
+    /// to the workspace's directory, such as `app/.env`.
+    #[must_use]
+    pub fn archived(&self) -> String {
+        format!("{}/{}", self.folder, self.path)
+    }
+}
+
+/// Returns each of `sources`, whose checkout is at `dir`, as its archived
+/// path and where it lies on the disk.
+pub(crate) fn on_disk(sources: &[IgnoredSource], dir: &Path) -> Vec<(String, PathBuf)> {
+    sources
+        .iter()
+        .map(|source| (source.archived(), dir.join(&source.path)))
+        .collect()
 }
 
 /// Why a restore cannot write the kept ignored entries back.
@@ -99,22 +149,76 @@ pub(crate) struct IgnoredRestored {
 /// Returns [`Error::StateUnreadable`] when a source cannot be read, is not
 /// a file or a link, or changes size while it is read, and
 /// [`Error::Unwritable`] when the tar cannot be written.
+#[cfg(test)]
 pub(crate) fn keep(dir: &Path, sources: &[(String, PathBuf)]) -> Result<Vec<IgnoredEntry>, Error> {
+    keep_carrying(dir, sources, &[])
+}
+
+/// Writes each of `sources` into the tar file in `dir`, as [`keep`] does,
+/// and carries over each of `carried` that the tar an earlier run wrote in
+/// `dir` still holds whole, unless a source already has its path. A run
+/// that finishes an archive uses it after a checkout is retired, when the
+/// checkout's files exist only in the tar. A carried entry that the old tar
+/// no longer holds whole is left out, and a restore names it as damaged.
+/// Returns the sources' entries, then the carried ones.
+///
+/// # Errors
+///
+/// Returns the errors of [`keep`].
+pub(crate) fn keep_carrying(
+    dir: &Path,
+    sources: &[(String, PathBuf)],
+    carried: &[IgnoredEntry],
+) -> Result<Vec<IgnoredEntry>, Error> {
     store::private_dir(dir)?;
     let tar = dir.join(IGNORED_TAR);
-    let mut kept = Vec::with_capacity(sources.len());
+    let carried: Vec<IgnoredEntry> = carried
+        .iter()
+        .filter(|entry| !sources.iter().any(|(path, _)| *path == entry.path))
+        .cloned()
+        .collect();
+    let whole = whole_entries(&tar, &carried)?;
+    let carried: Vec<IgnoredEntry> = carried
+        .into_iter()
+        .filter(|entry| whole.contains(&entry.path))
+        .collect();
+    let mut kept = Vec::with_capacity(sources.len() + carried.len());
     store::write_file_with(&tar, TAR_MODE, |file| {
+        let unwritable = |source| Error::Unwritable {
+            path: tar.clone(),
+            source,
+        };
         let mut builder = tar::Builder::new(file);
         for (path, on_disk) in sources {
             kept.push(append(&mut builder, path, on_disk)?);
         }
-        builder
-            .into_inner()
-            .map(|_| ())
-            .map_err(|source| Error::Unwritable {
-                path: tar.clone(),
-                source,
-            })
+        each_entry(&tar, &carried, |entry, found| {
+            if kept.iter().any(|copied| copied.path == entry.path) {
+                // The old tar holds the path twice, and one copy suffices.
+                return Ok(());
+            }
+            let mut header = found.header().clone();
+            match entry.kind {
+                IgnoredKind::Link => {
+                    let target = found
+                        .link_name()
+                        .ok()
+                        .flatten()
+                        .ok_or_else(|| unwritable(io::ErrorKind::InvalidData.into()))?;
+                    builder
+                        .append_link(&mut header, &entry.path, &target)
+                        .map_err(unwritable)?;
+                }
+                IgnoredKind::File => {
+                    builder
+                        .append_data(&mut header, &entry.path, &mut *found)
+                        .map_err(unwritable)?;
+                }
+            }
+            kept.push(entry.clone());
+            Ok(())
+        })?;
+        builder.into_inner().map(|_| ()).map_err(unwritable)
     })?;
     Ok(kept)
 }
@@ -238,6 +342,13 @@ impl<R: Read> Read for Hashing<R> {
 /// # Errors
 ///
 /// Returns [`Error::StateUnreadable`] when an original cannot be read.
+// Soft limit: the compare after a checkout moves aside does not call this
+// yet; the retire step that compares the moved checkout's ignored files
+// with the tar replaces this attribute.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the quarantine compare does not call it yet")
+)]
 pub(crate) fn changed(
     kept: &[IgnoredEntry],
     sources: &[(String, PathBuf)],
@@ -296,6 +407,9 @@ fn matches(entry: &IgnoredEntry, on_disk: &Path) -> Result<bool, Error> {
 ///
 /// Returns [`Error::StateUnreadable`] when the tar cannot be read, and
 /// [`Error::Unwritable`] when an entry cannot be written.
+// Soft limit: `mxv restore` does not call this yet; the restore step that
+// writes the ignored files back replaces this attribute.
+#[cfg_attr(not(test), expect(dead_code, reason = "restore does not call it yet"))]
 pub(crate) fn restore(
     dir: &Path,
     kept: &[IgnoredEntry],
