@@ -774,6 +774,7 @@ fn an_archive_deletes_target_and_node_modules_and_names_each_directory_it_delete
     let ArchiveOutcome::Retired {
         archive,
         disposable,
+        late,
         ..
     } = outcome
     else {
@@ -784,6 +785,7 @@ fn an_archive_deletes_target_and_node_modules_and_names_each_directory_it_delete
         [("app", "node_modules/"), ("app", "target/")],
         "the result names what the archive deleted"
     );
+    assert!(late.is_empty(), "{late:?}");
     assert!(disposable.iter().all(|path| path.bytes > 0));
     assert!(archive.ignored.is_empty(), "{:?}", archive.ignored);
     assert!(!setup.root.join("triage").exists());
@@ -806,7 +808,10 @@ fn a_file_written_into_target_after_the_move_is_named_as_deleted() {
     let outcome = setup.workspaces.archive(&setup.archives, plan).unwrap();
     clear_hook();
 
-    let ArchiveOutcome::Retired { disposable, .. } = outcome else {
+    let ArchiveOutcome::Retired {
+        disposable, late, ..
+    } = outcome
+    else {
         panic!("{outcome:?}");
     };
     assert!(
@@ -815,6 +820,7 @@ fn a_file_written_into_target_after_the_move_is_named_as_deleted() {
             .any(|path| path.checkout == "app" && path.path == "target/"),
         "{disposable:?}"
     );
+    assert_eq!(late, ["app: target/late.o"], "the late file is named");
     assert!(!setup.root.join("triage").exists());
 }
 

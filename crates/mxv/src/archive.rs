@@ -423,6 +423,11 @@ pub(crate) struct ArchiveResult {
     /// The disposable directories that the run deleted, or would delete,
     /// because a build makes them again.
     disposable: Vec<DisposableRow>,
+    /// Each entry that a process wrote at the top level of a disposable
+    /// directory after mxv measured it, with the checkout's folder in
+    /// front, such as `app: target/late.o`. The run deleted it with the
+    /// directory.
+    late: Vec<String>,
     /// The extra entries of the workspace's directory that the archive
     /// holds.
     root_files: Vec<String>,
@@ -470,6 +475,12 @@ impl fmt::Display for ArchiveResult {
             writeln!(formatter, "mxv {loses} {path}.")?;
         }
         DisposableRow::write_all(&self.disposable, formatter, deletes)?;
+        for entry in &self.late {
+            writeln!(
+                formatter,
+                "mxv deleted {entry}, which was written into a disposable directory after mxv measured it."
+            )?;
+        }
         for volume in &self.volumes {
             writeln!(formatter, "mxv {deletes} the docker volume {volume}.")?;
         }
@@ -859,6 +870,9 @@ struct Done {
     stopped: Vec<String>,
     /// The disposable directories that the run deleted.
     disposable: Vec<DisposableRow>,
+    /// The entries written into a disposable directory after mxv measured
+    /// it, which the run deleted.
+    late: Vec<String>,
     /// The volumes that the run deleted.
     volumes: Vec<String>,
     /// The warnings.
@@ -894,6 +908,7 @@ fn result_of(
         lost: archive.lost.clone(),
         stopped: done.stopped,
         disposable: done.disposable,
+        late: done.late,
         root_files: archive
             .root
             .iter()
@@ -1099,7 +1114,7 @@ pub(crate) fn archive(
     };
     let uncommitted = plan.uncommitted.clone();
     let mut warnings = plan.warnings.clone();
-    let (mut archive, removal, disposable) = match workspaces
+    let (mut archive, removal, disposable, late) = match workspaces
         .archive(&records, plan)
         .map_err(MxvFailure::from)?
     {
@@ -1107,7 +1122,8 @@ pub(crate) fn archive(
             archive,
             removal,
             disposable,
-        } => (*archive, *removal, disposable),
+            late,
+        } => (*archive, *removal, disposable, late),
         ArchiveOutcome::Refused(refusal) => return Err(archive_refusal(&name, refusal).into()),
     };
     warnings.extend(removal.warnings.iter().cloned());
@@ -1116,6 +1132,7 @@ pub(crate) fn archive(
     let done = Done {
         stopped: running,
         disposable: DisposableRow::of(&disposable),
+        late,
         volumes,
         warnings,
         cd,

@@ -489,6 +489,13 @@
             "$ref": "#/$defs/DisposableRow"
           }
         },
+        "late": {
+          "description": "Each entry that a process wrote at the top level of a disposable\ndirectory after mxv measured it, with the checkout's folder in\nfront, such as `app: target/late.o`. The run deleted it with the\ndirectory.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "root_files": {
           "description": "The extra entries of the workspace's directory that the archive\nholds.",
           "type": "array",
@@ -532,6 +539,7 @@
         "lost",
         "stopped",
         "disposable",
+        "late",
         "root_files",
         "volumes",
         "warnings",

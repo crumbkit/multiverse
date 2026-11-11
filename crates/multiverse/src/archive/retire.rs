@@ -37,6 +37,11 @@ pub enum ArchiveOutcome {
         /// Each disposable directory that the archive deleted, with its
         /// size measured before the checkouts moved.
         disposable: Vec<DisposablePath>,
+        /// Each entry that appeared at the top level of a disposable
+        /// directory after the measurement and that the archive deleted
+        /// with the directory, with the checkout's folder in front, such as
+        /// `app: target/late.o`.
+        late: Vec<String>,
     },
     /// The archive stopped, and the workspace's remaining checkouts are in
     /// their places.
@@ -67,9 +72,24 @@ struct Snapshot {
     /// Each path below the checkout, outside `.git` and the disposable
     /// directories.
     paths: BTreeSet<String>,
+    /// Each entry at the top level of a disposable directory, such as
+    /// `target/debug`. The compare leaves these out, since a build may
+    /// change them; [`Snapshot::late_disposable`] names the new ones.
+    disposable: BTreeSet<String>,
 }
 
 impl Snapshot {
+    /// Returns each entry at the top level of a disposable directory that
+    /// `later` holds and this snapshot does not, which deleting the
+    /// directory deletes with it.
+    fn late_disposable(&self, later: &Self) -> Vec<String> {
+        later
+            .disposable
+            .difference(&self.disposable)
+            .cloned()
+            .collect()
+    }
+
     /// Returns what differs between this snapshot and `later`, one sentence
     /// for each difference.
     fn differences(&self, later: &Self) -> Vec<String> {
@@ -166,12 +186,15 @@ fn retiring_in<'a>(
 /// `.git` at the top, without following a symbolic link. A directory in
 /// `skip`, which holds the disposable directories, is added itself and not
 /// walked, so the compare notices a disposable directory that goes and
-/// leaves what a build writes into one alone.
+/// leaves what a build writes into one alone. The entries at the top level
+/// of each such directory go in `inside`, so the archive can name an entry
+/// that a process writes there after the measurement.
 fn collect_paths(
     root: &Path,
     dir: &Path,
     skip: &BTreeSet<&str>,
     paths: &mut BTreeSet<String>,
+    inside: &mut BTreeSet<String>,
 ) -> Result<(), Error> {
     let unreadable = |source| Error::StateUnreadable {
         path: dir.to_path_buf(),
@@ -190,10 +213,27 @@ fn collect_paths(
         }
         let is_dir = entry.file_type().map_err(unreadable)?.is_dir();
         let disposable = skip.contains(relative.as_str());
-        paths.insert(relative);
-        if is_dir && !disposable {
-            collect_paths(root, &path, skip, paths)?;
+        if is_dir && disposable {
+            collect_top_level(root, &path, inside)?;
+        } else if is_dir {
+            collect_paths(root, &path, skip, paths, inside)?;
         }
+        paths.insert(relative);
+    }
+    Ok(())
+}
+
+/// Adds to `inside` each entry at the top level of the disposable
+/// directory `dir`, relative to `root`.
+fn collect_top_level(root: &Path, dir: &Path, inside: &mut BTreeSet<String>) -> Result<(), Error> {
+    let unreadable = |source| Error::StateUnreadable {
+        path: dir.to_path_buf(),
+        source,
+    };
+    for entry in fs::read_dir(dir).map_err(unreadable)? {
+        let path = entry.map_err(unreadable)?.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        inside.insert(relative.to_string_lossy().into_owned());
     }
     Ok(())
 }
@@ -348,6 +388,7 @@ impl<B: Backend> Workspaces<B> {
         root::copy_in(archives, &mut archive, &plan.removal.workspace, &generated)?;
         archives.write(&archive)?;
         (self.checkpoint)("root")?;
+        let mut late = Vec::new();
         for (planned, archived) in retiring_in(&plan, &archive) {
             let folder = planned.checkout.name.as_str();
             let kept: Vec<IgnoredEntry> = archive
@@ -356,21 +397,24 @@ impl<B: Backend> Workspaces<B> {
                 .filter(|entry| entry.folder() == folder)
                 .cloned()
                 .collect();
-            if let Some(admitted) = admitted.get(folder)
-                && let Some(refusal) = self.retire(
-                    &plan.removal,
-                    planned,
-                    archived,
-                    admitted,
-                    Retiring {
-                        left_out: plan.left_out(folder),
-                        sources: &plan.ignored_in(folder),
-                        kept: &kept,
-                    },
-                    &index,
-                )?
-            {
-                return Ok(ArchiveOutcome::Refused(refusal));
+            let Some(admitted) = admitted.get(folder) else {
+                continue;
+            };
+            let retired = self.retire(
+                &plan.removal,
+                planned,
+                archived,
+                admitted,
+                Retiring {
+                    left_out: plan.left_out(folder),
+                    sources: &plan.ignored_in(folder),
+                    kept: &kept,
+                },
+                &index,
+            )?;
+            match retired {
+                Ok(found) => late.extend(found),
+                Err(refusal) => return Ok(ArchiveOutcome::Refused(refusal)),
             }
         }
         let differences = root::differences(&archive, &plan.removal.workspace, &generated)?;
@@ -382,7 +426,7 @@ impl<B: Backend> Workspaces<B> {
         }
         root::delete_originals(&archive, &plan.removal.workspace, &generated)?;
         (self.checkpoint)("delete")?;
-        self.finish_removal(&name, archive, plan.removal, plan.disposable)
+        self.finish_removal(&name, archive, plan.removal, plan.disposable, late)
     }
 
     /// Writes the commits of the uncommitted work of each checkout that
@@ -425,13 +469,15 @@ impl<B: Backend> Workspaces<B> {
 
     /// Removes the workspace whose checkouts are retired and whose extra
     /// files are deleted, and names in the outcome the disposable
-    /// directories `disposable` that went with the checkouts.
+    /// directories `disposable` that went with the checkouts and the
+    /// entries `late` that appeared in them after they were measured.
     fn finish_removal(
         &self,
         name: &WorkspaceName,
         archive: Archive,
         mut removal: Removal,
         disposable: Vec<DisposablePath>,
+        late: Vec<String>,
     ) -> Result<ArchiveOutcome, Error> {
         for planned in &mut removal.checkouts {
             // A worktree's branch stays in its repository, and the pin
@@ -446,6 +492,7 @@ impl<B: Backend> Workspaces<B> {
                     archive: Box::new(archive),
                     removal: Box::new(removal),
                     disposable,
+                    late,
                 })
             }
             RemovalOutcome::Changed(fresh) => {
@@ -558,7 +605,8 @@ impl<B: Backend> Workspaces<B> {
             .collect();
         let skip: BTreeSet<&str> = trimmed.into_iter().collect();
         let mut paths = BTreeSet::new();
-        collect_paths(dir, dir, &skip, &mut paths)?;
+        let mut disposable = BTreeSet::new();
+        collect_paths(dir, dir, &skip, &mut paths, &mut disposable)?;
         Ok(Snapshot {
             head,
             changed: changes.changed,
@@ -572,6 +620,7 @@ impl<B: Backend> Workspaces<B> {
                 .collect(),
             wip,
             paths,
+            disposable,
         })
     }
 
@@ -615,7 +664,10 @@ impl<B: Backend> Workspaces<B> {
     /// Moves the checkout that `planned` describes aside, compares it with
     /// `admitted`, with what `archived` keeps of it and with the ignored
     /// entries that the tar keeps of it, and deletes it. It puts a checkout
-    /// that differs back in its place and returns the refusal. The
+    /// that differs back in its place and returns the refusal. Otherwise it
+    /// returns each entry that appeared at the top level of a disposable
+    /// directory after `admitted` was taken, with the folder in front, such
+    /// as `app: target/late.o`, which the deletion deleted. The
     /// uncommitted work is read without `retiring.left_out` through
     /// `index`.
     fn retire(
@@ -626,7 +678,7 @@ impl<B: Backend> Workspaces<B> {
         admitted: &Snapshot,
         retiring: Retiring<'_>,
         index: &Path,
-    ) -> Result<Option<ArchiveRefusal>, Error> {
+    ) -> Result<Result<Vec<String>, ArchiveRefusal>, Error> {
         let checkout = &planned.checkout;
         let invalid = || Error::Unwritable {
             path: checkout.path.clone(),
@@ -654,10 +706,10 @@ impl<B: Backend> Workspaces<B> {
                 let mut differences = admitted.differences(&moved);
                 differences.extend(self.kept_work_differences(&held, archived, &moved)?);
                 differences.extend(retiring.ignored_differences(&held)?);
-                Ok(differences)
+                Ok((differences, admitted.late_disposable(&moved)))
             });
-        let differences = match compared {
-            Ok(differences) => differences,
+        let (differences, late) = match compared {
+            Ok(found) => found,
             Err(error) => {
                 self.move_back(&removal.workspace, checkout, &held)?;
                 return Err(error);
@@ -665,7 +717,7 @@ impl<B: Backend> Workspaces<B> {
         };
         if !differences.is_empty() {
             self.move_back(&removal.workspace, checkout, &held)?;
-            return Ok(Some(ArchiveRefusal::SourceChanged {
+            return Ok(Err(ArchiveRefusal::SourceChanged {
                 folder: checkout.name.clone(),
                 differences,
             }));
@@ -677,6 +729,9 @@ impl<B: Backend> Workspaces<B> {
             self.backend.prune_checkouts(&checkout.source)?;
         }
         (self.checkpoint)(&format!("retired:{}", checkout.name))?;
-        Ok(None)
+        Ok(Ok(late
+            .into_iter()
+            .map(|path| format!("{}: {path}", checkout.name))
+            .collect()))
     }
 }
