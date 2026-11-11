@@ -344,7 +344,7 @@ fn an_ignored_file_over_the_limit_refuses_the_archive_and_names_itself() {
     assert_eq!(document["code"], "mxv::archive::unkeepable", "{document}");
     assert!(
         document.to_string().contains(
-            "app: the untracked file .env is 9 bytes, over archive_max_file (4 bytes). Move it out of the workspace or delete it."
+            "app: the ignored file .env is 9 bytes, over archive_max_file (4 bytes). Move it out of the workspace or delete it."
         ),
         "{document}"
     );

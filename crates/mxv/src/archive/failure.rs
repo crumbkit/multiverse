@@ -5,7 +5,8 @@ use std::fmt;
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
 use multiverse::{
-    ArchiveRefusal, ArchiveState, Operation, RestoreRefusal, Unkept, UnkeptKind, WorkspaceName,
+    ArchiveRefusal, ArchiveState, FileStatus, Operation, RestoreRefusal, Unkept, UnkeptKind,
+    WorkspaceName,
 };
 
 /// The code of a name that no workspace or archive has.
@@ -599,12 +600,12 @@ fn item_line(item: &Unkept) -> String {
             path: file,
             bytes,
             most,
-            untracked,
+            status,
         } => {
-            let what = if *untracked {
-                "the untracked file"
-            } else {
-                "the file"
+            let what = match status {
+                FileStatus::Untracked => "the untracked file",
+                FileStatus::Ignored => "the ignored file",
+                _ => "the file",
             };
             format!(
                 "{folder}: {what} {file} is {}, over archive_max_file ({}). Move it out of the workspace or delete it.",

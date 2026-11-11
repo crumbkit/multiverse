@@ -44,8 +44,8 @@ mod root;
 mod tests;
 
 pub use admit::{
-    ArchiveOptions, ArchivePlan, ArchivePlanned, ArchiveRefusal, Uncommitted, Unkeepable, Unkept,
-    UnkeptKind,
+    ArchiveOptions, ArchivePlan, ArchivePlanned, ArchiveRefusal, FileStatus, Uncommitted,
+    Unkeepable, Unkept, UnkeptKind,
 };
 pub use ignored::{IgnoredEntry, IgnoredKind, IgnoredSource};
 pub use record::{

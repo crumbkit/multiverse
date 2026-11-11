@@ -67,6 +67,18 @@ impl ArchiveOptions {
     }
 }
 
+/// How git sees a file of a checkout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FileStatus {
+    /// Git tracks the file.
+    Tracked,
+    /// Git neither tracks nor ignores the file.
+    Untracked,
+    /// Git ignores the file.
+    Ignored,
+}
+
 /// What a checkout or the workspace's directory holds that an archive
 /// cannot represent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,8 +114,8 @@ pub enum UnkeptKind {
         bytes: u64,
         /// The limit in bytes.
         most: u64,
-        /// Whether git does not track the file.
-        untracked: bool,
+        /// How git sees the file.
+        status: FileStatus,
     },
     /// A file marked skip-worktree or assume-unchanged with local edits.
     Hidden {
@@ -744,7 +756,7 @@ impl<B: Backend> Workspaces<B> {
                             path: relative,
                             bytes,
                             most: max_file,
-                            untracked: true,
+                            status: FileStatus::Ignored,
                         },
                     ),
                     Found::Other(relative) => {
@@ -764,7 +776,11 @@ impl<B: Backend> Workspaces<B> {
                     path: large.path,
                     bytes: large.bytes,
                     most: max_file,
-                    untracked: large.untracked,
+                    status: if large.untracked {
+                        FileStatus::Untracked
+                    } else {
+                        FileStatus::Tracked
+                    },
                 },
             );
         }

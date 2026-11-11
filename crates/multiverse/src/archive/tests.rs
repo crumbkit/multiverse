@@ -620,7 +620,7 @@ fn an_ignored_file_over_archive_max_file_is_refused_and_named() {
             path: ".env".to_owned(),
             bytes: 2048,
             most: 1024,
-            untracked: true,
+            status: FileStatus::Ignored,
         }),
         "{:?}",
         found.items
@@ -1135,7 +1135,7 @@ fn a_file_over_archive_max_file_is_refused_and_named() {
             path: "dump.sql".to_owned(),
             bytes: 2048,
             most: 1024,
-            untracked: true,
+            status: FileStatus::Untracked,
         }]
     );
     let archive = setup.archive_with(force().with_max_file(1024));
