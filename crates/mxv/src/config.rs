@@ -21,6 +21,9 @@
 //!   disposable directories of every workspace under, such as `"50GiB"`.
 //! - `stop_idle` is how long a running workspace must go unused before
 //!   `mxv reclaim` may stop it, such as `"2h"`.
+//! - `archive_max_file` is the largest file of a checkout's uncommitted
+//!   work that `mxv archive` keeps, such as `"1GiB"`. A larger file
+//!   refuses the archive. It defaults to `"100MiB"`.
 //!
 //! mxv parses the file strictly: any other key, a value of another type, a
 //! relative path, a glob that is absolute or holds `..`, a `clone_on_new`
@@ -67,6 +70,9 @@ pub(crate) struct Config {
     /// How long a running workspace must go unused before `mxv reclaim`
     /// may stop it, or `None` for the default.
     pub(crate) stop_idle: Option<Duration>,
+    /// The largest file of a checkout's uncommitted work that `mxv archive`
+    /// keeps, in bytes, or `None` for the default.
+    pub(crate) archive_max_file: Option<u64>,
 }
 
 /// The lowest port that `ports_range` may hold. Ports below it are
@@ -147,6 +153,11 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
                 config.stop_idle =
                     Some(unit(name, value.get_ref(), parse_age).map_err(|reason| bad(at, reason))?);
             }
+            "archive_max_file" => {
+                config.archive_max_file = Some(
+                    unit(name, value.get_ref(), parse_size).map_err(|reason| bad(at, reason))?,
+                );
+            }
             _ => {
                 return Err(bad(
                     at,
@@ -170,6 +181,7 @@ pub(crate) const SETTINGS: &[&str] = &[
     "`clean_idle`",
     "`max_disposable`",
     "`stop_idle`",
+    "`archive_max_file`",
 ];
 
 /// Returns the globs of the array `value` of the key `key`, each read with
