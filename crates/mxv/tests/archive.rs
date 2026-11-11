@@ -185,7 +185,7 @@ fn archive_then_restore_brings_back_the_commit_and_the_branch() {
     let setup = Setup::new();
     let commit = setup.commit_locally();
     let document = setup.archive();
-    assert_eq!(document["schema"], "mxv/archive/v1");
+    assert_eq!(document["schema"], "mxv/archive/v2");
     assert_eq!(document["data"]["pins"][0]["commit"], commit);
     let local = document["data"]["local_only"][0].as_str().unwrap();
     assert!(local.contains(&commit), "{document}");
@@ -243,18 +243,19 @@ fn a_dry_run_of_each_verb_changes_nothing() {
 }
 
 #[test]
-fn an_ignored_env_file_refuses_the_archive_with_its_code_and_wip_does_not_help() {
+fn an_ignored_env_file_refuses_the_archive_with_its_code_and_names_itself() {
     let setup = Setup::new();
     write(&setup.checkout().join(".git/info/exclude"), ".env\n");
     write(&setup.checkout().join(".env"), "SECRET=1\n");
-    for flags in [&[][..], &["--wip"][..]] {
-        let mut args = vec!["archive", "-w", "triage", "--yes"];
-        args.extend(flags);
-        let (exit, document) = setup.run(&args);
-        assert_eq!(exit, 1, "{document}");
-        assert_eq!(document["code"], "mxv::archive::unsaved_work", "{document}");
-        assert!(document.to_string().contains(".env"), "{document}");
-    }
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::unkeepable", "{document}");
+    assert!(
+        document
+            .to_string()
+            .contains("app: the ignored path .env. Move it out of the workspace or delete it."),
+        "{document}"
+    );
     assert!(setup.checkout().join(".env").is_file());
 }
 
@@ -352,7 +353,7 @@ fn a_record_from_a_newer_version_refuses_with_the_record_code() {
     let path = setup.root().join("state/mxv/archives/triage/archive.json");
     let record = fs::read_to_string(&path)
         .unwrap()
-        .replace("\"version\": 1", "\"version\": 99");
+        .replace("\"version\": 2", "\"version\": 99");
     write(&path, &record);
     let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
     assert_eq!(exit, 1, "{document}");
@@ -408,16 +409,17 @@ fn no_identity(setup: &Setup) -> PathBuf {
 }
 
 #[test]
-fn wip_commits_with_the_stated_identity_when_git_has_none() {
+fn uncommitted_work_is_kept_with_the_stated_identity_when_git_has_none() {
     let setup = Setup::new();
     write(&setup.checkout().join("draft.txt"), "draft\n");
+    let head = setup.head();
     let config = no_identity(&setup);
     #[expect(
         clippy::disallowed_methods,
         reason = "the test runs mxv with a git environment that has no identity"
     )]
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"))
-        .args(["archive", "-w", "triage", "--wip", "--yes", "--json"])
+        .args(["archive", "-w", "triage", "--yes", "--json"])
         .env_clear()
         .envs(
             setup
@@ -435,16 +437,25 @@ fn wip_commits_with_the_stated_identity_when_git_has_none() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+    let archived: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let pin = &archived["data"]["pins"][0];
+    let mirror = PathBuf::from(pin["repository"].as_str().unwrap());
+    let wip = pin["reference"].as_str().unwrap().replace("/head", "/wip");
+    assert_eq!(
+        git(&mirror, &["log", "-1", "--format=%an <%ae>", &wip]).trim(),
+        "mxv <mxv@localhost.invalid>"
+    );
     let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
     assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.head(), head, "the work comes back uncommitted");
     assert_eq!(
-        git(&setup.checkout(), &["log", "-1", "--format=%an <%ae>"]).trim(),
-        "mxv <mxv@localhost.invalid>"
+        fs::read_to_string(setup.checkout().join("draft.txt")).unwrap(),
+        "draft\n"
     );
 }
 
 #[test]
-fn a_wip_commit_that_cannot_run_fails_before_the_processes_stop() {
+fn a_refused_archive_leaves_the_processes_running() {
     let setup = Setup::new();
     write(
         &setup.checkout().join("mxv.toml"),
@@ -452,9 +463,9 @@ fn a_wip_commit_that_cannot_run_fails_before_the_processes_stop() {
     );
     let (exit, document) = setup.run(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
-    write(&setup.checkout().join(".git/index.lock"), "");
-    let (exit, document) = setup.run(&["archive", "-w", "triage", "--wip", "--yes"]);
-    fs::remove_file(setup.checkout().join(".git/index.lock")).unwrap();
+    write(&setup.checkout().join(".git/info/exclude"), ".env\n");
+    write(&setup.checkout().join(".env"), "SECRET=1\n");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
     let (_, status) = setup.run(&["status", "-w", "triage"]);
     let (_, _) = setup.run(&["down", "-w", "triage"]);
     assert_eq!(exit, 1, "{document}");
@@ -694,15 +705,59 @@ fn a_process_that_starts_while_the_question_waits_refuses_the_archive() {
 }
 
 #[test]
-fn the_question_names_each_path_that_wip_would_commit() {
+fn the_question_names_each_checkout_whose_uncommitted_work_it_keeps() {
     let setup = Setup::new();
     write(&setup.checkout().join("draft.txt"), "draft\n");
     let head = setup.head();
-    let prompted = Prompted::start(&setup, &["--wip"]);
+    let prompted = Prompted::start(&setup, &[]);
     let question = prompted.question.clone();
     prompted.answer("n");
-    assert!(question.contains("draft.txt"), "{question}");
+    assert!(
+        question.contains("It keeps the uncommitted work of app on pins"),
+        "{question}"
+    );
     assert_eq!(setup.head(), head, "a declined archive commits nothing");
+    assert!(setup.checkout().join("draft.txt").is_file());
+}
+
+#[test]
+fn a_dry_run_names_what_the_archive_keeps_and_the_restore_names_what_it_put_back() {
+    let setup = Setup::new();
+    let checkout = setup.checkout();
+    write(&checkout.join("stashed.txt"), "stash\n");
+    git(&checkout, &["add", "stashed.txt"]);
+    git(&checkout, &["stash", "--quiet"]);
+    git(&checkout, &["branch", "spike-cache"]);
+    write(&checkout.join("draft.txt"), "draft\n");
+    let output = setup
+        .command(&setup.root())
+        .args(["archive", "-w", "triage", "--dry-run"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    for line in [
+        "mxv would keep the untracked file app/draft.txt with the uncommitted work.",
+        "mxv would keep 1 stash of app.",
+        "mxv would keep the local branch spike-cache of app.",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    setup.archive();
+    let output = setup
+        .command(&setup.root())
+        .args(["restore", "triage", "--yes"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    for line in [
+        "mxv put back the uncommitted work of app: 1 untracked file.",
+        "mxv put back 1 stash of app.",
+        "mxv put back the local branch spike-cache of app.",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
 }
 
 #[test]
@@ -741,6 +796,51 @@ fn the_pin_of_a_clone_is_written_with_its_reference_synced() {
 }
 
 #[test]
+fn the_objects_of_uncommitted_work_are_written_with_git_syncing_them() {
+    let setup = Setup::new();
+    write(&setup.checkout().join("draft.txt"), "draft\n");
+    let trace = setup.root().join("trace.json");
+    let output = setup
+        .command(&setup.root())
+        .args(["archive", "-w", "triage", "--yes", "--json"])
+        .env("GIT_TRACE2_EVENT", trace.display().to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let writers: Vec<Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| {
+            let argv = event["argv"].to_string();
+            event["event"] == "start"
+                && (argv.contains("\"write-tree\"")
+                    || argv.contains("\"commit-tree\"")
+                    || argv.contains("\"add\",\"--all\""))
+        })
+        .collect();
+    assert!(
+        writers
+            .iter()
+            .any(|event| event["argv"].to_string().contains("\"commit-tree\"")),
+        "no commit-tree in the trace"
+    );
+    for event in &writers {
+        assert!(
+            event["argv"]
+                .to_string()
+                .contains("core.fsync=reference,loose-object"),
+            "a command that writes objects runs without syncing them: {}",
+            event["argv"]
+        );
+    }
+}
+
+#[test]
 fn a_restore_replaces_a_taken_port_from_the_configured_range_in_a_dry_run_and_a_real_run() {
     let setup = Setup::new();
     setup.archive();
@@ -752,8 +852,8 @@ fn a_restore_replaces_a_taken_port_from_the_configured_range_in_a_dry_run_and_a_
     );
     let path = setup.root().join("state/mxv/archives/triage/archive.json");
     let record = fs::read_to_string(&path).unwrap().replace(
-        "\"version\": 1,",
-        &format!("\"version\": 1,\n  \"ports\": {{ \"web\": {held} }},"),
+        "\"version\": 2,",
+        &format!("\"version\": 2,\n  \"ports\": {{ \"web\": {held} }},"),
     );
     write(&path, &record);
     for args in [

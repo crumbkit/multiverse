@@ -174,6 +174,15 @@ fn the_idle_age_and_the_disposable_limit_read_their_units() {
 }
 
 #[test]
+fn the_largest_file_an_archive_keeps_reads_its_unit() {
+    let config = parsed("archive_max_file = \"1GiB\"\n").unwrap();
+    assert_eq!(config.archive_max_file, Some(1024 * 1024 * 1024));
+    let (line, reason) = invalid("\narchive_max_file = 100\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("archive_max_file"), "{reason}");
+}
+
+#[test]
 fn an_idle_age_or_a_limit_without_a_unit_is_refused_with_its_line() {
     let (line, reason) = invalid("clean_idle = \"7\"\n");
     assert_eq!(line, Some(1));

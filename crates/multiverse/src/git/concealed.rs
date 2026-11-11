@@ -1,18 +1,20 @@
-//! What `git status` does not show about a checkout, and the check that a
-//! `--wip` commit can run. `mxv archive` deletes the checkout, so it reads
-//! all of this first.
+//! What `git status` does not show about a checkout, and the size of the
+//! files of its uncommitted work. `mxv archive` deletes the checkout, so it
+//! reads all of this first.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    CHECKOUT_DEADLINE, Git, LOCAL_DEADLINE, MOST_LISTING_BYTES, ORIGIN_REFS, git_dirs, lines,
-    module_dirs, run, run_in_holder, run_keeping, trimmed,
+    CHECKOUT_DEADLINE, Git, LOCAL_DEADLINE, MOST_LISTING_BYTES, ORIGIN_REFS, lines, module_dirs,
+    run, run_keeping, trimmed,
 };
-use crate::backend::{Backend, Concealed, LocalNames, RefHolder, SubmoduleWork};
+use crate::backend::{
+    Backend, Concealed, Hidden, LargeFile, LocalNames, Operation, Paused, SubmoduleWork,
+};
 use crate::error::Error;
 
 /// The most levels of nested submodules that mxv reads.
@@ -25,11 +27,12 @@ const GITLINK: &str = "160000";
 /// The file mode that git gives a symbolic link.
 const SYMLINK: &str = "120000";
 
-/// The name of the fallback identity of a `--wip` commit, which is used
-/// when git has no identity of the person.
+/// The name of the fallback identity of an archive's commit of uncommitted
+/// work, which is used when git has no identity of the person.
 const FALLBACK_NAME: &str = "mxv";
 
-/// The email of the fallback identity of a `--wip` commit.
+/// The email of the fallback identity of an archive's commit of uncommitted
+/// work.
 const FALLBACK_EMAIL: &str = "mxv@localhost.invalid";
 
 /// One entry of git's index.
@@ -81,7 +84,7 @@ fn index(checkout: &Path) -> Result<Vec<IndexEntry>, Error> {
 /// Returns each repository inside the checkout at `checkout` that git does
 /// not track. `git ls-files` ends the name of such a directory with `/`,
 /// and lists every other untracked path as a file.
-fn nested(checkout: &Path) -> Result<Vec<String>, Error> {
+pub(super) fn nested(checkout: &Path) -> Result<Vec<String>, Error> {
     let listed = run_keeping(
         checkout,
         ["ls-files", "-z", "-o", "--exclude-standard"],
@@ -124,7 +127,7 @@ fn matches_index(checkout: &Path, entry: &IndexEntry) -> Result<bool, Error> {
 /// Returns each path among `entries` that the index hides from `git status`
 /// and whose file differs from the index. A file that is absent from the
 /// disk, as in a sparse checkout, holds no work.
-fn hidden(checkout: &Path, entries: &[IndexEntry]) -> Result<Vec<String>, Error> {
+fn hidden(checkout: &Path, entries: &[IndexEntry]) -> Result<Vec<Hidden>, Error> {
     let mut found = Vec::new();
     for entry in entries.iter().filter(|entry| entry.is_hidden()) {
         if entry.mode == GITLINK {
@@ -137,7 +140,10 @@ fn hidden(checkout: &Path, entries: &[IndexEntry]) -> Result<Vec<String>, Error>
             Err(source) => return Err(Error::Inaccessible { path, source }),
         }
         if !matches_index(checkout, entry)? {
-            found.push(entry.path.clone());
+            found.push(Hidden {
+                path: entry.path.clone(),
+                skip_worktree: entry.tag == "S",
+            });
         }
     }
     Ok(found)
@@ -263,20 +269,34 @@ fn walk(
     Ok(())
 }
 
-/// The sentence for each file or directory of a git directory that says
-/// an operation stands paused.
-const PAUSED: [(&str, &str); 7] = [
-    ("rebase-merge", "a rebase is paused"),
-    ("rebase-apply", "a rebase is paused"),
-    ("MERGE_HEAD", "a merge is paused"),
-    ("CHERRY_PICK_HEAD", "a cherry-pick is paused"),
-    ("REVERT_HEAD", "a revert is paused"),
-    (
-        "sequencer",
-        "a sequence of cherry-picks or reverts is paused",
-    ),
-    ("BISECT_LOG", "a bisect is paused"),
+/// The operation that each file or directory of a git directory says
+/// stands paused. A cherry-pick or a revert of one commit writes its own
+/// file beside `sequencer`, so the sequence counts only without one.
+const PAUSED: [(&str, Operation); 7] = [
+    ("rebase-merge", Operation::Rebase),
+    ("rebase-apply", Operation::Rebase),
+    ("MERGE_HEAD", Operation::Merge),
+    ("CHERRY_PICK_HEAD", Operation::CherryPick),
+    ("REVERT_HEAD", Operation::Revert),
+    ("sequencer", Operation::Sequence),
+    ("BISECT_LOG", Operation::Bisect),
 ];
+
+/// Returns the operations that stand paused in the git directory `dir`,
+/// each once.
+fn paused_in(dir: &Path) -> Vec<Operation> {
+    let mut found: Vec<Operation> = Vec::new();
+    for (marker, operation) in PAUSED {
+        if fs::symlink_metadata(dir.join(marker)).is_ok() && !found.contains(&operation) {
+            found.push(operation);
+        }
+    }
+    let single = found.contains(&Operation::CherryPick) || found.contains(&Operation::Revert);
+    if single {
+        found.retain(|operation| *operation != Operation::Sequence);
+    }
+    found
+}
 
 /// What the walk over a checkout and its submodules found.
 #[derive(Default)]
@@ -286,7 +306,7 @@ struct Found {
     /// Each file that git does not account for.
     unlisted: Vec<String>,
     /// Each paused operation.
-    paused: Vec<String>,
+    paused: Vec<Paused>,
     /// The git directory of the checkout and of each initialised submodule.
     dirs: BTreeSet<PathBuf>,
 }
@@ -304,12 +324,12 @@ fn read_checkout(
     found: &mut Found,
 ) -> Result<(), Error> {
     let dir = git_dir(checkout)?;
-    found.paused.extend(
-        PAUSED
-            .iter()
-            .filter(|(marker, _)| fs::symlink_metadata(dir.join(marker)).is_ok())
-            .map(|(_, sentence)| format!("{prefix}{sentence}")),
-    );
+    found
+        .paused
+        .extend(paused_in(&dir).into_iter().map(|operation| Paused {
+            at: prefix.to_owned(),
+            operation,
+        }));
     found.dirs.insert(dir);
     let initialised: BTreeSet<String> = entries
         .iter()
@@ -408,16 +428,13 @@ pub(super) fn concealed(checkout: &Path) -> Result<Concealed, Error> {
     let mut found = Found::default();
     read_checkout(checkout, &entries, "", 0, &mut found)?;
     let top = git_dir(checkout)?;
-    // A clone's references go with it. A worktree's stay in its repository,
-    // which keeps them, and only the git directories of its submodules go.
-    let dirs = if checkout.join(".git").is_dir() {
-        git_dirs(checkout)?
-    } else {
-        module_dirs(&top.join("modules"))?
-    };
-    let mut referenced = Vec::new();
-    for dir in dirs {
-        referenced.extend(kept_by_other_references(&dir)?);
+    // The checkout's own other references are read by `orphans`, whose
+    // commits the archive keeps, and a worktree's stay in its repository.
+    // A submodule's commits live in its own git directory, which the
+    // archive deletes with the checkout and cannot pin.
+    let mut module_referenced = Vec::new();
+    for dir in module_dirs(&top.join("modules"))? {
+        module_referenced.extend(kept_by_other_references(&dir)?);
     }
     Ok(Concealed {
         nested: nested(checkout)?,
@@ -426,7 +443,7 @@ pub(super) fn concealed(checkout: &Path) -> Result<Concealed, Error> {
         submodules: found.submodules,
         unlisted: found.unlisted,
         paused: found.paused,
-        referenced,
+        module_referenced,
     })
 }
 
@@ -450,65 +467,100 @@ pub(super) fn identity(checkout: &Path) -> Result<Vec<String>, Error> {
     Ok(Vec::new())
 }
 
-/// Returns the failure when `git commit` could not run in the checkout at
-/// `checkout`, and changes nothing but a commit object that nothing names.
-pub(super) fn check_commit_all(checkout: &Path) -> Result<(), Error> {
-    let lock = run(
+/// Returns each path that `args`, a listing of `git ls-files` or `git diff`
+/// with `-z`, prints in the checkout at `checkout`.
+fn listed_paths(checkout: &Path, args: &[&str]) -> Result<Vec<String>, Error> {
+    let listed = run_keeping(
         checkout,
-        ["rev-parse", "--git-path", "index.lock"],
-        "rev-parse",
-        LOCAL_DEADLINE,
-    )?
-    .ok("rev-parse", checkout)?;
-    let lock = checkout.join(trimmed(&lock));
-    if fs::symlink_metadata(&lock).is_ok() {
-        return Err(Error::CommandFailed {
-            operation: "add",
-            dir: checkout.to_path_buf(),
-            code: None,
-            message: format!(
-                "git's index is locked by {}, so mxv could not commit the work",
-                lock.display()
-            ),
-        });
-    }
-    run(
-        checkout,
-        ["add", "--all", "--dry-run"],
-        "add",
+        args,
+        "ls-files",
         CHECKOUT_DEADLINE,
+        MOST_LISTING_BYTES,
     )?
-    .ok("add", checkout)?;
-    let mut probe = identity(checkout)?;
-    probe.extend(
-        [
-            "commit-tree",
-            "-m",
-            "mxv probe",
-            "-p",
-            "HEAD",
-            "HEAD^{tree}",
-        ]
-        .map(str::to_owned),
-    );
-    run(checkout, probe, "commit-tree", LOCAL_DEADLINE)?
-        .ok("commit-tree", checkout)
-        .map(drop)
+    .ok("ls-files", checkout)?;
+    Ok(listed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
-/// Returns the references of the kind `prefix` in the repository that
-/// `holder` names, each without the prefix.
-fn names_under(holder: RefHolder<'_>, prefix: &str) -> Result<Vec<String>, Error> {
-    let listed = run_in_holder(
-        holder,
-        ["for-each-ref", "--format=%(refname)", prefix],
-        "for-each-ref",
+/// Returns each file of the uncommitted work of the checkout at
+/// `checkout` that is larger than `most` bytes: a changed or staged
+/// tracked file, or an untracked file that no ignore rule matches. A file
+/// that is gone holds nothing to keep, and a nested repository has its own
+/// report.
+pub(super) fn large_files(checkout: &Path, most: u64) -> Result<Vec<LargeFile>, Error> {
+    let mut paths: BTreeMap<String, bool> = BTreeMap::new();
+    for path in listed_paths(checkout, &["ls-files", "-z", "--modified"])? {
+        paths.insert(path, false);
+    }
+    for path in listed_paths(
+        checkout,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+    )? {
+        paths.insert(path, false);
+    }
+    for path in listed_paths(
+        checkout,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    )? {
+        paths.entry(path).or_insert(true);
+    }
+    let mut found = Vec::new();
+    for (path, untracked) in paths {
+        if path.ends_with('/') {
+            continue;
+        }
+        let file = checkout.join(&path);
+        let metadata = match fs::symlink_metadata(&file) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(Error::Inaccessible { path: file, source }),
+        };
+        if metadata.is_file() && metadata.len() > most {
+            found.push(LargeFile {
+                path,
+                bytes: metadata.len(),
+                untracked,
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// Returns the path of each submodule that the index of the checkout at
+/// `checkout` names.
+pub(super) fn submodule_paths(checkout: &Path) -> Result<Vec<String>, Error> {
+    Ok(index(checkout)?
+        .into_iter()
+        .filter(|entry| entry.mode == GITLINK)
+        .map(|entry| entry.path)
+        .collect())
+}
+
+/// Returns the directory of each linked worktree that the repository of
+/// the clone at `checkout` lists, leaving out the clone itself.
+fn linked_worktrees(checkout: &Path) -> Result<Vec<String>, Error> {
+    let listed = run(
+        checkout,
+        ["worktree", "list", "--porcelain"],
+        "worktree list",
         LOCAL_DEADLINE,
     )?
-    .ok("for-each-ref", holder.path())?;
-    Ok(lines(&listed)
-        .iter()
-        .filter_map(|name| name.strip_prefix(prefix))
+    .ok("worktree list", checkout)?;
+    Ok(listed
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .skip(1)
         .map(str::to_owned)
         .collect())
 }
@@ -579,18 +631,7 @@ fn exclude_rules(path: &Path) -> Result<Vec<String>, Error> {
 
 /// Returns what the clone at `checkout` holds that a clone rebuilt from its
 /// mirror at `mirror` and the person's repository at `source` would not.
-pub(super) fn local_names(
-    checkout: &Path,
-    mirror: &Path,
-    source: &Path,
-) -> Result<LocalNames, Error> {
-    let absent = |prefix: &str| -> Result<Vec<String>, Error> {
-        let held = names_under(RefHolder::Mirror(mirror), prefix)?;
-        Ok(names_under(RefHolder::Repository(checkout), prefix)?
-            .into_iter()
-            .filter(|name| !held.contains(name))
-            .collect())
-    };
+pub(super) fn local_names(checkout: &Path, source: &Path) -> Result<LocalNames, Error> {
     let remotes = run(checkout, ["remote"], "remote", LOCAL_DEADLINE)?.ok("remote", checkout)?;
     let config = run(
         checkout,
@@ -618,8 +659,7 @@ pub(super) fn local_names(
         hooks: hooks(&git_dir(checkout)?)?,
         config,
         excludes,
-        branches: absent("refs/heads/")?,
-        tags: absent("refs/tags/")?,
+        worktrees: linked_worktrees(checkout)?,
         remotes: lines(&remotes)
             .into_iter()
             .filter(|remote| remote != "origin")

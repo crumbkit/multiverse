@@ -35,6 +35,50 @@ pub struct SubmoduleWork {
     pub commits: Vec<String>,
 }
 
+/// A git operation that can stand paused in a checkout, whose state its git
+/// directory holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Operation {
+    /// `git merge`, paused on a conflict.
+    Merge,
+    /// `git rebase`, paused on a conflict or an `edit`.
+    Rebase,
+    /// `git cherry-pick` of one commit.
+    CherryPick,
+    /// `git revert` of one commit.
+    Revert,
+    /// A sequence of cherry-picks or reverts.
+    Sequence,
+    /// `git bisect`.
+    Bisect,
+}
+
+/// A git operation that stands paused in a checkout or in one of its
+/// submodules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Paused {
+    /// The directory that the operation stands paused in, relative to the
+    /// checkout: empty for the checkout itself, or a submodule's path with
+    /// `/` after it.
+    pub at: String,
+    /// The operation.
+    pub operation: Operation,
+}
+
+/// A file that the index hides from `git status` and whose content differs
+/// from the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Hidden {
+    /// The file, relative to the checkout.
+    pub path: String,
+    /// Whether the file is marked skip-worktree. Otherwise it is marked
+    /// assume-unchanged.
+    pub skip_worktree: bool,
+}
+
 /// What `git status` does not show about a checkout.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -44,23 +88,70 @@ pub struct Concealed {
     pub nested: Vec<String>,
     /// Each file marked skip-worktree or assume-unchanged that differs from
     /// the index.
-    pub hidden: Vec<String>,
+    pub hidden: Vec<Hidden>,
     /// Each initialised submodule, parents before the submodules inside
     /// them.
     pub submodules: Vec<SubmoduleWork>,
     /// Each file below the checkout that no listing of git accounts for,
     /// such as a file in a submodule directory that is not initialised.
     pub unlisted: Vec<String>,
-    /// Each commit that only a reference outside the branches, tags, notes
-    /// and remote branches keeps, with the reference, such as
-    /// `<commit> (refs/backup/x)`.
-    pub referenced: Vec<String>,
-    /// Each git operation that stands paused, in a sentence.
-    pub paused: Vec<String>,
+    /// Each commit of a submodule's git directory that only a reference
+    /// outside the branches, tags, notes and remote branches keeps, with
+    /// the reference, such as `<commit> (refs/backup/x)`. The checkout's
+    /// own such commits are what [`Backend::orphans`] returns, which an
+    /// archive keeps.
+    pub module_referenced: Vec<String>,
+    /// Each git operation that stands paused.
+    pub paused: Vec<Paused>,
     /// The stashes and commits of each git directory of a submodule whose
     /// working files are gone, as after `git submodule deinit`, with the
     /// submodule's name as its path.
     pub orphaned: Vec<SubmoduleWork>,
+}
+
+/// A stash entry of a clone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StashEntry {
+    /// The stash's commit.
+    pub commit: String,
+    /// The message of its reflog entry, such as `WIP on main: 4b825dc Fix`.
+    pub message: String,
+}
+
+/// The two commits that keep a checkout's uncommitted work, which nothing
+/// but the archive's pins names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WipCommits {
+    /// The commit of the index, whose parent is `HEAD`.
+    pub index: String,
+    /// The commit of the working files, whose parents are `HEAD` and
+    /// `index`.
+    pub worktree: String,
+}
+
+/// The trees of a checkout's index and of its working files, which a
+/// commit of its uncommitted work would hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WipTrees {
+    /// The tree of the index.
+    pub index: String,
+    /// The tree of the working files, without the ignored ones.
+    pub worktree: String,
+}
+
+/// A file of a checkout's uncommitted work, with its size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LargeFile {
+    /// The file, relative to the checkout.
+    pub path: String,
+    /// The file's size in bytes.
+    pub bytes: u64,
+    /// Whether git does not track the file.
+    pub untracked: bool,
 }
 
 /// The repository that holds a reference, and how git must be told about
@@ -89,10 +180,9 @@ impl<'a> RefHolder<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LocalNames {
-    /// Each local branch.
-    pub branches: Vec<String>,
-    /// Each tag.
-    pub tags: Vec<String>,
+    /// Each linked worktree made from the clone, by its directory, which
+    /// stops working when the clone is deleted.
+    pub worktrees: Vec<String>,
     /// Each remote other than `origin`.
     pub remotes: Vec<String>,
     /// Each hook in the clone's git directory.
@@ -415,19 +505,145 @@ pub trait Backend {
     /// Returns the failure of the update.
     fn write_ref(&self, repository: &Path, reference: &str, commit: &str) -> Result<(), Error>;
 
-    /// Fetches the `HEAD` of the clone at `checkout` into the bare `mirror`
-    /// under the reference `reference`, and returns the commit that the
-    /// reference then names.
+    /// Fetches each object of `refs`, a list of a reference and the object
+    /// it names, from the clone at `checkout` into the bare `mirror`, and
+    /// points each reference of the mirror at its object, durably. The
+    /// objects need no reference in the clone.
     ///
     /// # Errors
     ///
-    /// Returns the failure of the fetch.
-    fn fetch_head_into_mirror(
+    /// Returns the failure of the fetch, and [`Error::CommandFailed`] when a
+    /// reference then names another object.
+    fn fetch_into_mirror(
         &self,
         mirror: &Path,
         checkout: &Path,
-        reference: &str,
-    ) -> Result<String, Error>;
+        refs: &[(String, String)],
+    ) -> Result<(), Error>;
+
+    /// Returns each reference below `prefix`, such as `refs/heads/`, in the
+    /// repository that `holder` names, as its name without the prefix and
+    /// the object that it names. An annotated tag names its tag object.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn refs_under(
+        &self,
+        holder: RefHolder<'_>,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, Error>;
+
+    /// Returns each stash entry of the checkout at `checkout`, newest
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn stash_entries(&self, checkout: &Path) -> Result<Vec<StashEntry>, Error>;
+
+    /// Returns the commits of the checkout at `checkout` that `origin` does
+    /// not hold and that neither `HEAD` nor any of `kept` reaches, each one
+    /// that no other of them reaches. For a clone they come from its
+    /// branches, tags, notes and other references, and from the commits
+    /// that only the reflog of a detached `HEAD` holds. With `shared`, the
+    /// checkout is a worktree, whose branches, tags and other references
+    /// stay in its repository, and they come only from the reflog of its
+    /// detached `HEAD`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn orphans(&self, checkout: &Path, kept: &[String], shared: bool)
+    -> Result<Vec<String>, Error>;
+
+    /// Returns each file of the uncommitted work of the checkout at
+    /// `checkout`, changed, staged or untracked and not ignored, that is
+    /// larger than `most` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing or of reading a file's size.
+    fn large_files(&self, checkout: &Path, most: u64) -> Result<Vec<LargeFile>, Error>;
+
+    /// Returns the trees that a commit of the uncommitted work of the
+    /// checkout at `checkout` would hold, written through the temporary
+    /// index file `index`, which starts as a copy of the checkout's own.
+    /// The checkout's index, branch and references stay as they are. Each
+    /// path of `left_out`, relative to the checkout, holds its content in
+    /// `HEAD` in both trees. A path that a paused operation left unmerged
+    /// holds its content in `HEAD` in the tree of the index and its
+    /// working file in the tree of the working files.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the copy or of a git command.
+    fn wip_trees(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+    ) -> Result<WipTrees, Error>;
+
+    /// Writes the two commits of the uncommitted work of the checkout at
+    /// `checkout`, as [`Backend::wip_trees`] reads it through `index`
+    /// without `left_out`, with `message`, and with author and committer
+    /// dates of `time`, seconds since the Unix epoch, so the same work
+    /// gives the same commits. The objects are on disk when it returns.
+    /// Nothing names the commits until the caller writes a reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a git command.
+    fn write_wip(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+        time: u64,
+        message: &str,
+    ) -> Result<WipCommits, Error>;
+
+    /// Returns the tree of `commit` in the repository at `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error>;
+
+    /// Puts the uncommitted work of `wip` back into the clean checkout at
+    /// `checkout`: its working files become the tree of `wip.worktree`, and
+    /// its index the tree of `wip.index`. Nothing is committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a git command.
+    fn apply_wip(&self, checkout: &Path, wip: &WipCommits) -> Result<(), Error>;
+
+    /// Adds `commit`, a stash commit, to the stash of the checkout at
+    /// `checkout` as its newest entry, with `message`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the command.
+    fn store_stash(&self, checkout: &Path, commit: &str, message: &str) -> Result<(), Error>;
+
+    /// Creates `reference` at `object` in the repository at `dir`, in one
+    /// step that fails when the reference already exists, and reports
+    /// whether it created it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the update for another reason.
+    fn create_ref(&self, dir: &Path, reference: &str, object: &str) -> Result<bool, Error>;
+
+    /// Returns the path of each submodule that the index of the checkout at
+    /// `checkout` names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn submodule_paths(&self, checkout: &Path) -> Result<Vec<String>, Error>;
 
     /// Deletes the reference `reference` of the repository that `holder`
     /// names. Deleting a reference that does not exist succeeds.
@@ -452,24 +668,6 @@ pub trait Backend {
         revision: &str,
     ) -> Result<Option<String>, Error>;
 
-    /// Stages every change and untracked file of `checkout` that the ignore
-    /// rules do not ignore, and commits them with `message`, without
-    /// running any hook.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of the staging or the commit.
-    fn commit_all(&self, checkout: &Path, message: &str) -> Result<(), Error>;
-
-    /// Returns the failure when [`Backend::commit_all`] could not run in
-    /// `checkout`, such as a held index lock, and changes nothing that the
-    /// person can see.
-    ///
-    /// # Errors
-    ///
-    /// Returns the reason that the commit could not run.
-    fn check_commit_all(&self, checkout: &Path) -> Result<(), Error>;
-
     /// Returns what `git status` does not show about `checkout`.
     ///
     /// # Errors
@@ -477,19 +675,14 @@ pub trait Backend {
     /// Returns the failure of a listing.
     fn concealed(&self, checkout: &Path) -> Result<Concealed, Error>;
 
-    /// Returns what the clone at `checkout` holds that a clone rebuilt from
-    /// its mirror at `mirror` and the person's repository at `source` would
-    /// not have.
+    /// Returns what the clone at `checkout` holds that neither an archive
+    /// keeps nor a clone rebuilt from its mirror and the person's
+    /// repository at `source` has.
     ///
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn local_names(
-        &self,
-        checkout: &Path,
-        mirror: &Path,
-        source: &Path,
-    ) -> Result<LocalNames, Error>;
+    fn local_names(&self, checkout: &Path, source: &Path) -> Result<LocalNames, Error>;
 
     /// Deletes the remote `origin` of `checkout`.
     ///

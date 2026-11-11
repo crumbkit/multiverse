@@ -14,9 +14,9 @@ use clap::Args;
 use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
-    Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveRecords,
-    ArchiveState, ArchivedCheckout, Archives, Git, Mode, RestoreOutcome, RestorePlanned, Volumes,
-    Workspace, WorkspaceName, Workspaces,
+    ARCHIVE_MAX_FILE, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
+    ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Git, KEPT_NAMESPACE, Mode, PutBack,
+    RestoreOutcome, RestorePlanned, Uncommitted, Volumes, Workspace, WorkspaceName, Workspaces,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -38,7 +38,7 @@ pub(crate) use failure::CODES;
 pub use failure::{
     ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
     ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_SOURCE_CHANGED,
-    ARCHIVE_UNFINISHED, ARCHIVE_UNSAVED_WORK, ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED,
+    ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED,
     RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
     RESTORE_UNFINISHED,
 };
@@ -48,7 +48,7 @@ use failure::{ArchiveFailure, archive_refusal, restore_refusal};
 pub(crate) const ARCHIVE: Document<Prose<ArchiveResult>> = Document::new(
     "mxv",
     "archive",
-    1,
+    2,
     "What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.",
 );
 
@@ -67,11 +67,7 @@ pub(crate) struct ArchiveArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// Commit uncommitted changes and untracked files onto the branch first; ignored files stay untouched
-    #[arg(long, conflicts_with = "force")]
-    pub(crate) wip: bool,
-
-    /// Lose what the archive cannot keep, such as uncommitted changes, ignored files such as .env and stashes, and list it in the archive
+    /// Lose what the archive cannot keep, such as an ignored .env file, a paused merge or a file over archive_max_file, and list it in the archive
     #[arg(long)]
     pub(crate) force: bool,
 
@@ -118,6 +114,164 @@ pub(crate) struct PinRow {
     reference: String,
 }
 
+/// What an archive kept of one checkout besides the commit of its `HEAD`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct KeptRow {
+    /// The checkout's folder.
+    folder: String,
+    /// The branch of the checkout, or null for a detached `HEAD`.
+    branch: Option<String>,
+    /// Whether the archive kept uncommitted work, which restore puts back
+    /// uncommitted.
+    uncommitted: bool,
+    /// Each staged or unstaged change of a tracked file, as
+    /// `git status --porcelain` prints it, such as ` M src/lib.rs`.
+    changes: Vec<String>,
+    /// Each untracked path, relative to the checkout. A directory ends
+    /// with `/`.
+    untracked: Vec<String>,
+    /// The number of stash entries.
+    stashes: usize,
+    /// Each local branch besides the checkout's own.
+    branches: Vec<String>,
+    /// Each tag that origin does not hold.
+    tags: Vec<String>,
+    /// Each per-worktree reference, by its name below `refs/worktree/`.
+    worktree: Vec<String>,
+    /// Each commit that no branch reaches, which restore keeps under
+    /// `refs/mxv/kept/`.
+    orphans: Vec<String>,
+}
+
+impl KeptRow {
+    /// Returns what the archive keeps of `checkout`, whose uncommitted
+    /// work `uncommitted` lists, or `None` when it keeps nothing besides
+    /// `HEAD`.
+    fn of(checkout: &ArchivedCheckout, uncommitted: &[Uncommitted]) -> Option<Self> {
+        let lines: Vec<&String> = uncommitted
+            .iter()
+            .filter(|work| work.folder == checkout.folder)
+            .flat_map(|work| &work.changes)
+            .collect();
+        let kept = &checkout.kept;
+        let row = Self {
+            folder: checkout.folder.clone(),
+            branch: (!checkout.detached).then(|| checkout.branch.clone()),
+            uncommitted: kept.wip.is_some() || !lines.is_empty(),
+            changes: lines
+                .iter()
+                .filter(|line| !line.starts_with("??"))
+                .map(|line| (*line).clone())
+                .collect(),
+            untracked: lines
+                .iter()
+                .filter_map(|line| line.strip_prefix("?? "))
+                .map(str::to_owned)
+                .collect(),
+            stashes: kept.stashes.len(),
+            branches: kept.branches.keys().cloned().collect(),
+            tags: kept.tags.keys().cloned().collect(),
+            worktree: kept.worktree.keys().cloned().collect(),
+            orphans: kept.orphans.clone(),
+        };
+        let empty = !row.uncommitted
+            && row.stashes == 0
+            && row.branches.is_empty()
+            && row.tags.is_empty()
+            && row.worktree.is_empty()
+            && row.orphans.is_empty();
+        (!empty).then_some(row)
+    }
+
+    /// Writes the sentences of this row, with `keeps` as the verb, such
+    /// as `would keep`.
+    fn write(&self, formatter: &mut fmt::Formatter<'_>, keeps: &str) -> fmt::Result {
+        let folder = &self.folder;
+        if !self.changes.is_empty() {
+            write!(
+                formatter,
+                "mxv {keeps} the staged and unstaged changes of {folder}, {}, as uncommitted work that restore brings back.",
+                counted(self.changes.len(), "file", "files")
+            )?;
+            match &self.branch {
+                Some(branch) => writeln!(formatter, " The branch {branch} stays where it is.")?,
+                None => writeln!(formatter)?,
+            }
+        }
+        for path in &self.untracked {
+            let what = if path.ends_with('/') {
+                "directory"
+            } else {
+                "file"
+            };
+            writeln!(
+                formatter,
+                "mxv {keeps} the untracked {what} {folder}/{path} with the uncommitted work."
+            )?;
+        }
+        if self.uncommitted && self.changes.is_empty() && self.untracked.is_empty() {
+            writeln!(
+                formatter,
+                "mxv {keeps} the uncommitted work of {folder}, which restore brings back."
+            )?;
+        }
+        if self.stashes > 0 {
+            writeln!(
+                formatter,
+                "mxv {keeps} {} of {folder}.",
+                counted(self.stashes, "stash", "stashes")
+            )?;
+        }
+        for branch in &self.branches {
+            writeln!(
+                formatter,
+                "mxv {keeps} the local branch {branch} of {folder}."
+            )?;
+        }
+        for tag in &self.tags {
+            writeln!(
+                formatter,
+                "mxv {keeps} the tag {tag} of {folder}, which origin does not hold."
+            )?;
+        }
+        for name in &self.worktree {
+            writeln!(
+                formatter,
+                "mxv {keeps} the per-worktree reference refs/worktree/{name} of {folder}."
+            )?;
+        }
+        if !self.orphans.is_empty() {
+            let references: Vec<String> = self
+                .orphans
+                .iter()
+                .map(|commit| format!("{KEPT_NAMESPACE}{commit}"))
+                .collect();
+            writeln!(
+                formatter,
+                "mxv {keeps} {} of {folder} that no branch reaches, {}, as {} after restore.",
+                counted(self.orphans.len(), "commit", "commits"),
+                self.orphans.join(", "),
+                listed(&references)
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Returns `count` with the noun that fits it, such as `1 file`.
+fn counted(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// Returns `items` joined as a sentence joins them, such as `a, b and c`.
+fn listed(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// What `mxv archive` did, or would do on a dry run.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct ArchiveResult {
@@ -130,8 +284,9 @@ pub(crate) struct ArchiveResult {
     /// Each commit that exists only on this machine, with the checkout's
     /// folder in front. The archive pushes nothing.
     local_only: Vec<String>,
-    /// The paths that `--wip` committed, or would commit.
-    wip: Vec<String>,
+    /// What the archive kept of each checkout besides its commit, or would
+    /// keep, for each checkout that keeps something.
+    kept: Vec<KeptRow>,
     /// What `--force` lost, or would lose.
     lost: Vec<String>,
     /// The workspace's units that the run stopped, or would stop.
@@ -161,32 +316,23 @@ impl fmt::Display for ArchiveResult {
         for warning in &self.warnings {
             writeln!(formatter, "Warning: {warning}.")?;
         }
-        let (archived, stops, deletes, commits, loses, keeps, is) = if self.planned {
+        let (archived, stops, deletes, loses, keeps, is) = if self.planned {
             (
                 "would archive",
                 "would stop",
                 "would delete",
-                "would commit",
                 "would lose",
                 "would keep",
                 "would stay",
             )
         } else {
-            (
-                "archived",
-                "stopped",
-                "deleted",
-                "committed",
-                "lost",
-                "kept",
-                "stays",
-            )
+            ("archived", "stopped", "deleted", "lost", "kept", "stays")
         };
         for process in &self.stopped {
             writeln!(formatter, "mxv {stops} the unit {process}.")?;
         }
-        for path in &self.wip {
-            writeln!(formatter, "mxv {commits} {path}.")?;
+        for row in &self.kept {
+            row.write(formatter, keeps)?;
         }
         for path in &self.lost {
             writeln!(formatter, "mxv {loses} {path}.")?;
@@ -252,6 +398,169 @@ pub(crate) struct RestoredCheckout {
     commit: String,
 }
 
+/// What a restore put back into one checkout besides its commit.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct PutBackRow {
+    /// The checkout's folder.
+    folder: String,
+    /// The checkout's directory.
+    path: String,
+    /// Whether the restore put back uncommitted work.
+    uncommitted: bool,
+    /// The number of files with staged changes, which a dry run does not
+    /// count.
+    staged: usize,
+    /// The number of files with unstaged changes, which a dry run does not
+    /// count.
+    unstaged: usize,
+    /// The number of untracked paths, which a dry run does not count.
+    untracked: usize,
+    /// The number of stash entries.
+    stashes: usize,
+    /// Each local branch besides the checkout's own.
+    branches: Vec<String>,
+    /// Each tag that origin does not hold.
+    tags: Vec<String>,
+    /// Each per-worktree reference, by its name below `refs/worktree/`.
+    worktree: Vec<String>,
+    /// Each reference below `refs/mxv/kept/` that keeps a commit no branch
+    /// reaches.
+    kept: Vec<String>,
+    /// Each submodule that comes back uninitialised, which a dry run does
+    /// not list.
+    submodules: Vec<String>,
+}
+
+impl PutBackRow {
+    /// Returns the row of what a restore put back, `put_back`, into the
+    /// checkout at `path`, which held uncommitted work when `uncommitted`.
+    fn restored(put_back: PutBack, path: String, uncommitted: bool) -> Self {
+        Self {
+            folder: put_back.folder,
+            path,
+            uncommitted,
+            staged: put_back.staged,
+            unstaged: put_back.unstaged,
+            untracked: put_back.untracked,
+            stashes: put_back.stashes,
+            branches: put_back.branches,
+            tags: put_back.tags,
+            worktree: put_back.worktree,
+            kept: put_back.kept,
+            submodules: put_back.submodules,
+        }
+    }
+
+    /// Returns the row of what a restore of `checkout` would put back.
+    fn planned(checkout: &ArchivedCheckout) -> Self {
+        let kept = &checkout.kept;
+        Self {
+            folder: checkout.folder.clone(),
+            path: checkout.path.display().to_string(),
+            uncommitted: kept.wip.is_some(),
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            stashes: kept.stashes.len(),
+            branches: kept.branches.keys().cloned().collect(),
+            tags: kept.tags.keys().cloned().collect(),
+            worktree: kept.worktree.keys().cloned().collect(),
+            kept: kept
+                .orphans
+                .iter()
+                .map(|commit| format!("{KEPT_NAMESPACE}{commit}"))
+                .collect(),
+            submodules: Vec::new(),
+        }
+    }
+
+    /// Writes the sentences of this row, with `puts` as the verb, such as
+    /// `would put`.
+    fn write(&self, formatter: &mut fmt::Formatter<'_>, puts: &str) -> fmt::Result {
+        let folder = &self.folder;
+        if self.uncommitted {
+            let parts: Vec<String> = [
+                (self.staged, "staged file", "staged files"),
+                (self.unstaged, "unstaged file", "unstaged files"),
+                (self.untracked, "untracked file", "untracked files"),
+            ]
+            .into_iter()
+            .filter(|(count, ..)| *count > 0)
+            .map(|(count, one, many)| counted(count, one, many))
+            .collect();
+            if parts.is_empty() {
+                writeln!(
+                    formatter,
+                    "mxv {puts} back the uncommitted work of {folder}."
+                )?;
+            } else {
+                writeln!(
+                    formatter,
+                    "mxv {puts} back the uncommitted work of {folder}: {}.",
+                    listed(&parts)
+                )?;
+            }
+        }
+        if self.stashes > 0 {
+            writeln!(
+                formatter,
+                "mxv {puts} back {} of {folder}.",
+                counted(self.stashes, "stash", "stashes")
+            )?;
+        }
+        let mut references: Vec<String> = self
+            .branches
+            .iter()
+            .map(|branch| format!("the local branch {branch}"))
+            .collect();
+        references.extend(self.tags.iter().map(|tag| format!("the tag {tag}")));
+        references.extend(
+            self.worktree
+                .iter()
+                .map(|name| format!("the per-worktree reference refs/worktree/{name}")),
+        );
+        if !references.is_empty() {
+            writeln!(
+                formatter,
+                "mxv {puts} back {} of {folder}.",
+                listed(&references)
+            )?;
+        }
+        if !self.kept.is_empty() {
+            writeln!(
+                formatter,
+                "mxv {puts} back {} of {folder} as {}.",
+                counted(self.kept.len(), "commit", "commits"),
+                listed(&self.kept)
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Writes a warning for each submodule that comes back uninitialised.
+    fn write_submodules(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for submodule in &self.submodules {
+            writeln!(
+                formatter,
+                "Warning: the submodule {submodule} of {} comes back uninitialised. `git -C {} submodule update --init` initialises it.",
+                self.folder, self.path
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Reports whether the row says nothing.
+    fn is_empty(&self) -> bool {
+        !self.uncommitted
+            && self.stashes == 0
+            && self.branches.is_empty()
+            && self.tags.is_empty()
+            && self.worktree.is_empty()
+            && self.kept.is_empty()
+            && self.submodules.is_empty()
+    }
+}
+
 /// What `mxv restore` did, or would do on a dry run.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct RestoreResult {
@@ -261,6 +570,9 @@ pub(crate) struct RestoreResult {
     path: String,
     /// The checkouts that the restore rebuilt.
     checkouts: Vec<RestoredCheckout>,
+    /// What the restore put back into each checkout besides its commit, or
+    /// would put back, for each checkout that has something.
+    put_back: Vec<PutBackRow>,
     /// Each port that the restore gave a new number.
     ports: Vec<PortRow>,
     /// The folder of each clone whose mirror mxv clones again from its
@@ -278,10 +590,10 @@ impl fmt::Display for RestoreResult {
         for warning in &self.warnings {
             writeln!(formatter, "Warning: {warning}.")?;
         }
-        let (restored, gives, clones) = if self.planned {
-            ("would restore", "would give", "would clone")
+        let (restored, gives, clones, puts) = if self.planned {
+            ("would restore", "would give", "would clone", "would put")
         } else {
-            ("restored", "gave", "cloned")
+            ("restored", "gave", "cloned", "put")
         };
         for folder in &self.missing_mirrors {
             writeln!(formatter, "mxv {clones} the mirror of {folder} again.")?;
@@ -292,6 +604,12 @@ impl fmt::Display for RestoreResult {
                 |branch| format!("on {branch} at {}", checkout.commit),
             );
             writeln!(formatter, "The checkout {} is {place}.", checkout.path)?;
+        }
+        for row in &self.put_back {
+            row.write(formatter, puts)?;
+        }
+        for row in &self.put_back {
+            row.write_submodules(formatter)?;
         }
         for port in &self.ports {
             writeln!(
@@ -388,14 +706,29 @@ struct Done {
     cd: Option<String>,
 }
 
-/// Returns the result of the archive of the checkouts of `archive`.
-fn result_of(archive: &Archive, wip: Vec<String>, done: Done, planned: bool) -> ArchiveResult {
+/// Returns what the archive keeps of each of `checkouts`, whose
+/// uncommitted work `uncommitted` lists.
+fn kept_rows(checkouts: &[ArchivedCheckout], uncommitted: &[Uncommitted]) -> Vec<KeptRow> {
+    checkouts
+        .iter()
+        .filter_map(|checkout| KeptRow::of(checkout, uncommitted))
+        .collect()
+}
+
+/// Returns the result of the archive of the checkouts of `archive`, whose
+/// uncommitted work `uncommitted` lists.
+fn result_of(
+    archive: &Archive,
+    uncommitted: &[Uncommitted],
+    done: Done,
+    planned: bool,
+) -> ArchiveResult {
     ArchiveResult {
         name: archive.name.to_string(),
         path: archive.path.display().to_string(),
         pins: pin_rows(&archive.checkouts),
         local_only: local_only(&archive.checkouts),
-        wip,
+        kept: kept_rows(&archive.checkouts, uncommitted),
         lost: archive.lost.clone(),
         stopped: done.stopped,
         disposable: done.disposable,
@@ -448,7 +781,7 @@ fn dry_result(plan: &ArchivePlan, running: Vec<String>, cd: Option<String>) -> A
         path: workspace.path.display().to_string(),
         pins: pin_rows(&plan.checkouts),
         local_only: local_only(&plan.checkouts),
-        wip: plan.wip.clone(),
+        kept: kept_rows(&plan.checkouts, &plan.uncommitted),
         lost: plan.lost.clone(),
         stopped: running,
         disposable: plan.removal.disposable.clone(),
@@ -478,10 +811,16 @@ fn question(plan: &ArchivePlan, running: &[String], delete_volumes: bool) -> Str
             plan.removal.manifest.join(", ")
         ));
     }
-    if !plan.wip.is_empty() {
+    let uncommitted: Vec<&str> = plan
+        .uncommitted
+        .iter()
+        .filter(|work| !work.changes.is_empty())
+        .map(|work| work.folder.as_str())
+        .collect();
+    if !uncommitted.is_empty() {
         text.push_str(&format!(
-            " It commits {} onto the branch first.",
-            plan.wip.join(", ")
+            " It keeps the uncommitted work of {} on pins, without a commit on any branch, and restore puts it back uncommitted.",
+            uncommitted.join(", ")
         ));
     }
     if !plan.lost.is_empty() {
@@ -539,7 +878,12 @@ pub(crate) fn archive(
     let workspaces = configured(environment)?;
     let records = archives(environment)?;
     let runs = environment.runs()?;
-    let options = ArchiveOptions::new(args.wip, args.force, runs.containers_ran(&name));
+    let max_file = environment
+        .config()?
+        .archive_max_file
+        .unwrap_or(ARCHIVE_MAX_FILE);
+    let options =
+        ArchiveOptions::new(args.force, runs.containers_ran(&name)).with_max_file(max_file);
     if output.is_dry_run() {
         return dry_run(environment, &workspaces, &records, &name, options);
     }
@@ -557,7 +901,7 @@ pub(crate) fn archive(
             };
             let volumes = stale_volumes(environment, &archive, args.delete_volumes)?;
             done.volumes = finish(environment, &workspaces, &records, &mut archive, volumes)?;
-            return Ok(Prose::new(result_of(&archive, Vec::new(), done, false)));
+            return Ok(Prose::new(result_of(&archive, &[], done, false)));
         }
     };
     let workspace = plan.removal.workspace.clone();
@@ -571,7 +915,6 @@ pub(crate) fn archive(
         return Err(manifest_disposable(&name, &plan).into());
     }
     output.confirm(args.yes, &question(&plan, &running, args.delete_volumes))?;
-    workspaces.check_wip(&plan).map_err(MxvFailure::from)?;
     if !running.is_empty() {
         processes::stop_all_locked(environment, &workspace, &lock)?;
     }
@@ -581,7 +924,7 @@ pub(crate) fn archive(
     } else {
         None
     };
-    let wip = plan.wip.clone();
+    let uncommitted = plan.uncommitted.clone();
     let mut warnings = plan.warnings.clone();
     let (mut archive, removal) = match workspaces
         .archive(&records, plan)
@@ -600,7 +943,7 @@ pub(crate) fn archive(
         warnings,
         cd,
     };
-    Ok(Prose::new(result_of(&archive, wip, done, false)))
+    Ok(Prose::new(result_of(&archive, &uncommitted, done, false)))
 }
 
 /// Returns what an archive of the workspace `name` would do, and changes
@@ -623,7 +966,7 @@ fn dry_run(
                 cd: cd_target(environment, &archive.path),
                 ..Done::default()
             };
-            return Ok(Prose::new(result_of(&archive, Vec::new(), done, true)));
+            return Ok(Prose::new(result_of(&archive, &[], done, true)));
         }
     };
     let workspace = &plan.removal.workspace;
@@ -690,6 +1033,13 @@ pub(crate) fn restore(
             name: name.to_string(),
             path: plan.archive.path.display().to_string(),
             checkouts: restored_checkouts(&plan.archive),
+            put_back: plan
+                .archive
+                .checkouts
+                .iter()
+                .map(PutBackRow::planned)
+                .filter(|row| !row.is_empty())
+                .collect(),
             ports: port_rows(ports),
             missing_mirrors: plan.missing_mirrors,
             warnings: Vec::new(),
@@ -720,6 +1070,19 @@ pub(crate) fn restore(
         name: name.to_string(),
         path: archive.path.display().to_string(),
         checkouts: restored_checkouts(&archive),
+        put_back: restored
+            .put_back
+            .into_iter()
+            .zip(&archive.checkouts)
+            .map(|(put_back, checkout)| {
+                PutBackRow::restored(
+                    put_back,
+                    checkout.path.display().to_string(),
+                    checkout.kept.wip.is_some(),
+                )
+            })
+            .filter(|row| !row.is_empty())
+            .collect(),
         ports: port_rows(restored.ports),
         missing_mirrors,
         warnings: restored.warnings,

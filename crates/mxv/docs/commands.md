@@ -505,8 +505,7 @@ Archive a workspace, so restore can rebuild it at the same commits
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `--wip`: Commit uncommitted changes and untracked files onto the branch first; ignored files stay untouched
-- `--force`: Lose what the archive cannot keep, such as uncommitted changes, ignored files such as .env and stashes, and list it in the archive
+- `--force`: Lose what the archive cannot keep, such as an ignored .env file, a paused merge or a file over archive\_max\_file, and list it in the archive
 - `--delete-volumes`: Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
