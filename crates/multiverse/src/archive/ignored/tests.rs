@@ -61,7 +61,12 @@ fn restore(
     force: bool,
 ) -> Result<Result<IgnoredRestored, IgnoredRefusal>, Error> {
     let (app, web) = (root.join("app"), root.join("web"));
-    super::restore(dir, kept, &[("app", app.as_path()), ("web", web.as_path())], force)
+    super::restore(
+        dir,
+        kept,
+        &[("app", app.as_path()), ("web", web.as_path())],
+        force,
+    )
 }
 
 fn mode_of(path: &Path) -> u32 {
@@ -402,7 +407,10 @@ fn an_entry_of_a_checkout_that_is_the_workspace_comes_back_at_the_checkouts_own_
         fs::read_to_string(rebuilt.join(".env")).unwrap(),
         "TOKEN=old\n"
     );
-    assert!(!rebuilt.join("app").exists(), "restore wrote below the folder");
+    assert!(
+        !rebuilt.join("app").exists(),
+        "restore wrote below the folder"
+    );
 }
 
 #[test]
