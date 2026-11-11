@@ -30,7 +30,7 @@ sha2 = { workspace = true }
 # phase holds the container engine that `up`, `down`, `status`, `logs` and
 # `remove` run a manifest's containers with, the run directory's paths, and
 # the rules of workspace and unit names. phase never depends on multiverse.
-phase = { package = "mxv-phase", path = "../phase", version = "0.0.0" }
+phase = { package = "mxv-phase", path = "../phase", version = "0.1.0" }
 
 # macOS clones a new checkout's ignored directories with clonefile(2)
 # through reflink-copy, and tells its ENOTSUP failure by libc's errno.

@@ -921,7 +921,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "multiverse"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "mxv-phase",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "mxv"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "crumbkit 0.3.1",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "mxv-phase"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hmac",
  "libc",
