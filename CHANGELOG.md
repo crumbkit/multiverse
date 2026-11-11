@@ -5,6 +5,8 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.1.0] - 2026-11-11
+
 ### Added
 
 - `deadband status` and `deadband top` show the workspace of each job that
