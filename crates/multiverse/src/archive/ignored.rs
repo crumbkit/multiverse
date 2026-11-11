@@ -159,8 +159,10 @@ pub(crate) fn keep(dir: &Path, sources: &[(String, PathBuf)]) -> Result<Vec<Igno
 /// `dir` still holds whole, unless a source already has its path. A run
 /// that finishes an archive uses it after a checkout is retired, when the
 /// checkout's files exist only in the tar. A carried entry that the old tar
-/// no longer holds whole is left out, and a restore names it as damaged.
-/// Returns the sources' entries, then the carried ones.
+/// no longer holds whole is not written into the new tar but stays in the
+/// returned list, so the record still names it and a restore reports it as
+/// damaged, or as lost under force. Returns the sources' entries, then the
+/// carried ones that the new tar holds, then the carried ones it does not.
 ///
 /// # Errors
 ///
@@ -178,11 +180,10 @@ pub(crate) fn keep_carrying(
         .cloned()
         .collect();
     let whole = whole_entries(&tar, &carried)?;
-    let carried: Vec<IgnoredEntry> = carried
+    let (carried, damaged): (Vec<IgnoredEntry>, Vec<IgnoredEntry>) = carried
         .into_iter()
-        .filter(|entry| whole.contains(&entry.path))
-        .collect();
-    let mut kept = Vec::with_capacity(sources.len() + carried.len());
+        .partition(|entry| whole.contains(&entry.path));
+    let mut kept = Vec::with_capacity(sources.len() + carried.len() + damaged.len());
     store::write_file_with(&tar, TAR_MODE, |file| {
         let unwritable = |source| Error::Unwritable {
             path: tar.clone(),
@@ -220,6 +221,9 @@ pub(crate) fn keep_carrying(
         })?;
         builder.into_inner().map(|_| ()).map_err(unwritable)
     })?;
+    // No damaged entry shares a path with a source or a whole carried entry,
+    // because `carried` drops the sources' paths before the partition.
+    kept.extend(damaged);
     Ok(kept)
 }
 

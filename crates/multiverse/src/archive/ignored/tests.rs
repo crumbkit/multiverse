@@ -157,9 +157,10 @@ fn a_rerun_after_a_partial_tar_writes_it_again_and_finishes() {
     assert_eq!(restored.written, ["app/.env"]);
 }
 
-#[test]
-fn a_rerun_carries_the_whole_entries_of_a_retired_checkout_into_the_new_tar() {
-    let scene = scene();
+/// Keeps `app/.env` and `app/config/master.key`, retires the checkout `app`
+/// with a record of master.key that no longer matches the tar, and reruns
+/// the keep with `web/.env` as its source, carrying app's entries.
+fn rerun_after_a_retired_checkout(scene: &Scene) -> (Vec<IgnoredEntry>, Vec<IgnoredEntry>) {
     scene.file("app/.env", "TOKEN=abc\n", 0o640);
     scene.file("app/config/master.key", "0123456789", 0o600);
     let first = keep(
@@ -174,19 +175,25 @@ fn a_rerun_carries_the_whole_entries_of_a_retired_checkout_into_the_new_tar() {
     fs::remove_dir_all(scene.workspace.join("app")).unwrap();
     fs::create_dir_all(scene.workspace.join("web")).unwrap();
     scene.file("web/.env", "TOKEN=web\n", 0o600);
-
     let kept = keep_carrying(&scene.archive, &scene.sources(&["web/.env"]), &carried).unwrap();
+    (carried, kept)
+}
+
+#[test]
+fn a_rerun_carries_the_whole_entries_of_a_retired_checkout_into_the_new_tar() {
+    let scene = scene();
+    let (carried, kept) = rerun_after_a_retired_checkout(&scene);
 
     assert_eq!(
         kept.iter()
             .map(|entry| entry.path.as_str())
             .collect::<Vec<_>>(),
-        ["web/.env", "app/.env"],
-        "the sources come first, then the carried entries that are whole"
+        ["web/.env", "app/.env", "app/config/master.key"],
+        "the sources come first, then the whole carried entries, then the damaged ones"
     );
-    assert_eq!(kept[1], first[0]);
+    assert_eq!(kept[1..], carried[..]);
     let rebuilt = scene.rebuilt();
-    let restored = put_back(restore(&scene.archive, &kept, &rebuilt, false));
+    let restored = put_back(restore(&scene.archive, &kept, &rebuilt, true));
     assert_eq!(restored.written, ["web/.env", "app/.env"]);
     assert_eq!(
         fs::read_to_string(rebuilt.join("app/.env")).unwrap(),
@@ -197,6 +204,22 @@ fn a_rerun_carries_the_whole_entries_of_a_retired_checkout_into_the_new_tar() {
         fs::read_to_string(rebuilt.join("web/.env")).unwrap(),
         "TOKEN=web\n"
     );
+    assert_eq!(restored.lost, ["app/config/master.key"]);
+}
+
+#[test]
+fn a_restore_after_a_rerun_refuses_with_a_carried_entry_the_old_tar_held_damaged() {
+    let scene = scene();
+    let (_, kept) = rerun_after_a_retired_checkout(&scene);
+    let rebuilt = scene.rebuilt();
+
+    let refused = restore(&scene.archive, &kept, &rebuilt, false).unwrap();
+
+    assert_eq!(
+        refused.unwrap_err(),
+        IgnoredRefusal::Damaged(vec!["app/config/master.key".to_owned()])
+    );
+    assert!(!rebuilt.join("app/.env").exists(), "restore wrote a file");
 }
 
 #[test]
