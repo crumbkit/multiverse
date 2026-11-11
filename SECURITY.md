@@ -38,6 +38,7 @@ Host processes receive `PATH`, `HOME`, manifest-derived variables and the `PASSE
 - `mxv restore` checks every entry against its digest before it writes any. It never writes over a path the rebuilt checkout already holds, and never writes through a link. A damaged tar refuses with `mxv::restore::ignored_damaged` unless `--force` is given.
 - `mxv restore` and `mxv remove --archived` delete the tar. Deleting an archive removes the tar's directory before the record.
 - A single ignored file over `archive_max_file` (100 MiB by default) is refused with `mxv::archive::unkeepable` and is never tarred.
+- Known limit: the tar keeps files and symbolic links only. An empty directory below an ignored directory is not kept, and the mode of an ignored directory is not kept. `mxv restore` makes a directory such as a 0700 `secrets/` again with the default mode, usually 0755, so other users may list the names of the files inside it. Each file gets its own kept mode back, so a 0600 file inside it stays unreadable to them.
 
 ## What mxv trusts
 

@@ -1466,6 +1466,13 @@ mode and SHA-256 digest. `mxv restore` writes them back with their modes. The
 disposable directories, such as `target/`, are deleted, and the archive result
 names each one with its size.
 
+The tar keeps files and symbolic links only, so it has two known limits. An
+empty directory below an ignored directory is not kept, and restore does not
+make it again. The mode of an ignored directory is not kept either: restore
+makes a directory such as a 0700 `secrets/` with the default mode, usually
+0755, though each file inside it gets its own kept mode back. Set the
+directory's mode again after a restore if it matters.
+
 An archive keeps three things in git. Each checkout's git state stays reachable
 through references below `refs/mxv/archives/<archive id>/<folder>/`, called
 pins, in the worktree's repository or the clone's mirror:
