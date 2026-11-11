@@ -278,6 +278,7 @@ fn an_archive_keeps_an_ignored_env_file_and_restore_writes_it_back() {
     let (exit, listed) = setup.run(&["list", "--archived"]);
     assert_eq!(exit, 0, "{listed}");
     assert_eq!(listed["data"][0]["ignored"], 1, "{listed}");
+    assert_eq!(listed["data"][0]["ignored_bytes"], 9, "{listed}");
     let (exit, restored) = setup.run(&["restore", "triage", "--yes"]);
     assert_eq!(exit, 0, "{restored}");
     assert_eq!(

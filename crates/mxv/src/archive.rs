@@ -1330,11 +1330,8 @@ fn row(archive: &Archive) -> WorkspaceRow {
         .iter()
         .map(|checkout| checkout.local_only.len())
         .sum();
-    let row = WorkspaceRow::from(&archive.workspace()).archived(
-        age(archive),
-        local,
-        archive.ignored.len(),
-    );
+    let row =
+        WorkspaceRow::from(&archive.workspace()).archived(age(archive), local, &archive.ignored);
     if archive.state == ArchiveState::Retiring {
         row.with_problem(unfinished_problem(archive.name.as_str()))
     } else {

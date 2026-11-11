@@ -8,8 +8,8 @@ use crumbkit::{Age, Children, Row};
 use multiverse::Error;
 use multiverse::{
     Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
-    DisposableSource, Fate, Kind, MANIFEST_FILE, Manifest, ManifestSource, ProcessNote,
-    ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
+    DisposableSource, Fate, IgnoredEntry, Kind, MANIFEST_FILE, Manifest, ManifestSource,
+    ProcessNote, ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -79,6 +79,9 @@ pub(crate) struct WorkspaceRow {
     /// archive keeps in its private tar, or null in a row of a workspace
     /// that is not archived.
     ignored: Option<u32>,
+    /// The bytes that the ignored files and links in the archive's private
+    /// tar take, or null in a row of a workspace that is not archived.
+    ignored_bytes: Option<Size>,
     /// The bytes that the workspace's disposable directories take on disk,
     /// such as `target/` and `node_modules/`, which `mxv clean` deletes, or
     /// null when `--sizes` was not given.
@@ -255,6 +258,7 @@ impl Row for WorkspaceRow {
         "archived",
         "local_only",
         "ignored",
+        "ignored_bytes",
         "ports",
         "problem",
     ];
@@ -313,6 +317,7 @@ impl From<&Workspace> for WorkspaceRow {
             archived: None,
             local_only: None,
             ignored: None,
+            ignored_bytes: None,
             disposable: None,
         }
     }
@@ -348,6 +353,7 @@ impl WorkspaceRow {
             archived: None,
             local_only: None,
             ignored: None,
+            ignored_bytes: None,
             disposable: None,
         }
     }
@@ -365,12 +371,18 @@ impl WorkspaceRow {
     }
 
     /// Returns the row of an archived workspace, archived `age` ago, with
-    /// `local_only` commits that exist only on this machine and `ignored`
-    /// files and links in the archive's private tar.
-    pub(crate) fn archived(mut self, age: Age, local_only: usize, ignored: usize) -> Self {
+    /// `local_only` commits that exist only on this machine and the
+    /// `ignored` files and links in the archive's private tar.
+    pub(crate) fn archived(
+        mut self,
+        age: Age,
+        local_only: usize,
+        ignored: &[IgnoredEntry],
+    ) -> Self {
         self.archived = Some(age);
         self.local_only = Some(u32::try_from(local_only).unwrap_or(u32::MAX));
-        self.ignored = Some(u32::try_from(ignored).unwrap_or(u32::MAX));
+        self.ignored = Some(u32::try_from(ignored.len()).unwrap_or(u32::MAX));
+        self.ignored_bytes = Some(Size(ignored.iter().map(|entry| entry.size).sum()));
         self
     }
 

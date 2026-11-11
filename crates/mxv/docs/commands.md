@@ -169,6 +169,7 @@ mxv list
 - `archived`: How long ago the workspace was archived, or null in a row of a workspace that is not archived.
 - `local_only`: The number of commits of an archived workspace that exist only on this machine, or null in a row of a workspace that is not archived.
 - `ignored`: The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
+- `ignored_bytes`: The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 

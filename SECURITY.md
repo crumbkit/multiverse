@@ -34,7 +34,7 @@ Host processes receive `PATH`, `HOME`, manifest-derived variables and the `PASSE
 `mxv archive` copies every ignored file and symbolic link that is outside the disposable set (the set `mxv clean` uses) into one tar. These files often hold secrets, such as `.env`, so the archive holds copies of those secrets.
 
 - The tar is at `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar`. It has mode 0600 in a 0700 directory, so only the same user can read it. It is not compressed or encrypted, and it stays on this machine's disk until it is deleted.
-- The archive record holds each entry's path, kind, size, mode and SHA-256 digest, and never any contents. No command prints the tar's contents, and `mxv list --archived --long` prints only counts.
+- The archive record holds each entry's path, kind, size, mode and SHA-256 digest, and never any contents. No command prints the tar's contents, and `mxv list --archived` prints only the number of ignored entries and their total size.
 - `mxv restore` checks every entry against its digest before it writes any. It never writes over a path the rebuilt checkout already holds, and never writes through a link. A damaged tar refuses with `mxv::restore::ignored_damaged` unless `--force` is given.
 - `mxv restore` and `mxv remove --archived` delete the tar. Deleting an archive removes the tar's directory before the record.
 - A single ignored file over `archive_max_file` (100 MiB by default) is refused with `mxv::archive::unkeepable` and is never tarred.
