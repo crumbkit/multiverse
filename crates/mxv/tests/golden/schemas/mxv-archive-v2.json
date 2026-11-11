@@ -461,6 +461,13 @@
             "$ref": "#/$defs/KeptRow"
           }
         },
+        "ignored": {
+          "description": "The ignored files and links that the archive kept in a private tar,\nor would keep, for each checkout that has some. Restore writes them\nback.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IgnoredRow"
+          }
+        },
         "lost": {
           "description": "What `--force` lost, or would lose.",
           "type": "array",
@@ -476,10 +483,10 @@
           }
         },
         "disposable": {
-          "description": "The ignored build directories that the run deleted, or would delete,\nbecause a build makes them again.",
+          "description": "The disposable directories that the run deleted, or would delete,\nbecause a build makes them again.",
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/DisposableRow"
           }
         },
         "root_files": {
@@ -521,6 +528,7 @@
         "pins",
         "local_only",
         "kept",
+        "ignored",
         "lost",
         "stopped",
         "disposable",
@@ -646,6 +654,59 @@
         "tags",
         "worktree",
         "orphans"
+      ]
+    },
+    "IgnoredRow": {
+      "description": "The ignored files and links of one checkout that an archive keeps in\nits private tar.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The checkout's folder.",
+          "type": "string"
+        },
+        "paths": {
+          "description": "Each file or link, relative to the workspace's directory, such as\n`app/.env`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bytes": {
+          "description": "The bytes of the files, which leaves out the links.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "folder",
+        "paths",
+        "bytes"
+      ]
+    },
+    "DisposableRow": {
+      "description": "One disposable directory that an archive deletes, because a build makes\nit again.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The checkout's folder.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The directory, relative to the checkout, with `/` after it, such as\n`target/`.",
+          "type": "string"
+        },
+        "bytes": {
+          "description": "The bytes that the directory took on disk.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "folder",
+        "path",
+        "bytes"
       ]
     }
   }

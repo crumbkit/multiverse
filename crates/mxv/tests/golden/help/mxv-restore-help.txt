@@ -7,6 +7,9 @@ Arguments:
           The name of the archived workspace
 
 Options:
+      --force
+          Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
+
       --dry-run
           Report what the command would change, and change nothing
 

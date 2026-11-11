@@ -44,6 +44,12 @@ pub const RESTORE_COMMIT_MISSING: Code = Code::new("mxv", "restore", "commit_mis
 pub const RESTORE_UNFINISHED: Code = Code::new("mxv", "restore", "unfinished");
 /// The code of a file of an archive that differs from its digest.
 pub const RESTORE_ROOT_FILE_CHANGED: Code = Code::new("mxv", "restore", "root_file_changed");
+/// The code of an ignored file whose copy in the archive is missing or
+/// differs from its digest.
+pub const RESTORE_IGNORED_DAMAGED: Code = Code::new("mxv", "restore", "ignored_damaged");
+/// The code of an ignored file whose path the rebuilt workspace already
+/// holds.
+pub const RESTORE_IGNORED_TAKEN: Code = Code::new("mxv", "restore", "ignored_taken");
 
 /// Every failure code of this module.
 pub(crate) const CODES: &[&Code] = &[
@@ -64,6 +70,8 @@ pub(crate) const CODES: &[&Code] = &[
     &RESTORE_COMMIT_MISSING,
     &RESTORE_UNFINISHED,
     &RESTORE_ROOT_FILE_CHANGED,
+    &RESTORE_IGNORED_DAMAGED,
+    &RESTORE_IGNORED_TAKEN,
 ];
 
 /// Why an archive or a restore stopped.
@@ -195,6 +203,22 @@ pub(crate) enum ArchiveFailure {
         /// The file.
         path: String,
     },
+    /// The archive's copy of an ignored file is missing or differs from
+    /// its digest.
+    IgnoredDamaged {
+        /// The archive's name.
+        name: String,
+        /// Each archived path, such as `app/.env`.
+        paths: Vec<String>,
+    },
+    /// The rebuilt workspace already holds something at an ignored file's
+    /// path.
+    IgnoredTaken {
+        /// The archive's name.
+        name: String,
+        /// Each archived path, such as `app/.env`.
+        paths: Vec<String>,
+    },
 }
 
 /// Returns the failure of `refusal` for the workspace `name`.
@@ -257,6 +281,8 @@ pub(super) fn restore_refusal(name: &WorkspaceName, refusal: RestoreRefusal) -> 
             commit,
         },
         RestoreRefusal::RootFileChanged { path } => ArchiveFailure::RootFileChanged { name, path },
+        RestoreRefusal::IgnoredDamaged { paths } => ArchiveFailure::IgnoredDamaged { name, paths },
+        RestoreRefusal::IgnoredTaken { paths } => ArchiveFailure::IgnoredTaken { name, paths },
         _ => ArchiveFailure::RestoreNotFound { name },
     }
 }
@@ -281,6 +307,8 @@ impl Failure for ArchiveFailure {
             Self::BranchMoved { .. } => &RESTORE_BRANCH_MOVED,
             Self::CommitMissing { .. } => &RESTORE_COMMIT_MISSING,
             Self::RootFileChanged { .. } => &RESTORE_ROOT_FILE_CHANGED,
+            Self::IgnoredDamaged { .. } => &RESTORE_IGNORED_DAMAGED,
+            Self::IgnoredTaken { .. } => &RESTORE_IGNORED_TAKEN,
         }
     }
 
@@ -343,6 +371,12 @@ impl Failure for ArchiveFailure {
             Self::RootFileChanged { name, .. } => Recovery::hint(format!(
                 "put the file back, or run `mxv remove --archived {name}` to delete the archive"
             )),
+            Self::IgnoredDamaged { name, .. } => Recovery::hint(format!(
+                "`mxv restore {name} --force` restores the workspace without these files and lists them as lost"
+            )),
+            Self::IgnoredTaken { .. } => {
+                Recovery::hint("look at what wrote these paths, then restore again")
+            }
         }
     }
 
@@ -375,7 +409,9 @@ impl Failure for ArchiveFailure {
             Self::Unusable { folder, reason } => {
                 vec![Field::new("folder", folder), Field::new("reason", reason)]
             }
-            Self::ManifestDisposable { name, paths } => vec![
+            Self::ManifestDisposable { name, paths }
+            | Self::IgnoredDamaged { name, paths }
+            | Self::IgnoredTaken { name, paths } => vec![
                 Field::new("name", name),
                 Field::new("paths", FieldValue::list(paths.iter())),
             ],
@@ -499,6 +535,16 @@ impl fmt::Display for ArchiveFailure {
             Self::RootFileChanged { path, .. } => write!(
                 formatter,
                 "the archive's copy of {path} differs from its recorded digest"
+            ),
+            Self::IgnoredDamaged { paths, .. } => write!(
+                formatter,
+                "the archive's copy of {} is missing or differs from its recorded digest",
+                paths.join(", ")
+            ),
+            Self::IgnoredTaken { paths, .. } => write!(
+                formatter,
+                "the rebuilt workspace already holds {}",
+                paths.join(", ")
             ),
         }
     }

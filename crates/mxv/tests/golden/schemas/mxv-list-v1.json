@@ -213,6 +213,15 @@
           "format": "uint32",
           "minimum": 0
         },
+        "ignored": {
+          "description": "The number of ignored files and links, such as `.env`, that the\narchive keeps in its private tar, or null in a row of a workspace\nthat is not archived.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "disposable": {
           "description": "The bytes that the workspace's disposable directories take on disk,\nsuch as `target/` and `node_modules/`, which `mxv clean` deletes, or\nnull when `--sizes` was not given.",
           "type": [
@@ -232,6 +241,7 @@
         "size",
         "archived",
         "local_only",
+        "ignored",
         "disposable"
       ]
     },

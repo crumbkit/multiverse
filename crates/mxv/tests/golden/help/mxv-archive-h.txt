@@ -4,7 +4,7 @@ Usage: mxv archive [OPTIONS]
 
 Options:
   -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
-      --force                  Lose what the archive cannot keep, such as an ignored .env file, a paused merge or a file over archive_max_file, and list it in the archive
+      --force                  Lose what the archive cannot keep, such as a paused merge or a file over archive_max_file, and list it in the archive
       --delete-volumes         Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
       --dry-run                Report what the command would change, and change nothing
       --yes                    Proceed without asking for confirmation
