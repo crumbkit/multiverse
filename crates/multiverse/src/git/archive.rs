@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::{
     CHECKOUT_DEADLINE, FETCH_DEADLINE, LOCAL_DEADLINE, MOST_OUTPUT_BYTES, ORIGIN_REFS, concealed,
-    detached, lines, run, run_in_holder, run_in_mirror, run_with, trimmed,
+    detached, lines, run, run_in_holder, run_in_mirror, run_with, run_with_input, trimmed,
 };
 use crate::backend::{RefHolder, StashEntry, WipCommits, WipTrees};
 use crate::error::Error;
@@ -188,10 +188,27 @@ pub(super) fn orphans(
         }
     }
     if found.len() > 1 {
-        let mut args = vec!["merge-base".to_owned(), "--independent".to_owned()];
-        args.extend(found);
-        found =
-            lines(&run(checkout, &args, "merge-base", LOCAL_DEADLINE)?.ok("merge-base", checkout)?);
+        // Each commit that no other found commit reaches is one that the
+        // parents of the found commits do not reach. The list goes on
+        // standard input, because a long local history would not fit on a
+        // command line.
+        let mut input = String::new();
+        for commit in &found {
+            input.push_str(commit);
+            input.push_str("\n^");
+            input.push_str(commit);
+            input.push_str("^@\n");
+        }
+        found = lines(
+            &run_with_input(
+                checkout,
+                ["rev-list", "--stdin"],
+                input.into_bytes(),
+                "rev-list",
+                LOCAL_DEADLINE,
+            )?
+            .ok("rev-list", checkout)?,
+        );
     }
     found.sort_unstable();
     Ok(found)
@@ -231,10 +248,47 @@ fn with_index(
     .ok(operation, checkout)
 }
 
+/// Returns each path of `checkout` that `index` holds unmerged, once.
+fn unmerged_paths(checkout: &Path, index: &Path) -> Result<Vec<String>, Error> {
+    let listed = with_index(
+        checkout,
+        index,
+        &["ls-files", "--unmerged", "-z"],
+        "ls-files",
+        LOCAL_DEADLINE,
+    )?;
+    let mut paths: Vec<String> = listed
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t').map(|(_, path)| path.to_owned()))
+        .collect();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Sets each of `paths` in `index` to its entry in `HEAD`, or takes it out
+/// when `HEAD` lacks it.
+fn reset_to_head(checkout: &Path, index: &Path, paths: &[String]) -> Result<(), Error> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["--literal-pathspecs", "reset", "--quiet", "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    with_index(checkout, index, &args, "reset", LOCAL_DEADLINE).map(drop)
+}
+
 /// Returns the trees of the index and the working files of `checkout`,
 /// written through `index`, which starts as a copy of the checkout's own
-/// index file and is deleted afterwards.
-pub(super) fn wip_trees(checkout: &Path, index: &Path) -> Result<WipTrees, Error> {
+/// index file and is deleted afterwards. Each of `left_out` keeps its
+/// entry in `HEAD` in both trees, so its uncommitted content is not
+/// written. A path that a paused merge, rebase, cherry-pick or revert left
+/// unmerged takes its entry in `HEAD` in the tree of the index, and its
+/// working file, conflict markers included, in the tree of the working
+/// files. The objects are synced before git reports success.
+pub(super) fn wip_trees(
+    checkout: &Path,
+    index: &Path,
+    left_out: &[String],
+) -> Result<WipTrees, Error> {
     let own = index_file(checkout)?;
     match fs::remove_file(index) {
         Ok(()) => {}
@@ -268,21 +322,32 @@ pub(super) fn wip_trees(checkout: &Path, index: &Path) -> Result<WipTrees, Error
     ];
     unstage.extend(nested.iter().map(|path| path.trim_end_matches('/')));
     let read = || -> Result<WipTrees, Error> {
+        // write-tree refuses an index with unmerged entries.
+        let mut back = unmerged_paths(checkout, index)?;
+        back.extend(left_out.iter().cloned());
+        reset_to_head(checkout, index, &back)?;
         let staged = with_index(
             checkout,
             index,
-            &["write-tree"],
+            &["-c", DURABLE, "write-tree"],
             "write-tree",
             LOCAL_DEADLINE,
         )?;
-        with_index(checkout, index, &["add", "--all"], "add", CHECKOUT_DEADLINE)?;
+        with_index(
+            checkout,
+            index,
+            &["-c", DURABLE, "add", "--all"],
+            "add",
+            CHECKOUT_DEADLINE,
+        )?;
         if !nested.is_empty() {
             with_index(checkout, index, &unstage, "rm", CHECKOUT_DEADLINE)?;
         }
+        reset_to_head(checkout, index, left_out)?;
         let worktree = with_index(
             checkout,
             index,
-            &["write-tree"],
+            &["-c", DURABLE, "write-tree"],
             "write-tree",
             LOCAL_DEADLINE,
         )?;
@@ -312,7 +377,19 @@ fn commit_tree(
     let mut args: Vec<String> = identity.to_vec();
     // A signature can wait for a passphrase that nobody is there to give,
     // and a signed commit would differ on a rerun.
-    args.extend(["-c", "commit.gpgsign=false", "commit-tree", tree].map(str::to_owned));
+    // The commit is synced, because for a worktree nothing copies it
+    // before the checkout is deleted.
+    args.extend(
+        [
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            DURABLE,
+            "commit-tree",
+            tree,
+        ]
+        .map(str::to_owned),
+    );
     for parent in parents {
         args.extend(["-p".to_owned(), (*parent).to_owned()]);
     }
@@ -338,10 +415,11 @@ fn commit_tree(
 pub(super) fn write_wip(
     checkout: &Path,
     index: &Path,
+    left_out: &[String],
     time: u64,
     message: &str,
 ) -> Result<WipCommits, Error> {
-    let trees = wip_trees(checkout, index)?;
+    let trees = wip_trees(checkout, index, left_out)?;
     let head = trimmed(
         &run(
             checkout,

@@ -269,6 +269,10 @@ pub struct Uncommitted {
     /// Each change and untracked path, as `git status --porcelain` prints
     /// it, such as `?? notes.md`.
     pub changes: Vec<String>,
+    /// Each file, relative to the checkout, that is over
+    /// [`ArchiveOptions::max_file`], whose uncommitted content the commits
+    /// leave out. Only an archive with `force` gets this far with one.
+    pub left_out: Vec<String>,
 }
 
 /// Why `mxv archive` left a workspace as it was.
@@ -644,7 +648,9 @@ impl<B: Backend> Workspaces<B> {
             );
         }
         unkeepable.add_concealed(folder, path, concealed);
+        let mut left_out = Vec::new();
         for large in self.backend.large_files(path, max_file)? {
+            left_out.push(large.path.clone());
             unkeepable.push(
                 folder,
                 path,
@@ -665,9 +671,16 @@ impl<B: Backend> Workspaces<B> {
         Ok(Uncommitted {
             folder: folder.to_owned(),
             changes: of_folder(&removal.discarded, folder)
-                .filter(|item| !ignored.contains(item) && !nested.iter().any(|n| n == item))
+                .filter(|item| {
+                    !ignored.contains(item)
+                        && !nested.iter().any(|n| n == item)
+                        && !left_out
+                            .iter()
+                            .any(|large| item.get(3..) == Some(large.as_str()))
+                })
                 .map(str::to_owned)
                 .collect(),
+            left_out,
         })
     }
 
@@ -911,6 +924,16 @@ impl<B: Backend> Workspaces<B> {
 }
 
 impl ArchivePlan {
+    /// Returns the files of the checkout `folder` whose uncommitted content
+    /// the archive leaves out, because each is over the largest file it
+    /// keeps.
+    pub(super) fn left_out(&self, folder: &str) -> &[String] {
+        self.uncommitted
+            .iter()
+            .find(|work| work.folder == folder)
+            .map_or(&[], |work| work.left_out.as_slice())
+    }
+
     /// Returns the record of the archive of the workspace `name`, in the
     /// state [`ArchiveState::Retiring`].
     pub(super) fn record(&self, name: &WorkspaceName) -> Archive {

@@ -796,6 +796,51 @@ fn the_pin_of_a_clone_is_written_with_its_reference_synced() {
 }
 
 #[test]
+fn the_objects_of_uncommitted_work_are_written_with_git_syncing_them() {
+    let setup = Setup::new();
+    write(&setup.checkout().join("draft.txt"), "draft\n");
+    let trace = setup.root().join("trace.json");
+    let output = setup
+        .command(&setup.root())
+        .args(["archive", "-w", "triage", "--yes", "--json"])
+        .env("GIT_TRACE2_EVENT", trace.display().to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let writers: Vec<Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| {
+            let argv = event["argv"].to_string();
+            event["event"] == "start"
+                && (argv.contains("\"write-tree\"")
+                    || argv.contains("\"commit-tree\"")
+                    || argv.contains("\"add\",\"--all\""))
+        })
+        .collect();
+    assert!(
+        writers
+            .iter()
+            .any(|event| event["argv"].to_string().contains("\"commit-tree\"")),
+        "no commit-tree in the trace"
+    );
+    for event in &writers {
+        assert!(
+            event["argv"]
+                .to_string()
+                .contains("core.fsync=reference,loose-object"),
+            "a command that writes objects runs without syncing them: {}",
+            event["argv"]
+        );
+    }
+}
+
+#[test]
 fn a_restore_replaces_a_taken_port_from_the_configured_range_in_a_dry_run_and_a_real_run() {
     let setup = Setup::new();
     setup.archive();

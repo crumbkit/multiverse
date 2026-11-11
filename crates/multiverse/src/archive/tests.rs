@@ -665,6 +665,61 @@ fn a_file_over_archive_max_file_is_refused_and_named() {
         "{:?}",
         archive.lost
     );
+    setup.restore();
+    assert!(
+        !checkout.join("dump.sql").exists(),
+        "a file the archive lists as lost does not come back"
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("small.txt")).unwrap(),
+        "small\n"
+    );
+}
+
+#[test]
+fn force_on_a_merge_that_stopped_on_a_conflict_keeps_the_conflicted_file_and_loses_the_merge() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    write(checkout.join("shared.txt"), "base\n");
+    git(&checkout, &["add", "shared.txt"]);
+    git(&checkout, &["commit", "--quiet", "-m", "Base"]);
+    git(&checkout, &["switch", "--quiet", "-c", "other"]);
+    write(checkout.join("shared.txt"), "theirs\n");
+    git(&checkout, &["commit", "--quiet", "-am", "Theirs"]);
+    git(&checkout, &["switch", "--quiet", "triage"]);
+    write(checkout.join("shared.txt"), "ours\n");
+    git(&checkout, &["commit", "--quiet", "-am", "Ours"]);
+    let head = setup.head();
+    // The merge stops on the conflict and exits 1, which the alias's shell
+    // turns into success for the test's git helper.
+    git(
+        &checkout,
+        &[
+            "-c",
+            "alias.conflict=!git merge --quiet other; true",
+            "conflict",
+        ],
+    );
+    assert!(
+        !git(&checkout, &["ls-files", "--unmerged"]).is_empty(),
+        "the merge left unmerged entries"
+    );
+    assert!(matches!(
+        setup.refusal(ArchiveOptions::default()),
+        ArchiveRefusal::Unkeepable(_)
+    ));
+    let archive = setup.archive_with(force());
+    assert_eq!(archive.lost, vec!["app: a merge is paused".to_owned()]);
+    setup.restore();
+    assert_eq!(setup.head(), head);
+    assert!(!checkout.join(".git/MERGE_HEAD").exists());
+    let text = fs::read_to_string(checkout.join("shared.txt")).unwrap();
+    assert!(
+        text.contains("<<<<<<<") && text.contains("theirs"),
+        "{text}"
+    );
+    assert_eq!(status(&checkout), vec![" M shared.txt".to_owned()]);
 }
 
 #[test]
@@ -1249,15 +1304,26 @@ fn a_mirror_that_is_gone_with_a_commit_only_it_held_refuses_and_builds_nothing()
 fn removing_an_archive_deletes_its_record_and_pins() {
     let setup = setup(Kind::Clone);
     setup.create();
+    let checkout = setup.checkout();
+    write(checkout.join("stashed.txt"), "stash\n");
+    git(&checkout, &["add", "stashed.txt"]);
+    git(&checkout, &["stash", "push", "--quiet", "-m", "kept"]);
+    leave_detached_commit(&checkout);
+    leave_uncommitted_work(&checkout);
     let archive = setup.archive();
     let pin = archive.checkouts[0].pin.clone();
+    let dir = pin.strip_suffix("head").unwrap().to_owned();
     let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    let pins = git(&mirror, &["for-each-ref", "--format=%(refname)", &dir]);
+    for kind in ["/head", "/wip", "/wip-index", "/stash/", "/orphans/"] {
+        assert!(pins.contains(kind), "no {kind} pin in {pins}");
+    }
     setup
         .workspaces
         .remove_archive(&setup.archives, archive, Mode::Change)
         .unwrap();
     assert!(setup.record().is_none());
-    assert_eq!(git(&mirror, &["for-each-ref", &pin]), "");
+    assert_eq!(git(&mirror, &["for-each-ref", &dir]), "");
 }
 
 #[test]

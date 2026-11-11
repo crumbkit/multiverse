@@ -569,17 +569,27 @@ pub trait Backend {
     /// Returns the trees that a commit of the uncommitted work of the
     /// checkout at `checkout` would hold, written through the temporary
     /// index file `index`, which starts as a copy of the checkout's own.
-    /// The checkout's index, branch and references stay as they are.
+    /// The checkout's index, branch and references stay as they are. Each
+    /// path of `left_out`, relative to the checkout, holds its content in
+    /// `HEAD` in both trees. A path that a paused operation left unmerged
+    /// holds its content in `HEAD` in the tree of the index and its
+    /// working file in the tree of the working files.
     ///
     /// # Errors
     ///
     /// Returns the failure of the copy or of a git command.
-    fn wip_trees(&self, checkout: &Path, index: &Path) -> Result<WipTrees, Error>;
+    fn wip_trees(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+    ) -> Result<WipTrees, Error>;
 
     /// Writes the two commits of the uncommitted work of the checkout at
-    /// `checkout`, as [`Backend::wip_trees`] reads it through `index`, with
-    /// `message`, and with author and committer dates of `time`, seconds
-    /// since the Unix epoch, so the same work gives the same commits.
+    /// `checkout`, as [`Backend::wip_trees`] reads it through `index`
+    /// without `left_out`, with `message`, and with author and committer
+    /// dates of `time`, seconds since the Unix epoch, so the same work
+    /// gives the same commits. The objects are on disk when it returns.
     /// Nothing names the commits until the caller writes a reference.
     ///
     /// # Errors
@@ -589,6 +599,7 @@ pub trait Backend {
         &self,
         checkout: &Path,
         index: &Path,
+        left_out: &[String],
         time: u64,
         message: &str,
     ) -> Result<WipCommits, Error>;

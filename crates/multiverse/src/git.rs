@@ -23,7 +23,9 @@
 //!   stays as it is, and `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE`, the
 //!   time of the archive's record, so the same work gives the same
 //!   commits.
-//! - Streams and deadline: standard input is empty. The module keeps the
+//! - Streams and deadline: standard input is empty, except for a command
+//!   that reads a list of commits from it, which could be longer than a
+//!   command line may be. The module keeps the
 //!   first [`MOST_OUTPUT_BYTES`] bytes of standard output and of standard
 //!   error and discards the rest. A fetch has [`FETCH_DEADLINE`],
 //!   `worktree add` has [`CHECKOUT_DEADLINE`], and every other command has
@@ -38,7 +40,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -347,6 +349,48 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_fed(dir, args, env, None, operation, deadline, kept)
+}
+
+/// Runs `git -C <dir> <args>` as [`run`] does, with `input` on its
+/// standard input.
+fn run_with_input<I, S>(
+    dir: &Path,
+    args: I,
+    input: Vec<u8>,
+    operation: &'static str,
+    deadline: Duration,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_fed(
+        dir,
+        args,
+        &[],
+        Some(input),
+        operation,
+        deadline,
+        MOST_OUTPUT_BYTES,
+    )
+}
+
+/// Runs `git -C <dir> <args>` as [`run_with`] does, with `input`, when
+/// given, written to its standard input.
+fn run_fed<I, S>(
+    dir: &Path,
+    args: I,
+    env: &[(&str, &OsStr)],
+    input: Option<Vec<u8>>,
+    operation: &'static str,
+    deadline: Duration,
+    kept: u64,
+) -> Result<Finished, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
@@ -366,7 +410,11 @@ where
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
         .envs(env.iter().copied())
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[expect(
@@ -382,6 +430,15 @@ where
         program: GIT,
         source,
     })?;
+    // The input is written on a thread of its own, so a child that fills
+    // its output pipe before it reads all of its input cannot block this
+    // one. A child that exits early makes the write fail, and its exit
+    // status reports why.
+    if let Some((mut stream, bytes)) = child.stdin.take().zip(input) {
+        thread::spawn(move || {
+            let _ = stream.write_all(&bytes);
+        });
+    }
     let stdout = child.stdout.take().map(|stream| drain(stream, kept));
     let stderr = child
         .stderr
@@ -1055,18 +1112,24 @@ impl Backend for Git {
         concealed::large_files(checkout, most)
     }
 
-    fn wip_trees(&self, checkout: &Path, index: &Path) -> Result<WipTrees, Error> {
-        archive::wip_trees(checkout, index)
+    fn wip_trees(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+    ) -> Result<WipTrees, Error> {
+        archive::wip_trees(checkout, index, left_out)
     }
 
     fn write_wip(
         &self,
         checkout: &Path,
         index: &Path,
+        left_out: &[String],
         time: u64,
         message: &str,
     ) -> Result<WipCommits, Error> {
-        archive::write_wip(checkout, index, time, message)
+        archive::write_wip(checkout, index, left_out, time, message)
     }
 
     fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error> {

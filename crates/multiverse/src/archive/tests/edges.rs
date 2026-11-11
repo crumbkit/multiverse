@@ -136,6 +136,31 @@ fn a_commit_only_another_reference_keeps_comes_back_as_a_kept_reference() {
 }
 
 #[test]
+fn an_archive_keeps_only_the_tips_of_the_commits_that_other_references_keep() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let checkout = setup.checkout();
+    let commit = |message: &str| {
+        git(
+            &checkout,
+            &["commit", "--quiet", "--allow-empty", "-m", message],
+        );
+        setup.head()
+    };
+    commit("First");
+    let chain_tip = commit("Second");
+    git(&checkout, &["update-ref", "refs/backup/chain", &chain_tip]);
+    git(&checkout, &["reset", "--quiet", "--hard", "HEAD~2"]);
+    let single = commit("Single");
+    git(&checkout, &["update-ref", "refs/backup/single", &single]);
+    git(&checkout, &["reset", "--quiet", "--hard", "HEAD~1"]);
+    let archive = setup.archive();
+    let mut tips = vec![chain_tip, single];
+    tips.sort_unstable();
+    assert_eq!(archive.checkouts[0].kept.orphans, tips);
+}
+
+#[test]
 fn another_reference_that_names_a_commit_origin_holds_does_not_refuse_the_archive() {
     let setup = setup(Kind::Clone);
     setup.create();

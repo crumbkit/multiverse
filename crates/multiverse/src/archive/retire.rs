@@ -215,6 +215,7 @@ impl<B: Backend> Workspaces<B> {
                         confirmed.removal.workspace.kind,
                         &planned.checkout.path,
                         planned,
+                        confirmed.left_out(&planned.checkout.name),
                         index,
                     )?,
                 );
@@ -305,8 +306,14 @@ impl<B: Backend> Workspaces<B> {
         (self.checkpoint)("root")?;
         for (planned, archived) in retiring_in(&plan, &archive) {
             if let Some(admitted) = admitted.get(&planned.checkout.name)
-                && let Some(refusal) =
-                    self.retire(&plan.removal, planned, archived, admitted, &index)?
+                && let Some(refusal) = self.retire(
+                    &plan.removal,
+                    planned,
+                    archived,
+                    admitted,
+                    plan.left_out(&planned.checkout.name),
+                    &index,
+                )?
             {
                 return Ok(ArchiveOutcome::Refused(refusal));
             }
@@ -343,9 +350,13 @@ impl<B: Backend> Workspaces<B> {
                 .iter()
                 .any(|work| work.folder == planned.checkout.name && !work.changes.is_empty());
             archived.kept.wip = if has_work {
-                let written =
-                    self.backend
-                        .write_wip(&planned.checkout.path, index, time, WIP_MESSAGE)?;
+                let written = self.backend.write_wip(
+                    &planned.checkout.path,
+                    index,
+                    plan.left_out(&planned.checkout.name),
+                    time,
+                    WIP_MESSAGE,
+                )?;
                 Some(KeptWip {
                     index: written.index,
                     worktree: written.worktree,
@@ -438,12 +449,14 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Reads the git state and the path list of a checkout at `dir`, which
-    /// `planned` describes, reading the uncommitted work through `index`.
+    /// `planned` describes, reading the uncommitted work without
+    /// `left_out` through `index`.
     fn snapshot(
         &self,
         kind: WorkspaceKind,
         dir: &Path,
         planned: &CheckoutRemoval,
+        left_out: &[String],
         index: &Path,
     ) -> Result<Snapshot, Error> {
         let mut head = self.backend.head(dir)?;
@@ -479,7 +492,7 @@ impl<B: Backend> Workspaces<B> {
                 self.backend.refs_under(own, "refs/worktree/")?,
             )
         };
-        let wip = self.backend.wip_trees(dir, index)?;
+        let wip = self.backend.wip_trees(dir, index, left_out)?;
         let trimmed: Vec<&str> = planned
             .disposable
             .iter()
@@ -544,13 +557,15 @@ impl<B: Backend> Workspaces<B> {
     /// Moves the checkout that `planned` describes aside, compares it with
     /// `admitted` and with what `archived` keeps of it, and deletes it. It
     /// puts a checkout that differs back in its place and returns the
-    /// refusal. The uncommitted work is read through `index`.
+    /// refusal. The uncommitted work is read without `left_out` through
+    /// `index`.
     fn retire(
         &self,
         removal: &Removal,
         planned: &CheckoutRemoval,
         archived: &ArchivedCheckout,
         admitted: &Snapshot,
+        left_out: &[String],
         index: &Path,
     ) -> Result<Option<ArchiveRefusal>, Error> {
         let checkout = &planned.checkout;
@@ -569,7 +584,7 @@ impl<B: Backend> Workspaces<B> {
         store::move_aside(&checkout.path, &held)?;
         (self.checkpoint)(&format!("moved:{}", checkout.name))?;
         let compared = self
-            .snapshot(removal.workspace.kind, &held, planned, index)
+            .snapshot(removal.workspace.kind, &held, planned, left_out, index)
             .and_then(|moved| {
                 let mut differences = admitted.differences(&moved);
                 differences.extend(self.kept_work_differences(&held, archived, &moved)?);

@@ -907,17 +907,23 @@ impl Backend for Scripted {
     ) -> Result<Vec<crate::backend::LargeFile>, Error> {
         Git.large_files(checkout, most)
     }
-    fn wip_trees(&self, checkout: &Path, index: &Path) -> Result<crate::backend::WipTrees, Error> {
-        Git.wip_trees(checkout, index)
+    fn wip_trees(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+    ) -> Result<crate::backend::WipTrees, Error> {
+        Git.wip_trees(checkout, index, left_out)
     }
     fn write_wip(
         &self,
         checkout: &Path,
         index: &Path,
+        left_out: &[String],
         time: u64,
         message: &str,
     ) -> Result<crate::backend::WipCommits, Error> {
-        Git.write_wip(checkout, index, time, message)
+        Git.write_wip(checkout, index, left_out, time, message)
     }
     fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error> {
         Git.tree_of(dir, commit)
