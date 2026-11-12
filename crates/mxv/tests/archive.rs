@@ -462,16 +462,15 @@ fn an_unfinished_archive_is_a_degraded_row_that_names_the_command_that_finishes_
         .unwrap()
         .replace("\"state\": \"archived\"", "\"state\": \"retiring\"");
     write(&path, &record);
-    let (exit, document) = setup.run(&["list"]);
-    assert_eq!(exit, 1, "{document}");
-    let row = &document["data"][0];
-    assert_eq!(row["name"], "triage");
-    assert!(
-        row["problem"]
-            .as_str()
-            .unwrap()
-            .contains("mxv archive -w triage")
-    );
+    for args in [&["list"][..], &["list", "--archived"][..]] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(document["total"], 1, "{args:?}: {document}");
+        let row = &document["data"][0];
+        assert_eq!(row["name"], "triage");
+        assert_eq!(row["problem"], "the archive stopped before it finished");
+        assert_eq!(row["repair"], "mxv archive -w triage");
+    }
     let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::restore::unfinished");
@@ -482,6 +481,59 @@ fn an_unfinished_archive_is_a_degraded_row_that_names_the_command_that_finishes_
     assert_eq!(exit, 0, "{document}");
     let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
     assert_eq!(exit, 0, "{document}");
+}
+
+#[test]
+fn an_archive_stopped_after_it_deleted_the_checkout_names_archive_and_not_remove() {
+    let setup = Setup::new();
+    let workspace = setup.root().join("state/mxv/workspaces/triage.json");
+    let kept = fs::read_to_string(&workspace).unwrap();
+    setup.archive();
+    // A kill after the checkout was deleted and before the workspace record
+    // was removed leaves both records, the archive's still retiring.
+    write(&workspace, &kept);
+    let path = setup.root().join("state/mxv/archives/triage/archive.json");
+    let record = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"state\": \"archived\"", "\"state\": \"retiring\"");
+    write(&path, &record);
+    let (exit, document) = setup.run(&["list"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["total"], 1, "{document}");
+    assert_eq!(
+        document["data"][0]["path"],
+        setup.workspace().display().to_string()
+    );
+    assert_eq!(document["data"][0]["repair"], "mxv archive -w triage");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["list"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 0, "{document}");
+}
+
+#[test]
+fn an_unfinished_archive_beside_a_newer_workspace_is_named_on_the_archive_row_alone() {
+    let setup = Setup::new();
+    setup.archive();
+    let path = setup.root().join("state/mxv/archives/triage/archive.json");
+    let record = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"state\": \"archived\"", "\"state\": \"retiring\"");
+    write(&path, &record);
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["list"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"][0]["problem"], "");
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 1, "{document}");
+    let row = &document["data"][0];
+    assert_eq!(
+        row["problem"],
+        "an older archive beside a newer workspace triage"
+    );
+    assert_eq!(row["repair"], "");
 }
 
 #[test]

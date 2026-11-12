@@ -44,6 +44,19 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv list` and `mxv list --archived` gain a `repair` column, which names
+  the command that fixes each broken row, and list the broken rows first. A
+  workspace whose checkout directories are all gone names `mxv remove NAME`,
+  unless the directory that holds the workspace is gone too, as on a disk
+  that is not mounted.
+  An archive that stopped before it finished names `mxv archive -w NAME`,
+  and its problem now reads "the archive stopped before it finished". A
+  record that mxv cannot read says to move the file aside by hand, and the
+  row of an archive record that mxv cannot read is named by the archive's
+  directory instead of `archive`. An
+  unfinished archive whose name a newer workspace holds shows only in
+  `mxv list --archived`, and no longer marks the newer workspace's row.
+  The library's `multiverse::health::classify` finds these records.
 - The config key `archive_max_file` sets the largest file of a checkout's
   uncommitted work that `mxv archive` keeps, such as `"1GiB"`. It defaults
   to 100 MiB.

@@ -562,8 +562,37 @@ fn list_reports_a_corrupt_record_and_still_lists_the_other_workspaces() {
     assert_eq!(listed["total"], 2);
     assert_eq!(listed["data"][0]["name"], "broken");
     assert_ne!(listed["data"][0]["problem"], "");
+    let record = setup.root().join("state/mxv/workspaces/broken.json");
+    assert_eq!(
+        listed["data"][0]["repair"],
+        format!(
+            "move {} aside by hand; mxv never deletes a record it cannot read",
+            record.display()
+        )
+    );
     assert_eq!(listed["data"][1]["name"], "reading-list");
     assert_eq!(listed["data"][1]["problem"], "");
+    assert_eq!(listed["data"][1]["repair"], "");
+}
+
+#[test]
+fn a_workspace_whose_checkouts_are_all_gone_names_remove_which_removes_it() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    let workspace = created(&setup, "triage");
+    fs::remove_dir_all(&workspace).unwrap();
+    let (exit, listed) = setup.json(&["list"]);
+    assert_eq!(exit, 1, "{listed}");
+    let triage = &listed["data"][0];
+    assert_eq!(triage["name"], "triage", "{listed}");
+    assert_eq!(triage["problem"], "every checkout directory is gone");
+    assert_eq!(triage["repair"], "mxv remove triage");
+    assert_eq!(listed["data"][1]["name"], "reading-list", "{listed}");
+    let (exit, document) = setup.json(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, listed) = setup.json(&["list"]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(listed["total"], 1, "{listed}");
 }
 
 #[test]

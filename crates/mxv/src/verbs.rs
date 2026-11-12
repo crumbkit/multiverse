@@ -4,6 +4,7 @@
 use crumbkit::{Batch, Call, Document, Listing, Prose, Run};
 use std::path::PathBuf;
 
+use multiverse::health::{self, Problem};
 use multiverse::{
     AddOutcome, Allow, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined, Manifest,
     ManifestProblem, Mode, NewOutcome, PathGlob, RemovalOutcome, RemovalPlan, Repo, Store,
@@ -530,10 +531,11 @@ pub(crate) fn add(
     Ok(NewRow::new(&workspace, &root, cloned, None).with_warnings(&warnings))
 }
 
-/// Returns the first page of the workspaces: a row for each record that
-/// mxv cannot read, first, and then the workspaces in name order. With
-/// `--sizes`, each workspace's row on the page holds its sizes, and only
-/// the workspaces on the page are measured.
+/// Returns the first page of the workspaces: a row for each broken record
+/// with its repair first, such as a record that mxv cannot read or an
+/// archive that has not finished, and then the other workspaces in name
+/// order. With `--sizes`, each workspace's row on the page holds its
+/// sizes, and only the workspaces on the page are measured.
 pub(crate) fn list(
     environment: &Environment,
     args: &ListArgs,
@@ -542,30 +544,71 @@ pub(crate) fn list(
         return crate::archive::list(environment, args);
     }
     let records = store(environment)?.list()?;
+    let archived = crate::archive::archives(environment)?.list()?;
+    let broken = health::classify(&records, &archived).workspaces;
     let measure = if args.sizes {
         Some(configured(environment)?)
     } else {
         None
     };
     let shown = args.page.limit().unwrap_or(usize::MAX);
-    let mut rows: Vec<WorkspaceRow> = records
-        .problems
+    let live = |name: &str| {
+        records
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.name.as_str() == name)
+    };
+    let mut listed: Vec<(Option<&Workspace>, WorkspaceRow)> = broken
         .iter()
-        .map(WorkspaceRow::unreadable)
+        .map(|broken| {
+            if matches!(broken.problem, Problem::Unreadable { .. }) {
+                return (None, WorkspaceRow::broken(broken));
+            }
+            if let Some(workspace) = live(&broken.name) {
+                return (
+                    Some(workspace),
+                    WorkspaceRow::from(workspace).with_broken(broken),
+                );
+            }
+            let row = archived
+                .archives
+                .iter()
+                .find(|archive| archive.name.as_str() == broken.name)
+                .map_or_else(
+                    || WorkspaceRow::broken(broken),
+                    |archive| crate::archive::row(archive).with_broken(broken),
+                );
+            (None, row)
+        })
         .collect();
-    for workspace in &records.workspaces {
-        let row = WorkspaceRow::from(workspace);
-        rows.push(match &measure {
+    listed.extend(
+        records
+            .workspaces
+            .iter()
+            .filter(|workspace| {
+                !broken
+                    .iter()
+                    .any(|found| found.name == workspace.name.as_str())
+            })
+            .map(|workspace| (Some(workspace), WorkspaceRow::from(workspace))),
+    );
+    let rows = listed
+        .into_iter()
+        .enumerate()
+        .map(|(index, (workspace, row))| match (&measure, workspace) {
             // A workspace that mxv cannot measure keeps its row with the
-            // failure as its problem, and the others are still measured.
-            Some(workspaces) if rows.len() < shown => match workspaces.disk_usage(workspace) {
-                Ok(usage) => row.with_usage(&usage),
-                Err(error) => row.with_problem(format!("mxv cannot measure it: {error}")),
-            },
+            // failure as its problem, unless it already has one, and the
+            // others are still measured.
+            (Some(workspaces), Some(workspace)) if index < shown => {
+                match workspaces.disk_usage(workspace) {
+                    Ok(usage) => row.with_usage(&usage),
+                    Err(_) if row.has_problem() => row,
+                    Err(error) => row.with_problem(format!("mxv cannot measure it: {error}")),
+                }
+            }
             _ => row,
-        });
-    }
-    crate::archive::mark_unfinished(environment, &mut rows)?;
+        })
+        .collect();
     Ok(args.page.first_of(rows).described("workspaces").next(
         Call::new(&["show"]).arg("names"),
         "takes up to 100 names in one call.",

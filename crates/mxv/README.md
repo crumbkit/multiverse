@@ -217,8 +217,15 @@ a local branch with the workspace's name.
 
 `mxv list` lists the records it can read, and adds a row for each record it
 cannot read, such as one that is not JSON or that a newer mxv wrote. Such a
-row names the record without `.json` and says what is wrong in `problem`, and the run
-exits with 1.
+row names the record without `.json` and says what is wrong in `problem`.
+`mxv list` also marks a workspace whose checkout directories are all gone,
+unless the directory that holds the workspace is gone too, as on a disk that
+is not mounted, and an archive that stopped before it finished. Each broken row comes
+first, and its `repair` column names the command that fixes it, such as
+`mxv remove NAME` or `mxv archive -w NAME`. A record that mxv cannot read
+has no command, because mxv never deletes what it cannot read, so its
+`repair` says to move the file aside by hand. When any row has a problem,
+the run exits with 1.
 
 ## Running an app
 
@@ -1583,8 +1590,11 @@ checkout back, keeps the record and refuses with
 workspace manifest with what it copied before it deletes them, and refuses
 with the same code on a difference. Running the same `mxv archive -w NAME`
 again admits the checkout as it is now, pins any new commit and copies any new
-file. An archive that stops partway shows in `mxv list` as a row with a
-problem, and the same `mxv archive -w NAME` finishes it.
+file. An archive that stops partway shows in `mxv list` and
+`mxv list --archived` as a row with a problem whose `repair` is
+`mxv archive -w NAME`, and that command finishes it. When a newer workspace
+has taken the name, only `mxv list --archived` shows the older archive, and
+its `repair` is empty.
 
 When the current directory was inside the workspace, the last line of the
 result names a directory to change to.

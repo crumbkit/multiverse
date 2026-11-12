@@ -13,7 +13,10 @@
 //! XDG state starts as a copy of `tests/fixtures/xdg`, which holds the
 //! record of the workspace `reading-list`. That record names directories
 //! under `/home/agent`, which do not exist, so the examples of `show`, `cd`
-//! and `remove` read a record whose checkout is already gone. `MXV_ROOT` is
+//! and `remove` read a record whose checkout is already gone. `mxv list`
+//! still shows the workspace without a problem, because `/home/agent/mxv`
+//! is gone too, and mxv does not name a workspace for removal when the
+//! directory that holds it is missing. `MXV_ROOT` is
 //! unset, and the fixture's config file sets `root = "/home/agent/mxv"`, so
 //! the examples of `new` and `show` print a root whose length is the same on
 //! every machine. The default root under the temporary `XDG_DATA_HOME`
