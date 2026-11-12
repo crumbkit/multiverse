@@ -5,7 +5,9 @@
 //! each one that does not, with the [`Repair`] that brings it back. It
 //! stores nothing and changes nothing, so a listing can call it on every
 //! run. [`Workspaces::repair`](crate::Workspaces::repair) performs the
-//! repairs that [`Repair::Repair`] names.
+//! repairs that [`Repair::Repair`] names, and
+//! [`Archives::orphans`](crate::Archives::orphans) finds what no record
+//! names.
 
 use std::ffi::OsStr;
 use std::io;
@@ -18,8 +20,10 @@ use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::store::Records;
 
+mod orphans;
 mod repair;
 
+pub use orphans::{Orphan, OrphanKind, Swept};
 pub use repair::Repaired;
 
 #[cfg(test)]

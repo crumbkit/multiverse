@@ -62,8 +62,8 @@ workspace may need to act on.
   anything, and `--yes` repairs without asking. An unfinished archive whose
   pins are gone moves aside to the hidden directory `.NAME.<id>`, and
   nothing is deleted; that directory and the archive's
-  `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar` stay until a person
-  deletes them. An older unfinished archive beside a newer workspace of the same name is
+  `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar` stay until
+  `mxv repair --orphans --delete-aside` deletes them. An older unfinished archive beside a newer workspace of the same name is
   finished under the name `NAME-YYYY-MM-DD`, so `mxv restore` of that name
   brings it back. An archive left beside the workspace that a restore of it
   rebuilt is deleted. The new problems read "the archive stopped before it
@@ -83,6 +83,15 @@ workspace may need to act on.
   The library's `classify` now takes the backend that reads the pins, and
   `Workspaces::repair` carries out the repairs. phase exports its calendar
   functions as `phase::calendar`.
+- `mxv repair --orphans` lists, with their sizes, the archives that a
+  repair moved aside and the directories of ignored files whose archive no
+  record names. Each holds the only copies of its files, so it is deleted
+  only with `--delete-aside`, and `--yes` only skips the question. The
+  listing and `--dry-run` write nothing. When an archive record cannot be
+  read, the command fails with that record's error and deletes nothing.
+  The `mxv/repair/v1` document gains an `orphans` list, and its `name` is
+  null with `--orphans`. The library's `Archives::orphans` and
+  `Archives::sweep_orphan` find and delete these items.
 - The config key `archive_max_file` sets the largest file of a checkout's
   uncommitted work that `mxv archive` keeps, such as `"1GiB"`. It defaults
   to 100 MiB.

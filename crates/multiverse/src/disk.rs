@@ -314,7 +314,7 @@ fn absolute(checkout: &Path, path: &str) -> PathBuf {
 /// each directory, and of each file whose every hard link lies inside the
 /// tree. A file with a hard link elsewhere, such as in a package store,
 /// frees nothing.
-fn freeable(root: &Path) -> u64 {
+pub(crate) fn freeable(root: &Path) -> u64 {
     let mut files: HashMap<(u64, u64), (u64, u64, u64)> = HashMap::new();
     let mut total: u64 = 0;
     let mut stack = vec![root.to_path_buf()];

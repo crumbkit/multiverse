@@ -1341,3 +1341,237 @@ fn a_retiring_archive_that_meets_a_new_workspace_names_the_way_out() {
     assert!(hint.contains("mxv repair triage"), "{document}");
     assert!(!hint.contains("remove --archived"), "{document}");
 }
+
+impl Setup {
+    /// Returns the data directory of the archive `triage`, which holds its
+    /// ignored files.
+    fn archive_data(&self) -> PathBuf {
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(self.archive_record("triage")).unwrap())
+                .unwrap();
+        let id = record["id"].as_str().unwrap();
+        self.root().join("data/mxv/archives").join(id)
+    }
+
+    /// Moves the archive `triage` aside through `mxv repair`, as a repair
+    /// of an archive whose pins are gone does, and returns the directory
+    /// it moved to and its data directory.
+    fn move_archive_aside(&self) -> (PathBuf, PathBuf) {
+        self.ignore_env();
+        self.archive();
+        self.mark_retiring();
+        self.delete_pins();
+        let data = self.archive_data();
+        let (exit, document) = self.run(&["repair", "triage", "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        let aside = PathBuf::from(document["data"]["kept"][0].as_str().unwrap());
+        assert!(aside.exists() && data.exists(), "{document}");
+        (aside, data)
+    }
+
+    /// Writes a data directory of ignored files whose archive id no record
+    /// names, as a person who deleted a moved-aside archive by hand leaves
+    /// one, and returns it.
+    fn plant_unnamed_data(&self) -> PathBuf {
+        let data = self
+            .root()
+            .join("data/mxv/archives/0123456789abcdef0123456789abcdef");
+        write(&data.join("ignored.tar"), "the only copy\n");
+        data
+    }
+}
+
+/// Returns the rows of `mxv repair --orphans` in `document`.
+fn orphan_rows(document: &Value) -> &Vec<Value> {
+    document["data"]["orphans"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{document}"))
+}
+
+/// Returns the row of `document` whose kind is `kind`.
+fn orphan_row<'a>(document: &'a Value, kind: &str) -> &'a Value {
+    orphan_rows(document)
+        .iter()
+        .find(|row| row["kind"] == kind)
+        .unwrap_or_else(|| panic!("no {kind} row: {document}"))
+}
+
+/// Returns every path below `dir` with its contents, in path order.
+fn tree(dir: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if path.is_dir() && !path.is_symlink() {
+            for entry in fs::read_dir(&path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+            found.push((path, None));
+        } else {
+            let bytes = fs::read(&path).ok();
+            found.push((path, bytes));
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn an_archive_moved_aside_by_repair_is_kept_by_orphans_until_delete_aside() {
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+
+    for args in [
+        &["repair", "--orphans"][..],
+        &["repair", "--orphans", "--yes"],
+    ] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 0, "{document}");
+        assert_eq!(document["data"]["state"], "unchanged", "{document}");
+        let row = orphan_row(&document, "moved_aside");
+        assert_eq!(row["state"], "kept", "{document}");
+        assert_eq!(row["path"], aside.display().to_string());
+        assert!(row["size"].as_u64().unwrap() > 0, "{document}");
+        assert!(
+            row["reasons"].to_string().contains("--delete-aside"),
+            "{document}"
+        );
+        assert!(aside.exists() && data.exists());
+    }
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "swept", "{document}");
+    assert_eq!(orphan_row(&document, "moved_aside")["state"], "deleted");
+    assert!(!aside.exists(), "{document}");
+    assert!(!data.exists(), "{document}");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(orphan_rows(&document).is_empty(), "{document}");
+}
+
+#[test]
+fn an_ignored_tarball_with_no_record_is_deleted_by_orphans_with_delete_aside() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    setup.archive();
+    let named = setup.archive_data();
+    let data = setup.plant_unnamed_data();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_rows(&document).len(), 1, "{document}");
+    let row = orphan_row(&document, "ignored_files");
+    assert_eq!(row["state"], "deleted", "{document}");
+    assert_eq!(row["path"], data.display().to_string());
+    assert!(!data.exists());
+    assert!(named.join("ignored.tar").exists(), "{document}");
+}
+
+#[test]
+fn repair_orphans_lists_and_dry_runs_without_writing_anything() {
+    let setup = Setup::new();
+    setup.move_archive_aside();
+    setup.plant_unnamed_data();
+    // mxv's own usage log in state/mxv grows with each command, so only the
+    // archives and their data directories are compared.
+    let archives = setup.root().join("state/mxv/archives");
+    let before = tree(&archives);
+    let data_before = tree(&setup.root().join("data"));
+
+    let (exit, document) = setup.run(&["repair", "--orphans"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_rows(&document).len(), 2, "{document}");
+    let (exit, document) = setup.run(&[
+        "repair",
+        "--orphans",
+        "--delete-aside",
+        "--dry-run",
+        "--yes",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_sweep", "{document}");
+    assert_eq!(orphan_rows(&document).len(), 2, "{document}");
+    for row in orphan_rows(&document) {
+        assert_eq!(row["state"], "would_delete", "{document}");
+    }
+    assert_eq!(tree(&archives), before);
+    assert_eq!(tree(&setup.root().join("data")), data_before);
+}
+
+#[test]
+fn repair_orphans_refuses_and_deletes_nothing_while_an_archive_record_cannot_be_read() {
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let unnamed = setup.plant_unnamed_data();
+    write(&setup.archive_record("other"), "not a record\n");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::record::corrupt", "{document}");
+    assert!(aside.exists() && data.exists() && unnamed.exists());
+}
+
+#[test]
+fn repair_orphans_refuses_while_a_moved_aside_record_cannot_be_read() {
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let unnamed = setup.plant_unnamed_data();
+    write(&aside.join("archive.json"), "not a record\n");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::record::corrupt", "{document}");
+    assert!(aside.exists() && data.exists() && unnamed.exists());
+}
+
+#[test]
+fn a_hidden_directory_without_the_record_of_its_name_is_left_out_by_orphans() {
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let archives = aside.parent().unwrap();
+    let empty = archives.join(".notes.0123456789abcdef0123456789abcdef");
+    write(&empty.join("notes.md"), "mine\n");
+    let other = archives.join(".elsewhere.0123456789abcdef0123456789abcdef");
+    write(
+        &other.join("archive.json"),
+        &fs::read_to_string(aside.join("archive.json")).unwrap(),
+    );
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_rows(&document).len(), 1, "{document}");
+    assert_eq!(
+        orphan_row(&document, "moved_aside")["path"],
+        aside.display().to_string()
+    );
+    assert!(!aside.exists() && !data.exists(), "{document}");
+    assert!(empty.join("notes.md").exists(), "{document}");
+    assert!(other.join("archive.json").exists(), "{document}");
+}
+
+#[test]
+fn a_sweep_whose_deletion_fails_names_what_it_deleted_and_exits_with_the_failure() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let unnamed = setup.plant_unnamed_data();
+    // A directory without write permission keeps its file, so its deletion
+    // fails after the moved-aside archive, which sorts first, is deleted.
+    fs::set_permissions(&unnamed, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    fs::set_permissions(&unnamed, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["data"]["state"], "swept", "{document}");
+    assert_eq!(orphan_row(&document, "moved_aside")["state"], "deleted");
+    let row = orphan_row(&document, "ignored_files");
+    assert_eq!(row["state"], "kept", "{document}");
+    assert_eq!(row["reasons"].as_array().unwrap().len(), 1, "{document}");
+    let failures = document["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{document}");
+    assert!(!aside.exists() && !data.exists(), "{document}");
+    assert!(unnamed.join("ignored.tar").exists(), "{document}");
+}
