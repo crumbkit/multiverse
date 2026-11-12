@@ -37,6 +37,7 @@ mod phase_plan;
 mod ports;
 mod process;
 mod provision;
+mod proxy;
 mod record;
 mod redacted;
 mod runs;
@@ -76,6 +77,11 @@ pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS,
 pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::process::process_table;
 pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
+pub use crate::proxy::{
+    Authority, DOMAIN as ROUTE_DOMAIN, Declared, Derived, Proxy, ProxyError, Route,
+    Settings as ProxySettings, Shadowed, Status as ProxyStatus, SyncMode, Synced,
+    derive as derive_routes,
+};
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
     MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, Reclaimed, WORKTREE_RECORD_VERSION, Workspace,
