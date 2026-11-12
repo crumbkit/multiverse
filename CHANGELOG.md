@@ -77,7 +77,9 @@ workspace may need to act on.
   of either name refuses with `mxv::archive::rename_unfinished`. A repair
   whose records change after its question repairs nothing and fails with
   `mxv::repair::changed`, and an older archive whose dated names are all
-  taken fails with `mxv::repair::names_taken`.
+  taken fails with `mxv::repair::names_taken`. A repair of a name whose
+  archive record cannot be read fails with the read error. A repair that
+  finishes a stopped rename holds the locks of both names.
   The library's `classify` now takes the backend that reads the pins, and
   `Workspaces::repair` carries out the repairs. phase exports its calendar
   functions as `phase::calendar`.

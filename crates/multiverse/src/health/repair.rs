@@ -87,6 +87,10 @@ impl<B: Backend> Workspaces<B> {
     ) -> Result<Repaired, Error> {
         let all = archives.list()?;
         let Some(archive) = all.archives.iter().find(|archive| archive.name == *name) else {
+            // `list` keeps a record that it cannot read in `problems`, so
+            // the record of the name is read again here, and the error of
+            // an unreadable one returns instead of "nothing is broken".
+            archives.read(name)?;
             return self.repair_workspace(name);
         };
         // A rename that stopped is finished first, whichever of its two

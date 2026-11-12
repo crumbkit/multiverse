@@ -710,6 +710,49 @@ fn a_stopped_rename_with_no_workspace_left_is_finished_by_mxv_repair_of_either_n
 }
 
 #[test]
+fn a_stopped_rename_beside_a_newer_workspace_is_finished_by_mxv_repair_of_the_dated_name() {
+    let setup = Setup::new();
+    let head = setup.head();
+    setup.archive();
+    setup.mark_retiring();
+    let dated = setup.plant_dated_copy();
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 1, "{document}");
+    for row in document["data"].as_array().unwrap() {
+        assert_eq!(row["repair"], "mxv repair triage", "{document}");
+    }
+
+    let (exit, document) = setup.run(&["repair", &dated, "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "finished", "{document}");
+    assert_eq!(document["data"]["older"], "triage", "{document}");
+    assert_eq!(document["data"]["archive"], dated.as_str(), "{document}");
+    assert!(!setup.archive_record("triage").exists());
+    assert!(setup.checkout().join(".git").exists());
+
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 1, "{document}");
+    let (exit, document) = setup.run(&["restore", &dated, "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let restored = setup.root().join("mxv").join(&dated).join("app");
+    assert_eq!(git(&restored, &["rev-parse", "HEAD"]).trim(), head);
+}
+
+#[test]
+fn repair_of_a_name_whose_archive_record_cannot_be_read_returns_the_read_error() {
+    let setup = Setup::new();
+    setup.archive();
+    write(&setup.archive_record("triage"), "not a record\n");
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::record::corrupt", "{document}");
+    assert!(setup.archive_record("triage").exists());
+}
+
+#[test]
 fn an_older_archive_whose_pins_are_gone_beside_a_newer_workspace_is_moved_aside() {
     let setup = Setup::new();
     setup.archive();

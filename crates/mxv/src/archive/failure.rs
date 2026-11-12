@@ -32,9 +32,6 @@ pub const ARCHIVE_PINS_GONE: Code = Code::new("mxv", "archive", "pins_gone");
 /// The code of an archive whose move to a dated name a repair started and
 /// did not finish.
 pub const ARCHIVE_RENAME_UNFINISHED: Code = Code::new("mxv", "archive", "rename_unfinished");
-/// The code of a repair whose records changed between the question and
-/// the repair.
-pub const REPAIR_CHANGED: Code = Code::new("mxv", "repair", "changed");
 /// The code of `--yes` with paths that only a repository's own `mxv.toml`
 /// declares disposable.
 pub const ARCHIVE_MANIFEST_DISPOSABLE: Code = Code::new("mxv", "archive", "manifest_disposable");
@@ -73,7 +70,6 @@ pub(crate) const CODES: &[&Code] = &[
     &ARCHIVE_UNFINISHED,
     &ARCHIVE_PINS_GONE,
     &ARCHIVE_RENAME_UNFINISHED,
-    &REPAIR_CHANGED,
     &ARCHIVE_MANIFEST_DISPOSABLE,
     &ARCHIVE_RECORD_TOO_LARGE,
     &ARCHIVE_VOLUMES_IN_USE,
@@ -157,13 +153,6 @@ pub(crate) enum ArchiveFailure {
         name: String,
         /// The name of the other record.
         other: String,
-    },
-    /// The records of the name changed between the question of `mxv
-    /// repair` and the repair, so it would do something other than what
-    /// the person confirmed.
-    RepairChanged {
-        /// The name.
-        name: String,
     },
     /// `--yes` with paths that only a repository's `mxv.toml` declares
     /// disposable.
@@ -339,7 +328,6 @@ impl Failure for ArchiveFailure {
             Self::Unfinished { .. } => &ARCHIVE_UNFINISHED,
             Self::PinsGone { .. } => &ARCHIVE_PINS_GONE,
             Self::RenameUnfinished { .. } => &ARCHIVE_RENAME_UNFINISHED,
-            Self::RepairChanged { .. } => &REPAIR_CHANGED,
             Self::ManifestDisposable { .. } => &ARCHIVE_MANIFEST_DISPOSABLE,
             Self::RecordTooLarge { .. } => &ARCHIVE_RECORD_TOO_LARGE,
             Self::VolumesInUse { .. } => &ARCHIVE_VOLUMES_IN_USE,
@@ -389,9 +377,6 @@ impl Failure for ArchiveFailure {
             Self::RenameUnfinished { name, .. } => Recovery::hint(format!(
                 "run `mxv repair {name}`, which finishes the move and then the archive"
             )),
-            Self::RepairChanged { name } => Recovery::hint(format!(
-                "run `mxv repair {name}` again, which asks about the records as they now stand"
-            )),
             Self::PinsGone { name } => Recovery::hint(format!(
                 "run `mxv repair {name}`, which moves the archive aside so that it no longer claims a restore brings the workspace back"
             )),
@@ -437,7 +422,6 @@ impl Failure for ArchiveFailure {
             | Self::NameTaken { name, .. }
             | Self::Unfinished { name }
             | Self::PinsGone { name }
-            | Self::RepairChanged { name }
             | Self::RestoreNotFound { name }
             | Self::RestoreUnfinished { name } => vec![Field::new("name", name)],
             Self::SourceChanged {
@@ -556,10 +540,6 @@ impl fmt::Display for ArchiveFailure {
             Self::RenameUnfinished { name, other } => write!(
                 formatter,
                 "a repair stopped while it moved the archive {name}, so the record {other} holds the same archive and its files are split between the two"
-            ),
-            Self::RepairChanged { name } => write!(
-                formatter,
-                "the records of {name} changed after mxv asked, so mxv repaired nothing"
             ),
             Self::PinsGone { name } => write!(
                 formatter,
