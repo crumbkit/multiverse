@@ -4,8 +4,11 @@
 //!
 //! The library's [`Workspaces::repair`](multiverse::Workspaces::repair)
 //! decides what each broken record needs and carries out the move, the
-//! rename or the deletion. [`Archives::orphans`] finds what no record
-//! names, and [`Archives::sweep_orphan`] deletes one item. This module
+//! rename or the deletion.
+//! [`Archives::orphans`](multiverse::Archives::orphans) finds what no
+//! record names, and
+//! [`Archives::sweep_orphan`](multiverse::Archives::sweep_orphan) deletes
+//! one item. This module
 //! holds the workspace's lock and finishes a renamed archive as `mxv
 //! archive -w` finishes one.
 
@@ -14,7 +17,7 @@ use std::fmt;
 use clap::Args;
 use crumbkit::{Document, DryRun, Prose, Run, Yes};
 use multiverse::health::{Orphan, OrphanKind, Repaired, Swept};
-use multiverse::{Archives, Mode, WorkspaceName};
+use multiverse::{Mode, WorkspaceName};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -232,28 +235,28 @@ impl fmt::Display for RepairResult {
         for warning in &self.warnings {
             writeln!(formatter, "Warning: {warning}.")?;
         }
-        let Some(name) = &self.name else {
-            if self.orphans.is_empty() {
-                return write!(
-                    formatter,
-                    "mxv found nothing that no record names, so it changed nothing."
-                );
-            }
-            let lines: Vec<String> = self.orphans.iter().map(ToString::to_string).collect();
-            return write!(formatter, "{}", lines.join("\n"));
-        };
+        let name = self.name.as_deref().unwrap_or_default();
         match self.state {
+            RepairState::Unchanged if self.name.is_some() => match &self.repair {
+                Some(repair) => write!(
+                    formatter,
+                    "mxv repair changed nothing, because `{repair}` repairs the records of {name}."
+                ),
+                None => write!(
+                    formatter,
+                    "Nothing of {name} is broken, so mxv changed nothing."
+                ),
+            },
+            // A sweep of `--orphans`, which names no workspace.
             RepairState::Unchanged | RepairState::Swept | RepairState::WouldSweep => {
-                match &self.repair {
-                    Some(repair) => write!(
+                if self.orphans.is_empty() {
+                    return write!(
                         formatter,
-                        "mxv repair changed nothing, because `{repair}` repairs the records of {name}."
-                    ),
-                    None => write!(
-                        formatter,
-                        "Nothing of {name} is broken, so mxv changed nothing."
-                    ),
+                        "mxv found nothing that no record names, so it changed nothing."
+                    );
                 }
+                let lines: Vec<String> = self.orphans.iter().map(ToString::to_string).collect();
+                write!(formatter, "{}", lines.join("\n"))
             }
             RepairState::MovedAside | RepairState::WouldMoveAside => {
                 let moved = if self.state == RepairState::MovedAside {
@@ -491,28 +494,26 @@ fn orphans(
         args.yes,
         &format!("Delete {}, which no record names?", paths.join(", ")),
     )?;
+    // A failure keeps its item with the error as the reason, and the sweep
+    // goes on, so the result still names each item already deleted.
     for orphan in &found {
-        let row = sweep(&records, orphan)?;
+        let row = match records.sweep_orphan(orphan) {
+            Ok(Swept::Deleted) => OrphanRow::new(orphan, OrphanState::Deleted, Vec::new()),
+            Ok(Swept::Kept) => OrphanRow::new(
+                orphan,
+                OrphanState::Kept,
+                vec!["another command changed it after mxv listed it".to_owned()],
+            ),
+            Err(error) => OrphanRow::new(
+                orphan,
+                OrphanState::Kept,
+                vec![MxvFailure::from(error).to_string()],
+            ),
+        };
         if row.state == OrphanState::Deleted {
             result.state = RepairState::Swept;
         }
         result.orphans.push(row);
     }
     Ok(Prose::new(result))
-}
-
-/// Deletes `orphan` and returns its row.
-fn sweep(records: &Archives, orphan: &Orphan) -> Result<OrphanRow, crumbkit::Error> {
-    let swept = records.sweep_orphan(orphan).map_err(MxvFailure::from)?;
-    Ok(match swept {
-        Swept::Deleted => OrphanRow::new(orphan, OrphanState::Deleted, Vec::new()),
-        Swept::Kept(reasons) => OrphanRow::new(orphan, OrphanState::Kept, reasons),
-        // `Swept` is non-exhaustive, so an outcome that a newer library
-        // adds reads as kept until this command learns it.
-        _ => OrphanRow::new(
-            orphan,
-            OrphanState::Kept,
-            vec!["this mxv does not know what the sweep did".to_owned()],
-        ),
-    })
 }

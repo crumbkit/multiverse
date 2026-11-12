@@ -1370,8 +1370,8 @@ impl Setup {
     }
 
     /// Writes a data directory of ignored files whose archive id no record
-    /// names, as a deletion of an archive that stopped between its two
-    /// directories leaves one, and returns it.
+    /// names, as a person who deleted a moved-aside archive by hand leaves
+    /// one, and returns it.
     fn plant_unnamed_data(&self) -> PathBuf {
         let data = self
             .root()
@@ -1511,4 +1511,42 @@ fn repair_orphans_refuses_and_deletes_nothing_while_an_archive_record_cannot_be_
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::record::corrupt", "{document}");
     assert!(aside.exists() && data.exists() && unnamed.exists());
+}
+
+#[test]
+fn repair_orphans_refuses_while_a_moved_aside_record_cannot_be_read() {
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let unnamed = setup.plant_unnamed_data();
+    write(&aside.join("archive.json"), "not a record\n");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::record::corrupt", "{document}");
+    assert!(aside.exists() && data.exists() && unnamed.exists());
+}
+
+#[test]
+fn a_hidden_directory_without_the_record_of_its_name_is_left_out_by_orphans() {
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let archives = aside.parent().unwrap();
+    let empty = archives.join(".notes.0123456789abcdef0123456789abcdef");
+    write(&empty.join("notes.md"), "mine\n");
+    let other = archives.join(".elsewhere.0123456789abcdef0123456789abcdef");
+    write(
+        &other.join("archive.json"),
+        &fs::read_to_string(aside.join("archive.json")).unwrap(),
+    );
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_rows(&document).len(), 1, "{document}");
+    assert_eq!(
+        orphan_row(&document, "moved_aside")["path"],
+        aside.display().to_string()
+    );
+    assert!(!aside.exists() && !data.exists(), "{document}");
+    assert!(empty.join("notes.md").exists(), "{document}");
+    assert!(other.join("archive.json").exists(), "{document}");
 }

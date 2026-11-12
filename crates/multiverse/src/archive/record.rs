@@ -597,9 +597,17 @@ impl Archives {
     /// the record of every data directory that a running archive made. It
     /// writes nothing.
     ///
+    /// A hidden directory counts as moved aside only when it holds a record
+    /// whose [`Archives::aside_of`] is the directory itself. A hidden
+    /// directory without a record, or with another archive's record, is
+    /// not one that mxv wrote, so it is left out.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::StateUnreadable`] when a directory cannot be read.
+    /// Returns [`Error::StateUnreadable`] when a directory cannot be read,
+    /// and the read error of a hidden directory's record that cannot be
+    /// read, because such a record may be the only copy of an archive's
+    /// root files.
     pub(crate) fn leftovers(&self) -> Result<Leftovers, Error> {
         let mut found = Leftovers::default();
         for path in directories(&self.data)? {
@@ -611,29 +619,16 @@ impl Archives {
             let hidden = path
                 .file_name()
                 .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
-            if hidden {
-                // A record that cannot be read leaves its directory listed
-                // without a record, so the directory is still named and is
-                // never read as a live archive.
-                let record = read_record(&path.join(RECORD_FILE)).ok().flatten();
+            if !hidden {
+                continue;
+            }
+            if let Some(record) = read_record(&path.join(RECORD_FILE))?
+                && self.aside_of(&record) == path
+            {
                 found.aside.push((path, record));
             }
         }
         Ok(found)
-    }
-
-    /// Deletes the directory `path`, which [`Archives::leftovers`] named,
-    /// and everything in it, by file descriptor.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Unwritable`] when it cannot be deleted.
-    pub(crate) fn delete_leftover(path: &Path) -> Result<(), Error> {
-        delete_directory(path)?;
-        if let Some(parent) = path.parent() {
-            store::sync_dir(parent);
-        }
-        Ok(())
     }
 }
 
@@ -641,8 +636,8 @@ impl Archives {
 #[derive(Debug, Default)]
 pub(crate) struct Leftovers {
     /// Each directory `.<name>.<id>` that a repair moved aside, with its
-    /// record, or `None` when the record cannot be read.
-    pub(crate) aside: Vec<(PathBuf, Option<Archive>)>,
+    /// record.
+    pub(crate) aside: Vec<(PathBuf, Archive)>,
     /// Each data directory, with the archive id that names it.
     pub(crate) data: Vec<(String, PathBuf)>,
 }
