@@ -1,0 +1,15 @@
+Serve the routes that workspaces declare at stable names
+
+Usage: mxv proxy [OPTIONS] <COMMAND>
+
+Commands:
+  status  Show whether the proxy runs, and each route that a workspace declares
+  start   Start the proxy, and load the routes of every workspace
+  stop    Stop the proxy; the next `mxv up` of a workspace with routes starts it again
+  trust   Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv proxy --help` describes them.
+Next: mxv proxy <COMMAND> -h

@@ -1,26 +1,26 @@
-PATH               ABOUT
-mxv                Create, archive and restore task workspaces that span several git repositories
-mxv new            Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin
-mxv add            Add a clone of a repository to a workspace, on the workspace's branch
-mxv list           List the workspaces
-mxv show           Show workspaces by name, in the order given
-mxv cd             Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
-mxv up             Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
-mxv down           Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
-mxv restart        Build a workspace's units through deadband, then stop them and start them again
-mxv status         Report whether each unit of a workspace is running, exited or stopped
-mxv logs           Print the last lines of a unit's log, and follow it with --follow
-mxv exec           Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code
-mxv run            Run a task of a workspace through deadband, or list its tasks
-mxv archive        Archive a workspace, so restore can rebuild it at the same commits
-mxv restore        Rebuild an archived workspace at its archived commits
-mxv repair         Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names
-mxv remove         Remove a workspace's checkouts, its merged branches, its directory and its record
-mxv clean          Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
-mxv reclaim        Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
-mxv pin            Keep mxv reclaim from stopping a workspace
-mxv unpin          Let mxv reclaim stop a workspace again while it is idle
-mxv ports          Manage the host ports that a workspace holds
-mxv ports reset    Give a stopped workspace new host ports, each different from the port it held
-mxv commands       Explore mxv's commands
-mxv commands list  List a branch of mxv's commands with their arguments, examples and columns
+PATH              ABOUT
+mxv               Create, archive and restore task workspaces that span several git repositories
+mxv new           Create a workspace with its own clone of each repository, on a new branch from the freshly fetched origin
+mxv add           Add a clone of a repository to a workspace, on the workspace's branch
+mxv list          List the workspaces
+mxv show          Show workspaces by name, in the order given
+mxv cd            Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
+mxv up            Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
+mxv down          Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
+mxv restart       Build a workspace's units through deadband, then stop them and start them again
+mxv status        Report whether each unit of a workspace is running, exited or stopped
+mxv logs          Print the last lines of a unit's log, and follow it with --follow
+mxv exec          Run a one-off command in a workspace or in the context of a running unit, and exit with its exit code
+mxv run           Run a task of a workspace through deadband, or list its tasks
+mxv archive       Archive a workspace, so restore can rebuild it at the same commits
+mxv restore       Rebuild an archived workspace at its archived commits
+mxv repair        Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names
+mxv remove        Remove a workspace's checkouts, its merged branches, its directory and its record
+mxv clean         Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+mxv reclaim       Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
+mxv pin           Keep mxv reclaim from stopping a workspace
+mxv unpin         Let mxv reclaim stop a workspace again while it is idle
+mxv ports         Manage the host ports that a workspace holds
+mxv ports reset   Give a stopped workspace new host ports, each different from the port it held
+mxv proxy         Serve the routes that workspaces declare at stable names
+mxv proxy status  Show whether the proxy runs, and each route that a workspace declares

@@ -1,0 +1,14 @@
+Show whether the proxy runs, and each route that a workspace declares
+
+Usage: mxv proxy status [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv proxy status
+
+Effects: read-only, closed-world.
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv proxy status --help` describes them.
+Next: mxv proxy status --help explains each column.

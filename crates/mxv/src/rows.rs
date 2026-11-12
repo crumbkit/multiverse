@@ -1231,6 +1231,29 @@ pub(crate) enum StateName {
     Unknown,
 }
 
+impl ProcessRow {
+    /// Returns the state as the word that a row prints, such as `running`.
+    pub(crate) const fn state_text(&self) -> &'static str {
+        self.state.as_str()
+    }
+}
+
+impl StateName {
+    /// Returns the word that a row prints for the state.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::Created => "created",
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Stopping => "stopping",
+            Self::Restarting => "restarting",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl Row for ProcessRow {
     const COLUMNS: &'static [&'static str] = &[
         "name", "kind", "state", "ready", "pid", "code", "signal", "reason", "ports", "sandbox",

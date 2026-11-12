@@ -699,6 +699,7 @@ pub(crate) fn remove(
     output: &mut Run,
     environment: &Environment,
     args: &RemoveArgs,
+    served: &mut crate::proxy::Served,
 ) -> Result<Prose<RemovalResult>, crumbkit::Error> {
     if args.archived {
         return crate::archive::remove(output, environment, args);
@@ -803,6 +804,13 @@ pub(crate) fn remove(
     }
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
         RemovalOutcome::Done(removed) => {
+            crate::proxy::sync(
+                environment,
+                &multiverse::Store::new(environment.records()?),
+                &removed.workspace,
+                multiverse::SyncMode::IfRunning,
+                served,
+            );
             let held = processes::forget(environment, &name, id.as_ref())?;
             if let Some(volumes) = volumes {
                 processes::delete_volumes(environment, volumes)?;

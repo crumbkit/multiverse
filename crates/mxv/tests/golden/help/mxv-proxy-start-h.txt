@@ -1,0 +1,14 @@
+Start the proxy, and load the routes of every workspace
+
+Usage: mxv proxy start [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv proxy start
+
+Effects: additive, idempotent, open-world.
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv proxy start --help` describes them.
+Next: mxv proxy start --help explains each column.

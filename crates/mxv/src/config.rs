@@ -24,6 +24,11 @@
 //! - `archive_max_file` is the largest file of a checkout's uncommitted
 //!   work that `mxv archive` keeps, such as `"1GiB"`. A larger file
 //!   refuses the archive. It defaults to `"100MiB"`.
+//! - `proxy_http` and `proxy_https` are the loopback addresses, such as
+//!   `"127.0.0.1:80"`, where the proxy serves the routes of workspaces. They
+//!   default to ports 80 and 443 on `127.0.0.1`.
+//! - `caddy` is the absolute path, or a path that starts with `~/`, of the
+//!   `caddy` program. Without it mxv uses the first `caddy` on `PATH`.
 //!
 //! mxv parses the file strictly: any other key, a value of another type, a
 //! relative path, a glob that is absolute or holds `..`, a `clone_on_new`
@@ -31,6 +36,7 @@
 //! `mxv::config::invalid`, which names the file and the line.
 
 use std::io;
+use std::net::SocketAddr;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -73,6 +79,14 @@ pub(crate) struct Config {
     /// The largest file of a checkout's uncommitted work that `mxv archive`
     /// keeps, in bytes, or `None` for the default.
     pub(crate) archive_max_file: Option<u64>,
+    /// The loopback address where the proxy serves HTTP, or `None` for the
+    /// default.
+    pub(crate) proxy_http: Option<SocketAddr>,
+    /// The loopback address where the proxy serves HTTPS, or `None` for
+    /// the default.
+    pub(crate) proxy_https: Option<SocketAddr>,
+    /// The path of the `caddy` program, or `None` to search `PATH`.
+    pub(crate) caddy: Option<PathBuf>,
 }
 
 /// The lowest port that `ports_range` may hold. Ports below it are
@@ -158,6 +172,18 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
                     unit(name, value.get_ref(), parse_size).map_err(|reason| bad(at, reason))?,
                 );
             }
+            "proxy_http" | "proxy_https" => {
+                let address = loopback(name, value.get_ref()).map_err(|reason| bad(at, reason))?;
+                if name == "proxy_http" {
+                    config.proxy_http = Some(address);
+                } else {
+                    config.proxy_https = Some(address);
+                }
+            }
+            "caddy" => {
+                config.caddy =
+                    Some(caddy(value.get_ref(), home).map_err(|reason| bad(at, reason))?);
+            }
             _ => {
                 return Err(bad(
                     at,
@@ -182,6 +208,9 @@ pub(crate) const SETTINGS: &[&str] = &[
     "`max_disposable`",
     "`stop_idle`",
     "`archive_max_file`",
+    "`proxy_http`",
+    "`proxy_https`",
+    "`caddy`",
 ];
 
 /// Returns the globs of the array `value` of the key `key`, each read with
@@ -225,6 +254,41 @@ fn unit<T>(
         .as_str()
         .ok_or_else(|| format!("`{key}` must be a string, such as \"7d\" or \"50GiB\""))?;
     parse(text).map_err(|reason| format!("`{key}` is refused: {reason}"))
+}
+
+/// Returns the loopback socket address that `value` holds for the key
+/// `key`, or the reason it is not one.
+fn loopback(key: &str, value: &DeValue<'_>) -> Result<SocketAddr, String> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| format!("`{key}` must be a string, such as \"127.0.0.1:80\""))?;
+    let address: SocketAddr = text.parse().map_err(|_| {
+        format!(
+            "`{key}` is {text:?}, and it must be an address with a port, such as \"127.0.0.1:80\""
+        )
+    })?;
+    if !address.ip().is_loopback() {
+        return Err(format!(
+            "`{key}` is {text:?}, and it must be a loopback address, because the proxy serves only this machine"
+        ));
+    }
+    Ok(address)
+}
+
+/// Returns the `caddy` path that `value` names, with `~` meaning `home`, or
+/// the reason it is not an absolute path.
+fn caddy(value: &DeValue<'_>, home: &Path) -> Result<PathBuf, String> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| "`caddy` must be a string that holds an absolute path".to_owned())?;
+    let expanded = expand(text, home)
+        .ok_or_else(|| format!("`caddy` is {text:?}, and only `~` or `~/` may start a path"))?;
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "`caddy` is the relative path {text:?}, and it must be an absolute path"
+        ));
+    }
+    Ok(expanded)
 }
 
 /// Returns the root that `value` names, with `~` meaning `home`, or the

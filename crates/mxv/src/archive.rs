@@ -1073,6 +1073,7 @@ pub(crate) fn archive(
     output: &mut Run,
     environment: &Environment,
     args: &ArchiveArgs,
+    served: &mut crate::proxy::Served,
 ) -> Result<Prose<ArchiveResult>, crumbkit::Error> {
     let name = chosen(environment, args)?;
     let workspaces = configured(environment)?;
@@ -1108,6 +1109,7 @@ pub(crate) fn archive(
                 volumes,
                 &mut done.warnings,
             )?;
+            sync_after_archive(environment, &archive.workspace(), served)?;
             return Ok(Prose::new(result_of(&archive, &[], done, false)));
         }
     };
@@ -1154,6 +1156,7 @@ pub(crate) fn archive(
         volumes,
         &mut warnings,
     )?;
+    sync_after_archive(environment, &workspace, served)?;
     drop(lock);
     let done = Done {
         stopped: running,
@@ -1164,6 +1167,23 @@ pub(crate) fn archive(
         cd,
     };
     Ok(Prose::new(result_of(&archive, &uncommitted, done, false)))
+}
+
+/// Takes the routes of the archived `workspace` away from the proxy when
+/// it runs. The workspace's record is gone, so its routes leave with it.
+fn sync_after_archive(
+    environment: &Environment,
+    workspace: &Workspace,
+    served: &mut crate::proxy::Served,
+) -> Result<(), crumbkit::Error> {
+    crate::proxy::sync(
+        environment,
+        &multiverse::Store::new(environment.records()?),
+        workspace,
+        multiverse::SyncMode::IfRunning,
+        served,
+    );
+    Ok(())
 }
 
 /// Returns what an archive of the workspace `name` would do, and changes
@@ -1230,6 +1250,7 @@ pub(crate) fn restore(
     output: &mut Run,
     environment: &Environment,
     args: &RestoreArgs,
+    served: &mut crate::proxy::Served,
 ) -> Result<Prose<RestoreResult>, crumbkit::Error> {
     let name = parse_name(&args.name)?;
     let workspaces = configured(environment)?;
@@ -1286,6 +1307,15 @@ pub(crate) fn restore(
         RestoreOutcome::Restored(restored) => *restored,
         RestoreOutcome::Refused(refusal) => return Err(restore_refusal(&name, refusal).into()),
     };
+    if let Some(workspace) = store.read(&name).map_err(MxvFailure::from)? {
+        crate::proxy::sync(
+            environment,
+            &store,
+            &workspace,
+            multiverse::SyncMode::Start,
+            served,
+        );
+    }
     drop(lock);
     Ok(Prose::new(RestoreResult {
         name: name.to_string(),

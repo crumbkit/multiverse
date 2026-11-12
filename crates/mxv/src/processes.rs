@@ -15,8 +15,8 @@ use multiverse::phase::Growth;
 use multiverse::phase::WorkspaceId;
 use multiverse::{
     BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Lock,
-    Manifest, ManifestError, Marker, Needed, Reclaimed, Runs, Store, UpOutcome, Volumes, Workspace,
-    WorkspaceName,
+    Manifest, ManifestError, Marker, Needed, Reclaimed, Runs, Store, SyncMode, UpOutcome, Volumes,
+    Workspace, WorkspaceName,
 };
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -25,6 +25,7 @@ use crate::admission::Deadband;
 use crate::cli::{LogsArgs, PortsResetArgs, ProcessesArgs, StatusArgs};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
+use crate::proxy::{self, Served};
 use crate::rows::{CheckoutStateRow, LogLine, PortRow, ProcessRow, StatusSummary};
 use crate::run_failures::RunFailure;
 use crate::verbs;
@@ -237,7 +238,7 @@ fn manifest(workspace: &Workspace) -> Result<Option<Manifest>, RunFailure> {
 /// Returns the workspace's manifest, or `None` when it has none or it does
 /// not parse, for `down` and `status`, which then work from the run records
 /// so a broken manifest never keeps processes running.
-fn lenient_manifest(workspace: &Workspace) -> Option<Manifest> {
+pub(crate) fn lenient_manifest(workspace: &Workspace) -> Option<Manifest> {
     workspace.manifest().ok().flatten()
 }
 
@@ -490,6 +491,7 @@ pub(crate) fn up(
     output: &Run,
     environment: &Environment,
     args: &ProcessesArgs,
+    served: &mut Served,
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     ask_first(output, &context)?;
@@ -514,7 +516,21 @@ pub(crate) fn up(
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
     };
-    start(&mut context, passed, &manifest, &args.processes).map(Ok)
+    let rows = start(&mut context, passed, &manifest, &args.processes)?;
+    sync_proxy(environment, &context, SyncMode::Start, served);
+    Ok(Ok(rows))
+}
+
+/// Brings the proxy in line with the workspace's routes while the command
+/// still holds the workspace's lock, and leaves what it says in `served`.
+fn sync_proxy(environment: &Environment, context: &Context, mode: SyncMode, served: &mut Served) {
+    proxy::sync(
+        environment,
+        &context.store,
+        &context.workspace,
+        mode,
+        served,
+    );
 }
 
 /// Starts the context's processes, and returns their rows or the failure
@@ -695,6 +711,7 @@ fn stop_every(
 pub(crate) fn down(
     environment: &Environment,
     args: &ProcessesArgs,
+    served: &mut Served,
 ) -> Result<Batch<ProcessRow, RunFailure>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let lock = context.lock()?;
@@ -716,6 +733,7 @@ pub(crate) fn down(
             context.forget_reclaim(&stopped)?;
         }
     }
+    sync_proxy(environment, &context, SyncMode::IfRunning, served);
     let workspace = context.workspace.name.to_string();
     let keys: Vec<&str> = results
         .iter()
@@ -753,6 +771,7 @@ pub(crate) fn restart(
     output: &Run,
     environment: &Environment,
     args: &ProcessesArgs,
+    served: &mut Served,
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let manifest = required_manifest(&context.workspace)?;
@@ -770,7 +789,9 @@ pub(crate) fn restart(
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
     };
-    replace(&mut context, &lock, passed, &manifest, &args.processes).map(Ok)
+    let rows = replace(&mut context, &lock, passed, &manifest, &args.processes)?;
+    sync_proxy(environment, &context, SyncMode::Start, served);
+    Ok(Ok(rows))
 }
 
 /// Stops the context's processes and starts them again. It is the only
@@ -873,6 +894,7 @@ pub(crate) fn logs(output: Run, environment: &Environment, args: &LogsArgs) -> E
 pub(crate) fn ports_reset(
     environment: &Environment,
     args: &PortsResetArgs,
+    served: &mut Served,
 ) -> Result<Vec<PortRow>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &[])?;
     let manifest = required_manifest(&context.workspace)?;
@@ -905,6 +927,7 @@ pub(crate) fn ports_reset(
         }
         .into());
     }
+    sync_proxy(environment, &context, SyncMode::IfRunning, served);
     Ok(manifest
         .ports
         .iter()

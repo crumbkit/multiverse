@@ -1,0 +1,33 @@
+Start the proxy, and load the routes of every workspace
+
+Usage: mxv proxy start [OPTIONS]
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv proxy start
+          Start the proxy, or load the current routes into it
+
+Columns:
+  route      The route's name in the workspace's `routes`.
+  workspace  The workspace that declares the route.
+  url        The URL that serves the route, or `(not served)` when another workspace's name makes the same host label.
+  unit       The process or container that listens on the route's port, or null when no unit does.
+  state      The state of the unit: `running`, `stopped`, and so on, or why the route has no unit.
+
+Effects: additive, idempotent, open-world.
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.

@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/proxy-start/v1",
+  "description": "The state of the proxy once it serves the routes of every workspace, and each route.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/proxy-start/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "data": {
+      "description": "The rows of the page, up to the limit.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RouteRow"
+      }
+    },
+    "total": {
+      "description": "The number of rows that matched, of which data holds one page. It is absent when the tool did not count the rows.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "description": "True when the document leaves out rows that matched, because of the limit or the output budget, and false when data holds every row.",
+      "type": "boolean"
+    },
+    "summary": {
+      "$ref": "#/$defs/ProxySummary"
+    },
+    "next": {
+      "description": "The next steps, in the order the text prints them. It is absent when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "description": "The sentence or phrase that the text prints for the step.",
+            "type": "string"
+          },
+          "commands": {
+            "description": "The commands that carry out the step, in order.",
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "call": {
+                      "description": "A command line of this tool.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "call"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "description": "A command line of another program.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "run"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "text",
+          "commands"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The over-budget code.",
+          "type": "string"
+        },
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "code",
+        "budget"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "data",
+    "truncated",
+    "summary"
+  ],
+  "$defs": {
+    "RouteRow": {
+      "description": "One route, as `mxv proxy status` prints it.",
+      "type": "object",
+      "properties": {
+        "route": {
+          "description": "The route's name in the workspace's `routes`.",
+          "type": "string"
+        },
+        "workspace": {
+          "description": "The workspace that declares the route.",
+          "type": "string"
+        },
+        "url": {
+          "description": "The URL that serves the route, or `(not served)` when another\nworkspace's name makes the same host label.",
+          "type": "string"
+        },
+        "unit": {
+          "description": "The process or container that listens on the route's port, or null\nwhen no unit does.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "The state of the unit: `running`, `stopped`, and so on, or why the\nroute has no unit.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "One line under the route when it is not served.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "route",
+        "workspace",
+        "url",
+        "unit",
+        "state",
+        "notes"
+      ]
+    },
+    "ProxySummary": {
+      "description": "What `mxv proxy status` says above its rows.",
+      "type": "object",
+      "properties": {
+        "running": {
+          "description": "Whether Caddy answers on the admin socket.",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "Caddy's version, or null when mxv could not tell.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pid": {
+          "description": "Caddy's process id, or null.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "http": {
+          "description": "The address that serves HTTP.",
+          "type": "string"
+        },
+        "https": {
+          "description": "The address that serves HTTPS.",
+          "type": "string"
+        },
+        "authority": {
+          "description": "`none` when Caddy has not made a certificate authority, `trusted`\nor `untrusted` when this machine does or does not trust it, and\n`unknown` when mxv cannot tell on this system.",
+          "$ref": "#/$defs/AuthorityState"
+        },
+        "routes": {
+          "description": "The number of routes that the proxy serves once it runs.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "problems": {
+          "description": "One sentence for each record or manifest that mxv could not read.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "running",
+        "version",
+        "pid",
+        "http",
+        "https",
+        "authority",
+        "routes",
+        "problems"
+      ]
+    },
+    "AuthorityState": {
+      "description": "Whether this machine trusts the proxy's certificate authority.",
+      "oneOf": [
+        {
+          "description": "Caddy has not made one.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "This machine trusts it.",
+          "type": "string",
+          "const": "trusted"
+        },
+        {
+          "description": "This machine does not trust it.",
+          "type": "string",
+          "const": "untrusted"
+        },
+        {
+          "description": "mxv cannot tell on this system.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    }
+  }
+}

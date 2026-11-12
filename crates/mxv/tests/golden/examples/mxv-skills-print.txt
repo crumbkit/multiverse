@@ -85,3 +85,12 @@ this mxv's. `mxv skills print` prints it.
 `mxv commands list --all` lists every command, and `mxv <command> --help`
 describes one. `--json` prints JSON, and `mxv schemas list` and
 `mxv schemas show <ID>` describe its documents.
+
+## Stable names for HTTP ports
+
+When the manifest lists `routes`, `mxv up` serves each at
+`https://<port>.<workspace>.mxv.localhost`, and `mxv proxy status` lists the
+URLs. Open those names instead of `localhost:<port>`. A warning from `up` that
+carries a `mxv::proxy::` code leaves the units running; report it. Never run
+`mxv proxy trust`: it raises a system password prompt that only the person
+can answer, so tell the person to run it.

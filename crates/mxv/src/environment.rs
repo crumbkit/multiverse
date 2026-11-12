@@ -7,7 +7,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use etcetera::BaseStrategy as _;
-use multiverse::{CallerEnvironment, DEFAULT_PORT_RANGE, Runs};
+use multiverse::{CallerEnvironment, DEFAULT_PORT_RANGE, Proxy, ProxySettings as Settings, Runs};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -217,7 +217,7 @@ impl Environment {
         // there.
         let mut runs = Runs::new(&self.state()?)
             .with_caller(self.caller.clone())
-            .with_protected(vec![self.state()?, self.mirrors()?]);
+            .with_protected(vec![self.state()?, self.mirrors()?, self.proxy_data()?]);
         if let Some(program) = &self.program {
             runs = runs
                 .with_keeper(
@@ -227,6 +227,35 @@ impl Environment {
                 .with_provisioner(program, &crate::PROVISION_WORDS);
         }
         Ok(runs)
+    }
+
+    /// Returns the proxy: Caddy, supervised by phase, with the addresses
+    /// and the program that the config file names.
+    pub(crate) fn proxy(&self) -> Result<Proxy, MxvFailure> {
+        let config = self.config()?;
+        let defaults = Settings::new(self.state()?, self.bases()?.data.join("mxv"));
+        let settings = defaults
+            .clone()
+            .with_addresses(
+                config.proxy_http.unwrap_or_else(|| defaults.http()),
+                config.proxy_https.unwrap_or_else(|| defaults.https()),
+            )
+            .with_caddy(config.caddy)
+            .with_search(self.caller.path_dirs());
+        let mut proxy = Proxy::new(settings).with_caller(&self.caller);
+        if let Some(program) = &self.program {
+            proxy = proxy.with_keeper(
+                program.clone(),
+                crate::KEEPER_WORDS.iter().map(OsString::from).collect(),
+            );
+        }
+        Ok(proxy)
+    }
+
+    /// Returns the directory of the proxy's certificates and keys,
+    /// `$XDG_DATA_HOME/mxv/proxy`, which no sandboxed app may touch.
+    fn proxy_data(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.bases()?.data.join("mxv").join("proxy"))
     }
 
     /// Returns the run files that [`Environment::runs`] builds, or `None`

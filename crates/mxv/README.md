@@ -1037,6 +1037,59 @@ to the apps in its `connect` list. mxv adds the backend of each service in
 further grant. The manifest cannot name `mxv-dynamodb` or `mxv-aws` in
 `connect` itself, because `connect` names units of the manifest.
 
+## Stable names for HTTP ports
+
+A workspace's host ports change from one workspace to the next, so a bookmark
+to `localhost:23817` stops working when the workspace is replaced. A manifest
+can name the ports that serve HTTP in `routes`, and mxv then serves each one
+at a name that depends only on the port and the workspace names:
+
+```toml
+ports = ["web", "api"]
+routes = ["web"]
+```
+
+For a workspace `reading-list`, the route `web` is served at
+`https://web.reading-list.mxv.localhost`, and also at the same name over
+plain HTTP. Every name in `routes` must appear in `ports`. A unit that
+declares `listen` for that port is the upstream; when no unit listens on it,
+`mxv proxy status` says so.
+
+mxv runs one Caddy for all workspaces. `mxv up` and `mxv restart` start it
+when the workspace declares a route, and `mxv down`, `mxv remove`,
+`mxv archive`, `mxv restore` and `mxv ports reset` rebuild its routes from the
+workspace records. A route of a stopped workspace answers with a 502 page
+that says which workspace is stopped and which command starts it. The
+routes are rebuilt from the records on every call, so a Caddy that was
+killed comes back with the last load the next time any of those verbs runs.
+
+A failure to serve the routes never fails the verb. The units run, and mxv
+prints a warning that carries an error code, such as `mxv::proxy::port_held`,
+`mxv::proxy::port_denied`, `mxv::proxy::caddy_missing` or
+`mxv::proxy::caddy_too_old`. The `proxy` verbs are:
+
+| Command | What it does |
+| --- | --- |
+| `mxv proxy status` | Lists every route with its URL, unit and unit state, and says whether Caddy runs. |
+| `mxv proxy start` | Starts Caddy, or loads the current routes into the Caddy that runs. |
+| `mxv proxy stop` | Stops Caddy. The next `mxv up` of a workspace with a route starts it again. |
+| `mxv proxy trust` | Installs Caddy's local certificate authority in the system trust store. |
+
+Three config keys control it. `proxy_http` and `proxy_https` are the
+addresses Caddy listens on, by default `127.0.0.1:80` and `127.0.0.1:443`;
+the URL carries the HTTPS port unless it is 443. `caddy` is the absolute or
+`~/` path of the Caddy program, found on `PATH` when unset. mxv needs
+Caddy 2.8 or later.
+
+Two workspaces whose names make the same host label, such as `my_notes` and
+`my.notes`, share the label `my-notes`. mxv serves the one whose name sorts
+first and lists the other as not served, with a note that names both.
+
+HTTPS uses Caddy's own certificate authority. Until `mxv proxy trust` runs,
+a browser warns about the certificate. `mxv proxy trust` asks first, needs a
+terminal and raises the system's own password prompt, so an agent never runs
+it and a person runs it once. The HTTP names work without it.
+
 ## The workspace manifest
 
 A workspace can hold a manifest of its own, the workspace manifest, at

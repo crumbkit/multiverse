@@ -16,6 +16,7 @@ mod environment;
 mod exec;
 mod failures;
 mod processes;
+mod proxy;
 mod reclaim;
 mod repair;
 mod rows;
@@ -72,6 +73,12 @@ pub use crate::failures::{
     WORKSPACE_BUSY,
 };
 #[doc(hidden)]
+pub use crate::proxy::{
+    PROXY_CADDY_MISSING, PROXY_CADDY_TOO_OLD, PROXY_LOAD_FAILED, PROXY_PORT_DENIED,
+    PROXY_PORT_HELD, PROXY_SOCKET_PATH_TOO_LONG, PROXY_START_FAILED, PROXY_TRUST_FAILED,
+    PROXY_TRUST_NEEDS_TERMINAL,
+};
+#[doc(hidden)]
 pub use crate::run_failures::{
     BUILD_FAILED, BUILD_TIMED_OUT, BUILD_UNSTARTABLE, MANIFEST_INVALID, MANIFEST_NAME_CLASH,
     MANIFEST_NEWER, MANIFEST_NOT_FOUND, MANIFEST_RESERVED, MANIFEST_UNIT_NAME,
@@ -92,6 +99,12 @@ pub const ARCHIVE_CODES: &[&Code] = archive::CODES;
 /// crumbkit-test's codes, recovery and twin checks.
 #[doc(hidden)]
 pub const CODES: &[&Code] = failures::CODES;
+
+/// Every failure code of the `mxv proxy` commands and of the warnings that
+/// the lifecycle verbs print, which the tests pass to crumbkit-test's
+/// codes, recovery and twin checks beside [`CODES`].
+#[doc(hidden)]
+pub const PROXY_CODES: &[&Code] = proxy::CODES;
 
 /// Every failure code of the process verbs, which the tests pass to
 /// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
@@ -136,10 +149,11 @@ where
         Verb::Cd(args) => crumbkit::finish(output, verbs::CD, verbs::cd(environment, &args)),
         // `remove` reads `--dry-run` and asks for confirmation through
         // `&mut output`, so it runs before `finish`.
-        Verb::Remove(args) => {
-            let result = verbs::remove(&mut output, environment, &args);
-            crumbkit::finish(output, verbs::REMOVE, result)
-        }
+        Verb::Remove(args) => proxy::serving(
+            output,
+            |output, served| verbs::remove(output, environment, &args, served),
+            |output, result| crumbkit::finish(output, verbs::REMOVE, result),
+        ),
         // `clean` reads `--dry-run` and asks for confirmation through
         // `&mut output`, so it runs before `finish`.
         Verb::Clean(args) => {
@@ -162,17 +176,21 @@ where
         }
         // `up` and `restart` read `--no-input` through `&output` before they
         // ask for wider permissions, so each runs before `finish`.
-        Verb::Up(args) => {
-            let result = processes::up(&output, environment, &args);
-            processes::finish_interruptible(output, processes::UP, result)
-        }
-        Verb::Down(args) => {
-            crumbkit::finish(output, processes::DOWN, processes::down(environment, &args))
-        }
-        Verb::Restart(args) => {
-            let result = processes::restart(&output, environment, &args);
-            processes::finish_interruptible(output, processes::RESTART, result)
-        }
+        Verb::Up(args) => proxy::serving(
+            output,
+            |output, served| processes::up(output, environment, &args, served),
+            |output, result| processes::finish_interruptible(output, processes::UP, result),
+        ),
+        Verb::Down(args) => proxy::serving(
+            output,
+            |_, served| processes::down(environment, &args, served),
+            |output, result| crumbkit::finish(output, processes::DOWN, result),
+        ),
+        Verb::Restart(args) => proxy::serving(
+            output,
+            |output, served| processes::restart(output, environment, &args, served),
+            |output, result| processes::finish_interruptible(output, processes::RESTART, result),
+        ),
         Verb::Status(args) => {
             let result = processes::status(environment, &args);
             crumbkit::finish(output, processes::STATUS, result)
@@ -188,20 +206,24 @@ where
         Verb::Run(args) => run::run(output, environment, &args),
         Verb::Ports {
             command: PortsCommand::Reset(args),
-        } => {
-            let result = processes::ports_reset(environment, &args);
-            crumbkit::finish(output, processes::PORTS_RESET, result)
-        }
+        } => proxy::serving(
+            output,
+            |_, served| processes::ports_reset(environment, &args, served),
+            |output, result| crumbkit::finish(output, processes::PORTS_RESET, result),
+        ),
+        Verb::Proxy { command } => proxy::run(output, environment, command),
         // `archive` and `restore` read `--dry-run` and ask for confirmation
         // through `&mut output`, so each runs before `finish`.
-        Verb::Archive(args) => {
-            let result = archive::archive(&mut output, environment, &args);
-            crumbkit::finish(output, archive::ARCHIVE, result)
-        }
-        Verb::Restore(args) => {
-            let result = archive::restore(&mut output, environment, &args);
-            crumbkit::finish(output, archive::RESTORE, result)
-        }
+        Verb::Archive(args) => proxy::serving(
+            output,
+            |output, served| archive::archive(output, environment, &args, served),
+            |output, result| crumbkit::finish(output, archive::ARCHIVE, result),
+        ),
+        Verb::Restore(args) => proxy::serving(
+            output,
+            |output, served| archive::restore(output, environment, &args, served),
+            |output, result| crumbkit::finish(output, archive::RESTORE, result),
+        ),
         // `repair` reads `--dry-run` and asks for confirmation through
         // `&mut output`, so it runs before `finish`.
         Verb::Repair(args) => {
@@ -369,8 +391,8 @@ pub fn provision(args: &[OsString]) -> ExitCode {
 }
 
 /// The environment source of a keeper, which mxv's plans never ask for:
-/// each process of an mxv plan is never restarted, so its keeper never
-/// resolves a fresh environment.
+/// no process of an mxv plan restarts, and the proxy's Caddy restarts with
+/// the environment it started with, so no keeper resolves a fresh one.
 struct NoFreshEnvironment;
 
 impl multiverse::phase::EnvironmentSource for NoFreshEnvironment {
@@ -384,7 +406,7 @@ impl multiverse::phase::EnvironmentSource for NoFreshEnvironment {
         Err(multiverse::phase::EnvironmentError::new(
             format!("{app}/{process}"),
             "mxv".to_owned(),
-            "mxv never restarts a process, so its keeper resolves no fresh environment".into(),
+            "mxv restarts no process with a fresh environment, so its keeper resolves none".into(),
         ))
     }
 }
@@ -494,6 +516,22 @@ pub(crate) fn notice(line: &str) {
     // A line that cannot be written changes nothing the command does, so
     // its failure is ignored.
     drop(writeln!(stderr, "mxv: {line}."));
+}
+
+/// Prints each of `lines` on standard error as it is, for a command whose
+/// notes carry their own words and punctuation.
+pub(crate) fn say(lines: &[String]) {
+    use std::io::Write as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and a lifecycle verb says what the proxy serves there beside its result"
+    )]
+    let mut stderr = std::io::stderr();
+    for line in lines {
+        // A line that cannot be written changes nothing the command does,
+        // so its failure is ignored.
+        drop(writeln!(stderr, "{line}"));
+    }
 }
 
 /// Prints each of `warnings` on standard error as a line of its own, for
