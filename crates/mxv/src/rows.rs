@@ -292,6 +292,9 @@ fn problem_text(broken: &Broken) -> String {
         Problem::ArchiveBesideNewerWorkspace => {
             format!("an older archive beside a newer workspace {}", broken.name)
         }
+        Problem::RenameUnfinished => {
+            "a repair stopped while it moved the archive to its dated name".to_owned()
+        }
         Problem::RestoreUnfinished => {
             "the restore stopped before it deleted the archive".to_owned()
         }

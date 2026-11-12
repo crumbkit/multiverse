@@ -15,7 +15,7 @@ use multiverse::{Mode, WorkspaceName};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::archive::{archives, finish};
+use crate::archive::{ArchiveFailure, archives, finish};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -75,6 +75,10 @@ pub(crate) struct RepairResult {
     name: String,
     /// What the repair did, or would do.
     state: RepairState,
+    /// The name that the older archive had, such as `docs`, or null when
+    /// no archive was renamed. It differs from `name` when `name` is the
+    /// dated name of a rename that an earlier repair started.
+    older: Option<String>,
     /// The dated name that the older archive takes, such as
     /// `docs-2026-11-02`, or null when no archive was renamed.
     archive: Option<String>,
@@ -99,6 +103,7 @@ impl RepairResult {
         Self {
             name: name.to_string(),
             state,
+            older: None,
             archive: None,
             kept: Vec::new(),
             repair: None,
@@ -139,10 +144,14 @@ impl fmt::Display for RepairResult {
                 if let Some(tar) = self.kept.get(1) {
                     writeln!(formatter, "Its ignored files stay in {tar}.")?;
                 }
-                write!(formatter, "Nothing is deleted.")
+                write!(
+                    formatter,
+                    "Nothing is deleted, and nothing in mxv deletes these paths later, so delete them yourself once you no longer need them."
+                )
             }
             RepairState::Finished | RepairState::WouldFinish => {
                 let dated = self.archive.as_deref().unwrap_or_default();
+                let name = self.older.as_deref().unwrap_or(name);
                 if self.state == RepairState::Finished {
                     write!(
                         formatter,
@@ -175,8 +184,8 @@ fn question(name: &WorkspaceName, planned: &Repaired) -> Option<String> {
             "Move the archive of {name} aside to {}? Its pins are gone, so no restore can bring the workspace back.",
             kept.display()
         )),
-        Repaired::Renamed { archive, .. } => Some(format!(
-            "Finish the older archive of {name} as {}?",
+        Repaired::Renamed { from, archive } => Some(format!(
+            "Finish the older archive of {from} as {}?",
             archive.name
         )),
         Repaired::Deleted(_) => Some(format!(
@@ -202,9 +211,19 @@ pub(crate) fn repair(
     let (repaired, lock) = match question(&name, &planned) {
         Some(text) if !dry => {
             output.confirm(args.yes, &text)?;
-            // The repair classifies the records again under the lock, so
-            // a change since the question is repaired as it now stands.
+            // The person confirmed one repair, so the records are planned
+            // again under the lock, and a plan that asks a different
+            // question refuses before anything changes.
             let lock = processes::lock(environment, &name)?;
+            let again = workspaces
+                .repair(&records, &name, Mode::DryRun)
+                .map_err(MxvFailure::from)?;
+            if question(&name, &again).as_deref() != Some(text.as_str()) {
+                return Err(ArchiveFailure::RepairChanged {
+                    name: name.to_string(),
+                }
+                .into());
+            }
             let repaired = workspaces
                 .repair(&records, &name, Mode::Change)
                 .map_err(MxvFailure::from)?;
@@ -233,19 +252,23 @@ pub(crate) fn repair(
                 },
             )
         },
-        Repaired::Renamed { mut archive, .. } => {
+        Repaired::Renamed { from, mut archive } => {
             if !dry {
                 // Soft limit: the dated name was free when the library
                 // chose it, and this command holds only the lock of
-                // `name`. An `mxv new` of the dated name in the moment
-                // between them leaves the archive beside a newer workspace
-                // again, which `mxv list --archived` names and a second
-                // `mxv repair` of the dated name finishes under another
-                // name. Taking the lock of the dated name inside the
-                // library's choice would close it.
+                // `name`. When an `mxv new` of the dated name runs in the
+                // moment between them, `finish` still marks the archive
+                // archived, beside a workspace that has another stable id.
+                // `mxv list --archived` then names no problem, the archive
+                // and its pins stay whole, and `mxv restore` of the dated
+                // name refuses with `mxv::restore::name_taken` until that
+                // workspace is gone, so nothing is lost. Taking the lock of
+                // the dated name inside the library's choice would close
+                // the gap.
                 finish(environment, &workspaces, &records, &mut archive, None)?;
             }
             RepairResult {
+                older: Some(from.to_string()),
                 archive: Some(archive.name.to_string()),
                 ..RepairResult::new(
                     &name,

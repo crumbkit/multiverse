@@ -440,6 +440,13 @@
           "description": "What the repair did, or would do.",
           "$ref": "#/$defs/RepairState"
         },
+        "older": {
+          "description": "The name that the older archive had, such as `docs`, or null when\nno archive was renamed. It differs from `name` when `name` is the\ndated name of a rename that an earlier repair started.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "archive": {
           "description": "The dated name that the older archive takes, such as\n`docs-2026-11-02`, or null when no archive was renamed.",
           "type": [
@@ -479,6 +486,7 @@
       "required": [
         "name",
         "state",
+        "older",
         "archive",
         "kept",
         "repair",

@@ -139,6 +139,15 @@ pub enum Error {
         /// The lock file.
         path: PathBuf,
     },
+    /// Every dated name that a repair tries for an older archive, from
+    /// `NAME-<date>` to `NAME-<date>-<most>`, is taken by a workspace, an
+    /// archive or a directory, so the repair changed nothing.
+    DatedNamesTaken {
+        /// The archive's name.
+        name: crate::name::WorkspaceName,
+        /// The last dated name that the repair tried.
+        last: String,
+    },
     /// Another mxv command holds the lock of a mirror, such as a
     /// `mxv new` that still fetches it, for longer than the wait.
     MirrorBusy {
@@ -506,6 +515,10 @@ impl fmt::Display for Error {
                 "another mxv command holds the lock {} and has not released it",
                 path.display()
             ),
+            Self::DatedNamesTaken { name, last } => write!(
+                formatter,
+                "every dated name for the older archive of {name}, up to {last}, is already taken"
+            ),
             Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::OriginFetchFailed { .. } => self.fmt_fetch(formatter),
@@ -737,6 +750,7 @@ impl std::error::Error for Error {
             | Self::ProcessTable { .. }
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
+            | Self::DatedNamesTaken { .. }
             | Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::OriginFetchFailed { .. }

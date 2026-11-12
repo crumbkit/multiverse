@@ -78,6 +78,12 @@ pub enum Problem {
     /// with another stable id has its name, so archiving the name again
     /// refuses.
     ArchiveBesideNewerWorkspace,
+    /// A repair stopped while it moved an older archive to its dated name,
+    /// so this record and another one hold the same archive id, and the
+    /// archive's files are split between their two directories. Both rows
+    /// name the repair of the older name, and a repair of either name
+    /// finishes the move.
+    RenameUnfinished,
     /// The archive is [`ArchiveState::Archived`], and the workspace of its
     /// name has its stable id, so a restore rebuilt the workspace and
     /// stopped before it deleted the archive.
@@ -132,29 +138,28 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
             .workspaces
             .iter()
             .find(|workspace| workspace.name == archive.name);
-        let Some(problem) = archive_problem(backend, archive, live) else {
-            continue;
-        };
         // A repair that stopped while it moved an older archive to its
-        // dated name leaves two records of one archive id. The record of
-        // the dated name holds only part of the archive's files, so the
-        // repair of the old name finishes the move.
-        let renaming = archives
-            .archives
-            .iter()
-            .find(|other| other.id == archive.id && other.name != archive.name);
-        let repair = match (&problem, renaming) {
-            (Problem::ArchiveUnfinished, Some(other)) => Repair::Repair(other.name.clone()),
-            _ => repair_of(&problem, &archive.name),
+        // dated name leaves two records of one archive id, whichever state
+        // each says. Both rows name the repair of the older name.
+        let (problem, repair) = match rename_pair(archive, &archives.archives) {
+            Some((old, _)) => (Problem::RenameUnfinished, Repair::Repair(old.name.clone())),
+            None => {
+                let Some(problem) = archive_problem(backend, archive, live) else {
+                    continue;
+                };
+                let repair = repair_of(&problem, &archive.name);
+                (problem, repair)
+            }
         };
+        // A newer workspace of the name is whole, so its row stays as it is.
+        let newer = live.is_some_and(|workspace| workspace.id != archive.workspace_id);
         let broken = Broken {
             name: archive.name.to_string(),
             repair: Some(repair),
             problem,
         };
         health.archives.push(broken.clone());
-        // The newer workspace is whole, so its row stays as it is.
-        if broken.problem != Problem::ArchiveBesideNewerWorkspace {
+        if !newer {
             named.push(broken);
         }
     }
@@ -222,13 +227,38 @@ fn repair_of(problem: &Problem, name: &WorkspaceName) -> Repair {
         Problem::Unreadable { .. }
         | Problem::ArchivePinsGone
         | Problem::ArchiveBesideNewerWorkspace
+        | Problem::RenameUnfinished
         | Problem::RestoreUnfinished => Repair::Repair(name.clone()),
     }
 }
 
+/// Returns the two records of a rename that a repair started and did not
+/// finish, older name first, when `archive` is one of them: another record
+/// of `all` holds the same archive id, and one of the two names is a dated
+/// name of the other, as `Workspaces::repair` chooses one.
+pub(crate) fn rename_pair<'a>(
+    archive: &'a Archive,
+    all: &'a [Archive],
+) -> Option<(&'a Archive, &'a Archive)> {
+    all.iter()
+        .filter(|other| other.id == archive.id && other.name != archive.name)
+        .find_map(|other| {
+            if repair::dated_candidates(archive).any(|name| name == other.name) {
+                Some((archive, other))
+            } else if repair::dated_candidates(other).any(|name| name == archive.name) {
+                Some((other, archive))
+            } else {
+                None
+            }
+        })
+}
+
 /// Reports whether `archive` has checkouts and the pin of no checkout's
 /// `HEAD` names its commit any more, as when the mirror that held the pins
-/// is gone. An archive without checkouts needs no pin.
+/// is gone. An archive without checkouts needs no pin. An archive that
+/// lost the pins of only some checkouts still counts as whole, so it is
+/// finished. Its restore refuses with `mxv::restore::commit_missing` when
+/// no repository holds the commit of such a checkout any more.
 ///
 /// # Errors
 ///

@@ -60,8 +60,10 @@ workspace may need to act on.
 - `mxv repair NAME` repairs the broken records that `mxv list` names it
   for, and `--dry-run` prints what it would do. It asks before it changes
   anything, and `--yes` repairs without asking. An unfinished archive whose
-  pins are gone moves aside to a hidden directory, and nothing is deleted.
-  An older unfinished archive beside a newer workspace of the same name is
+  pins are gone moves aside to the hidden directory `.NAME.<id>`, and
+  nothing is deleted; that directory and the archive's
+  `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar` stay until a person
+  deletes them. An older unfinished archive beside a newer workspace of the same name is
   finished under the name `NAME-YYYY-MM-DD`, so `mxv restore` of that name
   brings it back. An archive left beside the workspace that a restore of it
   rebuilt is deleted. The new problems read "the archive stopped before it
@@ -69,8 +71,16 @@ workspace may need to act on.
   deleted the archive". `mxv archive -w` refuses to finish an archive whose
   pins are gone, with `mxv::archive::pins_gone`, and the recovery of
   `mxv::archive::name_taken` for an older archive now names `mxv repair`.
+  A repair that stopped while it moved an archive to its dated name shows
+  as "a repair stopped while it moved the archive to its dated name" on
+  both records, with `mxv repair` of the older name, and `mxv archive -w`
+  of either name refuses with `mxv::archive::rename_unfinished`. A repair
+  whose records change after its question repairs nothing and fails with
+  `mxv::repair::changed`, and an older archive whose dated names are all
+  taken fails with `mxv::repair::names_taken`.
   The library's `classify` now takes the backend that reads the pins, and
-  `Workspaces::repair` carries out the repairs.
+  `Workspaces::repair` carries out the repairs. phase exports its calendar
+  functions as `phase::calendar`.
 - The config key `archive_max_file` sets the largest file of a checkout's
   uncommitted work that `mxv archive` keeps, such as `"1GiB"`. It defaults
   to 100 MiB.

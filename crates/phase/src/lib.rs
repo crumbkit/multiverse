@@ -17,6 +17,7 @@
 //! The library reads no environment variable and writes to no standard
 //! stream. The `mxv` command links it.
 
+pub mod calendar;
 mod cancel;
 mod clock;
 mod engine;

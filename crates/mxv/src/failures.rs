@@ -119,6 +119,9 @@ pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
 /// `mxv up` that still waits for a unit to be ready.
 pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
+/// The code of an older archive for which `mxv repair` finds every dated
+/// name taken.
+pub const REPAIR_NAMES_TAKEN: Code = Code::new("mxv", "repair", "names_taken");
 /// The code of a manifest that declares containers on a machine without a
 /// `docker` program on `PATH`.
 pub const DOCKER_NOT_FOUND: Code = Code::new("mxv", "docker", "not_found");
@@ -457,6 +460,7 @@ pub(crate) const CODES: &[&Code] = &[
     &PROCESS_UNSUPPORTED_OS,
     &PORT_EXHAUSTED,
     &WORKSPACE_BUSY,
+    &REPAIR_NAMES_TAKEN,
     &DOCKER_NOT_FOUND,
     &DOCKER_COMPOSE_MISSING,
     &DOCKER_ADDRESS_POOLS_EXHAUSTED,
@@ -580,6 +584,7 @@ impl Failure for MxvFailure {
                 Error::UnsupportedOs { .. } => &PROCESS_UNSUPPORTED_OS,
                 Error::NoFreePort { .. } => &PORT_EXHAUSTED,
                 Error::Busy { .. } => &WORKSPACE_BUSY,
+                Error::DatedNamesTaken { .. } => &REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
                 Error::OriginFetchFailed { .. } => &CHECKOUT_ORIGIN_UNREACHABLE,
@@ -965,6 +970,9 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::Busy { .. } => Recovery::hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
         ),
+        Error::DatedNamesTaken { name, last } => Recovery::hint(format!(
+            "rename or remove a workspace or archive that holds a dated name of {name}, such as {last}, then run `mxv repair {name}` again"
+        )),
         Error::DockerMissing { .. } => Recovery::hint(
             "install docker and put it on PATH, and run the command again; a workspace that has run containers needs docker until `mxv remove` removes it",
         ),
@@ -1026,6 +1034,9 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::CorruptRecord { path, .. }
         | Error::Unwritable { path, .. }
         | Error::Busy { path } => vec![Field::new("path", shown(path))],
+        Error::DatedNamesTaken { name, last } => {
+            vec![Field::new("name", name.as_str()), Field::new("last", last)]
+        }
         Error::MirrorBusy { mirror } => vec![Field::new("mirror", shown(mirror))],
         Error::TemplateInvalid { path, message } => vec![
             Field::new("path", shown(path)),

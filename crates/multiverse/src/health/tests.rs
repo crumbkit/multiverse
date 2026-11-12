@@ -186,27 +186,70 @@ fn an_unfinished_archive_beside_a_newer_workspace_is_named_on_the_archive_alone(
 fn a_dated_copy_that_a_stopped_repair_left_is_finished_by_repairing_the_old_name() {
     let dir = tempfile::tempdir().unwrap();
     let old = archive("docs", '1', ArchiveState::Retiring);
-    let mut dated = old.clone();
-    dated.name = name("docs-2026-11-02");
+    // The archive started at the epoch, so its first dated name is this.
+    let dated = old.renamed(&name("docs-1970-01-01"));
     let health = classify(
         &records(vec![workspace(dir.path(), "docs", '2', &["app"])], vec![]),
         &archives(vec![old, dated], vec![]),
     );
-    assert_eq!(
-        health.archives,
-        [
-            Broken {
-                name: "docs".to_owned(),
-                problem: Problem::ArchiveBesideNewerWorkspace,
-                repair: Some(Repair::Repair(name("docs"))),
-            },
-            Broken {
-                name: "docs-2026-11-02".to_owned(),
-                problem: Problem::ArchiveUnfinished,
-                repair: Some(Repair::Repair(name("docs"))),
-            },
-        ]
+    let both = |text: &str| Broken {
+        name: text.to_owned(),
+        problem: Problem::RenameUnfinished,
+        repair: Some(Repair::Repair(name("docs"))),
+    };
+    assert_eq!(health.archives, [both("docs"), both("docs-1970-01-01")]);
+    // The newer workspace docs is whole, so only the dated record shows
+    // in the listing of the workspaces.
+    assert_eq!(health.workspaces, [both("docs-1970-01-01")]);
+}
+
+#[test]
+fn a_stopped_rename_with_no_workspace_left_names_one_repair_on_both_rows() {
+    let old = archive("docs", '1', ArchiveState::Retiring);
+    let dated = old.renamed(&name("docs-1970-01-01"));
+    let health = classify(
+        &records(vec![], vec![]),
+        &archives(vec![old, dated], vec![]),
     );
+    let both = |text: &str| Broken {
+        name: text.to_owned(),
+        problem: Problem::RenameUnfinished,
+        repair: Some(Repair::Repair(name("docs"))),
+    };
+    assert_eq!(health.archives, [both("docs"), both("docs-1970-01-01")]);
+    assert_eq!(health.workspaces, [both("docs"), both("docs-1970-01-01")]);
+}
+
+#[test]
+fn two_records_of_one_id_whose_names_are_not_dated_are_no_rename() {
+    let old = archive("docs", '1', ArchiveState::Archived);
+    let other = old.renamed(&name("notes"));
+    let health = classify(
+        &records(vec![], vec![]),
+        &archives(vec![old, other], vec![]),
+    );
+    assert!(health.archives.is_empty(), "{health:?}");
+}
+
+#[test]
+fn a_long_name_cut_before_a_dash_takes_a_dated_name_without_a_doubled_dash() {
+    let long = format!("{}-{}", "a".repeat(49), "b".repeat(14));
+    assert_eq!(long.len(), 64);
+    let older = archive(&long, '1', ArchiveState::Retiring);
+    let first = super::repair::dated_candidates(&older).next().unwrap();
+    assert_eq!(first.as_str(), format!("{}-1970-01-01", "a".repeat(49)));
+}
+
+#[test]
+fn the_dated_names_run_from_the_plain_date_to_the_suffix_99() {
+    let older = archive("docs", '1', ArchiveState::Retiring);
+    let names: Vec<String> = super::repair::dated_candidates(&older)
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(names.len(), 99);
+    assert_eq!(names[0], "docs-1970-01-01");
+    assert_eq!(names[1], "docs-1970-01-01-2");
+    assert_eq!(names[98], "docs-1970-01-01-99");
 }
 
 #[test]

@@ -302,6 +302,21 @@ pub struct Archive {
 }
 
 impl Archive {
+    /// Returns this archive under the name `to`, with the workspace's
+    /// directory and each checkout's directory moved to the directory of
+    /// that name beside the old one. It writes nothing.
+    pub(crate) fn renamed(&self, to: &WorkspaceName) -> Self {
+        let mut renamed = self.clone();
+        renamed.name = to.clone();
+        if let Some(parent) = self.path.parent() {
+            renamed.path = parent.join(to.as_str());
+        }
+        for checkout in &mut renamed.checkouts {
+            checkout.path = renamed.path.join(&checkout.folder);
+        }
+        renamed
+    }
+
     /// Returns the archive's checkouts as the checkouts of a workspace, each
     /// on its recorded branch, with no commit yet.
     pub(crate) fn workspace_checkouts(&self) -> Vec<Checkout> {
@@ -368,7 +383,7 @@ pub struct Archives {
 }
 
 /// The archives that [`Archives::list`] found.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct ArchiveRecords {
     /// Each archive that could be read, in name order.
@@ -542,14 +557,7 @@ impl Archives {
     /// fails, and [`Error::StateUnreadable`] when the old directory cannot
     /// be read.
     pub(crate) fn rename(&self, archive: &Archive, to: &WorkspaceName) -> Result<Archive, Error> {
-        let mut renamed = archive.clone();
-        renamed.name = to.clone();
-        if let Some(parent) = archive.path.parent() {
-            renamed.path = parent.join(to.as_str());
-        }
-        for checkout in &mut renamed.checkouts {
-            checkout.path = renamed.path.join(&checkout.folder);
-        }
+        let renamed = archive.renamed(to);
         self.write(&renamed)?;
         let old = self.dir_of(&archive.name);
         let new = self.dir_of(to);

@@ -636,6 +636,79 @@ fn a_stale_retiring_archive_beside_a_newer_workspace_is_finished_under_a_dated_n
     assert!(setup.checkout().join(".git").exists());
 }
 
+impl Setup {
+    /// Writes a copy of the record of the archive `triage` under its first
+    /// dated name, with no other file, as a repair that stopped right after
+    /// it wrote the renamed record leaves it, and returns the dated name.
+    fn plant_dated_copy(&self) -> String {
+        let mut record: Value =
+            serde_json::from_str(&fs::read_to_string(self.archive_record("triage")).unwrap())
+                .unwrap();
+        let days = i64::try_from(record["time"].as_u64().unwrap() / 86_400).unwrap();
+        let (year, month, day) = multiverse::phase::calendar::civil_from_days(days);
+        let dated = format!("triage-{year:04}-{month:02}-{day:02}");
+        let path = PathBuf::from(record["path"].as_str().unwrap()).with_file_name(&dated);
+        record["name"] = dated.clone().into();
+        record["path"] = path.display().to_string().into();
+        for checkout in record["checkouts"].as_array_mut().unwrap() {
+            let folder = checkout["folder"].as_str().unwrap().to_owned();
+            checkout["path"] = path.join(folder).display().to_string().into();
+        }
+        let file = self.archive_record(&dated);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write(&file, &serde_json::to_string_pretty(&record).unwrap());
+        dated
+    }
+}
+
+#[test]
+fn a_stopped_rename_with_no_workspace_left_is_finished_by_mxv_repair_of_either_name() {
+    for older in [true, false] {
+        let setup = Setup::new();
+        let head = setup.head();
+        setup.archive();
+        setup.mark_retiring();
+        let dated = setup.plant_dated_copy();
+        for args in [&["list"][..], &["list", "--archived"][..]] {
+            let (exit, document) = setup.run(args);
+            assert_eq!(exit, 1, "{args:?}: {document}");
+            assert_eq!(document["total"], 2, "{args:?}: {document}");
+            for row in document["data"].as_array().unwrap() {
+                assert_eq!(
+                    row["problem"], "a repair stopped while it moved the archive to its dated name",
+                    "{document}"
+                );
+                assert_eq!(row["repair"], "mxv repair triage", "{document}");
+            }
+        }
+        for name in ["triage", dated.as_str()] {
+            let (exit, document) = setup.run(&["archive", "-w", name, "--yes"]);
+            assert_eq!(exit, 1, "{name}: {document}");
+            assert_eq!(
+                document["code"], "mxv::archive::rename_unfinished",
+                "{name}: {document}"
+            );
+        }
+
+        let given = if older { "triage" } else { dated.as_str() };
+        let (exit, document) = setup.run(&["repair", given, "--yes"]);
+        assert_eq!(exit, 0, "{given}: {document}");
+        assert_eq!(document["data"]["state"], "finished", "{document}");
+        assert_eq!(document["data"]["older"], "triage", "{document}");
+        assert_eq!(document["data"]["archive"], dated.as_str(), "{document}");
+        assert!(!setup.archive_record("triage").exists());
+
+        let (exit, document) = setup.run(&["list", "--archived"]);
+        assert_eq!(exit, 0, "{document}");
+        assert_eq!(document["total"], 1, "{document}");
+        assert_eq!(document["data"][0]["name"], dated.as_str());
+        let (exit, document) = setup.run(&["restore", &dated, "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        let restored = setup.root().join("mxv").join(&dated).join("app");
+        assert_eq!(git(&restored, &["rev-parse", "HEAD"]).trim(), head);
+    }
+}
+
 #[test]
 fn an_older_archive_whose_pins_are_gone_beside_a_newer_workspace_is_moved_aside() {
     let setup = Setup::new();
