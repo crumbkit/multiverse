@@ -101,11 +101,13 @@ workspace may need to act on.
   docker failure leaves the logs and the next sweep lists the id again.
   With `--delete-volumes` the listing also finds, by docker's workspace-id
   label, the volumes of an id that phase keeps nothing of, such as those
-  that a removal stopped after it forgot the id leaves, as rows of the kind
-  `volumes`. It counts only the volumes whose run-record label names this
-  state directory, so it never lists those of another state directory. A
-  docker that does not answer then fails the listing before anything is
-  deleted. A directory of the
+  that a removal stopped after it forgot the id leaves. Each is a
+  `run_record` row whose path is its first volume's name, and a row's
+  `volumes` names the volumes of its id. It counts only the volumes whose
+  run-record label names this state directory, so it never lists those of
+  another state directory, and it asks docker once for the whole listing.
+  A docker that does not answer then fails the listing before anything is
+  deleted, run files included. A directory of the
   archives without its own record is listed as kept and never deleted. A
   deletion that fails partway has the row state `partly_deleted`, and its
   `deleted` field names the paths that are gone. A row now carries `name`,
