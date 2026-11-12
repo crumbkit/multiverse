@@ -947,7 +947,13 @@ impl RemovalResult {
 
     /// Returns the result of a removal of `name` that had nothing to do,
     /// because no workspace has the name, or with `of_archive` no archive.
-    pub(crate) fn unchanged(name: &WorkspaceName, path: &Path, of_archive: bool) -> Self {
+    /// `planned` is set on a dry run, as for every result.
+    pub(crate) fn unchanged(
+        name: &WorkspaceName,
+        path: &Path,
+        of_archive: bool,
+        planned: bool,
+    ) -> Self {
         Self {
             state: LifecycleState::Unchanged,
             name: name.to_string(),
@@ -965,7 +971,7 @@ impl RemovalResult {
             manifest_deleted: None,
             pins: Vec::new(),
             of_archive,
-            planned: false,
+            planned,
         }
     }
 

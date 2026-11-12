@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
-use multiverse::health::{self, Broken, Problem, Repaired};
+use multiverse::health::{self, Broken, Problem, Rebuilt};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
     ARCHIVE_MAX_FILE, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
@@ -749,6 +749,10 @@ pub(crate) struct RestoreResult {
     /// stopped before it deleted, which an unchanged run deleted with the
     /// record, or would delete on a dry run. Empty otherwise.
     stale_pins: Vec<String>,
+    /// Whether an unchanged run found such an archive record, which may
+    /// have no pins.
+    #[serde(skip)]
+    stale: bool,
     /// The checkouts that the restore rebuilt.
     checkouts: Vec<RestoredCheckout>,
     /// What the restore put back into each checkout besides its commit, or
@@ -774,19 +778,29 @@ pub(crate) struct RestoreResult {
 impl fmt::Display for RestoreResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.state == LifecycleState::Unchanged {
-            if !self.stale_pins.is_empty() {
-                let deleted = if self.planned {
-                    "would delete"
-                } else {
-                    "deleted"
-                };
-                writeln!(
-                    formatter,
-                    "mxv {deleted} the archive record of {} that an earlier restore left, with its pins {}.",
-                    self.name,
-                    listed(&self.stale_pins)
-                )?;
+            for warning in &self.warnings {
+                writeln!(formatter, "Warning: {warning}.")?;
             }
+            // Without a stale archive, the workspace of the name may be one
+            // that `mxv new` made after the archive was deleted.
+            if !self.stale {
+                return writeln!(
+                    formatter,
+                    "A workspace named {} exists and no archive of it is left, so there is nothing to do.",
+                    self.name
+                );
+            }
+            let deleted = if self.planned {
+                "would delete"
+            } else {
+                "deleted"
+            };
+            writeln!(
+                formatter,
+                "mxv {deleted} the archive record of {} that an earlier restore left, with its pins {}.",
+                self.name,
+                listed(&self.stale_pins)
+            )?;
             return writeln!(
                 formatter,
                 "The workspace {} is already restored, so there is nothing to do.",
@@ -967,11 +981,12 @@ fn result_of(
 }
 
 /// Returns the result of an archive of a name whose archive `archive` has
-/// finished, which has nothing to do.
-fn unchanged(archive: &Archive) -> ArchiveResult {
+/// finished, which has nothing to do. `planned` is set on a dry run, as
+/// for every result.
+fn unchanged(archive: &Archive, planned: bool) -> ArchiveResult {
     ArchiveResult {
         state: LifecycleState::Unchanged,
-        ..result_of(archive, &[], Done::default(), false)
+        ..result_of(archive, &[], Done::default(), planned)
     }
 }
 
@@ -1144,7 +1159,7 @@ pub(crate) fn archive(
         .map_err(MxvFailure::from)?
     {
         ArchivePlanned::Ready(plan) => *plan,
-        ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive))),
+        ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, false))),
         ArchivePlanned::Refused(refusal) => return Err(archive_refusal(&name, refusal).into()),
         ArchivePlanned::Finish(mut archive) => {
             let mut done = Done {
@@ -1232,7 +1247,7 @@ fn dry_run(
         .map_err(MxvFailure::from)?
     {
         ArchivePlanned::Ready(plan) => *plan,
-        ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive))),
+        ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, true))),
         ArchivePlanned::Refused(refusal) => return Err(archive_refusal(name, refusal).into()),
         ArchivePlanned::Finish(archive) => {
             let done = Done {
@@ -1282,15 +1297,17 @@ fn stale_volumes(
 /// holds. When an earlier restore stopped before it deleted the archive
 /// `stale`, which has the workspace's stable id, the run asks and then
 /// deletes it with its pins under the workspace's lock, as `mxv repair`
-/// does, because the workspace holds every commit again.
+/// does, because the workspace holds every commit again. Under the lock
+/// it plans the restore again, and deletes the archive only when the plan
+/// still names the same one as stale.
 fn restored_already(
     output: &mut Run,
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     records: &Archives,
     name: &WorkspaceName,
+    args: &RestoreArgs,
     stale: Option<Box<Archive>>,
-    yes: Yes,
 ) -> Result<Prose<RestoreResult>, crumbkit::Error> {
     let pins = |archive: &Archive| -> Vec<String> {
         archive
@@ -1303,23 +1320,40 @@ fn restored_already(
         .find(name)
         .map_err(MxvFailure::from)?
         .map_or_else(|| PathBuf::from(name.as_str()), |workspace| workspace.path);
-    let mut stale_pins = Vec::new();
-    if let Some(archive) = stale {
-        stale_pins = pins(&archive);
+    let mut stale_pins = None;
+    let mut warnings = Vec::new();
+    if let Some(confirmed) = stale {
+        stale_pins = Some(pins(&confirmed));
         if !output.is_dry_run() {
             output.confirm(
-                yes,
+                args.yes,
                 &format!(
                     "The workspace {name} is already restored. Delete the archive record that an earlier restore left, with its pins?"
                 ),
             )?;
             let lock = processes::lock(environment, name)?;
             stale_pins = match workspaces
-                .repair(records, name, Mode::Change)
+                .plan_restore(records, name, args.force)
                 .map_err(MxvFailure::from)?
             {
-                Repaired::Deleted(removed) => pins(&removed.archive),
-                _ => Vec::new(),
+                RestorePlanned::Unchanged { stale: Some(again) } if again.id == confirmed.id => {
+                    let removed = workspaces
+                        .remove_archive(records, *again, Mode::Change)
+                        .map_err(MxvFailure::from)?;
+                    warnings = removed.warnings;
+                    Some(pins(&removed.archive))
+                }
+                // Another run deleted the archive after the question.
+                RestorePlanned::Unchanged { stale: None } => None,
+                RestorePlanned::Refused(refusal) => {
+                    return Err(restore_refusal(name, refusal).into());
+                }
+                RestorePlanned::Unchanged { .. } | RestorePlanned::Ready(_) => {
+                    return Err(MxvFailure::RepairChanged {
+                        name: name.to_string(),
+                    }
+                    .into());
+                }
             };
             drop(lock);
         }
@@ -1328,13 +1362,14 @@ fn restored_already(
         state: LifecycleState::Unchanged,
         name: name.to_string(),
         path: path.display().to_string(),
-        stale_pins,
+        stale: stale_pins.is_some(),
+        stale_pins: stale_pins.unwrap_or_default(),
         checkouts: Vec::new(),
         put_back: Vec::new(),
         lost: Vec::new(),
         ports: Vec::new(),
         missing_mirrors: Vec::new(),
-        warnings: Vec::new(),
+        warnings,
         planned: output.is_dry_run(),
     }))
 }
@@ -1363,8 +1398,8 @@ pub(crate) fn restore(
                 &workspaces,
                 &records,
                 &name,
+                args,
                 stale,
-                args.yes,
             );
         }
         RestorePlanned::Refused(refusal) => return Err(restore_refusal(&name, refusal).into()),
@@ -1379,6 +1414,7 @@ pub(crate) fn restore(
             name: name.to_string(),
             path: plan.archive.path.display().to_string(),
             stale_pins: Vec::new(),
+            stale: false,
             checkouts: restored_checkouts(&plan.archive),
             put_back: plan
                 .archive
@@ -1419,6 +1455,7 @@ pub(crate) fn restore(
         name: name.to_string(),
         path: archive.path.display().to_string(),
         stale_pins: Vec::new(),
+        stale: false,
         checkouts: restored_checkouts(&archive),
         put_back: restored
             .put_back
@@ -1539,7 +1576,12 @@ pub(crate) fn remove(
     let records = archives(environment)?;
     let Some(archive) = records.read(&name).map_err(MxvFailure::from)? else {
         let path = environment.root()?.path.join(name.as_str());
-        return Ok(Prose::new(RemovalResult::unchanged(&name, &path, true)));
+        return Ok(Prose::new(RemovalResult::unchanged(
+            &name,
+            &path,
+            true,
+            output.is_dry_run(),
+        )));
     };
     if archive.state == ArchiveState::Retiring {
         return Err(ArchiveFailure::Unfinished {
@@ -1590,7 +1632,9 @@ pub(crate) fn remove(
 }
 
 /// Returns the failure when a live workspace has the stable id of
-/// `archive`, because its docker volumes are then that workspace's.
+/// `archive`, because its docker volumes are then that workspace's. A
+/// workspace whose directories are partly gone counts too, so its volumes
+/// stay until `mxv remove` removes it.
 fn refuse_live_volumes(
     environment: &Environment,
     archive: &Archive,
@@ -1599,7 +1643,7 @@ fn refuse_live_volumes(
     let live = store.list().map_err(MxvFailure::from)?.workspaces;
     match live
         .iter()
-        .find(|workspace| workspace.id.is_some() && workspace.id == archive.workspace_id)
+        .find(|workspace| health::rebuilt(archive, workspace) != Rebuilt::Unrelated)
     {
         Some(workspace) => Err(ArchiveFailure::VolumesInUse {
             name: archive.name.to_string(),

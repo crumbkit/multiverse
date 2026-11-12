@@ -1574,6 +1574,34 @@ fn a_restore_stopped_after_its_record_has_nothing_to_do_but_delete_its_archive()
 }
 
 #[test]
+fn a_restore_stopped_after_its_record_refuses_once_a_checkout_directory_is_gone() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let archive = setup.archive();
+    stop_at("record");
+    let result = setup
+        .workspaces
+        .restore(&setup.archives, setup.restore_plan(), &setup.runs);
+    clear_hook();
+    assert!(result.is_err());
+    let workspace = setup.workspaces.find(&name()).unwrap().unwrap();
+    std::fs::remove_dir_all(&workspace.checkouts[0].path).unwrap();
+    assert!(matches!(
+        setup.restore_refusal(),
+        RestoreRefusal::NameTaken { record: true, .. }
+    ));
+    let repaired = setup
+        .workspaces
+        .repair(&setup.archives, &name(), Mode::Change)
+        .unwrap();
+    assert!(
+        matches!(repaired, crate::health::Repaired::Unchanged { .. }),
+        "{repaired:?}"
+    );
+    assert_eq!(setup.record().as_ref(), Some(&archive));
+}
+
+#[test]
 fn archiving_a_name_whose_archive_has_finished_has_nothing_to_do() {
     let setup = setup(Kind::Worktree);
     setup.create();

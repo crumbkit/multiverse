@@ -530,7 +530,7 @@ Effects: destructive, idempotent, closed-world.
 
 Rebuild an archived workspace at its archived commits.
 
-When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged.
+When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name\_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back.
 
 ### Arguments
 

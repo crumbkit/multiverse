@@ -10,6 +10,7 @@ use crate::archive::{
 };
 use crate::backend::{Backend, WipCommits};
 use crate::error::Error;
+use crate::health::{self, Rebuilt};
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::runs::Runs;
@@ -94,7 +95,9 @@ pub enum RestorePlanned {
     /// A workspace record holds the name and no archive needs restoring,
     /// so there is nothing to do. `stale` is the archive that an earlier
     /// restore rebuilt and stopped before it deleted, which has the
-    /// workspace's stable id; [`Workspaces::repair`] deletes it.
+    /// workspace's stable id while the workspace's directory and every
+    /// checkout's directory are there, as [`Rebuilt::Whole`] says;
+    /// [`Workspaces::remove_archive`] deletes it.
     Unchanged {
         /// The archive that an earlier restore left, or `None`.
         stale: Option<Box<Archive>>,
@@ -231,11 +234,11 @@ impl<B: Backend> Workspaces<B> {
         if archive.state != ArchiveState::Archived {
             return refused(RestoreRefusal::Unfinished(Box::new(archive)));
         }
-        // A restore writes the workspace's record, with the archive's
-        // stable id, before it deletes the archive.
+        // A workspace of the archive's id whose directories are partly
+        // gone refuses below, because the archive may hold the only copies
+        // of its files.
         if let Some(workspace) = &workspace
-            && workspace.id.is_some()
-            && workspace.id == archive.workspace_id
+            && health::rebuilt(&archive, workspace) == Rebuilt::Whole
         {
             return Ok(RestorePlanned::Unchanged {
                 stale: Some(Box::new(archive)),
