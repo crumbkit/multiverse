@@ -534,7 +534,13 @@ trailing space never matches another value.
 The `mxv.run-record` label holds an absolute path. A run of mxv with
 another `XDG_STATE_HOME` keeps the run record elsewhere, so the label of
 an object that an earlier run created then names a path that this run
-does not use. The label also shows the home directory's path, which
+does not use. phase treats such an object as foreign, as it does any
+container or volume whose run-record label differs from the path of its own
+run record by one character, or is missing. A second state directory that
+holds the same workspace id therefore neither lists, deletes, mounts nor
+replaces the first one's volume or container, and `up` halts with Docker's
+foreign cause. The sweep, `status` and the volume-owner helper match by
+workspace id alone. The label also shows the home directory's path, which
 usually holds the user's name, to anyone who can read the object's
 Docker labels.
 

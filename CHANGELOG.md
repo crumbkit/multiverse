@@ -159,6 +159,17 @@ workspace may need to act on.
 - `mxv archive --wip` is gone, because an archive keeps uncommitted work
   without a commit on the branch.
 
+### Fixed
+
+- phase treats a container or volume as its own only when its `mxv.run-record`
+  label names its own run record. A second state directory that holds the
+  same workspace id, such as a copy, no longer lists, deletes, mounts or
+  replaces the first one's volumes and containers; `mxv up` fails with
+  `mxv::docker::foreign_object` instead. A state directory reached by another
+  path than the one that made its objects (a moved `XDG_STATE_HOME`, or one
+  set through a symbolic link) now finds them foreign and keeps them; run mxv
+  with the old path to reach them again.
+
 ## [0.1.1] - 2026-11-11
 
 ### Fixed

@@ -34,12 +34,28 @@ fn key(name: &str) -> VolumeKey {
     VolumeKey::new(name).unwrap()
 }
 
+/// The run record that [`scope`] writes into its objects' labels.
+const RUN_RECORD: &str = "/state/phase/runs/record.json";
+
 /// Returns an object's labels as `docker inspect` prints them with
-/// `{{json .Labels}}`: the workspace id, app and `label` labels, where an
-/// empty value leaves its label out.
+/// `{{json .Labels}}`: the scope's run record, and the workspace id, app and
+/// `label` labels, where an empty value leaves its label out.
 fn printed_labels(workspace: &str, app: &str, label: &str, object: &str) -> String {
+    printed_labels_of(RUN_RECORD, workspace, app, label, object)
+}
+
+/// Like [`printed_labels`], for an object that names the run record
+/// `run_record`; an empty one leaves the label out.
+fn printed_labels_of(
+    run_record: &str,
+    workspace: &str,
+    app: &str,
+    label: &str,
+    object: &str,
+) -> String {
     let mut labels = serde_json::Map::new();
     for (key, value) in [
+        ("mxv.run-record", run_record),
         ("mxv.workspace-id", workspace),
         ("mxv.app", app),
         (label, object),
@@ -65,7 +81,7 @@ fn scope(app: &str) -> Scope {
     Scope::app(
         Identity {
             id: WorkspaceId::try_from(WORKSPACE.to_owned()).unwrap(),
-            run_record: "/state/phase/runs/record.json".into(),
+            run_record: RUN_RECORD.into(),
         },
         &AppName::try_from(app.to_owned()).unwrap(),
     )
@@ -92,6 +108,29 @@ fn a_scope_owns_only_objects_whose_labels_name_its_workspace_app_and_object() {
         "mxv.volume",
         "db"
     )));
+}
+
+#[test]
+fn a_scope_owns_no_container_or_volume_whose_run_record_label_names_another_state_directory() {
+    let scope = scope("reading-list");
+    for (label, object) in [("mxv.container", "db"), ("mxv.volume", "data")] {
+        let labels = |run_record: &str| {
+            printed_labels_of(run_record, WORKSPACE, "reading-list", label, object)
+        };
+        assert!(scope.owns(&labels(RUN_RECORD), label, object));
+        for foreign in [
+            "/other/state/phase/runs/record.json",
+            "/state/phase/runs/record.json ",
+            "/state/phase/runs/record.json/",
+            "state/phase/runs/record.json",
+            "",
+        ] {
+            assert!(
+                !scope.owns(&labels(foreign), label, object),
+                "{label}: {foreign:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -357,6 +396,13 @@ fn a_named_volume_handle_is_minted_only_for_labels_that_name_its_workspace_and_v
             "data",
         )),
         printed(container_labels(WORKSPACE, "reading-list", "data")),
+        printed(printed_labels_of(
+            "/other/state/phase/runs/record.json",
+            WORKSPACE,
+            "reading-list",
+            "mxv.volume",
+            "data",
+        )),
     ] {
         let minted = mint_volume(&scope, &name, &labels);
         assert!(
@@ -479,8 +525,15 @@ fn an_app_scope_labels_a_container_with_the_workspace_id_run_record_and_app_and_
 #[test]
 fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_of_its_workspace() {
     let scope = app_scope("api");
+    let run_record = format!("/state/runs/{WORKSPACE_ID}.json");
     let container = |workspace: &str, app: &str, process: &str| {
-        json!({"mxv.workspace-id": workspace, "mxv.app": app, "mxv.container": process}).to_string()
+        json!({
+            "mxv.workspace-id": workspace,
+            "mxv.run-record": run_record,
+            "mxv.app": app,
+            "mxv.container": process,
+        })
+        .to_string()
     };
     assert!(scope.owns(
         &container(WORKSPACE_ID, "api", "server"),
@@ -512,7 +565,12 @@ fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_o
         "mxv.container",
         "server"
     ));
-    let volume = json!({"mxv.workspace-id": WORKSPACE_ID, "mxv.volume": "data"}).to_string();
+    let volume = json!({
+        "mxv.workspace-id": WORKSPACE_ID,
+        "mxv.run-record": run_record,
+        "mxv.volume": "data",
+    })
+    .to_string();
     assert!(scope.owns(&volume, "mxv.volume", "data"));
     assert!(app_scope("web").owns(&volume, "mxv.volume", "data"));
     assert!(!scope.owns(&volume, "mxv.volume", "cache"));
