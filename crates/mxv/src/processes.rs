@@ -1001,7 +1001,7 @@ pub(crate) fn forget(
     Ok(held
         .into_iter()
         .map(|reason| {
-            format!("phase kept the run record of {name}, because {reason}, so stop that process yourself")
+            format!("the run record of {name} stays, because {reason}; stop that process yourself")
         })
         .collect())
 }

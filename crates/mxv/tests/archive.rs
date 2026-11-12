@@ -370,11 +370,200 @@ fn removing_an_archive_clears_it_and_clean_never_touches_it() {
 }
 
 #[test]
-fn removing_an_archive_refuses_a_name_that_no_archive_has() {
+fn removing_an_archive_of_a_name_that_no_archive_has_has_nothing_to_do() {
     let setup = Setup::new();
     let (exit, document) = setup.run(&["remove", "--archived", "other", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(
+        document["data"]["pins"].as_array().unwrap().is_empty(),
+        "{document}"
+    );
+}
+
+#[test]
+fn archiving_an_archived_name_has_nothing_to_do() {
+    let setup = Setup::new();
+    let archived = setup.archive();
+    assert_eq!(archived["data"]["state"], "done", "{archived}");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(
+        document["data"]["pins"], archived["data"]["pins"],
+        "{document}"
+    );
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    let output = setup
+        .command(&setup.root())
+        .args(["archive", "-w", "triage", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "The workspace triage is already archived, so there is nothing to do. `mxv restore triage` brings it back."
+    );
+    // The archive is untouched, so a restore still brings it back.
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+}
+
+#[test]
+fn restoring_a_live_workspace_whose_archive_is_gone_has_nothing_to_do() {
+    let setup = Setup::new();
+    setup.archive();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(
+        document["data"]["path"],
+        setup.workspace().display().to_string(),
+        "{document}"
+    );
+    assert!(
+        document["data"]["stale_pins"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{document}"
+    );
+    let output = setup
+        .command(&setup.root())
+        .args(["restore", "triage", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "A workspace named triage exists and no archive of it is left, so there is nothing to do."
+    );
+}
+
+impl Setup {
+    /// Restores the archive `triage` and writes its record and its first
+    /// pin back, as a restore that stopped after it wrote the workspace's
+    /// record and before it deleted the pins leaves them, and returns the
+    /// record's path.
+    fn stop_restore_before_its_deletion(&self) -> PathBuf {
+        self.archive();
+        let record = self.archive_record("triage");
+        let saved = fs::read_to_string(&record).unwrap();
+        let (exit, document) = self.run(&["restore", "triage", "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        write(&record, &saved);
+        let value: Value = serde_json::from_str(&saved).unwrap();
+        let checkout = &value["checkouts"][0];
+        let mirror = PathBuf::from(checkout["mirror"].as_str().unwrap());
+        let (pin, commit) = (checkout["pin"].as_str(), checkout["commit"].as_str());
+        git(&mirror, &["update-ref", pin.unwrap(), commit.unwrap()]);
+        record
+    }
+
+    /// Returns the pin of the archive `triage`'s first checkout, and the
+    /// commit that the repository holding it resolves it to, or `None`.
+    fn first_pin(&self) -> (String, Option<String>) {
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(self.archive_record("triage")).unwrap())
+                .unwrap();
+        let checkout = &record["checkouts"][0];
+        let mirror = PathBuf::from(checkout["mirror"].as_str().unwrap());
+        let pin = checkout["pin"].as_str().unwrap().to_owned();
+        let commit = git(&mirror, &["for-each-ref", "--format=%(objectname)", &pin])
+            .trim()
+            .to_owned();
+        (pin, Some(commit).filter(|commit| !commit.is_empty()))
+    }
+}
+
+#[test]
+fn a_dry_run_of_a_stopped_restore_lists_the_stale_pins_and_keeps_them() {
+    let setup = Setup::new();
+    let record = setup.stop_restore_before_its_deletion();
+    let (pin, commit) = setup.first_pin();
+    assert!(commit.is_some(), "the pin {pin} resolves before the run");
+    let (exit, document) = setup.run(&["restore", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(
+        document["data"]["stale_pins"],
+        serde_json::json!([pin]),
+        "{document}"
+    );
+    assert!(record.exists(), "{document}");
+    assert_eq!(setup.first_pin().1, commit, "{document}");
+}
+
+#[test]
+fn a_stopped_restore_whose_workspace_directory_is_gone_keeps_its_archive() {
+    let setup = Setup::new();
+    let record = setup.stop_restore_before_its_deletion();
+    let (pin, commit) = setup.first_pin();
+    fs::remove_dir_all(setup.workspace()).unwrap();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
     assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::archive::not_found");
+    assert_eq!(document["code"], "mxv::restore::name_taken", "{document}");
+    assert!(record.exists(), "{document}");
+    // `mxv repair` keeps it too, because the archive may hold the only
+    // copies of the workspace's files.
+    let (_, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert!(record.exists(), "{document}");
+    assert_eq!(setup.first_pin(), (pin, commit), "{document}");
+    // Removing what is left of the workspace lets the restore go ahead.
+    let (exit, document) = setup.run(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+    assert!(setup.checkout().is_dir(), "{document}");
+}
+
+#[test]
+fn a_restore_refuses_a_name_whose_workspace_and_archive_have_no_stable_id() {
+    let setup = Setup::new();
+    let record = setup.stop_restore_before_its_deletion();
+    let workspace = setup.root().join("state/mxv/workspaces/triage.json");
+    for (path, key) in [(&record, "workspace_id"), (&workspace, "id")] {
+        let mut value: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert!(
+            value.as_object_mut().unwrap().remove(key).is_some(),
+            "{key}"
+        );
+        write(path, &serde_json::to_string_pretty(&value).unwrap());
+    }
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::restore::name_taken", "{document}");
+    assert!(record.exists(), "{document}");
+}
+
+#[test]
+fn a_restore_stopped_before_it_deleted_its_archive_is_finished_by_restoring_again() {
+    let setup = Setup::new();
+    setup.archive();
+    let record = setup.archive_record("triage");
+    let saved = fs::read_to_string(&record).unwrap();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    // The restore rebuilt the workspace with the archive's stable id; put
+    // back the record it deleted, as a restore stopped just before that
+    // deletion leaves it.
+    write(&record, &saved);
+
+    let (exit, document) = setup.run(&["restore", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(record.exists(), "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    let pin = document["data"]["stale_pins"][0].as_str().unwrap();
+    assert!(pin.starts_with("refs/mxv/archives/"), "{document}");
+    assert!(!record.exists(), "{document}");
+    assert!(setup.workspace().join("app").is_dir(), "{document}");
 }
 
 #[test]

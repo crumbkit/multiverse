@@ -328,7 +328,7 @@ impl<B: Backend> Workspaces<B> {
         )? {
             ArchivePlanned::Ready(plan) => *plan,
             ArchivePlanned::Refused(refusal) => return Ok(ArchiveOutcome::Refused(refusal)),
-            ArchivePlanned::Finish(_) => {
+            ArchivePlanned::Finish(_) | ArchivePlanned::Unchanged(_) => {
                 return Ok(ArchiveOutcome::Refused(ArchiveRefusal::NotFound));
             }
         };

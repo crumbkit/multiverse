@@ -1,4 +1,6 @@
-Archive a workspace, so restore can rebuild it at the same commits
+Archive a workspace, so restore can rebuild it at the same commits.
+
+When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
 
 Usage: mxv archive [OPTIONS]
 
@@ -31,4 +33,4 @@ Examples:
   mxv archive -w reading-list --dry-run
           Print what archiving the workspace reading-list would do
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.

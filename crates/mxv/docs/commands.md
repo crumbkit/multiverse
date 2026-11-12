@@ -505,7 +505,9 @@ Writes: applies all items or none.
 
 ## `mxv archive`
 
-Archive a workspace, so restore can rebuild it at the same commits
+Archive a workspace, so restore can rebuild it at the same commits.
+
+When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
 
 ### Arguments
 
@@ -523,11 +525,13 @@ Print what archiving the workspace reading-list would do.
 mxv archive -w reading-list --dry-run
 ```
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv restore`
 
-Rebuild an archived workspace at its archived commits
+Rebuild an archived workspace at its archived commits.
+
+When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name\_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
 
 ### Arguments
 
@@ -544,7 +548,7 @@ Print what restoring the archived workspace sample would do.
 mxv restore sample --dry-run
 ```
 
-Effects: additive, not idempotent, open-world.
+Effects: additive, idempotent, open-world.
 
 ## `mxv repair`
 
@@ -552,7 +556,7 @@ Repair the broken records of one name that `mxv list` names `mxv repair NAME` fo
 
 An archive that stopped before it finished, and whose pins are gone, moves aside to the hidden directory .NAME.\<ID\> beside the other archives, which `mxv list --archived` does not list, and its private tar of ignored files stays at $XDG\_DATA\_HOME/mxv/archives/\<ID\>/ignored.tar. They stay until `mxv repair --orphans --delete-aside` deletes them; the result names both paths. An older archive that stopped before it finished, beside a newer workspace of the same name, takes the name NAME-YYYY-MM-DD, from the day the archive started, or that name with -2 and on when it is taken, and mxv finishes it, so `mxv restore` of the dated name brings it back. When its pins are gone, it moves aside instead. When an earlier repair stopped while it moved the archive, `mxv list` names `mxv repair` of the older name on both records, a repair of either name finishes the move, and `mxv archive -w` of either name refuses with mxv::archive::rename\_unfinished. An archive beside the workspace that a restore of it rebuilt, because the restore stopped before it deleted the archive, is deleted with its pins. mxv asks before each repair that changes something, and --yes repairs without asking. When the records change between the question and the repair, so that the repair would differ from the one confirmed, mxv repairs nothing and fails with mxv::repair::changed. A name with nothing broken, or with a problem that another command repairs, changes nothing, and the result names that command. Each repair can run again after it stops partway.
 
-With --orphans and no NAME, mxv lists, with its size, each item that no record names. The run files of a name that no workspace has, and phase's run record and logs of a workspace id that no workspace or archive record holds, are mxv's derived state, so mxv deletes them after you confirm. Before it deletes a run record, phase's sweep stops the processes and removes the containers, networks and run volumes that it names; a process that phase cannot stop keeps the record and the logs, and its row names the process. The docker volumes that hold the data of such an id stay unless you pass --delete-volumes, which deletes them before the logs and also lists, by docker's workspace-id label, the volumes of this state directory whose id phase keeps nothing of. Each archive that a repair moved aside, and each directory of ignored files at $XDG\_DATA\_HOME/mxv/archives/\<ID\> whose archive no record names, such as the one of a moved-aside archive whose directory you deleted by hand, holds the only copies of its files, so mxv deletes them only with --delete-aside, and --yes only skips the question. A directory of the archives without its own record, such as a hidden one without the record of the archive that its name names, is listed as kept and never deleted. The listing and --dry-run take no lock and write nothing. When a workspace or archive record cannot be read, a moved-aside one included, mxv lists nothing, deletes nothing and fails with that record's error, because the record may name what looks orphaned; move the record aside and run the command again. Before each deletion, mxv lists again and deletes the item only when the listing still holds it. An item whose deletion fails has the state partly\_deleted, its row names the paths that are gone and gives the error, mxv goes on with the next item, prints every row, and then exits with the code of the first error.
+With --orphans and no NAME, mxv lists, with its size, each item that no record names. The run files of a name that no workspace has, and phase's run record and logs of a workspace id that no workspace or archive record holds, are mxv's derived state, so mxv deletes them after you confirm. Before it deletes a run record, phase's sweep stops the processes and removes the containers, networks and run volumes that it names; a process that phase cannot stop keeps the record and the logs, and its row names the process. The docker volumes that hold the data of such an id stay unless you pass --delete-volumes, which deletes them before the logs and also lists, by docker's workspace-id label, the volumes of this state directory whose id phase keeps nothing of. With --delete-volumes and a docker that does not answer, mxv refuses the whole sweep and deletes nothing, run files included. Each archive that a repair moved aside, and each directory of ignored files at $XDG\_DATA\_HOME/mxv/archives/\<ID\> whose archive no record names, such as the one of a moved-aside archive whose directory you deleted by hand, holds the only copies of its files, so mxv deletes them only with --delete-aside, and --yes only skips the question. A directory of the archives without its own record, such as a hidden one without the record of the archive that its name names, is listed as kept and never deleted. The listing and --dry-run take no lock and write nothing. When a workspace or archive record cannot be read, a moved-aside one included, mxv lists nothing, deletes nothing and fails with that record's error, because the record may name what looks orphaned; move the record aside and run the command again. Before each deletion, mxv lists again and deletes the item only when the listing still holds it. An item whose deletion fails has the state partly\_deleted, its row names the paths that are gone and gives the error, mxv goes on with the next item, prints every row, and then exits with the code of the first error.
 
 ### Arguments
 
@@ -581,7 +585,9 @@ Effects: destructive, idempotent, closed-world.
 
 ## `mxv remove`
 
-Remove a workspace's checkouts, its merged branches, its directory and its record
+Remove a workspace's checkouts, its merged branches, its directory and its record.
+
+When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
 
 ### Arguments
 
@@ -601,7 +607,7 @@ Print what removing the workspace reading-list would delete.
 mxv remove reading-list --dry-run
 ```
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv clean`
 

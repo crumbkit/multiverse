@@ -87,17 +87,20 @@ pub fn app_volume_labels(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) ->
 }
 
 /// Returns each workspace id that docker labels a data volume of `phase`
-/// with, in id order. A volume counts as `phase`'s when its run-record
-/// label names `phase`'s run record of its id, so the volumes that another
-/// state directory's phase made, which may share the docker daemon, are
-/// left out.
+/// with, and the names of those volumes, from one `docker volume ls`, in
+/// id order and each id's names in name order. A volume counts as
+/// `phase`'s when its run-record label names `phase`'s run record of its
+/// id, so the volumes that another state directory's phase made, which may
+/// share the docker daemon, are left out. [`app_volumes`] checks each
+/// volume again before it is deleted.
 ///
 /// # Errors
 ///
 /// Returns the errors of `docker version` and [`ContainerError::Failed`].
-pub fn labelled_workspace_ids(phase: &Phase) -> Result<Vec<WorkspaceId>, ContainerError> {
-    let format =
-        format!("{{{{.Label \"{WORKSPACE_ID_LABEL}\"}}}}\t{{{{.Label \"{RUN_RECORD_LABEL}\"}}}}");
+pub fn labelled_volumes(phase: &Phase) -> Result<Vec<(WorkspaceId, Vec<String>)>, ContainerError> {
+    let format = format!(
+        "{{{{.Name}}}}\t{{{{.Label \"{WORKSPACE_ID_LABEL}\"}}}}\t{{{{.Label \"{RUN_RECORD_LABEL}\"}}}}"
+    );
     let listed = quick(
         [
             "volume",
@@ -110,15 +113,28 @@ pub fn labelled_workspace_ids(phase: &Phase) -> Result<Vec<WorkspaceId>, Contain
         "volume ls",
     )?
     .checked("volume ls", None)?;
-    let ids: std::collections::BTreeSet<WorkspaceId> = listed
-        .lines()
-        .filter_map(|line| {
-            let (id, run_record) = line.split_once('\t')?;
-            let id = WorkspaceId::try_from(id.to_owned()).ok()?;
-            (Path::new(run_record) == phase.run_record(&id)).then_some(id)
+    let mut found: BTreeMap<WorkspaceId, Vec<String>> = BTreeMap::new();
+    for line in listed.lines() {
+        let mut fields = line.splitn(3, '\t');
+        let (Some(name), Some(id), Some(run_record)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Ok(id) = WorkspaceId::try_from(id.to_owned()) else {
+            continue;
+        };
+        if Path::new(run_record) == phase.run_record(&id) {
+            found.entry(id).or_default().push(name.to_owned());
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(id, mut names)| {
+            names.sort();
+            (id, names)
         })
-        .collect();
-    Ok(ids.into_iter().collect())
+        .collect())
 }
 
 /// Returns the data volumes of the apps of the workspace whose stable id

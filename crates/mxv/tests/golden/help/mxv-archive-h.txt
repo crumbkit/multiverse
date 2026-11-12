@@ -13,5 +13,5 @@ Options:
 Examples:
   mxv archive -w reading-list --dry-run
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 Global flags: --json, --no-input. `mxv archive --help` describes them.

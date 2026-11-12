@@ -89,8 +89,9 @@ pub enum Problem {
     /// finishes the move.
     RenameUnfinished,
     /// The archive is [`ArchiveState::Archived`], and the workspace of its
-    /// name has its stable id, so a restore rebuilt the workspace and
-    /// stopped before it deleted the archive.
+    /// name has its stable id with its directory and every checkout's
+    /// directory there, as [`Rebuilt::Whole`] says, so a restore rebuilt
+    /// the workspace and stopped before it deleted the archive.
     RestoreUnfinished,
     /// The workspace has checkouts, and every checkout's directory is gone,
     /// while the directory that holds the workspace's directory is there.
@@ -211,15 +212,55 @@ fn archive_problem<B: Backend>(
         } else {
             Problem::ArchiveUnfinished
         }),
-        // An archive and a workspace that both lack a stable id, as an
-        // older multiverse wrote them, may be unrelated, so only a shared
-        // id shows that the restore rebuilt this workspace.
+        // A workspace of the archive's id whose directories are partly
+        // gone keeps its row from `checkouts_gone`, and the archive stays,
+        // because it may hold the only copies of the workspace's files.
         (ArchiveState::Archived, Some(workspace))
-            if archive.workspace_id.is_some() && workspace.id == archive.workspace_id =>
+            if rebuilt(archive, workspace) == Rebuilt::Whole =>
         {
             Some(Problem::RestoreUnfinished)
         }
         (ArchiveState::Archived, _) => None,
+    }
+}
+
+/// How a workspace record stands to an archive: whether a restore rebuilt
+/// the workspace from the archive, and whether all of it is still there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rebuilt {
+    /// The workspace is another one: the two stable ids differ, or the
+    /// records lack one, as an older multiverse wrote them, so they may be
+    /// unrelated.
+    Unrelated,
+    /// The workspace has the archive's stable id, and its directory and
+    /// every checkout's directory are there, so a restore rebuilt it and it
+    /// holds every commit again. The archive is then stale.
+    Whole,
+    /// The workspace has the archive's stable id, and its directory or a
+    /// checkout's directory is gone or cannot be read, so the archive may
+    /// hold the only copies of the workspace's files.
+    Partly,
+}
+
+/// Returns how `workspace` stands to `archive`. A restore writes the
+/// workspace's record, with the archive's stable id, before it deletes
+/// the archive, so only this rule decides whether that archive is stale.
+/// `Workspaces::plan_restore`, [`classify`] and the volume guard of
+/// `mxv remove --archived` all call it.
+#[must_use]
+pub fn rebuilt(archive: &Archive, workspace: &Workspace) -> Rebuilt {
+    if archive.workspace_id.is_none() || workspace.id != archive.workspace_id {
+        return Rebuilt::Unrelated;
+    }
+    let whole = workspace.path.is_dir()
+        && workspace
+            .checkouts
+            .iter()
+            .all(|checkout| checkout.path.is_dir());
+    if whole {
+        Rebuilt::Whole
+    } else {
+        Rebuilt::Partly
     }
 }
 

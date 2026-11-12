@@ -20,6 +20,27 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv archive`, `mxv restore` and `mxv remove` succeed with nothing to do
+  when their goal already holds, and their documents gain a `state` of
+  `done`, `planned` or `unchanged`. `mxv archive -w NAME` of a name that
+  only a finished archive holds lists the archive's pins and names
+  `mxv restore NAME`, where it refused with `mxv::archive::name_taken`.
+  `mxv restore NAME` of a name that a workspace holds and no archive needs
+  restoring exits 0. When an earlier restore stopped after it rebuilt the
+  workspace and before it deleted the archive, so the archive has the
+  workspace's stable id, `mxv restore` asks and then deletes the archive
+  with its pins, which its new `stale_pins` field names, where it refused
+  with `mxv::restore::name_taken`. It still refuses when the workspace's
+  directory or a checkout's directory is gone, because the archive may
+  then hold the only copies of the workspace's files, and `mxv repair`
+  keeps such an archive too. When the records change after that question,
+  `mxv restore` deletes nothing and fails with the new code
+  `mxv::restore::changed`. `mxv remove NAME` of a name that no
+  workspace has, and `mxv remove --archived NAME` of a name that no archive
+  has, exit 0, where they failed with `mxv::workspace::not_found` and
+  `mxv::archive::not_found`. Their `Effects:` lines now say idempotent. The
+  library's `ArchivePlanned::Unchanged` and `RestorePlanned::Unchanged`
+  report these cases.
 - `mxv archive` keeps a checkout's git state instead of refusing it. It
   keeps the staged and unstaged changes and the untracked files as two
   commits that only its pins name, so the branch and the index never move,
@@ -114,11 +135,13 @@ workspace may need to act on.
   docker failure leaves the logs and the next sweep lists the id again.
   With `--delete-volumes` the listing also finds, by docker's workspace-id
   label, the volumes of an id that phase keeps nothing of, such as those
-  that a removal stopped after it forgot the id leaves, as rows of the kind
-  `volumes`. It counts only the volumes whose run-record label names this
-  state directory, so it never lists those of another state directory. A
-  docker that does not answer then fails the listing before anything is
-  deleted. A directory of the
+  that a removal stopped after it forgot the id leaves. Each is a
+  `run_record` row whose path is its first volume's name, and a row's
+  `volumes` names the volumes of its id. It counts only the volumes whose
+  run-record label names this state directory, so it never lists those of
+  another state directory, and it asks docker once for the whole listing.
+  A docker that does not answer then fails the listing before anything is
+  deleted, run files included. A directory of the
   archives without its own record is listed as kept and never deleted. A
   deletion that fails partway has the row state `partly_deleted`, and its
   `deleted` field names the paths that are gone. A row now carries `name`,

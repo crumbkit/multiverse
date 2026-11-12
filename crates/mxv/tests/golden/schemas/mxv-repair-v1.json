@@ -575,7 +575,7 @@
           ]
         },
         "id": {
-          "description": "The workspace id of a run record or of volumes, or null.",
+          "description": "The workspace id of a run record, or null.",
           "type": [
             "string",
             "null"
@@ -606,7 +606,7 @@
           }
         },
         "volumes": {
-          "description": "The docker volumes of a `volumes` item, or those that\n`--delete-volumes` deleted with a run record.",
+          "description": "The docker volumes of a run record that `--delete-volumes` lists,\nor those that it deleted.",
           "type": "array",
           "items": {
             "type": "string"
@@ -634,14 +634,9 @@
           "const": "run_files"
         },
         {
-          "description": "phase's run record and logs of a workspace id that no record holds.",
+          "description": "phase's run record and logs of a workspace id that no record holds,\nand with --delete-volumes its docker data volumes.",
           "type": "string",
           "const": "run_record"
-        },
-        {
-          "description": "The docker data volumes of a workspace id that no record holds and\nphase keeps nothing of, which only --delete-volumes lists.",
-          "type": "string",
-          "const": "volumes"
         },
         {
           "description": "An archive that `mxv repair NAME` moved aside, with its ignored\nfiles.",

@@ -584,14 +584,17 @@ fn stop_a_removal_before_its_volumes(
     (id, volume)
 }
 
-/// Returns the row of `mxv repair --orphans` in `document` whose kind is
-/// `kind`, or `None`.
-fn orphan_row<'a>(document: &'a Value, kind: &str) -> Option<&'a Value> {
+/// Returns the rows of `mxv repair --orphans` in `document`.
+fn orphan_rows(document: &Value) -> &Vec<Value> {
     document["data"]["orphans"]
         .as_array()
         .unwrap_or_else(|| panic!("{document}"))
-        .iter()
-        .find(|row| row["kind"] == kind)
+}
+
+/// Returns the row of `mxv repair --orphans` in `document` whose kind is
+/// `kind`, or `None`.
+fn orphan_row<'a>(document: &'a Value, kind: &str) -> Option<&'a Value> {
+    orphan_rows(document).iter().find(|row| row["kind"] == kind)
 }
 
 #[test]
@@ -611,14 +614,15 @@ fn delete_volumes_lists_and_deletes_the_volumes_of_an_id_that_nothing_else_names
     // Without --delete-volumes the sweep asks docker nothing.
     let (exit, document) = setup.json(&["repair", "--orphans", "--dry-run"]);
     assert_eq!(exit, 0, "{document}");
-    assert!(orphan_row(&document, "volumes").is_none(), "{document}");
+    assert!(orphan_rows(&document).is_empty(), "{document}");
 
     let (exit, document) = setup.json(&["repair", "--orphans", "--delete-volumes", "--yes"]);
     assert_eq!(exit, 0, "{document}");
-    let rows = document["data"]["orphans"].as_array().unwrap();
+    let rows = orphan_rows(&document);
     assert_eq!(rows.len(), 1, "{document}");
     let row = &rows[0];
-    assert_eq!(row["kind"], "volumes", "{document}");
+    assert_eq!(row["kind"], "run_record", "{document}");
+    assert_eq!(row["path"], volume.name.as_str(), "{document}");
     assert_eq!(row["id"], id.as_str(), "{document}");
     assert_eq!(row["state"], "deleted", "{document}");
     assert_eq!(row["volumes"][0], volume.name.as_str(), "{document}");
@@ -642,12 +646,52 @@ fn delete_volumes_deletes_the_volumes_of_a_run_record_before_its_logs() {
 
     let (exit, document) = setup.json(&["repair", "--orphans", "--delete-volumes", "--yes"]);
     assert_eq!(exit, 0, "{document}");
-    let row = orphan_row(&document, "run_record").unwrap_or_else(|| panic!("{document}"));
+    let rows = orphan_rows(&document);
+    assert_eq!(rows.len(), 1, "{document}");
+    let row = &rows[0];
+    assert_eq!(row["kind"], "run_record", "{document}");
     assert_eq!(row["state"], "deleted", "{document}");
     assert_eq!(row["volumes"][0], volume.name.as_str(), "{document}");
-    assert!(orphan_row(&document, "volumes").is_none(), "{document}");
     let (kept, _) = docker(&["volume", "inspect", &volume.name]);
     assert!(!kept, "{document}");
+    assert!(!logs.exists(), "{document}");
+}
+
+#[test]
+fn delete_volumes_keeps_the_logs_when_docker_refuses_to_delete_a_volume() {
+    if !docker_runs("delete_volumes_keeps_the_logs_when_docker_refuses") {
+        return;
+    }
+    let name = "mxvtest-orphan-in-use";
+    let setup = Setup::new(name, &web());
+    let (id, volume) = stop_a_removal_before_its_volumes(&setup, name, true);
+    let logs = setup.root().join("state/mxv/phase/logs").join(&id);
+    // A container that mxv did not start mounts the volume, so docker
+    // refuses to delete it after phase has no run record of the id.
+    let user = Foreign {
+        kind: "container",
+        name: format!("mxvtest-in-use-{id}"),
+    };
+    let mount = format!("{}:/data", volume.name);
+    let (started, _) = docker(&[
+        "run", "-d", "--name", &user.name, "-v", &mount, IMAGE, "sleep", "60",
+    ]);
+    assert!(started);
+
+    let (exit, document) = setup.json(&["repair", "--orphans", "--delete-volumes", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    let row = orphan_row(&document, "run_record").unwrap_or_else(|| panic!("{document}"));
+    assert_eq!(row["state"], "partly_deleted", "{document}");
+    assert_eq!(row["deleted"], serde_json::json!([]), "{document}");
+    assert!(logs.join("web.log").exists(), "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &volume.name]);
+    assert!(kept, "{document}");
+
+    drop(user);
+    let (exit, document) = setup.json(&["repair", "--orphans", "--delete-volumes", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = orphan_row(&document, "run_record").unwrap_or_else(|| panic!("{document}"));
+    assert_eq!(row["state"], "deleted", "{document}");
     assert!(!logs.exists(), "{document}");
 }
 

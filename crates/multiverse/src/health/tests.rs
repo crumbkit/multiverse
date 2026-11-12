@@ -309,6 +309,26 @@ fn a_finished_archive_beside_the_workspace_it_holds_is_a_restore_that_stopped() 
 }
 
 #[test]
+fn a_finished_archive_beside_its_workspace_whose_directory_is_gone_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = workspace(dir.path(), "docs", '1', &["app"]);
+    fs::remove_dir_all(&docs.path).unwrap();
+    let health = classify(
+        &records(vec![docs], vec![]),
+        &archives(vec![archive("docs", '1', ArchiveState::Archived)], vec![]),
+    );
+    assert!(health.archives.is_empty(), "{health:?}");
+    assert_eq!(
+        health.workspaces,
+        [Broken {
+            name: "docs".to_owned(),
+            problem: Problem::CheckoutsGone,
+            repair: Some(Repair::Remove(name("docs"))),
+        }]
+    );
+}
+
+#[test]
 fn a_finished_archive_and_a_workspace_without_ids_are_not_a_restore_that_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let mut docs = workspace(dir.path(), "docs", '1', &["app"]);

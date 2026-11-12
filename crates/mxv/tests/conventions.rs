@@ -72,12 +72,13 @@ use mxv::{
     PROXY_START_FAILED, PROXY_TRUST_FAILED, PROXY_TRUST_NEEDS_TERMINAL, RECORD_CORRUPT,
     RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPAIR_CHANGED, REPAIR_NAMES_TAKEN,
     REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
-    REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED,
-    RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
-    RESTORE_UNFINISHED, RUN_CODES, TASK_AMBIGUOUS, TASK_UNKNOWN, TEMPLATE_AMBIGUOUS,
-    TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED,
-    WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT,
-    WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
+    REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED, RESTORE_COMMIT_MISSING,
+    RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND,
+    RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED, RUN_CODES, TASK_AMBIGUOUS, TASK_UNKNOWN,
+    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY,
+    WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
 
@@ -97,6 +98,9 @@ const ARCHIVE_STATE: &str = "Only a real workspace or archive in that state prov
 
 /// Why the start probes cannot provoke `mxv::repair::changed`.
 const REPAIR_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv repair` and its repair provokes it, and no test runs two commands at that moment.";
+
+/// Why the start probes cannot provoke `mxv::restore::changed`.
+const RESTORE_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv restore`, which offers to delete the archive that an earlier restore left, and the deletion provokes it, and no test runs two commands at that moment; the unit tests of mxv's failures check its message and its recovery.";
 
 /// Why the start probes cannot provoke `mxv::repair::names_taken`.
 const REPAIR_NAMES: &str = "Only an older archive beside a newer workspace whose 99 dated names are all taken provokes it, and the fixture holds no such archive; multiverse's health tests check the names that the repair tries.";
@@ -473,6 +477,7 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(&ARCHIVE_PINS_GONE, ARCHIVE_STATE),
     Unprovoked::new(&ARCHIVE_RENAME_UNFINISHED, ARCHIVE_STATE),
     Unprovoked::new(&REPAIR_CHANGED, REPAIR_RACE),
+    Unprovoked::new(&RESTORE_CHANGED, RESTORE_RACE),
     Unprovoked::new(&REPAIR_NAMES_TAKEN, REPAIR_NAMES),
     Unprovoked::new(&ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_STATE),
     Unprovoked::new(&ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_STATE),
