@@ -1703,7 +1703,7 @@ fn run_files_left_by_a_stopped_remove_are_forgotten_by_mxv_repair_orphans() {
 }
 
 #[test]
-fn delete_volumes_names_the_deleted_logs_when_docker_does_not_answer() {
+fn delete_volumes_keeps_the_logs_and_deletes_nothing_when_docker_does_not_answer() {
     let setup = Setup::new();
     let id = "0123456789abcdef0123456789abcdef";
     let logs = setup.root().join("state/mxv/phase/logs").join(id);
@@ -1718,14 +1718,73 @@ fn delete_volumes_names_the_deleted_logs_when_docker_does_not_answer() {
         .unwrap();
     let document: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(1), "{document}");
+    // The listing asks docker for the volumes of ids that no record holds,
+    // so it fails before the sweep deletes anything, and the logs keep the
+    // id listed for the next sweep.
+    let code = document["code"].as_str().unwrap();
+    assert!(code.starts_with("mxv::docker::"), "{document}");
+    assert!(logs.join("web.log").exists(), "{document}");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_row(&document, "run_record")["id"], id, "{document}");
+}
+
+#[test]
+fn a_run_record_that_phase_keeps_is_kept_by_orphans_with_its_reason() {
+    let setup = Setup::new();
+    let id = setup.start_process();
+    let pid = fs::read_to_string(setup.checkout().join("pid"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let record = setup
+        .root()
+        .join("state/mxv/phase/runs")
+        .join(format!("{id}.json"));
+    let logs = setup.root().join("state/mxv/phase/logs").join(&id);
+    let original = fs::read_to_string(&record).unwrap();
+    // phase never signals group 1, so it cannot stop an entry that names
+    // it and keeps the entry in its record.
+    let mut planted: Value = serde_json::from_str(&original).unwrap();
+    set_groups(&mut planted, 1);
+    write(&record, &serde_json::to_string_pretty(&planted).unwrap());
+    fs::remove_file(setup.workspace_record()).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
     let row = orphan_row(&document, "run_record");
-    assert_eq!(row["state"], "partly_deleted", "{document}");
-    assert_eq!(
-        row["deleted"],
-        serde_json::json!([logs.display().to_string()]),
+    assert_eq!(row["state"], "kept", "{document}");
+    let reasons = row["reasons"].to_string();
+    assert!(reasons.contains("phase cannot tell whether"), "{document}");
+    assert!(record.exists() && logs.exists(), "{document}");
+    assert!(runs(&pid), "{document}");
+
+    // The person stops the process, here by putting the record back so
+    // that phase can, and the next sweep deletes the record and the logs.
+    write(&record, &original);
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_row(&document, "run_record")["state"], "deleted");
+    assert!(
+        !runs(&pid) && !record.exists() && !logs.exists(),
         "{document}"
     );
-    let code = document["failures"][0]["code"].as_str().unwrap();
-    assert!(code.starts_with("mxv::docker::"), "{document}");
-    assert!(!logs.exists(), "{document}");
+}
+
+/// Sets every `group` field below `value` to `group`.
+fn set_groups(value: &mut Value, group: u64) {
+    match value {
+        Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                if key == "group" && field.is_number() {
+                    *field = Value::from(group);
+                } else {
+                    set_groups(field, group);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|item| set_groups(item, group)),
+        _ => {}
+    }
 }

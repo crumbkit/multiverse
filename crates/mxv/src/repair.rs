@@ -161,6 +161,9 @@ pub(crate) enum OrphanRowKind {
     RunFiles,
     /// phase's run record and logs of a workspace id that no record holds.
     RunRecord,
+    /// The docker data volumes of a workspace id that no record holds and
+    /// phase keeps nothing of, which only --delete-volumes lists.
+    Volumes,
     /// An archive that `mxv repair NAME` moved aside, with its ignored
     /// files.
     MovedAside,
@@ -191,11 +194,12 @@ pub(crate) enum OrphanState {
 pub(crate) struct OrphanRow {
     /// What the item is.
     kind: OrphanRowKind,
-    /// The directory, or the first of a run record's paths.
+    /// The directory, the first of a run record's paths, or the first
+    /// volume's name.
     path: String,
     /// The workspace name of run files, or null.
     name: Option<String>,
-    /// The workspace id of a run record, or null.
+    /// The workspace id of a run record or of volumes, or null.
     id: Option<String>,
     /// What the sweep did with it, or would do on a dry run.
     state: OrphanState,
@@ -208,20 +212,25 @@ pub(crate) struct OrphanRow {
     /// The item's paths that a deletion that stopped deleted. Empty unless
     /// the state is `partly_deleted`.
     deleted: Vec<String>,
-    /// The docker volumes that `--delete-volumes` deleted with a run
-    /// record.
+    /// The docker volumes of a `volumes` item, or those that
+    /// `--delete-volumes` deleted with a run record.
     volumes: Vec<String>,
 }
 
 impl OrphanRow {
     /// Returns the row of `orphan` in `state`, kept for `reasons`.
     fn new(orphan: &Orphan, state: OrphanState, reasons: Vec<String>) -> Self {
+        let mut volumes = Vec::new();
         let (kind, name, id) = match &orphan.kind {
             OrphanKind::RunFiles { name } => {
                 (OrphanRowKind::RunFiles, Some(name.to_string()), None)
             }
             OrphanKind::RunRecord { id, .. } => {
                 (OrphanRowKind::RunRecord, None, Some(id.as_str().to_owned()))
+            }
+            OrphanKind::Volumes { id, names } => {
+                volumes.clone_from(names);
+                (OrphanRowKind::Volumes, None, Some(id.as_str().to_owned()))
             }
             OrphanKind::MovedAside { .. } => (OrphanRowKind::MovedAside, None, None),
             OrphanKind::IgnoredFiles => (OrphanRowKind::IgnoredFiles, None, None),
@@ -236,7 +245,7 @@ impl OrphanRow {
             size: Size(orphan.bytes),
             reasons,
             deleted: Vec::new(),
-            volumes: Vec::new(),
+            volumes,
         }
     }
 }
@@ -254,6 +263,11 @@ impl fmt::Display for OrphanRow {
                 "{path} ({size}), phase's run record and logs of the workspace id {}, which no record holds",
                 self.id.as_deref().unwrap_or_default()
             ),
+            OrphanRowKind::Volumes => format!(
+                "the docker volumes {} of the workspace id {}, which no record holds",
+                self.volumes.join(", "),
+                self.id.as_deref().unwrap_or_default()
+            ),
             OrphanRowKind::MovedAside => format!(
                 "{path} ({size}), an archive that mxv repair moved aside because its pins were gone, with its ignored files"
             ),
@@ -266,7 +280,9 @@ impl fmt::Display for OrphanRow {
         };
         let reasons = self.reasons.join("; ");
         match self.state {
-            OrphanState::Deleted if self.volumes.is_empty() => {
+            OrphanState::Deleted
+                if self.volumes.is_empty() || self.kind == OrphanRowKind::Volumes =>
+            {
                 write!(formatter, "mxv deleted {what}.")
             }
             OrphanState::Deleted => write!(
@@ -462,6 +478,7 @@ pub(crate) fn repair(
             )
         },
         Repaired::Renamed { from, mut archive } => {
+            let mut warnings = Vec::new();
             if !dry {
                 // Soft limit: the command holds the locks of both names,
                 // and `mxv new` takes no lock. When an `mxv new` of the
@@ -472,11 +489,19 @@ pub(crate) fn repair(
                 // archive and its pins stay whole, and `mxv restore` of
                 // the dated name refuses with `mxv::restore::name_taken`
                 // until that workspace is gone, so nothing is lost.
-                finish(environment, &workspaces, &records, &mut archive, None)?;
+                finish(
+                    environment,
+                    &workspaces,
+                    &records,
+                    &mut archive,
+                    None,
+                    &mut warnings,
+                )?;
             }
             RepairResult {
                 older: Some(from.to_string()),
                 archive: Some(archive.name.to_string()),
+                warnings,
                 ..RepairResult::new(
                     &name,
                     if dry {
@@ -515,12 +540,15 @@ pub(crate) fn repair(
 /// Returns why `mxv repair --orphans` with `args` keeps `kind` without
 /// trying to delete it, or `None` when the sweep deletes it. Run files and
 /// run records are mxv's and phase's derived state, so the sweep deletes
-/// them. A moved-aside archive and ignored files hold the only copies of
-/// their files, so only `--delete-aside` deletes them, and `--yes` only
-/// skips the question.
+/// them. The volumes of an id are listed only with `--delete-volumes`,
+/// which deletes them. A moved-aside archive and ignored files hold the
+/// only copies of their files, so only `--delete-aside` deletes them, and
+/// `--yes` only skips the question.
 fn kept_without_sweep(kind: &OrphanKind, args: &RepairArgs) -> Option<&'static str> {
     match kind {
         OrphanKind::RunFiles { .. } | OrphanKind::RunRecord { .. } => None,
+        OrphanKind::Volumes { .. } if args.delete_volumes => None,
+        OrphanKind::Volumes { .. } => Some("only --delete-volumes deletes docker volumes"),
         OrphanKind::MovedAside { .. } | OrphanKind::IgnoredFiles if args.delete_aside => None,
         OrphanKind::MovedAside { .. } | OrphanKind::IgnoredFiles => {
             Some("it holds the only copies of its files, so only --delete-aside deletes it")
@@ -540,7 +568,7 @@ fn orphans(
     let records = archives(environment)?;
     let runs = environment.runs()?;
     let found = workspaces
-        .orphans(&records, &runs)
+        .orphans(&records, &runs, args.delete_volumes)
         .map_err(MxvFailure::from)?;
     let mut result = RepairResult::sweep();
     let swept: Vec<&Orphan> = found

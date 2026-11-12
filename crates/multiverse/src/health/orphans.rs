@@ -16,7 +16,7 @@ use crate::archive::{Archive, ArchiveRecords, ArchiveState, Archives};
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::runs::Runs;
+use crate::runs::{Forgotten, Runs};
 use crate::store;
 use crate::workspaces::{Workspaces, delete_directory};
 
@@ -61,6 +61,17 @@ pub enum OrphanKind {
         /// The run record and the directory of logs, those that exist.
         paths: Vec<PathBuf>,
     },
+    /// The docker data volumes of a workspace id that no record holds and
+    /// that phase keeps no run record or logs of, such as those of a
+    /// removal that stopped after it forgot the id and before it deleted
+    /// the volumes. Only a listing for `--delete-volumes` asks docker for
+    /// them. The item's path is the first volume's name.
+    Volumes {
+        /// The id.
+        id: WorkspaceId,
+        /// The names of the volumes, in name order.
+        names: Vec<String>,
+    },
     /// An archive that `mxv repair NAME` moved aside to `.<name>.<id>`,
     /// because its pins were gone. It holds the only copies of the
     /// workspace's root files.
@@ -83,11 +94,12 @@ pub enum OrphanKind {
 
 impl OrphanKind {
     /// Reports whether `self` at `path` and `other` at `other_path` are the
-    /// same item. A run record is the same while it has the same id,
-    /// whichever of its paths still exist.
+    /// same item. A run record, or the volumes of an id, are the same while
+    /// they have the same id, whichever of their paths or volumes remain.
     fn same(&self, path: &Path, other: &Self, other_path: &Path) -> bool {
         match (self, other) {
-            (Self::RunRecord { id, .. }, Self::RunRecord { id: other, .. }) => id == other,
+            (Self::RunRecord { id, .. }, Self::RunRecord { id: other, .. })
+            | (Self::Volumes { id, .. }, Self::Volumes { id: other, .. }) => id == other,
             _ => self == other && path == other_path,
         }
     }
@@ -124,26 +136,44 @@ impl<B: Backend> Workspaces<B> {
     /// without its own record. It writes nothing and takes no lock.
     ///
     /// The run files of a name whose archive has not finished are left
-    /// out, because `mxv archive -w` deletes them.
+    /// out, because `mxv archive -w` deletes them. With `volumes`, it also
+    /// asks docker for the data volumes of each id that no record holds and
+    /// that phase keeps nothing of.
     ///
     /// # Errors
     ///
     /// Returns the read error of the first workspace or archive record that
     /// cannot be read, a moved-aside one included, because such a record
-    /// may name what would otherwise look orphaned, and the errors of
-    /// reading the directories.
-    pub fn orphans(&self, archives: &Archives, runs: &Runs) -> Result<Vec<Orphan>, Error> {
-        self.scan(archives, runs, true)
+    /// may name what would otherwise look orphaned, the errors of reading
+    /// the directories, and with `volumes` the docker errors.
+    pub fn orphans(
+        &self,
+        archives: &Archives,
+        runs: &Runs,
+        volumes: bool,
+    ) -> Result<Vec<Orphan>, Error> {
+        self.scan(archives, runs, volumes, true)
     }
 
     /// Returns what [`Workspaces::orphans`] returns, with each size
     /// measured only when `sized`.
-    fn scan(&self, archives: &Archives, runs: &Runs, sized: bool) -> Result<Vec<Orphan>, Error> {
+    fn scan(
+        &self,
+        archives: &Archives,
+        runs: &Runs,
+        volumes: bool,
+        sized: bool,
+    ) -> Result<Vec<Orphan>, Error> {
         // What may hold an orphan is read before the records. Each command
         // that makes such a thing writes its record first, except one that
         // holds the lock of the name, which a sweep of run files takes.
         let leftovers = archives.leftovers()?;
         let ids = runs.phase_ids()?;
+        let labelled = if volumes {
+            runs.volume_ids()?
+        } else {
+            Vec::new()
+        };
         let run_dirs = runs.run_dirs()?;
         let workspaces = self.store.list()?;
         if let Some(problem) = workspaces.problems.into_iter().next() {
@@ -182,19 +212,36 @@ impl<B: Backend> Workspaces<B> {
                     .filter_map(|archive| archive.workspace_id.as_ref()),
             )
             .collect();
-        for id in ids {
-            if known.contains(&id) {
+        for id in &ids {
+            if known.contains(id) {
                 continue;
             }
-            let paths = runs.phase_paths(&id);
+            let paths = runs.phase_paths(id);
             let Some(path) = paths.first().cloned() else {
                 continue;
             };
             let bytes = paths.iter().map(|path| size(path)).sum();
             items.push(Orphan {
-                kind: OrphanKind::RunRecord { id, paths },
+                kind: OrphanKind::RunRecord {
+                    id: id.clone(),
+                    paths,
+                },
                 path,
                 bytes,
+            });
+        }
+        for (id, names) in labelled {
+            // The sweep of a run record deletes the volumes of its id.
+            if known.contains(&id) || ids.contains(&id) {
+                continue;
+            }
+            let Some(path) = names.first().map(PathBuf::from) else {
+                continue;
+            };
+            items.push(Orphan {
+                kind: OrphanKind::Volumes { id, names },
+                path,
+                bytes: 0,
             });
         }
         let mut aside_ids = BTreeSet::new();
@@ -232,12 +279,12 @@ impl<B: Backend> Workspaces<B> {
     /// Deletes `orphan`, which [`Workspaces::orphans`] returned, when a
     /// fresh listing still holds it, and takes the lock of the name of run
     /// files first. Run files are deleted. phase's sweep stops what a run
-    /// record names, and the record's logs are deleted only when phase
-    /// removed the record; with `delete_volumes`, the docker volumes that
-    /// docker labels with its id are deleted too. A moved-aside archive is
-    /// deleted and then its data directory, and a data directory is
-    /// deleted. A directory of the archives without its own record is never
-    /// deleted.
+    /// record names, and once phase removed the record, `delete_volumes`
+    /// deletes the docker volumes that docker labels with its id, and then
+    /// the logs are deleted. The volumes of an id are deleted only with
+    /// `delete_volumes`. A moved-aside archive is deleted and then its data
+    /// directory, and a data directory is deleted. A directory of the
+    /// archives without its own record is never deleted.
     ///
     /// # Errors
     ///
@@ -252,11 +299,17 @@ impl<B: Backend> Workspaces<B> {
         delete_volumes: bool,
     ) -> Result<Swept, Error> {
         let _lock = match &orphan.kind {
+            OrphanKind::Unrecorded => return Ok(Swept::Kept(vec![UNRECORDED.to_owned()])),
+            OrphanKind::Volumes { .. } if !delete_volumes => {
+                return Ok(Swept::Kept(vec![
+                    "only --delete-volumes deletes docker volumes".to_owned(),
+                ]));
+            }
             OrphanKind::RunFiles { name } => Some(runs.lock(name)?),
             _ => None,
         };
         let current = self
-            .scan(archives, runs, false)?
+            .scan(archives, runs, delete_volumes, false)?
             .into_iter()
             .any(|item| orphan.kind.same(&orphan.path, &item.kind, &item.path));
         if !current {
@@ -264,16 +317,16 @@ impl<B: Backend> Workspaces<B> {
         }
         let paths = paths_of(orphan);
         let swept = match &orphan.kind {
-            OrphanKind::RunFiles { name } => runs.forget(name, None).map(|()| Vec::new()),
-            OrphanKind::RunRecord { id, .. } => match runs.forget_id(id) {
-                Ok(held) if !held.is_empty() => return Ok(Swept::Kept(held)),
-                Ok(_) if delete_volumes => runs.archived_volumes(id).and_then(|found| {
-                    let names = found.names();
-                    runs.delete_volumes(found).map(|()| names)
-                }),
-                Ok(_) => Ok(Vec::new()),
+            OrphanKind::RunFiles { name } => runs.forget(name, None).map(|_| Vec::new()),
+            OrphanKind::RunRecord { id, .. } => match runs.forget_id(id, delete_volumes) {
+                Ok(Forgotten::Held(held)) => return Ok(Swept::Kept(held)),
+                Ok(Forgotten::Done { volumes }) => Ok(volumes),
                 Err(error) => Err(error),
             },
+            OrphanKind::Volumes { id, .. } => runs.archived_volumes(id).and_then(|found| {
+                let names = found.names();
+                runs.delete_volumes(found).map(|()| names)
+            }),
             OrphanKind::MovedAside { .. } | OrphanKind::IgnoredFiles => paths
                 .iter()
                 .try_for_each(|path| delete(path))
@@ -298,6 +351,7 @@ impl<B: Backend> Workspaces<B> {
 fn paths_of(orphan: &Orphan) -> Vec<PathBuf> {
     match &orphan.kind {
         OrphanKind::RunRecord { paths, .. } => paths.clone(),
+        OrphanKind::Volumes { .. } => Vec::new(),
         OrphanKind::MovedAside { data } => std::iter::once(orphan.path.clone())
             .chain(data.clone())
             .collect(),

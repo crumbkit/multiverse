@@ -77,5 +77,5 @@ pub use crate::engine::container::objects::{ContainerState, Inspected, OwnedCont
 pub(crate) use crate::engine::container::runner::{ComposeRunner, recorded_logs};
 pub use crate::engine::container::volumes::{
     WorkspaceVolumes, app_volume_labels, app_volume_name, app_volumes, container_memory,
-    delete_app_volumes, volume_exists,
+    delete_app_volumes, labelled_workspace_ids, volume_exists,
 };

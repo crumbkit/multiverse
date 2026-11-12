@@ -31,6 +31,8 @@ mod phased;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use phased::Forgotten;
+
 pub use phased::{
     Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Exec, ExecEnd, ExecTarget, Granting,
     LogOutput, MiseListing, MiseTaskName, PermissionAsk, Place, PreparedTask, TaskEnd,

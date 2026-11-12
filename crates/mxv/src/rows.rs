@@ -924,6 +924,12 @@ impl RemovalResult {
         self.volumes = volumes;
         self
     }
+
+    /// Returns this result with `warnings` added after its own.
+    pub(crate) fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings.extend(warnings);
+        self
+    }
 }
 
 /// Prints one sentence for the workspace, one for each checkout, and one

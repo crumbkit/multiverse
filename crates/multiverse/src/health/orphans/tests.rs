@@ -59,7 +59,7 @@ fn a_data_directory_that_the_fresh_listing_no_longer_holds_is_kept() {
     plant(&data);
     let found = setup
         .workspaces
-        .orphans(&setup.archives, &setup.runs)
+        .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, OrphanKind::IgnoredFiles);
@@ -85,7 +85,7 @@ fn a_data_directory_that_a_record_names_again_is_kept() {
     plant(&data);
     let found = setup
         .workspaces
-        .orphans(&setup.archives, &setup.runs)
+        .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     assert_eq!(found.len(), 1);
     // An archive writes the record that names the directory between the
@@ -122,7 +122,7 @@ fn a_directory_of_the_archives_without_its_own_record_is_listed_and_never_delete
 
     let found = setup
         .workspaces
-        .orphans(&setup.archives, &setup.runs)
+        .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     let paths: Vec<_> = found.iter().map(|orphan| orphan.path.clone()).collect();
     assert_eq!(paths, [copied.clone(), stray.clone(), started.clone()]);
@@ -161,7 +161,7 @@ fn run_files_of_a_name_without_a_record_are_listed_and_deleted() {
 
     let found = setup
         .workspaces
-        .orphans(&setup.archives, &setup.runs)
+        .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(
@@ -198,7 +198,7 @@ fn logs_of_an_id_that_no_record_holds_are_listed_and_deleted() {
 
     let found = setup
         .workspaces
-        .orphans(&setup.archives, &setup.runs)
+        .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     assert_eq!(found.len(), 1, "{found:?}");
     let OrphanKind::RunRecord { id, paths } = &found[0].kind else {
@@ -221,11 +221,11 @@ fn a_fresh_listing_measures_no_size() {
     plant(&setup.path("data/0123456789abcdef0123456789abcdef"));
     let sized = setup
         .workspaces
-        .orphans(&setup.archives, &setup.runs)
+        .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     let fresh = setup
         .workspaces
-        .scan(&setup.archives, &setup.runs, false)
+        .scan(&setup.archives, &setup.runs, false, false)
         .unwrap();
     assert!(sized[0].bytes > 0);
     assert_eq!(fresh[0].bytes, 0);

@@ -610,16 +610,17 @@ impl Archives {
     /// root files.
     pub(crate) fn leftovers(&self) -> Result<Leftovers, Error> {
         let mut found = Leftovers::default();
-        for path in directories(&self.data)? {
-            if let Some(id) = path.file_name().and_then(|name| name.to_str()) {
-                found.data.push((id.to_owned(), path.clone()));
+        for entry in store::entries(&self.data)? {
+            if entry.dir {
+                found.data.push((entry.name, entry.path));
             }
         }
-        for path in directories(&self.dir)? {
-            let hidden = path
-                .file_name()
-                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
-            if !hidden {
+        for entry in store::entries(&self.dir)? {
+            if !entry.dir {
+                continue;
+            }
+            let path = entry.path;
+            if !entry.name.starts_with('.') {
                 // `Archives::list` reads the record of a name, so only a
                 // directory without one is a leftover.
                 match fs::symlink_metadata(path.join(RECORD_FILE)) {
@@ -652,29 +653,6 @@ pub(crate) struct Leftovers {
     /// Each directory of the archives without its own record, in path
     /// order.
     pub(crate) unrecorded: Vec<PathBuf>,
-}
-
-/// Returns each directory in `dir`, without following a symbolic link, in
-/// name order, or nothing when `dir` does not exist.
-fn directories(dir: &Path) -> Result<Vec<PathBuf>, Error> {
-    let unreadable = |source| Error::StateUnreadable {
-        path: dir.to_path_buf(),
-        source,
-    };
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(unreadable(error)),
-    };
-    let mut found = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(unreadable)?;
-        if entry.file_type().map_err(unreadable)?.is_dir() {
-            found.push(entry.path());
-        }
-    }
-    found.sort();
-    Ok(found)
 }
 
 /// Returns the archive record at `path`, or `None` when no file is there.
