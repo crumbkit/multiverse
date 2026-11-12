@@ -201,11 +201,12 @@ fn logs_of_an_id_that_no_record_holds_are_listed_and_deleted() {
         .orphans(&setup.archives, &setup.runs, false)
         .unwrap();
     assert_eq!(found.len(), 1, "{found:?}");
-    let OrphanKind::RunRecord { id, paths } = &found[0].kind else {
+    let OrphanKind::RunRecord { id, paths, volumes } = &found[0].kind else {
         panic!("{found:?}");
     };
     assert_eq!(id.as_str(), orphaned);
     assert_eq!(paths, std::slice::from_ref(&logs));
+    assert!(volumes.is_empty());
     let swept = setup
         .workspaces
         .sweep_orphan(&setup.archives, &setup.runs, &found[0], false)

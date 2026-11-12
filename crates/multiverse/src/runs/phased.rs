@@ -1419,7 +1419,7 @@ impl Runs {
                 })
                 .collect();
             if held.is_empty() {
-                held.push("phase kept its run record".to_owned());
+                held.push("phase could not stop a process that it names".to_owned());
             }
             return Ok(Forgotten::Held(held));
         }
@@ -1441,22 +1441,15 @@ impl Runs {
 
     /// Returns each workspace id that docker labels a data volume of this
     /// phase with, with the names of those volumes, in id order, whether or
-    /// not phase keeps a run record or logs of it. A volume that another
-    /// state directory's phase made is left out.
+    /// not phase keeps a run record or logs of it, from one `docker volume
+    /// ls`. A volume that another state directory's phase made is left out.
     ///
     /// # Errors
     ///
     /// Returns [`Error::DockerMissing`], [`Error::DockerUnavailable`] and
     /// [`Error::DockerFailed`].
     pub(crate) fn volume_ids(&self) -> Result<Vec<(WorkspaceId, Vec<String>)>, Error> {
-        let mut found = Vec::new();
-        for id in phase::container::labelled_workspace_ids(&self.phase)? {
-            let names = app_volumes(&self.phase, &id)?.names();
-            if !names.is_empty() {
-                found.push((id, names));
-            }
-        }
-        Ok(found)
+        Ok(phase::container::labelled_volumes(&self.phase)?)
     }
 
     /// Returns the directory of phase's logs of the workspace id `id`.
