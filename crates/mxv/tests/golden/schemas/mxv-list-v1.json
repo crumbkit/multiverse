@@ -174,7 +174,11 @@
           }
         },
         "problem": {
-          "description": "Why mxv cannot read the workspace's record, such as a record that\nis not JSON or that a newer mxv wrote, or empty when it can. A row\nwith a problem names its record, without `.json`, in `name`, and\nleaves the other fields empty.",
+          "description": "What is wrong with the workspace or its archive, or empty when\nnothing is: a record that mxv cannot read, such as one that is not\nJSON or that a newer mxv wrote, an archive that stopped before it\nfinished, a workspace whose checkout directories are all gone, or a\nsize that mxv cannot measure. A row of a record that mxv cannot read\nnames the record in `name`, a workspace record without `.json` and\nan archive record by its directory, and leaves the other fields\nempty.",
+          "type": "string"
+        },
+        "repair": {
+          "description": "The command that repairs the problem, such as\n`mxv archive -w old-api`, what the person does by hand when no\ncommand can, or empty when no repair is known.",
           "type": "string"
         },
         "ports": {
@@ -246,6 +250,7 @@
         "branch",
         "path",
         "problem",
+        "repair",
         "ports",
         "size",
         "archived",

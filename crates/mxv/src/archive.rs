@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
+use multiverse::health::{self, Broken, Problem};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
     ARCHIVE_MAX_FILE, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
@@ -796,7 +797,7 @@ impl fmt::Display for RestoreResult {
 }
 
 /// Returns the archives that `environment` names.
-fn archives(environment: &Environment) -> Result<Archives, MxvFailure> {
+pub(crate) fn archives(environment: &Environment) -> Result<Archives, MxvFailure> {
     Ok(Archives::new(
         environment.archives()?,
         environment.archive_data()?,
@@ -1313,11 +1314,6 @@ fn port_rows(changes: Vec<multiverse::PortChange>) -> Vec<PortRow> {
         .collect()
 }
 
-/// The problem of a row whose archive has not finished.
-fn unfinished_problem(name: &str) -> String {
-    format!("archiving stopped partway; `mxv archive -w {name}` finishes it")
-}
-
 /// Returns the age of `archive`.
 fn age(archive: &Archive) -> crumbkit::Age {
     let now = SystemTime::now();
@@ -1325,61 +1321,58 @@ fn age(archive: &Archive) -> crumbkit::Age {
 }
 
 /// Returns the row of `archive`.
-fn row(archive: &Archive) -> WorkspaceRow {
+pub(crate) fn row(archive: &Archive) -> WorkspaceRow {
     let local = archive
         .checkouts
         .iter()
         .map(|checkout| checkout.local_only.len())
         .sum();
-    let row =
-        WorkspaceRow::from(&archive.workspace()).archived(age(archive), local, &archive.ignored);
-    if archive.state == ArchiveState::Retiring {
-        row.with_problem(unfinished_problem(archive.name.as_str()))
-    } else {
-        row
-    }
+    WorkspaceRow::from(&archive.workspace()).archived(age(archive), local, &archive.ignored)
 }
 
-/// Returns each archive as a row, the degraded rows first.
+/// Returns the row of `broken` in a listing of the archives: the row of
+/// the archive of its name with its problem, or the name alone for a
+/// record that mxv cannot read.
+fn broken_row(broken: &Broken, found: &[Archive]) -> WorkspaceRow {
+    let archive = match broken.problem {
+        Problem::Unreadable { .. } => None,
+        _ => found
+            .iter()
+            .find(|archive| archive.name.as_str() == broken.name),
+    };
+    archive.map_or_else(
+        || WorkspaceRow::broken(broken),
+        |archive| row(archive).with_broken(broken),
+    )
+}
+
+/// Returns each archive as a row, the broken ones first with their repair.
 pub(crate) fn list(
     environment: &Environment,
     args: &ListArgs,
 ) -> Result<Listing<WorkspaceRow>, MxvFailure> {
     let records: ArchiveRecords = archives(environment)?.list()?;
-    let (found, problems) = (records.archives, records.problems);
-    let mut rows: Vec<WorkspaceRow> = problems.iter().map(WorkspaceRow::unreadable).collect();
-    let (retiring, finished): (Vec<&Archive>, Vec<&Archive>) = found
+    let live = multiverse::Store::new(environment.records()?).list()?;
+    let broken = health::classify(&live, &records).archives;
+    let mut rows: Vec<WorkspaceRow> = broken
         .iter()
-        .partition(|archive| archive.state == ArchiveState::Retiring);
-    rows.extend(retiring.into_iter().map(row));
-    rows.extend(finished.into_iter().map(row));
+        .map(|broken| broken_row(broken, &records.archives))
+        .collect();
+    rows.extend(
+        records
+            .archives
+            .iter()
+            .filter(|archive| {
+                !broken
+                    .iter()
+                    .any(|found| found.name == archive.name.as_str())
+            })
+            .map(row),
+    );
     Ok(args.page.first_of(rows).described("archives").next(
         crumbkit::Call::new(&["restore"]).arg("name"),
         "rebuilds an archived workspace.",
     ))
-}
-
-/// Puts the row of each archive that has not finished at the front of
-/// `rows`. A workspace whose record is still there keeps one row, with the
-/// problem added, so a listing never shows a name twice.
-pub(crate) fn mark_unfinished(
-    environment: &Environment,
-    rows: &mut Vec<WorkspaceRow>,
-) -> Result<(), MxvFailure> {
-    let found = archives(environment)?.list()?.archives;
-    for archive in found
-        .iter()
-        .rev()
-        .filter(|archive| archive.state == ArchiveState::Retiring)
-    {
-        let name = archive.name.as_str();
-        let front = match rows.iter().position(|row| row.name() == name) {
-            Some(index) => rows.remove(index).with_problem(unfinished_problem(name)),
-            None => row(archive),
-        };
-        rows.insert(0, front);
-    }
-    Ok(())
 }
 
 /// Deletes the archive that `args` names.

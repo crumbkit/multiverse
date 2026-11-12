@@ -27,6 +27,7 @@ mod disk;
 mod disposable;
 mod error;
 mod git;
+pub mod health;
 mod lookup;
 mod manifest;
 mod marker;

@@ -171,7 +171,8 @@ mxv list
 - `ignored`: The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
 - `ignored_bytes`: The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
-- `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
+- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, a workspace whose checkout directories are all gone, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
+- `repair`: The command that repairs the problem, such as `mxv archive -w old-api`, what the person does by hand when no command can, or empty when no repair is known.
 
 ### Columns that `--long` adds
 

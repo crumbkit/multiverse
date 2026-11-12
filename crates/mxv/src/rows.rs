@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 
 use crumbkit::{Age, Children, Row};
-use multiverse::Error;
+use multiverse::health::{Broken, Problem, Repair};
 use multiverse::{
     Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
     DisposableSource, Fate, IgnoredEntry, Kind, MANIFEST_FILE, Manifest, ManifestSource,
@@ -57,11 +57,19 @@ pub(crate) struct WorkspaceRow {
     manifest_paths: Vec<String>,
     /// The workspace's checkouts, one for each repository.
     checkouts: Vec<CheckoutRow>,
-    /// Why mxv cannot read the workspace's record, such as a record that
-    /// is not JSON or that a newer mxv wrote, or empty when it can. A row
-    /// with a problem names its record, without `.json`, in `name`, and
-    /// leaves the other fields empty.
+    /// What is wrong with the workspace or its archive, or empty when
+    /// nothing is: a record that mxv cannot read, such as one that is not
+    /// JSON or that a newer mxv wrote, an archive that stopped before it
+    /// finished, a workspace whose checkout directories are all gone, or a
+    /// size that mxv cannot measure. A row of a record that mxv cannot read
+    /// names the record in `name`, a workspace record without `.json` and
+    /// an archive record by its directory, and leaves the other fields
+    /// empty.
     problem: String,
+    /// The command that repairs the problem, such as
+    /// `mxv archive -w old-api`, what the person does by hand when no
+    /// command can, or empty when no repair is known.
+    repair: String,
     /// The host port that the workspace holds for each named port of its
     /// manifest, which the first `mxv up` allocates.
     ports: BTreeMap<String, u16>,
@@ -261,12 +269,37 @@ impl Row for WorkspaceRow {
         "ignored_bytes",
         "ports",
         "problem",
+        "repair",
     ];
     const PROBLEM: Option<&'static str> = Some("problem");
     const LONG_COLUMNS: &'static [&'static str] =
         &["kind", "manifest", "manifest_path", "repositories"];
-    // A person copies the name into the next command.
-    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
+    // A person copies the name and the repair into the next command.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name", "repair"];
+}
+
+/// Returns the text of the problem of `broken`.
+fn problem_text(broken: &Broken) -> String {
+    match &broken.problem {
+        Problem::Unreadable { reason } => reason.clone(),
+        Problem::ArchiveUnfinished => "the archive stopped before it finished".to_owned(),
+        Problem::ArchiveBesideNewerWorkspace => {
+            format!("an older archive beside a newer workspace {}", broken.name)
+        }
+        Problem::CheckoutsGone => "every checkout directory is gone".to_owned(),
+    }
+}
+
+/// Returns the command of `repair`, or what the person does by hand.
+fn repair_text(repair: &Repair) -> String {
+    match repair {
+        Repair::Archive(name) => format!("mxv archive -w {name}"),
+        Repair::Remove(name) => format!("mxv remove {name}"),
+        Repair::MoveAside(path) => format!(
+            "move {} aside by hand; mxv never deletes a record it cannot read",
+            path.display()
+        ),
+    }
 }
 
 impl From<&Checkout> for CheckoutRow {
@@ -312,6 +345,7 @@ impl From<&Workspace> for WorkspaceRow {
                 .collect(),
             checkouts: workspace.checkouts.iter().map(CheckoutRow::from).collect(),
             problem: String::new(),
+            repair: String::new(),
             ports: workspace.ports.clone(),
             size: None,
             archived: None,
@@ -324,21 +358,12 @@ impl From<&Workspace> for WorkspaceRow {
 }
 
 impl WorkspaceRow {
-    /// Returns the row of a record that mxv cannot read, with `error`, a
-    /// record error that names the record's path, as its problem.
-    pub(crate) fn unreadable(error: &Error) -> Self {
-        let name = match error {
-            Error::CorruptRecord { path, .. }
-            | Error::NewerRecord { path, .. }
-            | Error::MismatchedRecord { path, .. }
-            | Error::StateUnreadable { path, .. } => path
-                .file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
+    /// Returns the row of `broken` alone, such as a record that mxv cannot
+    /// read, with every field but the name, the problem and the repair
+    /// empty.
+    pub(crate) fn broken(broken: &Broken) -> Self {
         Self {
-            name,
+            name: broken.name.clone(),
             branch: String::new(),
             path: String::new(),
             repositories: Vec::new(),
@@ -347,7 +372,8 @@ impl WorkspaceRow {
             manifest_path: None,
             manifest_paths: Vec::new(),
             checkouts: Vec::new(),
-            problem: error.to_string(),
+            problem: String::new(),
+            repair: String::new(),
             ports: BTreeMap::new(),
             size: None,
             archived: None,
@@ -356,6 +382,14 @@ impl WorkspaceRow {
             ignored_bytes: None,
             disposable: None,
         }
+        .with_broken(broken)
+    }
+
+    /// Returns the row with the problem and the repair of `broken`.
+    pub(crate) fn with_broken(mut self, broken: &Broken) -> Self {
+        self.problem = problem_text(broken);
+        self.repair = broken.repair.as_ref().map(repair_text).unwrap_or_default();
+        self
     }
 
     /// Returns the row with the sizes of `usage`.
@@ -363,11 +397,6 @@ impl WorkspaceRow {
         self.size = Some(Size(usage.bytes));
         self.disposable = Some(Size(usage.disposable_bytes));
         self
-    }
-
-    /// Returns the workspace's name.
-    pub(crate) fn name(&self) -> &str {
-        &self.name
     }
 
     /// Returns the row of an archived workspace, archived `age` ago, with
@@ -384,6 +413,11 @@ impl WorkspaceRow {
         self.ignored = Some(u32::try_from(ignored.len()).unwrap_or(u32::MAX));
         self.ignored_bytes = Some(Size(ignored.iter().map(|entry| entry.size).sum()));
         self
+    }
+
+    /// Returns whether the row has a problem.
+    pub(crate) const fn has_problem(&self) -> bool {
+        !self.problem.is_empty()
     }
 
     /// Returns the row with `problem`, such as a measurement that failed.
