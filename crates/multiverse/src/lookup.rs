@@ -347,6 +347,7 @@ fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
     }
     into.containers.extend(from.containers);
     into.ports.extend(from.ports);
+    into.routes.extend(from.routes);
     // `Declared::add` has checked that a service of one name is declared
     // the same way in every file.
     for (name, service) in from.services {
@@ -653,6 +654,13 @@ impl Workspace {
             let into = merged.get_or_insert_with(|| emptied(&renamed));
             absorb(into, renamed, &checkout.path);
         }
+        if let Some(merged) = &merged {
+            crate::manifest::check_labels(&merged.routes).map_err(|message| ManifestError {
+                path: self.manifest_file(),
+                line: None,
+                problem: ManifestProblem::Invalid { message },
+            })?;
+        }
         Ok(merged)
     }
 }
@@ -664,6 +672,7 @@ fn emptied(manifest: &Manifest) -> Manifest {
     empty.processes.clear();
     empty.containers.clear();
     empty.ports.clear();
+    empty.routes.clear();
     empty.services.clear();
     empty.tasks.clear();
     empty.warnings.clear();

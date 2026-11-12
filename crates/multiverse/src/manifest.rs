@@ -12,6 +12,7 @@
 //!
 //! ```toml
 //! ports = ["api", "web", "dynamodb"]
+//! routes = ["web"]
 //! disposable = ["web/test-results/"]
 //! clone_on_new = ["node_modules/"]
 //!
@@ -46,6 +47,9 @@
 //! A process's `build` is a command that `mxv up` and `mxv restart` run
 //! before the process starts, under a place from the machine's job limiter,
 //! as [`crate::Runs::build`] describes. No shell reads it.
+//!
+//! `routes` names ports of `ports` that the proxy serves at the host name
+//! `<port>.<workspace>.mxv.localhost`.
 //!
 //! An `env` value may name a host port as `{port.<name>}`, and writes a
 //! literal brace as `{{` or `}}`. Any other brace fails the manifest.
@@ -121,6 +125,10 @@ pub struct Manifest {
     /// The named ports, in the order declared. mxv gives each workspace its
     /// own host port for each name.
     pub ports: Vec<String>,
+    /// The ports, by name, that the proxy serves at a stable host name
+    /// `<port>.<workspace>.mxv.localhost`. Each is one of [`Manifest::ports`]
+    /// or of the ports that a manifest joins.
+    pub routes: Vec<String>,
     /// The processes, by name.
     pub processes: BTreeMap<String, Process>,
     /// The containers, by name. No container has the name of a process.
@@ -721,6 +729,7 @@ impl std::error::Error for ManifestError {}
 const OWN_KEYS: &[&str] = &[
     "version",
     "ports",
+    "routes",
     "processes",
     "containers",
     "disposable",
@@ -742,6 +751,9 @@ struct RawManifest {
     /// The named ports.
     #[serde(default)]
     ports: Vec<Spanned<String>>,
+    /// The ports that the proxy serves.
+    #[serde(default)]
+    routes: Vec<Spanned<String>>,
     /// The processes.
     #[serde(default)]
     processes: BTreeMap<Spanned<String>, RawProcess>,
@@ -1452,6 +1464,7 @@ impl Manifest {
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         check_version_and_reserved(&errors, &raw)?;
         let ports = check_ports(&errors, &raw.ports)?;
+        let routes = check_routes(&errors, &raw.routes, &ports, joined)?;
         if let Some(name) = raw
             .ports
             .iter()
@@ -1577,6 +1590,7 @@ impl Manifest {
         };
         let manifest = Self {
             ports,
+            routes,
             processes,
             containers,
             disposable: globs(&raw.disposable, PathGlob::parse_directory, "disposable")?,
@@ -1677,6 +1691,7 @@ impl Manifest {
             .collect();
         Self {
             ports: names(&self.ports),
+            routes: names(&self.routes),
             processes,
             containers,
             disposable: self.disposable.clone(),
@@ -1685,6 +1700,16 @@ impl Manifest {
             tasks: self.tasks.clone(),
             warnings: self.warnings.clone(),
         }
+    }
+
+    /// Returns the name of the process or container that listens on or
+    /// publishes the port `port`, or `None` when no unit does.
+    #[must_use]
+    pub fn listener_of(&self, port: &str) -> Option<String> {
+        self.listeners()
+            .into_iter()
+            .find(|(listened, _)| listened == port)
+            .map(|(_, unit)| unit)
     }
 
     /// Returns each port that a process listens on or a container
@@ -1884,6 +1909,75 @@ fn check_ports(errors: &Errors<'_>, raw: &[Spanned<String>]) -> Result<Vec<Strin
         ports.push(port.get_ref().clone());
     }
     Ok(ports)
+}
+
+/// Checks the `routes` against the declared `ports` and the ports of
+/// `joined`, and returns their names in order.
+fn check_routes(
+    errors: &Errors<'_>,
+    raw: &[Spanned<String>],
+    ports: &[String],
+    joined: &Joined,
+) -> Result<Vec<String>, ManifestError> {
+    let mut routes: Vec<String> = Vec::new();
+    for route in raw {
+        let name = route.get_ref();
+        if !ports.contains(name) && !joined.ports.contains(name) {
+            return Err(errors.invalid(
+                &route.span(),
+                format!("the route `{name}` is not a name in `ports`"),
+            ));
+        }
+        if routes.contains(name) {
+            return Err(errors.invalid(
+                &route.span(),
+                format!("the route `{name}` is declared twice"),
+            ));
+        }
+        routes.push(name.clone());
+    }
+    if let Err(message) = check_labels(&routes) {
+        let span = raw.first().map_or(0..0, Spanned::span);
+        return Err(errors.invalid(&span, message));
+    }
+    Ok(routes)
+}
+
+/// The most bytes of one DNS label, which a route's port name and its
+/// workspace name each become in the route's host name.
+pub(crate) const MOST_LABEL_BYTES: usize = 63;
+
+/// Returns `name` as one label of a host name: lower case, with every `_`
+/// and `.` written as `-`.
+pub(crate) fn host_label(name: &str) -> String {
+    name.chars()
+        .map(|character| match character {
+            '_' | '.' => '-',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Checks that the host labels of the route names `routes` are no longer
+/// than [`MOST_LABEL_BYTES`] and that no two are equal, and returns the
+/// message of the first route that breaks a rule.
+pub(crate) fn check_labels(routes: &[String]) -> Result<(), String> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for route in routes {
+        let label = host_label(route);
+        if label.len() > MOST_LABEL_BYTES {
+            return Err(format!(
+                "the route `{route}` makes a host label of {} bytes, and a label holds at most {MOST_LABEL_BYTES}",
+                label.len()
+            ));
+        }
+        if let Some(other) = seen.insert(label.clone(), route) {
+            return Err(format!(
+                "the routes `{other}` and `{route}` both make the host label `{label}`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Checks the task `name` and returns its name and the task. Its `needs`
