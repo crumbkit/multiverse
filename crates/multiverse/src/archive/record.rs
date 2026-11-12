@@ -588,6 +588,86 @@ impl Archives {
         store::sync_dir(&self.dir);
         Ok(())
     }
+
+    /// Returns what the directory of archives and the data directory hold
+    /// besides the records that [`Archives::list`] reads: each directory
+    /// that a repair moved aside, and each data directory. It reads the
+    /// data directory first. An archive writes its record before its data
+    /// directory, so a caller that lists the records after this call sees
+    /// the record of every data directory that a running archive made. It
+    /// writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when a directory cannot be read.
+    pub(crate) fn leftovers(&self) -> Result<Leftovers, Error> {
+        let mut found = Leftovers::default();
+        for path in directories(&self.data)? {
+            if let Some(id) = path.file_name().and_then(|name| name.to_str()) {
+                found.data.push((id.to_owned(), path.clone()));
+            }
+        }
+        for path in directories(&self.dir)? {
+            let hidden = path
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
+            if hidden {
+                // A record that cannot be read leaves its directory listed
+                // without a record, so the directory is still named and is
+                // never read as a live archive.
+                let record = read_record(&path.join(RECORD_FILE)).ok().flatten();
+                found.aside.push((path, record));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Deletes the directory `path`, which [`Archives::leftovers`] named,
+    /// and everything in it, by file descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when it cannot be deleted.
+    pub(crate) fn delete_leftover(path: &Path) -> Result<(), Error> {
+        delete_directory(path)?;
+        if let Some(parent) = path.parent() {
+            store::sync_dir(parent);
+        }
+        Ok(())
+    }
+}
+
+/// What [`Archives::leftovers`] found.
+#[derive(Debug, Default)]
+pub(crate) struct Leftovers {
+    /// Each directory `.<name>.<id>` that a repair moved aside, with its
+    /// record, or `None` when the record cannot be read.
+    pub(crate) aside: Vec<(PathBuf, Option<Archive>)>,
+    /// Each data directory, with the archive id that names it.
+    pub(crate) data: Vec<(String, PathBuf)>,
+}
+
+/// Returns each directory in `dir`, without following a symbolic link, in
+/// name order, or nothing when `dir` does not exist.
+fn directories(dir: &Path) -> Result<Vec<PathBuf>, Error> {
+    let unreadable = |source| Error::StateUnreadable {
+        path: dir.to_path_buf(),
+        source,
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unreadable(error)),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(unreadable)?;
+        if entry.file_type().map_err(unreadable)?.is_dir() {
+            found.push(entry.path());
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// Returns the archive record at `path`, or `None` when no file is there.

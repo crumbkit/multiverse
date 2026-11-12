@@ -1,17 +1,20 @@
-Repair the broken records of one name that `mxv list` names `mxv repair NAME` for
+Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names
 
-Usage: mxv repair [OPTIONS] <NAME>
+Usage: mxv repair [OPTIONS] [NAME]
 
 Arguments:
-  <NAME>  The name of the workspace or archive whose records to repair
+  [NAME]  The name of the workspace or archive whose records to repair
 
 Options:
-      --dry-run  Report what the command would change, and change nothing
-      --yes      Proceed without asking for confirmation
-  -h, --help     Print help (see more with '--help')
+      --orphans       List what no record names, and delete what --delete-aside allows, instead of repairing one name's records
+      --delete-aside  With --orphans, delete the archives that a repair moved aside and the ignored files that no archive names, which hold the only copies of their files
+      --dry-run       Report what the command would change, and change nothing
+      --yes           Proceed without asking for confirmation
+  -h, --help          Print help (see more with '--help')
 
 Examples:
   mxv repair sample --dry-run
+  mxv repair --orphans --delete-aside --dry-run
 
 Effects: destructive, idempotent, closed-world.
 Global flags: --json, --no-input. `mxv repair --help` describes them.
