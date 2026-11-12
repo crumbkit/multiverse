@@ -1333,9 +1333,11 @@ impl Runs {
         }
     }
 
-    /// Forgets the stable id `id` of the workspace `name`, as
-    /// [`Runs::forget_id`] does, and deletes every run file of the
-    /// workspace, whatever other files it holds. When phase keeps its run
+    /// Stops what phase's run record of the workspace `name`, whose stable
+    /// id is `id`, names and phase no longer supervises, with phase's
+    /// sweep, deletes the id's logs once phase removed the record, and
+    /// deletes every run file of the workspace, whatever other files it
+    /// holds. When phase keeps its run
     /// record of the id, because it could not stop a process, the record
     /// and the logs stay, and `mxv repair --orphans` names them once no
     /// record holds the id. The workspace's volumes stay;

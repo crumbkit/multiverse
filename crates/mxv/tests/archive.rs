@@ -1653,11 +1653,11 @@ impl Setup {
 
 /// Reports whether a process with the pid `pid` runs.
 fn runs(pid: &str) -> bool {
-    std::process::Command::new("kill")
+    Command::new("kill")
         .args(["-0", pid])
-        .status()
-        .unwrap()
-        .success()
+        .env("PATH", PATH)
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 #[test]
