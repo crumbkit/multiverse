@@ -1174,7 +1174,7 @@ fn a_second_state_directory_with_the_same_id_neither_lists_deletes_nor_mounts_th
     assert!(world.container("db", "server").is_some());
 
     let own = app_volumes(&world.phase, &world.id).unwrap();
-    assert_eq!(own.names(), [volume.clone()]);
+    assert_eq!(own.names(), std::slice::from_ref(&volume));
     world.down();
     delete_app_volumes(own).unwrap();
     assert!(docker(&["volume", "inspect", &volume]).is_none());
