@@ -67,15 +67,18 @@ use mxv::{
     PERMISSIONS_NOT_GRANTED, PHASE_FAILED, PORT_EXHAUSTED, PORT_NOT_FOUND, PORT_TAKEN,
     PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
     PROCESS_NOT_READY, PROCESS_STILL_NEEDED, PROCESS_TABLE_UNREADABLE, PROCESS_UNSTARTABLE,
-    PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER,
-    RECORD_UNREADABLE, REPAIR_CHANGED, REPAIR_NAMES_TAKEN, REPOSITORY_EMPTY_ORIGIN,
-    REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED,
-    RESTORE_CHANGED, RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN,
-    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
-    RUN_CODES, TASK_AMBIGUOUS, TASK_UNKNOWN, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL,
-    VOLUME_RENAMED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY,
-    WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND,
-    WORKSPACE_RUNNING, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND,
+    PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, PROXY_CADDY_MISSING, PROXY_CADDY_TOO_OLD,
+    PROXY_CODES, PROXY_LOAD_FAILED, PROXY_PORT_DENIED, PROXY_PORT_HELD, PROXY_SOCKET_PATH_TOO_LONG,
+    PROXY_START_FAILED, PROXY_TRUST_FAILED, PROXY_TRUST_NEEDS_TERMINAL, RECORD_CORRUPT,
+    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPAIR_CHANGED, REPAIR_NAMES_TAKEN,
+    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED, RESTORE_COMMIT_MISSING,
+    RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND,
+    RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED, RUN_CODES, TASK_AMBIGUOUS, TASK_UNKNOWN,
+    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY,
+    WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
 
@@ -157,6 +160,16 @@ const ALLOW: &[Allow] = &[
         "The command replaces only host ports that mxv allocated, refuses while the workspace's units run, and deletes no file that the person wrote, so it asks no question first.",
     ),
     Allow::new(Rule::Examples, "ports reset", NO_LIVE_CHECKOUT),
+    Allow::new(
+        Rule::Yes,
+        "proxy stop",
+        "The command stops only the Caddy that mxv started, which the next mxv up of a workspace with a route starts again, and it deletes no file, so it asks no question first.",
+    ),
+    Allow::new(
+        Rule::Examples,
+        "proxy trust",
+        "The command asks a person at a terminal and raises the system's password prompt, which a test cannot answer; tests/proxy.rs checks its refusal without a terminal.",
+    ),
     Allow::untwinned(
         NEWER_RECORD,
         "The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.",
@@ -440,7 +453,19 @@ const STARTS: &[Failing<'static>] = &[
 /// provoke it.
 const BUILD_DEADLINE: &str = "Only a build that runs for an hour provokes it from the command line; the library's build tests shorten the deadline and provoke it.";
 
+/// Why the failures of the proxy have no line to provoke them.
+const PROXY_STATE: &str = "Each needs a Caddy program, a held address or a terminal that a fixed fixture cannot hold; tests/proxy.rs provokes them with a missing program, a held address and a refused terminal.";
+
 const UNPROVOKED: &[Unprovoked<'static>] = &[
+    Unprovoked::new(&PROXY_PORT_HELD, PROXY_STATE),
+    Unprovoked::new(&PROXY_PORT_DENIED, PROXY_STATE),
+    Unprovoked::new(&PROXY_CADDY_MISSING, PROXY_STATE),
+    Unprovoked::new(&PROXY_CADDY_TOO_OLD, PROXY_STATE),
+    Unprovoked::new(&PROXY_START_FAILED, PROXY_STATE),
+    Unprovoked::new(&PROXY_LOAD_FAILED, PROXY_STATE),
+    Unprovoked::new(&PROXY_SOCKET_PATH_TOO_LONG, PROXY_STATE),
+    Unprovoked::new(&PROXY_TRUST_NEEDS_TERMINAL, PROXY_STATE),
+    Unprovoked::new(&PROXY_TRUST_FAILED, PROXY_STATE),
     Unprovoked::new(&ARCHIVE_NOT_FOUND, ARCHIVE_STATE),
     Unprovoked::new(&ARCHIVE_NAME_TAKEN, ARCHIVE_STATE),
     Unprovoked::new(&ARCHIVE_SOURCE_CHANGED, ARCHIVE_STATE),
@@ -894,7 +919,7 @@ struct Fixtures {
 }
 
 /// Every failure code that a command of `mxv` can print.
-const ALL_CODES: &[&[&crumbkit::Code]] = &[CODES, RUN_CODES, ARCHIVE_CODES];
+const ALL_CODES: &[&[&crumbkit::Code]] = &[CODES, RUN_CODES, ARCHIVE_CODES, PROXY_CODES];
 
 /// Returns the fixtures that the suite of the `mxv` command reads.
 fn fixtures() -> Fixtures {
@@ -934,7 +959,9 @@ impl Fixtures {
             .unprovoked(UNPROVOKED);
         Suite::new(|| (Cli::command(), TOOL))
             .allow(ALLOW)
-            .verbs(&["usage", "reset", "install", "check", "print"])
+            .verbs(&[
+                "usage", "reset", "install", "check", "print", "status", "start", "stop", "trust",
+            ])
             .path_budgets(PATH_BUDGETS)
             .examples(examples)
             .recoveries(recoveries)

@@ -234,6 +234,10 @@ The keeper has no state enum. Its life is the control flow of `phase/src/engine/
 | `Recorder` write | `Recorder`, `Note::applies_to` | Another operation has already changed the entry. | The entry stays as that operation wrote it. | Nothing needs recovery. | `a_keepers_end_and_stop_skip_an_entry_that_another_operation_already_stopped` and `a_keeper_leaves_a_record_entry_that_names_another_process_unchanged` in `phase/src/engine/keeper/tests.rs` plant the entry. |
 | `Recorder` write | `Recorder` | The write fails. | The note is dropped and written to the keeper's diagnostic log, and the record is stale. | The next `up` or `status` reads the process table. | None |
 
+## Proxy
+
+`Proxy::sync` in `crates/multiverse/src/proxy.rs` is the one entry point. It holds a lock in the proxy state directory, rebuilds the routes from the workspace records, reads the configuration that Caddy holds from its admin socket, and loads the new one only when the two differ. It returns early when no workspace declares a route and Caddy does not run. Caddy runs as a phase app of the workspace `mxv-proxy`. Caddy's own autosave is off (`persist` is false). `load` writes the loaded configuration to `bootstrap.json` in the proxy state directory, and phase's keeper restarts a killed Caddy from that file, so it serves the last load again at once. The next `sync` compares what Caddy holds with the current routes and loads only when they differ. `mxv proxy stop` stops the app and keeps the state. A sync that fails after a unit change leaves the units as they are and reports a warning.
+
 ## Port ledger
 
 Ports are the `ports` map of the workspace record. A port is free or held. `.ports.lock` guards allocation (`Runs::assign_ports`, `multiverse/src/runs.rs`).

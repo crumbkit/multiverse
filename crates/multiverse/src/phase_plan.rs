@@ -178,6 +178,15 @@ impl CallerEnvironment {
         Self { vars }
     }
 
+    /// Returns the directories of the caller's `PATH`, in order.
+    #[must_use]
+    pub fn path_dirs(&self) -> Vec<PathBuf> {
+        self.vars
+            .get("PATH")
+            .map(|path| std::env::split_paths(path.reveal()).collect())
+            .unwrap_or_default()
+    }
+
     /// Returns `PATH` and `HOME`, for phase's inherited variables.
     pub(crate) fn inherited(&self) -> BTreeMap<String, String> {
         PHASE_SETS

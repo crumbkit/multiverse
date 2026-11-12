@@ -29,6 +29,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv pin`](#mxv-pin): Keep mxv reclaim from stopping a workspace
 - [`mxv unpin`](#mxv-unpin): Let mxv reclaim stop a workspace again while it is idle
 - [`mxv ports`](#mxv-ports): Manage the host ports that a workspace holds
+- [`mxv proxy`](#mxv-proxy): Serve the routes that workspaces declare at stable names
 - [`mxv commands`](#mxv-commands): Explore mxv's commands
 - [`mxv schemas`](#mxv-schemas): Explore the JSON documents that mxv prints
 - [`mxv self`](#mxv-self): Review mxv's own use
@@ -759,6 +760,103 @@ mxv ports reset -w reading-list api
 Effects: destructive, not idempotent, closed-world.
 
 Writes: applies all items or none.
+
+## `mxv proxy`
+
+Serve the routes that workspaces declare at stable names
+
+### Commands
+
+- [`mxv proxy status`](#mxv-proxy-status): Show whether the proxy runs, and each route that a workspace declares
+- [`mxv proxy start`](#mxv-proxy-start): Start the proxy, and load the routes of every workspace
+- [`mxv proxy stop`](#mxv-proxy-stop): Stop the proxy; the next `mxv up` of a workspace with routes starts it again
+- [`mxv proxy trust`](#mxv-proxy-trust): Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+
+## `mxv proxy status`
+
+Show whether the proxy runs, and each route that a workspace declares
+
+### Examples
+
+List the routes and say whether the proxy runs.
+
+```sh
+mxv proxy status
+```
+
+### Columns
+
+- `route`: The route's name in the workspace's `routes`.
+- `workspace`: The workspace that declares the route.
+- `url`: The URL that serves the route, or `(not served)` when another workspace's name makes the same host label.
+- `unit`: The process or container that listens on the route's port, or null when no unit does.
+- `state`: The state of the unit: `running`, `stopped`, and so on, or why the route has no unit.
+
+Effects: read-only, closed-world.
+
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+
+## `mxv proxy start`
+
+Start the proxy, and load the routes of every workspace
+
+### Examples
+
+Start the proxy, or load the current routes into it.
+
+```sh
+mxv proxy start
+```
+
+### Columns
+
+- `route`: The route's name in the workspace's `routes`.
+- `workspace`: The workspace that declares the route.
+- `url`: The URL that serves the route, or `(not served)` when another workspace's name makes the same host label.
+- `unit`: The process or container that listens on the route's port, or null when no unit does.
+- `state`: The state of the unit: `running`, `stopped`, and so on, or why the route has no unit.
+
+Effects: additive, idempotent, open-world.
+
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+
+## `mxv proxy stop`
+
+Stop the proxy; the next `mxv up` of a workspace with routes starts it again
+
+### Examples
+
+Stop the proxy.
+
+```sh
+mxv proxy stop
+```
+
+### Columns
+
+- `route`: The route's name in the workspace's `routes`.
+- `workspace`: The workspace that declares the route.
+- `url`: The URL that serves the route, or `(not served)` when another workspace's name makes the same host label.
+- `unit`: The process or container that listens on the route's port, or null when no unit does.
+- `state`: The state of the unit: `running`, `stopped`, and so on, or why the route has no unit.
+
+Effects: destructive, idempotent, closed-world.
+
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+
+## `mxv proxy trust`
+
+Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+
+### Examples
+
+Install the proxy's local certificate authority in the system trust store.
+
+```sh
+mxv proxy trust
+```
+
+Effects: additive, idempotent, open-world.
 
 ## `mxv commands`
 

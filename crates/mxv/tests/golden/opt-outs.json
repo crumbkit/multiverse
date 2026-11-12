@@ -156,6 +156,25 @@
       "budget": null
     },
     {
+      "rule": "effects/yes",
+      "applies_to": "mxv proxy stop",
+      "reason": "The command stops only the Caddy that mxv started, which the next mxv up of a workspace with a route starts again, and it deletes no file, so it asks no question first.",
+      "costs": [
+        "An agent without a terminal cannot run the command, or the command runs without asking anyone."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv proxy trust",
+      "reason": "The command asks a person at a terminal and raises the system's password prompt, which a test cannot answer; tests/proxy.rs checks its refusal without a terminal.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
       "rule": "twins/no-twin",
       "applies_to": "mxv show reading-list",
       "reason": "The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.",
@@ -251,6 +270,21 @@
       "declaration": "passes-on-exit",
       "applies_to": "mxv run",
       "declares": "The command exits with the exit code of the task."
+    },
+    {
+      "declaration": "children",
+      "applies_to": "mxv proxy status",
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name."
+    },
+    {
+      "declaration": "children",
+      "applies_to": "mxv proxy start",
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name."
+    },
+    {
+      "declaration": "children",
+      "applies_to": "mxv proxy stop",
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name."
     }
   ]
 }

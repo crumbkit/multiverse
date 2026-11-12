@@ -1415,3 +1415,61 @@ fn a_renamed_manifest_keeps_its_tasks_under_their_own_names() {
     let renamed = manifest.renamed(&|name| format!("app-{name}"));
     assert!(renamed.tasks.contains_key(&TaskName::new("test").unwrap()));
 }
+
+#[test]
+fn a_route_must_name_a_declared_port_and_appear_once() {
+    let manifest = parse("ports = [\"web\", \"api\"]\nroutes = [\"web\"]\n").unwrap();
+    assert_eq!(manifest.routes, ["web"]);
+    let (line, undeclared) = problem("ports = [\"web\"]\nroutes = [\"api\"]\n");
+    assert_eq!(line, Some(2));
+    assert!(
+        matches!(&undeclared, ManifestProblem::Invalid { message } if message.contains("`api`") && message.contains("ports")),
+        "{undeclared:?}"
+    );
+    let (line, twice) = problem("ports = [\"web\"]\nroutes = [\"web\", \"web\"]\n");
+    assert_eq!(line, Some(2));
+    assert!(
+        matches!(&twice, ManifestProblem::Invalid { message } if message.contains("twice")),
+        "{twice:?}"
+    );
+}
+
+#[test]
+fn two_routes_with_the_same_host_label_fail_as_invalid() {
+    let (_, problem) = problem("ports = [\"a_b\", \"a-b\"]\nroutes = [\"a_b\", \"a-b\"]\n");
+    assert!(
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("a-b")),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn a_route_whose_label_is_longer_than_a_dns_label_fails_as_invalid() {
+    let long = "p".repeat(64);
+    let text = format!("ports = [\"{long}\"]\nroutes = [\"{long}\"]\n");
+    let (_, problem) = problem(&text);
+    assert!(
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("63")),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn a_renamed_manifest_prefixes_its_routes_like_its_ports() {
+    let manifest = parse("ports = [\"http\"]\nroutes = [\"http\"]\n").unwrap();
+    let renamed = manifest.renamed(&|name| format!("api-{name}"));
+    assert_eq!(renamed.routes, ["api-http"]);
+}
+
+#[test]
+fn a_manifest_that_joins_others_may_route_one_of_their_ports() {
+    let mut joined = Joined::default();
+    joined.add(&parse("ports = [\"api-http\"]\n").unwrap());
+    let manifest = Manifest::parse_joining(
+        "routes = [\"api-http\"]\n",
+        Path::new("/workspace/mxv.toml"),
+        &joined,
+    )
+    .unwrap();
+    assert_eq!(manifest.routes, ["api-http"]);
+}

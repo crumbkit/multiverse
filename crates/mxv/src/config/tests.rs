@@ -217,3 +217,41 @@ fn stop_idle_sets_how_long_a_running_workspace_must_be_unused_before_reclaim_sto
     assert_eq!(line, Some(2));
     assert!(reason.contains("stop_idle"), "{reason}");
 }
+
+#[test]
+fn the_proxy_addresses_and_the_caddy_path_are_read() {
+    let config = parsed(
+        "proxy_http = \"127.0.0.1:8080\"\nproxy_https = \"[::1]:8443\"\ncaddy = \"~/bin/caddy\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.proxy_http, Some("127.0.0.1:8080".parse().unwrap()));
+    assert_eq!(config.proxy_https, Some("[::1]:8443".parse().unwrap()));
+    assert_eq!(config.caddy, Some(PathBuf::from("/home/agent/bin/caddy")));
+}
+
+#[test]
+fn a_proxy_address_that_is_not_loopback_is_refused_with_its_line() {
+    let (line, reason) = invalid("\nproxy_http = \"0.0.0.0:80\"\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("loopback"), "{reason}");
+}
+
+#[test]
+fn a_proxy_address_without_a_port_is_refused() {
+    let (_, reason) = invalid("proxy_https = \"127.0.0.1\"\n");
+    assert!(reason.contains("proxy_https"), "{reason}");
+}
+
+#[test]
+fn a_relative_caddy_path_is_refused() {
+    let (_, reason) = invalid("caddy = \"bin/caddy\"\n");
+    assert!(reason.contains("absolute"), "{reason}");
+}
+
+#[test]
+fn the_same_address_for_proxy_http_and_proxy_https_is_refused_on_the_second_line() {
+    let (line, reason) =
+        invalid("proxy_http = \"127.0.0.1:8080\"\nproxy_https = \"127.0.0.1:8080\"\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("cannot share"), "{reason}");
+}

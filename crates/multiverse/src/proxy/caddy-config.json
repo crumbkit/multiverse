@@ -1,0 +1,196 @@
+{
+  "admin": {
+    "listen": "unix//state/mxv/proxy/admin.sock|0600",
+    "config": {
+      "persist": false
+    }
+  },
+  "storage": {
+    "module": "file_system",
+    "root": "/data/mxv/proxy/caddy"
+  },
+  "logging": {
+    "logs": {
+      "default": {
+        "level": "INFO",
+        "writer": {
+          "output": "stderr"
+        }
+      }
+    }
+  },
+  "apps": {
+    "pki": {
+      "certificate_authorities": {
+        "local": {
+          "install_trust": false
+        }
+      }
+    },
+    "http": {
+      "http_port": 8080,
+      "https_port": 8443,
+      "servers": {
+        "mxv": {
+          "listen": [
+            "127.0.0.1:8080",
+            "127.0.0.1:8443"
+          ],
+          "routes": [
+            {
+              "match": [
+                {
+                  "host": [
+                    "api.reading-list.mxv.localhost"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "localhost:21877"
+                    }
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [
+                {
+                  "host": [
+                    "web.reading-list.mxv.localhost"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "localhost:24310"
+                    }
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "match": [
+                {
+                  "host": [
+                    "web.triage.mxv.localhost"
+                  ]
+                }
+              ],
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {
+                      "dial": "localhost:24311"
+                    }
+                  ]
+                }
+              ],
+              "terminal": true
+            }
+          ],
+          "errors": {
+            "routes": [
+              {
+                "match": [
+                  {
+                    "host": [
+                      "api.reading-list.mxv.localhost"
+                    ]
+                  }
+                ],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": "502",
+                    "headers": {
+                      "Content-Type": [
+                        "text/plain; charset=utf-8"
+                      ]
+                    },
+                    "body": "api.reading-list.mxv.localhost is a route of the stopped workspace reading-list.\nRun `mxv up -w reading-list` to start it.\n"
+                  }
+                ],
+                "terminal": true
+              },
+              {
+                "match": [
+                  {
+                    "host": [
+                      "web.reading-list.mxv.localhost"
+                    ]
+                  }
+                ],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": "502",
+                    "headers": {
+                      "Content-Type": [
+                        "text/plain; charset=utf-8"
+                      ]
+                    },
+                    "body": "web.reading-list.mxv.localhost is a route of the stopped workspace reading-list.\nRun `mxv up -w reading-list` to start it.\n"
+                  }
+                ],
+                "terminal": true
+              },
+              {
+                "match": [
+                  {
+                    "host": [
+                      "web.triage.mxv.localhost"
+                    ]
+                  }
+                ],
+                "handle": [
+                  {
+                    "handler": "static_response",
+                    "status_code": "502",
+                    "headers": {
+                      "Content-Type": [
+                        "text/plain; charset=utf-8"
+                      ]
+                    },
+                    "body": "web.triage.mxv.localhost is a route of the stopped workspace triage.\nRun `mxv up -w triage` to start it.\n"
+                  }
+                ],
+                "terminal": true
+              }
+            ]
+          },
+          "automatic_https": {
+            "disable_redirects": true
+          }
+        }
+      }
+    },
+    "tls": {
+      "automation": {
+        "policies": [
+          {
+            "subjects": [
+              "api.reading-list.mxv.localhost",
+              "web.reading-list.mxv.localhost",
+              "web.triage.mxv.localhost"
+            ],
+            "issuers": [
+              {
+                "module": "internal"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -46,6 +46,12 @@ Later commands find the processes through the run record. The keeper's `Recorder
 2. Under the workspace lock, `Runs::prepare_task` in `crates/multiverse/src/runs/phased/task.rs` assigns ports and builds the plan with one more app, `mxv-task`. The lock ends before the task starts.
 3. `PreparedTask::run` asks `Admission` for a place and runs the task through `Phase::exec`, with the caller's standard streams and no timer. No run record names the task.
 
+## `mxv proxy`
+
+1. `processes::sync_proxy` in `crates/mxv/src/processes.rs` runs after `up`, `restart`, `down` and `ports reset`, and `verbs::remove` and `archive` do the same after they change the records.
+2. `proxy::sync` in `crates/mxv/src/proxy.rs` calls `Proxy::sync` in `crates/multiverse/src/proxy.rs` and turns a failure into a warning with an error code.
+3. `Proxy::sync` derives `Route` values from the records (`proxy/routes.rs`), renders Caddy's JSON configuration (`proxy/caddy_config.rs`), starts Caddy through phase when needed (`proxy/process.rs`) and talks to its admin socket (`proxy/admin.rs`).
+
 ## Key decisions
 
 Decision records in `crates/mxv/docs/decisions/`:

@@ -5,6 +5,19 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Added
+
+- A manifest's `routes` list names ports that serve HTTP, and mxv serves
+  each at `https://<port>.<workspace>.mxv.localhost` through one Caddy for
+  all workspaces. `mxv up`, `restart`, `down`, `remove`, `archive`, `restore`
+  and `ports reset` keep the routes in line with the workspace records, and a
+  failure to do so is a warning with an error code and never fails the verb.
+- `mxv proxy status`, `start`, `stop` and `trust` operate the proxy. The
+  config keys `proxy_http`, `proxy_https` and `caddy` set its addresses and
+  program. `mxv proxy trust` needs a terminal and a confirmation.
+- `.github/workflows/proxy.yml` runs the tests that start a real Caddy, with
+  the Caddy release pinned by digest. It is not a required check.
+
 ### Changed
 
 - `mxv archive`, `mxv restore` and `mxv remove` succeed with nothing to do

@@ -1,0 +1,14 @@
+Stop the proxy; the next `mxv up` of a workspace with routes starts it again
+
+Usage: mxv proxy stop [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv proxy stop
+
+Effects: destructive, idempotent, closed-world.
+Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv proxy stop --help` describes them.
+Next: mxv proxy stop --help explains each column.

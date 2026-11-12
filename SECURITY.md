@@ -64,6 +64,8 @@ Guards are in order.
 
 mxv keeps no listener open. The ledger allocates from `ports_range`, by default 20000 to 29999, and fails when none is free. Containers publish on 127.0.0.1. mxv connects to deadband's Unix socket.
 
+Caddy listens on `proxy_http` and `proxy_https`, by default 127.0.0.1:80 and 127.0.0.1:443, and its admin API is a Unix socket in the proxy state directory that only the person can open. Each address is bound only on loopback. A route forwards to `localhost` and the host port of its workspace, which reaches 127.0.0.1 and ::1, so it opens no port that the workspace did not already expose. Caddy's certificate authority key lives under `$XDG_DATA_HOME/mxv/proxy/caddy`, which `mxv clean` and `sweep` protect. `mxv proxy trust` installs that authority in the system trust store, which gives it the power to vouch for any name, so mxv asks first, refuses without a terminal, and the skill tells agents never to run it.
+
 ## Sandbox
 
 A process runs under nono only when it declares `[permissions]`. Seatbelt is partial, and Linux reports Landlock as unsandboxed. On an older kernel or a build without the `sandbox` feature, a declaring app runs unsandboxed.

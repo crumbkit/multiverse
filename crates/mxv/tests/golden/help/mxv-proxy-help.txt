@@ -1,0 +1,30 @@
+Serve the routes that workspaces declare at stable names
+
+Usage: mxv proxy [OPTIONS] <COMMAND>
+
+Commands:
+  status  Show whether the proxy runs, and each route that a workspace declares
+  start   Start the proxy, and load the routes of every workspace
+  stop    Stop the proxy; the next `mxv up` of a workspace with routes starts it again
+  trust   Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Next: mxv proxy <COMMAND> -h

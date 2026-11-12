@@ -70,6 +70,22 @@ pub(crate) fn is_taken(port: u16) -> bool {
     TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err() || accepts(port)
 }
 
+/// Checks that a listener can bind `address` now, and releases it. A
+/// connection to the address counts as a holder too, because a bind of one
+/// address can succeed beside a server that listens on every address.
+///
+/// # Errors
+///
+/// Returns the error of the bind, whose kind is `AddrInUse` when something
+/// holds the address and `PermissionDenied` when the system keeps the port
+/// for privileged programs.
+pub(crate) fn can_bind(address: SocketAddr) -> std::io::Result<()> {
+    if TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).is_ok() {
+        return Err(std::io::ErrorKind::AddrInUse.into());
+    }
+    TcpListener::bind(address).map(drop)
+}
+
 /// Reports whether a TCP connection to `port` on 127.0.0.1 or on `::1`
 /// succeeds. A server that binds `localhost` may listen on either one.
 pub(crate) fn accepts(port: u16) -> bool {

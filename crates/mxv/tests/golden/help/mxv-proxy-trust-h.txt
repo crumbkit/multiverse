@@ -1,0 +1,12 @@
+Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+
+Usage: mxv proxy trust [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv proxy trust
+
+Effects: additive, idempotent, open-world.
+Global flags: --json, --no-input. `mxv proxy trust --help` describes them.

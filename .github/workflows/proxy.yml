@@ -1,0 +1,77 @@
+# Tests of `mxv proxy` that start a real Caddy. The pull-request lane in
+# ci.yml runs the other proxy tests, which need no Caddy process. This
+# workflow is not a required check: it runs when a pull request changes the
+# proxy code, on every push to main, and nightly, so a new Caddy release that
+# breaks the generated configuration shows up within a day.
+name: Proxy
+
+on:
+  pull_request:
+    paths:
+      - "crates/multiverse/src/proxy.rs"
+      - "crates/multiverse/src/proxy/**"
+      - "crates/multiverse/src/manifest.rs"
+      - "crates/multiverse/src/manifest/**"
+      - "crates/multiverse/src/lookup.rs"
+      - "crates/multiverse/src/phase_plan.rs"
+      - "crates/mxv/src/config.rs"
+      - "crates/mxv/src/config/**"
+      - "crates/phase/**"
+      - "crates/mxv/src/proxy.rs"
+      - "crates/mxv/src/proxy/**"
+      - "crates/mxv/tests/proxy.rs"
+      - ".github/workflows/proxy.yml"
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_WARNINGS: deny
+  CARGO_TERM_COLOR: always
+  # The Caddy release that the tests run against. The digest is the SHA-512
+  # that the release publishes in caddy_2.10.0_checksums.txt for the Linux
+  # amd64 archive.
+  CADDY_VERSION: 2.10.0
+  CADDY_SHA512: 626682d623ca04356ab3c9a93a82386cfde6d8243b11f2d0eea9e97ba630c7ada62373401e96b72c6690c98ae8dd004d61fafe477f5249690d5cb251ebbfd2d9
+
+jobs:
+  caddy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
+        with:
+          tool: cargo-nextest@0.9.140
+          fallback: none
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The archive is checked against the pinned digest before it is
+      # unpacked, so a changed release asset fails the job.
+      - name: caddy
+        run: |
+          archive="caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$archive" \
+            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/$archive"
+          echo "$CADDY_SHA512  $RUNNER_TEMP/$archive" | sha512sum --check -
+          mkdir "$RUNNER_TEMP/caddy"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/caddy" caddy
+          echo "MXV_CADDY_BIN=$RUNNER_TEMP/caddy/caddy" >> "$GITHUB_ENV"
+      - name: proxy tests
+        env:
+          MXV_CADDY_TESTS: "1"
+        run: cargo nextest run --locked -p mxv --test proxy

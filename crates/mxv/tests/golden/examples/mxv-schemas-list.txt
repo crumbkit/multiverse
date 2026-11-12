@@ -1,26 +1,26 @@
-ID                    KIND    FORM      DESCRIPTION
-mxv/failure/v1        output  document  The document that a command prints on standard output when it fails with --json.
-mxv/new/v1            output  document  The workspace that the run created, or would create on a dry run, and the ignored directories that it cloned into the checkout.
-mxv/add/v1            output  document  The workspace with the checkout that the run added, or would add on a dry run, and the ignored directories that it cloned into the new checkout.
-mxv/list/v1           output  document  One page of the workspaces, in name order, and the number of workspaces.
-mxv/show/v1           output  document  The workspaces with the given names and their sizes on disk, and a failure for each name that no workspace has.
-mxv/cd/v1             output  document  The directory of the workspace or of one of its checkouts, for `cd "$(mxv cd <NAME>)"`.
-mxv/up/v1             output  document  The selected units and their dependencies, in the order they started, each running.
-mxv/down/v1           output  document  The units that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.
-mxv/restart/v1        output  document  The restarted units and their dependencies, in the order they started, each running.
-mxv/status/v1         output  document  Each unit of the workspace's manifest in start order, then each other unit that its run record holds, with its state, and the manifest's error when it does not parse.
-mxv/logs/v1           output  stream    The last lines of a unit's log, then with --follow each line that the unit writes.
-mxv/run/v1            output  document  Each task of the workspace: those that a manifest declares, then those that mise lists, by checkout.
-mxv/ports-reset/v1    output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
-mxv/archive/v2        output  document  What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.
-mxv/restore/v1        output  document  The workspace that the restore rebuilt and each port that changed, or what it would do on a dry run.
-mxv/repair/v1         output  document  What the repair of one name's broken records, or the sweep of what no record names, did, or would do on a dry run.
-mxv/remove/v1         output  document  What the run removed, deleted and kept, or would on a dry run.
-mxv/clean/v1          output  document  Each workspace that the run considered, with the disposable directories it deleted, or would delete on a dry run, and the bytes they took, or why it kept them, and a failure for each workspace whose directories could not be deleted.
-mxv/reclaim/v1        output  document  Each workspace that the run considered, with what it stopped or cleaned, or would on a dry run, the bytes that frees, and why the workspace counts as idle or why the run kept it, and a failure for each workspace that could not be measured, stopped or cleaned.
-mxv/pin/v1            output  document  The workspace and whether it is pinned, which it is after the run.
-mxv/unpin/v1          output  document  The workspace and whether it is pinned, which it is not after the run.
-mxv/commands-list/v1  output  document  One branch of the tool's commands with their arguments, examples and columns.
-mxv/schemas-list/v1   output  document  The JSON documents that the tool prints, with a description of each.
-mxv/schemas-show/v1   output  document  The JSON Schema of each document id given.
-mxv/self-usage/v1     output  document  The patterns in the usage log where callers waste effort, and a summary of the runs read.
+ID                   KIND    FORM      DESCRIPTION
+mxv/failure/v1       output  document  The document that a command prints on standard output when it fails with --json.
+mxv/new/v1           output  document  The workspace that the run created, or would create on a dry run, and the ignored directories that it cloned into the checkout.
+mxv/add/v1           output  document  The workspace with the checkout that the run added, or would add on a dry run, and the ignored directories that it cloned into the new checkout.
+mxv/list/v1          output  document  One page of the workspaces, in name order, and the number of workspaces.
+mxv/show/v1          output  document  The workspaces with the given names and their sizes on disk, and a failure for each name that no workspace has.
+mxv/cd/v1            output  document  The directory of the workspace or of one of its checkouts, for `cd "$(mxv cd <NAME>)"`.
+mxv/up/v1            output  document  The selected units and their dependencies, in the order they started, each running.
+mxv/down/v1          output  document  The units that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.
+mxv/restart/v1       output  document  The restarted units and their dependencies, in the order they started, each running.
+mxv/status/v1        output  document  Each unit of the workspace's manifest in start order, then each other unit that its run record holds, with its state, and the manifest's error when it does not parse.
+mxv/logs/v1          output  stream    The last lines of a unit's log, then with --follow each line that the unit writes.
+mxv/run/v1           output  document  Each task of the workspace: those that a manifest declares, then those that mise lists, by checkout.
+mxv/ports-reset/v1   output  document  Each port of the workspace's manifest and the host port that it holds after the reset.
+mxv/proxy-status/v1  output  document  Whether the proxy runs, its addresses and certificate authority, and each route that a workspace declares with the unit behind it.
+mxv/proxy-start/v1   output  document  The state of the proxy once it serves the routes of every workspace, and each route.
+mxv/proxy-stop/v1    output  document  The state of the proxy once it has stopped, and each route that a workspace declares.
+mxv/proxy-trust/v1   output  document  The name of the certificate authority that this machine now trusts.
+mxv/archive/v2       output  document  What the archive kept and where each checkout's commit is pinned, or what it would do on a dry run.
+mxv/restore/v1       output  document  The workspace that the restore rebuilt and each port that changed, or what it would do on a dry run.
+mxv/repair/v1        output  document  What the repair of one name's broken records, or the sweep of what no record names, did, or would do on a dry run.
+mxv/remove/v1        output  document  What the run removed, deleted and kept, or would on a dry run.
+mxv/clean/v1         output  document  Each workspace that the run considered, with the disposable directories it deleted, or would delete on a dry run, and the bytes they took, or why it kept them, and a failure for each workspace whose directories could not be deleted.
+mxv/reclaim/v1       output  document  Each workspace that the run considered, with what it stopped or cleaned, or would on a dry run, the bytes that frees, and why the workspace counts as idle or why the run kept it, and a failure for each workspace that could not be measured, stopped or cleaned.
+mxv/pin/v1           output  document  The workspace and whether it is pinned, which it is after the run.
+mxv/unpin/v1         output  document  The workspace and whether it is pinned, which it is not after the run.

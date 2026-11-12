@@ -21,6 +21,9 @@ use crumbkit_usage::{
 use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
+use crate::proxy::{
+    START as PROXY_START, STATUS as PROXY_STATUS, STOP as PROXY_STOP, TRUST as PROXY_TRUST,
+};
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
 use crate::repair::{REPAIR, RepairArgs};
 use crate::run::RUN;
@@ -68,6 +71,7 @@ const HELP: Help = Help::new()
                 "Run a workspace's app",
                 &["up", "down", "restart", "status", "logs", "exec", "run", "ports"],
             ),
+            Goal::new("Serve a workspace at a stable name", &["proxy"]),
             Goal::new(
                 "Put a workspace away",
                 &["archive", "restore", "repair", "remove"],
@@ -179,6 +183,25 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::destructive().all_or_none())
             .document(PORTS_RESET),
+        Leaf::new(&["proxy", "status"])
+            .examples(&[Example::new(&[], "List the routes and say whether the proxy runs")])
+            .effects(Effects::read_only())
+            .document(PROXY_STATUS),
+        Leaf::new(&["proxy", "start"])
+            .examples(&[Example::new(&[], "Start the proxy, or load the current routes into it")])
+            .effects(Effects::additive().idempotent().open_world())
+            .document(PROXY_START),
+        Leaf::new(&["proxy", "stop"])
+            .examples(&[Example::new(&[], "Stop the proxy")])
+            .effects(Effects::destructive().idempotent())
+            .document(PROXY_STOP),
+        Leaf::new(&["proxy", "trust"])
+            .examples(&[Example::new(
+                &[],
+                "Install the proxy's local certificate authority in the system trust store",
+            )])
+            .effects(Effects::additive().idempotent().open_world())
+            .document(PROXY_TRUST),
         Leaf::new(&["archive"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "--dry-run"],
@@ -418,6 +441,12 @@ pub(crate) enum Verb {
         #[command(subcommand)]
         command: PortsCommand,
     },
+    /// Serve the routes that workspaces declare at stable names.
+    Proxy {
+        /// What to do with the proxy.
+        #[command(subcommand)]
+        command: ProxyCommand,
+    },
     /// Explore mxv's commands.
     Commands {
         /// What to do with the commands.
@@ -456,6 +485,19 @@ pub(crate) enum Verb {
 pub(crate) enum CommandsCommand {
     /// List a branch of mxv's commands with their arguments, examples and columns.
     List(CommandsList),
+}
+
+/// The commands for the proxy that serves the routes of workspaces.
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProxyCommand {
+    /// Show whether the proxy runs, and each route that a workspace declares.
+    Status,
+    /// Start the proxy, and load the routes of every workspace.
+    Start,
+    /// Stop the proxy; the next `mxv up` of a workspace with routes starts it again.
+    Stop,
+    /// Ask a person to trust the proxy's certificate authority, so browsers accept its certificates.
+    Trust,
 }
 
 /// The commands for a workspace's host ports.

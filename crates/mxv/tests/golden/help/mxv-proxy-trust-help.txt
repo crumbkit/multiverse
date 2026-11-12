@@ -1,0 +1,19 @@
+Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+
+Usage: mxv proxy trust [OPTIONS]
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv proxy trust
+          Install the proxy's local certificate authority in the system trust store
+
+Effects: additive, idempotent, open-world.
