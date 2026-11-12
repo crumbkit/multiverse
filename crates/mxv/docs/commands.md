@@ -504,7 +504,9 @@ Writes: applies all items or none.
 
 ## `mxv archive`
 
-Archive a workspace, so restore can rebuild it at the same commits
+Archive a workspace, so restore can rebuild it at the same commits.
+
+When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
 
 ### Arguments
 
@@ -522,11 +524,13 @@ Print what archiving the workspace reading-list would do.
 mxv archive -w reading-list --dry-run
 ```
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv restore`
 
-Rebuild an archived workspace at its archived commits
+Rebuild an archived workspace at its archived commits.
+
+When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name\_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
 
 ### Arguments
 
@@ -543,7 +547,7 @@ Print what restoring the archived workspace sample would do.
 mxv restore sample --dry-run
 ```
 
-Effects: additive, not idempotent, open-world.
+Effects: additive, idempotent, open-world.
 
 ## `mxv repair`
 
@@ -580,7 +584,9 @@ Effects: destructive, idempotent, closed-world.
 
 ## `mxv remove`
 
-Remove a workspace's checkouts, its merged branches, its directory and its record
+Remove a workspace's checkouts, its merged branches, its directory and its record.
+
+When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
 
 ### Arguments
 
@@ -600,7 +606,7 @@ Print what removing the workspace reading-list would delete.
 mxv remove reading-list --dry-run
 ```
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv clean`
 

@@ -184,14 +184,14 @@ const HELP: Help = Help::new()
                 &["-w", "reading-list", "--dry-run"],
                 "Print what archiving the workspace reading-list would do",
             )])
-            .effects(Effects::destructive())
+            .effects(Effects::destructive().idempotent())
             .document(ARCHIVE),
         Leaf::new(&["restore"])
             .examples(&[Example::new(
                 &["sample", "--dry-run"],
                 "Print what restoring the archived workspace sample would do",
             )])
-            .effects(Effects::additive().open_world())
+            .effects(Effects::additive().idempotent().open_world())
             .document(RESTORE),
         Leaf::new(&["repair"])
             .examples(&[
@@ -211,7 +211,7 @@ const HELP: Help = Help::new()
                 &["reading-list", "--dry-run"],
                 "Print what removing the workspace reading-list would delete",
             )])
-            .effects(Effects::destructive())
+            .effects(Effects::destructive().idempotent())
             .document(REMOVE),
         Leaf::new(&["clean"])
             .examples(&[Example::new(
@@ -380,8 +380,12 @@ pub(crate) enum Verb {
     /// Each task takes one place from deadband, and `gate = false` opts a declared task out. A task has no sandbox and no time limit, and receives its own checkout's ports as MXV_PORT_<NAME> and other checkouts' ports as MXV_PORT_<CHECKOUT>_<NAME>. A task of the workspace manifest receives that manifest's ports as MXV_PORT_<NAME> and every checkout's in the longer form. A declared task receives the variables of the services that it needs, and a mise task those of every service. mxv adds MISE_JOBS=1 beside deadband's job variables, so a mise task runs one step at a time under its place. mxv exits with the task's exit code, or with 128 plus the number of the signal that ended it. A Ctrl-C at a terminal reaches the task itself, and mxv waits for it to end. A task runs on, no longer counted by deadband, when something sends SIGTERM or SIGKILL to mxv alone.
     Run(RunArgs),
     /// Archive a workspace, so restore can rebuild it at the same commits.
+    ///
+    /// When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
     Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
+    ///
+    /// When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
     Restore(RestoreArgs),
     /// Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names.
     ///
@@ -390,6 +394,8 @@ pub(crate) enum Verb {
     /// With --orphans and no NAME, mxv lists, with its size, each item that no record names. The run files of a name that no workspace has, and phase's run record and logs of a workspace id that no workspace or archive record holds, are mxv's derived state, so mxv deletes them after you confirm. Before it deletes a run record, phase's sweep stops the processes and removes the containers, networks and run volumes that it names; a process that phase cannot stop keeps the record and the logs, and its row names the process. The docker volumes that hold the data of such an id stay unless you pass --delete-volumes, which deletes them before the logs and also lists, by docker's workspace-id label, the volumes of this state directory whose id phase keeps nothing of. With --delete-volumes and a docker that does not answer, mxv refuses the whole sweep and deletes nothing, run files included. Each archive that a repair moved aside, and each directory of ignored files at $XDG_DATA_HOME/mxv/archives/<ID> whose archive no record names, such as the one of a moved-aside archive whose directory you deleted by hand, holds the only copies of its files, so mxv deletes them only with --delete-aside, and --yes only skips the question. A directory of the archives without its own record, such as a hidden one without the record of the archive that its name names, is listed as kept and never deleted. The listing and --dry-run take no lock and write nothing. When a workspace or archive record cannot be read, a moved-aside one included, mxv lists nothing, deletes nothing and fails with that record's error, because the record may name what looks orphaned; move the record aside and run the command again. Before each deletion, mxv lists again and deletes the item only when the listing still holds it. An item whose deletion fails has the state partly_deleted, its row names the paths that are gone and gives the error, mxv goes on with the next item, prints every row, and then exits with the code of the first error.
     Repair(RepairArgs),
     /// Remove a workspace's checkouts, its merged branches, its directory and its record.
+    ///
+    /// When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`
     // lines and `commands list` name only `remove`.
     #[command(alias = "rm")]

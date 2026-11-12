@@ -432,6 +432,10 @@
       "description": "What `mxv restore` did, or would do on a dry run.",
       "type": "object",
       "properties": {
+        "state": {
+          "description": "Whether the run restored the workspace, would restore it on a dry\nrun, or had nothing to do because a workspace already holds the\nname and no archive needs restoring.",
+          "$ref": "#/$defs/LifecycleState"
+        },
         "name": {
           "description": "The workspace's name.",
           "type": "string"
@@ -439,6 +443,13 @@
         "path": {
           "description": "The workspace's directory.",
           "type": "string"
+        },
+        "stale_pins": {
+          "description": "The pins of the archive record that an earlier restore rebuilt and\nstopped before it deleted, which an unchanged run deleted with the\nrecord, or would delete on a dry run. Empty otherwise.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "checkouts": {
           "description": "The checkouts that the restore rebuilt.",
@@ -484,14 +495,36 @@
         }
       },
       "required": [
+        "state",
         "name",
         "path",
+        "stale_pins",
         "checkouts",
         "put_back",
         "lost",
         "ports",
         "missing_mirrors",
         "warnings"
+      ]
+    },
+    "LifecycleState": {
+      "description": "Whether a run of `mxv archive`, `mxv restore` or `mxv remove` changed\nanything.",
+      "oneOf": [
+        {
+          "description": "The run did what the result reports.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "A dry run: the run would do what the result reports.",
+          "type": "string",
+          "const": "planned"
+        },
+        {
+          "description": "The verb's goal already held, so there was nothing to do and the\nrun changed nothing, except to delete an archive record that an\nearlier restore left behind.",
+          "type": "string",
+          "const": "unchanged"
+        }
       ]
     },
     "RestoredCheckout": {

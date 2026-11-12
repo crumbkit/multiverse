@@ -1615,12 +1615,22 @@ cloned again from the recorded origin, and a clone that cannot reach the origin
 leaves no empty mirror behind. An `ssh://` origin keeps its user name, and an
 archive removes any password from an origin URL.
 
+When a workspace already holds the name and no archive of it needs
+restoring, the restore has nothing to do: it exits 0 and its state is
+`unchanged`. When an earlier restore stopped after it rebuilt the workspace
+and before it deleted the archive, a second restore asks and then deletes
+that archive with its pins, which `stale_pins` names. `mxv archive -w` of a
+name that only a finished archive holds, and `mxv remove` of a name that no
+workspace has, or with `--archived` no archive, also exit 0 with the state
+`unchanged`.
+
 A restore refuses, and builds nothing, with these codes:
 
 | Code | Cause |
 | --- | --- |
-| `mxv::restore::not_found` | No archive has the name. |
-| `mxv::restore::name_taken` | A workspace holds the name, or something exists at the recorded path. |
+| `mxv::restore::not_found` | No archive and no workspace has the name. |
+| `mxv::restore::name_taken` | A workspace of another stable id holds the name, a workspace of the archive's stable id has lost its directory or a checkout's directory, or something exists at the recorded path. |
+| `mxv::restore::changed` | The records of the name changed after mxv asked to delete the archive that an earlier restore left, so mxv deleted nothing. `mxv restore NAME --dry-run` shows the records as they now stand. |
 | `mxv::restore::branch_moved` | A worktree's branch points at another commit than the archive pinned. |
 | `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
 | `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |

@@ -746,8 +746,16 @@ pub(crate) fn remove(
     let plan = workspaces
         .plan_removal(&name, allow)
         .map_err(MxvFailure::from)?;
+    let planned = output.is_dry_run();
+    let gone = || -> Result<Prose<RemovalResult>, crumbkit::Error> {
+        let path = environment.root()?.path.join(name.as_str());
+        Ok(Prose::new(RemovalResult::unchanged(
+            &name, &path, false, planned,
+        )))
+    };
     let removal = match plan {
         RemovalPlan::Ready(removal) => removal,
+        RemovalPlan::NotFound => return gone(),
         refused => return Err(refusal(&name, allow, refused).into()),
     };
     if output.is_dry_run() {
@@ -813,6 +821,8 @@ pub(crate) fn remove(
                     .with_warnings(held),
             ))
         }
+        // Another removal finished after the question.
+        RemovalOutcome::Changed(RemovalPlan::NotFound) => gone(),
         RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {
             name: name.to_string(),
             allow,

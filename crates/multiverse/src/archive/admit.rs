@@ -388,6 +388,9 @@ pub enum ArchivePlanned {
     /// An earlier run deleted the workspace's record and did not mark the
     /// archive as finished. [`Workspaces::finish_archive`] finishes it.
     Finish(Box<Archive>),
+    /// No workspace has the name and its archive has finished, so there
+    /// is nothing to do.
+    Unchanged(Box<Archive>),
     /// The archive cannot go ahead.
     Refused(ArchiveRefusal),
 }
@@ -959,7 +962,10 @@ impl<B: Backend> Workspaces<B> {
                 }
                 Ok(Subject::Done(ArchivePlanned::Finish(Box::new(archive))))
             }
-            (_, Some(archive)) if archive.state == ArchiveState::Archived => {
+            (None, Some(archive)) if archive.state == ArchiveState::Archived => {
+                Ok(Subject::Done(ArchivePlanned::Unchanged(Box::new(archive))))
+            }
+            (Some(_), Some(archive)) if archive.state == ArchiveState::Archived => {
                 refused(ArchiveRefusal::NameTaken(Box::new(archive)))
             }
             (Some(workspace), Some(archive)) if archive.workspace_id != workspace.id => {
