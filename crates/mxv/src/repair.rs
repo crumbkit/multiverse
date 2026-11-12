@@ -495,7 +495,9 @@ fn orphans(
         &format!("Delete {}, which no record names?", paths.join(", ")),
     )?;
     // A failure keeps its item with the error as the reason, and the sweep
-    // goes on, so the result still names each item already deleted.
+    // goes on, so the result still names each item already deleted. The
+    // command then exits with the code of the first failure.
+    let mut failures = Vec::new();
     for orphan in &found {
         let row = match records.sweep_orphan(orphan) {
             Ok(Swept::Deleted) => OrphanRow::new(orphan, OrphanState::Deleted, Vec::new()),
@@ -504,16 +506,17 @@ fn orphans(
                 OrphanState::Kept,
                 vec!["another command changed it after mxv listed it".to_owned()],
             ),
-            Err(error) => OrphanRow::new(
-                orphan,
-                OrphanState::Kept,
-                vec![MxvFailure::from(error).to_string()],
-            ),
+            Err(error) => {
+                let failure = MxvFailure::from(error);
+                let row = OrphanRow::new(orphan, OrphanState::Kept, vec![failure.to_string()]);
+                failures.push(failure.into());
+                row
+            }
         };
         if row.state == OrphanState::Deleted {
             result.state = RepairState::Swept;
         }
         result.orphans.push(row);
     }
-    Ok(Prose::new(result))
+    Ok(Prose::with_failures(result, failures))
 }

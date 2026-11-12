@@ -1550,3 +1550,28 @@ fn a_hidden_directory_without_the_record_of_its_name_is_left_out_by_orphans() {
     assert!(empty.join("notes.md").exists(), "{document}");
     assert!(other.join("archive.json").exists(), "{document}");
 }
+
+#[test]
+fn a_sweep_whose_deletion_fails_names_what_it_deleted_and_exits_with_the_failure() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    let unnamed = setup.plant_unnamed_data();
+    // A directory without write permission keeps its file, so its deletion
+    // fails after the moved-aside archive, which sorts first, is deleted.
+    fs::set_permissions(&unnamed, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    fs::set_permissions(&unnamed, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["data"]["state"], "swept", "{document}");
+    assert_eq!(orphan_row(&document, "moved_aside")["state"], "deleted");
+    let row = orphan_row(&document, "ignored_files");
+    assert_eq!(row["state"], "kept", "{document}");
+    assert_eq!(row["reasons"].as_array().unwrap().len(), 1, "{document}");
+    let failures = document["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1, "{document}");
+    assert!(!aside.exists() && !data.exists(), "{document}");
+    assert!(unnamed.join("ignored.tar").exists(), "{document}");
+}
