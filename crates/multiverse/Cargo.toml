@@ -27,6 +27,10 @@ regex = { workspace = true }
 # sha2 takes the digest of each file that `mxv archive` copies out of a
 # workspace's directory, which `mxv restore` checks before it writes it back.
 sha2 = { workspace = true }
+# tar writes and reads `ignored.tar`, the private file in which `mxv
+# archive` keeps a workspace's ignored files, with their permission bits
+# and link targets.
+tar = { workspace = true }
 # phase holds the container engine that `up`, `down`, `status`, `logs` and
 # `remove` run a manifest's containers with, the run directory's paths, and
 # the rules of workspace and unit names. phase never depends on multiverse.

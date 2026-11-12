@@ -1458,7 +1458,22 @@ keeps what `mxv restore NAME` needs to rebuild it at the same commits, on the
 same branches, with the same stable id. Use it for work that you may want
 back; `mxv remove` is for work that you do not.
 
-An archive keeps three things. Each checkout's git state stays reachable
+An archive also keeps each checkout's ignored files outside the disposable
+set, such as `.env`, which hold copies of your secrets. They go into one
+uncompressed tar, `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar`, mode 0600 in
+a directory of mode 0700, and the record lists each entry's path, kind, size,
+mode and SHA-256 digest. `mxv restore` writes them back with their modes. The
+disposable directories, such as `target/`, are deleted, and the archive result
+names each one with its size.
+
+The tar keeps files and symbolic links only, so it has two known limits. An
+empty directory below an ignored directory is not kept, and restore does not
+make it again. The mode of an ignored directory is not kept either: restore
+makes a directory such as a 0700 `secrets/` with the default mode, usually
+0755, though each file inside it gets its own kept mode back. Set the
+directory's mode again after a restore if it matters.
+
+An archive keeps three things in git. Each checkout's git state stays reachable
 through references below `refs/mxv/archives/<archive id>/<folder>/`, called
 pins, in the worktree's repository or the clone's mirror:
 
@@ -1490,8 +1505,8 @@ them instead.
 
 Archives have no expiry, and `mxv clean` never touches one. `mxv list
 --archived` lists them with each one's age and the number of commits that
-exist only on this machine. `mxv remove --archived NAME` deletes an archive
-and its references. `--delete-volumes` on that command deletes its docker
+exist only on this machine. `mxv remove --archived NAME` deletes an archive,
+its ignored-files tar and its references. `--delete-volumes` on that command deletes its docker
 volumes first. It fails and keeps the archive when docker does not answer, and
 refuses with `mxv::archive::volumes_in_use` when a live workspace has the same
 stable id.
@@ -1507,11 +1522,10 @@ lists every item that an archive cannot keep, each with what to do about it.
 Everything else in the workspace is kept, and `--force` archives it and loses
 only the listed items. These refuse:
 
-- A checkout holds an ignored file outside the disposable set, such as a
-  `.env`, so a secret never enters an archive. Move the file or delete it.
-- A file of the uncommitted work is larger than `archive_max_file` in the
-  config file, which is 100 MiB unless you set it. Move the file or delete
-  it.
+- A file of the uncommitted work, or an ignored file, is larger than
+  `archive_max_file` in the config file, which is 100 MiB unless you set it.
+  Move the file or delete it.
+- An ignored path holds a git repository, or is a socket.
 - The workspace's directory holds a file that mxv cannot copy, such as a
   socket.
 - A checkout holds a git repository that it does not track. A commit would

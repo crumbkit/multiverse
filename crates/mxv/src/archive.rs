@@ -15,8 +15,9 @@ use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
     ARCHIVE_MAX_FILE, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
-    ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Git, KEPT_NAMESPACE, Mode, PutBack,
-    RestoreOutcome, RestorePlanned, Uncommitted, Volumes, Workspace, WorkspaceName, Workspaces,
+    ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, DisposablePath, Git, IgnoredEntry,
+    IgnoredKind, KEPT_NAMESPACE, Mode, PutBack, RestoreOutcome, RestorePlanned, Uncommitted,
+    Volumes, Workspace, WorkspaceName, Workspaces,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -28,6 +29,7 @@ use crate::processes;
 use crate::reclaim::{user_reason, users};
 use crate::rows::{RemovalResult, WorkspaceRow};
 use crate::run_failures::RunFailure;
+use crate::units::Size;
 use crate::verbs::{configured, parse_name};
 
 mod failure;
@@ -39,8 +41,8 @@ pub use failure::{
     ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
     ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_SOURCE_CHANGED,
     ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED,
-    RESTORE_COMMIT_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
-    RESTORE_UNFINISHED,
+    RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN,
+    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
 };
 use failure::{ArchiveFailure, archive_refusal, restore_refusal};
 
@@ -67,7 +69,7 @@ pub(crate) struct ArchiveArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// Lose what the archive cannot keep, such as an ignored .env file, a paused merge or a file over archive_max_file, and list it in the archive
+    /// Lose what the archive cannot keep, such as a paused merge or a file over archive_max_file, and list it in the archive
     #[arg(long)]
     pub(crate) force: bool,
 
@@ -89,6 +91,10 @@ pub(crate) struct ArchiveArgs {
 pub(crate) struct RestoreArgs {
     /// The name of the archived workspace
     pub(crate) name: String,
+
+    /// Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
+    #[arg(long)]
+    pub(crate) force: bool,
 
     /// Print what the command would do, and change nothing.
     #[command(flatten)]
@@ -258,6 +264,125 @@ impl KeptRow {
     }
 }
 
+/// The ignored files and links of one checkout that an archive keeps in
+/// its private tar.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct IgnoredRow {
+    /// The checkout's folder.
+    folder: String,
+    /// Each file or link, relative to the workspace's directory, such as
+    /// `app/.env`.
+    paths: Vec<String>,
+    /// The bytes of the files, which leaves out the links.
+    bytes: u64,
+}
+
+impl IgnoredRow {
+    /// Returns one row for each folder of `entries`, each a folder, a path
+    /// relative to the workspace's directory and a number of bytes, in the
+    /// order that the folders first appear.
+    fn grouped(entries: impl IntoIterator<Item = (String, String, u64)>) -> Vec<Self> {
+        let mut rows: Vec<Self> = Vec::new();
+        for (folder, path, bytes) in entries {
+            match rows.iter_mut().find(|row| row.folder == folder) {
+                Some(row) => {
+                    row.paths.push(path);
+                    row.bytes += bytes;
+                }
+                None => rows.push(Self {
+                    folder,
+                    paths: vec![path],
+                    bytes,
+                }),
+            }
+        }
+        rows
+    }
+
+    /// Returns the rows of what `plan` would keep.
+    fn planned(plan: &ArchivePlan) -> Vec<Self> {
+        Self::grouped(
+            plan.ignored
+                .iter()
+                .map(|source| (source.folder.clone(), source.archived(), source.bytes)),
+        )
+    }
+
+    /// Returns the rows of what `archive` keeps.
+    fn kept(archive: &Archive) -> Vec<Self> {
+        Self::grouped(archive.ignored.iter().map(|entry| {
+            let bytes = if matches!(entry.kind, IgnoredKind::File) {
+                entry.size
+            } else {
+                0
+            };
+            (entry.folder().to_owned(), entry.path.clone(), bytes)
+        }))
+    }
+
+    /// Writes the sentence of this row, with `keeps` as the verb, such as
+    /// `would keep`.
+    fn write(&self, formatter: &mut fmt::Formatter<'_>, keeps: &str) -> fmt::Result {
+        writeln!(
+            formatter,
+            "mxv {keeps} {} of {}, {} in all, in a private file that only you can read: {}.",
+            counted(self.paths.len(), "ignored file", "ignored files"),
+            self.folder,
+            Size(self.bytes),
+            self.paths.join(", ")
+        )
+    }
+}
+
+/// One disposable directory that an archive deletes, because a build makes
+/// it again.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct DisposableRow {
+    /// The checkout's folder.
+    folder: String,
+    /// The directory, relative to the checkout, with `/` after it, such as
+    /// `target/`.
+    path: String,
+    /// The bytes that the directory took on disk.
+    bytes: u64,
+}
+
+impl DisposableRow {
+    /// Returns the rows of `paths`.
+    fn of(paths: &[DisposablePath]) -> Vec<Self> {
+        paths
+            .iter()
+            .map(|found| Self {
+                folder: found.checkout.clone(),
+                path: found.path.clone(),
+                bytes: found.bytes,
+            })
+            .collect()
+    }
+
+    /// Writes the one sentence that names every row of `rows`, with
+    /// `deletes` as the verb, such as `would delete`.
+    fn write_all(rows: &[Self], formatter: &mut fmt::Formatter<'_>, deletes: &str) -> fmt::Result {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let named: Vec<String> = rows
+            .iter()
+            .map(|row| format!("{}/{} ({})", row.folder, row.path, Size(row.bytes)))
+            .collect();
+        let noun = if rows.len() == 1 {
+            "directory"
+        } else {
+            "directories"
+        };
+        writeln!(
+            formatter,
+            "mxv {deletes} the disposable {noun} {}.",
+            listed(&named)
+        )
+    }
+}
+
 /// Returns `count` with the noun that fits it, such as `1 file`.
 fn counted(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
@@ -287,13 +412,22 @@ pub(crate) struct ArchiveResult {
     /// What the archive kept of each checkout besides its commit, or would
     /// keep, for each checkout that keeps something.
     kept: Vec<KeptRow>,
+    /// The ignored files and links that the archive kept in a private tar,
+    /// or would keep, for each checkout that has some. Restore writes them
+    /// back.
+    ignored: Vec<IgnoredRow>,
     /// What `--force` lost, or would lose.
     lost: Vec<String>,
     /// The workspace's units that the run stopped, or would stop.
     stopped: Vec<String>,
-    /// The ignored build directories that the run deleted, or would delete,
+    /// The disposable directories that the run deleted, or would delete,
     /// because a build makes them again.
-    disposable: Vec<String>,
+    disposable: Vec<DisposableRow>,
+    /// Each entry that a process wrote at the top level of a disposable
+    /// directory after mxv measured it, with the checkout's folder in
+    /// front, such as `app: target/late.o`. The run deleted it with the
+    /// directory.
+    late: Vec<String>,
     /// The extra entries of the workspace's directory that the archive
     /// holds.
     root_files: Vec<String>,
@@ -334,13 +468,17 @@ impl fmt::Display for ArchiveResult {
         for row in &self.kept {
             row.write(formatter, keeps)?;
         }
+        for row in &self.ignored {
+            row.write(formatter, keeps)?;
+        }
         for path in &self.lost {
             writeln!(formatter, "mxv {loses} {path}.")?;
         }
-        for path in &self.disposable {
+        DisposableRow::write_all(&self.disposable, formatter, deletes)?;
+        for entry in &self.late {
             writeln!(
                 formatter,
-                "mxv {deletes} the ignored build directory {path}."
+                "mxv deleted {entry}, which was written into a disposable directory after mxv measured it."
             )?;
         }
         for volume in &self.volumes {
@@ -429,6 +567,10 @@ pub(crate) struct PutBackRow {
     /// Each submodule that comes back uninitialised, which a dry run does
     /// not list.
     submodules: Vec<String>,
+    /// Each ignored file or link that the restore wrote back from the
+    /// archive's private tar, relative to the workspace's directory, such
+    /// as `app/.env`.
+    ignored: Vec<String>,
 }
 
 impl PutBackRow {
@@ -448,11 +590,13 @@ impl PutBackRow {
             worktree: put_back.worktree,
             kept: put_back.kept,
             submodules: put_back.submodules,
+            ignored: put_back.ignored,
         }
     }
 
-    /// Returns the row of what a restore of `checkout` would put back.
-    fn planned(checkout: &ArchivedCheckout) -> Self {
+    /// Returns the row of what a restore of `checkout` would put back,
+    /// with the entries of `ignored` that belong to it.
+    fn planned(checkout: &ArchivedCheckout, ignored: &[IgnoredEntry]) -> Self {
         let kept = &checkout.kept;
         Self {
             folder: checkout.folder.clone(),
@@ -471,6 +615,11 @@ impl PutBackRow {
                 .map(|commit| format!("{KEPT_NAMESPACE}{commit}"))
                 .collect(),
             submodules: Vec::new(),
+            ignored: ignored
+                .iter()
+                .filter(|entry| entry.folder() == checkout.folder)
+                .map(|entry| entry.path.clone())
+                .collect(),
         }
     }
 
@@ -534,6 +683,14 @@ impl PutBackRow {
                 listed(&self.kept)
             )?;
         }
+        if !self.ignored.is_empty() {
+            writeln!(
+                formatter,
+                "mxv {puts} back {} of {folder}: {}.",
+                counted(self.ignored.len(), "ignored file", "ignored files"),
+                self.ignored.join(", ")
+            )?;
+        }
         Ok(())
     }
 
@@ -558,6 +715,7 @@ impl PutBackRow {
             && self.worktree.is_empty()
             && self.kept.is_empty()
             && self.submodules.is_empty()
+            && self.ignored.is_empty()
     }
 }
 
@@ -573,6 +731,11 @@ pub(crate) struct RestoreResult {
     /// What the restore put back into each checkout besides its commit, or
     /// would put back, for each checkout that has something.
     put_back: Vec<PutBackRow>,
+    /// Each ignored file or link that `--force` left out, because the
+    /// archive's copy of it is missing or differs from its digest, relative
+    /// to the workspace's directory. A dry run does not read the copies, so
+    /// it lists none.
+    lost: Vec<String>,
     /// Each port that the restore gave a new number.
     ports: Vec<PortRow>,
     /// The folder of each clone whose mirror mxv clones again from its
@@ -608,6 +771,12 @@ impl fmt::Display for RestoreResult {
         for row in &self.put_back {
             row.write(formatter, puts)?;
         }
+        for path in &self.lost {
+            writeln!(
+                formatter,
+                "mxv lost the ignored file {path}, because the archive's copy of it is missing or damaged."
+            )?;
+        }
         for row in &self.put_back {
             row.write_submodules(formatter)?;
         }
@@ -628,7 +797,10 @@ impl fmt::Display for RestoreResult {
 
 /// Returns the archives that `environment` names.
 fn archives(environment: &Environment) -> Result<Archives, MxvFailure> {
-    Ok(Archives::new(environment.archives()?))
+    Ok(Archives::new(
+        environment.archives()?,
+        environment.archive_data()?,
+    ))
 }
 
 /// Returns the pids of the ancestors of `own` in `table`, which walks the
@@ -696,8 +868,11 @@ fn cd_target(environment: &Environment, path: &std::path::Path) -> Option<String
 struct Done {
     /// The units that the run stopped.
     stopped: Vec<String>,
-    /// The disposable paths.
-    disposable: Vec<String>,
+    /// The disposable directories that the run deleted.
+    disposable: Vec<DisposableRow>,
+    /// The entries written into a disposable directory after mxv measured
+    /// it, which the run deleted.
+    late: Vec<String>,
     /// The volumes that the run deleted.
     volumes: Vec<String>,
     /// The warnings.
@@ -729,9 +904,11 @@ fn result_of(
         pins: pin_rows(&archive.checkouts),
         local_only: local_only(&archive.checkouts),
         kept: kept_rows(&archive.checkouts, uncommitted),
+        ignored: IgnoredRow::kept(archive),
         lost: archive.lost.clone(),
         stopped: done.stopped,
         disposable: done.disposable,
+        late: done.late,
         root_files: archive
             .root
             .iter()
@@ -782,9 +959,11 @@ fn dry_result(plan: &ArchivePlan, running: Vec<String>, cd: Option<String>) -> A
         pins: pin_rows(&plan.checkouts),
         local_only: local_only(&plan.checkouts),
         kept: kept_rows(&plan.checkouts, &plan.uncommitted),
+        ignored: IgnoredRow::planned(plan),
         lost: plan.lost.clone(),
         stopped: running,
-        disposable: plan.removal.disposable.clone(),
+        disposable: DisposableRow::of(&plan.disposable),
+        late: Vec::new(),
         root_files: plan.root.clone(),
         volumes: Vec::new(),
         warnings: plan.warnings.clone(),
@@ -821,6 +1000,16 @@ fn question(plan: &ArchivePlan, running: &[String], delete_volumes: bool) -> Str
         text.push_str(&format!(
             " It keeps the uncommitted work of {} on pins, without a commit on any branch, and restore puts it back uncommitted.",
             uncommitted.join(", ")
+        ));
+    }
+    let ignored = IgnoredRow::planned(plan);
+    if !ignored.is_empty() {
+        let count: usize = ignored.iter().map(|row| row.paths.len()).sum();
+        let folders: Vec<String> = ignored.into_iter().map(|row| row.folder).collect();
+        text.push_str(&format!(
+            " It keeps {} of {} in a private file that only you can read, and restore writes them back.",
+            counted(count, "ignored file", "ignored files"),
+            listed(&folders)
         ));
     }
     if !plan.lost.is_empty() {
@@ -926,11 +1115,16 @@ pub(crate) fn archive(
     };
     let uncommitted = plan.uncommitted.clone();
     let mut warnings = plan.warnings.clone();
-    let (mut archive, removal) = match workspaces
+    let (mut archive, removal, disposable, late) = match workspaces
         .archive(&records, plan)
         .map_err(MxvFailure::from)?
     {
-        ArchiveOutcome::Retired { archive, removal } => (*archive, *removal),
+        ArchiveOutcome::Retired {
+            archive,
+            removal,
+            disposable,
+            late,
+        } => (*archive, *removal, disposable, late),
         ArchiveOutcome::Refused(refusal) => return Err(archive_refusal(&name, refusal).into()),
     };
     warnings.extend(removal.warnings.iter().cloned());
@@ -938,7 +1132,8 @@ pub(crate) fn archive(
     drop(lock);
     let done = Done {
         stopped: running,
-        disposable: removal.disposable,
+        disposable: DisposableRow::of(&disposable),
+        late,
         volumes,
         warnings,
         cd,
@@ -1018,7 +1213,7 @@ pub(crate) fn restore(
         .runs()?
         .with_port_range(environment.port_range()?);
     let plan = match workspaces
-        .plan_restore(&records, &name)
+        .plan_restore(&records, &name, args.force)
         .map_err(MxvFailure::from)?
     {
         RestorePlanned::Ready(plan) => *plan,
@@ -1037,9 +1232,10 @@ pub(crate) fn restore(
                 .archive
                 .checkouts
                 .iter()
-                .map(PutBackRow::planned)
+                .map(|checkout| PutBackRow::planned(checkout, &plan.archive.ignored))
                 .filter(|row| !row.is_empty())
                 .collect(),
+            lost: Vec::new(),
             ports: port_rows(ports),
             missing_mirrors: plan.missing_mirrors,
             warnings: Vec::new(),
@@ -1083,6 +1279,7 @@ pub(crate) fn restore(
             })
             .filter(|row| !row.is_empty())
             .collect(),
+        lost: restored.lost,
         ports: port_rows(restored.ports),
         missing_mirrors,
         warnings: restored.warnings,
@@ -1134,7 +1331,8 @@ fn row(archive: &Archive) -> WorkspaceRow {
         .iter()
         .map(|checkout| checkout.local_only.len())
         .sum();
-    let row = WorkspaceRow::from(&archive.workspace()).archived(age(archive), local);
+    let row =
+        WorkspaceRow::from(&archive.workspace()).archived(age(archive), local, &archive.ignored);
     if archive.state == ArchiveState::Retiring {
         row.with_problem(unfinished_problem(archive.name.as_str()))
     } else {

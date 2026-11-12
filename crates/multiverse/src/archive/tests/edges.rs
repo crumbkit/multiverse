@@ -322,6 +322,31 @@ fn a_record_whose_pin_leaves_the_archive_namespace_is_refused_as_corrupt() {
 }
 
 #[test]
+fn a_record_whose_id_is_not_32_lowercase_hex_digits_is_refused_as_corrupt() {
+    let quoted = |archive: &Archive| format!("\"id\": \"{}\"", archive.id);
+    for id in [
+        "",
+        "/tmp/outside",
+        "..",
+        "../0123456789abcdef0123456789abcdef",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef",
+    ] {
+        let to = format!("\"id\": \"{id}\"");
+        assert_corrupt(&edited_record(Kind::Clone, quoted, &to));
+    }
+}
+
+#[test]
+fn a_record_whose_id_is_32_lowercase_hex_digits_still_reads() {
+    let quoted = |archive: &Archive| format!("\"id\": \"{}\"", archive.id);
+    let id = "0123456789abcdef0123456789abcdef";
+    let setup = edited_record(Kind::Clone, quoted, &format!("\"id\": \"{id}\""));
+    let archive = setup.archives.read(&name()).unwrap().unwrap();
+    assert_eq!(archive.id, id);
+}
+
+#[test]
 fn a_restored_clone_tracks_the_remote_that_it_tracked_when_it_was_archived() {
     let setup = setup(Kind::Clone);
     setup.create();
@@ -380,12 +405,12 @@ fn what_a_forced_run_lost_with_a_checkout_it_retired_stays_recorded_as_lost() {
     let setup = setup(Kind::Clone);
     setup.create();
     setup.ignore_env();
-    write(setup.checkout().join(".env"), "doomed\n");
-    let plan = setup.plan(force());
+    write(setup.checkout().join(".env"), "x".repeat(2048));
+    let plan = setup.plan(force().with_max_file(1024));
     stop_at("retired:app");
     assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
     clear_hook();
-    let archive = setup.archive_with(ArchiveOptions::default());
+    let archive = setup.archive_with(ArchiveOptions::default().with_max_file(1024));
     assert!(
         archive.lost.iter().any(|item| item.contains(".env")),
         "{:?}",

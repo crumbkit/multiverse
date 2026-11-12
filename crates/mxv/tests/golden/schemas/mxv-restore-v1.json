@@ -454,6 +454,13 @@
             "$ref": "#/$defs/PutBackRow"
           }
         },
+        "lost": {
+          "description": "Each ignored file or link that `--force` left out, because the\narchive's copy of it is missing or differs from its digest, relative\nto the workspace's directory. A dry run does not read the copies, so\nit lists none.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "ports": {
           "description": "Each port that the restore gave a new number.",
           "type": "array",
@@ -481,6 +488,7 @@
         "path",
         "checkouts",
         "put_back",
+        "lost",
         "ports",
         "missing_mirrors",
         "warnings"
@@ -591,6 +599,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "ignored": {
+          "description": "Each ignored file or link that the restore wrote back from the\narchive's private tar, relative to the workspace's directory, such\nas `app/.env`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -605,7 +620,8 @@
         "tags",
         "worktree",
         "kept",
-        "submodules"
+        "submodules",
+        "ignored"
       ]
     },
     "PortRow": {

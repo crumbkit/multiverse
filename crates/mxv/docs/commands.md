@@ -168,6 +168,8 @@ mxv list
 - `disposable`: The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes, or null when `--sizes` was not given.
 - `archived`: How long ago the workspace was archived, or null in a row of a workspace that is not archived.
 - `local_only`: The number of commits of an archived workspace that exist only on this machine, or null in a row of a workspace that is not archived.
+- `ignored`: The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
+- `ignored_bytes`: The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
 - `problem`: Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
@@ -505,7 +507,7 @@ Archive a workspace, so restore can rebuild it at the same commits
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `--force`: Lose what the archive cannot keep, such as an ignored .env file, a paused merge or a file over archive\_max\_file, and list it in the archive
+- `--force`: Lose what the archive cannot keep, such as a paused merge or a file over archive\_max\_file, and list it in the archive
 - `--delete-volumes`: Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
@@ -527,6 +529,7 @@ Rebuild an archived workspace at its archived commits
 ### Arguments
 
 - `<NAME>`: The name of the archived workspace. Required.
+- `--force`: Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 

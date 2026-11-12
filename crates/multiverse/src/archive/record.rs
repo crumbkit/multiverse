@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use phase::WorkspaceId;
 use serde::{Deserialize, Serialize};
 
+use crate::archive::ignored::IgnoredEntry;
 use crate::archive::root::RootEntry;
 use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, PIN_NAMESPACE, RECORD_FILE, WIP_INDEX};
 use crate::backend::RefHolder;
@@ -294,6 +295,10 @@ pub struct Archive {
     /// The permission bits of the workspace manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_mode: Option<u32>,
+    /// Each ignored file or link that the archive keeps in its private tar,
+    /// in the order it was written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<IgnoredEntry>,
 }
 
 impl Archive {
@@ -351,11 +356,15 @@ struct Versioned {
     version: u32,
 }
 
-/// The archives that one state directory holds.
+/// The archives that one state directory holds, with the data directory
+/// that holds what their records only name.
 #[derive(Clone, Debug)]
 pub struct Archives {
-    /// The directory that holds one directory for each archive.
+    /// The directory that holds one directory for each archive, by name.
     dir: PathBuf,
+    /// The directory that holds each archive's private tar of ignored
+    /// files, in a directory named by the archive's id.
+    data: PathBuf,
 }
 
 /// The archives that [`Archives::list`] found.
@@ -370,16 +379,24 @@ pub struct ArchiveRecords {
 
 impl Archives {
     /// Returns the archives in `dir`, such as
-    /// `~/.local/state/mxv/archives`.
+    /// `~/.local/state/mxv/archives`, whose tars of ignored files lie in
+    /// `data`, such as `~/.local/share/mxv/archives`.
     #[must_use]
-    pub const fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    pub const fn new(dir: PathBuf, data: PathBuf) -> Self {
+        Self { dir, data }
     }
 
     /// Returns the directory of the archive of `name`.
     #[must_use]
     pub fn dir_of(&self, name: &WorkspaceName) -> PathBuf {
         self.dir.join(name.as_str())
+    }
+
+    /// Returns the data directory of the archive `id`, which holds its
+    /// private tar of ignored files.
+    #[must_use]
+    pub fn data_of(&self, id: &str) -> PathBuf {
+        self.data.join(id)
     }
 
     /// Returns the record of the archive of `name`, or `None` when no
@@ -469,9 +486,12 @@ impl Archives {
         Ok(dir.join(WIP_INDEX))
     }
 
-    /// Deletes the directory of the archive of `name` and everything in it.
-    pub(super) fn delete(&self, name: &WorkspaceName) -> Result<(), Error> {
-        delete_directory(&self.dir_of(name))?;
+    /// Deletes the data directory of `archive`, which holds its ignored
+    /// files, then the directory of its record, and everything in them.
+    pub(super) fn delete(&self, archive: &Archive) -> Result<(), Error> {
+        delete_directory(&self.data_of(&archive.id))?;
+        store::sync_dir(&self.data);
+        delete_directory(&self.dir_of(&archive.name))?;
         store::sync_dir(&self.dir);
         Ok(())
     }
@@ -504,9 +524,25 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
         });
     }
     let archive: Archive = serde_json::from_slice(&bytes).map_err(corrupt)?;
+    if !is_archive_id(&archive.id) {
+        return Err(corrupt(serde::de::Error::custom(format!(
+            "the archive id {:?} is not 32 lowercase hex digits",
+            archive.id
+        ))));
+    }
     if let Some(entry) = archive.root.iter().find(|entry| !stays_inside(&entry.path)) {
         return Err(corrupt(serde::de::Error::custom(format!(
             "the root entry {} leaves the workspace's directory",
+            entry.path
+        ))));
+    }
+    if let Some(entry) = archive
+        .ignored
+        .iter()
+        .find(|entry| !stays_inside(&entry.path))
+    {
+        return Err(corrupt(serde::de::Error::custom(format!(
+            "the ignored entry {} leaves the workspace's directory",
             entry.path
         ))));
     }
@@ -542,6 +578,16 @@ fn inside_workspace(workspace: &Path, path: &Path) -> bool {
             .components()
             .all(|part| matches!(part, Component::Normal(_)))
     })
+}
+
+/// Reports whether `id`, an archive id from a record, is 32 lowercase hex
+/// digits, so that the data directory it names lies below the archives'
+/// data directory.
+fn is_archive_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Reports whether `pin`, a reference from a record, lies below the

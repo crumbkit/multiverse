@@ -14,8 +14,8 @@ mxv runs locally as one person.
 ## What mxv stores
 
 - Workspace records hold names, paths (usually with the user name), branches, commits and ports.
-- Mirrors hold each origin's branches and tags, and archive pins, which can be unpushed commits, stashes, or commits of a checkout's uncommitted and untracked files. An ignored file such as `.env` never enters a pin, because it refuses the archive.
-- Archives (mode 0700) hold workspace root files and origins, which keep an SSH user name.
+- Mirrors hold each origin's branches and tags, and archive pins, which can be unpushed commits, stashes, or commits of a checkout's uncommitted and untracked files. An ignored file such as `.env` never enters a pin; the archive keeps it in its private tar instead (see "Archived ignored files").
+- Archives (mode 0700) hold workspace root files and origins, which keep an SSH user name. Each archive's directory under `$XDG_DATA_HOME/mxv/archives/<id>/` also holds `ignored.tar`, a copy of the checkouts' ignored files, which can include secrets.
 - Run records (0600) hold process ids and no environment values. `env-digest.key` keys digests of non-secret values.
 - App logs (0600) hold what apps print, unrotated. Keeper diagnostic logs hold the keeper's notes and standard error.
 - Docker volumes hold what containers wrote.
@@ -28,6 +28,17 @@ mxv has no secret store, and a manifest's `secrets` key fails.
 A password in an origin URL reaches git's command line and the clone's `.git/config`. mxv removes it from messages and records.
 
 Host processes receive `PATH`, `HOME`, manifest-derived variables and the `PASSED_THROUGH` allowlist, which includes `SSH_AUTH_SOCK` and excludes `AWS_*`.
+
+## Archived ignored files
+
+`mxv archive` copies every ignored file and symbolic link that is outside the disposable set (the set `mxv clean` uses) into one tar. These files often hold secrets, such as `.env`, so the archive holds copies of those secrets.
+
+- The tar is at `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar`. It has mode 0600 in a 0700 directory, so only the same user can read it. It is not compressed or encrypted, and it stays on this machine's disk until it is deleted.
+- The archive record holds each entry's path, kind, size, mode and SHA-256 digest, and never any contents. No command prints the tar's contents, and `mxv list --archived` prints only the number of ignored entries and their total size.
+- `mxv restore` checks every entry against its digest before it writes any. It never writes over a path the rebuilt checkout already holds, and never writes through a link. A damaged tar refuses with `mxv::restore::ignored_damaged` unless `--force` is given.
+- `mxv restore` and `mxv remove --archived` delete the tar. Deleting an archive removes the tar's directory before the record.
+- A single ignored file over `archive_max_file` (100 MiB by default) is refused with `mxv::archive::unkeepable` and is never tarred.
+- Known limit: the tar keeps files and symbolic links only. An empty directory below an ignored directory is not kept, and the mode of an ignored directory is not kept. `mxv restore` makes a directory such as a 0700 `secrets/` again with the default mode, usually 0755, so other users may list the names of the files inside it. Each file gets its own kept mode back, so a 0600 file inside it stays unreadable to them.
 
 ## What mxv trusts
 
@@ -47,7 +58,7 @@ Guards are in order.
 - `reclaim` stops units; disk needs use `clean`. Guard: `reclaim::recheck` under the lock.
 - `remove` deletes checkouts, a worktree repository's merged branches (unmerged with `--delete-unmerged`) and volumes. Guards: running units need `--force`; volumes need `--delete-volumes`; `plan_removal`; prompt; `loses_more` on a fresh plan. No workspace lock covers `Workspaces::remove`.
 - `archive` deletes checkouts, root originals and, with `--delete-volumes`, volumes. Guards: workspace lock; `admit`; `refuse_outsider`; prompt; snapshot comparison in `retire`.
-- `remove --archived` deletes the archive, its pins and, with `--delete-volumes`, volumes. Guards: refuses `Retiring`; prompt; workspace lock; `refuse_live_volumes`.
+- `remove --archived` deletes the archive, its pins, its ignored-files tar and, with `--delete-volumes`, volumes. Guards: refuses `Retiring`; prompt; workspace lock; `refuse_live_volumes`.
 
 ## Sockets and ports
 

@@ -157,6 +157,28 @@ impl Setup {
         write(&checkout.join("cache-dir/data"), "x\n");
     }
 
+    /// Commits a `.gitignore` that ignores `.env` and `target/` in the
+    /// checkout, and writes an `.env` file of 9 bytes there.
+    fn ignore_env(&self) {
+        let checkout = self.checkout();
+        write(&checkout.join(".gitignore"), ".env\ntarget/\n");
+        git(&checkout, &["add", ".gitignore"]);
+        git(&checkout, &["commit", "--quiet", "-m", "Ignore"]);
+        write(&checkout.join(".env"), "SECRET=1\n");
+    }
+
+    /// Returns the path of the tar that holds the ignored files of the
+    /// archive `triage`.
+    fn ignored_tar(&self) -> PathBuf {
+        let path = self.root().join("state/mxv/archives/triage/archive.json");
+        let record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let id = record["id"].as_str().unwrap();
+        self.root()
+            .join("data/mxv/archives")
+            .join(id)
+            .join("ignored.tar")
+    }
+
     /// Runs `script` with `sh` in the checkout. `mxv` in the script is the
     /// built binary, and the script's standard output comes back.
     fn sh(&self, script: &str) -> (i32, String) {
@@ -243,17 +265,88 @@ fn a_dry_run_of_each_verb_changes_nothing() {
 }
 
 #[test]
-fn an_ignored_env_file_refuses_the_archive_with_its_code_and_names_itself() {
+fn an_archive_keeps_an_ignored_env_file_and_restore_writes_it_back() {
     let setup = Setup::new();
-    write(&setup.checkout().join(".git/info/exclude"), ".env\n");
-    write(&setup.checkout().join(".env"), "SECRET=1\n");
+    setup.ignore_env();
+    let document = setup.archive();
+    let kept = &document["data"]["ignored"][0];
+    assert_eq!(kept["folder"], "app", "{document}");
+    assert_eq!(kept["paths"], serde_json::json!(["app/.env"]), "{document}");
+    assert_eq!(kept["bytes"], 9, "{document}");
+    let tar = setup.ignored_tar();
+    assert!(tar.is_file(), "the archive wrote no tar at {tar:?}");
+    let (exit, listed) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(listed["data"][0]["ignored"], 1, "{listed}");
+    assert_eq!(listed["data"][0]["ignored_bytes"], 9, "{listed}");
+    let (exit, restored) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{restored}");
+    assert_eq!(
+        restored["data"]["put_back"][0]["ignored"],
+        serde_json::json!(["app/.env"]),
+        "{restored}"
+    );
+    assert_eq!(restored["data"]["lost"], serde_json::json!([]));
+    assert_eq!(
+        fs::read_to_string(setup.checkout().join(".env")).unwrap(),
+        "SECRET=1\n"
+    );
+    assert!(!tar.exists(), "the restore left the tar at {tar:?}");
+}
+
+#[test]
+fn a_damaged_tar_refuses_the_restore_with_its_code_and_force_restores_without_the_file() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    setup.archive();
+    let tar = setup.ignored_tar();
+    let mut bytes = fs::read(&tar).unwrap();
+    let secret = bytes
+        .windows(8)
+        .position(|window| window == b"SECRET=1")
+        .expect("the tar holds the bytes of .env");
+    bytes[secret + 7] = b'2';
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test damages the tar as a failing disk would"
+    )]
+    fs::write(&tar, &bytes).unwrap();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::restore::ignored_damaged",
+        "{document}"
+    );
+    let text = document.to_string();
+    assert!(text.contains("app/.env"), "{document}");
+    assert!(text.contains("mxv restore triage --force"), "{document}");
+    assert!(!setup.workspace().exists(), "{document}");
+    let (exit, restored) = setup.run(&["restore", "triage", "--yes", "--force"]);
+    assert_eq!(exit, 0, "{restored}");
+    assert_eq!(
+        restored["data"]["lost"],
+        serde_json::json!(["app/.env"]),
+        "{restored}"
+    );
+    assert!(setup.checkout().is_dir(), "{restored}");
+    assert!(!setup.checkout().join(".env").exists(), "{restored}");
+}
+
+#[test]
+fn an_ignored_file_over_the_limit_refuses_the_archive_and_names_itself() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    write(
+        &setup.root().join("config/mxv/config.toml"),
+        "archive_max_file = \"4B\"\n",
+    );
     let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::archive::unkeepable", "{document}");
     assert!(
-        document
-            .to_string()
-            .contains("app: the ignored path .env. Move it out of the workspace or delete it."),
+        document.to_string().contains(
+            "app: the ignored file .env is 9 bytes, over archive_max_file (4 bytes). Move it out of the workspace or delete it."
+        ),
         "{document}"
     );
     assert!(setup.checkout().join(".env").is_file());
@@ -463,9 +556,10 @@ fn a_refused_archive_leaves_the_processes_running() {
     );
     let (exit, document) = setup.run(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
-    write(&setup.checkout().join(".git/info/exclude"), ".env\n");
-    write(&setup.checkout().join(".env"), "SECRET=1\n");
+    // An archive cannot keep a socket, so it refuses.
+    let socket = std::os::unix::net::UnixListener::bind(setup.workspace().join("socket")).unwrap();
     let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    drop(socket);
     let (_, status) = setup.run(&["status", "-w", "triage"]);
     let (_, _) = setup.run(&["down", "-w", "triage"]);
     assert_eq!(exit, 1, "{document}");
@@ -721,6 +815,22 @@ fn the_question_names_each_checkout_whose_uncommitted_work_it_keeps() {
 }
 
 #[test]
+fn the_question_names_the_ignored_files_that_the_archive_keeps() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    let prompted = Prompted::start(&setup, &[]);
+    let question = prompted.question.clone();
+    prompted.answer("n");
+    assert!(
+        question.contains(
+            "It keeps 1 ignored file of app in a private file that only you can read, and restore writes them back."
+        ),
+        "{question}"
+    );
+    assert!(setup.checkout().join(".env").is_file());
+}
+
+#[test]
 fn a_dry_run_names_what_the_archive_keeps_and_the_restore_names_what_it_put_back() {
     let setup = Setup::new();
     let checkout = setup.checkout();
@@ -729,6 +839,8 @@ fn a_dry_run_names_what_the_archive_keeps_and_the_restore_names_what_it_put_back
     git(&checkout, &["stash", "--quiet"]);
     git(&checkout, &["branch", "spike-cache"]);
     write(&checkout.join("draft.txt"), "draft\n");
+    setup.ignore_env();
+    write(&checkout.join("target/debug/built"), "built\n");
     let output = setup
         .command(&setup.root())
         .args(["archive", "-w", "triage", "--dry-run"])
@@ -740,6 +852,8 @@ fn a_dry_run_names_what_the_archive_keeps_and_the_restore_names_what_it_put_back
         "mxv would keep the untracked file app/draft.txt with the uncommitted work.",
         "mxv would keep 1 stash of app.",
         "mxv would keep the local branch spike-cache of app.",
+        "mxv would keep 1 ignored file of app, 9 B in all, in a private file that only you can read: app/.env.",
+        "mxv would delete the disposable directory app/target/ (",
     ] {
         assert!(text.contains(line), "{line}\n{text}");
     }
@@ -755,6 +869,7 @@ fn a_dry_run_names_what_the_archive_keeps_and_the_restore_names_what_it_put_back
         "mxv put back the uncommitted work of app: 1 untracked file.",
         "mxv put back 1 stash of app.",
         "mxv put back the local branch spike-cache of app.",
+        "mxv put back 1 ignored file of app: app/.env.",
     ] {
         assert!(text.contains(line), "{line}\n{text}");
     }

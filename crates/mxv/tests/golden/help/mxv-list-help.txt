@@ -40,15 +40,17 @@ Examples:
           List the first page of workspaces
 
 Columns:
-  name        The workspace's name, which is also the name of its directory and of its checkouts' branch.
-  branch      The branch that the workspace's checkouts were created on.
-  path        The workspace's directory, which `mxv cd` prints.
-  size        The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed, or null when `--sizes` was not given.
-  disposable  The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes, or null when `--sizes` was not given.
-  archived    How long ago the workspace was archived, or null in a row of a workspace that is not archived.
-  local_only  The number of commits of an archived workspace that exist only on this machine, or null in a row of a workspace that is not archived.
-  ports       The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
-  problem     Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
+  name           The workspace's name, which is also the name of its directory and of its checkouts' branch.
+  branch         The branch that the workspace's checkouts were created on.
+  path           The workspace's directory, which `mxv cd` prints.
+  size           The bytes that the workspace's directory takes on disk, with each file that has several hard links counted once and no symbolic link followed, or null when `--sizes` was not given.
+  disposable     The bytes that the workspace's disposable directories take on disk, such as `target/` and `node_modules/`, which `mxv clean` deletes, or null when `--sizes` was not given.
+  archived       How long ago the workspace was archived, or null in a row of a workspace that is not archived.
+  local_only     The number of commits of an archived workspace that exist only on this machine, or null in a row of a workspace that is not archived.
+  ignored        The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
+  ignored_bytes  The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
+  ports          The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
+  problem        Why mxv cannot read the workspace's record, such as a record that is not JSON or that a newer mxv wrote, or empty when it can. A row with a problem names its record, without `.json`, in `name`, and leaves the other fields empty.
 
 Columns that --long adds:
   kind           How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.

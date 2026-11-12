@@ -19,11 +19,24 @@ workspace may need to act on.
 - An archive refuses only what it cannot keep: a paused merge, rebase,
   cherry-pick, revert or bisect, a repository that git does not track, the
   work of a submodule, a file marked skip-worktree or assume-unchanged with
-  local edits, a file that git does not list, an ignored file, an entry of
-  the workspace's directory such as a socket, and a file over
-  `archive_max_file`. The failure code is `mxv::archive::unkeepable`, which
+  local edits, a file that git does not list, an ignored path that holds a
+  repository or is a socket, an entry of the workspace's directory such as a
+  socket, and a file over `archive_max_file`. The failure code is `mxv::archive::unkeepable`, which
   replaces `mxv::archive::unsaved_work`, and each line says what to do.
   `--force` loses only those items.
+- `mxv archive` keeps each checkout's ignored files outside the disposable
+  set, such as `.env`, in a private tar at
+  `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar`, readable only by the
+  person, and `mxv restore` writes them back with their modes. The archive
+  record lists each entry's path, kind, size, mode and digest. `mxv restore`
+  refuses a damaged entry with `mxv::restore::ignored_damaged`, and
+  `--force` restores without it. A path that the rebuilt checkout already
+  holds refuses with `mxv::restore::ignored_taken`. The archive result and
+  the dry run name each ignored file kept and each disposable directory
+  deleted with its size, and `mxv list --archived` has the new field
+  `ignored`. The archive document gains the rows `ignored` and
+  `disposable`, and the restore document gains `put_back[].ignored` and
+  `lost`.
 - The `mxv archive` document is version 2. It replaces `wip` with `kept`,
   which lists what the archive kept of each checkout. The `mxv restore`
   document gains `put_back`, which lists what the restore put back, and

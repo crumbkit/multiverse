@@ -45,11 +45,11 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "XDG_DATA_HOME",
-        purpose: "The data directory, an absolute path. The workspace root defaults to `$XDG_DATA_HOME/mxv/workspaces`, and mxv keeps one bare mirror for each origin in `$XDG_DATA_HOME/mxv/mirrors`. When it is unset, empty or relative, mxv uses `~/.local/share`.",
+        purpose: "The data directory, an absolute path. The workspace root defaults to `$XDG_DATA_HOME/mxv/workspaces`, mxv keeps one bare mirror for each origin in `$XDG_DATA_HOME/mxv/mirrors`, and the ignored files that an archive keeps, such as `.env`, are in `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar`, which only the person can read. When it is unset, empty or relative, mxv uses `~/.local/share`.",
     },
     Variable {
         name: "XDG_STATE_HOME",
-        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock and marks of each workspace in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. Each archive is in `$XDG_STATE_HOME/mxv/archives/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
+        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock and marks of each workspace in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. Each archive's record is in `$XDG_STATE_HOME/mxv/archives/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
     },
     Variable {
         name: "DEADBAND_SOCKET",
@@ -255,6 +255,12 @@ impl Environment {
     /// `$XDG_STATE_HOME/mxv/archives`.
     pub(crate) fn archives(&self) -> Result<PathBuf, MxvFailure> {
         Ok(self.state()?.join("archives"))
+    }
+
+    /// Returns the directory that holds the ignored files of each archive,
+    /// `$XDG_DATA_HOME/mxv/archives`.
+    pub(crate) fn archive_data(&self) -> Result<PathBuf, MxvFailure> {
+        Ok(self.bases()?.data.join("mxv").join("archives"))
     }
 
     /// Returns the directory of the workspace records,

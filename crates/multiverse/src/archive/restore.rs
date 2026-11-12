@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::archive::ignored::{self, IgnoredRefusal};
 use crate::archive::{
     Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, root,
 };
@@ -56,6 +57,18 @@ pub enum RestoreRefusal {
         /// The file, relative to the workspace's directory.
         path: String,
     },
+    /// An entry of the archive's tar of ignored files is missing or differs
+    /// from its digest; `--force` restores without it.
+    IgnoredDamaged {
+        /// Each archived path, as `<folder>/<path>`.
+        paths: Vec<String>,
+    },
+    /// The rebuilt workspace already holds something at an ignored entry's
+    /// path.
+    IgnoredTaken {
+        /// Each archived path, as `<folder>/<path>`.
+        paths: Vec<String>,
+    },
 }
 
 /// A restore that [`Workspaces::plan_restore`] found nothing in the way of.
@@ -67,6 +80,10 @@ pub struct RestorePlan {
     /// The folder of each clone whose mirror is gone, so the restore clones
     /// the mirror again from the recorded origin.
     pub missing_mirrors: Vec<String>,
+    /// Whether the restore goes ahead without an ignored entry that is
+    /// missing from the tar or differs from its digest, and lists it as
+    /// lost.
+    pub force: bool,
 }
 
 /// The outcome of [`Workspaces::plan_restore`].
@@ -124,6 +141,9 @@ pub struct PutBack {
     /// Each submodule that the checkout's index names, which the restore
     /// leaves uninitialised.
     pub submodules: Vec<String>,
+    /// Each ignored file or link written back into the checkout from the
+    /// archive's tar, as its archived path, such as `app/.env`.
+    pub ignored: Vec<String>,
 }
 
 impl PutBack {
@@ -150,6 +170,9 @@ pub struct Restored {
     /// What the restore put back into each checkout, in the record's
     /// order.
     pub put_back: Vec<PutBack>,
+    /// Each ignored entry, as its archived path, that a forced restore left
+    /// out because the tar lacked it or it differed from its digest.
+    pub lost: Vec<String>,
     /// What the restore could not finish after it wrote the record, such
     /// as a pin that it could not delete.
     pub warnings: Vec<String>,
@@ -176,7 +199,8 @@ pub struct ArchivedRemoval {
 
 impl<B: Backend> Workspaces<B> {
     /// Returns whether the archive `name` can be restored, and changes
-    /// nothing.
+    /// nothing. With `force`, the restore leaves out an ignored entry whose
+    /// tar entry is damaged instead of refusing.
     ///
     /// # Errors
     ///
@@ -186,6 +210,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         archives: &Archives,
         name: &WorkspaceName,
+        force: bool,
     ) -> Result<RestorePlanned, Error> {
         let refused = |refusal| Ok(RestorePlanned::Refused(refusal));
         let Some(archive) = archives.read(name)? else {
@@ -244,6 +269,7 @@ impl<B: Backend> Workspaces<B> {
         Ok(RestorePlanned::Ready(Box::new(RestorePlan {
             archive,
             missing_mirrors,
+            force,
         })))
     }
 
@@ -262,7 +288,7 @@ impl<B: Backend> Workspaces<B> {
         runs: &Runs,
     ) -> Result<RestoreOutcome, Error> {
         let name = confirmed.archive.name.clone();
-        let plan = match self.plan_restore(archives, &name)? {
+        let plan = match self.plan_restore(archives, &name, confirmed.force)? {
             RestorePlanned::Ready(plan) => *plan,
             RestorePlanned::Refused(refusal) => return Ok(RestoreOutcome::Refused(refusal)),
         };
@@ -282,22 +308,22 @@ impl<B: Backend> Workspaces<B> {
             ..Made::default()
         };
         let mut put_back = Vec::new();
+        let mut lost = Vec::new();
         let built = self.rebuild(
             archives,
             &archive,
+            plan.force,
             &mut workspace,
             &mut made,
             &mut put_back,
+            &mut lost,
             runs,
         );
         let ports = match built {
-            Ok(Some(ports)) => ports,
-            Ok(None) => {
+            Ok(Ok(ports)) => ports,
+            Ok(Err(refusal)) => {
                 self.unmake(&archive, &workspace, &made);
-                return Ok(RestoreOutcome::Refused(RestoreRefusal::NameTaken {
-                    path: archive.path.clone(),
-                    record: true,
-                }));
+                return Ok(RestoreOutcome::Refused(refusal));
             }
             Err(error) => {
                 self.unmake(&archive, &workspace, &made);
@@ -309,7 +335,7 @@ impl<B: Backend> Workspaces<B> {
             runs.remember_containers(&archive.name)?;
         }
         warnings.extend(self.delete_pins(&archive));
-        if let Err(error) = archives.delete(&archive.name) {
+        if let Err(error) = archives.delete(&archive) {
             warnings.push(format!(
                 "mxv rebuilt the workspace and could not delete its archive; `mxv remove --archived {}` deletes it: {error}",
                 archive.name
@@ -319,6 +345,7 @@ impl<B: Backend> Workspaces<B> {
             workspace,
             ports,
             put_back,
+            lost,
             warnings,
         })))
     }
@@ -389,19 +416,28 @@ impl<B: Backend> Workspaces<B> {
         Ok(None)
     }
 
-    /// Makes the workspace's directory and checkouts, puts back what the
-    /// archive kept of each checkout into `put_back`, writes the root files
-    /// and the workspace's record, and returns the ports that changed, or
-    /// `None` when another record took the name first.
+    /// Makes the workspace's directory and checkouts, writes the ignored
+    /// files back, puts back what the archive kept of each checkout into
+    /// `put_back`, writes the root files and the workspace's record, and
+    /// returns the ports that changed. It returns the refusal when an
+    /// ignored entry is damaged, and `force` is not set, or its path is
+    /// taken, and [`RestoreRefusal::NameTaken`] when another record took the
+    /// name first. A forced restore adds each damaged entry to `lost`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the rebuild fills the three lists that the outcome reports"
+    )]
     fn rebuild(
         &self,
         archives: &Archives,
         archive: &Archive,
+        force: bool,
         workspace: &mut Workspace,
         made: &mut Made,
         put_back: &mut Vec<PutBack>,
+        lost: &mut Vec<String>,
         runs: &Runs,
-    ) -> Result<Option<Vec<PortChange>>, Error> {
+    ) -> Result<Result<Vec<PortChange>, RestoreRefusal>, Error> {
         let unwritable = |path: &Path| {
             let path = path.to_path_buf();
             move |source| Error::Unwritable { path, source }
@@ -432,8 +468,39 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         (self.checkpoint)("apply")?;
+        // The ignored files come after the checkouts and the uncommitted
+        // work, so a path that the rebuilt checkout holds is found and
+        // refused rather than written over.
+        let mut written = Vec::new();
+        if !archive.ignored.is_empty() {
+            let data = archives.data_of(&archive.id);
+            let checkouts: Vec<(&str, &Path)> = workspace
+                .checkouts
+                .iter()
+                .map(|checkout| (checkout.name.as_str(), checkout.path.as_path()))
+                .collect();
+            match ignored::restore(&data, &archive.ignored, &checkouts, force)? {
+                Ok(restored) => {
+                    written = restored.written;
+                    lost.extend(restored.lost);
+                }
+                Err(IgnoredRefusal::Damaged(paths)) => {
+                    return Ok(Err(RestoreRefusal::IgnoredDamaged { paths }));
+                }
+                Err(IgnoredRefusal::Taken(paths)) => {
+                    return Ok(Err(RestoreRefusal::IgnoredTaken { paths }));
+                }
+            }
+        }
+        (self.checkpoint)("ignored")?;
         for (checkout, archived) in workspace.checkouts.iter().zip(&archive.checkouts) {
-            put_back.push(self.put_back_kept(archive.kind, checkout, &archived.kept, made)?);
+            let mut kept = self.put_back_kept(archive.kind, checkout, &archived.kept, made)?;
+            kept.ignored = written
+                .iter()
+                .filter(|path| folder_of(path) == checkout.name)
+                .cloned()
+                .collect();
+            put_back.push(kept);
         }
         (self.checkpoint)("kept")?;
         made.agents = true;
@@ -444,9 +511,13 @@ impl<B: Backend> Workspaces<B> {
         // The archive leaves the marker out, so the run writes it again,
         // after the root entries in case an older archive holds one.
         self.write_marker(workspace, made)?;
-        runs.restored_ports(workspace, &self.store, |workspace, store| {
+        let ports = runs.restored_ports(workspace, &self.store, |workspace, store| {
             Ok(store.create(workspace)? == Created::Written)
-        })
+        })?;
+        Ok(ports.ok_or_else(|| RestoreRefusal::NameTaken {
+            path: archive.path.clone(),
+            record: true,
+        }))
     }
 
     /// Makes the clone of `checkout` at its archived commit, through the
@@ -644,9 +715,15 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         let warnings = self.delete_pins(&archive);
-        archives.delete(&archive.name)?;
+        archives.delete(&archive)?;
         Ok(ArchivedRemoval { archive, warnings })
     }
+}
+
+/// Returns the checkout's folder of the archived path `path`, such as `app`
+/// of `app/.env`.
+fn folder_of(path: &str) -> &str {
+    path.split('/').next().unwrap_or(path)
 }
 
 /// Returns the refusal of a checkout whose commit is gone.
