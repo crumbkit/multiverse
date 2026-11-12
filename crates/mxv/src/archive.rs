@@ -1349,7 +1349,7 @@ fn restored_already(
                     return Err(restore_refusal(name, refusal).into());
                 }
                 RestorePlanned::Unchanged { .. } | RestorePlanned::Ready(_) => {
-                    return Err(MxvFailure::RepairChanged {
+                    return Err(MxvFailure::RestoreChanged {
                         name: name.to_string(),
                     }
                     .into());

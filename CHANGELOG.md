@@ -20,7 +20,9 @@ workspace may need to act on.
   with `mxv::restore::name_taken`. It still refuses when the workspace's
   directory or a checkout's directory is gone, because the archive may
   then hold the only copies of the workspace's files, and `mxv repair`
-  keeps such an archive too. `mxv remove NAME` of a name that no
+  keeps such an archive too. When the records change after that question,
+  `mxv restore` deletes nothing and fails with the new code
+  `mxv::restore::changed`. `mxv remove NAME` of a name that no
   workspace has, and `mxv remove --archived NAME` of a name that no archive
   has, exit 0, where they failed with `mxv::workspace::not_found` and
   `mxv::archive::not_found`. Their `Effects:` lines now say idempotent. The

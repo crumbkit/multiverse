@@ -392,7 +392,7 @@ impl Failure for ArchiveFailure {
             Self::RestoreNameTaken { name, path, record } => {
                 if *record {
                     Recovery::hint(format!(
-                        "remove the workspace {name} first, or run `mxv remove --archived {name}` to delete the archive"
+                        "run `mxv remove {name}` first, which keeps the archive, and then restore again; `mxv remove --archived {name}` deletes the archive instead, with any files that only it still holds"
                     ))
                 } else {
                     Recovery::hint(format!("move or delete {path}, then restore again"))

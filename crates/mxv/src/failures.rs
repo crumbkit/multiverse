@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
 use multiverse::{Allow, BadName, Error};
 
+#[cfg(test)]
+mod tests;
+
 /// The code of a name that no workspace has.
 pub const WORKSPACE_NOT_FOUND: Code = Code::new("mxv", "workspace", "not_found");
 /// The code of a new workspace whose name another workspace has.
@@ -125,6 +128,9 @@ pub const REPAIR_NAMES_TAKEN: Code = Code::new("mxv", "repair", "names_taken");
 /// The code of a repair whose records changed between the question and
 /// the repair.
 pub const REPAIR_CHANGED: Code = Code::new("mxv", "repair", "changed");
+/// The code of a restore whose records changed between the question that
+/// offered to delete a left-over archive and the deletion.
+pub const RESTORE_CHANGED: Code = Code::new("mxv", "restore", "changed");
 /// The code of a manifest that declares containers on a machine without a
 /// `docker` program on `PATH`.
 pub const DOCKER_NOT_FOUND: Code = Code::new("mxv", "docker", "not_found");
@@ -226,6 +232,13 @@ pub(crate) enum MxvFailure {
     /// repair` and the repair, so it would do something other than what
     /// the person confirmed.
     RepairChanged {
+        /// The name.
+        name: String,
+    },
+    /// The records of the name changed between the question of `mxv
+    /// restore`, which offered to delete the archive that an earlier
+    /// restore left, and the deletion, so mxv deleted nothing.
+    RestoreChanged {
         /// The name.
         name: String,
     },
@@ -472,6 +485,7 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_BUSY,
     &REPAIR_NAMES_TAKEN,
     &REPAIR_CHANGED,
+    &RESTORE_CHANGED,
     &DOCKER_NOT_FOUND,
     &DOCKER_COMPOSE_MISSING,
     &DOCKER_ADDRESS_POOLS_EXHAUSTED,
@@ -559,6 +573,7 @@ impl Failure for MxvFailure {
             Self::IgnoredFiles { .. } | Self::ManifestDisposable { .. } => &WORKSPACE_IGNORED_FILES,
             Self::Changed { .. } => &WORKSPACE_CHANGED,
             Self::RepairChanged { .. } => &REPAIR_CHANGED,
+            Self::RestoreChanged { .. } => &RESTORE_CHANGED,
             Self::StrayCommits { .. } => &CHECKOUT_UNREACHABLE_COMMITS,
             Self::Unpushed { .. } => &CHECKOUT_UNPUSHED_COMMITS,
             Self::Stashed { .. } => &CHECKOUT_STASHES,
@@ -643,6 +658,11 @@ impl Failure for MxvFailure {
             Self::RepairChanged { name } => Recovery::hint(format!(
                 "run `mxv repair {name}` again, which asks about the records as they now stand"
             )),
+            Self::RestoreChanged { name } => Recovery::Run(Call::typed(vec![
+                "restore".to_owned(),
+                name.clone(),
+                "--dry-run".to_owned(),
+            ])),
             Self::Locked {
                 name,
                 repository,
@@ -777,7 +797,8 @@ impl Failure for MxvFailure {
             | Self::Exists { name }
             | Self::BadName { name, .. }
             | Self::Changed { name, .. }
-            | Self::RepairChanged { name } => {
+            | Self::RepairChanged { name }
+            | Self::RestoreChanged { name } => {
                 vec![Field::new("name", name)]
             }
             Self::Dirty { name, changes, .. } => vec![
@@ -1228,6 +1249,10 @@ impl fmt::Display for MxvFailure {
                 formatter,
                 "the records of {name} changed after mxv asked, so mxv repaired nothing"
             ),
+            Self::RestoreChanged { name } => write!(
+                formatter,
+                "the records of {name} changed after mxv asked, so mxv deleted nothing"
+            ),
             Self::Locked {
                 name, path, reason, ..
             } => write!(
@@ -1364,6 +1389,7 @@ impl std::error::Error for MxvFailure {
             | Self::ManifestDisposable { .. }
             | Self::Changed { .. }
             | Self::RepairChanged { .. }
+            | Self::RestoreChanged { .. }
             | Self::StrayCommits { .. }
             | Self::Unpushed { .. }
             | Self::Stashed { .. }

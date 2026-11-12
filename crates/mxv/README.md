@@ -1629,7 +1629,8 @@ A restore refuses, and builds nothing, with these codes:
 | Code | Cause |
 | --- | --- |
 | `mxv::restore::not_found` | No archive and no workspace has the name. |
-| `mxv::restore::name_taken` | A workspace of another stable id holds the name, or something exists at the recorded path. |
+| `mxv::restore::name_taken` | A workspace of another stable id holds the name, a workspace of the archive's stable id has lost its directory or a checkout's directory, or something exists at the recorded path. |
+| `mxv::restore::changed` | The records of the name changed after mxv asked to delete the archive that an earlier restore left, so mxv deleted nothing. `mxv restore NAME --dry-run` shows the records as they now stand. |
 | `mxv::restore::branch_moved` | A worktree's branch points at another commit than the archive pinned. |
 | `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
 | `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |
