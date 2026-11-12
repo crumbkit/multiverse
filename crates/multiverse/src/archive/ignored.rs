@@ -364,7 +364,7 @@ pub(crate) fn changed(
 }
 
 /// Reports whether the entry at `on_disk` is still what `entry` records.
-fn matches(entry: &IgnoredEntry, on_disk: &Path) -> Result<bool, Error> {
+pub(super) fn matches(entry: &IgnoredEntry, on_disk: &Path) -> Result<bool, Error> {
     let metadata = match fs::symlink_metadata(on_disk) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),

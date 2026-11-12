@@ -1,13 +1,13 @@
 //! Converts between days since 1970-01-01 and dates of the proleptic
 //! Gregorian calendar, in UTC, with Howard Hinnant's algorithms. phase reads
-//! docker's timestamps with them, and multiverse names an older archive by
-//! the day it started.
+//! docker's timestamps with them, and [`civil_from_days`] is public so that
+//! a caller can name a day.
 
 /// Returns the days from 1970-01-01 to the proleptic Gregorian date
 /// `year`-`month`-`day`, with Howard Hinnant's `days_from_civil`. A date
 /// before 1970 gives a negative number.
 #[must_use]
-pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let year_of_era = year.rem_euclid(400);

@@ -62,8 +62,8 @@ workspace may need to act on.
   anything, and `--yes` repairs without asking. An unfinished archive whose
   pins are gone moves aside to the hidden directory `.NAME.<id>`, and
   nothing is deleted; that directory and the archive's
-  `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar` stay until a person
-  deletes them. An older unfinished archive beside a newer workspace of the same name is
+  `$XDG_DATA_HOME/mxv/archives/<id>/ignored.tar` stay until
+  `mxv repair --orphans --yes` deletes them. An older unfinished archive beside a newer workspace of the same name is
   finished under the name `NAME-YYYY-MM-DD`, so `mxv restore` of that name
   brings it back. An archive left beside the workspace that a restore of it
   rebuilt is deleted. The new problems read "the archive stopped before it
@@ -77,7 +77,20 @@ workspace may need to act on.
   of either name refuses with `mxv::archive::rename_unfinished`. A repair
   whose records change after its question repairs nothing and fails with
   `mxv::repair::changed`, and an older archive whose dated names are all
-  taken fails with `mxv::repair::names_taken`.
+  taken fails with `mxv::repair::names_taken`. A repair of a name whose
+  archive record cannot be read fails with the read error. A repair that
+  finishes a stopped rename holds the locks of both names.
+- `mxv repair --orphans` deletes what no record names: a workspace
+  directory that a restore killed during its rebuild left, the run files
+  and logs that a remove killed after it deleted the record left, a tar of
+  ignored files with no record, an archive directory with no record, and a
+  moved-aside archive. A directory is deleted only when a restore of the
+  archive of its name would write it again, and mxv compares it before and
+  after it moves it aside. Otherwise it stays, and the result names what it
+  holds. `--dry-run` lists the items, the volumes of a forgotten run are
+  deleted only with `--delete-volumes`, and a moved-aside archive or a tar
+  of ignored files is deleted only with `--yes`. The `mxv/repair/v1`
+  document gains an `orphans` list, and its `name` is null for a sweep.
   The library's `classify` now takes the backend that reads the pins, and
   `Workspaces::repair` carries out the repairs. phase exports its calendar
   functions as `phase::calendar`.

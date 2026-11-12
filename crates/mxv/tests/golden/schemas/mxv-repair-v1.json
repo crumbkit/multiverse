@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/repair/v1",
-  "description": "What the repair of one name's broken records did, or would do on a dry run.",
+  "description": "What the repair of one name's broken records, or the sweep of what no record names, did, or would do on a dry run.",
   "type": "object",
   "properties": {
     "schema": {
@@ -433,8 +433,11 @@
       "type": "object",
       "properties": {
         "name": {
-          "description": "The name whose records the command repaired.",
-          "type": "string"
+          "description": "The name whose records the command repaired, or null with\n`--orphans`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "description": "What the repair did, or would do.",
@@ -475,6 +478,13 @@
             "type": "string"
           }
         },
+        "orphans": {
+          "description": "With `--orphans`, one row for each item that no record names. Empty\nwithout `--orphans`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrphanRow"
+          }
+        },
         "warnings": {
           "description": "What the repair could not finish, one sentence for each, such as a\npin that it could not delete.",
           "type": "array",
@@ -491,6 +501,7 @@
         "kept",
         "repair",
         "pins",
+        "orphans",
         "warnings"
       ]
     },
@@ -498,7 +509,7 @@
       "description": "What the repair did with the records of the name.",
       "oneOf": [
         {
-          "description": "Nothing of the name is broken, or what is broken is another\ncommand's to repair, which `repair` names.",
+          "description": "Nothing of the name is broken, or what is broken is another\ncommand's to repair, which `repair` names. With `--orphans`, the\nsweep deleted nothing.",
           "type": "string",
           "const": "unchanged"
         },
@@ -531,6 +542,136 @@
           "description": "A dry run: the archive would be deleted.",
           "type": "string",
           "const": "would_delete"
+        },
+        {
+          "description": "With `--orphans`, the sweep deleted at least one item.",
+          "type": "string",
+          "const": "swept"
+        },
+        {
+          "description": "With `--orphans`, a dry run: the sweep would delete at least one\nitem.",
+          "type": "string",
+          "const": "would_sweep"
+        }
+      ]
+    },
+    "OrphanRow": {
+      "description": "One item that no record names, as `mxv repair --orphans` prints it.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "What the item is.",
+          "$ref": "#/$defs/OrphanRowKind"
+        },
+        "path": {
+          "description": "Where it is: the directory, or the run record or the logs of a\nworkspace id.",
+          "type": "string"
+        },
+        "state": {
+          "description": "What the sweep did with it, or would do on a dry run.",
+          "$ref": "#/$defs/OrphanState"
+        },
+        "size": {
+          "description": "The bytes that deleting it frees, measured for a moved-aside archive\nand for ignored files, or null.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "archive": {
+          "description": "The archive whose restore writes a directory again, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The workspace id of a run record, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasons": {
+          "description": "Why it stays, one sentence for each reason, such as a file of a\ndirectory that no archive writes again. Empty when it is deleted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "volumes": {
+          "description": "The docker volumes that the sweep deleted with a run record.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "path",
+        "state",
+        "size",
+        "archive",
+        "id",
+        "reasons",
+        "volumes"
+      ]
+    },
+    "OrphanRowKind": {
+      "description": "What one item that no record names is, in an [`OrphanRow`].",
+      "oneOf": [
+        {
+          "description": "A directory under the workspace root that no workspace record\nnames.",
+          "type": "string",
+          "const": "directory"
+        },
+        {
+          "description": "The run files of a name that no workspace record holds.",
+          "type": "string",
+          "const": "run_files"
+        },
+        {
+          "description": "phase's run record and logs of a workspace id that no record holds.",
+          "type": "string",
+          "const": "run_record"
+        },
+        {
+          "description": "An archive that `mxv repair NAME` moved aside, with its ignored\nfiles.",
+          "type": "string",
+          "const": "moved_aside"
+        },
+        {
+          "description": "A directory of ignored files whose archive no record names.",
+          "type": "string",
+          "const": "ignored_files"
+        },
+        {
+          "description": "A directory of the archives that holds no record.",
+          "type": "string",
+          "const": "unrecorded"
+        }
+      ]
+    },
+    "OrphanState": {
+      "description": "What the sweep did with one item, in an [`OrphanRow`].",
+      "oneOf": [
+        {
+          "description": "The sweep deleted it.",
+          "type": "string",
+          "const": "deleted"
+        },
+        {
+          "description": "A dry run: the sweep would delete it.",
+          "type": "string",
+          "const": "would_delete"
+        },
+        {
+          "description": "It stays, for the reasons that the row gives.",
+          "type": "string",
+          "const": "kept"
         }
       ]
     }

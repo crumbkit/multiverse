@@ -194,10 +194,16 @@ const HELP: Help = Help::new()
             .effects(Effects::additive().open_world())
             .document(RESTORE),
         Leaf::new(&["repair"])
-            .examples(&[Example::new(
-                &["sample", "--dry-run"],
-                "Print what repairing the records of sample would do",
-            )])
+            .examples(&[
+                Example::new(
+                    &["sample", "--dry-run"],
+                    "Print what repairing the records of sample would do",
+                ),
+                Example::new(
+                    &["--orphans", "--dry-run"],
+                    "Print what deleting everything that no record names would delete",
+                ),
+            ])
             .effects(Effects::destructive().idempotent())
             .document(REPAIR),
         Leaf::new(&["remove"])
@@ -377,9 +383,11 @@ pub(crate) enum Verb {
     Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
     Restore(RestoreArgs),
-    /// Repair the broken records of one name that `mxv list` names `mxv repair NAME` for.
+    /// Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans delete what no record names.
     ///
-    /// An archive that stopped before it finished, and whose pins are gone, moves aside to the hidden directory .NAME.<ID> beside the other archives, which `mxv list --archived` does not list, and its private tar of ignored files stays at $XDG_DATA_HOME/mxv/archives/<ID>/ignored.tar. No mxv command deletes either one yet, so they stay until you delete them by hand; the result names both paths. An older archive that stopped before it finished, beside a newer workspace of the same name, takes the name NAME-YYYY-MM-DD, from the day the archive started, or that name with -2 and on when it is taken, and mxv finishes it, so `mxv restore` of the dated name brings it back. When its pins are gone, it moves aside instead. When an earlier repair stopped while it moved the archive, `mxv list` names `mxv repair` of the older name on both records, a repair of either name finishes the move, and `mxv archive -w` of either name refuses with mxv::archive::rename_unfinished. An archive beside the workspace that a restore of it rebuilt, because the restore stopped before it deleted the archive, is deleted with its pins. mxv asks before each repair that changes something, and --yes repairs without asking. When the records change between the question and the repair, so that the repair would differ from the one confirmed, mxv repairs nothing and fails with mxv::repair::changed. A name with nothing broken, or with a problem that another command repairs, changes nothing, and the result names that command. Each repair can run again after it stops partway.
+    /// An archive that stopped before it finished, and whose pins are gone, moves aside to the hidden directory .NAME.<ID> beside the other archives, which `mxv list --archived` does not list, and its private tar of ignored files stays at $XDG_DATA_HOME/mxv/archives/<ID>/ignored.tar. They stay until `mxv repair --orphans --yes` deletes them; the result names both paths. An older archive that stopped before it finished, beside a newer workspace of the same name, takes the name NAME-YYYY-MM-DD, from the day the archive started, or that name with -2 and on when it is taken, and mxv finishes it, so `mxv restore` of the dated name brings it back. When its pins are gone, it moves aside instead. When an earlier repair stopped while it moved the archive, `mxv list` names `mxv repair` of the older name on both records, a repair of either name finishes the move, and `mxv archive -w` of either name refuses with mxv::archive::rename_unfinished. An archive beside the workspace that a restore of it rebuilt, because the restore stopped before it deleted the archive, is deleted with its pins. mxv asks before each repair that changes something, and --yes repairs without asking. When the records change between the question and the repair, so that the repair would differ from the one confirmed, mxv repairs nothing and fails with mxv::repair::changed. A name with nothing broken, or with a problem that another command repairs, changes nothing, and the result names that command. Each repair can run again after it stops partway.
+    ///
+    /// With --orphans and no NAME, mxv looks for what no record names: a directory under the workspace root, the run files and logs of a workspace id, a tar of ignored files, an archive directory without its record, and a moved-aside archive. A directory is deleted only when a restore of the archive of its name would write it again, so that deleting it loses nothing: each checkout at the archived commit, with no uncommitted work or the work that the archive keeps, ignored files that match the archive's copies, references to commits that the archive holds, and no other entry. Anything else stays, and the result names what it holds. mxv compares the directory, moves it aside, compares it again, and deletes it only when both comparisons find nothing. A directory with no archive is deleted only when it holds nothing. Run files and logs are forgotten after their processes are stopped, and their containers' volumes are deleted only with --delete-volumes. A moved-aside archive and an unnamed tar of ignored files are deleted only with --yes, because nothing else keeps their contents. mxv asks before it deletes anything else. When any record cannot be read, mxv deletes nothing and says why.
     Repair(RepairArgs),
     /// Remove a workspace's checkouts, its merged branches, its directory and its record.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`

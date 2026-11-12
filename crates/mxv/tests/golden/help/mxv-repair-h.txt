@@ -1,17 +1,20 @@
-Repair the broken records of one name that `mxv list` names `mxv repair NAME` for
+Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans delete what no record names
 
-Usage: mxv repair [OPTIONS] <NAME>
+Usage: mxv repair [OPTIONS] [NAME]
 
 Arguments:
-  <NAME>  The name of the workspace or archive whose records to repair
+  [NAME]  The name of the workspace or archive whose records to repair
 
 Options:
-      --dry-run  Report what the command would change, and change nothing
-      --yes      Proceed without asking for confirmation
-  -h, --help     Print help (see more with '--help')
+      --orphans         Delete what no record names, instead of repairing one name's records
+      --delete-volumes  With --orphans, also delete the docker volumes labelled with each workspace id that no record holds
+      --dry-run         Report what the command would change, and change nothing
+      --yes             Proceed without asking for confirmation
+  -h, --help            Print help (see more with '--help')
 
 Examples:
   mxv repair sample --dry-run
+  mxv repair --orphans --dry-run
 
 Effects: destructive, idempotent, closed-world.
 Global flags: --json, --no-input. `mxv repair --help` describes them.

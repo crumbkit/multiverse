@@ -440,6 +440,10 @@ const RUNS_DIR: &str = "runs";
 /// is never read as a run record.
 const TOUCHED_FILE: &str = ".touched";
 
+/// The lock file in a workspace's run directory, which [`Runs::lock`]
+/// takes.
+const LOCK_FILE: &str = ".lock";
+
 /// The directory under mxv's state directory that phase keeps its own state
 /// in. Phase keeps each workspace's run record at
 /// `<PHASE_DIR>/runs/<workspace-id>.json`, apart from mxv's records.
@@ -598,7 +602,7 @@ impl Runs {
     /// longer than the lock wait, which is [`LOCK_WAIT`] by default, and
     /// [`Error::Unwritable`] when the lock file cannot be opened.
     pub fn lock(&self, name: &WorkspaceName) -> Result<Lock, Error> {
-        store::lock(&self.workspace_dir(name).join(".lock"), self.lock_wait)
+        store::lock(&self.workspace_dir(name).join(LOCK_FILE), self.lock_wait)
     }
 
     /// Records that an mxv command named the workspace `name` now, as the

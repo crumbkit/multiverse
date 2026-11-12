@@ -36,6 +36,7 @@ use crate::mirror::directory;
 
 mod admit;
 mod ignored;
+mod orphan;
 mod record;
 mod restore;
 mod retire;

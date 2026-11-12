@@ -710,6 +710,49 @@ fn a_stopped_rename_with_no_workspace_left_is_finished_by_mxv_repair_of_either_n
 }
 
 #[test]
+fn a_stopped_rename_beside_a_newer_workspace_is_finished_by_mxv_repair_of_the_dated_name() {
+    let setup = Setup::new();
+    let head = setup.head();
+    setup.archive();
+    setup.mark_retiring();
+    let dated = setup.plant_dated_copy();
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 1, "{document}");
+    for row in document["data"].as_array().unwrap() {
+        assert_eq!(row["repair"], "mxv repair triage", "{document}");
+    }
+
+    let (exit, document) = setup.run(&["repair", &dated, "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "finished", "{document}");
+    assert_eq!(document["data"]["older"], "triage", "{document}");
+    assert_eq!(document["data"]["archive"], dated.as_str(), "{document}");
+    assert!(!setup.archive_record("triage").exists());
+    assert!(setup.checkout().join(".git").exists());
+
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 1, "{document}");
+    let (exit, document) = setup.run(&["restore", &dated, "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let restored = setup.root().join("mxv").join(&dated).join("app");
+    assert_eq!(git(&restored, &["rev-parse", "HEAD"]).trim(), head);
+}
+
+#[test]
+fn repair_of_a_name_whose_archive_record_cannot_be_read_returns_the_read_error() {
+    let setup = Setup::new();
+    setup.archive();
+    write(&setup.archive_record("triage"), "not a record\n");
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::record::corrupt", "{document}");
+    assert!(setup.archive_record("triage").exists());
+}
+
+#[test]
 fn an_older_archive_whose_pins_are_gone_beside_a_newer_workspace_is_moved_aside() {
     let setup = Setup::new();
     setup.archive();
@@ -1297,4 +1340,301 @@ fn a_retiring_archive_that_meets_a_new_workspace_names_the_way_out() {
     let hint = document.to_string();
     assert!(hint.contains("mxv repair triage"), "{document}");
     assert!(!hint.contains("remove --archived"), "{document}");
+}
+
+/// Copies the directory `from` to `to` with `cp -Rp`, which keeps each
+/// file's permission bits.
+fn copy_dir(from: &Path, to: &Path) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test copies a directory as it stands, to plant it back later"
+    )]
+    let status = std::process::Command::new("cp")
+        .arg("-Rp")
+        .arg(from)
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cp {} {}", from.display(), to.display());
+}
+
+impl Setup {
+    /// Returns the record of the archive `triage`.
+    fn archive_json(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(self.archive_record("triage")).unwrap()).unwrap()
+    }
+
+    /// Returns the data directory of the archive `triage`.
+    fn archive_data(&self) -> PathBuf {
+        let id = self.archive_json()["id"].as_str().unwrap().to_owned();
+        self.root().join("data/mxv/archives").join(id)
+    }
+
+    /// Restores the archive `triage` and then puts back its record, its
+    /// data directory and its pins and deletes the workspace record, as a
+    /// restore that was killed after it rebuilt the checkouts and before
+    /// it wrote the workspace record leaves them.
+    fn plant_stopped_restore(&self) {
+        let record = self.archive_json();
+        let id = record["id"].as_str().unwrap().to_owned();
+        let mirror = PathBuf::from(record["checkouts"][0]["mirror"].as_str().unwrap());
+        let pins = git(
+            &mirror,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                &format!("refs/mxv/archives/{id}/"),
+            ],
+        );
+        let archive = self
+            .archive_record("triage")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let data = self.archive_data();
+        let saved = self.root().join("saved");
+        fs::create_dir_all(&saved).unwrap();
+        copy_dir(&archive, &saved.join("archive"));
+        let had_data = data.exists();
+        if had_data {
+            copy_dir(&data, &saved.join("data"));
+        }
+        let (exit, document) = self.run(&["restore", "triage", "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        copy_dir(&saved.join("archive"), &archive);
+        if had_data {
+            copy_dir(&saved.join("data"), &data);
+        }
+        for line in pins.lines() {
+            let (name, object) = line.split_once(' ').unwrap();
+            git(&mirror, &["update-ref", name, object]);
+        }
+        fs::remove_dir_all(&saved).unwrap();
+        fs::remove_file(self.root().join("state/mxv/workspaces/triage.json")).unwrap();
+    }
+}
+
+/// Returns the rows of `mxv repair --orphans` in `document`.
+fn orphan_rows(document: &Value) -> &Vec<Value> {
+    document["data"]["orphans"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{document}"))
+}
+
+/// Returns the row of `document` whose kind is `kind`.
+fn orphan_row<'a>(document: &'a Value, kind: &str) -> &'a Value {
+    orphan_rows(document)
+        .iter()
+        .find(|row| row["kind"] == kind)
+        .unwrap_or_else(|| panic!("no {kind} row: {document}"))
+}
+
+#[test]
+fn a_restore_killed_during_its_rebuild_is_repaired_by_mxv_repair_orphans() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    let head = setup.head();
+    setup.archive();
+    setup.plant_stopped_restore();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::restore::name_taken", "{document}");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_sweep", "{document}");
+    let row = orphan_row(&document, "directory");
+    assert_eq!(row["state"], "would_delete", "{document}");
+    assert_eq!(row["archive"], "triage", "{document}");
+    assert_eq!(row["path"], setup.workspace().display().to_string());
+    assert!(setup.checkout().join(".git").exists());
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "swept", "{document}");
+    assert_eq!(orphan_row(&document, "directory")["state"], "deleted");
+    assert!(!setup.workspace().exists());
+
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.head(), head);
+    assert_eq!(
+        fs::read_to_string(setup.checkout().join(".env")).unwrap(),
+        "SECRET=1\n"
+    );
+}
+
+#[test]
+fn repair_leaves_an_orphan_directory_that_holds_a_file_of_its_own_and_names_it() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.plant_stopped_restore();
+    write(&setup.workspace().join("notes.md"), "mine\n");
+    write(&setup.checkout().join("draft.txt"), "mine too\n");
+    let stray = setup.root().join("mxv/stray");
+    write(&stray.join("todo.txt"), "keep\n");
+    let empty = setup.root().join("mxv/empty");
+    fs::create_dir_all(&empty).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let rows = orphan_rows(&document);
+    let row = |path: &Path| {
+        rows.iter()
+            .find(|row| row["path"] == path.display().to_string())
+            .unwrap_or_else(|| panic!("{}: {document}", path.display()))
+    };
+    let kept = row(&setup.workspace());
+    assert_eq!(kept["state"], "kept", "{document}");
+    let reasons = kept["reasons"].to_string();
+    assert!(reasons.contains("notes.md"), "{document}");
+    assert!(
+        reasons.contains("app: its uncommitted work differs"),
+        "{document}"
+    );
+    assert_eq!(row(&stray)["state"], "kept", "{document}");
+    assert!(row(&stray)["reasons"].to_string().contains("todo.txt"));
+    assert_eq!(row(&empty)["state"], "deleted", "{document}");
+    assert!(setup.workspace().join("notes.md").exists());
+    assert!(setup.checkout().join("draft.txt").exists());
+    assert!(stray.join("todo.txt").exists());
+    assert!(!empty.exists());
+    assert!(!setup.root().join("mxv/.triage.mxv-removing").exists());
+}
+
+#[test]
+fn run_files_left_by_a_stopped_remove_are_forgotten_by_mxv_repair_orphans() {
+    let setup = Setup::new();
+    write(
+        &setup.checkout().join("mxv.toml"),
+        "[processes.web]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready\", timeout_seconds = 20 }\n",
+    );
+    let (exit, document) = setup.run(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let record_path = setup.root().join("state/mxv/workspaces/triage.json");
+    let record: Value = serde_json::from_str(&fs::read_to_string(&record_path).unwrap()).unwrap();
+    let id = record["id"].as_str().unwrap().to_owned();
+    let logs = setup.root().join("state/mxv/phase/logs").join(&id);
+    let runs = setup.root().join("state/mxv/runs/triage");
+    assert!(logs.exists(), "{}", logs.display());
+    // A removal killed after it deleted the record leaves the run files,
+    // the run record and the logs, with nothing that names them.
+    fs::remove_dir_all(setup.workspace()).unwrap();
+    fs::remove_file(&record_path).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = orphan_row(&document, "run_record");
+    assert_eq!(row["state"], "deleted", "{document}");
+    assert_eq!(row["id"], id.as_str(), "{document}");
+    assert!(!logs.exists());
+    assert!(
+        !setup
+            .root()
+            .join("state/mxv/phase/runs")
+            .join(format!("{id}.json"))
+            .exists()
+    );
+    if orphan_rows(&document)
+        .iter()
+        .any(|row| row["kind"] == "run_files")
+    {
+        assert_eq!(orphan_row(&document, "run_files")["state"], "deleted");
+    }
+    assert!(!runs.join(".touched").exists(), "{document}");
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+}
+
+#[test]
+fn an_archive_moved_aside_by_repair_is_listed_and_swept_by_orphans() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    setup.archive();
+    setup.mark_retiring();
+    setup.delete_pins();
+    let data = setup.archive_data();
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let aside = PathBuf::from(document["data"]["kept"][0].as_str().unwrap());
+    assert!(aside.exists() && data.exists());
+
+    let (exit, document) = setup.run(&["repair", "--orphans"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    let row = orphan_row(&document, "moved_aside");
+    assert_eq!(row["state"], "kept", "{document}");
+    assert_eq!(row["path"], aside.display().to_string());
+    assert!(row["size"].as_u64().unwrap() > 0, "{document}");
+    assert!(row["reasons"].to_string().contains("--yes"), "{document}");
+    assert!(aside.exists() && data.exists());
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_row(&document, "moved_aside")["state"], "deleted");
+    assert!(!aside.exists(), "{document}");
+    assert!(!data.exists(), "{document}");
+}
+
+#[test]
+fn an_ignored_tarball_with_no_record_is_swept_by_orphans() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    setup.archive();
+    let data = setup.archive_data();
+    assert!(data.join("ignored.tar").exists());
+    // A deletion of the archive that stopped between its two directories
+    // leaves the ignored files and no record.
+    fs::remove_dir_all(setup.archive_record("triage").parent().unwrap()).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = orphan_row(&document, "ignored_files");
+    assert_eq!(row["state"], "deleted", "{document}");
+    assert_eq!(row["path"], data.display().to_string());
+    assert!(!data.exists());
+}
+
+/// Returns every path below `dir`, in order.
+fn tree(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        found.push(path.clone());
+        if path.is_dir() && !path.is_symlink() {
+            for entry in fs::read_dir(&path).unwrap() {
+                stack.push(entry.unwrap().path());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn repair_orphans_dry_run_changes_nothing() {
+    let setup = Setup::new();
+    setup.ignore_env();
+    setup.archive();
+    setup.plant_stopped_restore();
+    let data = setup.archive_data();
+    let tar = setup
+        .root()
+        .join("data/mxv/archives/0123456789abcdef0123456789abcdef");
+    copy_dir(&data, &tar);
+    fs::create_dir_all(setup.root().join("mxv/empty")).unwrap();
+    let before = tree(&setup.root());
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--dry-run", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_sweep", "{document}");
+    for row in orphan_rows(&document) {
+        assert_eq!(row["state"], "would_delete", "{document}");
+    }
+    assert_eq!(orphan_rows(&document).len(), 3, "{document}");
+    assert_eq!(tree(&setup.root()), before);
 }

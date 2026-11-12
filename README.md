@@ -47,7 +47,9 @@ at the same commits, with the uncommitted work, the stashes, the other
 local branches, the tags that origin lacks and the commits that no branch
 reaches put back as they were. `mxv list` lists broken records first, each
 with the command that repairs it, and `mxv repair NAME` repairs the
-archives that a stopped archive or restore left behind.
+archives that a stopped archive or restore left behind. `mxv repair --orphans`
+deletes the directories and run files that no record names, when deleting
+them loses nothing.
 
 ## Licence
 

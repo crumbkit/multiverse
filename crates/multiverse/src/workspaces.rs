@@ -682,7 +682,7 @@ fn partial_refusal(workspace: Workspace, checkout: &str) -> RemovalPlan {
 
 /// The suffix of the name under which mxv moves a clone aside before it
 /// deletes it, such as `.app.mxv-removing` beside `app`.
-const ASIDE_SUFFIX: &str = ".mxv-removing";
+pub(crate) const ASIDE_SUFFIX: &str = ".mxv-removing";
 
 /// Returns the path beside `checkout` under which [`delete_clone`] moves
 /// it before deleting it, or `None` for a path without a name.

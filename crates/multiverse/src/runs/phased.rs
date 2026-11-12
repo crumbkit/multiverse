@@ -1362,6 +1362,100 @@ impl Runs {
         }
     }
 
+    /// Returns each directory of run files, `<runs>/<name>`, whose name is
+    /// a workspace's name and that holds more than the workspace's lock, in
+    /// name order. A command that takes the lock of a name that has no
+    /// workspace, such as `mxv archive`, leaves the lock file, which holds
+    /// nothing, so a directory with only that file is left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when a directory cannot be read.
+    pub(crate) fn run_dirs(&self) -> Result<Vec<(WorkspaceName, PathBuf)>, Error> {
+        let mut found = Vec::new();
+        for (name, path) in entries(&self.dir)? {
+            let Ok(name) = name.parse::<WorkspaceName>() else {
+                continue;
+            };
+            if !path.is_dir() || path.is_symlink() {
+                continue;
+            }
+            let more = entries(&path)?
+                .iter()
+                .any(|(entry, _)| entry != super::LOCK_FILE);
+            if more {
+                found.push((name, path));
+            }
+        }
+        Ok(found)
+    }
+
+    /// Returns each workspace id that phase keeps a run record or logs of,
+    /// with those paths, in id order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when a directory cannot be read.
+    pub(crate) fn phase_ids(&self) -> Result<Vec<(WorkspaceId, Vec<PathBuf>)>, Error> {
+        let mut found: BTreeMap<String, (WorkspaceId, Vec<PathBuf>)> = BTreeMap::new();
+        let state = self.phase.state_dir();
+        let records = entries(&state.join("runs"))?
+            .into_iter()
+            .filter_map(|(name, path)| Some((name.strip_suffix(".json")?.to_owned(), path)));
+        let logs = entries(&state.join("logs"))?;
+        for (text, path) in records.chain(logs) {
+            let Ok(id) = WorkspaceId::try_from(text.clone()) else {
+                continue;
+            };
+            found
+                .entry(text)
+                .or_insert_with(|| (id, Vec::new()))
+                .1
+                .push(path);
+        }
+        Ok(found.into_values().collect())
+    }
+
+    /// Stops what phase's run record of the workspace id `id` names and
+    /// phase no longer supervises, which removes the record, and then
+    /// deletes the id's logs. When phase cannot stop an item, such as a
+    /// process whose start time it may not read, the record and the logs
+    /// stay, and it returns one sentence for each such item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Phase`] for a failure of phase, the docker errors,
+    /// and [`Error::Unwritable`] when the logs cannot be deleted.
+    pub(crate) fn forget_id(&self, id: &WorkspaceId) -> Result<Vec<String>, Error> {
+        let swept = self
+            .phase
+            .sweep(id, false)
+            .map_err(|error| self.phase_error(id, error))?;
+        if self.phase.run_record(id).exists() {
+            let mut held: Vec<String> = swept
+                .items
+                .iter()
+                .filter(|item| {
+                    !matches!(
+                        item.outcome,
+                        phase::SweepOutcome::Stopped | phase::SweepOutcome::Gone
+                    )
+                })
+                .map(|item| format!("{} {} ({:?})", item.app, item.process, item.outcome))
+                .collect();
+            if held.is_empty() {
+                held.push("phase kept its run record".to_owned());
+            }
+            return Ok(held);
+        }
+        let logs = self.phase.state_dir().join("logs").join(id.as_str());
+        match fs::remove_dir_all(&logs) {
+            Ok(()) => Ok(Vec::new()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(source) => Err(Error::Unwritable { path: logs, source }),
+        }
+    }
+
     /// Returns the docker containers of `workspace`, running or stopped,
     /// which a removal removes, in name order. It runs no docker command
     /// for a workspace that phase has not run.
@@ -1466,6 +1560,29 @@ fn errored(
             message: message.to_owned(),
         },
     }
+}
+
+/// Returns the name and path of each entry of `dir` whose name is text, in
+/// name order, or nothing when `dir` does not exist.
+fn entries(dir: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
+    let unreadable = |source| Error::StateUnreadable {
+        path: dir.to_path_buf(),
+        source,
+    };
+    let listed = match fs::read_dir(dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unreadable(error)),
+    };
+    let mut found = Vec::new();
+    for entry in listed {
+        let entry = entry.map_err(unreadable)?;
+        if let Ok(name) = entry.file_name().into_string() {
+            found.push((name, entry.path()));
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// Returns phase's code `code` as a static string when it is one of

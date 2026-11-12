@@ -22,7 +22,7 @@ Run a workspace's app
 Put a workspace away
   archive     Archive a workspace, so restore can rebuild it at the same commits
   restore     Rebuild an archived workspace at its archived commits
-  repair      Repair the broken records of one name that `mxv list` names `mxv repair NAME` for
+  repair      Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans delete what no record names
   remove      Remove a workspace's checkouts, its merged branches, its directory and its record
 
 Free disk space

@@ -18,8 +18,10 @@ use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::store::Records;
 
+mod orphans;
 mod repair;
 
+pub use orphans::{Orphan, OrphanKind, Orphans, Swept};
 pub use repair::Repaired;
 
 #[cfg(test)]
