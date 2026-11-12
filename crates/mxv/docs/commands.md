@@ -22,6 +22,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv run`](#mxv-run): Run a task of a workspace through deadband, or list its tasks
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
+- [`mxv repair`](#mxv-repair): Repair the broken records of one name that `mxv list` names `mxv repair NAME` for
 - [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
 - [`mxv clean`](#mxv-clean): Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces
 - [`mxv reclaim`](#mxv-reclaim): Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
@@ -171,8 +172,8 @@ mxv list
 - `ignored`: The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
 - `ignored_bytes`: The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
-- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, a workspace whose checkout directories are all gone, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
-- `repair`: The command that repairs the problem, such as `mxv archive -w old-api`, what the person does by hand when no command can, or empty when no repair is known.
+- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, one that stopped and whose pins are gone, an older archive beside a newer workspace of the same name, which only the archive listing shows, a restore that stopped before it deleted the archive, a workspace whose checkout directories are all gone, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
+- `repair`: The command that repairs the problem, such as `mxv archive -w old-api` or `mxv repair old-api`, what the person does by hand when no command can, or empty when no repair is known.
 
 ### Columns that `--long` adds
 
@@ -543,6 +544,28 @@ mxv restore sample --dry-run
 ```
 
 Effects: additive, not idempotent, open-world.
+
+## `mxv repair`
+
+Repair the broken records of one name that `mxv list` names `mxv repair NAME` for.
+
+An archive that stopped before it finished, and whose pins are gone, moves aside to the hidden directory .NAME.\<ID\> beside the other archives, which `mxv list --archived` does not list, and its private tar of ignored files stays at $XDG\_DATA\_HOME/mxv/archives/\<ID\>/ignored.tar. No mxv command deletes either one yet, so they stay until you delete them by hand; the result names both paths. An older archive that stopped before it finished, beside a newer workspace of the same name, takes the name NAME-YYYY-MM-DD, from the day the archive started, or that name with -2 and on when it is taken, and mxv finishes it, so `mxv restore` of the dated name brings it back. When its pins are gone, it moves aside instead. When an earlier repair stopped while it moved the archive, `mxv list` names `mxv repair` of the older name on both records, a repair of either name finishes the move, and `mxv archive -w` of either name refuses with mxv::archive::rename\_unfinished. An archive beside the workspace that a restore of it rebuilt, because the restore stopped before it deleted the archive, is deleted with its pins. mxv asks before each repair that changes something, and --yes repairs without asking. When the records change between the question and the repair, so that the repair would differ from the one confirmed, mxv repairs nothing and fails with mxv::repair::changed. A name with nothing broken, or with a problem that another command repairs, changes nothing, and the result names that command. Each repair can run again after it stops partway.
+
+### Arguments
+
+- `<NAME>`: The name of the workspace or archive whose records to repair. Required.
+- `--dry-run`: Report what the command would change, and change nothing
+- `--yes`: Proceed without asking for confirmation
+
+### Examples
+
+Print what repairing the records of sample would do.
+
+```sh
+mxv repair sample --dry-run
+```
+
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv remove`
 

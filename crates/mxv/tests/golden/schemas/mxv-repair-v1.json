@@ -1,0 +1,538 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/repair/v1",
+  "description": "What the repair of one name's broken records did, or would do on a dry run.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/repair/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "data": {
+      "$ref": "#/$defs/RepairResult"
+    },
+    "failures": {
+      "description": "The failures that the answer leaves out. It is empty when nothing failed.",
+      "type": "array",
+      "items": {
+        "description": "A failure of some of the ids: the fields of the failure document without schema.",
+        "type": "object",
+        "properties": {
+          "url": {
+            "description": "A page that explains the failure. It is present only when the failure has one.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The key that the caller gave for the answer that failed, when the failure is one answer of a batch.",
+            "type": "string"
+          },
+          "index": {
+            "description": "The position of key among the keys that the caller gave, counted from 0, so two failures of the same key differ. It is present only with key.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "code": {
+            "description": "The failure's stable code, such as shelf::books::not_found. It is one or more printable ASCII characters without spaces, from ! to ~.",
+            "type": "string",
+            "pattern": "^[!-~]+$"
+          },
+          "message": {
+            "description": "What went wrong.",
+            "type": "string"
+          },
+          "cause": {
+            "description": "The errors that led to the failure, joined with \": \". It is present only when the failure has a cause.",
+            "type": "string"
+          },
+          "fields": {
+            "description": "The values at fault, in the order the failure gives them, each under a name of one or more lowercase ASCII letters, digits and underscores. A value is a string, an integer, a boolean, null, or an array or object of such values, and an object holds each key once. It is present only when the failure names at least one.",
+            "type": "object",
+            "propertyNames": {
+              "pattern": "^[a-z0-9_]+$"
+            },
+            "additionalProperties": {
+              "type": [
+                "string",
+                "integer",
+                "boolean",
+                "null",
+                "array",
+                "object"
+              ],
+              "$anchor": "field_value",
+              "items": {
+                "$ref": "#field_value"
+              },
+              "additionalProperties": {
+                "$ref": "#field_value"
+              }
+            }
+          },
+          "labels": {
+            "description": "The places in a source, such as a file, that the failure points at, in the order the failure gives them. It is present only when the failure has at least one label.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "offset": {
+                  "description": "The byte offset of the start of the span from the start of the source.",
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "length": {
+                  "description": "The length of the span in bytes.",
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "name": {
+                  "description": "The name of the source, such as a file name. It is present only when the span could be read and the source has a name.",
+                  "type": "string"
+                },
+                "line": {
+                  "description": "The 1-based line that holds the start of the span. It is present only when the span could be read.",
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "column": {
+                  "description": "The 1-based column of the start of the span, counted in characters of its line. It is present only when the span could be read.",
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "excerpt": {
+                  "description": "The lines of the source that the span covers, with one line before and one after where the source has them. It is present only when the span could be read.",
+                  "type": "object",
+                  "properties": {
+                    "line": {
+                      "description": "The 1-based number of the first line of the excerpt.",
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "text": {
+                      "description": "The lines, joined by the line breaks of the source, without a line break at the end.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "line",
+                    "text"
+                  ]
+                },
+                "text": {
+                  "description": "What the label says about the span. It is present only when the label has text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "offset",
+                "length"
+              ]
+            }
+          },
+          "related": {
+            "description": "The diagnostics that the failure's diagnostic relates to it, in the order it gives them. It is present only when there is at least one.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "description": "What the related diagnostic says.",
+                  "type": "string"
+                },
+                "code": {
+                  "description": "The related diagnostic's own code, which is free text. It is present only when the diagnostic has one.",
+                  "type": "string"
+                },
+                "severity": {
+                  "description": "How severe the related diagnostic is. A diagnostic that gives no severity is an error.",
+                  "enum": [
+                    "error",
+                    "warning",
+                    "advice"
+                  ]
+                },
+                "cause": {
+                  "description": "The errors below the related diagnostic, joined with \": \". It is present only when there is one.",
+                  "type": "string"
+                },
+                "labels": {
+                  "description": "The places in a source, such as a file, that the failure points at, in the order the failure gives them. It is present only when the failure has at least one label.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "offset": {
+                        "description": "The byte offset of the start of the span from the start of the source.",
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "length": {
+                        "description": "The length of the span in bytes.",
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "name": {
+                        "description": "The name of the source, such as a file name. It is present only when the span could be read and the source has a name.",
+                        "type": "string"
+                      },
+                      "line": {
+                        "description": "The 1-based line that holds the start of the span. It is present only when the span could be read.",
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "column": {
+                        "description": "The 1-based column of the start of the span, counted in characters of its line. It is present only when the span could be read.",
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "excerpt": {
+                        "description": "The lines of the source that the span covers, with one line before and one after where the source has them. It is present only when the span could be read.",
+                        "type": "object",
+                        "properties": {
+                          "line": {
+                            "description": "The 1-based number of the first line of the excerpt.",
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "text": {
+                            "description": "The lines, joined by the line breaks of the source, without a line break at the end.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "line",
+                          "text"
+                        ]
+                      },
+                      "text": {
+                        "description": "What the label says about the span. It is present only when the label has text.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "offset",
+                      "length"
+                    ]
+                  }
+                },
+                "help": {
+                  "description": "The related diagnostic's advice. It is present only when it gives some.",
+                  "type": "string"
+                },
+                "url": {
+                  "description": "A page that explains the related diagnostic. It is present only when it has one.",
+                  "type": "string"
+                },
+                "related": {
+                  "description": "The diagnostics related to this one, in the same shape, to at most eight levels below the failure.",
+                  "type": "array",
+                  "items": {
+                    "$ref": "#related"
+                  }
+                }
+              },
+              "$anchor": "related",
+              "required": [
+                "message",
+                "severity"
+              ]
+            }
+          },
+          "recovery": {
+            "description": "What the caller can do next, tagged by kind.",
+            "oneOf": [
+              {
+                "description": "Run this command. With `all`, run it once with every value of the failure's field that `all` names in place of the argument's placeholder, such as `<ID>...`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "run"
+                  },
+                  "call": {
+                    "type": "string"
+                  },
+                  "all": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "description": "A person must run this command in a terminal, so a program should hand the step to a person.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "terminal"
+                  },
+                  "call": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "description": "Run the same command again later.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "retry"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Follow this advice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "hint"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "There is no next step, for this reason.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "none"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "reason"
+                ]
+              }
+            ]
+          },
+          "alternatives": {
+            "description": "Other repairs the caller can try, in order of preference, each in the shape of recovery. It is present only when the failure offers at least one.",
+            "type": "array",
+            "items": {
+              "description": "A repair the caller can try instead, tagged by kind.",
+              "oneOf": [
+                {
+                  "description": "Run this command. With `all`, run it once with every value of the failure's field that `all` names in place of the argument's placeholder, such as `<ID>...`.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "run"
+                    },
+                    "call": {
+                      "type": "string"
+                    },
+                    "all": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "call"
+                  ]
+                },
+                {
+                  "description": "A person must run this command in a terminal, so a program should hand the step to a person.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "terminal"
+                    },
+                    "call": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "call"
+                  ]
+                },
+                {
+                  "description": "Run the same command again later.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "retry"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                },
+                {
+                  "description": "Follow this advice.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "hint"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "text"
+                  ]
+                },
+                {
+                  "description": "There is no next step, for this reason.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "none"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "reason"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "recovery"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "data",
+    "failures"
+  ],
+  "$defs": {
+    "RepairResult": {
+      "description": "What `mxv repair` did, or would do on a dry run.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The name whose records the command repaired.",
+          "type": "string"
+        },
+        "state": {
+          "description": "What the repair did, or would do.",
+          "$ref": "#/$defs/RepairState"
+        },
+        "older": {
+          "description": "The name that the older archive had, such as `docs`, or null when\nno archive was renamed. It differs from `name` when `name` is the\ndated name of a rename that an earlier repair started.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archive": {
+          "description": "The dated name that the older archive takes, such as\n`docs-2026-11-02`, or null when no archive was renamed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kept": {
+          "description": "The paths that hold what moved aside: the archive's directory, and\nits private tar of ignored files when it has one. Empty when nothing\nmoved aside.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "repair": {
+          "description": "The command that repairs what is broken when `mxv repair` does not,\nsuch as `mxv archive -w docs`, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pins": {
+          "description": "The references of the pins that the deletion deleted, or would\ndelete.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "description": "What the repair could not finish, one sentence for each, such as a\npin that it could not delete.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "state",
+        "older",
+        "archive",
+        "kept",
+        "repair",
+        "pins",
+        "warnings"
+      ]
+    },
+    "RepairState": {
+      "description": "What the repair did with the records of the name.",
+      "oneOf": [
+        {
+          "description": "Nothing of the name is broken, or what is broken is another\ncommand's to repair, which `repair` names.",
+          "type": "string",
+          "const": "unchanged"
+        },
+        {
+          "description": "The directory of an archive whose pins are gone moved aside.",
+          "type": "string",
+          "const": "moved_aside"
+        },
+        {
+          "description": "A dry run: the directory would move aside.",
+          "type": "string",
+          "const": "would_move_aside"
+        },
+        {
+          "description": "An older archive beside a newer workspace was finished under the\ndated name in `archive`.",
+          "type": "string",
+          "const": "finished"
+        },
+        {
+          "description": "A dry run: the older archive would be finished under that name.",
+          "type": "string",
+          "const": "would_finish"
+        },
+        {
+          "description": "The archive that a restore had already rebuilt was deleted, with its\npins.",
+          "type": "string",
+          "const": "deleted"
+        },
+        {
+          "description": "A dry run: the archive would be deleted.",
+          "type": "string",
+          "const": "would_delete"
+        }
+      ]
+    }
+  }
+}

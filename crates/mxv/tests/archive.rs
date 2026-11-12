@@ -512,15 +512,92 @@ fn an_archive_stopped_after_it_deleted_the_checkout_names_archive_and_not_remove
     assert_eq!(document["total"], 0, "{document}");
 }
 
+impl Setup {
+    /// Returns the path of the archive record of `name`.
+    fn archive_record(&self, name: &str) -> PathBuf {
+        self.root()
+            .join("state/mxv/archives")
+            .join(name)
+            .join("archive.json")
+    }
+
+    /// Marks the archive `triage` as still retiring, as a run that stopped
+    /// before it finished would leave it.
+    fn mark_retiring(&self) {
+        let path = self.archive_record("triage");
+        let record = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"state\": \"archived\"", "\"state\": \"retiring\"");
+        write(&path, &record);
+    }
+
+    /// Deletes every pin of the archive `triage` from its mirror, as a
+    /// person who deleted the references by hand would.
+    fn delete_pins(&self) {
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(self.archive_record("triage")).unwrap())
+                .unwrap();
+        let checkout = &record["checkouts"][0];
+        let mirror = PathBuf::from(checkout["mirror"].as_str().unwrap());
+        let pin = checkout["pin"].as_str().unwrap();
+        git(&mirror, &["update-ref", "-d", pin]);
+    }
+}
+
 #[test]
-fn an_unfinished_archive_beside_a_newer_workspace_is_named_on_the_archive_row_alone() {
+fn a_retiring_record_with_no_pins_is_never_marked_archived() {
     let setup = Setup::new();
     setup.archive();
-    let path = setup.root().join("state/mxv/archives/triage/archive.json");
-    let record = fs::read_to_string(&path)
-        .unwrap()
-        .replace("\"state\": \"archived\"", "\"state\": \"retiring\"");
-    write(&path, &record);
+    setup.mark_retiring();
+    setup.delete_pins();
+    for args in [&["list"][..], &["list", "--archived"][..]] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        let row = &document["data"][0];
+        assert_eq!(row["name"], "triage", "{args:?}: {document}");
+        assert_eq!(
+            row["problem"],
+            "the archive stopped before it finished, and its pins are gone"
+        );
+        assert_eq!(row["repair"], "mxv repair triage");
+    }
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::pins_gone", "{document}");
+    assert!(setup.archive_record("triage").exists());
+
+    let (exit, document) = setup.run(&["repair", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_move_aside", "{document}");
+    assert!(setup.archive_record("triage").exists());
+    let (exit, document) = setup.run(&["repair", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::confirmation::needs_yes",
+        "{document}"
+    );
+    assert!(setup.archive_record("triage").exists());
+
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "moved_aside", "{document}");
+    let kept = PathBuf::from(document["data"]["kept"][0].as_str().unwrap());
+    assert!(kept.join("archive.json").exists(), "{document}");
+    assert!(!setup.archive_record("triage").exists());
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 0, "{document}");
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+}
+
+#[test]
+fn a_stale_retiring_archive_beside_a_newer_workspace_is_finished_under_a_dated_name() {
+    let setup = Setup::new();
+    let head = setup.head();
+    setup.archive();
+    setup.mark_retiring();
     let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
     assert_eq!(exit, 0, "{document}");
     let (exit, document) = setup.run(&["list"]);
@@ -533,7 +610,174 @@ fn an_unfinished_archive_beside_a_newer_workspace_is_named_on_the_archive_row_al
         row["problem"],
         "an older archive beside a newer workspace triage"
     );
-    assert_eq!(row["repair"], "");
+    assert_eq!(row["repair"], "mxv repair triage");
+
+    let (exit, document) = setup.run(&["repair", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_finish", "{document}");
+    assert!(setup.archive_record("triage").exists());
+
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "finished", "{document}");
+    let dated = document["data"]["archive"].as_str().unwrap().to_owned();
+    let date = dated.strip_prefix("triage-").unwrap();
+    assert_eq!(date.len(), "2026-11-02".len(), "{dated}");
+    assert!(!setup.archive_record("triage").exists());
+
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 1, "{document}");
+    assert_eq!(document["data"][0]["name"], dated.as_str());
+    let (exit, document) = setup.run(&["restore", &dated, "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let restored = setup.root().join("mxv").join(&dated).join("app");
+    assert_eq!(git(&restored, &["rev-parse", "HEAD"]).trim(), head);
+    assert!(setup.checkout().join(".git").exists());
+}
+
+impl Setup {
+    /// Writes a copy of the record of the archive `triage` under its first
+    /// dated name, with no other file, as a repair that stopped right after
+    /// it wrote the renamed record leaves it, and returns the dated name.
+    fn plant_dated_copy(&self) -> String {
+        let mut record: Value =
+            serde_json::from_str(&fs::read_to_string(self.archive_record("triage")).unwrap())
+                .unwrap();
+        let days = i64::try_from(record["time"].as_u64().unwrap() / 86_400).unwrap();
+        let (year, month, day) = multiverse::phase::calendar::civil_from_days(days);
+        let dated = format!("triage-{year:04}-{month:02}-{day:02}");
+        let path = PathBuf::from(record["path"].as_str().unwrap()).with_file_name(&dated);
+        record["name"] = dated.clone().into();
+        record["path"] = path.display().to_string().into();
+        for checkout in record["checkouts"].as_array_mut().unwrap() {
+            let folder = checkout["folder"].as_str().unwrap().to_owned();
+            checkout["path"] = path.join(folder).display().to_string().into();
+        }
+        let file = self.archive_record(&dated);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write(&file, &serde_json::to_string_pretty(&record).unwrap());
+        dated
+    }
+}
+
+#[test]
+fn a_stopped_rename_with_no_workspace_left_is_finished_by_mxv_repair_of_either_name() {
+    for older in [true, false] {
+        let setup = Setup::new();
+        let head = setup.head();
+        setup.archive();
+        setup.mark_retiring();
+        let dated = setup.plant_dated_copy();
+        for args in [&["list"][..], &["list", "--archived"][..]] {
+            let (exit, document) = setup.run(args);
+            assert_eq!(exit, 1, "{args:?}: {document}");
+            assert_eq!(document["total"], 2, "{args:?}: {document}");
+            for row in document["data"].as_array().unwrap() {
+                assert_eq!(
+                    row["problem"], "a repair stopped while it moved the archive to its dated name",
+                    "{document}"
+                );
+                assert_eq!(row["repair"], "mxv repair triage", "{document}");
+            }
+        }
+        for name in ["triage", dated.as_str()] {
+            let (exit, document) = setup.run(&["archive", "-w", name, "--yes"]);
+            assert_eq!(exit, 1, "{name}: {document}");
+            assert_eq!(
+                document["code"], "mxv::archive::rename_unfinished",
+                "{name}: {document}"
+            );
+        }
+
+        let given = if older { "triage" } else { dated.as_str() };
+        let (exit, document) = setup.run(&["repair", given, "--yes"]);
+        assert_eq!(exit, 0, "{given}: {document}");
+        assert_eq!(document["data"]["state"], "finished", "{document}");
+        assert_eq!(document["data"]["older"], "triage", "{document}");
+        assert_eq!(document["data"]["archive"], dated.as_str(), "{document}");
+        assert!(!setup.archive_record("triage").exists());
+
+        let (exit, document) = setup.run(&["list", "--archived"]);
+        assert_eq!(exit, 0, "{document}");
+        assert_eq!(document["total"], 1, "{document}");
+        assert_eq!(document["data"][0]["name"], dated.as_str());
+        let (exit, document) = setup.run(&["restore", &dated, "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        let restored = setup.root().join("mxv").join(&dated).join("app");
+        assert_eq!(git(&restored, &["rev-parse", "HEAD"]).trim(), head);
+    }
+}
+
+#[test]
+fn an_older_archive_whose_pins_are_gone_beside_a_newer_workspace_is_moved_aside() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.mark_retiring();
+    setup.delete_pins();
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "moved_aside", "{document}");
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 0, "{document}");
+    assert!(setup.checkout().join(".git").exists());
+}
+
+#[test]
+fn a_restore_stopped_before_it_deleted_its_archive_is_finished_by_mxv_repair() {
+    let setup = Setup::new();
+    setup.archive();
+    let path = setup.archive_record("triage");
+    let record = fs::read_to_string(&path).unwrap();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    // A kill after the pins were deleted and before the record was leaves
+    // the record of the finished archive beside the restored workspace.
+    write(&path, &record);
+    for args in [&["list"][..], &["list", "--archived"][..]] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(document["total"], 1, "{args:?}: {document}");
+        let row = &document["data"][0];
+        assert_eq!(
+            row["problem"],
+            "the restore stopped before it deleted the archive"
+        );
+        assert_eq!(row["repair"], "mxv repair triage");
+    }
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "deleted", "{document}");
+    assert!(!path.exists());
+    assert!(setup.checkout().join(".git").exists());
+    let (exit, document) = setup.run(&["list"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["total"], 1, "{document}");
+}
+
+#[test]
+fn repair_of_a_name_with_nothing_broken_has_nothing_to_do() {
+    let setup = Setup::new();
+    for name in ["triage", "missing"] {
+        let (exit, document) = setup.run(&["repair", name, "--yes"]);
+        assert_eq!(exit, 0, "{name}: {document}");
+        assert_eq!(document["data"]["state"], "unchanged", "{name}: {document}");
+    }
+}
+
+#[test]
+fn repair_of_an_unfinished_archive_names_the_command_that_finishes_it() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.mark_retiring();
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(document["data"]["repair"], "mxv archive -w triage");
+    assert!(setup.archive_record("triage").exists());
 }
 
 #[test]
@@ -1051,6 +1295,6 @@ fn a_retiring_archive_that_meets_a_new_workspace_names_the_way_out() {
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::archive::name_taken");
     let hint = document.to_string();
-    assert!(hint.contains("mxv remove triage"), "{document}");
+    assert!(hint.contains("mxv repair triage"), "{document}");
     assert!(!hint.contains("remove --archived"), "{document}");
 }

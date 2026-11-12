@@ -21,6 +21,7 @@ use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
 use crate::disposable::DisposableSet;
 use crate::error::Error;
+use crate::health::{pins_gone, rename_pair};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
 use crate::record::{Workspace, WorkspaceKind};
@@ -300,6 +301,15 @@ pub enum ArchiveRefusal {
     NotFound,
     /// An archive already holds the name.
     NameTaken(Box<Archive>),
+    /// The archive of the name has not finished, its workspace is gone, and
+    /// the pin of no checkout names its commit, so it cannot be finished.
+    /// `Workspaces::repair` moves it aside.
+    PinsGone(Box<Archive>),
+    /// A repair stopped while it moved the archive to its dated name, so
+    /// two records hold one archive id and the archive's files are split
+    /// between their directories. The archive holds the other record.
+    /// `Workspaces::repair` of either name finishes the move.
+    RenameUnfinished(Box<Archive>),
     /// A clone's mirror is gone, so nothing could hold its pin.
     MirrorMissing {
         /// The checkout's folder.
@@ -925,12 +935,28 @@ impl<B: Backend> Workspaces<B> {
 
     /// Returns what the record of the workspace `name` and its archive say
     /// about an archive of it.
+    ///
+    /// `health::classify` (`health.rs`) holds the same rule for which
+    /// retiring archive this finishes and which it refuses, and names the
+    /// repair of each in `mxv list`, so a change to one changes the other.
     fn subject(&self, archives: &Archives, name: &WorkspaceName) -> Result<Subject, Error> {
         let refused = |refusal| Ok(Subject::Done(ArchivePlanned::Refused(refusal)));
         let existing = archives.read(name)?;
         match (self.store.read(name)?, existing) {
             (None, None) => refused(ArchiveRefusal::NotFound),
+            // Finishing one record of a rename that stopped would mark an
+            // archive whose files are split between two directories.
             (None, Some(archive)) if archive.state == ArchiveState::Retiring => {
+                let all = archives.list()?;
+                if let Some((old, dated)) = rename_pair(&archive, &all.archives) {
+                    let other = if old.name == archive.name { dated } else { old };
+                    return refused(ArchiveRefusal::RenameUnfinished(Box::new(other.clone())));
+                }
+                if pins_gone(&self.backend, &archive)? {
+                    // Marking an archive whose pins are gone as archived
+                    // would claim that a restore brings back what is gone.
+                    return refused(ArchiveRefusal::PinsGone(Box::new(archive)));
+                }
                 Ok(Subject::Done(ArchivePlanned::Finish(Box::new(archive))))
             }
             (_, Some(archive)) if archive.state == ArchiveState::Archived => {

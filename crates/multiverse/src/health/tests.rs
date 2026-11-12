@@ -4,12 +4,44 @@ use std::path::{Path, PathBuf};
 
 use phase::WorkspaceId;
 
-use super::{Broken, Problem, Repair, classify};
-use crate::archive::{ARCHIVE_VERSION, Archive, ArchiveRecords, ArchiveState};
+use super::{Broken, Health, Problem, Repair};
+use crate::archive::{
+    ARCHIVE_VERSION, Archive, ArchiveRecords, ArchiveState, ArchivedCheckout, Kept,
+};
 use crate::error::Error;
+use crate::git::Git;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::store::Records;
+use crate::testing::{fixture, git};
+
+/// Classifies `records` and `archives`, reading pins through git.
+fn classify(records: &Records, archives: &ArchiveRecords) -> Health {
+    super::classify(&Git, records, archives)
+}
+
+/// Returns `archive` with one checkout `app` whose pin lies in
+/// `repository` and names `commit`.
+fn with_checkout(mut archive: Archive, repository: &Path, commit: &str) -> Archive {
+    archive.kind = WorkspaceKind::Worktree;
+    archive.checkouts = vec![ArchivedCheckout {
+        folder: "app".to_owned(),
+        path: archive.path.join("app"),
+        source: repository.to_path_buf(),
+        origin: None,
+        branch: archive.name.to_string(),
+        detached: false,
+        base: "refs/remotes/origin/main".to_owned(),
+        upstream: None,
+        upstream_remote: None,
+        commit: commit.to_owned(),
+        mirror: None,
+        pin: format!("refs/mxv/archives/{}/app/head", archive.id),
+        local_only: Vec::new(),
+        kept: Kept::default(),
+    }];
+    archive
+}
 
 fn name(text: &str) -> WorkspaceName {
     text.parse().unwrap()
@@ -44,11 +76,11 @@ fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) -> Workspac
 }
 
 /// Returns an archive of the workspace `text` with the id `digit`, in
-/// `state`.
+/// `state`. The archive's own id is made of `digit` too.
 fn archive(text: &str, digit: char, state: ArchiveState) -> Archive {
     Archive {
         version: ARCHIVE_VERSION,
-        id: "a".repeat(32),
+        id: std::iter::repeat_n(digit, 32).collect(),
         state,
         time: 0,
         name: name(text),
@@ -145,9 +177,150 @@ fn an_unfinished_archive_beside_a_newer_workspace_is_named_on_the_archive_alone(
         [Broken {
             name: "docs".to_owned(),
             problem: Problem::ArchiveBesideNewerWorkspace,
-            repair: None,
+            repair: Some(Repair::Repair(name("docs"))),
         }]
     );
+}
+
+#[test]
+fn a_dated_copy_that_a_stopped_repair_left_is_finished_by_repairing_the_old_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = archive("docs", '1', ArchiveState::Retiring);
+    // The archive started at the epoch, so its first dated name is this.
+    let dated = old.renamed(&name("docs-1970-01-01"));
+    let health = classify(
+        &records(vec![workspace(dir.path(), "docs", '2', &["app"])], vec![]),
+        &archives(vec![old, dated], vec![]),
+    );
+    let both = |text: &str| Broken {
+        name: text.to_owned(),
+        problem: Problem::RenameUnfinished,
+        repair: Some(Repair::Repair(name("docs"))),
+    };
+    assert_eq!(health.archives, [both("docs"), both("docs-1970-01-01")]);
+    // The newer workspace docs is whole, so only the dated record shows
+    // in the listing of the workspaces.
+    assert_eq!(health.workspaces, [both("docs-1970-01-01")]);
+}
+
+#[test]
+fn a_stopped_rename_with_no_workspace_left_names_one_repair_on_both_rows() {
+    let old = archive("docs", '1', ArchiveState::Retiring);
+    let dated = old.renamed(&name("docs-1970-01-01"));
+    let health = classify(
+        &records(vec![], vec![]),
+        &archives(vec![old, dated], vec![]),
+    );
+    let both = |text: &str| Broken {
+        name: text.to_owned(),
+        problem: Problem::RenameUnfinished,
+        repair: Some(Repair::Repair(name("docs"))),
+    };
+    assert_eq!(health.archives, [both("docs"), both("docs-1970-01-01")]);
+    assert_eq!(health.workspaces, [both("docs"), both("docs-1970-01-01")]);
+}
+
+#[test]
+fn two_records_of_one_id_whose_names_are_not_dated_are_no_rename() {
+    let old = archive("docs", '1', ArchiveState::Archived);
+    let other = old.renamed(&name("notes"));
+    let health = classify(
+        &records(vec![], vec![]),
+        &archives(vec![old, other], vec![]),
+    );
+    assert!(health.archives.is_empty(), "{health:?}");
+}
+
+#[test]
+fn a_long_name_cut_before_a_dash_takes_a_dated_name_without_a_doubled_dash() {
+    let long = format!("{}-{}", "a".repeat(49), "b".repeat(14));
+    assert_eq!(long.len(), 64);
+    let older = archive(&long, '1', ArchiveState::Retiring);
+    let first = super::repair::dated_candidates(&older).next().unwrap();
+    assert_eq!(first.as_str(), format!("{}-1970-01-01", "a".repeat(49)));
+}
+
+#[test]
+fn the_dated_names_run_from_the_plain_date_to_the_suffix_99() {
+    let older = archive("docs", '1', ArchiveState::Retiring);
+    let names: Vec<String> = super::repair::dated_candidates(&older)
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(names.len(), 99);
+    assert_eq!(names[0], "docs-1970-01-01");
+    assert_eq!(names[1], "docs-1970-01-01-2");
+    assert_eq!(names[98], "docs-1970-01-01-99");
+}
+
+#[test]
+fn an_unfinished_archive_whose_pins_are_gone_is_repaired_and_not_finished() {
+    let fixture = fixture();
+    let commit = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let pinless = with_checkout(
+        archive("old-api", '1', ArchiveState::Retiring),
+        &fixture.clone,
+        commit.trim(),
+    );
+    let health = classify(&records(vec![], vec![]), &archives(vec![pinless], vec![]));
+    let expected = Broken {
+        name: "old-api".to_owned(),
+        problem: Problem::ArchivePinsGone,
+        repair: Some(Repair::Repair(name("old-api"))),
+    };
+    assert_eq!(health.archives, std::slice::from_ref(&expected));
+    assert_eq!(health.workspaces, [expected]);
+}
+
+#[test]
+fn an_unfinished_archive_whose_pin_is_there_is_finished_by_archiving_it() {
+    let fixture = fixture();
+    let commit = git(&fixture.clone, &["rev-parse", "HEAD"]);
+    let pinned = with_checkout(
+        archive("old-api", '1', ArchiveState::Retiring),
+        &fixture.clone,
+        commit.trim(),
+    );
+    git(
+        &fixture.clone,
+        &["update-ref", &pinned.checkouts[0].pin, commit.trim()],
+    );
+    let health = classify(&records(vec![], vec![]), &archives(vec![pinned], vec![]));
+    assert_eq!(health.archives[0].problem, Problem::ArchiveUnfinished);
+    assert_eq!(
+        health.archives[0].repair,
+        Some(Repair::Archive(name("old-api")))
+    );
+}
+
+#[test]
+fn a_finished_archive_beside_the_workspace_it_holds_is_a_restore_that_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let health = classify(
+        &records(vec![workspace(dir.path(), "docs", '1', &["app"])], vec![]),
+        &archives(vec![archive("docs", '1', ArchiveState::Archived)], vec![]),
+    );
+    let expected = Broken {
+        name: "docs".to_owned(),
+        problem: Problem::RestoreUnfinished,
+        repair: Some(Repair::Repair(name("docs"))),
+    };
+    assert_eq!(health.archives, std::slice::from_ref(&expected));
+    assert_eq!(health.workspaces, [expected]);
+}
+
+#[test]
+fn a_finished_archive_and_a_workspace_without_ids_are_not_a_restore_that_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut docs = workspace(dir.path(), "docs", '1', &["app"]);
+    docs.id = None;
+    let mut archived = archive("docs", '1', ArchiveState::Archived);
+    archived.workspace_id = None;
+    let health = classify(
+        &records(vec![docs], vec![]),
+        &archives(vec![archived], vec![]),
+    );
+    assert!(health.workspaces.is_empty(), "{health:?}");
+    assert!(health.archives.is_empty(), "{health:?}");
 }
 
 #[test]

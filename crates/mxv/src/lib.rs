@@ -17,6 +17,7 @@ mod exec;
 mod failures;
 mod processes;
 mod reclaim;
+mod repair;
 mod rows;
 mod run;
 mod run_failures;
@@ -34,10 +35,11 @@ use crumbkit::Code;
 #[doc(hidden)]
 pub use crate::archive::{
     ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
-    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_SOURCE_CHANGED,
-    ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED,
-    RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN,
-    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE,
+    ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE,
+    ARCHIVE_VOLUMES_IN_USE, REPAIR_CHANGED, RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING,
+    RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND,
+    RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
 };
 #[doc(hidden)]
 pub use crate::cli::{Cli, TOOL};
@@ -66,7 +68,7 @@ pub use crate::failures::{
 pub use crate::failures::{
     DOCKER_ADDRESS_POOLS_EXHAUSTED, DOCKER_COMPOSE_MISSING, DOCKER_FAILED, DOCKER_FOREIGN_OBJECT,
     DOCKER_NOT_FOUND, DOCKER_UNAVAILABLE, PHASE_FAILED, PORT_EXHAUSTED, PROCESS_TABLE_UNREADABLE,
-    PROCESS_UNSTARTABLE, PROCESS_UNSUPPORTED_OS, WORKSPACE_BUSY,
+    PROCESS_UNSTARTABLE, PROCESS_UNSUPPORTED_OS, REPAIR_NAMES_TAKEN, WORKSPACE_BUSY,
 };
 #[doc(hidden)]
 pub use crate::run_failures::{
@@ -198,6 +200,12 @@ where
         Verb::Restore(args) => {
             let result = archive::restore(&mut output, environment, &args);
             crumbkit::finish(output, archive::RESTORE, result)
+        }
+        // `repair` reads `--dry-run` and asks for confirmation through
+        // `&mut output`, so it runs before `finish`.
+        Verb::Repair(args) => {
+            let result = repair::repair(&mut output, environment, &args);
+            crumbkit::finish(output, repair::REPAIR, result)
         }
         // crumbkit's own commands read the command tree through
         // `&mut output`, so each runs before `finish` takes `output`.
