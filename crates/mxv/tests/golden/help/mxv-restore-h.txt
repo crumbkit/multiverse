@@ -14,5 +14,5 @@ Options:
 Examples:
   mxv restore sample --dry-run
 
-Effects: additive, not idempotent, open-world.
+Effects: additive, idempotent, open-world.
 Global flags: --json, --no-input. `mxv restore --help` describes them.

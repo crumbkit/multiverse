@@ -432,6 +432,10 @@
       "description": "What `mxv archive` did, or would do on a dry run.",
       "type": "object",
       "properties": {
+        "state": {
+          "description": "Whether the run archived the workspace, would archive it on a dry\nrun, or had nothing to do because no workspace has the name and its\narchive has finished. An unchanged result lists the archive's pins.",
+          "$ref": "#/$defs/LifecycleState"
+        },
         "name": {
           "description": "The workspace's name.",
           "type": "string"
@@ -530,6 +534,7 @@
         }
       },
       "required": [
+        "state",
         "name",
         "path",
         "pins",
@@ -545,6 +550,26 @@
         "warnings",
         "restore",
         "cd"
+      ]
+    },
+    "LifecycleState": {
+      "description": "Whether a run of `mxv archive`, `mxv restore` or `mxv remove` changed\nanything.",
+      "oneOf": [
+        {
+          "description": "The run did what the result reports.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "A dry run: the run would do what the result reports.",
+          "type": "string",
+          "const": "planned"
+        },
+        {
+          "description": "The verb's goal already held, so there was nothing to do and the\nrun changed nothing, except to delete an archive record that an\nearlier restore left behind.",
+          "type": "string",
+          "const": "unchanged"
+        }
       ]
     },
     "PinRow": {

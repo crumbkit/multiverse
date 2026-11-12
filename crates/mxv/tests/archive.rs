@@ -370,11 +370,103 @@ fn removing_an_archive_clears_it_and_clean_never_touches_it() {
 }
 
 #[test]
-fn removing_an_archive_refuses_a_name_that_no_archive_has() {
+fn removing_an_archive_of_a_name_that_no_archive_has_has_nothing_to_do() {
     let setup = Setup::new();
     let (exit, document) = setup.run(&["remove", "--archived", "other", "--yes"]);
-    assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::archive::not_found");
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(
+        document["data"]["pins"].as_array().unwrap().is_empty(),
+        "{document}"
+    );
+}
+
+#[test]
+fn archiving_an_archived_name_has_nothing_to_do() {
+    let setup = Setup::new();
+    let archived = setup.archive();
+    assert_eq!(archived["data"]["state"], "done", "{archived}");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(
+        document["data"]["pins"], archived["data"]["pins"],
+        "{document}"
+    );
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    let output = setup
+        .command(&setup.root())
+        .args(["archive", "-w", "triage", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "The workspace triage is already archived, so there is nothing to do. `mxv restore triage` brings it back."
+    );
+    // The archive is untouched, so a restore still brings it back.
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+}
+
+#[test]
+fn restoring_a_live_workspace_whose_archive_is_gone_has_nothing_to_do() {
+    let setup = Setup::new();
+    setup.archive();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(
+        document["data"]["path"],
+        setup.workspace().display().to_string(),
+        "{document}"
+    );
+    assert!(
+        document["data"]["stale_pins"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{document}"
+    );
+    let output = setup
+        .command(&setup.root())
+        .args(["restore", "triage", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "The workspace triage is already restored, so there is nothing to do."
+    );
+}
+
+#[test]
+fn a_restore_stopped_before_it_deleted_its_archive_is_finished_by_restoring_again() {
+    let setup = Setup::new();
+    setup.archive();
+    let record = setup.archive_record("triage");
+    let saved = fs::read_to_string(&record).unwrap();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    // The restore rebuilt the workspace with the archive's stable id; put
+    // back the record it deleted, as a restore stopped just before that
+    // deletion leaves it.
+    write(&record, &saved);
+
+    let (exit, document) = setup.run(&["restore", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(record.exists(), "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    let pin = document["data"]["stale_pins"][0].as_str().unwrap();
+    assert!(pin.starts_with("refs/mxv/archives/"), "{document}");
+    assert!(!record.exists(), "{document}");
+    assert!(setup.workspace().join("app").is_dir(), "{document}");
 }
 
 #[test]

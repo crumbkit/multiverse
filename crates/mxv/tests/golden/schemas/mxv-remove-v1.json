@@ -432,6 +432,10 @@
       "description": "What `mxv remove` did to a workspace, or would do on a dry run.",
       "type": "object",
       "properties": {
+        "state": {
+          "description": "Whether the run removed something, would remove it on a dry run, or\nhad nothing to do because no workspace, or with `--archived` no\narchive, has the name.",
+          "$ref": "#/$defs/LifecycleState"
+        },
         "name": {
           "description": "The workspace's name.",
           "type": "string"
@@ -517,6 +521,7 @@
         }
       },
       "required": [
+        "state",
         "name",
         "path",
         "directory",
@@ -531,6 +536,26 @@
         "warnings",
         "manifest_deleted",
         "pins"
+      ]
+    },
+    "LifecycleState": {
+      "description": "Whether a run of `mxv archive`, `mxv restore` or `mxv remove` changed\nanything.",
+      "oneOf": [
+        {
+          "description": "The run did what the result reports.",
+          "type": "string",
+          "const": "done"
+        },
+        {
+          "description": "A dry run: the run would do what the result reports.",
+          "type": "string",
+          "const": "planned"
+        },
+        {
+          "description": "The verb's goal already held, so there was nothing to do and the\nrun changed nothing, except to delete an archive record that an\nearlier restore left behind.",
+          "type": "string",
+          "const": "unchanged"
+        }
       ]
     },
     "DirectoryFate": {

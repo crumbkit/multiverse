@@ -504,7 +504,9 @@ Writes: applies all items or none.
 
 ## `mxv archive`
 
-Archive a workspace, so restore can rebuild it at the same commits
+Archive a workspace, so restore can rebuild it at the same commits.
+
+When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
 
 ### Arguments
 
@@ -522,11 +524,13 @@ Print what archiving the workspace reading-list would do.
 mxv archive -w reading-list --dry-run
 ```
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv restore`
 
-Rebuild an archived workspace at its archived commits
+Rebuild an archived workspace at its archived commits.
+
+When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged.
 
 ### Arguments
 
@@ -543,7 +547,7 @@ Print what restoring the archived workspace sample would do.
 mxv restore sample --dry-run
 ```
 
-Effects: additive, not idempotent, open-world.
+Effects: additive, idempotent, open-world.
 
 ## `mxv repair`
 
@@ -580,7 +584,9 @@ Effects: destructive, idempotent, closed-world.
 
 ## `mxv remove`
 
-Remove a workspace's checkouts, its merged branches, its directory and its record
+Remove a workspace's checkouts, its merged branches, its directory and its record.
+
+When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
 
 ### Arguments
 
@@ -600,7 +606,7 @@ Print what removing the workspace reading-list would delete.
 mxv remove reading-list --dry-run
 ```
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv clean`
 

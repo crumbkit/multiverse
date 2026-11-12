@@ -7,6 +7,22 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv archive`, `mxv restore` and `mxv remove` succeed with nothing to do
+  when their goal already holds, and their documents gain a `state` of
+  `done`, `planned` or `unchanged`. `mxv archive -w NAME` of a name that
+  only a finished archive holds lists the archive's pins and names
+  `mxv restore NAME`, where it refused with `mxv::archive::name_taken`.
+  `mxv restore NAME` of a name that a workspace holds and no archive needs
+  restoring exits 0. When an earlier restore stopped after it rebuilt the
+  workspace and before it deleted the archive, so the archive has the
+  workspace's stable id, `mxv restore` asks and then deletes the archive
+  with its pins, which its new `stale_pins` field names, where it refused
+  with `mxv::restore::name_taken`. `mxv remove NAME` of a name that no
+  workspace has, and `mxv remove --archived NAME` of a name that no archive
+  has, exit 0, where they failed with `mxv::workspace::not_found` and
+  `mxv::archive::not_found`. Their `Effects:` lines now say idempotent. The
+  library's `ArchivePlanned::Unchanged` and `RestorePlanned::Unchanged`
+  report these cases.
 - `mxv archive` keeps a checkout's git state instead of refusing it. It
   keeps the staged and unstaged changes and the untracked files as two
   commits that only its pins name, so the branch and the index never move,

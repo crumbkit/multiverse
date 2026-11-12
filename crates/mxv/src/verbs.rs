@@ -748,6 +748,10 @@ pub(crate) fn remove(
         .map_err(MxvFailure::from)?;
     let removal = match plan {
         RemovalPlan::Ready(removal) => removal,
+        RemovalPlan::NotFound => {
+            let path = environment.root()?.path.join(name.as_str());
+            return Ok(Prose::new(RemovalResult::unchanged(&name, &path, false)));
+        }
         refused => return Err(refusal(&name, allow, refused).into()),
     };
     if output.is_dry_run() {

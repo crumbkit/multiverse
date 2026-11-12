@@ -17,5 +17,5 @@ Options:
 Examples:
   mxv remove reading-list --dry-run
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
 Global flags: --json, --no-input. `mxv remove --help` describes them.

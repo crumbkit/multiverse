@@ -175,7 +175,7 @@ impl Setup {
             .unwrap()
         {
             RestorePlanned::Ready(plan) => *plan,
-            RestorePlanned::Refused(refusal) => panic!("{refusal:?}"),
+            planned => panic!("{planned:?}"),
         }
     }
 
@@ -203,8 +203,14 @@ impl Setup {
             .unwrap()
         {
             RestorePlanned::Refused(refusal) => refusal,
-            RestorePlanned::Ready(plan) => panic!("{plan:?}"),
+            planned => panic!("{planned:?}"),
         }
+    }
+
+    fn restore_planned(&self) -> RestorePlanned {
+        self.workspaces
+            .plan_restore(&self.archives, &name(), false)
+            .unwrap()
     }
 
     fn record(&self) -> Option<Archive> {
@@ -1315,7 +1321,7 @@ fn resumes_after(kind: Kind, step: &'static str) {
     clear_hook();
     assert!(stopped.is_err(), "{step}: the run did not stop");
     let mut archive = match setup.planned(ArchiveOptions::default()) {
-        ArchivePlanned::Finish(archive) => *archive,
+        ArchivePlanned::Finish(archive) | ArchivePlanned::Unchanged(archive) => *archive,
         ArchivePlanned::Ready(plan) => {
             match setup.workspaces.archive(&setup.archives, *plan).unwrap() {
                 ArchiveOutcome::Retired { archive, .. } => *archive,
@@ -1537,7 +1543,7 @@ fn a_clone_restore_stopped_after_each_step_leaves_the_archive_whole() {
 }
 
 #[test]
-fn a_restore_stopped_after_its_record_keeps_the_archive_and_refuses_the_name() {
+fn a_restore_stopped_after_its_record_has_nothing_to_do_but_delete_its_archive() {
     let setup = setup(Kind::Worktree);
     setup.create();
     let archive = setup.archive();
@@ -1548,10 +1554,43 @@ fn a_restore_stopped_after_its_record_keeps_the_archive_and_refuses_the_name() {
     clear_hook();
     assert!(result.is_err());
     assert_eq!(setup.record().as_ref(), Some(&archive));
+    let RestorePlanned::Unchanged { stale: Some(stale) } = setup.restore_planned() else {
+        panic!("{:?}", setup.restore_planned());
+    };
+    assert_eq!(*stale, archive);
+    let repaired = setup
+        .workspaces
+        .repair(&setup.archives, &name(), Mode::Change)
+        .unwrap();
+    assert!(
+        matches!(repaired, crate::health::Repaired::Deleted(_)),
+        "{repaired:?}"
+    );
+    assert_eq!(setup.record(), None);
     assert!(matches!(
-        setup.restore_refusal(),
-        RestoreRefusal::NameTaken { record: true, .. }
+        setup.restore_planned(),
+        RestorePlanned::Unchanged { stale: None }
     ));
+}
+
+#[test]
+fn archiving_a_name_whose_archive_has_finished_has_nothing_to_do() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let archive = setup.archive();
+    let planned = setup
+        .workspaces
+        .plan_archive(
+            &setup.archives,
+            &name(),
+            ArchiveOptions::default(),
+            Mode::Change,
+        )
+        .unwrap();
+    assert!(
+        matches!(&planned, ArchivePlanned::Unchanged(found) if **found == archive),
+        "{planned:?}"
+    );
 }
 
 #[test]

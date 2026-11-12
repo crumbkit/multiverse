@@ -91,6 +91,14 @@ pub struct RestorePlan {
 pub enum RestorePlanned {
     /// Nothing is in the way.
     Ready(Box<RestorePlan>),
+    /// A workspace record holds the name and no archive needs restoring,
+    /// so there is nothing to do. `stale` is the archive that an earlier
+    /// restore rebuilt and stopped before it deleted, which has the
+    /// workspace's stable id; [`Workspaces::repair`] deletes it.
+    Unchanged {
+        /// The archive that an earlier restore left, or `None`.
+        stale: Option<Box<Archive>>,
+    },
     /// The restore cannot go ahead.
     Refused(RestoreRefusal),
 }
@@ -213,13 +221,27 @@ impl<B: Backend> Workspaces<B> {
         force: bool,
     ) -> Result<RestorePlanned, Error> {
         let refused = |refusal| Ok(RestorePlanned::Refused(refusal));
+        let workspace = self.store.read(name)?;
         let Some(archive) = archives.read(name)? else {
+            if workspace.is_some() {
+                return Ok(RestorePlanned::Unchanged { stale: None });
+            }
             return refused(RestoreRefusal::NotFound);
         };
         if archive.state != ArchiveState::Archived {
             return refused(RestoreRefusal::Unfinished(Box::new(archive)));
         }
-        let record = self.store.read(name)?.is_some();
+        // A restore writes the workspace's record, with the archive's
+        // stable id, before it deletes the archive.
+        if let Some(workspace) = &workspace
+            && workspace.id.is_some()
+            && workspace.id == archive.workspace_id
+        {
+            return Ok(RestorePlanned::Unchanged {
+                stale: Some(Box::new(archive)),
+            });
+        }
+        let record = workspace.is_some();
         if record || Entry::at(&archive.path)? != Entry::Absent {
             return refused(RestoreRefusal::NameTaken {
                 path: archive.path,
@@ -291,6 +313,13 @@ impl<B: Backend> Workspaces<B> {
         let plan = match self.plan_restore(archives, &name, confirmed.force)? {
             RestorePlanned::Ready(plan) => *plan,
             RestorePlanned::Refused(refusal) => return Ok(RestoreOutcome::Refused(refusal)),
+            // Another command restored the workspace after the plan.
+            RestorePlanned::Unchanged { .. } => {
+                return Ok(RestoreOutcome::Refused(RestoreRefusal::NameTaken {
+                    path: confirmed.archive.path,
+                    record: true,
+                }));
+            }
         };
         let archive = plan.archive;
         let mut warnings = Vec::new();

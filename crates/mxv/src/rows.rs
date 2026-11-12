@@ -9,7 +9,7 @@ use multiverse::health::{Broken, Problem, Repair};
 use multiverse::{
     Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
     DisposableSource, Fate, IgnoredEntry, Kind, MANIFEST_FILE, Manifest, ManifestSource,
-    ProcessNote, ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind,
+    ProcessNote, ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind, WorkspaceName,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -698,9 +698,35 @@ impl NewRow {
     }
 }
 
+/// Whether a run of `mxv archive`, `mxv restore` or `mxv remove` changed
+/// anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LifecycleState {
+    /// The run did what the result reports.
+    Done,
+    /// A dry run: the run would do what the result reports.
+    Planned,
+    /// The verb's goal already held, so there was nothing to do and the
+    /// run changed nothing, except to delete an archive record that an
+    /// earlier restore left behind.
+    Unchanged,
+}
+
+impl LifecycleState {
+    /// Returns `Planned` for a dry run, or else `Done`.
+    pub(crate) const fn of(planned: bool) -> Self {
+        if planned { Self::Planned } else { Self::Done }
+    }
+}
+
 /// What `mxv remove` did to a workspace, or would do on a dry run.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct RemovalResult {
+    /// Whether the run removed something, would remove it on a dry run, or
+    /// had nothing to do because no workspace, or with `--archived` no
+    /// archive, has the name.
+    state: LifecycleState,
     /// The workspace's name.
     name: String,
     /// The workspace's directory.
@@ -859,6 +885,7 @@ impl RemovalResult {
     /// `planned` is set.
     pub(crate) fn new(removal: &Removal, planned: bool) -> Self {
         Self {
+            state: LifecycleState::of(planned),
             name: removal.workspace.name.to_string(),
             path: removal.workspace.path.display().to_string(),
             directory: removal.directory.into(),
@@ -894,6 +921,7 @@ impl RemovalResult {
         planned: bool,
     ) -> Self {
         Self {
+            state: LifecycleState::of(planned),
             name: archive.name.to_string(),
             path: archive.path.display().to_string(),
             directory: DirectoryFate::Missing,
@@ -917,6 +945,30 @@ impl RemovalResult {
         }
     }
 
+    /// Returns the result of a removal of `name` that had nothing to do,
+    /// because no workspace has the name, or with `of_archive` no archive.
+    pub(crate) fn unchanged(name: &WorkspaceName, path: &Path, of_archive: bool) -> Self {
+        Self {
+            state: LifecycleState::Unchanged,
+            name: name.to_string(),
+            path: path.display().to_string(),
+            directory: DirectoryFate::Missing,
+            checkouts: Vec::new(),
+            force: false,
+            delete_unmerged: false,
+            disposable: Vec::new(),
+            discarded: Vec::new(),
+            containers: Vec::new(),
+            volumes: Vec::new(),
+            manifest_paths: Vec::new(),
+            warnings: Vec::new(),
+            manifest_deleted: None,
+            pins: Vec::new(),
+            of_archive,
+            planned: false,
+        }
+    }
+
     /// Returns this result with the docker containers that the removal
     /// removes and the volumes that it deletes.
     pub(crate) fn with_docker(mut self, containers: Vec<String>, volumes: Vec<String>) -> Self {
@@ -936,6 +988,18 @@ impl RemovalResult {
 /// for the record, in the future tense for a dry run.
 impl fmt::Display for RemovalResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.state == LifecycleState::Unchanged {
+            let what = if self.of_archive {
+                "archive"
+            } else {
+                "workspace"
+            };
+            return writeln!(
+                formatter,
+                "There is no {what} named {}, so there is nothing to do.",
+                self.name
+            );
+        }
         let (removes, deletes, keeps, discards) = if self.planned {
             (
                 "would remove",

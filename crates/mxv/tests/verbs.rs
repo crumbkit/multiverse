@@ -24,8 +24,9 @@ fn run_json(args: &[&str]) -> (i32, Value) {
 
 #[test]
 fn rm_is_a_hidden_alias_of_remove() {
-    let (_, document) = run_json(&["rm", "reading-list", "--yes"]);
-    assert_eq!(document["code"], "mxv::workspace::not_found");
+    let (exit, document) = run_json(&["rm", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
     let (_, commands) = run_json(&["commands", "list"]);
     let listed = commands.to_string();
     assert!(listed.contains("\"mxv remove\""));

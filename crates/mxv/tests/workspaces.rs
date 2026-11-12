@@ -607,11 +607,27 @@ fn a_dry_run_of_remove_changes_nothing() {
 }
 
 #[test]
-fn remove_of_a_name_that_no_workspace_has_fails_with_not_found() {
+fn removing_a_gone_name_has_nothing_to_do() {
     let setup = Setup::new();
     let (exit, document) = setup.json(&["remove", "missing", "--yes"]);
-    assert_eq!(exit, 1);
-    assert_eq!(document["code"], "mxv::workspace::not_found");
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert_eq!(document["data"]["name"], "missing", "{document}");
+    let (exit, text) = setup.text(&["remove", "missing", "--yes"]);
+    assert_eq!(exit, 0, "{text}");
+    assert_eq!(
+        text.trim(),
+        "There is no workspace named missing, so there is nothing to do."
+    );
+    // A removal that finished leaves the name gone, so a second one has
+    // nothing to do either.
+    created(&setup, "reading-list");
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
 }
 
 /// Writes a small file at `path`, as a person working in a checkout would.

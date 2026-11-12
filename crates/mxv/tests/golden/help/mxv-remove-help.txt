@@ -1,4 +1,6 @@
-Remove a workspace's checkouts, its merged branches, its directory and its record
+Remove a workspace's checkouts, its merged branches, its directory and its record.
+
+When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
 
 Usage: mxv remove [OPTIONS] <NAME>
 
@@ -38,4 +40,4 @@ Examples:
   mxv remove reading-list --dry-run
           Print what removing the workspace reading-list would delete
 
-Effects: destructive, not idempotent, closed-world.
+Effects: destructive, idempotent, closed-world.
