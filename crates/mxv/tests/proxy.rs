@@ -484,10 +484,14 @@ fn a_real_caddy_answers_a_route_over_http_and_https_and_explains_a_stopped_works
     );
     let (_, text, _) = setup.text(&["proxy", "status"]);
     assert!(text.contains("proxy: running (caddy "), "{text}");
-    assert!(
-        text.contains("certificate authority: created, not trusted by this machine"),
-        "{text}"
-    );
+    // Only macOS can ask the system whether it trusts the root, so any other
+    // system says that mxv cannot tell.
+    let authority = if cfg!(target_os = "macos") {
+        "certificate authority: created, not trusted by this machine"
+    } else {
+        "certificate authority: created; mxv cannot tell whether this machine trusts it"
+    };
+    assert!(text.contains(authority), "{text}");
     let (exit, _) = setup.json(&["down", "-w", "reading-list"]);
     assert_eq!(exit, 0);
     let body = real.wait_for("https", host, "502");
