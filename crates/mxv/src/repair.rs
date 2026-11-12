@@ -15,7 +15,7 @@ use multiverse::{Mode, WorkspaceName};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::archive::{ArchiveFailure, archives, finish};
+use crate::archive::{archives, finish};
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -195,6 +195,21 @@ fn question(name: &WorkspaceName, planned: &Repaired) -> Option<String> {
     }
 }
 
+/// Returns the names whose locks the repair `planned` of `name` takes, in
+/// the order it takes them: both names of a rename, so that a repair of
+/// either name excludes the other, and otherwise `name` alone.
+fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
+    let mut names = vec![name.clone()];
+    if let Repaired::Renamed { from, archive } = planned {
+        names = vec![from.clone(), archive.name.clone()];
+    }
+    // Two repairs that take the same two locks take them in one order, so
+    // neither waits for the other while it holds the first.
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Repairs the records of the name that `args` names.
 pub(crate) fn repair(
     output: &mut Run,
@@ -208,18 +223,21 @@ pub(crate) fn repair(
     let planned = workspaces
         .repair(&records, &name, Mode::DryRun)
         .map_err(MxvFailure::from)?;
-    let (repaired, lock) = match question(&name, &planned) {
+    let (repaired, locks) = match question(&name, &planned) {
         Some(text) if !dry => {
             output.confirm(args.yes, &text)?;
             // The person confirmed one repair, so the records are planned
-            // again under the lock, and a plan that asks a different
+            // again under the locks, and a plan that asks a different
             // question refuses before anything changes.
-            let lock = processes::lock(environment, &name)?;
+            let mut locks = Vec::new();
+            for held in lock_names(&name, &planned) {
+                locks.push(processes::lock(environment, &held)?);
+            }
             let again = workspaces
                 .repair(&records, &name, Mode::DryRun)
                 .map_err(MxvFailure::from)?;
             if question(&name, &again).as_deref() != Some(text.as_str()) {
-                return Err(ArchiveFailure::RepairChanged {
+                return Err(MxvFailure::RepairChanged {
                     name: name.to_string(),
                 }
                 .into());
@@ -227,11 +245,11 @@ pub(crate) fn repair(
             let repaired = workspaces
                 .repair(&records, &name, Mode::Change)
                 .map_err(MxvFailure::from)?;
-            (repaired, Some(lock))
+            (repaired, locks)
         }
         // A dry run, or a name with nothing to repair, changes nothing, so
         // it takes no lock.
-        _ => (planned, None),
+        _ => (planned, Vec::new()),
     };
     let result = match repaired {
         Repaired::Unchanged { repair } => RepairResult {
@@ -254,17 +272,15 @@ pub(crate) fn repair(
         },
         Repaired::Renamed { from, mut archive } => {
             if !dry {
-                // Soft limit: the dated name was free when the library
-                // chose it, and this command holds only the lock of
-                // `name`. When an `mxv new` of the dated name runs in the
-                // moment between them, `finish` still marks the archive
-                // archived, beside a workspace that has another stable id.
-                // `mxv list --archived` then names no problem, the archive
-                // and its pins stay whole, and `mxv restore` of the dated
-                // name refuses with `mxv::restore::name_taken` until that
-                // workspace is gone, so nothing is lost. Taking the lock of
-                // the dated name inside the library's choice would close
-                // the gap.
+                // Soft limit: the command holds the locks of both names,
+                // and `mxv new` takes no lock. When an `mxv new` of the
+                // dated name runs in the moment between the choice of the
+                // name and `finish`, `finish` still marks the archive
+                // archived, beside a workspace that has another stable
+                // id. `mxv list --archived` then names no problem, the
+                // archive and its pins stay whole, and `mxv restore` of
+                // the dated name refuses with `mxv::restore::name_taken`
+                // until that workspace is gone, so nothing is lost.
                 finish(environment, &workspaces, &records, &mut archive, None)?;
             }
             RepairResult {
@@ -301,6 +317,6 @@ pub(crate) fn repair(
         // adds reports no change until this command learns it.
         _ => RepairResult::new(&name, RepairState::Unchanged),
     };
-    drop(lock);
+    drop(locks);
     Ok(Prose::new(result))
 }
