@@ -6,11 +6,12 @@ Arguments:
   [NAME]  The name of the workspace or archive whose records to repair
 
 Options:
-      --orphans       List what no record names, and delete what --delete-aside allows, instead of repairing one name's records
-      --delete-aside  With --orphans, delete the archives that a repair moved aside and the ignored files that no archive names, which hold the only copies of their files
-      --dry-run       Report what the command would change, and change nothing
-      --yes           Proceed without asking for confirmation
-  -h, --help          Print help (see more with '--help')
+      --orphans         List what no record names and delete its run files and run records. phase's sweep first stops the processes and removes the containers, networks and run volumes that a run record names
+      --delete-aside    With --orphans, delete the archives that a repair moved aside and the ignored files that no archive names, which hold the only copies of their files
+      --delete-volumes  With --orphans, also delete the docker volumes that hold the data of each workspace id that no record holds
+      --dry-run         Report what the command would change, and change nothing
+      --yes             Proceed without asking for confirmation
+  -h, --help            Print help (see more with '--help')
 
 Examples:
   mxv repair sample --dry-run

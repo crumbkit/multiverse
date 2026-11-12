@@ -1527,7 +1527,7 @@ fn repair_orphans_refuses_while_a_moved_aside_record_cannot_be_read() {
 }
 
 #[test]
-fn a_hidden_directory_without_the_record_of_its_name_is_left_out_by_orphans() {
+fn a_hidden_directory_without_its_own_record_is_kept_by_orphans_and_never_deleted() {
     let setup = Setup::new();
     let (aside, data) = setup.move_archive_aside();
     let archives = aside.parent().unwrap();
@@ -1541,11 +1541,29 @@ fn a_hidden_directory_without_the_record_of_its_name_is_left_out_by_orphans() {
 
     let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
     assert_eq!(exit, 0, "{document}");
-    assert_eq!(orphan_rows(&document).len(), 1, "{document}");
+    assert_eq!(orphan_rows(&document).len(), 3, "{document}");
     assert_eq!(
         orphan_row(&document, "moved_aside")["path"],
         aside.display().to_string()
     );
+    let unrecorded: Vec<&Value> = orphan_rows(&document)
+        .iter()
+        .filter(|row| row["kind"] == "unrecorded")
+        .collect();
+    let paths: Vec<&str> = unrecorded
+        .iter()
+        .map(|row| row["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [other.to_str().unwrap(), empty.to_str().unwrap()],
+        "{document}"
+    );
+    for row in unrecorded {
+        assert_eq!(row["state"], "kept", "{document}");
+        let reason = row["reasons"][0].as_str().unwrap();
+        assert!(reason.contains("mxv never deletes it"), "{document}");
+    }
     assert!(!aside.exists() && !data.exists(), "{document}");
     assert!(empty.join("notes.md").exists(), "{document}");
     assert!(other.join("archive.json").exists(), "{document}");
@@ -1567,11 +1585,147 @@ fn a_sweep_whose_deletion_fails_names_what_it_deleted_and_exits_with_the_failure
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["data"]["state"], "swept", "{document}");
     assert_eq!(orphan_row(&document, "moved_aside")["state"], "deleted");
+    // The deletion began, so the row does not claim the item is whole.
     let row = orphan_row(&document, "ignored_files");
-    assert_eq!(row["state"], "kept", "{document}");
+    assert_eq!(row["state"], "partly_deleted", "{document}");
+    assert_eq!(row["deleted"], serde_json::json!([]), "{document}");
     assert_eq!(row["reasons"].as_array().unwrap().len(), 1, "{document}");
     let failures = document["failures"].as_array().unwrap();
     assert_eq!(failures.len(), 1, "{document}");
+    assert_eq!(failures[0]["code"], "mxv::file::unwritable", "{document}");
     assert!(!aside.exists() && !data.exists(), "{document}");
     assert!(unnamed.join("ignored.tar").exists(), "{document}");
+}
+
+#[test]
+fn a_moved_aside_archive_whose_data_cannot_be_deleted_names_its_deleted_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let setup = Setup::new();
+    let (aside, data) = setup.move_archive_aside();
+    // The archive's directory is deleted first, and then its data
+    // directory, which keeps its file.
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(exit, 1, "{document}");
+    let row = orphan_row(&document, "moved_aside");
+    assert_eq!(row["state"], "partly_deleted", "{document}");
+    assert_eq!(
+        row["deleted"],
+        serde_json::json!([aside.display().to_string()]),
+        "{document}"
+    );
+    assert_eq!(
+        document["failures"][0]["code"], "mxv::file::unwritable",
+        "{document}"
+    );
+    assert!(!aside.exists() && data.exists(), "{document}");
+
+    // A second sweep lists the data directory as unnamed and deletes it.
+    let (exit, document) = setup.run(&["repair", "--orphans", "--delete-aside", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(orphan_row(&document, "ignored_files")["state"], "deleted");
+    assert!(!data.exists(), "{document}");
+}
+
+impl Setup {
+    /// Starts a process in the workspace `triage` that writes its pid to
+    /// `pid` in the checkout, and returns the workspace's stable id.
+    fn start_process(&self) -> String {
+        write(
+            &self.checkout().join("mxv.toml"),
+            "[processes.web]\nargv = [\"sh\", \"-c\", \"echo $$ > pid; echo ready; exec sleep 60\"]\nready = { log = \"^ready\", timeout_seconds = 20 }\n",
+        );
+        let (exit, document) = self.run(&["up", "-w", "triage"]);
+        assert_eq!(exit, 0, "{document}");
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(self.workspace_record()).unwrap()).unwrap();
+        record["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Returns the path of the record of the workspace `triage`.
+    fn workspace_record(&self) -> PathBuf {
+        self.root().join("state/mxv/workspaces/triage.json")
+    }
+}
+
+/// Reports whether a process with the pid `pid` runs.
+fn runs(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn run_files_left_by_a_stopped_remove_are_forgotten_by_mxv_repair_orphans() {
+    let setup = Setup::new();
+    let id = setup.start_process();
+    let pid = fs::read_to_string(setup.checkout().join("pid"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(runs(&pid));
+    let record = setup
+        .root()
+        .join("state/mxv/phase/runs")
+        .join(format!("{id}.json"));
+    let logs = setup.root().join("state/mxv/phase/logs").join(&id);
+    let files = setup.root().join("state/mxv/runs/triage");
+    assert!(record.exists() && logs.exists() && files.exists());
+    // A removal killed after it deleted the record leaves the process, the
+    // run record, the logs and the run files, with nothing that names
+    // them.
+    fs::remove_file(setup.workspace_record()).unwrap();
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_sweep", "{document}");
+    assert_eq!(orphan_row(&document, "run_files")["name"], "triage");
+    assert_eq!(orphan_row(&document, "run_record")["id"], id.as_str());
+    assert!(runs(&pid) && record.exists() && logs.exists() && files.exists());
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "swept", "{document}");
+    assert_eq!(orphan_row(&document, "run_files")["state"], "deleted");
+    assert_eq!(orphan_row(&document, "run_record")["state"], "deleted");
+    assert!(!runs(&pid), "{document}");
+    assert!(!record.exists() && !logs.exists() && !files.exists());
+
+    let (exit, document) = setup.run(&["repair", "--orphans", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(orphan_rows(&document).is_empty(), "{document}");
+}
+
+#[test]
+fn delete_volumes_names_the_deleted_logs_when_docker_does_not_answer() {
+    let setup = Setup::new();
+    let id = "0123456789abcdef0123456789abcdef";
+    let logs = setup.root().join("state/mxv/phase/logs").join(id);
+    write(&logs.join("web.log"), "ready\n");
+    let socket = format!("unix://{}", setup.root().join("none.sock").display());
+
+    let output = setup
+        .command(&setup.root())
+        .args(["repair", "--orphans", "--delete-volumes", "--yes", "--json"])
+        .env("DOCKER_HOST", socket)
+        .output()
+        .unwrap();
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{document}");
+    let row = orphan_row(&document, "run_record");
+    assert_eq!(row["state"], "partly_deleted", "{document}");
+    assert_eq!(
+        row["deleted"],
+        serde_json::json!([logs.display().to_string()]),
+        "{document}"
+    );
+    let code = document["failures"][0]["code"].as_str().unwrap();
+    assert!(code.starts_with("mxv::docker::"), "{document}");
+    assert!(!logs.exists(), "{document}");
 }

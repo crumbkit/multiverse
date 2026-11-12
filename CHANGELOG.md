@@ -90,8 +90,20 @@ workspace may need to act on.
   listing and `--dry-run` write nothing. When an archive record cannot be
   read, the command fails with that record's error and deletes nothing.
   The `mxv/repair/v1` document gains an `orphans` list, and its `name` is
-  null with `--orphans`. The library's `Archives::orphans` and
-  `Archives::sweep_orphan` find and delete these items.
+  null with `--orphans`. The library's `Workspaces::orphans` and
+  `Workspaces::sweep_orphan` find and delete these items.
+- `mxv repair --orphans` also lists the run files of a name that no
+  workspace has and phase's run record and logs of a workspace id that no
+  record holds, and deletes them after the person confirms. phase's sweep
+  first stops the processes and removes the containers, networks and run
+  volumes that the run record names. `--delete-volumes` also deletes the
+  docker volumes that hold the data of such an id. A directory of the
+  archives without its own record is listed as kept and never deleted. A
+  deletion that fails partway has the row state `partly_deleted`, and its
+  `deleted` field names the paths that are gone. A row now carries `name`,
+  `id`, `deleted` and `volumes`.
+- `Runs::forget` deletes the logs of a workspace id only once phase's sweep
+  removed its run record, so the logs stay while phase keeps the record.
 - The config key `archive_max_file` sets the largest file of a checkout's
   uncommitted work that `mxv archive` keeps, such as `"1GiB"`. It defaults
   to 100 MiB.

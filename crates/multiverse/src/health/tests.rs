@@ -54,7 +54,7 @@ fn id(digit: char) -> WorkspaceId {
 /// Returns the record of a workspace `text` under `root` with the id
 /// `digit` and the checkouts `folders`, and makes each checkout's
 /// directory.
-fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) -> Workspace {
+pub(super) fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) -> Workspace {
     let path = root.join(text);
     let checkouts = folders
         .iter()
@@ -77,7 +77,7 @@ fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) -> Workspac
 
 /// Returns an archive of the workspace `text` with the id `digit`, in
 /// `state`. The archive's own id is made of `digit` too.
-fn archive(text: &str, digit: char, state: ArchiveState) -> Archive {
+pub(super) fn archive(text: &str, digit: char, state: ArchiveState) -> Archive {
     Archive {
         version: ARCHIVE_VERSION,
         id: std::iter::repeat_n(digit, 32).collect(),

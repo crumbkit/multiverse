@@ -591,16 +591,16 @@ impl Archives {
 
     /// Returns what the directory of archives and the data directory hold
     /// besides the records that [`Archives::list`] reads: each directory
-    /// that a repair moved aside, and each data directory. It reads the
-    /// data directory first. An archive writes its record before its data
-    /// directory, so a caller that lists the records after this call sees
-    /// the record of every data directory that a running archive made. It
-    /// writes nothing.
+    /// that a repair moved aside, each data directory, and each directory
+    /// without its own record. It reads the data directory first. An
+    /// archive writes its record before its data directory, so a caller
+    /// that lists the records after this call sees the record of every data
+    /// directory that a running archive made. It writes nothing.
     ///
     /// A hidden directory counts as moved aside only when it holds a record
     /// whose [`Archives::aside_of`] is the directory itself. A hidden
-    /// directory without a record, or with another archive's record, is
-    /// not one that mxv wrote, so it is left out.
+    /// directory without a record, or with another archive's record, and a
+    /// directory of a name that holds no record, are unrecorded.
     ///
     /// # Errors
     ///
@@ -620,12 +620,21 @@ impl Archives {
                 .file_name()
                 .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
             if !hidden {
+                // `Archives::list` reads the record of a name, so only a
+                // directory without one is a leftover.
+                match fs::symlink_metadata(path.join(RECORD_FILE)) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        found.unrecorded.push(path);
+                    }
+                    Ok(_) | Err(_) => {}
+                }
                 continue;
             }
-            if let Some(record) = read_record(&path.join(RECORD_FILE))?
-                && self.aside_of(&record) == path
-            {
-                found.aside.push((path, record));
+            match read_record(&path.join(RECORD_FILE))? {
+                Some(record) if self.aside_of(&record) == path => {
+                    found.aside.push((path, record));
+                }
+                Some(_) | None => found.unrecorded.push(path),
             }
         }
         Ok(found)
@@ -640,6 +649,9 @@ pub(crate) struct Leftovers {
     pub(crate) aside: Vec<(PathBuf, Archive)>,
     /// Each data directory, with the archive id that names it.
     pub(crate) data: Vec<(String, PathBuf)>,
+    /// Each directory of the archives without its own record, in path
+    /// order.
+    pub(crate) unrecorded: Vec<PathBuf>,
 }
 
 /// Returns each directory in `dir`, without following a symbolic link, in

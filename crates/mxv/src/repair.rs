@@ -5,18 +5,17 @@
 //! The library's [`Workspaces::repair`](multiverse::Workspaces::repair)
 //! decides what each broken record needs and carries out the move, the
 //! rename or the deletion.
-//! [`Archives::orphans`](multiverse::Archives::orphans) finds what no
+//! [`Workspaces::orphans`](multiverse::Workspaces::orphans) finds what no
 //! record names, and
-//! [`Archives::sweep_orphan`](multiverse::Archives::sweep_orphan) deletes
-//! one item. This module
-//! holds the workspace's lock and finishes a renamed archive as `mxv
-//! archive -w` finishes one.
+//! [`Workspaces::sweep_orphan`](multiverse::Workspaces::sweep_orphan)
+//! deletes one item. This module holds the workspace's lock and finishes a
+//! renamed archive as `mxv archive -w` finishes one.
 
 use std::fmt;
 
 use clap::Args;
 use crumbkit::{Document, DryRun, Prose, Run, Yes};
-use multiverse::health::{Orphan, OrphanKind, Repaired, Swept};
+use multiverse::health::{Orphan, OrphanKind, Repaired, Swept, UNRECORDED};
 use multiverse::{Mode, WorkspaceName};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -44,13 +43,17 @@ pub(crate) struct RepairArgs {
     #[arg(required_unless_present = "orphans", conflicts_with = "orphans")]
     pub(crate) name: Option<String>,
 
-    /// List what no record names, and delete what --delete-aside allows, instead of repairing one name's records.
+    /// List what no record names and delete its run files and run records. phase's sweep first stops the processes and removes the containers, networks and run volumes that a run record names.
     #[arg(long)]
     pub(crate) orphans: bool,
 
     /// With --orphans, delete the archives that a repair moved aside and the ignored files that no archive names, which hold the only copies of their files.
     #[arg(long, requires = "orphans")]
     pub(crate) delete_aside: bool,
+
+    /// With --orphans, also delete the docker volumes that hold the data of each workspace id that no record holds.
+    #[arg(long, requires = "orphans")]
+    pub(crate) delete_volumes: bool,
 
     /// Print what the command would do, and change nothing.
     #[command(flatten)]
@@ -154,11 +157,18 @@ impl RepairResult {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OrphanRowKind {
+    /// The run files of a name that no workspace has.
+    RunFiles,
+    /// phase's run record and logs of a workspace id that no record holds.
+    RunRecord,
     /// An archive that `mxv repair NAME` moved aside, with its ignored
     /// files.
     MovedAside,
     /// A directory of ignored files whose archive no record names.
     IgnoredFiles,
+    /// A directory of the archives without its own record, which mxv never
+    /// deletes.
+    Unrecorded,
 }
 
 /// What the sweep did with one item, in an [`OrphanRow`].
@@ -171,6 +181,9 @@ pub(crate) enum OrphanState {
     WouldDelete,
     /// It stays, for the reasons that the row gives.
     Kept,
+    /// The sweep began to delete it and failed, so part of it may be gone.
+    /// `deleted` names the paths that are gone, and `reasons` the failure.
+    PartlyDeleted,
 }
 
 /// One item that no record names, as `mxv repair --orphans` prints it.
@@ -178,30 +191,52 @@ pub(crate) enum OrphanState {
 pub(crate) struct OrphanRow {
     /// What the item is.
     kind: OrphanRowKind,
-    /// The directory.
+    /// The directory, or the first of a run record's paths.
     path: String,
+    /// The workspace name of run files, or null.
+    name: Option<String>,
+    /// The workspace id of a run record, or null.
+    id: Option<String>,
     /// What the sweep did with it, or would do on a dry run.
     state: OrphanState,
     /// The bytes that deleting it frees.
     size: Size,
-    /// Why it stays, one sentence for each reason, such as that only
-    /// --delete-aside deletes it. Empty when it is deleted.
+    /// Why it stays, or why its deletion stopped, one sentence for each
+    /// reason, such as that only --delete-aside deletes it. Empty when it
+    /// is deleted.
     reasons: Vec<String>,
+    /// The item's paths that a deletion that stopped deleted. Empty unless
+    /// the state is `partly_deleted`.
+    deleted: Vec<String>,
+    /// The docker volumes that `--delete-volumes` deleted with a run
+    /// record.
+    volumes: Vec<String>,
 }
 
 impl OrphanRow {
     /// Returns the row of `orphan` in `state`, kept for `reasons`.
     fn new(orphan: &Orphan, state: OrphanState, reasons: Vec<String>) -> Self {
-        let kind = match &orphan.kind {
-            OrphanKind::MovedAside { .. } => OrphanRowKind::MovedAside,
-            OrphanKind::IgnoredFiles => OrphanRowKind::IgnoredFiles,
+        let (kind, name, id) = match &orphan.kind {
+            OrphanKind::RunFiles { name } => {
+                (OrphanRowKind::RunFiles, Some(name.to_string()), None)
+            }
+            OrphanKind::RunRecord { id, .. } => {
+                (OrphanRowKind::RunRecord, None, Some(id.as_str().to_owned()))
+            }
+            OrphanKind::MovedAside { .. } => (OrphanRowKind::MovedAside, None, None),
+            OrphanKind::IgnoredFiles => (OrphanRowKind::IgnoredFiles, None, None),
+            OrphanKind::Unrecorded => (OrphanRowKind::Unrecorded, None, None),
         };
         Self {
             kind,
             path: orphan.path.display().to_string(),
+            name,
+            id,
             state,
             size: Size(orphan.bytes),
             reasons,
+            deleted: Vec::new(),
+            volumes: Vec::new(),
         }
     }
 }
@@ -211,20 +246,44 @@ impl fmt::Display for OrphanRow {
         let path = &self.path;
         let size = self.size;
         let what = match self.kind {
+            OrphanRowKind::RunFiles => format!(
+                "{path} ({size}), the run files of {}, which no workspace has",
+                self.name.as_deref().unwrap_or_default()
+            ),
+            OrphanRowKind::RunRecord => format!(
+                "{path} ({size}), phase's run record and logs of the workspace id {}, which no record holds",
+                self.id.as_deref().unwrap_or_default()
+            ),
             OrphanRowKind::MovedAside => format!(
                 "{path} ({size}), an archive that mxv repair moved aside because its pins were gone, with its ignored files"
             ),
             OrphanRowKind::IgnoredFiles => {
                 format!("{path} ({size}), the ignored files of an archive that no record names")
             }
+            OrphanRowKind::Unrecorded => {
+                format!("{path} ({size}), a directory of the archives without its own record")
+            }
         };
+        let reasons = self.reasons.join("; ");
         match self.state {
-            OrphanState::Deleted => write!(formatter, "mxv deleted {what}."),
-            OrphanState::WouldDelete => write!(formatter, "mxv would delete {what}."),
-            OrphanState::Kept => write!(
+            OrphanState::Deleted if self.volumes.is_empty() => {
+                write!(formatter, "mxv deleted {what}.")
+            }
+            OrphanState::Deleted => write!(
                 formatter,
-                "mxv kept {what}, because {}.",
-                self.reasons.join("; ")
+                "mxv deleted {what}, with the docker volumes {}.",
+                self.volumes.join(", ")
+            ),
+            OrphanState::WouldDelete => write!(formatter, "mxv would delete {what}."),
+            OrphanState::Kept => write!(formatter, "mxv kept {what}, because {reasons}."),
+            OrphanState::PartlyDeleted if self.deleted.is_empty() => write!(
+                formatter,
+                "mxv began to delete {what} and stopped, because {reasons}. Part of it may be gone."
+            ),
+            OrphanState::PartlyDeleted => write!(
+                formatter,
+                "mxv deleted {} of {what} and then stopped, because {reasons}.",
+                self.deleted.join(", ")
             ),
         }
     }
@@ -453,68 +512,105 @@ pub(crate) fn repair(
     Ok(Prose::new(result))
 }
 
-/// Lists what no record names for `mxv repair --orphans`, and deletes it
-/// when `--delete-aside` allows. Each kind that the sweep knows holds the
-/// only copies of its files, so `--yes` only skips the question.
+/// Returns why `mxv repair --orphans` with `args` keeps `kind` without
+/// trying to delete it, or `None` when the sweep deletes it. Run files and
+/// run records are mxv's and phase's derived state, so the sweep deletes
+/// them. A moved-aside archive and ignored files hold the only copies of
+/// their files, so only `--delete-aside` deletes them, and `--yes` only
+/// skips the question.
+fn kept_without_sweep(kind: &OrphanKind, args: &RepairArgs) -> Option<&'static str> {
+    match kind {
+        OrphanKind::RunFiles { .. } | OrphanKind::RunRecord { .. } => None,
+        OrphanKind::MovedAside { .. } | OrphanKind::IgnoredFiles if args.delete_aside => None,
+        OrphanKind::MovedAside { .. } | OrphanKind::IgnoredFiles => {
+            Some("it holds the only copies of its files, so only --delete-aside deletes it")
+        }
+        OrphanKind::Unrecorded => Some(UNRECORDED),
+    }
+}
+
+/// Lists what no record names for `mxv repair --orphans`, and deletes
+/// what [`kept_without_sweep`] allows after the person confirms.
 fn orphans(
     output: &mut Run,
     environment: &Environment,
     args: &RepairArgs,
 ) -> Result<Prose<RepairResult>, crumbkit::Error> {
+    let workspaces = configured(environment)?;
     let records = archives(environment)?;
-    let found = records.orphans().map_err(MxvFailure::from)?;
+    let runs = environment.runs()?;
+    let found = workspaces
+        .orphans(&records, &runs)
+        .map_err(MxvFailure::from)?;
     let mut result = RepairResult::sweep();
-    if !args.delete_aside {
-        let why = "it holds the only copies of its files, so only --delete-aside deletes it";
-        for orphan in &found {
-            result.orphans.push(OrphanRow::new(
-                orphan,
-                OrphanState::Kept,
-                vec![why.to_owned()],
-            ));
-        }
-        return Ok(Prose::new(result));
-    }
-    if output.is_dry_run() || found.is_empty() {
-        for orphan in &found {
-            result
-                .orphans
-                .push(OrphanRow::new(orphan, OrphanState::WouldDelete, Vec::new()));
-        }
-        if !found.is_empty() {
-            result.state = RepairState::WouldSweep;
-        }
-        return Ok(Prose::new(result));
-    }
-    let paths: Vec<String> = found
+    let swept: Vec<&Orphan> = found
         .iter()
-        .map(|orphan| orphan.path.display().to_string())
+        .filter(|orphan| kept_without_sweep(&orphan.kind, args).is_none())
         .collect();
-    output.confirm(
-        args.yes,
-        &format!("Delete {}, which no record names?", paths.join(", ")),
-    )?;
-    // A failure keeps its item with the error as the reason, and the sweep
-    // goes on, so the result still names each item already deleted. The
-    // command then exits with the code of the first failure.
+    let dry = output.is_dry_run();
+    if !dry && !swept.is_empty() {
+        let paths: Vec<String> = swept
+            .iter()
+            .map(|orphan| orphan.path.display().to_string())
+            .collect();
+        let mut question = format!("Delete {}, which no record names?", paths.join(", "));
+        if swept
+            .iter()
+            .any(|orphan| matches!(orphan.kind, OrphanKind::RunRecord { .. }))
+        {
+            question.push_str(
+                " phase's sweep first stops the processes and removes the containers, networks and run volumes that each run record names.",
+            );
+        }
+        output.confirm(args.yes, &question)?;
+    }
+    // A failure keeps its item, or names what of it is gone, with the error
+    // as the reason, and the sweep goes on, so the result still names each
+    // item already deleted. The command then exits with the code of the
+    // first failure.
     let mut failures = Vec::new();
     for orphan in &found {
-        let row = match records.sweep_orphan(orphan) {
-            Ok(Swept::Deleted) => OrphanRow::new(orphan, OrphanState::Deleted, Vec::new()),
-            Ok(Swept::Kept) => OrphanRow::new(
-                orphan,
-                OrphanState::Kept,
-                vec!["another command changed it after mxv listed it".to_owned()],
-            ),
-            Err(error) => {
-                let failure = MxvFailure::from(error);
-                let row = OrphanRow::new(orphan, OrphanState::Kept, vec![failure.to_string()]);
-                failures.push(failure.into());
-                row
+        let row = if let Some(why) = kept_without_sweep(&orphan.kind, args) {
+            OrphanRow::new(orphan, OrphanState::Kept, vec![why.to_owned()])
+        } else if dry {
+            OrphanRow::new(orphan, OrphanState::WouldDelete, Vec::new())
+        } else {
+            match workspaces.sweep_orphan(&records, &runs, orphan, args.delete_volumes) {
+                Ok(Swept::Deleted { volumes }) => OrphanRow {
+                    volumes,
+                    ..OrphanRow::new(orphan, OrphanState::Deleted, Vec::new())
+                },
+                Ok(Swept::Kept(reasons)) => OrphanRow::new(orphan, OrphanState::Kept, reasons),
+                Ok(Swept::PartlyDeleted { deleted, error }) => {
+                    let failure = MxvFailure::from(error);
+                    let row = OrphanRow {
+                        deleted: deleted
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect(),
+                        ..OrphanRow::new(
+                            orphan,
+                            OrphanState::PartlyDeleted,
+                            vec![failure.to_string()],
+                        )
+                    };
+                    failures.push(failure.into());
+                    row
+                }
+                Err(error) => {
+                    let failure = MxvFailure::from(error);
+                    let row = OrphanRow::new(orphan, OrphanState::Kept, vec![failure.to_string()]);
+                    failures.push(failure.into());
+                    row
+                }
             }
         };
-        if row.state == OrphanState::Deleted {
-            result.state = RepairState::Swept;
+        match row.state {
+            OrphanState::Deleted | OrphanState::PartlyDeleted => {
+                result.state = RepairState::Swept;
+            }
+            OrphanState::WouldDelete => result.state = RepairState::WouldSweep,
+            OrphanState::Kept => {}
         }
         result.orphans.push(row);
     }
