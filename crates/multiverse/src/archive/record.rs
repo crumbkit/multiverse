@@ -492,8 +492,9 @@ impl Archives {
         Ok(dir.join(WIP_INDEX))
     }
 
-    /// Returns the directory that [`Archives::move_aside`] moves the
-    /// directory of `archive` to: `.<name>.<id>` beside it, which no
+    /// Returns the directory that a repair moves the directory of an
+    /// archive whose pins are gone to, as
+    /// [`Workspaces::repair`](crate::Workspaces::repair) says: `.<name>.<id>` beside it, which no
     /// listing shows, because a name never starts with `.`.
     #[must_use]
     pub fn aside_of(&self, archive: &Archive) -> PathBuf {
@@ -520,11 +521,7 @@ impl Archives {
     pub(crate) fn move_aside(&self, archive: &Archive) -> Result<PathBuf, Error> {
         let from = self.dir_of(&archive.name);
         let to = self.aside_of(archive);
-        fs::rename(&from, &to).map_err(|source| Error::Unwritable {
-            path: to.clone(),
-            source,
-        })?;
-        store::sync_dir(&self.dir);
+        store::move_aside(&from, &to)?;
         Ok(to)
     }
 
@@ -567,12 +564,8 @@ impl Archives {
             if name == RECORD_FILE || name == WIP_INDEX || new.join(&name).exists() {
                 continue;
             }
-            fs::rename(old.join(&name), new.join(&name)).map_err(|source| Error::Unwritable {
-                path: new.join(&name),
-                source,
-            })?;
+            store::move_aside(&old.join(&name), &new.join(&name))?;
         }
-        store::sync_dir(&new);
         delete_directory(&old)?;
         store::sync_dir(&self.dir);
         Ok(renamed)

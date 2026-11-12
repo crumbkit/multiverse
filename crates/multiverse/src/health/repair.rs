@@ -54,7 +54,7 @@ pub enum Repaired {
     },
     /// The archive that a restore had already rebuilt is deleted, with its
     /// pins and its private tar.
-    Deleted(ArchivedRemoval),
+    Deleted(Box<ArchivedRemoval>),
 }
 
 impl<B: Backend> Workspaces<B> {
@@ -116,9 +116,9 @@ impl<B: Backend> Workspaces<B> {
                     archive: Box::new(renamed),
                 })
             }
-            Problem::RestoreUnfinished => Ok(Repaired::Deleted(
+            Problem::RestoreUnfinished => Ok(Repaired::Deleted(Box::new(
                 self.remove_archive(archives, archive, mode)?,
-            )),
+            ))),
             Problem::Unreadable { .. } | Problem::ArchiveUnfinished | Problem::CheckoutsGone => {
                 Ok(Repaired::Unchanged {
                     repair: broken.repair,
