@@ -549,6 +549,108 @@ fn remove_refuses_a_workspace_with_volumes_until_delete_volumes_allows_deleting_
     assert!(setup.containers().is_empty());
 }
 
+/// Runs `up` and `down` in the workspace `name` of `setup`, then deletes
+/// what a removal stopped after it forgot the workspace's id would have
+/// deleted: the workspace record, the run files, phase's run record and
+/// the logs. With `keep_logs` it then writes a log of the id, as a removal
+/// stopped before it forgot the id leaves. Returns the id and the volume,
+/// which a guard deletes when the test ends, since no record names it any
+/// more.
+fn stop_a_removal_before_its_volumes(
+    setup: &Setup,
+    name: &str,
+    keep_logs: bool,
+) -> (String, Foreign) {
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["down", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let id = setup.workspace_id().unwrap();
+    let volume = Foreign {
+        kind: "volume",
+        name: setup.volume_name("srv"),
+    };
+    assert_eq!(setup.volumes(), std::slice::from_ref(&volume.name));
+    let state = setup.root().join("state/mxv");
+    fs::remove_file(state.join(format!("workspaces/{name}.json"))).unwrap();
+    let _ = fs::remove_dir_all(state.join("runs").join(name));
+    let _ = fs::remove_file(state.join(format!("phase/runs/{id}.json")));
+    let logs = state.join("phase/logs").join(&id);
+    let _ = fs::remove_dir_all(&logs);
+    if keep_logs {
+        fs::create_dir_all(&logs).unwrap();
+        write(&logs.join("web.log"), "ready\n");
+    }
+    (id, volume)
+}
+
+/// Returns the row of `mxv repair --orphans` in `document` whose kind is
+/// `kind`, or `None`.
+fn orphan_row<'a>(document: &'a Value, kind: &str) -> Option<&'a Value> {
+    document["data"]["orphans"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{document}"))
+        .iter()
+        .find(|row| row["kind"] == kind)
+}
+
+#[test]
+fn delete_volumes_lists_and_deletes_the_volumes_of_an_id_that_nothing_else_names() {
+    if !docker_runs("delete_volumes_lists_and_deletes_the_volumes") {
+        return;
+    }
+    let name = "mxvtest-orphan-volumes";
+    let setup = Setup::new(name, &web());
+    let (id, volume) = stop_a_removal_before_its_volumes(&setup, name, false);
+    // A second state directory in the same docker daemon whose removal
+    // stopped the same way keeps its volume: no record of the first one's
+    // names it, but its run-record label names the second one's.
+    let other = Setup::new(name, &web());
+    let (other_id, other_volume) = stop_a_removal_before_its_volumes(&other, name, false);
+
+    // Without --delete-volumes the sweep asks docker nothing.
+    let (exit, document) = setup.json(&["repair", "--orphans", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(orphan_row(&document, "volumes").is_none(), "{document}");
+
+    let (exit, document) = setup.json(&["repair", "--orphans", "--delete-volumes", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let rows = document["data"]["orphans"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{document}");
+    let row = &rows[0];
+    assert_eq!(row["kind"], "volumes", "{document}");
+    assert_eq!(row["id"], id.as_str(), "{document}");
+    assert_eq!(row["state"], "deleted", "{document}");
+    assert_eq!(row["volumes"][0], volume.name.as_str(), "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &volume.name]);
+    assert!(!kept, "{document}");
+    assert_ne!(other_id, id);
+    let (kept, _) = docker(&["volume", "inspect", &other_volume.name]);
+    assert!(kept, "{document}");
+}
+
+#[test]
+fn delete_volumes_deletes_the_volumes_of_a_run_record_before_its_logs() {
+    if !docker_runs("delete_volumes_deletes_the_volumes_of_a_run_record") {
+        return;
+    }
+    let name = "mxvtest-orphan-logs";
+    let setup = Setup::new(name, &web());
+    let (id, volume) = stop_a_removal_before_its_volumes(&setup, name, true);
+    let logs = setup.root().join("state/mxv/phase/logs").join(&id);
+    assert!(logs.exists());
+
+    let (exit, document) = setup.json(&["repair", "--orphans", "--delete-volumes", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let row = orphan_row(&document, "run_record").unwrap_or_else(|| panic!("{document}"));
+    assert_eq!(row["state"], "deleted", "{document}");
+    assert_eq!(row["volumes"][0], volume.name.as_str(), "{document}");
+    assert!(orphan_row(&document, "volumes").is_none(), "{document}");
+    let (kept, _) = docker(&["volume", "inspect", &volume.name]);
+    assert!(!kept, "{document}");
+    assert!(!logs.exists(), "{document}");
+}
+
 #[test]
 fn remove_force_stops_a_running_container() {
     if !docker_runs("remove_force_stops_a_running_container") {

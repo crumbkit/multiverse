@@ -803,12 +803,14 @@ pub(crate) fn remove(
     }
     match workspaces.remove(removal).map_err(MxvFailure::from)? {
         RemovalOutcome::Done(removed) => {
-            processes::forget(environment, &name, id.as_ref())?;
+            let held = processes::forget(environment, &name, id.as_ref())?;
             if let Some(volumes) = volumes {
                 processes::delete_volumes(environment, volumes)?;
             }
             Ok(Prose::new(
-                RemovalResult::new(&removed, false).with_docker(containers, names),
+                RemovalResult::new(&removed, false)
+                    .with_docker(containers, names)
+                    .with_warnings(held),
             ))
         }
         RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {

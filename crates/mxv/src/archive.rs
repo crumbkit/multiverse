@@ -1041,15 +1041,22 @@ fn refuse_outsider(workspace: &Workspace) -> Result<(), crumbkit::Error> {
 
 /// Finishes the archive of `archive`, whose workspace is gone: deletes the
 /// run files and the volumes that the run asked to delete, and marks it.
-/// `mxv repair` calls it for an older archive that it renamed.
+/// It returns the names of the deleted volumes, and adds to `warnings` one
+/// sentence for each reason that phase kept its run record. `mxv repair`
+/// calls it for an older archive that it renamed.
 pub(crate) fn finish(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     records: &Archives,
     archive: &mut Archive,
     volumes: Option<Volumes>,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<String>, crumbkit::Error> {
-    processes::forget(environment, &archive.name, archive.workspace_id.as_ref())?;
+    warnings.extend(processes::forget(
+        environment,
+        &archive.name,
+        archive.workspace_id.as_ref(),
+    )?);
     let mut names = Vec::new();
     if let Some(volumes) = volumes {
         names = volumes.names();
@@ -1093,7 +1100,14 @@ pub(crate) fn archive(
                 ..Done::default()
             };
             let volumes = stale_volumes(environment, &archive, args.delete_volumes)?;
-            done.volumes = finish(environment, &workspaces, &records, &mut archive, volumes)?;
+            done.volumes = finish(
+                environment,
+                &workspaces,
+                &records,
+                &mut archive,
+                volumes,
+                &mut done.warnings,
+            )?;
             return Ok(Prose::new(result_of(&archive, &[], done, false)));
         }
     };
@@ -1132,7 +1146,14 @@ pub(crate) fn archive(
         ArchiveOutcome::Refused(refusal) => return Err(archive_refusal(&name, refusal).into()),
     };
     warnings.extend(removal.warnings.iter().cloned());
-    let volumes = finish(environment, &workspaces, &records, &mut archive, volumes)?;
+    let volumes = finish(
+        environment,
+        &workspaces,
+        &records,
+        &mut archive,
+        volumes,
+        &mut warnings,
+    )?;
     drop(lock);
     let done = Done {
         stopped: running,

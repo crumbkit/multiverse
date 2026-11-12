@@ -48,8 +48,10 @@ local branches, the tags that origin lacks and the commits that no branch
 reaches put back as they were. `mxv list` lists broken records first, each
 with the command that repairs it, and `mxv repair NAME` repairs the
 archives that a stopped archive or restore left behind. `mxv repair --orphans`
-lists the archive leftovers that no record names, and deletes them with
-`--delete-aside`.
+lists what no record names. It deletes the run files and run records among
+it after phase stops what they name, deletes the archive leftovers only with
+`--delete-aside`, and deletes the docker volumes of an unknown workspace id
+only with `--delete-volumes`.
 
 ## Licence
 

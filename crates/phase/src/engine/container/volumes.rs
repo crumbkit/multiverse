@@ -3,10 +3,11 @@
 //! containers that a reclaim measures.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::engine::container::command::quick;
 use crate::engine::container::names::{
-    Identity, Scope, VOLUME_LABEL, VolumeKey, VolumeName, WORKSPACE_ID_LABEL,
+    Identity, RUN_RECORD_LABEL, Scope, VOLUME_LABEL, VolumeKey, VolumeName, WORKSPACE_ID_LABEL,
 };
 use crate::engine::container::objects::{
     OwnedVolume, delete_volume, inspect_volume, reinspect_volume,
@@ -83,6 +84,41 @@ pub fn app_volume_labels(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) ->
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Returns each workspace id that docker labels a data volume of `phase`
+/// with, in id order. A volume counts as `phase`'s when its run-record
+/// label names `phase`'s run record of its id, so the volumes that another
+/// state directory's phase made, which may share the docker daemon, are
+/// left out.
+///
+/// # Errors
+///
+/// Returns the errors of `docker version` and [`ContainerError::Failed`].
+pub fn labelled_workspace_ids(phase: &Phase) -> Result<Vec<WorkspaceId>, ContainerError> {
+    let format =
+        format!("{{{{.Label \"{WORKSPACE_ID_LABEL}\"}}}}\t{{{{.Label \"{RUN_RECORD_LABEL}\"}}}}");
+    let listed = quick(
+        [
+            "volume",
+            "ls",
+            "--filter",
+            &format!("label={VOLUME_LABEL}"),
+            "--format",
+            format.as_str(),
+        ],
+        "volume ls",
+    )?
+    .checked("volume ls", None)?;
+    let ids: std::collections::BTreeSet<WorkspaceId> = listed
+        .lines()
+        .filter_map(|line| {
+            let (id, run_record) = line.split_once('\t')?;
+            let id = WorkspaceId::try_from(id.to_owned()).ok()?;
+            (Path::new(run_record) == phase.run_record(&id)).then_some(id)
+        })
+        .collect();
+    Ok(ids.into_iter().collect())
 }
 
 /// Returns the data volumes of the apps of the workspace whose stable id

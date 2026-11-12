@@ -966,13 +966,21 @@ pub(crate) fn stop_all_locked(
 }
 
 /// Removes the stopped containers of the workspace `name`, whose stable id
-/// is `id`, and deletes its run files and logs.
+/// is `id`, and deletes its run files and logs. It returns one warning for
+/// each reason that phase kept its run record, such as a process that it
+/// could not stop, which keeps the record and the logs too.
 pub(crate) fn forget(
     environment: &Environment,
     name: &WorkspaceName,
     id: Option<&WorkspaceId>,
-) -> Result<(), MxvFailure> {
-    Ok(environment.runs()?.forget(name, id)?)
+) -> Result<Vec<String>, MxvFailure> {
+    let held = environment.runs()?.forget(name, id)?;
+    Ok(held
+        .into_iter()
+        .map(|reason| {
+            format!("phase kept the run record of {name}, because {reason}, so stop that process yourself")
+        })
+        .collect())
 }
 
 /// Returns the docker volumes of `workspace`, for the refusal of `mxv

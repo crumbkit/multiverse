@@ -343,6 +343,49 @@ pub(crate) fn sync_dir(dir: &Path) {
     }
 }
 
+/// One entry of a directory that [`entries`] lists.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Entry {
+    /// The entry's name.
+    pub(crate) name: String,
+    /// The entry's path.
+    pub(crate) path: PathBuf,
+    /// Whether the entry is a directory, without following a symbolic link.
+    pub(crate) dir: bool,
+}
+
+/// Returns each entry of `dir` whose name is text, in name order, or
+/// nothing when `dir` does not exist.
+///
+/// # Errors
+///
+/// Returns [`Error::StateUnreadable`] when `dir` cannot be read.
+pub(crate) fn entries(dir: &Path) -> Result<Vec<Entry>, Error> {
+    let unreadable = |source| Error::StateUnreadable {
+        path: dir.to_path_buf(),
+        source,
+    };
+    let listed = match fs::read_dir(dir) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unreadable(error)),
+    };
+    let mut found = Vec::new();
+    for entry in listed {
+        let entry = entry.map_err(unreadable)?;
+        let dir = entry.file_type().map_err(unreadable)?.is_dir();
+        if let Ok(name) = entry.file_name().into_string() {
+            found.push(Entry {
+                name,
+                path: entry.path(),
+                dir,
+            });
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// Copies the file at `from` to `to` in one step, with the permission bits
 /// `mode`: it streams the bytes to a temporary file beside `to`, syncs it,
 /// renames it over `to` and syncs the directory (DUR-1). It returns the

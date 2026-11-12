@@ -564,8 +564,22 @@
           "$ref": "#/$defs/OrphanRowKind"
         },
         "path": {
-          "description": "The directory.",
+          "description": "The directory, the first of a run record's paths, or the first\nvolume's name.",
           "type": "string"
+        },
+        "name": {
+          "description": "The workspace name of run files, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "The workspace id of a run record or of volumes, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "description": "What the sweep did with it, or would do on a dry run.",
@@ -578,7 +592,21 @@
           "minimum": 0
         },
         "reasons": {
-          "description": "Why it stays, one sentence for each reason, such as that only\n--delete-aside deletes it. Empty when it is deleted.",
+          "description": "Why it stays, or why its deletion stopped, one sentence for each\nreason, such as that only --delete-aside deletes it. Empty when it\nis deleted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deleted": {
+          "description": "The item's paths that a deletion that stopped deleted. Empty unless\nthe state is `partly_deleted`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "volumes": {
+          "description": "The docker volumes of a `volumes` item, or those that\n`--delete-volumes` deleted with a run record.",
           "type": "array",
           "items": {
             "type": "string"
@@ -588,14 +616,33 @@
       "required": [
         "kind",
         "path",
+        "name",
+        "id",
         "state",
         "size",
-        "reasons"
+        "reasons",
+        "deleted",
+        "volumes"
       ]
     },
     "OrphanRowKind": {
       "description": "What one item that no record names is, in an [`OrphanRow`].",
       "oneOf": [
+        {
+          "description": "The run files of a name that no workspace has.",
+          "type": "string",
+          "const": "run_files"
+        },
+        {
+          "description": "phase's run record and logs of a workspace id that no record holds.",
+          "type": "string",
+          "const": "run_record"
+        },
+        {
+          "description": "The docker data volumes of a workspace id that no record holds and\nphase keeps nothing of, which only --delete-volumes lists.",
+          "type": "string",
+          "const": "volumes"
+        },
         {
           "description": "An archive that `mxv repair NAME` moved aside, with its ignored\nfiles.",
           "type": "string",
@@ -605,6 +652,11 @@
           "description": "A directory of ignored files whose archive no record names.",
           "type": "string",
           "const": "ignored_files"
+        },
+        {
+          "description": "A directory of the archives without its own record, which mxv never\ndeletes.",
+          "type": "string",
+          "const": "unrecorded"
         }
       ]
     },
@@ -625,6 +677,11 @@
           "description": "It stays, for the reasons that the row gives.",
           "type": "string",
           "const": "kept"
+        },
+        {
+          "description": "The sweep began to delete it and failed, so part of it may be gone.\n`deleted` names the paths that are gone, and `reasons` the failure.",
+          "type": "string",
+          "const": "partly_deleted"
         }
       ]
     }
