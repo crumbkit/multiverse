@@ -26,6 +26,9 @@ pub const ARCHIVE_CHECKOUT_UNUSABLE: Code = Code::new("mxv", "archive", "checkou
 /// The code of an archive that has not finished, for a command that needs
 /// a finished one.
 pub const ARCHIVE_UNFINISHED: Code = Code::new("mxv", "archive", "unfinished");
+/// The code of an archive that has not finished and whose pins are gone,
+/// so it cannot be finished.
+pub const ARCHIVE_PINS_GONE: Code = Code::new("mxv", "archive", "pins_gone");
 /// The code of `--yes` with paths that only a repository's own `mxv.toml`
 /// declares disposable.
 pub const ARCHIVE_MANIFEST_DISPOSABLE: Code = Code::new("mxv", "archive", "manifest_disposable");
@@ -62,6 +65,7 @@ pub(crate) const CODES: &[&Code] = &[
     &ARCHIVE_IN_USE,
     &ARCHIVE_CHECKOUT_UNUSABLE,
     &ARCHIVE_UNFINISHED,
+    &ARCHIVE_PINS_GONE,
     &ARCHIVE_MANIFEST_DISPOSABLE,
     &ARCHIVE_RECORD_TOO_LARGE,
     &ARCHIVE_VOLUMES_IN_USE,
@@ -129,6 +133,12 @@ pub(crate) enum ArchiveFailure {
     },
     /// The archive has not finished.
     Unfinished {
+        /// The name.
+        name: String,
+    },
+    /// The archive has not finished, and the pin of no checkout names its
+    /// commit any more.
+    PinsGone {
         /// The name.
         name: String,
     },
@@ -230,6 +240,7 @@ pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> 
             name,
             retiring: archive.state == ArchiveState::Retiring,
         },
+        ArchiveRefusal::PinsGone(_) => ArchiveFailure::PinsGone { name },
         ArchiveRefusal::MirrorMissing { folder, mirror } => ArchiveFailure::MirrorMissing {
             folder,
             mirror: mirror.display().to_string(),
@@ -299,6 +310,7 @@ impl Failure for ArchiveFailure {
             Self::InUse { .. } => &ARCHIVE_IN_USE,
             Self::Unusable { .. } => &ARCHIVE_CHECKOUT_UNUSABLE,
             Self::Unfinished { .. } => &ARCHIVE_UNFINISHED,
+            Self::PinsGone { .. } => &ARCHIVE_PINS_GONE,
             Self::ManifestDisposable { .. } => &ARCHIVE_MANIFEST_DISPOSABLE,
             Self::RecordTooLarge { .. } => &ARCHIVE_RECORD_TOO_LARGE,
             Self::VolumesInUse { .. } => &ARCHIVE_VOLUMES_IN_USE,
@@ -322,7 +334,7 @@ impl Failure for ArchiveFailure {
                 name,
                 retiring: true,
             } => Recovery::hint(format!(
-                "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv remove {name}` to remove the newer workspace, then `mxv archive -w {name}` finishes the earlier archive"
+                "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv repair {name}`, which finishes the earlier archive under a dated name, then archive {name} again"
             )),
             Self::NameTaken { name, .. } => Recovery::hint(format!(
                 "run `mxv restore {name}` to bring the archive back, or `mxv remove --archived {name}` to delete it"
@@ -345,6 +357,9 @@ impl Failure for ArchiveFailure {
             Self::Unfinished { name } | Self::RestoreUnfinished { name } => Recovery::hint(
                 format!("run `mxv archive -w {name}`, which finishes the archive"),
             ),
+            Self::PinsGone { name } => Recovery::hint(format!(
+                "run `mxv repair {name}`, which moves the archive aside so that it no longer claims a restore brings the workspace back"
+            )),
             Self::ManifestDisposable { name, .. } => Recovery::hint(format!(
                 "run `mxv archive -w {name}` without --yes and answer the prompt, or pass --force"
             )),
@@ -386,6 +401,7 @@ impl Failure for ArchiveFailure {
             Self::NotFound { name }
             | Self::NameTaken { name, .. }
             | Self::Unfinished { name }
+            | Self::PinsGone { name }
             | Self::RestoreNotFound { name }
             | Self::RestoreUnfinished { name } => vec![Field::new("name", name)],
             Self::SourceChanged {
@@ -498,6 +514,10 @@ impl fmt::Display for ArchiveFailure {
             Self::Unfinished { name } | Self::RestoreUnfinished { name } => {
                 write!(formatter, "the archive of {name} stopped partway")
             }
+            Self::PinsGone { name } => write!(
+                formatter,
+                "the archive of {name} stopped partway, and the pins that keep its commits are gone, so mxv cannot finish it"
+            ),
             Self::ManifestDisposable { name, paths } => write!(
                 formatter,
                 "archiving {name} would delete {}, which only the repository's mxv.toml declares disposable, and --yes alone does not delete such paths",

@@ -174,11 +174,11 @@
           }
         },
         "problem": {
-          "description": "What is wrong with the workspace or its archive, or empty when\nnothing is: a record that mxv cannot read, such as one that is not\nJSON or that a newer mxv wrote, an archive that stopped before it\nfinished, a workspace whose checkout directories are all gone, or a\nsize that mxv cannot measure. A row of a record that mxv cannot read\nnames the record in `name`, a workspace record without `.json` and\nan archive record by its directory, and leaves the other fields\nempty.",
+          "description": "What is wrong with the workspace or its archive, or empty when\nnothing is: a record that mxv cannot read, such as one that is not\nJSON or that a newer mxv wrote, an archive that stopped before it\nfinished, one that stopped and whose pins are gone, an older archive\nbeside a newer workspace of the same name, which only the archive\nlisting shows, a restore that stopped before it deleted the archive,\na workspace whose checkout directories are all gone, or a size that\nmxv cannot measure. A row of a record that mxv cannot read\nnames the record in `name`, a workspace record without `.json` and\nan archive record by its directory, and leaves the other fields\nempty.",
           "type": "string"
         },
         "repair": {
-          "description": "The command that repairs the problem, such as\n`mxv archive -w old-api`, what the person does by hand when no\ncommand can, or empty when no repair is known.",
+          "description": "The command that repairs the problem, such as\n`mxv archive -w old-api` or `mxv repair old-api`, what the person\ndoes by hand when no command can, or empty when no repair is known.",
           "type": "string"
         },
         "ports": {

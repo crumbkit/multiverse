@@ -1,0 +1,17 @@
+Repair the broken records of one name that `mxv list` names `mxv repair NAME` for
+
+Usage: mxv repair [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  The name of the workspace or archive whose records to repair
+
+Options:
+      --dry-run  Report what the command would change, and change nothing
+      --yes      Proceed without asking for confirmation
+  -h, --help     Print help (see more with '--help')
+
+Examples:
+  mxv repair sample --dry-run
+
+Effects: destructive, idempotent, closed-world.
+Global flags: --json, --no-input. `mxv repair --help` describes them.

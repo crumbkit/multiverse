@@ -45,7 +45,9 @@ repositories, and `mxv new --repo api --repo web` or `mxv add` gives it
 several. `mxv archive` puts a workspace away and `mxv restore` rebuilds it
 at the same commits, with the uncommitted work, the stashes, the other
 local branches, the tags that origin lacks and the commits that no branch
-reaches put back as they were.
+reaches put back as they were. `mxv list` lists broken records first, each
+with the command that repairs it, and `mxv repair NAME` repairs the
+archives that a stopped archive or restore left behind.
 
 ## Licence
 

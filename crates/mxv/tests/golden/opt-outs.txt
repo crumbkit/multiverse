@@ -100,7 +100,7 @@ twins/no-twin: mxv new triage --repo app --dry-run
 
 mxv has 8 declarations.
 
-root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv run, mxv archive, mxv restore, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin
+root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv run, mxv archive, mxv restore, mxv repair, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin
   Declares: Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.
   Reason: Workspaces are mxv's everyday resource, and people type these verbs many times a day.
 

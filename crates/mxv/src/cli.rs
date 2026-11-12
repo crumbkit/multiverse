@@ -22,6 +22,7 @@ use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
+use crate::repair::{REPAIR, RepairArgs};
 use crate::run::RUN;
 use crate::units::parse_age;
 use crate::verbs::{ADD, CD, LIST, NEW, REMOVE, SHOW};
@@ -54,7 +55,8 @@ const HELP: Help = Help::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",
-            "exec", "run", "archive", "restore", "remove", "clean", "reclaim", "pin", "unpin",
+            "exec", "run", "archive", "restore", "repair", "remove", "clean", "reclaim", "pin",
+            "unpin",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
     )
@@ -66,7 +68,10 @@ const HELP: Help = Help::new()
                 "Run a workspace's app",
                 &["up", "down", "restart", "status", "logs", "exec", "run", "ports"],
             ),
-            Goal::new("Put a workspace away", &["archive", "restore", "remove"]),
+            Goal::new(
+                "Put a workspace away",
+                &["archive", "restore", "repair", "remove"],
+            ),
             Goal::new("Free disk space", &["clean"]),
             Goal::new("Free memory", &["reclaim", "pin", "unpin"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
@@ -188,6 +193,13 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::additive().open_world())
             .document(RESTORE),
+        Leaf::new(&["repair"])
+            .examples(&[Example::new(
+                &["sample", "--dry-run"],
+                "Print what repairing the records of sample would do",
+            )])
+            .effects(Effects::destructive().idempotent())
+            .document(REPAIR),
         Leaf::new(&["remove"])
             .examples(&[Example::new(
                 &["reading-list", "--dry-run"],
@@ -365,6 +377,10 @@ pub(crate) enum Verb {
     Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
     Restore(RestoreArgs),
+    /// Repair the broken records of one name that `mxv list` names `mxv repair NAME` for.
+    ///
+    /// An archive that stopped before it finished, and whose pins are gone, moves aside to a hidden directory beside the other archives, which `mxv list --archived` does not list, and its private tar of ignored files stays where it is. mxv deletes neither. An older archive that stopped before it finished, beside a newer workspace of the same name, takes the name NAME-YYYY-MM-DD, from the day the archive started, or that name with -2 and on when it is taken, and mxv finishes it, so `mxv restore` of the dated name brings it back. When its pins are gone, it moves aside instead. An archive beside the workspace that a restore of it rebuilt, because the restore stopped before it deleted the archive, is deleted with its pins. mxv asks before each repair that changes something, and --yes repairs without asking. A name with nothing broken, or with a problem that another command repairs, changes nothing, and the result names that command. Each repair can run again after it stops partway.
+    Repair(RepairArgs),
     /// Remove a workspace's checkouts, its merged branches, its directory and its record.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`
     // lines and `commands list` name only `remove`.

@@ -57,6 +57,20 @@ workspace may need to act on.
   unfinished archive whose name a newer workspace holds shows only in
   `mxv list --archived`, and no longer marks the newer workspace's row.
   The library's `multiverse::health::classify` finds these records.
+- `mxv repair NAME` repairs the broken records that `mxv list` names it
+  for, and `--dry-run` prints what it would do. It asks before it changes
+  anything, and `--yes` repairs without asking. An unfinished archive whose
+  pins are gone moves aside to a hidden directory, and nothing is deleted.
+  An older unfinished archive beside a newer workspace of the same name is
+  finished under the name `NAME-YYYY-MM-DD`, so `mxv restore` of that name
+  brings it back. An archive left beside the workspace that a restore of it
+  rebuilt is deleted. The new problems read "the archive stopped before it
+  finished, and its pins are gone" and "the restore stopped before it
+  deleted the archive". `mxv archive -w` refuses to finish an archive whose
+  pins are gone, with `mxv::archive::pins_gone`, and the recovery of
+  `mxv::archive::name_taken` for an older archive now names `mxv repair`.
+  The library's `classify` now takes the backend that reads the pins, and
+  `Workspaces::repair` carries out the repairs.
 - The config key `archive_max_file` sets the largest file of a checkout's
   uncommitted work that `mxv archive` keeps, such as `"1GiB"`. It defaults
   to 100 MiB.

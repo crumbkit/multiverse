@@ -40,10 +40,10 @@ mod tests;
 pub(crate) use failure::CODES;
 pub use failure::{
     ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
-    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_SOURCE_CHANGED,
-    ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED,
-    RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN,
-    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE,
+    ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE,
+    RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN,
+    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
 };
 use failure::{ArchiveFailure, archive_refusal, restore_refusal};
 
@@ -1039,7 +1039,8 @@ fn refuse_outsider(workspace: &Workspace) -> Result<(), crumbkit::Error> {
 
 /// Finishes the archive of `archive`, whose workspace is gone: deletes the
 /// run files and the volumes that the run asked to delete, and marks it.
-fn finish(
+/// `mxv repair` calls it for an older archive that it renamed.
+pub(crate) fn finish(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
     records: &Archives,
@@ -1353,7 +1354,7 @@ pub(crate) fn list(
 ) -> Result<Listing<WorkspaceRow>, MxvFailure> {
     let records: ArchiveRecords = archives(environment)?.list()?;
     let live = multiverse::Store::new(environment.records()?).list()?;
-    let broken = health::classify(&live, &records).archives;
+    let broken = health::classify(&Git, &live, &records).archives;
     let mut rows: Vec<WorkspaceRow> = broken
         .iter()
         .map(|broken| broken_row(broken, &records.archives))

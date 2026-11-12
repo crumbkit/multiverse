@@ -213,7 +213,7 @@
   "declarations": [
     {
       "declaration": "root-verbs",
-      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv run, mxv archive, mxv restore, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin",
+      "applies_to": "mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv run, mxv archive, mxv restore, mxv repair, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin",
       "declares": "Each command sits directly under the root as a verb, and root help lists it under the heading Verbs.",
       "reason": "Workspaces are mxv's everyday resource, and people type these verbs many times a day."
     },

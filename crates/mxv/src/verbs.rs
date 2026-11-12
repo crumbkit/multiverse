@@ -545,7 +545,7 @@ pub(crate) fn list(
     }
     let records = store(environment)?.list()?;
     let archived = crate::archive::archives(environment)?.list()?;
-    let broken = health::classify(&records, &archived).workspaces;
+    let broken = health::classify(&Git, &records, &archived).workspaces;
     let measure = if args.sizes {
         Some(configured(environment)?)
     } else {

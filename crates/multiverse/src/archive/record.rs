@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use phase::WorkspaceId;
 use serde::{Deserialize, Serialize};
 
-use crate::archive::ignored::IgnoredEntry;
+use crate::archive::ignored::{IGNORED_TAR, IgnoredEntry};
 use crate::archive::root::RootEntry;
 use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, PIN_NAMESPACE, RECORD_FILE, WIP_INDEX};
 use crate::backend::RefHolder;
@@ -442,7 +442,13 @@ impl Archives {
         };
         let mut paths = Vec::new();
         for entry in entries {
-            paths.push(entry.map_err(unreadable)?.path().join(RECORD_FILE));
+            let entry = entry.map_err(unreadable)?;
+            // A name never starts with `.`, so such a directory is one that
+            // a repair moved aside, which no listing shows.
+            if entry.file_name().as_encoded_bytes().starts_with(b".") {
+                continue;
+            }
+            paths.push(entry.path().join(RECORD_FILE));
         }
         paths.sort();
         for path in paths {
@@ -484,6 +490,92 @@ impl Archives {
         let dir = self.dir_of(name);
         store::private_dir(&dir)?;
         Ok(dir.join(WIP_INDEX))
+    }
+
+    /// Returns the directory that [`Archives::move_aside`] moves the
+    /// directory of `archive` to: `.<name>.<id>` beside it, which no
+    /// listing shows, because a name never starts with `.`.
+    #[must_use]
+    pub fn aside_of(&self, archive: &Archive) -> PathBuf {
+        self.dir.join(format!(".{}.{}", archive.name, archive.id))
+    }
+
+    /// Returns the private tar of the ignored files of `archive`, when it
+    /// exists.
+    #[must_use]
+    pub fn ignored_tar(&self, archive: &Archive) -> Option<PathBuf> {
+        let tar = self.data_of(&archive.id).join(IGNORED_TAR);
+        tar.exists().then_some(tar)
+    }
+
+    /// Moves the directory of `archive`, with its record, its root files
+    /// and everything else in it, to [`Archives::aside_of`] in one rename,
+    /// so the archive leaves every listing and nothing in it is deleted.
+    /// The private tar of its ignored files stays where it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when the rename fails, such as when the
+    /// target already exists.
+    pub(crate) fn move_aside(&self, archive: &Archive) -> Result<PathBuf, Error> {
+        let from = self.dir_of(&archive.name);
+        let to = self.aside_of(archive);
+        fs::rename(&from, &to).map_err(|source| Error::Unwritable {
+            path: to.clone(),
+            source,
+        })?;
+        store::sync_dir(&self.dir);
+        Ok(to)
+    }
+
+    /// Gives `archive` the name `to`, with the workspace's directory and
+    /// each checkout's directory moved to the directory of that name
+    /// beside the old one, and returns it. The pins and the private tar
+    /// are named by the archive's id, so they stay. It writes the renamed
+    /// record first, then moves each other entry of the old directory,
+    /// such as the copies of the root files and of the workspace manifest,
+    /// into the new one with one rename each, then deletes the old
+    /// directory. A run that stops partway leaves a record of the same id
+    /// under the new name, and the next run moves the entries that are
+    /// left.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unwritable`] when a record, a move or a deletion
+    /// fails, and [`Error::StateUnreadable`] when the old directory cannot
+    /// be read.
+    pub(crate) fn rename(&self, archive: &Archive, to: &WorkspaceName) -> Result<Archive, Error> {
+        let mut renamed = archive.clone();
+        renamed.name = to.clone();
+        if let Some(parent) = archive.path.parent() {
+            renamed.path = parent.join(to.as_str());
+        }
+        for checkout in &mut renamed.checkouts {
+            checkout.path = renamed.path.join(&checkout.folder);
+        }
+        self.write(&renamed)?;
+        let old = self.dir_of(&archive.name);
+        let new = self.dir_of(to);
+        let unreadable = |source| Error::StateUnreadable {
+            path: old.clone(),
+            source,
+        };
+        for entry in fs::read_dir(&old).map_err(unreadable)? {
+            let name = entry.map_err(unreadable)?.file_name();
+            // The record was written new, and the temporary index of the
+            // uncommitted work is only read while a checkout retires.
+            if name == RECORD_FILE || name == WIP_INDEX || new.join(&name).exists() {
+                continue;
+            }
+            fs::rename(old.join(&name), new.join(&name)).map_err(|source| Error::Unwritable {
+                path: new.join(&name),
+                source,
+            })?;
+        }
+        store::sync_dir(&new);
+        delete_directory(&old)?;
+        store::sync_dir(&self.dir);
+        Ok(renamed)
     }
 
     /// Deletes the data directory of `archive`, which holds its ignored

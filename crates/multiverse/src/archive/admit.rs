@@ -21,6 +21,7 @@ use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
 use crate::disposable::DisposableSet;
 use crate::error::Error;
+use crate::health::pins_gone;
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
 use crate::record::{Workspace, WorkspaceKind};
@@ -300,6 +301,10 @@ pub enum ArchiveRefusal {
     NotFound,
     /// An archive already holds the name.
     NameTaken(Box<Archive>),
+    /// The archive of the name has not finished, its workspace is gone, and
+    /// the pin of no checkout names its commit, so it cannot be finished.
+    /// `Workspaces::repair` moves it aside.
+    PinsGone(Box<Archive>),
     /// A clone's mirror is gone, so nothing could hold its pin.
     MirrorMissing {
         /// The checkout's folder.
@@ -925,11 +930,23 @@ impl<B: Backend> Workspaces<B> {
 
     /// Returns what the record of the workspace `name` and its archive say
     /// about an archive of it.
+    ///
+    /// `health::classify` (`health.rs`) holds the same rule for which
+    /// retiring archive this finishes and which it refuses, and names the
+    /// repair of each in `mxv list`, so a change to one changes the other.
     fn subject(&self, archives: &Archives, name: &WorkspaceName) -> Result<Subject, Error> {
         let refused = |refusal| Ok(Subject::Done(ArchivePlanned::Refused(refusal)));
         let existing = archives.read(name)?;
         match (self.store.read(name)?, existing) {
             (None, None) => refused(ArchiveRefusal::NotFound),
+            // Marking an archive whose pins are gone as archived would claim
+            // that a restore brings back what is gone.
+            (None, Some(archive))
+                if archive.state == ArchiveState::Retiring
+                    && pins_gone(&self.backend, &archive)? =>
+            {
+                refused(ArchiveRefusal::PinsGone(Box::new(archive)))
+            }
             (None, Some(archive)) if archive.state == ArchiveState::Retiring => {
                 Ok(Subject::Done(ArchivePlanned::Finish(Box::new(archive))))
             }
