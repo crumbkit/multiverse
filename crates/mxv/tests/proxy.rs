@@ -535,3 +535,23 @@ fn starting_the_proxy_again_with_the_routes_unchanged_keeps_the_same_caddy() {
     assert_eq!(exit, 0, "{second}");
     assert_eq!(first["summary"]["pid"], second["summary"]["pid"]);
 }
+
+#[test]
+fn starting_the_proxy_again_with_the_routes_unchanged_loads_nothing() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.workspace("reading-list", &site());
+    let (exit, _, errors) = setup.json_and_errors(&["up", "-w", "reading-list"]);
+    assert_eq!(exit, 0, "{errors}");
+    let bootstrap = setup.root().join("state/mxv/proxy/bootstrap.json");
+    let before = fs::metadata(&bootstrap).unwrap().modified().unwrap();
+    for _ in 0..2 {
+        let (exit, document) = setup.json(&["proxy", "start"]);
+        assert_eq!(exit, 0, "{document}");
+    }
+    assert_eq!(
+        fs::metadata(&bootstrap).unwrap().modified().unwrap(),
+        before
+    );
+}

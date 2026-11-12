@@ -70,7 +70,9 @@ pub(crate) fn is_taken(port: u16) -> bool {
     TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err() || accepts(port)
 }
 
-/// Checks that a listener can bind `address` now, and releases it.
+/// Checks that a listener can bind `address` now, and releases it. A
+/// connection to the address counts as a holder too, because a bind of one
+/// address can succeed beside a server that listens on every address.
 ///
 /// # Errors
 ///
@@ -78,6 +80,9 @@ pub(crate) fn is_taken(port: u16) -> bool {
 /// holds the address and `PermissionDenied` when the system keeps the port
 /// for privileged programs.
 pub(crate) fn can_bind(address: SocketAddr) -> std::io::Result<()> {
+    if TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).is_ok() {
+        return Err(std::io::ErrorKind::AddrInUse.into());
+    }
     TcpListener::bind(address).map(drop)
 }
 

@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
 use crate::error::Error;
-use crate::ports::{DEFAULT_PORT_RANGE, accepts, allocate, is_taken};
+use crate::ports::{DEFAULT_PORT_RANGE, accepts, allocate, can_bind, is_taken};
 
 #[test]
 fn an_allocated_port_is_free_in_the_range_and_outside_the_reserved_ports() {
@@ -49,4 +49,12 @@ fn a_port_that_a_server_holds_on_every_address_is_taken() {
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     assert!(is_taken(port));
+}
+
+#[test]
+fn an_address_is_not_bindable_while_a_wildcard_listener_holds_its_port() {
+    let holder = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = holder.local_addr().unwrap().port();
+    let error = can_bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
 }

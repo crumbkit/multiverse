@@ -10,6 +10,13 @@ on:
     paths:
       - "crates/multiverse/src/proxy.rs"
       - "crates/multiverse/src/proxy/**"
+      - "crates/multiverse/src/manifest.rs"
+      - "crates/multiverse/src/manifest/**"
+      - "crates/multiverse/src/lookup.rs"
+      - "crates/multiverse/src/phase_plan.rs"
+      - "crates/mxv/src/config.rs"
+      - "crates/mxv/src/config/**"
+      - "crates/phase/**"
       - "crates/mxv/src/proxy.rs"
       - "crates/mxv/src/proxy/**"
       - "crates/mxv/tests/proxy.rs"

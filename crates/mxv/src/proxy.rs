@@ -281,7 +281,7 @@ fn warning(name: &WorkspaceName, mode: SyncMode, error: ProxyError) -> Vec<Strin
             let spelled = Spelling::COLONS.spell(Failure::code(&failure));
             return vec![
                 format!("warning: mxv could not {what} the routes of {name}, because {failure}."),
-                format!("The units still run. error code: {spelled}"),
+                format!("{}error code: {spelled}", still_run(mode)),
             ];
         }
         other => other.to_string(),
@@ -289,10 +289,20 @@ fn warning(name: &WorkspaceName, mode: SyncMode, error: ProxyError) -> Vec<Strin
     vec![
         format!("warning: mxv could not {what} the routes of {name}, because {reason}."),
         format!(
-            "Run `mxv proxy start` once that is fixed. The units still run. error code: {}",
+            "Run `mxv proxy start` once that is fixed. {}error code: {}",
+            still_run(mode),
             code.unwrap_or_default()
         ),
     ]
+}
+
+/// Returns the sentence that says the units still run after a verb that
+/// starts them, and nothing after a verb that stops or removes them.
+fn still_run(mode: SyncMode) -> &'static str {
+    match mode {
+        SyncMode::Start => "The units still run. ",
+        SyncMode::IfRunning => "",
+    }
 }
 
 /// Joins `items` as a sentence does: `a`, `a and b`, `a, b and c`.

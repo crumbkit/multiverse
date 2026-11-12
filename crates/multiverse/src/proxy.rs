@@ -399,23 +399,22 @@ impl Proxy {
         let _lock = store::lock(&self.settings.dir().join("lock"), LOCK_WAIT)?;
         let (found, _) = declared(store)?;
         let derived = derive(found);
-        let mut running = self.answering();
+        let mut current = self.current();
         if derived.served.is_empty() {
-            if running {
+            if current.is_some() {
                 self.stop_locked()?;
             }
             return Ok(Synced::default());
         }
-        if !running {
+        if current.is_none() {
             if mode == SyncMode::IfRunning {
                 return Ok(Synced::default());
             }
             self.start_locked(&derived.served)?;
-            running = true;
+            current = self.current();
         }
-        debug_assert!(running);
         let config = caddy_config::render(&self.settings, &derived.served);
-        if self.loaded()? != Some(config.clone()) {
+        if current.as_ref() != Some(&config) {
             self.load(&config)?;
         }
         Ok(Synced {
@@ -503,12 +502,11 @@ impl Proxy {
     }
 
     /// Returns the configuration that Caddy runs, or `None` when it does
-    /// not answer.
-    fn loaded(&self) -> Result<Option<serde_json::Value>, ProxyError> {
-        let Ok(response) = admin::get(&self.settings.socket(), "/config/") else {
-            return Ok(None);
-        };
-        Ok(serde_json::from_slice(&response.body).ok())
+    /// not answer. This is the only request that a sync makes to find out.
+    fn current(&self) -> Option<serde_json::Value> {
+        let response = admin::get(&self.settings.socket(), "/config/").ok()?;
+        (response.status == 200)
+            .then(|| serde_json::from_slice(&response.body).unwrap_or(serde_json::Value::Null))
     }
 
     /// Loads `config` and keeps it as the file Caddy starts from.

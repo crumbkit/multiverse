@@ -233,7 +233,7 @@ The keeper has no state enum. Its life is the control flow of `phase/src/engine/
 
 ## Proxy
 
-`Proxy::sync` in `crates/multiverse/src/proxy.rs` is the one entry point. It holds a lock in the proxy state directory, rebuilds the routes from the workspace records, reads the configuration that Caddy holds from its admin socket, and loads the new one only when the two differ. It returns early when no workspace declares a route and Caddy does not run. Caddy runs as a phase app of the workspace `mxv-proxy`. A killed Caddy leaves its last load in Caddy's own autosave, and the next `sync` starts it and loads the current routes. `mxv proxy stop` stops the app and keeps the state. A sync that fails after a unit change leaves the units as they are and reports a warning.
+`Proxy::sync` in `crates/multiverse/src/proxy.rs` is the one entry point. It holds a lock in the proxy state directory, rebuilds the routes from the workspace records, reads the configuration that Caddy holds from its admin socket, and loads the new one only when the two differ. It returns early when no workspace declares a route and Caddy does not run. Caddy runs as a phase app of the workspace `mxv-proxy`. Caddy's own autosave is off (`persist` is false). `load` writes the loaded configuration to `bootstrap.json` in the proxy state directory, and phase's keeper restarts a killed Caddy from that file, so it serves the last load again at once. The next `sync` compares what Caddy holds with the current routes and loads only when they differ. `mxv proxy stop` stops the app and keeps the state. A sync that fails after a unit change leaves the units as they are and reports a warning.
 
 ## Port ledger
 

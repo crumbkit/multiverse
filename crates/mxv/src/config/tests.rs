@@ -247,3 +247,11 @@ fn a_relative_caddy_path_is_refused() {
     let (_, reason) = invalid("caddy = \"bin/caddy\"\n");
     assert!(reason.contains("absolute"), "{reason}");
 }
+
+#[test]
+fn the_same_address_for_proxy_http_and_proxy_https_is_refused_on_the_second_line() {
+    let (line, reason) =
+        invalid("proxy_http = \"127.0.0.1:8080\"\nproxy_https = \"127.0.0.1:8080\"\n");
+    assert_eq!(line, Some(2));
+    assert!(reason.contains("cannot share"), "{reason}");
+}

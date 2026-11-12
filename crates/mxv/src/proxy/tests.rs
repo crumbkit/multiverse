@@ -130,3 +130,23 @@ fn nothing_is_said_before_a_lifecycle_verb_syncs() {
     let served = Served::default();
     assert!(served.lines().is_empty());
 }
+
+#[test]
+fn a_warning_after_a_verb_that_stops_units_does_not_say_they_still_run() {
+    let lines = warning(
+        &name("reading-list"),
+        SyncMode::IfRunning,
+        ProxyError::PortHeld {
+            address: "127.0.0.1:80".parse().unwrap(),
+            key: "proxy_http",
+        },
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("still run")),
+        "{lines:?}"
+    );
+    assert!(
+        lines[0].contains("could not update the routes"),
+        "{lines:?}"
+    );
+}

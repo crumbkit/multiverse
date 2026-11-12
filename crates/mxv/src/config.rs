@@ -174,6 +174,14 @@ pub(crate) fn parse(path: &Path, text: &str, home: &Path) -> Result<Config, MxvF
             }
             "proxy_http" | "proxy_https" => {
                 let address = loopback(name, value.get_ref()).map_err(|reason| bad(at, reason))?;
+                if [config.proxy_http, config.proxy_https].contains(&Some(address)) {
+                    return Err(bad(
+                        at,
+                        format!(
+                            "`{name}` is {address}, which `proxy_http` and `proxy_https` cannot share; give each its own address or port"
+                        ),
+                    ));
+                }
                 if name == "proxy_http" {
                     config.proxy_http = Some(address);
                 } else {
