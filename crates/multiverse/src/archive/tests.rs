@@ -171,7 +171,7 @@ impl Setup {
     fn restore_plan_with(&self, force: bool) -> RestorePlan {
         match self
             .workspaces
-            .plan_restore(&self.archives, &name(), force)
+            .plan_restore(&self.archives, &name(), RestoreOptions::new(force, false))
             .unwrap()
         {
             RestorePlanned::Ready(plan) => *plan,
@@ -196,10 +196,39 @@ impl Setup {
             .unwrap()
     }
 
+    fn restore_from_origin_outcome(&self) -> RestoreOutcome {
+        let plan = match self
+            .workspaces
+            .plan_restore(&self.archives, &name(), RestoreOptions::new(false, true))
+            .unwrap()
+        {
+            RestorePlanned::Ready(plan) => *plan,
+            planned => panic!("{planned:?}"),
+        };
+        self.workspaces
+            .restore(&self.archives, plan, &self.runs)
+            .unwrap()
+    }
+
+    fn restore_from_origin(&self) -> Restored {
+        match self.restore_from_origin_outcome() {
+            RestoreOutcome::Restored(restored) => *restored,
+            RestoreOutcome::Refused(refusal) => panic!("{refusal:?}"),
+        }
+    }
+
+    /// Hides the bare origin, so any fetch from it fails.
+    fn hide_origin(&self) -> (PathBuf, PathBuf) {
+        let origin = self.fixture.origin.clone();
+        let hidden = origin.with_extension("hidden");
+        crate::store::move_aside(&origin, &hidden).unwrap();
+        (origin, hidden)
+    }
+
     fn restore_refusal(&self) -> RestoreRefusal {
         match self
             .workspaces
-            .plan_restore(&self.archives, &name(), false)
+            .plan_restore(&self.archives, &name(), RestoreOptions::default())
             .unwrap()
         {
             RestorePlanned::Refused(refusal) => refusal,
@@ -209,7 +238,7 @@ impl Setup {
 
     fn restore_planned(&self) -> RestorePlanned {
         self.workspaces
-            .plan_restore(&self.archives, &name(), false)
+            .plan_restore(&self.archives, &name(), RestoreOptions::default())
             .unwrap()
     }
 
@@ -1811,9 +1840,10 @@ fn a_record_from_a_newer_version_is_refused_with_its_version() {
     let mut archive = setup.archive();
     archive.version = ARCHIVE_VERSION + 1;
     setup.archives.write(&archive).unwrap();
-    let refused = setup
-        .workspaces
-        .plan_restore(&setup.archives, &name(), false);
+    let refused =
+        setup
+            .workspaces
+            .plan_restore(&setup.archives, &name(), RestoreOptions::default());
     assert!(
         matches!(refused, Err(Error::NewerRecord { version, .. }) if version == ARCHIVE_VERSION + 1)
     );
@@ -1850,38 +1880,250 @@ fn a_restore_keeps_a_free_port_and_replaces_a_taken_one() {
     );
 }
 
+/// Leaves a stash, an unpushed local branch `spike` and uncommitted work in
+/// the checkout, as an archive keeps them only in its mirror.
+fn leave_work_that_only_the_mirror_will_hold(checkout: &Path) {
+    write(checkout.join("stashed.txt"), "stash\n");
+    git(checkout, &["add", "stashed.txt"]);
+    git(checkout, &["stash", "push", "--quiet", "-m", "kept"]);
+    git(checkout, &["switch", "--quiet", "-c", "spike"]);
+    git(
+        checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Spike"],
+    );
+    git(checkout, &["switch", "--quiet", "triage"]);
+    write(checkout.join("wip.txt"), "wip\n");
+}
+
 #[test]
-fn a_mirror_that_is_gone_is_cloned_again_from_the_origin_for_a_pushed_commit() {
+fn restore_fetches_nothing_and_refuses_when_the_mirror_is_gone_listing_what_would_be_lost() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    leave_work_that_only_the_mirror_will_hold(&setup.checkout());
+    setup.commit_locally();
+    let archive = setup.archive();
+    let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    fs::remove_dir_all(&mirror).unwrap();
+    // An unreachable origin proves that the refusal does not fetch.
+    setup.hide_origin();
+    let RestoreRefusal::MirrorMissing { checkouts } = setup.restore_refusal() else {
+        panic!("the restore was not refused for its mirror");
+    };
+    assert_eq!(checkouts.len(), 1);
+    assert_eq!(checkouts[0].folder, "app");
+    assert_eq!(checkouts[0].mirror, mirror);
+    let items = checkouts[0].items.join("; ");
+    assert!(items.contains("uncommitted work"), "{items}");
+    assert!(items.contains("1 stash"), "{items}");
+    assert!(items.contains("spike"), "{items}");
+    assert!(
+        items.contains("1 commit of triage that origin did not hold when archived"),
+        "{items}"
+    );
+    assert!(!mirror.join("HEAD").exists(), "the refusal made a mirror");
+    assert!(!setup.root.join("triage").exists());
+    assert_eq!(setup.record().unwrap().id, archive.id);
+}
+
+#[test]
+fn a_mirror_that_is_gone_with_no_origin_to_ask_refuses_for_the_missing_commit() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    git(&setup.checkout(), &["remote", "remove", "origin"]);
+    let archive = setup.archive();
+    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
+    assert!(matches!(
+        setup.restore_refusal(),
+        RestoreRefusal::CommitMissing { .. }
+    ));
+}
+
+#[test]
+fn restore_without_from_origin_does_not_fetch_a_mirror_that_is_there() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let archive = setup.archive();
+    let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    git(
+        &setup.fixture.clone,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/later"],
+    );
+    setup.restore();
+    assert_eq!(
+        git(&mirror, &["branch", "--list", "later"]).trim(),
+        "",
+        "the restore fetched the mirror"
+    );
+}
+
+#[test]
+fn a_mirror_that_lost_its_pins_refuses_a_plain_restore_like_a_mirror_that_is_gone() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let archive = setup.archive();
+    let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    let pins = git(
+        &mirror,
+        &["for-each-ref", "--format=%(refname)", "refs/mxv/archives"],
+    );
+    for pin in pins.lines() {
+        git(&mirror, &["update-ref", "-d", pin]);
+    }
+    let RestoreRefusal::MirrorMissing { checkouts } = setup.restore_refusal() else {
+        panic!("the restore was not refused for its mirror");
+    };
+    assert_eq!(checkouts[0].folder, "app");
+    assert_eq!(setup.record().unwrap().id, archive.id);
+}
+
+#[test]
+fn restore_from_origin_keeps_a_pin_whose_object_origin_holds() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    git(&setup.checkout(), &["switch", "--quiet", "-c", "spike"]);
+    git(
+        &setup.checkout(),
+        &["commit", "--quiet", "--allow-empty", "-m", "Spike"],
+    );
+    // Origin holds the commit under another name, so the archive keeps the
+    // branch spike and the new mirror holds its object.
+    git(
+        &setup.checkout(),
+        &["push", "--quiet", "origin", "spike:refs/heads/elsewhere"],
+    );
+    git(&setup.checkout(), &["switch", "--quiet", "triage"]);
+    let archive = setup.archive();
+    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
+    let restored = setup.restore_from_origin();
+    assert!(
+        restored
+            .lost_pins
+            .iter()
+            .all(|lost| !lost.what.contains("spike")),
+        "{:?}",
+        restored.lost_pins
+    );
+    assert!(
+        restored.put_back[0].branches.contains(&"spike".to_owned()),
+        "{:?}",
+        restored.put_back
+    );
+    assert!(
+        !git(&setup.checkout(), &["branch", "--list", "spike"])
+            .trim()
+            .is_empty()
+    );
+}
+
+#[test]
+fn restore_from_origin_rebuilds_at_the_archived_commit_and_lists_each_lost_pin() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let commit = setup.commit_locally();
+    git(&setup.checkout(), &["push", "--quiet", "origin", "triage"]);
+    leave_work_that_only_the_mirror_will_hold(&setup.checkout());
+    let archive = setup.archive();
+    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
+    let restored = setup.restore_from_origin();
+    assert_eq!(setup.head(), commit);
+    assert_eq!(branch(&setup.checkout()), "triage");
+    let lost: Vec<String> = restored
+        .lost_pins
+        .iter()
+        .map(|lost| format!("{}: {}", lost.folder, lost.what))
+        .collect();
+    let lost = lost.join("; ");
+    assert!(lost.contains("uncommitted work"), "{lost}");
+    assert!(lost.contains("stash"), "{lost}");
+    assert!(lost.contains("spike"), "{lost}");
+    assert_eq!(git(&setup.checkout(), &["stash", "list"]).trim(), "");
+    assert!(setup.record().is_none());
+    assert!(
+        archive.checkouts[0]
+            .mirror
+            .as_ref()
+            .unwrap()
+            .join("HEAD")
+            .is_file()
+    );
+}
+
+#[test]
+fn restore_from_origin_falls_back_to_the_branch_tip_then_the_default_branch_and_names_the_loss() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    git(&setup.checkout(), &["push", "--quiet", "origin", "triage"]);
+    let pushed = setup.head();
+    let local = setup.commit_locally();
+    let archive = setup.archive();
+    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
+    let restored = setup.restore_from_origin();
+    assert_eq!(setup.head(), pushed, "the branch tip on origin");
+    assert_eq!(branch(&setup.checkout()), "triage");
+    assert!(
+        restored
+            .lost_pins
+            .iter()
+            .any(|lost| lost.what.contains(&local)),
+        "{:?}",
+        restored.lost_pins
+    );
+
+    // Now a branch that origin does not hold: the default branch.
+    let setup = self::setup(Kind::Clone);
+    setup.create();
+    let local = setup.commit_locally();
+    let archive = setup.archive();
+    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
+    let main = git(&setup.fixture.origin, &["rev-parse", "main"])
+        .trim()
+        .to_owned();
+    let restored = setup.restore_from_origin();
+    assert_eq!(setup.head(), main, "origin's default branch");
+    assert_eq!(branch(&setup.checkout()), "triage");
+    assert!(
+        restored
+            .lost_pins
+            .iter()
+            .any(|lost| lost.what.contains(&local)),
+        "{:?}",
+        restored.lost_pins
+    );
+}
+
+#[test]
+fn a_failed_from_origin_fetch_leaves_no_mirror_and_the_archive_whole() {
     let setup = setup(Kind::Clone);
     setup.create();
     let commit = setup.commit_locally();
     git(&setup.checkout(), &["push", "--quiet", "origin", "triage"]);
     let archive = setup.archive();
-    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
-    setup.restore();
-    assert_eq!(setup.head(), commit);
-}
-
-#[test]
-fn a_mirror_that_is_gone_with_a_commit_only_it_held_refuses_and_builds_nothing() {
-    let setup = setup(Kind::Clone);
-    setup.create();
-    let commit = setup.commit_locally();
-    let archive = setup.archive();
-    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
-    let outcome = setup
+    let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    fs::remove_dir_all(&mirror).unwrap();
+    let (origin, hidden) = setup.hide_origin();
+    let plan = match setup
         .workspaces
-        .restore(&setup.archives, setup.restore_plan(), &setup.runs)
-        .unwrap();
+        .plan_restore(&setup.archives, &name(), RestoreOptions::new(false, true))
+        .unwrap()
+    {
+        RestorePlanned::Ready(plan) => *plan,
+        planned => panic!("{planned:?}"),
+    };
     assert!(
-        matches!(
-            &outcome,
-            RestoreOutcome::Refused(RestoreRefusal::CommitMissing { commit: gone, .. }) if *gone == commit
-        ),
-        "{outcome:?}"
+        setup
+            .workspaces
+            .restore(&setup.archives, plan, &setup.runs)
+            .is_err()
+    );
+    assert!(
+        !mirror.join("HEAD").exists(),
+        "the failed run left a mirror"
     );
     assert!(!setup.root.join("triage").exists());
     assert_eq!(setup.record().unwrap().id, archive.id);
+    crate::store::move_aside(&hidden, &origin).unwrap();
+    setup.restore_from_origin();
+    assert_eq!(setup.head(), commit);
 }
 
 #[test]
@@ -2297,33 +2539,6 @@ fn a_record_over_the_size_limit_refuses_before_anything_changes() {
     assert!(text.contains("RecordTooLarge"), "{text}");
     assert!(setup.record().is_none());
     assert!(setup.checkout().is_dir());
-}
-
-#[test]
-fn an_unreachable_origin_leaves_no_empty_mirror_behind() {
-    let setup = setup(Kind::Clone);
-    setup.create();
-    let commit = setup.commit_locally();
-    git(&setup.checkout(), &["push", "--quiet", "origin", "triage"]);
-    let archive = setup.archive();
-    let mirror = archive.checkouts[0].mirror.clone().unwrap();
-    fs::remove_dir_all(&mirror).unwrap();
-    let origin = setup.fixture.origin.clone();
-    let hidden = origin.with_extension("hidden");
-    crate::store::move_aside(&origin, &hidden).unwrap();
-    assert!(
-        setup
-            .workspaces
-            .restore(&setup.archives, setup.restore_plan(), &setup.runs)
-            .is_err()
-    );
-    assert!(
-        !mirror.join("HEAD").exists(),
-        "the failed run left a mirror"
-    );
-    crate::store::move_aside(&hidden, &origin).unwrap();
-    setup.restore();
-    assert_eq!(setup.head(), commit);
 }
 
 #[test]

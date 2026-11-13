@@ -34,10 +34,6 @@ pub const CHECKOUT_UNREACHABLE_COMMITS: Code = Code::new("mxv", "checkout", "unr
 pub const CHECKOUT_UNPUSHED_COMMITS: Code = Code::new("mxv", "checkout", "unpushed_commits");
 /// The code of a removal that a clone's stash entries stop.
 pub const CHECKOUT_STASHES: Code = Code::new("mxv", "checkout", "stashes");
-/// The code of a removal that cannot fetch a clone's `origin`, such as on
-/// a machine that is offline, so mxv cannot tell which commits the origin
-/// holds.
-pub const CHECKOUT_ORIGIN_UNREACHABLE: Code = Code::new("mxv", "checkout", "origin_unreachable");
 /// The code of a template of workspace manifests that mxv cannot use, such
 /// as one without a valid `[template]` table.
 pub const TEMPLATE_INVALID: Code = Code::new("mxv", "template", "invalid");
@@ -261,6 +257,11 @@ pub(crate) enum MxvFailure {
         path: PathBuf,
         /// The number of commits that deleting the clone would lose.
         commits: u32,
+        /// How long ago the clone's mirror last fetched from origin. The
+        /// count compares against the heads and tags that the mirror held
+        /// then, and against the clone's own remote branches. `None` when
+        /// the mirror has never fetched.
+        fetched_ago: Option<crumbkit::Age>,
         /// What the removal's flags allowed.
         allow: Allow,
     },
@@ -464,7 +465,6 @@ pub(crate) const CODES: &[&Code] = &[
     &GIT_TIMED_OUT,
     &MIRROR_LOCKED,
     &MIRROR_FETCH_FAILED,
-    &CHECKOUT_ORIGIN_UNREACHABLE,
     &TEMPLATE_INVALID,
     &TEMPLATE_AMBIGUOUS,
     &MANIFEST_UNTRUSTED,
@@ -614,7 +614,6 @@ impl Failure for MxvFailure {
                 Error::DatedNamesTaken { .. } => &REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
-                Error::OriginFetchFailed { .. } => &CHECKOUT_ORIGIN_UNREACHABLE,
                 Error::TemplateInvalid { .. } => &TEMPLATE_INVALID,
                 Error::TemplateAmbiguous { .. } => &TEMPLATE_AMBIGUOUS,
                 Error::ManifestUntrusted { .. } => &MANIFEST_UNTRUSTED,
@@ -685,7 +684,7 @@ impl Failure for MxvFailure {
             Self::Unpushed {
                 name, path, allow, ..
             } => Recovery::hint(format!(
-                "push the commits with `git -C {} push origin HEAD` and run `{}` again; `--delete-unmerged` deletes them with the clone",
+                "push the branches with `git -C {} push origin HEAD` and run `{}` again, which clears the count for a commit that a branch of origin then holds; a tag or note is cleared only by a later `mxv new` or `mxv add` of the repository that refreshes the mirror (a note is not cleared at all, because the mirror holds no notes); `--delete-unmerged` deletes the commits with the clone",
                 shown(path),
                 remove_line(name, *allow)
             )),
@@ -850,12 +849,19 @@ impl Failure for MxvFailure {
                 name,
                 path,
                 commits,
+                fetched_ago,
                 ..
-            } => vec![
-                Field::new("name", name),
-                Field::new("path", shown(path)),
-                Field::new("commits", *commits),
-            ],
+            } => {
+                let mut fields = vec![
+                    Field::new("name", name),
+                    Field::new("path", shown(path)),
+                    Field::new("commits", *commits),
+                ];
+                if let Some(age) = fetched_ago {
+                    fields.push(Field::new("fetched_ago", age.to_string()));
+                }
+                fields
+            }
             Self::Stashed {
                 name,
                 path,
@@ -1000,10 +1006,6 @@ fn library_recovery(error: &Error) -> Recovery {
             "read {}, copy it to a file of your own outside every git repository and outside the workspaces' root, such as a template in the config directory's `mxv/templates`, and pass that file to `--manifest`",
             shown(path)
         )),
-        Error::OriginFetchFailed { checkout, .. } => Recovery::hint(format!(
-            "check that the machine is online and that `git -C {} fetch origin` works with your credentials, and run the command again; `--delete-unmerged` removes the workspace without the fetch, and deletes the commits that origin does not hold",
-            shown(checkout)
-        )),
         Error::Busy { .. } => Recovery::hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
         ),
@@ -1089,10 +1091,6 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
                 "templates",
                 FieldValue::list(templates.iter().map(|path| shown(path))),
             ),
-        ],
-        Error::OriginFetchFailed { checkout, message } => vec![
-            Field::new("checkout", shown(checkout)),
-            Field::new("message", message),
         ],
         Error::MirrorFetchFailed {
             origin,
@@ -1276,13 +1274,9 @@ impl fmt::Display for MxvFailure {
                 name,
                 path,
                 commits,
+                fetched_ago,
                 ..
-            } => write!(
-                formatter,
-                "the clone {} of the workspace {name} holds {commits} {} that origin does not hold",
-                shown(path),
-                if *commits == 1 { "commit" } else { "commits" }
-            ),
+            } => unpushed_text(formatter, name, path, *commits, fetched_ago.as_ref()),
             Self::Stashed {
                 name,
                 path,
@@ -1400,5 +1394,28 @@ impl std::error::Error for MxvFailure {
             | Self::PartlyCleaned { .. }
             | Self::BadConfig { .. } => None,
         }
+    }
+}
+
+/// Writes the text of [`MxvFailure::Unpushed`]: the clone's unpushed
+/// commits, counted against the clone's remote branches and the heads and
+/// tags that the clone's mirror last fetched from origin, and when the
+/// mirror did so.
+fn unpushed_text(
+    formatter: &mut fmt::Formatter<'_>,
+    name: &str,
+    path: &Path,
+    commits: u32,
+    fetched_ago: Option<&crumbkit::Age>,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "the clone {} of the workspace {name} holds {commits} {} that origin did not hold",
+        shown(path),
+        if commits == 1 { "commit" } else { "commits" }
+    )?;
+    match fetched_ago {
+        Some(age) => write!(formatter, " when its mirror last fetched origin {age} ago"),
+        None => write!(formatter, " and its mirror has never fetched origin"),
     }
 }

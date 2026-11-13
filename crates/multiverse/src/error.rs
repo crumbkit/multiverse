@@ -164,15 +164,6 @@ pub enum Error {
         /// The line of git's standard error that says what failed.
         message: String,
     },
-    /// The fetch of a clone's `origin`, or of the `origin` of one of its
-    /// submodules, failed before a removal, such as when the machine is
-    /// offline, so mxv cannot tell which commits `origin` holds.
-    OriginFetchFailed {
-        /// The clone's directory, or the git directory of its submodule.
-        checkout: PathBuf,
-        /// The line of git's standard error that says what failed.
-        message: String,
-    },
     /// A template of workspace manifests cannot be used, such as one that
     /// is not valid TOML, has no valid `[template]` table, or is not a
     /// valid manifest once that table is removed.
@@ -292,8 +283,7 @@ fn detail(message: &str) -> String {
 }
 
 impl Error {
-    /// Writes the text of a failure to lock or fetch a mirror, or to fetch
-    /// a clone's origin.
+    /// Writes the text of a failure to lock or fetch a mirror.
     fn fmt_fetch(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MirrorBusy { mirror } => write!(
@@ -309,12 +299,6 @@ impl Error {
                 formatter,
                 "mxv could not fetch {origin} into the mirror {}{}",
                 mirror.display(),
-                detail(message)
-            ),
-            Self::OriginFetchFailed { checkout, message } => write!(
-                formatter,
-                "mxv could not fetch the origin of {}, so it cannot tell which commits the origin holds{}",
-                checkout.display(),
                 detail(message)
             ),
             _ => Ok(()),
@@ -519,9 +503,7 @@ impl fmt::Display for Error {
                 formatter,
                 "every dated name for the older archive of {name}, up to {last}, is already taken"
             ),
-            Self::MirrorBusy { .. }
-            | Self::MirrorFetchFailed { .. }
-            | Self::OriginFetchFailed { .. } => self.fmt_fetch(formatter),
+            Self::MirrorBusy { .. } | Self::MirrorFetchFailed { .. } => self.fmt_fetch(formatter),
             Self::TemplateInvalid { .. }
             | Self::TemplateAmbiguous { .. }
             | Self::ManifestUntrusted { .. } => self.fmt_template(formatter),
@@ -753,7 +735,6 @@ impl std::error::Error for Error {
             | Self::DatedNamesTaken { .. }
             | Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
-            | Self::OriginFetchFailed { .. }
             | Self::TemplateInvalid { .. }
             | Self::TemplateAmbiguous { .. }
             | Self::ManifestUntrusted { .. }

@@ -1398,12 +1398,12 @@ is never followed. It refuses, and changes nothing, in these cases:
   nothing. The result lists such paths in `manifest_paths`. When a checkout's `mxv.toml` is invalid,
   mxv uses the built-in set and the config file's globs for it, and the
   result, or the refusal's `warnings` field, says so.
-- A clone holds commits that no branch, tag or note of its `origin` holds.
-  Before it counts them, mxv fetches the clone's `origin`: its branches go
-  to the remote branches, and a copy of its tags and notes goes below
-  `refs/mxv/origin/` in the clone. The fetch deletes what the origin no
-  longer has, so a commit counts as pushed only while the origin still
-  holds it. The count includes the commits of the clone's `HEAD`,
+- A clone holds commits that no remote branch of the clone, and no head or tag that the clone's mirror last fetched from `origin`, holds. The mirror holds no notes, so a note counts until it is deleted.
+  mxv fetches nothing before it counts them. A commit counts as pushed when
+  the clone's remote branches, which the clone last fetched, or the mirror's
+  heads and tags hold it, and a
+  refusal names the age of the mirror's last fetch, so a person can tell
+  how old that view of `origin` is. The count includes the commits of the clone's `HEAD`,
   branches, tags and notes, and the commits made on a detached `HEAD` that
   nothing else holds, such as a commit made there before switching back to
   the branch, which git warns about when `HEAD` leaves it. A commit counts
@@ -1413,18 +1413,12 @@ is never followed. It refuses, and changes nothing, in these cases:
   branch's reflog, was given up on purpose, and does not count. A detached
   commit whose patch matches a commit that the origin or a local branch
   holds, such as one that was cherry-picked onto the branch, does not count
-  either. A tag that the origin also holds counts as pushed. Each submodule that the
+  either. A tag counts as pushed only while a remote branch holds its commit. Each submodule that the
   clone has initialised, whose git directory git keeps below
-  `.git/modules`, is fetched and counted the same way, because its commits
+  `.git/modules`, is counted the same way, because its commits
   are deleted with the clone. The refusal is
   `mxv::checkout::unpushed_commits`, and `--delete-unmerged` deletes the
-  commits with the clone. It also skips the fetch, so a removal with it
-  works offline.
-- The fetch of a clone's `origin`, or of a submodule's, fails, such as on a
-  machine that is offline. The failure is
-  `mxv::checkout::origin_unreachable`, it changes nothing, and its hint
-  says to go online and run the command again, or to pass
-  `--delete-unmerged` to remove the workspace without the fetch.
+  commits with the clone.
 - A clone holds stash entries. The refusal is `mxv::checkout::stashes`, and
   `--force` deletes them with the clone. The prompt says how many stash
   entries the removal deletes.

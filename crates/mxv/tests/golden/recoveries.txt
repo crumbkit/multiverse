@@ -65,7 +65,7 @@ mxv remove reading-list
   run mxv remove reading-list --json --yes
     exits 0
 
-mxv restore missing --dry-run
+mxv restore missing --from-origin --dry-run
   fails with mxv::restore::not_found
   run mxv list
     exits 0
@@ -173,6 +173,7 @@ codes that no start provokes:
   mxv::restore::name_taken: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::branch_moved: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::commit_missing: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
+  mxv::restore::mirror_missing: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::unfinished: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::root_file_changed: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::ignored_damaged: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
@@ -182,7 +183,6 @@ codes that no start provokes:
   mxv::template::invalid: Only a malformed template in the config directory's templates provokes it, and the check's fixture has no templates; tests/workspaces.rs provokes it with a template that lists the repository's origin and holds a key after its [template] header.
   mxv::manifest::untrusted: Only a `--manifest` file inside a git work tree or under the workspaces' root provokes it, and the check's command lines name no manifest file; tests/workspaces.rs provokes it with the repository's own mxv.toml.
   mxv::template::ambiguous: Only two templates that list the repository's origin provoke it, and the check's fixture has no templates; tests/workspaces.rs provokes it with two such templates.
-  mxv::checkout::origin_unreachable: Only a clone whose origin cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.
   mxv::workspace::changed: Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.
   mxv::path::inaccessible: Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.
   mxv::environment::no_directory: Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.

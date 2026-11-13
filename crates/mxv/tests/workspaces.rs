@@ -993,22 +993,14 @@ fn new_fails_with_mirror_fetch_failed_when_the_origin_is_gone_and_leaves_nothing
 }
 
 #[test]
-fn remove_fails_as_origin_unreachable_offline_and_delete_unmerged_skips_the_fetch() {
+fn remove_succeeds_without_contacting_an_origin_that_is_gone() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
     fs::remove_dir_all(setup.root().join("origin.git")).unwrap();
     let (exit, document) = setup.json(&["remove", "reading-list", "--dry-run"]);
-    assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::checkout::origin_unreachable");
-    assert!(
-        document["recovery"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("--delete-unmerged"),
-        "{document}"
-    );
+    assert_eq!(exit, 0, "{document}");
     assert!(workspace.exists());
-    let (exit, document) = setup.json(&["remove", "reading-list", "--delete-unmerged", "--yes"]);
+    let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
     assert_eq!(exit, 0, "{document}");
     assert!(!workspace.exists());
 }
