@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use wait_timeout::ChildExt as _;
 
+use super::ssh::git_command;
 use super::{
     Finished, GIT, LOCAL_DEADLINE, MOST_OUTPUT_BYTES, ORIGIN_REFS, drain, joined, lines, run,
 };
@@ -116,34 +117,7 @@ pub(super) fn detached_commits(dir: &Path) -> Result<Vec<String>, Error> {
 /// that changes nothing have no patch ID and are left out. `git log -p`
 /// writes straight into `git patch-id`, so no patch passes through mxv.
 fn patch_ids(dir: &Path, revisions: &[String]) -> Result<HashMap<String, String>, Error> {
-    let git = || {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/multiverse/src/git/detached.rs belongs to the module that starts processes (PROC-1)"
-        )]
-        let mut command = Command::new(GIT);
-        command
-            .arg("-C")
-            .arg(dir)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("LC_ALL", "C");
-        command
-    };
-    let mut log = git();
-    log.args([
-        "log",
-        "-p",
-        "--no-merges",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--pretty=medium",
-    ])
-    .args(revisions)
-    .arg("--")
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    let [mut log, mut patch_id] = patch_id_commands(dir, revisions);
     let unstartable = |source| Error::ProgramMissing {
         program: GIT,
         source,
@@ -159,12 +133,7 @@ fn patch_ids(dir: &Path, revisions: &[String]) -> Result<HashMap<String, String>
     )]
     let mut producer: std::process::Child = spawned.map_err(unstartable)?;
     let patches = producer.stdout.take().map_or_else(Stdio::null, Stdio::from);
-    let mut patch_id = git();
-    patch_id
-        .args(["patch-id", "--stable"])
-        .stdin(patches)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    patch_id.stdin(patches);
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/git/detached.rs belongs to the module that starts processes (PROC-1)"
@@ -222,4 +191,32 @@ fn patch_ids(dir: &Path, revisions: &[String]) -> Result<HashMap<String, String>
             Some((commit.to_owned(), patch.to_owned()))
         })
         .collect())
+}
+
+/// Returns the two commands of [`patch_ids`]: `git log -p` with
+/// `revisions`, and `git patch-id --stable`, whose standard input the
+/// caller connects to the log's standard output. Both come from
+/// [`git_command`], so neither can let ssh ask a question.
+pub(super) fn patch_id_commands(dir: &Path, revisions: &[String]) -> [Command; 2] {
+    let mut log = git_command(dir);
+    log.args([
+        "log",
+        "-p",
+        "--no-merges",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--pretty=medium",
+    ])
+    .args(revisions)
+    .arg("--")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    let mut patch_id = git_command(dir);
+    patch_id
+        .args(["patch-id", "--stable"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    [log, patch_id]
 }

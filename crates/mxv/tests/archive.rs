@@ -6,6 +6,8 @@
 
 #[path = "support/grants.rs"]
 mod grants;
+#[path = "support/ssh.rs"]
+mod ssh;
 #[path = "support/git.rs"]
 mod support;
 
@@ -18,6 +20,7 @@ use serde_json::Value;
 use snapbox::cmd::Command;
 use tempfile::TempDir;
 
+use crate::ssh::{SSH_ORIGIN, fake_ssh};
 use crate::support::{GIT_ENV, PATH, git, repository};
 
 /// Writes `text` to the file at `path`, and creates its directory.
@@ -1233,6 +1236,43 @@ fn a_restore_without_its_mirror_refuses_and_from_origin_rebuilds_it() {
     assert_eq!(setup.head(), head);
     let (_, listed) = setup.run(&["list", "--archived"]);
     assert_eq!(listed["data"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn restore_from_origin_over_ssh_that_would_prompt_warns_and_restores_from_the_mirror() {
+    let setup = Setup::new();
+    let ssh = fake_ssh(&setup.root(), &setup.root().join("origin.git"));
+    git(
+        &setup.checkout(),
+        &["remote", "set-url", "origin", SSH_ORIGIN],
+    );
+    let head = setup.head();
+    setup.archive();
+    let started = std::time::Instant::now();
+    let (exit, restored) = Setup::finished(
+        setup
+            .command(&setup.root())
+            .env("GIT_SSH_COMMAND", ssh.command("unknown")),
+        &["restore", "triage", "--from-origin", "--yes"],
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(exit, 0, "{restored}\n{}", ssh.logged());
+    let printed = restored.to_string();
+    assert!(
+        printed.contains("starts from what its mirror last fetched"),
+        "{printed}"
+    );
+    assert!(printed.contains("example.invalid"), "{printed}");
+    assert!(
+        printed.contains("Host key verification failed."),
+        "{printed}"
+    );
+    assert!(ssh.logged().contains("args: unknown "), "{}", ssh.logged());
+    assert_eq!(setup.head(), head);
 }
 
 #[test]

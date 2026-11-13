@@ -199,3 +199,19 @@ fn a_container_engine_failure_without_its_own_kind_opens_with_what_failed() {
         "phase's container engine failed: docker pull was cancelled"
     );
 }
+
+#[test]
+fn an_ssh_refusal_prints_the_host_and_the_line_ssh_gave() {
+    let error = Error::SshRefused {
+        remote: "ssh://git@example.invalid/acme/app.git".to_owned(),
+        host: "example.invalid".to_owned(),
+        user: Some("git".to_owned()),
+        port: None,
+        refusal: crate::error::SshRefusal::HostKeyUnverified,
+        message: "Host key verification failed.".to_owned(),
+    };
+    assert_eq!(
+        error.to_string(),
+        "ssh refused to fetch ssh://git@example.invalid/acme/app.git, because example.invalid has a key that the known hosts file does not hold: Host key verification failed."
+    );
+}

@@ -20,6 +20,18 @@ workspace may need to act on.
 
 ### Changed
 
+- A fetch from an SSH origin never waits on a question from ssh. mxv sets
+  `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=false` beside
+  `GIT_TERMINAL_PROMPT=0` on every git command, so ssh fails at once where it
+  would have asked for a passphrase or about a host key. The SSH command that
+  a person set in `GIT_SSH_COMMAND`, `core.sshCommand` or `GIT_SSH` is kept.
+  A person's own `SSH_ASKPASS` program no longer runs for mxv's git commands.
+- A fetch that ssh refuses fails with `mxv::ssh::authentication_failed`,
+  `mxv::ssh::host_key_unverified` or `mxv::ssh::host_key_changed`, whose
+  fields name the remote, the host and ssh's line, in place of
+  `mxv::mirror::fetch_failed` or `mxv::git::failed`. A script that matched
+  `mxv::mirror::fetch_failed` for such a failure reads the new codes. The
+  library's `Error` has the variant `SshRefused` and the enum `SshRefusal`.
 - No lifecycle verb fetches unless a person passes `--from-origin`. `mxv remove`
   and `mxv archive` no longer fetch origin before they count a clone's
   unpushed commits, so they work offline, and a refusal for unpushed commits

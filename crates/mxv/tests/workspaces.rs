@@ -5,6 +5,8 @@
 
 #![cfg(test)]
 
+#[path = "support/ssh.rs"]
+mod ssh;
 #[path = "support/git.rs"]
 mod support;
 
@@ -15,6 +17,7 @@ use serde_json::Value;
 use snapbox::cmd::Command;
 use tempfile::TempDir;
 
+use crate::ssh::{SSH_ORIGIN, fake_ssh};
 use crate::support::{GIT_ENV, PATH, git, repository};
 
 /// A temporary directory with a repository, a workspace root and a state
@@ -990,6 +993,104 @@ fn new_fails_with_mirror_fetch_failed_when_the_origin_is_gone_and_leaves_nothing
     assert!(!setup.workspace("reading-list").exists());
     let (_, listed) = setup.json(&["list"]);
     assert_eq!(listed["total"], 0, "{listed}");
+}
+
+/// The most time that a `mxv new` whose fetch fails may take: far less
+/// than the fetch deadline of 120 seconds, so a fetch that waited on a
+/// question until the deadline ended it fails the test.
+const AT_ONCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[test]
+fn new_over_ssh_that_would_prompt_fails_with_the_ssh_code_names_the_remote_and_leaves_nothing() {
+    let setup = Setup::new();
+    let ssh = fake_ssh(&setup.root(), &setup.root().join("origin.git"));
+    git(&setup.clone, &["remote", "set-url", "origin", SSH_ORIGIN]);
+    let started = std::time::Instant::now();
+    let (exit, document) = Setup::run_json(
+        setup
+            .command(&["new", "reading-list", "--repo", "app"])
+            .env("GIT_SSH_COMMAND", ssh.command("deny")),
+    );
+    assert!(started.elapsed() < AT_ONCE, "{:?}", started.elapsed());
+    assert_eq!(exit, 1, "{document}\n{}", ssh.logged());
+    assert_eq!(document["code"], "mxv::ssh::authentication_failed");
+    assert_eq!(document["fields"]["remote"], SSH_ORIGIN);
+    assert_eq!(document["fields"]["host"], "example.invalid");
+    assert_eq!(
+        document["fields"]["message"],
+        "git@example.invalid: Permission denied (publickey)."
+    );
+    assert!(
+        document["recovery"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ssh-add"),
+        "{document}"
+    );
+    assert!(!setup.workspace("reading-list").exists());
+    let (_, listed) = setup.json(&["list"]);
+    assert_eq!(listed["total"], 0, "{listed}");
+}
+
+#[test]
+fn new_keeps_the_ssh_command_the_person_set_in_the_environment() {
+    let setup = Setup::new();
+    let ssh = fake_ssh(&setup.root(), &setup.root().join("origin.git"));
+    git(&setup.clone, &["remote", "set-url", "origin", SSH_ORIGIN]);
+    let (exit, document) = Setup::run_json(
+        setup
+            .command(&["new", "reading-list", "--repo", "app"])
+            .env("GIT_SSH_COMMAND", ssh.command("accept")),
+    );
+    assert_eq!(exit, 0, "{document}\n{}", ssh.logged());
+    let logged = ssh.logged();
+    assert!(logged.contains("args: accept "), "{logged}");
+    assert!(!logged.contains("BatchMode"), "{logged}");
+    assert!(logged.contains("SSH_ASKPASS=false\n"), "{logged}");
+    assert!(logged.contains("SSH_ASKPASS_REQUIRE=force\n"), "{logged}");
+    let checkout = setup.workspace("reading-list").join("app");
+    let origin = git(&checkout, &["remote", "get-url", "origin"]);
+    assert_eq!(origin.trim(), SSH_ORIGIN);
+}
+
+/// Starts an HTTP server on a free local port that answers every request
+/// with `401 Unauthorized` and a request for a password, and returns its
+/// port. The server runs until the test's process ends.
+fn password_server() -> u16 {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(buffer.get(..read).unwrap_or_default()),
+                }
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"app\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    port
+}
+
+#[test]
+fn new_over_https_that_needs_a_password_still_fails_at_once_with_mirror_fetch_failed() {
+    let setup = Setup::new();
+    let url = format!("http://127.0.0.1:{}/acme/app.git", password_server());
+    git(&setup.clone, &["remote", "set-url", "origin", &url]);
+    let started = std::time::Instant::now();
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app"]);
+    assert!(started.elapsed() < AT_ONCE, "{:?}", started.elapsed());
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::mirror::fetch_failed", "{document}");
+    assert_eq!(document["fields"]["origin"], url);
+    assert!(!setup.workspace("reading-list").exists());
 }
 
 #[test]

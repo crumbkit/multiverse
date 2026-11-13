@@ -1,6 +1,10 @@
 use crumbkit::{Call, Failure as _, Recovery};
+use multiverse::SshRefusal;
 
-use super::{MxvFailure, RESTORE_CHANGED, WORKSPACE_NOT_FOUND};
+use super::{
+    MxvFailure, RESTORE_CHANGED, SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED,
+    SSH_HOST_KEY_UNVERIFIED, WORKSPACE_NOT_FOUND,
+};
 
 #[test]
 fn a_record_that_is_gone_at_a_write_reads_as_a_workspace_that_is_not_found() {
@@ -37,4 +41,77 @@ fn a_restore_whose_records_changed_after_the_question_offers_its_dry_run() {
         "--dry-run".to_owned(),
     ]);
     assert_eq!(format!("{call:?}"), format!("{expected:?}"));
+}
+
+/// Returns the failure of an ssh refusal of `refusal` by the host
+/// `git.example.com` on port `port`.
+fn ssh_refused(refusal: SshRefusal, port: Option<u16>) -> MxvFailure {
+    MxvFailure::from(multiverse::Error::SshRefused {
+        remote: "ssh://git@git.example.com/acme/app.git".to_owned(),
+        host: "git.example.com".to_owned(),
+        user: Some("git".to_owned()),
+        port,
+        refusal,
+        message: "Host key verification failed.".to_owned(),
+    })
+}
+
+/// Returns the advice of `failure`'s recovery.
+fn hint(failure: &MxvFailure) -> String {
+    let Recovery::Hint(text) = failure.recovery() else {
+        panic!("{failure:?} offers no advice");
+    };
+    text
+}
+
+#[test]
+fn each_ssh_refusal_has_its_own_code_and_names_the_remote_and_the_host() {
+    for (refusal, code) in [
+        (SshRefusal::AuthenticationFailed, &SSH_AUTHENTICATION_FAILED),
+        (SshRefusal::HostKeyUnverified, &SSH_HOST_KEY_UNVERIFIED),
+        (SshRefusal::HostKeyChanged, &SSH_HOST_KEY_CHANGED),
+    ] {
+        let failure = ssh_refused(refusal, None);
+        assert_eq!(failure.code(), code);
+        let fields: Vec<String> = failure
+            .fields()
+            .iter()
+            .map(|field| format!("{field:?}"))
+            .collect();
+        let fields = fields.join("\n");
+        for value in [
+            "ssh://git@git.example.com/acme/app.git",
+            "git.example.com",
+            "Host key verification failed.",
+        ] {
+            assert!(fields.contains(value), "{value} is missing from {fields}");
+        }
+        assert!(hint(&failure).contains("git.example.com"), "{failure:?}");
+    }
+    let unverified = hint(&ssh_refused(SshRefusal::HostKeyUnverified, Some(2222)));
+    assert!(
+        unverified.contains("`ssh -p 2222 git@git.example.com`"),
+        "{unverified}"
+    );
+    let changed = hint(&ssh_refused(SshRefusal::HostKeyChanged, Some(2222)));
+    assert!(
+        changed.contains("`ssh-keygen -R '[git.example.com]:2222'`"),
+        "{changed}"
+    );
+}
+
+#[test]
+fn the_recovery_of_a_changed_host_key_never_tells_the_person_to_accept_it() {
+    let changed = hint(&ssh_refused(SshRefusal::HostKeyChanged, None));
+    assert!(!changed.contains("yes"), "{changed}");
+    assert!(changed.contains("find out why"), "{changed}");
+    assert!(
+        changed.contains("`ssh-keygen -R git.example.com`"),
+        "{changed}"
+    );
+    let unverified = hint(&ssh_refused(SshRefusal::HostKeyUnverified, None));
+    assert!(
+        unverified.contains("compare the fingerprint"),
+        "{unverified}"
+    );
 }
