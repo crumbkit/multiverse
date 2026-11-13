@@ -16,6 +16,7 @@ use crate::phase::{Phase, UpDeadlines};
 use crate::plan::AppPlan;
 use crate::record::run::{ObjectKey, Started, VolumeOwner};
 use crate::record::store::{Journal, RunStore};
+use crate::record::testing::write_file;
 use crate::record::{DockerCause, SweepOutcome};
 use crate::report::{AppOutcome, Note, Report};
 use crate::select::Selection;
@@ -437,7 +438,9 @@ fn a_sweep_in_a_second_state_directory_with_the_same_id_leaves_the_first_ones_co
     let (second, _) = world.second_state();
     let copied = RunStore::new(second.path()).path(&world.id);
     std::fs::create_dir_all(copied.parent().unwrap()).unwrap();
-    std::fs::copy(RunStore::new(world.state.path()).path(&world.id), &copied).unwrap();
+    let record =
+        std::fs::read_to_string(RunStore::new(world.state.path()).path(&world.id)).unwrap();
+    write_file(&copied, &record);
     let elsewhere = Phase::new(second.path().to_path_buf());
 
     let swept = elsewhere.sweep(&world.id, false).unwrap();
