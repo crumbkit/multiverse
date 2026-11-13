@@ -48,7 +48,7 @@ pub use failure::{
     RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND,
     RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
 };
-use failure::{archive_refusal, restore_refusal};
+use failure::{refused, restore_refusal};
 
 /// The document that `mxv archive` prints.
 pub(crate) const ARCHIVE: Document<Prose<ArchiveResult>> = Document::new(
@@ -1197,7 +1197,7 @@ pub(crate) fn archive(
     {
         ArchivePlanned::Ready(plan) => *plan,
         ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, false))),
-        ArchivePlanned::Refused(refusal) => return Err(archive_refusal(&name, refusal).into()),
+        ArchivePlanned::Refused(refusal) => return Err(refused(&name, refusal)),
         ArchivePlanned::Finish(mut archive) => {
             let mut done = Done {
                 cd: cd_target(environment, &archive.path),
@@ -1248,7 +1248,7 @@ pub(crate) fn archive(
             disposable,
             late,
         } => (*archive, *removal, disposable, late),
-        ArchiveOutcome::Refused(refusal) => return Err(archive_refusal(&name, refusal).into()),
+        ArchiveOutcome::Refused(refusal) => return Err(refused(&name, refusal)),
     };
     warnings.extend(removal.warnings.iter().cloned());
     let volumes = finish(
@@ -1304,7 +1304,7 @@ fn dry_run(
     {
         ArchivePlanned::Ready(plan) => *plan,
         ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, true))),
-        ArchivePlanned::Refused(refusal) => return Err(archive_refusal(name, refusal).into()),
+        ArchivePlanned::Refused(refusal) => return Err(refused(name, refusal)),
         ArchivePlanned::Finish(archive) => {
             let done = Done {
                 cd: cd_target(environment, &archive.path),

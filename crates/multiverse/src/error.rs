@@ -113,6 +113,24 @@ pub enum Error {
         /// The workspace's name.
         name: crate::name::WorkspaceName,
     },
+    /// [`crate::Store::update`] or [`crate::Store::advance`] found the
+    /// workspace's record in another state than the one the command read,
+    /// such as when `mxv new` finished it meanwhile, so it wrote nothing.
+    StateChanged {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+    },
+    /// [`crate::Store::advance`] was asked for a move between two states
+    /// that no workspace makes, so it wrote nothing. No command asks for
+    /// one, so this is a defect of mxv.
+    TransitionRefused {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The state that the record holds.
+        from: crate::record::WorkspaceState,
+        /// The state that the caller asked for.
+        to: crate::record::WorkspaceState,
+    },
     /// A workspace record was written by a newer version of multiverse.
     NewerRecord {
         /// The path of the record.
@@ -561,6 +579,14 @@ impl fmt::Display for Error {
                 "the workspace record {} holds the name {name}, which its file name does not match",
                 path.display()
             ),
+            Self::StateChanged { name } => write!(
+                formatter,
+                "the record of the workspace {name} changed state after this command read it, so mxv wrote nothing"
+            ),
+            Self::TransitionRefused { name, from, to } => write!(
+                formatter,
+                "mxv cannot move the workspace {name} from {from} to {to}, so it wrote nothing"
+            ),
             Self::RecordMissing { name } => write!(
                 formatter,
                 "the workspace {name} has no record, so mxv wrote none"
@@ -817,6 +843,8 @@ impl std::error::Error for Error {
             | Self::TimedOut { .. }
             | Self::MismatchedRecord { .. }
             | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
             | Self::UnsupportedOs { .. }

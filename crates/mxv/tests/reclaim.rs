@@ -451,3 +451,24 @@ fn an_idle_age_under_ten_minutes_on_the_command_line_is_refused() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("shorter than 10m"), "{stderr}");
 }
+
+#[test]
+fn a_reclaim_keeps_a_running_workspace_whose_record_says_mxv_new_did_not_finish() {
+    let setup = Setup::new();
+    setup.idle_age("0s");
+    setup.running("triage");
+    let record = setup.root().join("state/mxv/workspaces/triage.json");
+    let saved = fs::read_to_string(&record).unwrap();
+    let mut changed: Value = serde_json::from_str(&saved).unwrap();
+    changed["state"] = Value::from("creating");
+    write(&record, &serde_json::to_string_pretty(&changed).unwrap());
+    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
+    // The record goes back, so the setup's drop stops the sleeper.
+    write(&record, &saved);
+    assert_eq!(exit, 0, "{document}");
+    let triage = row(&document, "triage");
+    assert_eq!(triage["state"], "kept", "{document}");
+    let reason = triage["reason"].as_str().unwrap();
+    assert!(reason.contains("mxv new"), "{reason}");
+    assert_eq!(setup.state("triage"), "running");
+}

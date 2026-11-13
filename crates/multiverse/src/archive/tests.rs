@@ -2850,3 +2850,38 @@ fn a_locked_worktree_refuses_as_a_checkout_that_cannot_be_read() {
     let text = refusal_text(setup.planned(ArchiveOptions::default()));
     assert!(text.contains("Unusable"), "{text}");
 }
+
+/// Writes the record of the workspace with the state `state`, as a
+/// `mxv new` that stopped before its last write leaves `creating`.
+fn set_state(setup: &Setup, state: &str) {
+    let path = setup.workspaces.store.path(&name());
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["state"] = serde_json::Value::from(state);
+    write(&path, serde_json::to_string_pretty(&record).unwrap());
+}
+
+#[test]
+fn an_archive_refuses_a_workspace_that_mxv_new_did_not_finish_of_either_kind() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let setup = setup(kind);
+        setup.create();
+        set_state(&setup, "creating");
+        assert_eq!(
+            setup.refusal(ArchiveOptions::default()),
+            ArchiveRefusal::Creating,
+            "{kind:?}"
+        );
+        assert!(setup.checkout().exists(), "{kind:?}");
+    }
+}
+
+#[test]
+fn an_archive_admits_a_live_workspace_of_either_kind() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let setup = setup(kind);
+        setup.create();
+        set_state(&setup, "live");
+        setup.plan(ArchiveOptions::default());
+    }
+}

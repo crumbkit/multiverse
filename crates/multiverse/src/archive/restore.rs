@@ -430,7 +430,9 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         (self.checkpoint)("mirrors")?;
-        let mut workspace = archive.workspace();
+        // The record is written last, once every checkout is in place, so
+        // it is written live.
+        let mut workspace = archive.workspace().finished();
         let mut made = Made {
             record_not_ours: true,
             ..Made::default()

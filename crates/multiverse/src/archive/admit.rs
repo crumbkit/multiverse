@@ -24,7 +24,7 @@ use crate::error::Error;
 use crate::health::{ArchiveCase, UnreadPins, archive_case};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
-use crate::record::{Workspace, WorkspaceKind};
+use crate::record::{Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::MOST_RECORD_BYTES;
 use crate::workspaces::{Allow, CheckoutRemoval, Fate, Mode, Removal, RemovalPlan, Workspaces};
 
@@ -299,6 +299,9 @@ pub struct Uncommitted {
 pub enum ArchiveRefusal {
     /// No workspace has the name.
     NotFound,
+    /// `mxv new` has not finished the workspace, so its record names
+    /// checkouts that may be missing or partial.
+    Creating,
     /// An archive already holds the name.
     NameTaken(Box<Archive>),
     /// The archive of the name has not finished, its workspace is gone, and
@@ -435,11 +438,15 @@ pub(super) fn submodule_items(checkout: &Path, found: &Concealed) -> Vec<(String
     items
 }
 
-/// Returns the refusal of the first checkout of `workspace` that an archive
+/// Returns the refusal of a workspace that `mxv new` did not finish, of
+/// either kind, or of the first checkout of `workspace` that an archive
 /// cannot start on: one that `mxv add` left unfinished, or a clone whose
 /// mirror is gone, unless an earlier run of this archive `resuming` already
 /// retired the clone.
 fn check_checkouts(workspace: &Workspace, resuming: Option<&Archive>) -> Option<ArchivePlanned> {
+    if workspace.state() == WorkspaceState::Creating {
+        return Some(ArchivePlanned::Refused(ArchiveRefusal::Creating));
+    }
     for checkout in &workspace.checkouts {
         if workspace.is_unfinished(checkout) {
             return Some(unusable(

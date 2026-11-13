@@ -1506,3 +1506,68 @@ fn remove_deletes_the_workspace_manifest_with_the_workspace() {
     );
     assert!(!setup.workspace("own").exists());
 }
+
+/// Sets the state of the record of the workspace `name` to `state`, as a
+/// `mxv new` that stopped before its last write leaves `creating`.
+fn set_state(setup: &Setup, name: &str, state: &str) {
+    let path = setup
+        .root()
+        .join("state/mxv/workspaces")
+        .join(format!("{name}.json"));
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["state"] = Value::from(state);
+    write_text(&path, &serde_json::to_string_pretty(&record).unwrap());
+}
+
+#[test]
+fn remove_and_a_forced_remove_remove_a_clone_workspace_that_mxv_new_did_not_finish() {
+    for force in [false, true] {
+        let setup = Setup::new();
+        let workspace = created(&setup, "reading-list");
+        set_state(&setup, "reading-list", "creating");
+        let mut args = vec!["remove", "reading-list", "--yes"];
+        if force {
+            args.push("--force");
+        }
+        let (exit, document) = setup.json(&args);
+        assert_eq!(exit, 0, "{force}: {document}");
+        assert!(!workspace.exists(), "{force}: {document}");
+        let (_, listed) = setup.json(&["list"]);
+        assert_eq!(listed["data"].as_array().unwrap().len(), 0, "{listed}");
+    }
+}
+
+#[test]
+fn remove_and_a_forced_remove_remove_a_worktree_workspace_that_mxv_new_did_not_finish() {
+    for force in [false, true] {
+        let setup = Setup::new();
+        let workspace = worktrees(&setup, "reading-list");
+        let checkout = workspace.join("app");
+        // `mxv new` locks a worktree as initializing while it adds it, so a
+        // run that stopped there leaves the lock and the new branch.
+        git(
+            &setup.clone,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "initializing",
+                checkout.to_str().unwrap(),
+            ],
+        );
+        set_state(&setup, "reading-list", "creating");
+        let mut args = vec!["remove", "reading-list", "--yes"];
+        if force {
+            args.push("--force");
+        }
+        let (exit, document) = setup.json(&args);
+        assert_eq!(exit, 0, "{force}: {document}");
+        assert!(!workspace.exists(), "{force}: {document}");
+        assert!(
+            git(&setup.clone, &["branch", "--list", "reading-list"]).is_empty(),
+            "{force}: {document}"
+        );
+        let (_, listed) = setup.json(&["list"]);
+        assert_eq!(listed["data"].as_array().unwrap().len(), 0, "{listed}");
+    }
+}

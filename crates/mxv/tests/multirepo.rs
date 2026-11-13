@@ -755,3 +755,44 @@ fn a_record_that_the_previous_mxv_wrote_still_reads_takes_a_checkout_and_is_remo
     assert_eq!(exit, 0, "{document}");
     assert!(!workspace.exists());
 }
+
+/// Sets the state of the record of the workspace `name` to `state`, as a
+/// `mxv new` that stopped before its last write leaves `creating`.
+fn set_state(setup: &Setup, name: &str, state: &str) {
+    let path = setup
+        .root()
+        .join("state/mxv/workspaces")
+        .join(format!("{name}.json"));
+    let mut record: Value = serde_json::from_str(&setup.record(name)).unwrap();
+    record["state"] = Value::from(state);
+    write_text(&path, &serde_json::to_string_pretty(&record).unwrap());
+}
+
+#[test]
+fn add_and_clean_refuse_a_workspace_that_mxv_new_did_not_finish() {
+    let setup = Setup::new();
+    let workspace = setup.created("triage", &["api"]);
+    set_state(&setup, "triage", "creating");
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "web"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::creating", "{document}");
+    assert!(!workspace.join("web").exists());
+    let (exit, document) = setup.json(&["clean", "triage", "--dry-run"]);
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document.to_string().contains("mxv::workspace::creating"),
+        "{document}"
+    );
+}
+
+#[test]
+fn add_and_clean_run_on_a_live_workspace() {
+    let setup = Setup::new();
+    let workspace = setup.created("triage", &["api"]);
+    set_state(&setup, "triage", "live");
+    let (exit, document) = setup.json(&["clean", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "web"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(workspace.join("web").exists());
+}
