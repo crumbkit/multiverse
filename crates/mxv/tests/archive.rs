@@ -1179,6 +1179,39 @@ fn a_mirror_that_is_gone_refuses_with_its_code() {
 }
 
 #[test]
+fn a_restore_without_its_mirror_refuses_and_from_origin_rebuilds_it() {
+    let setup = Setup::new();
+    let (_, shown) = setup.run(&["show", "triage", "--full"]);
+    let mirror = shown["data"][0]["checkouts"][0]["mirror"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let head = setup.head();
+    setup.archive();
+    fs::remove_dir_all(&mirror).unwrap();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::restore::mirror_missing",
+        "{document}"
+    );
+    assert!(
+        document["recovery"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("--from-origin"),
+        "{document}"
+    );
+    assert!(!Path::new(&mirror).exists(), "the refusal made a mirror");
+    assert!(!setup.workspace().exists());
+    let (exit, restored) = setup.run(&["restore", "triage", "--from-origin", "--yes"]);
+    assert_eq!(exit, 0, "{restored}");
+    assert_eq!(setup.head(), head);
+    let (_, listed) = setup.run(&["list", "--archived"]);
+    assert_eq!(listed["data"].as_array().unwrap().len(), 0);
+}
+
+#[test]
 fn an_unborn_head_refuses_with_the_code_of_a_checkout_that_cannot_be_read() {
     let setup = Setup::new();
     git(

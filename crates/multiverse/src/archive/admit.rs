@@ -595,11 +595,7 @@ impl<B: Backend> Workspaces<B> {
         if let Some(refused) = self.check_heads(&workspace) {
             return Ok(refused);
         }
-        let mut warnings = if refresh {
-            self.refresh_clones(&workspace)
-        } else {
-            Vec::new()
-        };
+        let mut warnings = Vec::new();
         let removal = match self.classify(name)? {
             Ok(removal) => removal,
             Err(refused) => return Ok(refused),
@@ -976,29 +972,6 @@ impl<B: Backend> Workspaces<B> {
             }
             (None, Some(_)) => refused(ArchiveRefusal::NotFound),
         }
-    }
-
-    /// Fetches each clone's `origin`, so the commits that exist only on
-    /// this machine are read against what the origin holds now, and returns
-    /// a warning for each fetch that failed. The pins keep each commit
-    /// either way.
-    fn refresh_clones(&self, workspace: &Workspace) -> Vec<String> {
-        if workspace.kind != WorkspaceKind::Clone {
-            return Vec::new();
-        }
-        workspace
-            .checkouts
-            .iter()
-            .filter(|checkout| checkout.path.is_dir())
-            .filter_map(|checkout| {
-                self.backend.refresh_origin(&checkout.path).err().map(|error| {
-                    format!(
-                        "mxv could not fetch the origin of {}, so it reads which commits exist only on this machine as the checkout last fetched them: {error}",
-                        checkout.name
-                    )
-                })
-            })
-            .collect()
     }
 
     /// Classifies the workspace `name` as `mxv remove` does, allowing

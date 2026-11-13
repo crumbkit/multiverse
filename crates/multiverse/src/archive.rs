@@ -52,8 +52,8 @@ pub use record::{
     Archive, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash, KeptWip,
 };
 pub use restore::{
-    ArchivedRemoval, PortChange, PutBack, RestoreOutcome, RestorePlan, RestorePlanned,
-    RestoreRefusal, Restored,
+    ArchivedRemoval, LostPin, MirrorLoss, PortChange, PutBack, RestoreOptions, RestoreOutcome,
+    RestorePlan, RestorePlanned, RestoreRefusal, Restored,
 };
 pub use retire::ArchiveOutcome;
 pub use root::{RootEntry, RootKind};

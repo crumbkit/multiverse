@@ -531,21 +531,24 @@ Effects: destructive, idempotent, closed-world.
 
 Rebuild an archived workspace at its archived commits.
 
+Restore fetches nothing. A clone's archived commits live in its mirror, so when a mirror is gone, mxv refuses with mxv::restore::mirror\_missing, lists per checkout what the mirror held that only it kept, such as uncommitted work, stashes and local branches, and changes nothing. `--from-origin` is the one option that contacts origin: it makes a new mirror and rebuilds each checkout at the archived commit when origin holds it, else at the tip of the archived branch on origin, else at the tip of origin's default branch. It restores the workspace's root files and the ignored files, lists each pin that it could not restore as lost, and then deletes the archive. A fetch that fails leaves the new mirror deleted and the archive whole.
+
 When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name\_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
 
 ### Arguments
 
 - `<NAME>`: The name of the archived workspace. Required.
 - `--force`: Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
+- `--from-origin`: Fetch origin into a new mirror when a clone's mirror is gone, and restore only what origin holds; this is the only option that opens a network connection
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 
 ### Examples
 
-Print what restoring the archived workspace sample would do.
+Print what restoring the archived workspace sample would do, with a new mirror from origin.
 
 ```sh
-mxv restore sample --dry-run
+mxv restore sample --from-origin --dry-run
 ```
 
 Effects: additive, idempotent, open-world.
@@ -586,6 +589,8 @@ Effects: destructive, idempotent, closed-world.
 ## `mxv remove`
 
 Remove a workspace's checkouts, its merged branches, its directory and its record.
+
+Remove fetches nothing. It counts a clone's unpushed commits against what the clone's mirror last fetched, and a refusal names how long ago that was.
 
 When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
 

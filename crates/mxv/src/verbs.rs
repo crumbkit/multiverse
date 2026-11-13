@@ -870,11 +870,16 @@ fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure 
             allow,
         },
         RemovalPlan::Unpushed {
-            checkout, commits, ..
+            checkout,
+            commits,
+            fetched,
+            ..
         } => MxvFailure::Unpushed {
             name,
             path: checkout,
             commits,
+            fetched_ago: fetched
+                .map(|time| crumbkit::Age::since(time, std::time::SystemTime::now())),
             allow,
         },
         RemovalPlan::Stashed {

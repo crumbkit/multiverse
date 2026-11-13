@@ -5,8 +5,8 @@ use std::fmt;
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
 use multiverse::{
-    ArchiveRefusal, ArchiveState, FileStatus, Operation, RestoreRefusal, Unkept, UnkeptKind,
-    WorkspaceName,
+    ArchiveRefusal, ArchiveState, FileStatus, MirrorLoss, Operation, RestoreRefusal, Unkept,
+    UnkeptKind, WorkspaceName,
 };
 
 /// The code of a name that no workspace or archive has.
@@ -54,6 +54,9 @@ pub const RESTORE_ROOT_FILE_CHANGED: Code = Code::new("mxv", "restore", "root_fi
 /// The code of an ignored file whose copy in the archive is missing or
 /// differs from its digest.
 pub const RESTORE_IGNORED_DAMAGED: Code = Code::new("mxv", "restore", "ignored_damaged");
+/// The code of a restore of a clone whose mirror is gone, which only
+/// `--from-origin` rebuilds.
+pub const RESTORE_MIRROR_MISSING: Code = Code::new("mxv", "restore", "mirror_missing");
 /// The code of an ignored file whose path the rebuilt workspace already
 /// holds.
 pub const RESTORE_IGNORED_TAKEN: Code = Code::new("mxv", "restore", "ignored_taken");
@@ -81,6 +84,7 @@ pub(crate) const CODES: &[&Code] = &[
     &RESTORE_ROOT_FILE_CHANGED,
     &RESTORE_IGNORED_DAMAGED,
     &RESTORE_IGNORED_TAKEN,
+    &RESTORE_MIRROR_MISSING,
 ];
 
 /// Why an archive or a restore stopped.
@@ -106,6 +110,14 @@ pub(crate) enum ArchiveFailure {
         folder: String,
         /// What differs.
         differences: Vec<String>,
+    },
+    /// The mirrors of an archive's clones are gone, and the restore may not
+    /// fetch.
+    RestoreMirrorMissing {
+        /// The archive's name.
+        name: String,
+        /// Each checkout whose mirror is gone.
+        checkouts: Vec<MirrorLoss>,
     },
     /// A clone's mirror is gone.
     MirrorMissing {
@@ -285,6 +297,9 @@ pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> 
 pub(super) fn restore_refusal(name: &WorkspaceName, refusal: RestoreRefusal) -> ArchiveFailure {
     let name = name.to_string();
     match refusal {
+        RestoreRefusal::MirrorMissing { checkouts } => {
+            ArchiveFailure::RestoreMirrorMissing { name, checkouts }
+        }
         RestoreRefusal::Unfinished(_) => ArchiveFailure::RestoreUnfinished { name },
         RestoreRefusal::NameTaken { path, record } => ArchiveFailure::RestoreNameTaken {
             name,
@@ -339,6 +354,7 @@ impl Failure for ArchiveFailure {
             Self::RootFileChanged { .. } => &RESTORE_ROOT_FILE_CHANGED,
             Self::IgnoredDamaged { .. } => &RESTORE_IGNORED_DAMAGED,
             Self::IgnoredTaken { .. } => &RESTORE_IGNORED_TAKEN,
+            Self::RestoreMirrorMissing { .. } => &RESTORE_MIRROR_MISSING,
         }
     }
 
@@ -413,6 +429,9 @@ impl Failure for ArchiveFailure {
             Self::IgnoredTaken { .. } => {
                 Recovery::hint("look at what wrote these paths, then restore again")
             }
+            Self::RestoreMirrorMissing { name, .. } => Recovery::hint(format!(
+                "`mxv restore {name} --from-origin` fetches origin again and restores only what origin holds, and `mxv remove --archived {name}` deletes the archive"
+            )),
         }
     }
 
@@ -491,6 +510,25 @@ impl Failure for ArchiveFailure {
             Self::RootFileChanged { name, path } => {
                 vec![Field::new("name", name), Field::new("path", path)]
             }
+            Self::RestoreMirrorMissing { name, checkouts } => vec![
+                Field::new("name", name),
+                Field::new(
+                    "mirrors",
+                    FieldValue::list(
+                        checkouts
+                            .iter()
+                            .map(|loss| loss.mirror.display().to_string()),
+                    ),
+                ),
+                Field::new(
+                    "lost",
+                    FieldValue::list(checkouts.iter().flat_map(|loss| {
+                        loss.items
+                            .iter()
+                            .map(|item| format!("{}: {item}", loss.folder))
+                    })),
+                ),
+            ],
         }
     }
 }
@@ -594,6 +632,25 @@ impl fmt::Display for ArchiveFailure {
                 "the rebuilt workspace already holds {}",
                 paths.join(", ")
             ),
+            Self::RestoreMirrorMissing { name, checkouts } => {
+                write!(
+                    formatter,
+                    "mxv cannot restore {name}, because the mirror that held its pins is gone:"
+                )?;
+                for loss in checkouts {
+                    write!(formatter, "\n- {}: {}", loss.folder, loss.mirror.display())?;
+                }
+                write!(
+                    formatter,
+                    "\nRestoring from origin would lose what only the mirror held, and it restores a commit only when origin holds it"
+                )?;
+                for loss in checkouts {
+                    for item in &loss.items {
+                        write!(formatter, "\n- {}: {item}", loss.folder)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }

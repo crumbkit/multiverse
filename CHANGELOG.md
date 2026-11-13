@@ -20,6 +20,18 @@ workspace may need to act on.
 
 ### Changed
 
+- No lifecycle verb fetches unless a person passes `--from-origin`. `mxv remove`
+  and `mxv archive` no longer fetch origin before they count a clone's
+  unpushed commits, so they work offline, and a refusal for unpushed commits
+  names how long ago the clone's mirror last fetched. The code
+  `mxv::checkout::origin_unreachable` is gone.
+- `mxv restore` refuses with the new code `mxv::restore::mirror_missing` when a
+  clone's mirror is gone, lists what only that mirror held, and changes
+  nothing. `mxv restore NAME --from-origin` makes a new mirror and rebuilds
+  each checkout at the archived commit when origin holds it, else at the
+  archived branch's tip on origin, else at origin's default branch. It lists
+  each pin it could not restore as lost, in the new `lost_pins` field of the
+  result, and then deletes the archive.
 - `mxv archive`, `mxv restore` and `mxv remove` succeed with nothing to do
   when their goal already holds, and their documents gain a `state` of
   `done`, `planned` or `unchanged`. `mxv archive -w NAME` of a name that

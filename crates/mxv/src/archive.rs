@@ -45,8 +45,8 @@ pub use failure::{
     ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE,
     ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE,
     ARCHIVE_VOLUMES_IN_USE, RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED,
-    RESTORE_IGNORED_TAKEN, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
-    RESTORE_UNFINISHED,
+    RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND,
+    RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
 };
 use failure::{archive_refusal, restore_refusal};
 
@@ -99,6 +99,10 @@ pub(crate) struct RestoreArgs {
     /// Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
     #[arg(long)]
     pub(crate) force: bool,
+
+    /// Fetch origin into a new mirror when a clone's mirror is gone, and restore only what origin holds; this is the only option that opens a network connection
+    #[arg(long)]
+    pub(crate) from_origin: bool,
 
     /// Print what the command would do, and change nothing.
     #[command(flatten)]
@@ -551,6 +555,16 @@ pub(crate) struct RestoredCheckout {
     commit: String,
 }
 
+/// One thing that only a lost mirror held, which a restore from origin could
+/// not put back.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct LostPinRow {
+    /// The checkout's folder.
+    folder: String,
+    /// What was lost.
+    what: String,
+}
+
 /// What a restore put back into one checkout besides its commit.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct PutBackRow {
@@ -763,6 +777,9 @@ pub(crate) struct RestoreResult {
     /// to the workspace's directory. A dry run does not read the copies, so
     /// it lists none.
     lost: Vec<String>,
+    /// Each pin of a lost mirror that origin did not hold, so the restore
+    /// could not put it back.
+    lost_pins: Vec<LostPinRow>,
     /// Each port that the restore gave a new number.
     ports: Vec<PortRow>,
     /// The folder of each clone whose mirror mxv clones again from its
@@ -836,6 +853,25 @@ impl fmt::Display for RestoreResult {
         }
         for row in &self.put_back {
             row.write_submodules(formatter)?;
+        }
+        let mut folders: Vec<&str> = Vec::new();
+        for pin in &self.lost_pins {
+            if !folders.contains(&pin.folder.as_str()) {
+                folders.push(&pin.folder);
+            }
+        }
+        for folder in folders {
+            let what: Vec<&str> = self
+                .lost_pins
+                .iter()
+                .filter(|pin| pin.folder == folder)
+                .map(|pin| pin.what.as_str())
+                .collect();
+            writeln!(
+                formatter,
+                "mxv lost what only the old mirror of {folder} held: {}.",
+                what.join("; ")
+            )?;
         }
         for port in &self.ports {
             writeln!(
@@ -1353,7 +1389,7 @@ fn restored_already(
             )?;
             let lock = processes::lock(environment, name)?;
             stale_pins = match workspaces
-                .plan_restore(records, name, args.force)
+                .plan_restore(records, name, restore_options(args))
                 .map_err(MxvFailure::from)?
             {
                 RestorePlanned::Unchanged { stale: Some(again) } if again.id == confirmed.id => {
@@ -1387,11 +1423,17 @@ fn restored_already(
         checkouts: Vec::new(),
         put_back: Vec::new(),
         lost: Vec::new(),
+        lost_pins: Vec::new(),
         ports: Vec::new(),
         missing_mirrors: Vec::new(),
         warnings,
         planned: output.is_dry_run(),
     }))
+}
+
+/// Returns what `args` allows the restore to do.
+fn restore_options(args: &RestoreArgs) -> multiverse::RestoreOptions {
+    multiverse::RestoreOptions::new(args.force, args.from_origin)
 }
 
 /// Restores the workspace that `args` names.
@@ -1408,7 +1450,7 @@ pub(crate) fn restore(
         .runs()?
         .with_port_range(environment.port_range()?);
     let plan = match workspaces
-        .plan_restore(&records, &name, args.force)
+        .plan_restore(&records, &name, restore_options(args))
         .map_err(MxvFailure::from)?
     {
         RestorePlanned::Ready(plan) => *plan,
@@ -1445,6 +1487,7 @@ pub(crate) fn restore(
                 .filter(|row| !row.is_empty())
                 .collect(),
             lost: Vec::new(),
+            lost_pins: Vec::new(),
             ports: port_rows(ports),
             missing_mirrors: plan.missing_mirrors,
             warnings: Vec::new(),
@@ -1480,13 +1523,22 @@ pub(crate) fn restore(
         );
     }
     drop(lock);
+    let lost_pins = restored.lost_pins.clone();
+    // A restore from origin may start a checkout at another commit than
+    // the archived one.
+    let mut checkouts = restored_checkouts(&archive);
+    for (row, rebuilt) in checkouts.iter_mut().zip(&restored.workspace.checkouts) {
+        if let Some(commit) = &rebuilt.commit {
+            row.commit.clone_from(commit);
+        }
+    }
     Ok(Prose::new(RestoreResult {
         state: LifecycleState::Done,
         name: name.to_string(),
         path: archive.path.display().to_string(),
         stale_pins: Vec::new(),
         stale: false,
-        checkouts: restored_checkouts(&archive),
+        checkouts,
         put_back: restored
             .put_back
             .into_iter()
@@ -1495,12 +1547,22 @@ pub(crate) fn restore(
                 PutBackRow::restored(
                     put_back,
                     checkout.path.display().to_string(),
-                    checkout.kept.wip.is_some(),
+                    checkout.kept.wip.is_some()
+                        && !lost_pins.iter().any(|pin| {
+                            pin.folder == checkout.folder && pin.what == "the uncommitted work"
+                        }),
                 )
             })
             .filter(|row| !row.is_empty())
             .collect(),
         lost: restored.lost,
+        lost_pins: lost_pins
+            .into_iter()
+            .map(|pin| LostPinRow {
+                folder: pin.folder,
+                what: pin.what,
+            })
+            .collect(),
         ports: port_rows(restored.ports),
         missing_mirrors,
         warnings: restored.warnings,

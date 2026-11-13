@@ -6,13 +6,14 @@ Arguments:
   <NAME>  The name of the archived workspace
 
 Options:
-      --force    Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
-      --dry-run  Report what the command would change, and change nothing
-      --yes      Proceed without asking for confirmation
-  -h, --help     Print help (see more with '--help')
+      --force        Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
+      --from-origin  Fetch origin into a new mirror when a clone's mirror is gone, and restore only what origin holds; this is the only option that opens a network connection
+      --dry-run      Report what the command would change, and change nothing
+      --yes          Proceed without asking for confirmation
+  -h, --help         Print help (see more with '--help')
 
 Examples:
-  mxv restore sample --dry-run
+  mxv restore sample --from-origin --dry-run
 
 Effects: additive, idempotent, open-world.
 Global flags: --json, --no-input. `mxv restore --help` describes them.

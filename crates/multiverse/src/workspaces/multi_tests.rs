@@ -988,20 +988,15 @@ fn a_removal_refuses_a_stash_in_the_second_checkout_and_names_it() {
 }
 
 #[test]
-fn a_removal_refuses_when_the_second_checkouts_origin_is_unreachable_and_names_it() {
+fn a_removal_plans_without_contacting_an_origin_that_is_gone() {
     let setup = setup();
-    let workspace = created(&setup, "triage", &both(&setup));
+    created(&setup, "triage", &both(&setup));
     fs::remove_dir_all(&setup.web.origin).unwrap();
-    let error = setup
+    let plan = setup
         .workspaces
         .plan_removal(&name("triage"), Allow::default())
-        .unwrap_err();
-    match error {
-        crate::error::Error::OriginFetchFailed { checkout, .. } => {
-            assert_eq!(checkout, workspace.checkouts[1].path);
-        }
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    assert!(matches!(plan, RemovalPlan::Ready(_)), "{plan:?}");
 }
 
 #[test]

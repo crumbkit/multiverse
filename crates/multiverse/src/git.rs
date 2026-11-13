@@ -118,16 +118,8 @@ impl Finished {
     }
 }
 
-/// The refspec that copies the tags of a clone's `origin` into a namespace
-/// of their own, so a tag counts as pushed only while `origin` holds it.
-const ORIGIN_TAGS: &str = "+refs/tags/*:refs/mxv/origin/tags/*";
-
-/// The refspec that copies the notes of a clone's `origin` into a
-/// namespace of their own, so a note counts as pushed only while `origin`
-/// holds it.
-const ORIGIN_NOTES: &str = "+refs/notes/*:refs/mxv/origin/notes/*";
-
-/// The pattern of the copies of the tags and notes of a clone's `origin`.
+/// The pattern of the copies of the tags and notes of a clone's `origin`
+/// that earlier versions of mxv fetched, which a removal no longer does.
 const ORIGIN_REFS: &str = "--glob=refs/mxv/origin/*";
 
 /// Returns the lines of `text` that are not empty.
@@ -980,34 +972,6 @@ impl Backend for Git {
         let commit = run(checkout, ["rev-parse", "HEAD"], "rev-parse", LOCAL_DEADLINE)?
             .ok("rev-parse", checkout)?;
         Ok(trimmed(&commit))
-    }
-
-    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
-        for dir in git_dirs(checkout)? {
-            let fetched = run(
-                &dir,
-                [
-                    "fetch",
-                    "--quiet",
-                    "--prune",
-                    "--no-tags",
-                    "--no-auto-gc",
-                    "origin",
-                    "+refs/heads/*:refs/remotes/origin/*",
-                    ORIGIN_TAGS,
-                    ORIGIN_NOTES,
-                ],
-                "fetch origin",
-                FETCH_DEADLINE,
-            )?;
-            if !fetched.status.success() {
-                return Err(Error::OriginFetchFailed {
-                    checkout: dir,
-                    message: explanation(fetched.status, &fetched.stderr),
-                });
-            }
-        }
-        Ok(())
     }
 
     fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {

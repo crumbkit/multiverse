@@ -858,9 +858,6 @@ impl Backend for Scripted {
     fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error> {
         Git.switch_branch(checkout, branch)
     }
-    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
-        Git.refresh_origin(checkout)
-    }
     fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
         Git.unpushed_commits(checkout)
     }

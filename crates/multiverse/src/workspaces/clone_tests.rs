@@ -252,6 +252,19 @@ fn removing_a_pushed_clone_deletes_it_keeps_the_mirror_and_leaves_the_persons_re
 }
 
 #[test]
+fn an_unpushed_refusal_names_when_the_mirror_last_fetched_origin() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    commit(&workspace.checkouts[0].path, "One");
+    let before = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let refused = plan(&setup, "reading-list", FORCE);
+    let RemovalPlan::Unpushed { fetched, .. } = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(fetched.is_some_and(|time| time > before), "{fetched:?}");
+}
+
+#[test]
 fn a_clone_with_unpushed_commits_is_kept_unless_unmerged_commits_may_be_deleted() {
     let setup = setup();
     let workspace = created(&setup, "reading-list");
@@ -279,6 +292,11 @@ fn a_commit_on_a_branch_that_origin_deleted_counts_as_unpushed() {
     commit(&checkout, "Squashed upstream");
     git(&checkout, &["push", "--quiet", "origin", "reading-list"]);
     git(&setup.fixture.origin, &["branch", "-D", "reading-list"]);
+    // A removal fetches nothing, so it sees the deletion once the person
+    // fetches.
+    let unchanged = plan(&setup, "reading-list", NOTHING);
+    assert!(matches!(unchanged, RemovalPlan::Ready(_)), "{unchanged:?}");
+    git(&checkout, &["fetch", "--quiet", "--prune", "origin"]);
     let refused = plan(&setup, "reading-list", NOTHING);
     assert!(
         matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
@@ -480,6 +498,18 @@ fn a_tag_that_origin_holds_on_a_commit_no_branch_holds_is_not_unpushed() {
     let workspace = created(&setup, "reading-list");
     let checkout = workspace.checkouts[0].path.clone();
     assert!(!git(&checkout, &["tag", "--list", "v1"]).trim().is_empty());
+    // A removal fetches nothing, so the tag counts as pushed once the clone
+    // copies origin's tags.
+    git(
+        &checkout,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "origin",
+            "+refs/tags/*:refs/mxv/origin/tags/*",
+        ],
+    );
     removed(&setup, "reading-list", NOTHING);
     assert!(!checkout.exists());
 }
@@ -516,6 +546,17 @@ fn a_note_that_origin_does_not_hold_counts_as_unpushed() {
         "{refused:?}"
     );
     git(&checkout, &["push", "--quiet", "origin", "refs/notes/*"]);
+    // A removal fetches nothing, so the push counts once the clone copies
+    // origin's notes.
+    git(
+        &checkout,
+        &[
+            "fetch",
+            "--quiet",
+            "origin",
+            "+refs/notes/*:refs/mxv/origin/notes/*",
+        ],
+    );
     removed(&setup, "reading-list", NOTHING);
 }
 
@@ -621,7 +662,7 @@ fn a_commit_made_after_the_plan_stops_a_removal_of_unmerged_commits() {
 }
 
 #[test]
-fn a_removal_that_cannot_reach_origin_says_so() {
+fn a_removal_plans_without_contacting_an_origin_it_cannot_reach() {
     let setup = setup();
     let workspace = created(&setup, "reading-list");
     let checkout = workspace.checkouts[0].path.clone();
@@ -629,14 +670,8 @@ fn a_removal_that_cannot_reach_origin_says_so() {
         &checkout,
         &["remote", "set-url", "origin", "/nonexistent/origin.git"],
     );
-    let error = setup
-        .workspaces
-        .plan_removal(&name("reading-list"), NOTHING)
-        .unwrap_err();
-    assert!(
-        matches!(error, Error::OriginFetchFailed { .. }),
-        "{error:?}"
-    );
+    let plan = plan(&setup, "reading-list", NOTHING);
+    assert!(matches!(plan, RemovalPlan::Ready(_)), "{plan:?}");
 }
 
 #[test]
