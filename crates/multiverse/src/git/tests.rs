@@ -510,9 +510,9 @@ fn a_fetch_over_ssh_that_would_prompt_fails_at_once_and_names_the_remote() {
     let started = std::time::Instant::now();
     let error = Git.fetch(&fixture.clone).unwrap_err();
     assert!(started.elapsed() < AT_ONCE, "{:?}", started.elapsed());
+    assert_eq!(error.ssh_host(), Some("example.invalid"));
     let Error::SshRefused {
         ref remote,
-        ref host,
         refusal,
         ..
     } = error
@@ -520,7 +520,6 @@ fn a_fetch_over_ssh_that_would_prompt_fails_at_once_and_names_the_remote() {
         panic!("{error:?}\n{}", ssh.logged());
     };
     assert_eq!(remote, SSH_ORIGIN);
-    assert_eq!(host, "example.invalid");
     assert_eq!(refusal, crate::SshRefusal::AuthenticationFailed);
     let logged = ssh.logged();
     assert!(logged.contains("args: deny "), "{logged}");
@@ -547,8 +546,8 @@ fn a_mirror_fetch_over_ssh_whose_host_key_is_unknown_names_the_host() {
     let started = std::time::Instant::now();
     let error = Git.fetch_mirror(&mirror, SSH_ORIGIN, "main").unwrap_err();
     assert!(started.elapsed() < AT_ONCE, "{:?}", started.elapsed());
+    assert_eq!(error.ssh_host(), Some("example.invalid"));
     let Error::SshRefused {
-        ref host,
         refusal,
         ref message,
         ..
@@ -556,7 +555,6 @@ fn a_mirror_fetch_over_ssh_whose_host_key_is_unknown_names_the_host() {
     else {
         panic!("{error:?}\n{}", ssh.logged());
     };
-    assert_eq!(host, "example.invalid");
     assert_eq!(refusal, crate::SshRefusal::HostKeyUnverified);
     assert_eq!(message, "Host key verification failed.");
 }

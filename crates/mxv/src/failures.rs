@@ -1021,12 +1021,11 @@ fn library_recovery(error: &Error) -> Recovery {
             "check that the machine is online and that `git ls-remote {origin}` works with your credentials, and run the command again"
         )),
         Error::SshRefused {
-            host,
-            user,
+            login,
             port,
             refusal,
             ..
-        } => ssh_recovery(host, user.as_deref(), *port, *refusal),
+        } => ssh_recovery(error.ssh_host().unwrap_or(login), login, *port, *refusal),
         Error::TemplateInvalid { path, .. } => Recovery::hint(format!(
             "fix {} as the README's section on templates describes, with a top-level [template] table that lists its origins, or move it out of the templates directory, and run the command again; `--manifest <FILE>` copies a file of your choice in place of a template",
             shown(path)
@@ -1135,12 +1134,12 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         ],
         Error::SshRefused {
             remote,
-            host,
+            login,
             message,
             ..
         } => vec![
             Field::new("remote", remote),
-            Field::new("host", host),
+            Field::new("host", error.ssh_host().unwrap_or(login)),
             Field::new("message", message),
         ],
         Error::NewerRecord { path, version } => vec![
@@ -1462,17 +1461,12 @@ fn unpushed_text(
     }
 }
 
-/// Returns what a person does about ssh's `refusal` to connect to `host` as
-/// `user` on `port`. A changed host key may mean that someone stands
-/// between the person and the host, so its advice never says to accept the
-/// new key without finding out why it changed.
-fn ssh_recovery(
-    host: &str,
-    user: Option<&str>,
-    port: Option<u16>,
-    refusal: SshRefusal,
-) -> Recovery {
-    let login = user.map_or_else(|| host.to_owned(), |user| format!("{user}@{host}"));
+/// Returns what a person does about ssh's `refusal` to connect to `host`
+/// as `login`, which is `user@host` or `host`, on `port`. A changed host key
+/// may mean that someone stands between the person and the host, so its
+/// advice never says to accept the new key without finding out why it
+/// changed.
+fn ssh_recovery(host: &str, login: &str, port: Option<u16>, refusal: SshRefusal) -> Recovery {
     let ssh = port.map_or_else(
         || format!("ssh {login}"),
         |port| format!("ssh -p {port} {login}"),

@@ -48,8 +48,7 @@ fn a_restore_whose_records_changed_after_the_question_offers_its_dry_run() {
 fn ssh_refused(refusal: SshRefusal, port: Option<u16>) -> MxvFailure {
     MxvFailure::from(multiverse::Error::SshRefused {
         remote: "ssh://git@git.example.com/acme/app.git".to_owned(),
-        host: "git.example.com".to_owned(),
-        user: Some("git".to_owned()),
+        login: "git@git.example.com".to_owned(),
         port,
         refusal,
         message: "Host key verification failed.".to_owned(),

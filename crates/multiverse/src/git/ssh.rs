@@ -121,10 +121,10 @@ pub(super) fn refused(url: &str, stderr: &str) -> Option<Error> {
     })?;
     // The warning about a changed key sits inside a frame of `@`.
     let message = line.trim().trim_matches('@').trim().to_owned();
+    let login = user.map_or_else(|| host.clone(), |user| format!("{user}@{host}"));
     Some(Error::SshRefused {
         remote: recorded_origin(url),
-        host,
-        user,
+        login,
         port,
         refusal,
         message: redacted(&message),

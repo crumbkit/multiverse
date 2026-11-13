@@ -13,10 +13,10 @@ fn a_permission_denied_line_from_ssh_is_an_authentication_failure() {
                   Please make sure you have the correct access rights\n\
                   and the repository exists.\n";
     let error = refused(ORIGIN, stderr).unwrap();
+    assert_eq!(error.ssh_host(), Some("example.invalid"));
     let Error::SshRefused {
         remote,
-        host,
-        user,
+        login,
         port,
         refusal,
         message,
@@ -26,8 +26,7 @@ fn a_permission_denied_line_from_ssh_is_an_authentication_failure() {
     };
     assert_eq!(refusal, SshRefusal::AuthenticationFailed);
     assert_eq!(remote, ORIGIN);
-    assert_eq!(host, "example.invalid");
-    assert_eq!(user.as_deref(), Some("git"));
+    assert_eq!(login, "git@example.invalid");
     assert_eq!(port, None);
     assert_eq!(
         message,
@@ -41,8 +40,7 @@ fn a_host_key_verification_line_is_an_unverified_host_key() {
                   fatal: Could not read from remote repository.\n";
     let error = refused("deploy@Git.Example.com:team/app.git", stderr).unwrap();
     let Error::SshRefused {
-        host,
-        user,
+        login,
         refusal,
         message,
         ..
@@ -51,8 +49,7 @@ fn a_host_key_verification_line_is_an_unverified_host_key() {
         panic!("{error:?}");
     };
     assert_eq!(refusal, SshRefusal::HostKeyUnverified);
-    assert_eq!(host, "git.example.com");
-    assert_eq!(user.as_deref(), Some("deploy"));
+    assert_eq!(login, "deploy@git.example.com");
     assert_eq!(message, "Host key verification failed.");
 }
 
@@ -66,8 +63,8 @@ fn a_changed_host_key_warning_is_a_changed_host_key_and_not_an_unverified_one() 
                   Host key verification failed.\n\
                   fatal: Could not read from remote repository.\n";
     let error = refused("ssh://git@git.example.com:2222/team/app.git", stderr).unwrap();
+    assert_eq!(error.ssh_host(), Some("git.example.com"));
     let Error::SshRefused {
-        host,
         port,
         refusal,
         message,
@@ -77,7 +74,6 @@ fn a_changed_host_key_warning_is_a_changed_host_key_and_not_an_unverified_one() 
         panic!("{error:?}");
     };
     assert_eq!(refusal, SshRefusal::HostKeyChanged);
-    assert_eq!(host, "git.example.com");
     assert_eq!(port, Some(2222));
     assert_eq!(message, "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!");
 }

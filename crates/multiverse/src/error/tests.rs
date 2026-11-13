@@ -204,8 +204,7 @@ fn a_container_engine_failure_without_its_own_kind_opens_with_what_failed() {
 fn an_ssh_refusal_prints_the_host_and_the_line_ssh_gave() {
     let error = Error::SshRefused {
         remote: "ssh://git@example.invalid/acme/app.git".to_owned(),
-        host: "example.invalid".to_owned(),
-        user: Some("git".to_owned()),
+        login: "git@example.invalid".to_owned(),
         port: None,
         refusal: crate::error::SshRefusal::HostKeyUnverified,
         message: "Host key verification failed.".to_owned(),

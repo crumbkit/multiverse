@@ -178,10 +178,10 @@ pub enum Error {
     SshRefused {
         /// The origin's URL, with its user name and without a password.
         remote: String,
-        /// The origin's host name, in lower case and without a port.
-        host: String,
-        /// The user name that the URL names, if it names one.
-        user: Option<String>,
+        /// Where ssh logs in: `user@host` when the URL names a user, and
+        /// `host` otherwise, with the host name in lower case and without
+        /// a port. [`Error::ssh_host`] returns the host alone.
+        login: String,
         /// The port that the URL names, when it is not 22.
         port: Option<u16>,
         /// Why ssh refused.
@@ -297,6 +297,24 @@ pub enum Error {
     },
 }
 
+/// Returns the host of `login`, an [`Error::SshRefused`] login of the form
+/// `user@host` or `host`.
+fn ssh_host(login: &str) -> &str {
+    login.rsplit_once('@').map_or(login, |(_, host)| host)
+}
+
+impl Error {
+    /// Returns the host that ssh refused to connect to, for an
+    /// [`Error::SshRefused`], and `None` for every other failure.
+    #[must_use]
+    pub fn ssh_host(&self) -> Option<&str> {
+        match self {
+            Self::SshRefused { login, .. } => Some(ssh_host(login)),
+            _ => None,
+        }
+    }
+}
+
 /// Why ssh refused to connect to the host of an SSH origin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SshRefusal {
@@ -342,11 +360,12 @@ impl Error {
             ),
             Self::SshRefused {
                 remote,
-                host,
+                login,
                 refusal,
                 message,
                 ..
             } => {
+                let host = ssh_host(login);
                 let why = match refusal {
                     SshRefusal::AuthenticationFailed => {
                         "accepted none of the keys that ssh offered"

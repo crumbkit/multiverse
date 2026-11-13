@@ -31,7 +31,8 @@ workspace may need to act on.
   fields name the remote, the host and ssh's line, in place of
   `mxv::mirror::fetch_failed` or `mxv::git::failed`. A script that matched
   `mxv::mirror::fetch_failed` for such a failure reads the new codes. The
-  library's `Error` has the variant `SshRefused` and the enum `SshRefusal`.
+  library's `Error` has the variant `SshRefused`, the method `ssh_host`, and
+  the enum `SshRefusal`.
 - No lifecycle verb fetches unless a person passes `--from-origin`. `mxv remove`
   and `mxv archive` no longer fetch origin before they count a clone's
   unpushed commits, so they work offline, and a refusal for unpushed commits
