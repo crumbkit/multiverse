@@ -20,6 +20,24 @@ workspace may need to act on.
 
 ### Changed
 
+- A workspace's record stores its state: `creating` from the first write
+  of `mxv new` until its last write, then `live`. `mxv restore` writes
+  `live`. A record without a state, which an older mxv wrote, reads as
+  `creating` when it is a workspace of clones whose checkouts all lack a
+  commit, and as `live` otherwise; nothing rewrites it. A worktree
+  workspace whose `mxv new` stopped partway now reads as `creating`, where
+  before it looked finished. `up`, `restart`, `ports reset`, `run`,
+  `exec`, `pin`, `unpin`, `add`, `archive` and `clean` refuse a `creating`
+  workspace with `mxv::workspace::creating`, in place of
+  `mxv::checkout::incomplete` for a workspace of clones, and its hint names
+  `mxv remove NAME` and then `mxv new`. `mxv reclaim` keeps it with a
+  reason, and `down`, `status`, `show`, `logs` and `remove` work on it. A
+  write fails with `mxv::workspace::state_changed`, and writes nothing,
+  when another command changed the record's state after this one read it.
+  The library gains `WorkspaceState`, `Workspace::state`, `Store::advance`,
+  `AddOutcome::Creating`, `ArchiveRefusal::Creating` and the errors
+  `StateChanged` and `TransitionRefused`. `Workspace::new` returns a
+  `creating` record.
 - A fetch from an SSH origin never waits on a question from ssh. mxv sets
   `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=false` beside
   `GIT_TERMINAL_PROMPT=0` on every git command, so ssh fails at once where it

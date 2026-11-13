@@ -13,7 +13,7 @@ use crate::lookup::{ManifestSource, checkout_prefix, prefixed};
 use crate::manifest::{Manifest, ManifestError};
 use crate::mirror::Origin;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace, WorkspaceKind, agents_text};
+use crate::record::{Checkout, Workspace, WorkspaceKind, WorkspaceState, agents_text};
 use crate::store::{self, Created, Records, Store};
 use crate::template::Found as FoundTemplate;
 
@@ -230,6 +230,9 @@ pub enum AddOutcome {
     Planned(Workspace),
     /// No workspace has the name.
     NotFound,
+    /// `mxv new` has not finished the workspace, so its record names
+    /// checkouts that may be missing or partial. `mxv remove` removes it.
+    Creating(Workspace),
     /// The workspace's checkouts are git worktrees, which mxv made before
     /// clones, and mxv adds no checkout to such a workspace.
     Worktrees(Workspace),
@@ -1406,6 +1409,9 @@ impl<B: Backend> Workspaces<B> {
         let Some(mut workspace) = self.store.read(name)? else {
             return Ok(AddOutcome::NotFound);
         };
+        if workspace.state() == WorkspaceState::Creating {
+            return Ok(AddOutcome::Creating(workspace));
+        }
         let Some(mirrors) = self
             .mirrors
             .as_ref()
@@ -1760,7 +1766,7 @@ impl<B: Backend> Workspaces<B> {
         self.write_agents(workspace)?;
         self.write_marker(workspace, made)?;
         write_manifest(workspace, manifest, made)?;
-        self.store.update(workspace)?;
+        self.store.advance(workspace, WorkspaceState::Live)?;
         Ok(Ok(()))
     }
 
@@ -1974,7 +1980,7 @@ impl<B: Backend> Workspaces<B> {
         self.write_agents(workspace)?;
         self.write_marker(workspace, made)?;
         write_manifest(workspace, manifest, made)?;
-        self.store.update(workspace)?;
+        self.store.advance(workspace, WorkspaceState::Live)?;
         Ok(Making::Done)
     }
 

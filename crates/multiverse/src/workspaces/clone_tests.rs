@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use crate::error::Error;
 use crate::git::Git;
 use crate::name::WorkspaceName;
-use crate::record::{Workspace, WorkspaceKind};
+use crate::record::{Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::{self, Store};
 use crate::testing::{Fixture, advance_origin, fixture, git, write};
 use crate::workspaces::{
@@ -940,4 +940,45 @@ fn a_clone_whose_deletion_was_interrupted_is_finished_by_a_second_removal() {
             .unwrap()
             .is_none()
     );
+}
+
+/// Stops the run at the step named `marker`, as a process killed there
+/// would: it panics, so no undo runs.
+fn stop_at_marker(step: &str) -> Result<(), Error> {
+    assert_ne!(step, "marker", "the test stops the run at the marker");
+    Ok(())
+}
+
+#[test]
+fn a_clone_creation_stopped_before_its_last_write_leaves_the_record_creating() {
+    let mut setup = setup();
+    setup.workspaces.checkpoint = stop_at_marker;
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        setup.workspaces.create(
+            &setup.root,
+            &name("reading-list"),
+            &setup.fixture.clone,
+            Mode::Change,
+        )
+    }));
+    assert!(stopped.is_err(), "{stopped:?}");
+    let read = setup
+        .workspaces
+        .find(&name("reading-list"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.state(), WorkspaceState::Creating);
+}
+
+#[test]
+fn a_clone_creation_that_finishes_leaves_the_record_live() {
+    let setup = setup();
+    let workspace = created(&setup, "reading-list");
+    assert_eq!(workspace.state(), WorkspaceState::Live);
+    let read = setup
+        .workspaces
+        .find(&name("reading-list"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.state(), WorkspaceState::Live);
 }

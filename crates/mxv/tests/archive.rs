@@ -2074,3 +2074,39 @@ fn set_groups(value: &mut Value, group: u64) {
         _ => {}
     }
 }
+
+/// Sets the state of the record of the workspace `triage` to `state`, as
+/// a `mxv new` that stopped before its last write leaves `creating`.
+fn set_state(setup: &Setup, state: &str) {
+    let path = setup.root().join("state/mxv/workspaces/triage.json");
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["state"] = Value::from(state);
+    write(&path, &serde_json::to_string_pretty(&record).unwrap());
+}
+
+#[test]
+fn an_archive_refuses_a_workspace_that_mxv_new_did_not_finish_and_names_mxv_remove() {
+    let setup = Setup::new();
+    set_state(&setup, "creating");
+    for args in [
+        &["archive", "-w", "triage", "--yes"][..],
+        &["archive", "-w", "triage", "--dry-run"][..],
+    ] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(document["code"], "mxv::workspace::creating", "{document}");
+        assert!(
+            document.to_string().contains("mxv remove triage"),
+            "{document}"
+        );
+    }
+    assert!(setup.checkout().exists());
+}
+
+#[test]
+fn an_archive_of_a_live_workspace_runs() {
+    let setup = Setup::new();
+    set_state(&setup, "live");
+    setup.archive();
+    assert!(!setup.checkout().exists());
+}

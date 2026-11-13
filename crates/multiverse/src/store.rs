@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::record::{RECORD_VERSION, Workspace};
+use crate::record::{RECORD_VERSION, Workspace, WorkspaceState};
 
 #[cfg(test)]
 mod tests;
@@ -195,38 +195,79 @@ impl Store {
     /// writes nothing when no record of the name exists, because only
     /// [`Store::create`] makes a record. A command that read the record
     /// before another command archived or removed the workspace therefore
-    /// cannot write it back. A workspace whose record an earlier version
-    /// wrote, which has no stable id, gets one first, so the record on disk
-    /// holds the id before any docker object is labelled with it.
+    /// cannot write it back. It never changes the workspace's state, which
+    /// only [`Store::advance`] does, and writes nothing when the record on
+    /// disk holds another state than `workspace`, such as when `mxv new`
+    /// finished the workspace after this command read it. A workspace whose
+    /// record an earlier version wrote, which has no stable id, gets one
+    /// first, so the record on disk holds the id before any docker object
+    /// is labelled with it.
     ///
     /// # Errors
     ///
     /// Returns [`Error::RecordMissing`] when no record of the name exists,
-    /// [`Error::Inaccessible`] when mxv cannot tell whether one exists,
-    /// [`Error::Unwritable`] when the record cannot be written, and the
-    /// errors of [`Workspace::ensure_id`].
+    /// [`Error::StateChanged`] when the record on disk holds another state,
+    /// the errors of [`Store::read`] when the record on disk cannot be
+    /// read, [`Error::Unwritable`] when the record cannot be written, and
+    /// the errors of [`Workspace::ensure_id`].
     pub fn update(&self, workspace: &mut Workspace) -> Result<(), Error> {
-        let target = self.path(&workspace.name);
+        self.check_stored(workspace)?;
+        self.write(workspace)
+    }
+
+    /// Moves the workspace to the state `to` and writes its record. The
+    /// one move that it makes is from [`WorkspaceState::Creating`] to
+    /// [`WorkspaceState::Live`], which `mxv new` makes with its last write.
+    /// Like [`Store::update`], it writes nothing when no record of the name
+    /// exists or the record on disk holds another state than `workspace`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TransitionRefused`] for any other move, and the
+    /// errors of [`Store::update`]. `workspace` keeps its state after a
+    /// failure.
+    pub fn advance(&self, workspace: &mut Workspace, to: WorkspaceState) -> Result<(), Error> {
+        let from = workspace.state();
+        if !matches!((from, to), (WorkspaceState::Creating, WorkspaceState::Live)) {
+            return Err(Error::TransitionRefused {
+                name: workspace.name.clone(),
+                from,
+                to,
+            });
+        }
+        self.check_stored(workspace)?;
+        workspace.set_state(to);
+        let written = self.write(workspace);
+        if written.is_err() {
+            workspace.set_state(from);
+        }
+        written
+    }
+
+    /// Returns an error unless the store holds a record of `workspace`'s
+    /// name in the state that `workspace` holds.
+    fn check_stored(&self, workspace: &Workspace) -> Result<(), Error> {
         // The check and the rename in `replace_file` are two steps. A
         // caller that holds the workspace's lock is safe, because an
-        // archive deletes the record under that lock. `mxv remove` deletes
-        // the record without the lock, so a record that it deletes between
-        // the check and the rename is still written back. Making `remove`
-        // take the workspace's lock closes this window.
-        match fs::symlink_metadata(&target) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(Error::RecordMissing {
-                    name: workspace.name.clone(),
-                });
-            }
-            Err(source) => {
-                return Err(Error::Inaccessible {
-                    path: target,
-                    source,
-                });
-            }
+        // archive deletes the record under that lock. `mxv new` and
+        // `mxv remove` write and delete the record without the lock, so a
+        // record that one of them changes between the check and the rename
+        // is still overwritten. Making them take the workspace's lock
+        // closes this window.
+        match self.read(&workspace.name)? {
+            None => Err(Error::RecordMissing {
+                name: workspace.name.clone(),
+            }),
+            Some(stored) if stored.state() != workspace.state() => Err(Error::StateChanged {
+                name: workspace.name.clone(),
+            }),
+            Some(_) => Ok(()),
         }
+    }
+
+    /// Writes the record of `workspace` over the record with its name.
+    fn write(&self, workspace: &mut Workspace) -> Result<(), Error> {
+        let target = self.path(&workspace.name);
         workspace.ensure_id()?;
         let bytes = record_bytes(workspace, &target)?;
         replace_file(&target, &bytes)
