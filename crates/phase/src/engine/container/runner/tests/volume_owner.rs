@@ -8,14 +8,15 @@ use std::time::Duration;
 
 use super::{BuiltImage, IMAGE, Mode, World, app, docker, docker_ready, outcome, start_deadline};
 use crate::cancel::Cancel;
-use crate::engine::container::volume_owner::HELPER_IMAGE;
+use crate::engine::container::Identity;
+use crate::engine::container::volume_owner::{HELPER_IMAGE, remove_helpers};
 use crate::engine::container::volumes::{app_volumes, delete_app_volumes};
 use crate::error::PhaseError;
 use crate::phase::{Phase, UpDeadlines};
 use crate::plan::AppPlan;
-use crate::record::DockerCause;
 use crate::record::run::{ObjectKey, Started, VolumeOwner};
 use crate::record::store::{Journal, RunStore};
+use crate::record::{DockerCause, SweepOutcome};
 use crate::report::{AppOutcome, Note, Report};
 use crate::select::Selection;
 use crate::source::Source;
@@ -111,6 +112,35 @@ impl World {
         .split_whitespace()
         .map(str::to_owned)
         .collect()
+    }
+
+    /// Returns the ids of the workspace's app containers.
+    fn containers(&self) -> Vec<String> {
+        let workspace = format!("label=mxv.workspace-id={}", self.id);
+        docker(&[
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            &workspace,
+            "--filter",
+            "label=mxv.container",
+        ])
+        .unwrap()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+    }
+
+    /// Returns the identity of this world's workspace under its own state
+    /// directory.
+    fn identity(&self) -> Identity {
+        Identity {
+            id: self.id.clone(),
+            run_record: RunStore::new(self.state.path()).path(&self.id),
+        }
     }
 
     /// Creates a volume-owner helper of the app `app` that mounts the
@@ -392,6 +422,63 @@ fn down_and_sweep_remove_a_leftover_helper() {
 
     assert_eq!(outcome(&report, "db"), &AppOutcome::Stopped, "{report:?}");
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+}
+
+#[test]
+fn a_sweep_in_a_second_state_directory_with_the_same_id_leaves_the_first_ones_container_running() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![app("db", "exec sleep 60")]);
+    world.up(&plan);
+    let running = world.containers();
+    assert_eq!(running.len(), 1, "{running:?}");
+    let (second, _) = world.second_state();
+    let copied = RunStore::new(second.path()).path(&world.id);
+    std::fs::create_dir_all(copied.parent().unwrap()).unwrap();
+    std::fs::copy(RunStore::new(world.state.path()).path(&world.id), &copied).unwrap();
+    let elsewhere = Phase::new(second.path().to_path_buf());
+
+    let swept = elsewhere.sweep(&world.id, false).unwrap();
+
+    assert_eq!(swept.items[0].outcome, SweepOutcome::Gone, "{swept:?}");
+    assert_eq!(world.containers(), running);
+
+    let swept = world.phase.sweep(&world.id, false).unwrap();
+
+    assert_eq!(swept.items[0].outcome, SweepOutcome::Stopped, "{swept:?}");
+    assert!(world.containers().is_empty(), "{:?}", world.containers());
+}
+
+#[test]
+fn a_second_state_directory_with_the_same_id_leaves_the_first_ones_volume_owner_helper() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let mut db = mounting("db", WRITES);
+    db.container.user = Some("1000:1000".to_owned());
+    let plan = world.plan(vec![db]);
+    world.up(&plan);
+    world.leave_helper("db");
+    let helper = world.helpers();
+    assert_eq!(helper.len(), 1, "{helper:?}");
+    let (second, _) = world.second_state();
+    let elsewhere = Identity {
+        id: world.id.clone(),
+        run_record: RunStore::new(second.path()).path(&world.id),
+    };
+
+    remove_helpers(&elsewhere, None).unwrap();
+    remove_helpers(&elsewhere, Some(&"db".parse().unwrap())).unwrap();
+
+    assert_eq!(world.helpers(), helper);
+
+    remove_helpers(&world.identity(), None).unwrap();
+
+    assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+    world.down();
 }
 
 /// A Dockerfile whose image ships `/data` holding a file and owned by

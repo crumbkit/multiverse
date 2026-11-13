@@ -15,8 +15,8 @@
 //! carries `mxv.app=<name>`. Compose adds labels of its own.
 //!
 //! `DockerCli` gives phase's `sweep` the objects of a workspace, and
-//! matches an object by `mxv.workspace-id`. It never matches or removes an
-//! object without an mxv label.
+//! matches an object by `mxv.workspace-id` and `mxv.run-record`. It never
+//! matches or removes an object without both labels.
 //!
 //! Every container runs on docker's default bridge network, with
 //! `network_mode: bridge`, so Compose creates no network for the project.
@@ -71,6 +71,7 @@ mod tests;
 
 pub(crate) use crate::engine::container::cli::DockerCli;
 pub use crate::engine::container::error::ContainerError;
+pub(crate) use crate::engine::container::names::Identity;
 pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
 pub(crate) use crate::engine::container::objects::answers_within;
 pub use crate::engine::container::objects::{ContainerState, Inspected, OwnedContainer, reinspect};

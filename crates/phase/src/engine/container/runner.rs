@@ -862,7 +862,7 @@ impl ComposeRunner {
     ) -> Result<Option<VolumeOwner>, Halt> {
         let app = start.app;
         let keys = app::volume_keys(app);
-        volume_owner::remove_helpers(start.workspace, Some(&app.name))
+        volume_owner::remove_helpers(scope.identity(), Some(&app.name))
             .map_err(|error| halt(&error))?;
         if keys.is_empty() {
             return Ok(None);
@@ -1745,7 +1745,7 @@ impl ContainerRunner for ComposeRunner {
         // removed too, so it does not keep a volume in use. The run record
         // does not name it, so a failure here is no container's result,
         // and the next `up` or sweep removes the helper.
-        let _ = volume_owner::remove_helpers(stop.workspace, Some(stop.app));
+        let _ = volume_owner::remove_helpers(scope.identity(), Some(stop.app));
         stopped
     }
 }

@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use crate::engine::container::Identity;
 use crate::engine::container::cli::DockerCli;
 use crate::engine::container::{ContainerError, ContainerState};
-use crate::name::WorkspaceId;
 use crate::record::DockerName;
 use crate::record::docker::{
     Docker, DockerCause, DockerError, DockerKind, DockerObject, SeenContainer,
@@ -83,6 +83,13 @@ exit 1
 /// The tests' workspace id.
 const WORKSPACE_ID: &str = "0123456789abcdef0123456789abcdef";
 
+/// The path of the run record of the tests' state directory.
+const RUN_RECORD: &str = "/state/runs/0123456789abcdef0123456789abcdef.json";
+
+/// The path of the run record of another state directory that holds the
+/// same workspace id.
+const OTHER_RUN_RECORD: &str = "/other/runs/0123456789abcdef0123456789abcdef.json";
+
 /// A container id.
 fn container_id(digit: char) -> String {
     std::iter::repeat_n(digit, 64).collect()
@@ -109,16 +116,32 @@ impl Fake {
     }
 
     /// Adds an object that docker finds by each of `targets`, whose id and
-    /// workspace id label are `fields`. An empty label is left out, and an object without labels prints `null`, as
-    /// docker does.
+    /// workspace id label are `fields`, with the run-record label of the
+    /// tests' state directory. An empty workspace id leaves both labels
+    /// out, and an object without labels prints `null`, as docker does.
     fn object(&self, targets: &[&str], fields: [&str; 2]) {
+        self.object_in(targets, fields, RUN_RECORD);
+    }
+
+    /// Adds an object as [`Fake::object`] does, whose run-record label is
+    /// `run_record`, or is left out when that is empty.
+    fn object_in(&self, targets: &[&str], fields: [&str; 2], run_record: &str) {
         let [id, workspace_id] = fields;
-        let labels: serde_json::Map<String, serde_json::Value> =
-            [("mxv.workspace-id", workspace_id)]
-                .into_iter()
-                .filter(|(_, value)| !value.is_empty())
-                .map(|(key, value)| (key.to_owned(), value.into()))
-                .collect();
+        let labels: serde_json::Map<String, serde_json::Value> = [
+            ("mxv.workspace-id", workspace_id),
+            (
+                "mxv.run-record",
+                if workspace_id.is_empty() {
+                    ""
+                } else {
+                    run_record
+                },
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| (key.to_owned(), value.into()))
+        .collect();
         let labels = if labels.is_empty() {
             "null".to_owned()
         } else {
@@ -171,8 +194,11 @@ fn write(path: &Path, text: &str) {
     fs::write(path, text).unwrap();
 }
 
-fn workspace() -> WorkspaceId {
-    WORKSPACE_ID.parse().unwrap()
+fn workspace() -> Identity {
+    Identity {
+        id: WORKSPACE_ID.parse().unwrap(),
+        run_record: PathBuf::from(RUN_RECORD),
+    }
 }
 
 fn name(text: &str) -> DockerName {
@@ -180,13 +206,13 @@ fn name(text: &str) -> DockerName {
 }
 
 fn object<'a>(
-    workspace: &'a WorkspaceId,
+    workspace: &'a Identity,
     kind: DockerKind,
     name: &'a DockerName,
     id: Option<&'a str>,
 ) -> DockerObject<'a> {
     DockerObject {
-        workspace,
+        identity: workspace,
         kind,
         name,
         id,
@@ -293,6 +319,110 @@ fn a_network_and_a_volume_are_found_through_their_own_inspect_commands() {
     let calls = fake.calls();
     assert!(calls.contains("network inspect --format"), "{calls}");
     assert!(calls.contains("volume inspect --format"), "{calls}");
+}
+
+#[test]
+fn a_container_found_by_its_name_is_not_matched_when_its_run_record_label_names_another_state_directory()
+ {
+    let fake = Fake::new();
+    let other = container_id('e');
+    let own = container_id('f');
+    fake.object_in(&["other.db"], [&other, WORKSPACE_ID], OTHER_RUN_RECORD);
+    fake.object(&["own.db"], [&own, WORKSPACE_ID]);
+    let workspace = workspace();
+    let docker = fake.docker();
+    let other_name = name("other.db");
+    let own_name = name("own.db");
+    assert_eq!(
+        docker
+            .find(&object(
+                &workspace,
+                DockerKind::Container,
+                &other_name,
+                None
+            ))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        docker
+            .find(&object(&workspace, DockerKind::Container, &own_name, None))
+            .unwrap(),
+        Some(own)
+    );
+}
+
+#[test]
+fn a_container_with_a_recorded_id_is_not_matched_when_its_run_record_label_is_missing_or_names_another_state_directory()
+ {
+    let fake = Fake::new();
+    let (other, missing, own) = (container_id('1'), container_id('2'), container_id('3'));
+    fake.object_in(&[&other], [&other, WORKSPACE_ID], OTHER_RUN_RECORD);
+    fake.labelled(
+        &[&missing],
+        &missing,
+        &serde_json::json!({ "mxv.workspace-id": WORKSPACE_ID }).to_string(),
+    );
+    fake.object(&[&own], [&own, WORKSPACE_ID]);
+    let workspace = workspace();
+    let db = name("db");
+    let docker = fake.docker();
+    let find = |id: &str| {
+        docker
+            .find(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .unwrap()
+    };
+    assert_eq!(find(&other), None);
+    assert_eq!(find(&missing), None);
+    assert_eq!(find(&own), Some(own.clone()));
+}
+
+#[test]
+fn a_network_and_a_volume_are_not_found_without_this_state_directorys_run_record_label() {
+    let fake = Fake::new();
+    let network_id = container_id('4');
+    fake.object_in(&["net"], [&network_id, WORKSPACE_ID], OTHER_RUN_RECORD);
+    fake.object_in(&["data"], ["data", WORKSPACE_ID], "");
+    fake.object(&["own-net"], [&network_id, WORKSPACE_ID]);
+    fake.object(&["own-data"], ["own-data", WORKSPACE_ID]);
+    let workspace = workspace();
+    let docker = fake.docker();
+    let find = |kind: DockerKind, target: &str| {
+        let target = name(target);
+        docker
+            .find(&object(&workspace, kind, &target, None))
+            .unwrap()
+    };
+    assert_eq!(find(DockerKind::Network, "net"), None);
+    assert_eq!(find(DockerKind::Volume, "data"), None);
+    assert_eq!(find(DockerKind::Network, "own-net"), Some(network_id));
+    assert_eq!(
+        find(DockerKind::Volume, "own-data"),
+        Some("own-data".to_owned())
+    );
+}
+
+#[test]
+fn the_state_of_a_container_of_another_state_directory_is_not_seen() {
+    let fake = Fake::new();
+    let (other, own) = (container_id('5'), container_id('6'));
+    let labels = |run_record: &str| serde_json::json!({ "mxv.workspace-id": WORKSPACE_ID, "mxv.run-record": run_record });
+    fake.labelled(
+        &[&other],
+        &other,
+        &format!("{}\nrunning 0", labels(OTHER_RUN_RECORD)),
+    );
+    fake.labelled(&[&own], &own, &format!("{}\nrunning 0", labels(RUN_RECORD)));
+    let workspace = workspace();
+    let db = name("db");
+    let state = |id: &str| {
+        fake.docker()
+            .container_seen(&object(&workspace, DockerKind::Container, &db, Some(id)))
+            .unwrap()
+            .map(|seen| seen.state)
+    };
+    assert_eq!(state(&other), None);
+    assert_eq!(state(&own), Some(ContainerState::Running));
 }
 
 #[test]
@@ -522,14 +652,33 @@ fn a_real_daemon_finds_and_removes_a_volume_and_a_container_by_this_workspaces_i
         return;
     }
     let id = crate::random::hex_id().unwrap();
-    let workspace: WorkspaceId = id.parse().unwrap();
+    let run_record = format!("/state/runs/{id}.json");
+    let workspace = Identity {
+        id: id.parse().unwrap(),
+        run_record: PathBuf::from(&run_record),
+    };
     let label = format!("mxv.workspace-id={id}");
+    let record_label = format!("mxv.run-record={run_record}");
     let other = format!("mxv.workspace-id={}", crate::random::hex_id().unwrap());
     let ours = format!("phase-test-{id}.data");
     let theirs = format!("phase-test-{id}.other");
-    assert!(real_docker(&["volume", "create", "--label", &label, &ours]));
     assert!(real_docker(&[
-        "volume", "create", "--label", &other, &theirs
+        "volume",
+        "create",
+        "--label",
+        &label,
+        "--label",
+        &record_label,
+        &ours
+    ]));
+    assert!(real_docker(&[
+        "volume",
+        "create",
+        "--label",
+        &other,
+        "--label",
+        &record_label,
+        &theirs
     ]));
     let docker = DockerCli::new();
     let ours_name = name(&ours);
@@ -560,6 +709,8 @@ fn a_real_daemon_finds_and_removes_a_volume_and_a_container_by_this_workspaces_i
         &container,
         "--label",
         &label,
+        "--label",
+        &record_label,
         "busybox:1.37.0"
     ]));
     let container_name = name(&container);
@@ -576,6 +727,86 @@ fn a_real_daemon_finds_and_removes_a_volume_and_a_container_by_this_workspaces_i
     assert_eq!(found.len(), 64, "{found}");
     removed.unwrap().unwrap();
     assert_eq!(after.unwrap(), None);
+}
+
+#[test]
+fn a_real_daemon_neither_finds_nor_removes_a_volume_or_a_container_of_another_state_directory_with_the_same_id()
+ {
+    if !real_docker(&["version", "--format", "{{.Server.Version}}"]) {
+        println!("skipping: no docker daemon answers");
+        return;
+    }
+    let id = crate::random::hex_id().unwrap();
+    let ours = Identity {
+        id: id.parse().unwrap(),
+        run_record: PathBuf::from(format!("/state/runs/{id}.json")),
+    };
+    let label = format!("mxv.workspace-id={id}");
+    let theirs_record = format!("mxv.run-record=/other/runs/{id}.json");
+    let volume = format!("phase-test-{id}.data");
+    assert!(real_docker(&[
+        "volume",
+        "create",
+        "--label",
+        &label,
+        "--label",
+        &theirs_record,
+        &volume
+    ]));
+    let docker = DockerCli::new();
+    let volume_name = name(&volume);
+    let found = docker.find(&object(&ours, DockerKind::Volume, &volume_name, None));
+    let kept = real_docker(&["volume", "inspect", "--", &volume]);
+    let _ = real_docker(&["volume", "rm", "--", &volume]);
+    assert_eq!(found.unwrap(), None);
+    assert!(kept, "{volume} was removed");
+
+    if !real_docker(&["image", "inspect", "busybox:1.37.0"]) {
+        println!("skipping the container: busybox:1.37.0 is not pulled");
+        return;
+    }
+    let container = format!("phase-test-{id}.db");
+    assert!(real_docker(&[
+        "container",
+        "create",
+        "--name",
+        &container,
+        "--label",
+        &label,
+        "--label",
+        &theirs_record,
+        "busybox:1.37.0"
+    ]));
+    let container_name = name(&container);
+    let by_name = docker.find(&object(&ours, DockerKind::Container, &container_name, None));
+    let recorded = real_output(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "--",
+        &container,
+    ])
+    .unwrap_or_default();
+    let by_id = docker.find(&object(
+        &ours,
+        DockerKind::Container,
+        &container_name,
+        Some(&recorded),
+    ));
+    let seen = docker.container_seen(&object(
+        &ours,
+        DockerKind::Container,
+        &container_name,
+        Some(&recorded),
+    ));
+    let kept = real_docker(&["container", "inspect", "--", &container]);
+    let _ = real_docker(&["rm", "--force", "--", &container]);
+    assert_eq!(by_name.unwrap(), None);
+    assert_eq!(recorded.len(), 64, "{recorded}");
+    assert_eq!(by_id.unwrap(), None);
+    assert_eq!(seen.unwrap(), None);
+    assert!(kept, "{container} was removed");
 }
 
 #[test]
@@ -659,7 +890,7 @@ fn a_label_value_that_holds_tabs_or_spaces_never_matches() {
     fake.labelled(
         &[target],
         &container_id('5'),
-        &serde_json::json!({ "mxv.workspace-id": format!("\t{WORKSPACE_ID}\treading-list") })
+        &serde_json::json!({ "mxv.workspace-id": format!("\t{WORKSPACE_ID}\treading-list"), "mxv.run-record": RUN_RECORD })
             .to_string(),
     );
     let container = name(target);
@@ -667,8 +898,9 @@ fn a_label_value_that_holds_tabs_or_spaces_never_matches() {
     let docker = fake.docker();
     assert_eq!(docker.find(&wanted).unwrap(), None);
     for labels in [
-        serde_json::json!({ "mxv.workspace-id": " " }),
-        serde_json::json!({ "mxv.workspace-id": format!("{WORKSPACE_ID} ") }),
+        serde_json::json!({ "mxv.workspace-id": " ", "mxv.run-record": RUN_RECORD }),
+        serde_json::json!({ "mxv.workspace-id": format!("{WORKSPACE_ID} "), "mxv.run-record": RUN_RECORD }),
+        serde_json::json!({ "mxv.workspace-id": WORKSPACE_ID, "mxv.run-record": format!("{RUN_RECORD} ") }),
     ] {
         fake.labelled(&[target], &container_id('5'), &labels.to_string());
         assert_eq!(docker.find(&wanted).unwrap(), None, "{labels}");
@@ -785,7 +1017,8 @@ fn a_container_removal_waits_at_least_a_second_and_rounds_a_part_second_up() {
 fn a_running_container_with_secret_files_that_docker_restarted_is_not_running() {
     let fake = Fake::new();
     let (waiting, restarted, fresh) = (container_id('a'), container_id('b'), container_id('c'));
-    let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
+    let ours =
+        format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}","mxv.run-record":"{RUN_RECORD}"}}"#);
     fake.labelled(
         &[&waiting],
         &waiting,
@@ -816,7 +1049,8 @@ fn a_running_container_with_secret_files_that_docker_restarted_is_not_running() 
 fn a_containers_restarts_and_start_time_come_from_its_inspection_with_its_state() {
     let fake = Fake::new();
     let (fresh, restarted, unreadable) = (container_id('a'), container_id('b'), container_id('c'));
-    let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
+    let ours =
+        format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}","mxv.run-record":"{RUN_RECORD}"}}"#);
     fake.labelled(
         &[&fresh],
         &fresh,
@@ -872,7 +1106,8 @@ fn a_containers_restarts_and_start_time_come_from_its_inspection_with_its_state(
 fn a_containers_state_comes_from_its_inspection_when_it_carries_this_workspaces_id() {
     let fake = Fake::new();
     let (running, exited, foreign) = (container_id('a'), container_id('b'), container_id('c'));
-    let ours = format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}"}}"#);
+    let ours =
+        format!(r#"{{"mxv.workspace-id":"{WORKSPACE_ID}","mxv.run-record":"{RUN_RECORD}"}}"#);
     fake.labelled(&[&running], &running, &format!("{ours}\nrunning 0"));
     fake.labelled(&[&exited], &exited, &format!("{ours}\nexited 137"));
     fake.labelled(

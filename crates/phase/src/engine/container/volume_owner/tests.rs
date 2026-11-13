@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use super::{HELPER_IMAGE, RunAs, Wanted, chown_args, helper_of, id_args, parse_id, wanted};
 use crate::engine::container::names::{Identity, Scope, VolumeKey};
 use crate::error::VolumeOwnerProblem;
-use crate::name::{AppName, WorkspaceId};
+use crate::name::AppName;
 use crate::plan::{AppPlan, RunnerKind};
 use crate::record::run::VolumeOwner;
 use crate::source::Source;
@@ -222,25 +222,86 @@ fn what_id_printed_counts_only_when_it_is_one_number_on_one_line() {
     }
 }
 
+/// The stable id of the tests' workspace.
+const HELPER_WORKSPACE: &str = "0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21";
+
+/// The path of the run record of the tests' state directory.
+const HELPER_RUN_RECORD: &str = "/state/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json";
+
+/// Returns the identity of the tests' workspace.
+fn helper_identity() -> Identity {
+    Identity {
+        id: HELPER_WORKSPACE.parse().unwrap(),
+        run_record: PathBuf::from(HELPER_RUN_RECORD),
+    }
+}
+
+/// Returns the labels of a helper as `docker container inspect` prints
+/// them, with the run-record label `run_record` when it is given.
+fn helper_labels(workspace: &str, run_record: Option<&str>, role: &str, app: &str) -> String {
+    let mut labels = serde_json::json!({
+        "mxv.workspace-id": workspace,
+        "mxv.role": role,
+        "mxv.app": app,
+    });
+    if let Some(run_record) = run_record {
+        labels["mxv.run-record"] = run_record.into();
+    }
+    labels.to_string()
+}
+
 #[test]
 fn a_leftover_helper_is_one_whose_labels_name_the_workspace_the_role_and_the_app() {
-    let workspace: WorkspaceId = "0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21".parse().unwrap();
+    let identity = helper_identity();
     let app: AppName = "db".parse().unwrap();
-    let of = |labels: &str| helper_of(&workspace, Some(&app), labels);
-    let own = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"db","mxv.volume":"data"}"#;
+    let of = |labels: &str| helper_of(&identity, Some(&app), labels);
+    let own = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.run-record":"/state/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json","mxv.role":"volume-owner","mxv.app":"db","mxv.volume":"data"}"#;
     assert!(of(own));
-    let id_helper = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"db"}"#;
-    assert!(of(id_helper));
+    let id_helper = helper_labels(
+        HELPER_WORKSPACE,
+        Some(HELPER_RUN_RECORD),
+        "volume-owner",
+        "db",
+    );
+    assert!(of(&id_helper));
     for foreign in [
-        r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e22","mxv.role":"volume-owner","mxv.app":"db"}"#,
-        r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner ","mxv.app":"db"}"#,
-        r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.app":"db","mxv.container":"server"}"#,
-        r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"web"}"#,
-        "null",
-        "not json",
+        helper_labels(
+            "0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e22",
+            Some(HELPER_RUN_RECORD),
+            "volume-owner",
+            "db",
+        ),
+        helper_labels(HELPER_WORKSPACE, Some(HELPER_RUN_RECORD), "volume-owner ", "db"),
+        helper_labels(HELPER_WORKSPACE, Some(HELPER_RUN_RECORD), "volume-owner", "web"),
+        r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.run-record":"/state/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json","mxv.app":"db","mxv.container":"server"}"#.to_owned(),
+        "null".to_owned(),
+        "not json".to_owned(),
     ] {
-        assert!(!of(foreign), "{foreign}");
+        assert!(!of(&foreign), "{foreign}");
     }
-    let web = r#"{"mxv.workspace-id":"0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21","mxv.role":"volume-owner","mxv.app":"web"}"#;
-    assert!(helper_of(&workspace, None, web));
+    let web = helper_labels(
+        HELPER_WORKSPACE,
+        Some(HELPER_RUN_RECORD),
+        "volume-owner",
+        "web",
+    );
+    assert!(helper_of(&identity, None, &web));
+}
+
+#[test]
+fn a_helper_whose_run_record_label_is_missing_or_names_another_state_directory_is_not_this_workspaces()
+ {
+    let identity = helper_identity();
+    let app: AppName = "db".parse().unwrap();
+    for run_record in [
+        None,
+        Some(""),
+        Some("/elsewhere/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json"),
+        Some("/state/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json "),
+        Some("/state/runs/../runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json"),
+    ] {
+        let labels = helper_labels(HELPER_WORKSPACE, run_record, "volume-owner", "db");
+        assert!(!helper_of(&identity, Some(&app), &labels), "{labels}");
+        assert!(!helper_of(&identity, None, &labels), "{labels}");
+    }
 }

@@ -58,11 +58,12 @@ use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, check_with, quick_with, run_program_until,
 };
 use crate::engine::container::names::{
-    APP_LABEL, ContainerId, ROLE_LABEL, Scope, VOLUME_OWNER_ROLE, VolumeKey, WORKSPACE_ID_LABEL,
+    APP_LABEL, ContainerId, Identity, ROLE_LABEL, Scope, VOLUME_OWNER_ROLE, VolumeKey,
+    WORKSPACE_ID_LABEL,
 };
 use crate::engine::container::secrets::{self, run_as};
 use crate::error::{PhaseError, VolumeOwnerProblem};
-use crate::name::{AppName, WorkspaceId};
+use crate::name::AppName;
 use crate::plan::AppPlan;
 use crate::plan::container::KEEP_OWNER;
 use crate::record::DockerCause;
@@ -242,10 +243,10 @@ pub(crate) fn parse_id(printed: &str) -> Option<u32> {
 }
 
 /// Reports whether `labels`, as the JSON that `docker container inspect`
-/// prints, name a volume-owner helper of the workspace `workspace`, and of
+/// prints, name a volume-owner helper of the workspace `identity`, and of
 /// `app` when `app` is given. Each value must equal the expected one
 /// exactly.
-pub(crate) fn helper_of(workspace: &WorkspaceId, app: Option<&AppName>, labels: &str) -> bool {
+pub(crate) fn helper_of(identity: &Identity, app: Option<&AppName>, labels: &str) -> bool {
     let Some(labels) = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
         .ok()
         .flatten()
@@ -253,7 +254,7 @@ pub(crate) fn helper_of(workspace: &WorkspaceId, app: Option<&AppName>, labels: 
         return false;
     };
     let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-    is(WORKSPACE_ID_LABEL, workspace.as_str())
+    identity.names(&labels)
         && is(ROLE_LABEL, VOLUME_OWNER_ROLE)
         && app.is_none_or(|app| is(APP_LABEL, app.as_str()))
 }
@@ -466,7 +467,7 @@ pub(crate) fn resolve(
     }))
 }
 
-/// Removes every volume-owner helper of the workspace `workspace`, or of
+/// Removes every volume-owner helper of the workspace `identity`, or of
 /// its app `app` when it is given, that the `docker` program `program`
 /// finds by its labels. A helper that Docker no longer has is skipped.
 ///
@@ -475,7 +476,7 @@ pub(crate) fn resolve(
 /// Returns the errors of the docker commands.
 pub(crate) fn remove_helpers_with(
     program: &OsStr,
-    workspace: &WorkspaceId,
+    identity: &Identity,
     app: Option<&AppName>,
 ) -> Result<(), ContainerError> {
     let listed = quick_with(
@@ -487,7 +488,7 @@ pub(crate) fn remove_helpers_with(
             "--quiet",
             "--no-trunc",
             "--filter",
-            &format!("label={WORKSPACE_ID_LABEL}={workspace}"),
+            &format!("label={WORKSPACE_ID_LABEL}={}", identity.id),
             "--filter",
             &format!("label={ROLE_LABEL}={VOLUME_OWNER_ROLE}"),
         ],
@@ -514,14 +515,14 @@ pub(crate) fn remove_helpers_with(
             continue;
         }
         let labels = inspected.checked_with(program, "container inspect", None)?;
-        if helper_of(workspace, app, labels.trim()) {
+        if helper_of(identity, app, labels.trim()) {
             remove_helper(program, &id)?;
         }
     }
     Ok(())
 }
 
-/// Removes the volume-owner helpers of the workspace `workspace`, or of its
+/// Removes the volume-owner helpers of the workspace `identity`, or of its
 /// app `app`, with the `docker` program on `PATH`, as
 /// [`remove_helpers_with`] does.
 ///
@@ -529,8 +530,8 @@ pub(crate) fn remove_helpers_with(
 ///
 /// Returns the errors of [`remove_helpers_with`].
 pub(crate) fn remove_helpers(
-    workspace: &WorkspaceId,
+    identity: &Identity,
     app: Option<&AppName>,
 ) -> Result<(), ContainerError> {
-    remove_helpers_with(DOCKER.as_ref(), workspace, app)
+    remove_helpers_with(DOCKER.as_ref(), identity, app)
 }

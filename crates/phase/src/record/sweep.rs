@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use crate::clock::deadline_in;
+use crate::engine::container::Identity as WorkspaceIdentity;
 use crate::engine::host::{HostRunner, HostStop, HostStopped};
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
@@ -76,9 +77,13 @@ pub(crate) fn sweep(
     let Some(record) = store.read(workspace)? else {
         return Ok(Swept::default());
     };
+    let identity = WorkspaceIdentity {
+        id: workspace.clone(),
+        run_record: store.path(workspace),
+    };
     if dry_run {
         let mut sweeper = Sweeper {
-            workspace,
+            identity: &identity,
             journal: None,
             reach,
             waits,
@@ -90,7 +95,7 @@ pub(crate) fn sweep(
         return Ok(Swept::default());
     };
     let mut sweeper = Sweeper {
-        workspace,
+        identity: &identity,
         journal: Some(&mut journal),
         reach,
         waits,
@@ -102,8 +107,9 @@ pub(crate) fn sweep(
 
 /// One sweep in progress.
 struct Sweeper<'j, 's, 'a> {
-    /// The workspace, whose label a Docker object found by name carries.
-    workspace: &'a WorkspaceId,
+    /// The workspace and the run record of the state directory being
+    /// swept, whose labels a Docker object must carry.
+    identity: &'a WorkspaceIdentity,
     /// The journal that records each step, or `None` for a dry run.
     journal: Option<&'j mut Journal<'s>>,
     /// The Docker calls and the process table.
@@ -128,7 +134,7 @@ impl Sweeper<'_, '_, '_> {
         for entry in &record.containers {
             let key = ObjectKey::Container(entry.app.clone(), entry.process.clone());
             let object = DockerObject {
-                workspace: self.workspace,
+                identity: self.identity,
                 kind: DockerKind::Container,
                 name: &entry.name,
                 id: entry.id.as_ref().map(ContainerId::as_str),
@@ -163,7 +169,7 @@ impl Sweeper<'_, '_, '_> {
             .chain(record.volumes.iter().map(|entry| entry.state))
             .any(|state| state != EntryState::Stopped);
         if live && self.journal.is_some() {
-            match self.reach.docker.remove_volume_helpers(self.workspace) {
+            match self.reach.docker.remove_volume_helpers(self.identity) {
                 Ok(()) | Err(DockerError::Unavailable { .. }) => {}
                 Err(source) => return Err(PhaseError::Docker { source }),
             }
@@ -171,7 +177,7 @@ impl Sweeper<'_, '_, '_> {
         for entry in &record.networks {
             let key = ObjectKey::Network(entry.name.clone());
             let object = DockerObject {
-                workspace: self.workspace,
+                identity: self.identity,
                 kind: DockerKind::Network,
                 name: &entry.name,
                 id: entry.id.as_ref().map(|id| id.as_str()),
@@ -189,7 +195,7 @@ impl Sweeper<'_, '_, '_> {
             } else {
                 let key = ObjectKey::Volume(entry.name.clone());
                 let object = DockerObject {
-                    workspace: self.workspace,
+                    identity: self.identity,
                     kind: DockerKind::Volume,
                     name: &entry.name,
                     id: None,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rustix::process::Signal;
 
-use crate::engine::container::ContainerState;
+use crate::engine::container::{ContainerState, Identity as WorkspaceIdentity};
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
 use crate::engine::keeper::{Kept, Launch};
 use crate::engine::probe::LogLines;
@@ -358,6 +358,9 @@ pub(crate) struct FakeObject {
     /// The value of phase's workspace label, or `None` for an object
     /// without it.
     pub(crate) workspace: Option<String>,
+    /// The value of phase's run-record label, or `None` for an object
+    /// that matches any run record.
+    pub(crate) run_record: Option<String>,
     /// The state of a container, which is running unless a test says
     /// otherwise.
     pub(crate) state: ContainerState,
@@ -381,9 +384,9 @@ pub(crate) struct FakeDocker {
     pub(crate) refuses: bool,
     /// The ids that `remove` was called with.
     pub(crate) removed: RefCell<Vec<String>>,
-    /// The workspaces whose volume-owner helpers `remove_volume_helpers`
-    /// was asked to remove.
-    pub(crate) helpers_removed: RefCell<Vec<String>>,
+    /// The workspace ids and run-record paths whose volume-owner helpers
+    /// `remove_volume_helpers` was asked to remove.
+    pub(crate) helpers_removed: RefCell<Vec<(String, String)>>,
 }
 
 impl FakeDocker {
@@ -407,9 +410,20 @@ impl FakeDocker {
             name: name.to_owned(),
             id: id.to_owned(),
             workspace: label.map(str::to_owned),
+            run_record: None,
             state: ContainerState::Running,
             started_at: Some("2026-11-05T10:00:00Z".to_owned()),
         });
+        self
+    }
+
+    /// Gives the object whose id is `id` the run-record label `run_record`.
+    pub(crate) fn run_record(self, id: &str, run_record: &str) -> Self {
+        for object in self.objects.borrow_mut().iter_mut() {
+            if object.id == id {
+                object.run_record = Some(run_record.to_owned());
+            }
+        }
         self
     }
 
@@ -446,13 +460,18 @@ impl FakeDocker {
         if self.down {
             return Err(Self::failure());
         }
-        let label = object.workspace.as_str();
+        let label = object.identity.id.as_str();
+        let run_record = object.identity.run_record.to_string_lossy();
         Ok(self
             .objects
             .borrow()
             .iter()
             .find(|found| {
                 found.kind == object.kind
+                    && found
+                        .run_record
+                        .as_deref()
+                        .is_none_or(|labelled| labelled == run_record)
                     && object.id.map_or(
                         found.name == object.name.as_str()
                             && found.workspace.as_deref() == Some(label),
@@ -493,13 +512,14 @@ impl Docker for FakeDocker {
         Ok(())
     }
 
-    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
+    fn remove_volume_helpers(&self, identity: &WorkspaceIdentity) -> Result<(), DockerError> {
         if self.down {
             return Err(Self::failure());
         }
-        self.helpers_removed
-            .borrow_mut()
-            .push(workspace.as_str().to_owned());
+        self.helpers_removed.borrow_mut().push((
+            identity.id.as_str().to_owned(),
+            identity.run_record.to_string_lossy().into_owned(),
+        ));
         Ok(())
     }
 }
@@ -532,7 +552,7 @@ impl Docker for Unreachable {
         Err(Self::failure())
     }
 
-    fn remove_volume_helpers(&self, _workspace: &WorkspaceId) -> Result<(), DockerError> {
+    fn remove_volume_helpers(&self, _identity: &WorkspaceIdentity) -> Result<(), DockerError> {
         Err(Self::failure())
     }
 }

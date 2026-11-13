@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::container::ContainerState;
-use crate::name::WorkspaceId;
+use crate::engine::container::{ContainerState, Identity};
 use crate::record::DockerName;
 
 /// A kind of Docker object that the run record names, and that a
@@ -35,12 +34,12 @@ pub enum DockerKind {
 
 /// A Docker object that the run record names: by its id once phase has
 /// recorded one, and otherwise by the name that phase gave it and the
-/// workspace label that phase put on it.
+/// labels that phase put on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DockerObject<'r> {
-    /// The workspace whose stable id phase put in the object's workspace
-    /// label.
-    pub(crate) workspace: &'r WorkspaceId,
+    /// The workspace whose stable id and run-record path phase put in the
+    /// object's workspace and run-record labels.
+    pub(crate) identity: &'r Identity,
     /// The object's kind.
     pub(crate) kind: DockerKind,
     /// The name that phase gave the object.
@@ -103,17 +102,18 @@ pub(crate) trait Docker {
     /// and [`DockerError::Refused`] when it answers and refuses.
     fn remove(&self, kind: DockerKind, id: &str, wait: Duration) -> Result<(), DockerError>;
 
-    /// Removes every volume-owner helper of the workspace `workspace`: a
-    /// short-lived container that phase labels with the workspace and the
-    /// `volume-owner` role, which a run that ended early left behind. The
-    /// run record does not name such a helper, so `sweep` finds it by its
-    /// labels, and never by its name alone.
+    /// Removes every volume-owner helper of the workspace `identity`: a
+    /// short-lived container that phase labels with the workspace, its run
+    /// record and the `volume-owner` role, which a run that ended early
+    /// left behind. The run record does not name such a helper, so `sweep`
+    /// finds it by its labels, and never by its name alone. A helper that
+    /// names another run record is left alone.
     ///
     /// # Errors
     ///
     /// Returns [`DockerError::Unavailable`] when Docker does not answer,
     /// and [`DockerError::Refused`] when it answers and refuses.
-    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError>;
+    fn remove_volume_helpers(&self, identity: &Identity) -> Result<(), DockerError>;
 }
 
 /// What Docker reports of a container: its state, how many times Docker

@@ -225,12 +225,28 @@ impl ContainerId {
 
 /// The stable id of a workspace and the path of its run record, which
 /// label the objects that a scope creates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Identity {
     /// The workspace's stable id.
     pub(crate) id: WorkspaceId,
     /// The absolute path of the workspace's run record.
     pub(crate) run_record: PathBuf,
+}
+
+impl Identity {
+    /// Reports whether `labels`, an object's labels, name this workspace:
+    /// the object's `mxv.workspace-id` label equals the workspace's stable
+    /// id and its `mxv.run-record` label equals the path of the
+    /// workspace's run record. Each value must equal the expected one
+    /// exactly, with nothing trimmed. The run record is the lossy UTF-8
+    /// string that [`Scope::labels`] writes, so a state directory reached
+    /// by another path than the one that made an object finds that object
+    /// foreign, and leaves it alone.
+    pub(crate) fn names(&self, labels: &BTreeMap<String, String>) -> bool {
+        let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
+        is(WORKSPACE_ID_LABEL, self.id.as_str())
+            && is(RUN_RECORD_LABEL, &self.run_record.to_string_lossy())
+    }
 }
 
 /// The objects of one app of a workspace, which are one compose project of
@@ -361,10 +377,10 @@ impl Scope {
         labels
     }
 
-    /// Returns the stable id of the workspace whose objects the scope
-    /// labels.
-    pub(crate) const fn workspace_id(&self) -> &WorkspaceId {
-        &self.identity.id
+    /// Returns the stable id and run record that label the scope's
+    /// objects.
+    pub(crate) const fn identity(&self) -> &Identity {
+        &self.identity
     }
 
     /// Reports whether `labels`, an object's labels as the JSON that
@@ -382,11 +398,7 @@ impl Scope {
             return false;
         };
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        is(WORKSPACE_ID_LABEL, self.identity.id.as_str())
-            && is(
-                RUN_RECORD_LABEL,
-                &self.identity.run_record.to_string_lossy(),
-            )
+        self.identity.names(&labels)
             && (label != CONTAINER_LABEL || is(APP_LABEL, self.app.as_str()))
             && is(label, object)
     }
