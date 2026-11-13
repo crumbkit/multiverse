@@ -117,11 +117,21 @@ impl Context {
     /// while they start or stop its processes, then reads the workspace's
     /// record again, so the ports are the ones that a command which held
     /// the lock before stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MxvFailure::NotFound`] when the record is gone once the
+    /// command holds the lock, such as when an `mxv archive` held the lock
+    /// first and deleted it. The command then writes nothing and starts or
+    /// stops nothing.
     pub(crate) fn lock(&mut self) -> Result<Lock, MxvFailure> {
         let lock = self.runs.lock(&self.workspace.name)?;
-        if let Some(fresh) = self.store.read(&self.workspace.name)? {
-            self.workspace = fresh;
-        }
+        self.workspace =
+            self.store
+                .read(&self.workspace.name)?
+                .ok_or_else(|| MxvFailure::NotFound {
+                    name: self.workspace.name.to_string(),
+                })?;
         Ok(lock)
     }
 
@@ -957,7 +967,9 @@ pub(crate) fn lock(environment: &Environment, name: &WorkspaceName) -> Result<Lo
 }
 
 /// Stops every process of `workspace` and deletes its run files and logs,
-/// for `mxv remove --force`.
+/// for `mxv remove --force`. When the record is gone once it holds the
+/// lock, it stops nothing, because the command that deleted the record
+/// stopped the processes, and `mxv remove` then finds no workspace.
 pub(crate) fn stop_all(
     environment: &Environment,
     workspace: &Workspace,
@@ -968,7 +980,11 @@ pub(crate) fn stop_all(
         workspace: workspace.clone(),
         processes: Vec::new(),
     };
-    let lock = context.lock()?;
+    let lock = match context.lock() {
+        Ok(lock) => lock,
+        Err(MxvFailure::NotFound { .. }) => return Ok(()),
+        Err(failure) => return Err(failure.into()),
+    };
     stop_every(&context, &lock, None)
 }
 
@@ -1038,8 +1054,8 @@ pub(crate) fn delete_volumes(
 /// It holds the workspace's lock, reads the record again and the names of
 /// what still runs, and passes both to `check`, which returns why the
 /// workspace is no longer idle, or `None`. When `check` gives a reason,
-/// or another mxv command holds the lock, it stops nothing and returns the
-/// reason.
+/// another mxv command holds the lock, or the record was deleted while it
+/// waited for the lock, it stops nothing and returns the reason.
 pub(crate) fn reclaim_stop(
     environment: &Environment,
     workspace: &Workspace,
@@ -1056,6 +1072,11 @@ pub(crate) fn reclaim_stop(
         Err(MxvFailure::Library(Error::Busy { .. })) => {
             return Ok(Err(
                 "another mxv command holds the workspace's lock".to_owned()
+            ));
+        }
+        Err(MxvFailure::NotFound { .. }) => {
+            return Ok(Err(
+                "the workspace's record was deleted while mxv waited for its lock".to_owned(),
             ));
         }
         Err(failure) => return Err(failure.into()),

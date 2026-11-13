@@ -361,6 +361,25 @@ fn a_record_with_one_checkout_written_again_keeps_version_three() {
 }
 
 #[test]
+fn a_store_does_not_write_back_a_record_that_was_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = workspace("app");
+    store.create(&mut workspace).unwrap();
+    store.delete(&workspace.name).unwrap();
+    let written = store.update(&mut workspace);
+    assert!(
+        matches!(&written, Err(Error::RecordMissing { name }) if name.as_str() == "app"),
+        "{written:?}"
+    );
+    let left: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
 fn a_record_of_version_five_is_refused_as_newer() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());

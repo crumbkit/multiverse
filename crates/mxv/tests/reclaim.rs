@@ -7,6 +7,8 @@
 
 #[path = "support/grants.rs"]
 mod grants;
+#[path = "support/held_lock.rs"]
+mod held_lock;
 #[path = "support/git.rs"]
 mod support;
 #[path = "support/ports.rs"]
@@ -318,6 +320,32 @@ fn a_pinned_workspace_is_never_chosen_until_it_is_unpinned() {
     let (_, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
     assert_eq!(row(&document, "kept")["state"], "stopped", "{document}");
     assert_eq!(setup.state("kept"), "stopped");
+}
+
+#[test]
+fn a_reclaim_that_waited_for_the_lock_keeps_a_workspace_whose_record_was_deleted() {
+    let setup = Setup::new();
+    setup.idle_age("0s");
+    setup.running("triage");
+    let state = setup.root().join("state/mxv");
+    let record = state.join("workspaces/triage.json");
+    let saved = fs::read_to_string(&record).unwrap();
+    let (exit, document) = held_lock::delete_record_while_locked(&state, "triage", || {
+        setup.json(&["reclaim", "--need", "memory=1K"])
+    });
+    let gone = !record.exists();
+    // The record goes back, so the setup's drop stops the sleeper, which
+    // the command that deleted the record would have stopped.
+    write(&record, &saved);
+    assert_eq!(exit, 0, "{document}");
+    let triage = row(&document, "triage");
+    assert_eq!(triage["state"], "kept", "{document}");
+    assert_eq!(
+        triage["reason"], "the workspace's record was deleted while mxv waited for its lock",
+        "{document}"
+    );
+    assert!(gone, "{document}");
+    assert_eq!(setup.state("triage"), "running");
 }
 
 #[test]

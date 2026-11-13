@@ -173,6 +173,15 @@ workspace may need to act on.
 
 ### Fixed
 
+- A command that waited for a workspace's lock while another command
+  archived the workspace no longer writes the workspace's record back.
+  `mxv up`, `down`, `restart`, `ports reset`, `pin`, `unpin`, `exec` and
+  `run` fail with `mxv::workspace::not_found` when the record is gone once
+  they hold the lock, and start or stop nothing. `mxv reclaim` keeps such a
+  workspace with a reason and carries on, and `mxv remove --force` exits
+  with the state `unchanged`. `Store::update` returns the new
+  `Error::RecordMissing` when no record of the name exists, so only
+  `Store::create` makes a record.
 - phase treats a container or volume as its own only when its `mxv.run-record`
   label names its own run record. A second state directory that holds the
   same workspace id, such as a copy, no longer lists, deletes, mounts or
