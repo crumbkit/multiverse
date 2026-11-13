@@ -12,7 +12,7 @@ use crate::name::{MOST_NAME_BYTES, WorkspaceName};
 use crate::store::Records;
 use crate::workspaces::{Mode, Workspaces};
 
-use super::{Problem, Repair, classify, pins_gone, rename_pair};
+use super::{ArchiveCase, Repair, UnreadPins, archive_case, classify, pins_gone, rename_pair};
 
 /// The most dated names that [`Workspaces::repair`] tries for an older
 /// archive: `NAME-<date>`, then `NAME-<date>-2` up to this suffix. When
@@ -99,37 +99,35 @@ impl<B: Backend> Workspaces<B> {
         if let Some((old, dated)) = rename_pair(archive, &all.archives) {
             return self.finish_rename(archives, old, &dated.name, mode);
         }
-        let records = Records {
-            workspaces: self.store.read(name)?.into_iter().collect(),
-            problems: Vec::new(),
-        };
-        let found = ArchiveRecords {
-            archives: vec![archive.clone()],
-            problems: Vec::new(),
-        };
-        let health = classify(&self.backend, &records, &found);
-        let Some(broken) = health.archives.into_iter().next() else {
-            return self.repair_workspace(name);
-        };
+        let live = self.store.read(name)?;
+        let reading = archive_case(
+            &self.backend,
+            archive,
+            live.as_ref(),
+            &all.archives,
+            UnreadPins::CountAsThere,
+        )?;
         let archive = archive.clone();
-        match broken.problem {
-            Problem::ArchivePinsGone => move_aside(archives, archive, mode),
-            Problem::ArchiveBesideNewerWorkspace if pins_gone(&self.backend, &archive)? => {
+        match reading.case {
+            ArchiveCase::PinsGone => move_aside(archives, archive, mode),
+            ArchiveCase::BesideNewerWorkspace if pins_gone(&self.backend, &archive)? => {
                 move_aside(archives, archive, mode)
             }
-            Problem::ArchiveBesideNewerWorkspace => {
+            ArchiveCase::BesideNewerWorkspace => {
                 let to = self.dated_name(archives, &archive)?;
                 self.finish_rename(archives, &archive, &to, mode)
             }
-            Problem::RestoreUnfinished => Ok(Repaired::Deleted(Box::new(
+            ArchiveCase::RestoreUnfinished => Ok(Repaired::Deleted(Box::new(
                 self.remove_archive(archives, archive, mode)?,
             ))),
-            Problem::Unreadable { .. }
-            | Problem::ArchiveUnfinished
-            | Problem::RenameUnfinished
-            | Problem::CheckoutsGone => Ok(Repaired::Unchanged {
-                repair: broken.repair,
-            }),
+            ArchiveCase::Finishable | ArchiveCase::Resumable | ArchiveCase::Renaming => {
+                Ok(Repaired::Unchanged {
+                    repair: reading.broken(name).map(|(_, repair)| repair),
+                })
+            }
+            ArchiveCase::ArchivedBesideWorkspace | ArchiveCase::Archived => {
+                self.repair_workspace(name)
+            }
         }
     }
 

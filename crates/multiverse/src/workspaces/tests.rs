@@ -743,21 +743,40 @@ fn a_checkout_locked_for_another_reason_stops_the_removal() {
     assert_eq!(reason, "on a USB disk");
 }
 
-/// A backend that runs git, and lets a test act at four points, as
+/// A backend that runs git, and lets a test act at five points, as
 /// another process might: before the fetch, after the checkout is added,
-/// before a branch is deleted, and before a checkout is removed.
-struct Scripted {
+/// before a branch is deleted, before a checkout is removed, and before a
+/// pin is read. The archive tests use it too.
+pub(crate) struct Scripted {
     /// Runs in the repository before the fetch.
-    before_fetch: fn(&Path),
+    pub(crate) before_fetch: fn(&Path),
     /// Runs in the repository after the checkout is added, and returns the
     /// error that the checkout then fails with, if any.
-    after_add: fn(&Path, &Path) -> Option<Error>,
+    pub(crate) after_add: fn(&Path, &Path) -> Option<Error>,
     /// Runs in the repository before a branch is deleted.
-    before_delete: fn(&Path),
+    pub(crate) before_delete: fn(&Path),
     /// Runs with the checkout before `git worktree remove`, and returns the
     /// error that the removal then fails with, if any, in place of running
     /// it, as a `git worktree remove` that missed its deadline does.
-    before_remove: fn(&Path) -> Option<Error>,
+    pub(crate) before_remove: fn(&Path) -> Option<Error>,
+    /// Runs with the repository that holds a pin before the pin is read,
+    /// and returns the error that the read then fails with, if any, in
+    /// place of running git, as a `git rev-parse` that cannot start does.
+    pub(crate) before_resolve: fn(&Path) -> Option<Error>,
+}
+
+impl Scripted {
+    /// Returns the backend that runs git at every point and changes
+    /// nothing.
+    pub(crate) fn plain() -> Self {
+        Self {
+            before_fetch: |_| {},
+            after_add: |_, _| None,
+            before_delete: |_| {},
+            before_remove: |_| None,
+            before_resolve: |_| None,
+        }
+    }
 }
 
 impl std::fmt::Debug for Scripted {
@@ -945,6 +964,9 @@ impl Backend for Scripted {
         holder: RefHolder<'_>,
         revision: &str,
     ) -> Result<Option<String>, Error> {
+        if let Some(error) = (self.before_resolve)(holder.path()) {
+            return Err(error);
+        }
         Git.resolve_commit(holder, revision)
     }
     fn concealed(&self, checkout: &Path) -> Result<crate::backend::Concealed, Error> {
@@ -1017,6 +1039,7 @@ fn a_branch_that_another_process_creates_during_the_fetch_is_left_alone() {
             after_add: |_, _| None,
             before_delete: |_| {},
             before_remove: |_| None,
+            before_resolve: |_| None,
         },
     );
     let outcome = workspaces
@@ -1065,6 +1088,7 @@ fn a_checkout_left_locked_while_initializing_by_a_failed_add_is_unlocked_and_rem
             },
             before_delete: |_| {},
             before_remove: |_| None,
+            before_resolve: |_| None,
         },
     );
     let result = workspaces.create(
@@ -1115,6 +1139,7 @@ fn a_branch_that_moves_while_the_removal_runs_is_kept_at_its_new_commit() {
                 git(repository, &["branch", "--force", "reading-list", "HEAD"]);
             },
             before_remove: |_| None,
+            before_resolve: |_| None,
         },
     );
     let RemovalPlan::Ready(plan) = workspaces
@@ -1353,6 +1378,7 @@ fn removing(before_remove: fn(&Path) -> Option<Error>) -> Scripted {
         after_add: |_, _| None,
         before_delete: |_| {},
         before_remove,
+        before_resolve: |_| None,
     }
 }
 

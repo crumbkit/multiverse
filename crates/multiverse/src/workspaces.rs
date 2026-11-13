@@ -22,7 +22,7 @@ mod clone_tests;
 #[cfg(test)]
 mod multi_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Whether an operation changes anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
