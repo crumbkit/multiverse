@@ -21,7 +21,7 @@ use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
 use crate::disposable::DisposableSet;
 use crate::error::Error;
-use crate::health::{pins_gone, rename_pair};
+use crate::health::{ArchiveCase, UnreadPins, archive_case};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
 use crate::record::{Workspace, WorkspaceKind};
@@ -933,44 +933,51 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Returns what the record of the workspace `name` and its archive say
-    /// about an archive of it.
-    ///
-    /// `health::classify` (`health.rs`) holds the same rule for which
-    /// retiring archive this finishes and which it refuses, and names the
-    /// repair of each in `mxv list`, so a change to one changes the other.
+    /// about an archive of it. The case of the two records comes from
+    /// `health::archive_case`, which `mxv list` and `mxv repair` read too.
     fn subject(&self, archives: &Archives, name: &WorkspaceName) -> Result<Subject, Error> {
         let refused = |refusal| Ok(Subject::Done(ArchivePlanned::Refused(refusal)));
         let existing = archives.read(name)?;
-        match (self.store.read(name)?, existing) {
-            (None, None) => refused(ArchiveRefusal::NotFound),
-            // Finishing one record of a rename that stopped would mark an
-            // archive whose files are split between two directories.
-            (None, Some(archive)) if archive.state == ArchiveState::Retiring => {
-                let all = archives.list()?;
-                if let Some((old, dated)) = rename_pair(&archive, &all.archives) {
-                    let other = if old.name == archive.name { dated } else { old };
-                    return refused(ArchiveRefusal::RenameUnfinished(Box::new(other.clone())));
-                }
-                if pins_gone(&self.backend, &archive)? {
-                    // Marking an archive whose pins are gone as archived
-                    // would claim that a restore brings back what is gone.
-                    return refused(ArchiveRefusal::PinsGone(Box::new(archive)));
-                }
-                Ok(Subject::Done(ArchivePlanned::Finish(Box::new(archive))))
+        let live = self.store.read(name)?;
+        let Some(archive) = existing else {
+            return match live {
+                None => refused(ArchiveRefusal::NotFound),
+                Some(workspace) => Ok(Subject::Found(Box::new(workspace), None)),
+            };
+        };
+        let all = archives.list()?;
+        let reading = archive_case(
+            &self.backend,
+            &archive,
+            live.as_ref(),
+            &all.archives,
+            UnreadPins::Fail,
+        )?;
+        match reading.case {
+            ArchiveCase::Finishable => Ok(Subject::Done(ArchivePlanned::Finish(Box::new(archive)))),
+            ArchiveCase::PinsGone => refused(ArchiveRefusal::PinsGone(Box::new(archive))),
+            ArchiveCase::Renaming => {
+                let other = match reading.rename {
+                    Some((old, dated)) if old.name == archive.name => dated,
+                    Some((old, _)) => old,
+                    // `archive_case` gives `Renaming` only with the pair.
+                    None => &archive,
+                };
+                refused(ArchiveRefusal::RenameUnfinished(Box::new(other.clone())))
             }
-            (None, Some(archive)) if archive.state == ArchiveState::Archived => {
+            ArchiveCase::Resumable => match live {
+                Some(workspace) => Ok(Subject::Found(Box::new(workspace), Some(Box::new(archive)))),
+                // `archive_case` gives `Resumable` only with a workspace.
+                None => refused(ArchiveRefusal::NotFound),
+            },
+            ArchiveCase::BesideNewerWorkspace
+            | ArchiveCase::RestoreUnfinished
+            | ArchiveCase::ArchivedBesideWorkspace => {
+                refused(ArchiveRefusal::NameTaken(Box::new(archive)))
+            }
+            ArchiveCase::Archived => {
                 Ok(Subject::Done(ArchivePlanned::Unchanged(Box::new(archive))))
             }
-            (Some(_), Some(archive)) if archive.state == ArchiveState::Archived => {
-                refused(ArchiveRefusal::NameTaken(Box::new(archive)))
-            }
-            (Some(workspace), Some(archive)) if archive.workspace_id != workspace.id => {
-                refused(ArchiveRefusal::NameTaken(Box::new(archive)))
-            }
-            (Some(workspace), resuming) => {
-                Ok(Subject::Found(Box::new(workspace), resuming.map(Box::new)))
-            }
-            (None, Some(_)) => refused(ArchiveRefusal::NotFound),
         }
     }
 

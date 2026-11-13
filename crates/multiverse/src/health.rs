@@ -143,21 +143,23 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
             .workspaces
             .iter()
             .find(|workspace| workspace.name == archive.name);
-        // A repair that stopped while it moved an older archive to its
-        // dated name leaves two records of one archive id, whichever state
-        // each says. Both rows name the repair of the older name.
-        let (problem, repair) = match rename_pair(archive, &archives.archives) {
-            Some((old, _)) => (Problem::RenameUnfinished, Repair::Repair(old.name.clone())),
-            None => {
-                let Some(problem) = archive_problem(backend, archive, live) else {
-                    continue;
-                };
-                let repair = repair_of(&problem, &archive.name);
-                (problem, repair)
-            }
+        let reading = match archive_case(
+            backend,
+            archive,
+            live,
+            &archives.archives,
+            UnreadPins::CountAsThere,
+        ) {
+            Ok(reading) => reading,
+            // A pin that cannot be read counts as there, so this read
+            // never fails.
+            Err(_) => continue,
+        };
+        let Some((problem, repair)) = reading.broken(&archive.name) else {
+            continue;
         };
         // A newer workspace of the name is whole, so its row stays as it is.
-        let newer = live.is_some_and(|workspace| workspace.id != archive.workspace_id);
+        let newer = live.is_some_and(|workspace| !same_workspace(archive, workspace));
         let broken = Broken {
             name: archive.name.to_string(),
             repair: Some(repair),
@@ -191,37 +193,139 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
     health
 }
 
-/// Returns what is wrong with `archive`, whose name the workspace `live`
-/// holds, or `None` when nothing is.
-///
-/// `Workspaces::subject` (`archive/admit.rs`) holds the same rule for
-/// which retiring archive `mxv archive -w` finishes and which it refuses,
-/// so a change to one changes the other.
-fn archive_problem<B: Backend>(
-    backend: &B,
-    archive: &Archive,
-    live: Option<&Workspace>,
-) -> Option<Problem> {
-    match (archive.state, live) {
-        (ArchiveState::Retiring, Some(workspace)) if workspace.id != archive.workspace_id => {
-            Some(Problem::ArchiveBesideNewerWorkspace)
+/// What one archive record and the workspace record of its name are,
+/// as [`archive_case`] decides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArchiveCase {
+    /// The archive is still retiring, no workspace has its name, and a
+    /// checkout's pin is there, so `mxv archive -w` finishes it.
+    Finishable,
+    /// The archive is still retiring, no workspace has its name, and the
+    /// pin of no checkout names its commit, so finishing it would claim
+    /// that a restore brings back what is gone.
+    PinsGone,
+    /// The archive is still retiring, no workspace has its name, and it is
+    /// one of the two records of a rename that a repair stopped, which
+    /// [`ArchiveReading::rename`] names.
+    Renaming,
+    /// The archive is still retiring beside the workspace it archives, so
+    /// `mxv archive` resumes it.
+    Resumable,
+    /// The archive is still retiring, and another workspace has its name.
+    BesideNewerWorkspace,
+    /// The archive is archived, and the workspace of its name is the one a
+    /// restore rebuilt from it, whole, as [`Rebuilt::Whole`] says.
+    RestoreUnfinished,
+    /// The archive is archived, and a workspace that is another one, or
+    /// that a restore rebuilt and is partly gone, has its name.
+    ArchivedBesideWorkspace,
+    /// The archive is archived, and no workspace has its name.
+    Archived,
+}
+
+/// What [`archive_case`] read about one archive record.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ArchiveReading<'a> {
+    /// What the archive and the workspace of its name are.
+    pub(crate) case: ArchiveCase,
+    /// The two records of a rename that a repair started and did not
+    /// finish, older name first, when the archive is one of them, whatever
+    /// the case.
+    pub(crate) rename: Option<(&'a Archive, &'a Archive)>,
+}
+
+impl ArchiveReading<'_> {
+    /// Returns what is wrong with the archive of `name`, and its repair,
+    /// or `None` when nothing is. A stopped rename comes first, whatever
+    /// state each of its records says, and both of its rows name the
+    /// repair of the older name.
+    fn broken(&self, name: &WorkspaceName) -> Option<(Problem, Repair)> {
+        if let Some((old, _)) = self.rename {
+            return Some((Problem::RenameUnfinished, Repair::Repair(old.name.clone())));
         }
-        (ArchiveState::Retiring, Some(_)) => Some(Problem::ArchiveUnfinished),
-        (ArchiveState::Retiring, None) => Some(if pins_gone(backend, archive).unwrap_or(false) {
-            Problem::ArchivePinsGone
-        } else {
-            Problem::ArchiveUnfinished
-        }),
+        let problem = match self.case {
+            ArchiveCase::Finishable | ArchiveCase::Resumable => Problem::ArchiveUnfinished,
+            ArchiveCase::PinsGone => Problem::ArchivePinsGone,
+            ArchiveCase::Renaming => Problem::RenameUnfinished,
+            ArchiveCase::BesideNewerWorkspace => Problem::ArchiveBesideNewerWorkspace,
+            ArchiveCase::RestoreUnfinished => Problem::RestoreUnfinished,
+            ArchiveCase::ArchivedBesideWorkspace | ArchiveCase::Archived => return None,
+        };
+        let repair = repair_of(&problem, name);
+        Some((problem, repair))
+    }
+}
+
+/// What [`archive_case`] does when it cannot read a pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnreadPins {
+    /// It returns the error, as `mxv archive -w` does before it finishes
+    /// an archive.
+    Fail,
+    /// It counts the pin as there, so a listing names `mxv archive -w` as
+    /// the repair.
+    CountAsThere,
+}
+
+/// Returns what `archive` and `live`, the workspace record of its name,
+/// are. `all` holds every archive record, so a rename that a repair
+/// stopped is found. This is the one rule for an unfinished archive:
+/// [`classify`], `Workspaces::subject` (`archive/admit.rs`) and
+/// [`Workspaces::repair`](crate::Workspaces::repair) each take their
+/// answer from it.
+///
+/// It reads the pins, through `backend`, only for a retiring archive that
+/// no workspace has the name of and that is no rename's.
+///
+/// # Errors
+///
+/// Returns the failure to read a pin, with [`UnreadPins::Fail`].
+pub(crate) fn archive_case<'a, B: Backend>(
+    backend: &B,
+    archive: &'a Archive,
+    live: Option<&Workspace>,
+    all: &'a [Archive],
+    pins: UnreadPins,
+) -> Result<ArchiveReading<'a>, Error> {
+    let rename = rename_pair(archive, all);
+    let case = match (archive.state, live) {
+        (ArchiveState::Retiring, Some(workspace)) if !same_workspace(archive, workspace) => {
+            ArchiveCase::BesideNewerWorkspace
+        }
+        (ArchiveState::Retiring, Some(_)) => ArchiveCase::Resumable,
+        // Finishing one record of a rename that stopped would mark an
+        // archive whose files are split between two directories.
+        (ArchiveState::Retiring, None) if rename.is_some() => ArchiveCase::Renaming,
+        (ArchiveState::Retiring, None) => {
+            let gone = match pins {
+                UnreadPins::Fail => pins_gone(backend, archive)?,
+                UnreadPins::CountAsThere => pins_gone(backend, archive).unwrap_or(false),
+            };
+            if gone {
+                ArchiveCase::PinsGone
+            } else {
+                ArchiveCase::Finishable
+            }
+        }
         // A workspace of the archive's id whose directories are partly
         // gone keeps its row from `checkouts_gone`, and the archive stays,
         // because it may hold the only copies of the workspace's files.
         (ArchiveState::Archived, Some(workspace))
             if rebuilt(archive, workspace) == Rebuilt::Whole =>
         {
-            Some(Problem::RestoreUnfinished)
+            ArchiveCase::RestoreUnfinished
         }
-        (ArchiveState::Archived, _) => None,
-    }
+        (ArchiveState::Archived, Some(_)) => ArchiveCase::ArchivedBesideWorkspace,
+        (ArchiveState::Archived, None) => ArchiveCase::Archived,
+    };
+    Ok(ArchiveReading { case, rename })
+}
+
+/// Reports whether `workspace` is the workspace that `archive` archives:
+/// the two stable ids are equal, or both records lack one, as an older
+/// multiverse wrote them.
+pub(crate) fn same_workspace(archive: &Archive, workspace: &Workspace) -> bool {
+    workspace.id == archive.workspace_id
 }
 
 /// How a workspace record stands to an archive: whether a restore rebuilt

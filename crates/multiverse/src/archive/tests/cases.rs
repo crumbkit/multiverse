@@ -80,7 +80,7 @@ fn retiring_beside_its_workspace_without_ids(setup: &Setup) -> WorkspaceName {
     let path = setup.workspaces.store.path(&name());
     let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     record.as_object_mut().unwrap().remove("id");
-    fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    write(&path, serde_json::to_vec_pretty(&record).unwrap());
     assert_eq!(
         setup.workspaces.store.read(&name()).unwrap().unwrap().id,
         None
