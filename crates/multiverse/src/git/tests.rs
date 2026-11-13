@@ -3,7 +3,7 @@ use std::fs;
 use crate::backend::{Backend as _, Changes};
 use crate::error::Error;
 use crate::git::{Git, explanation, message};
-use crate::testing::{advance_origin, fixture, git, write};
+use crate::testing::{SSH_ORIGIN, advance_origin, fake_ssh, fixture, git, write};
 
 #[test]
 fn a_status_longer_than_the_kept_output_of_a_command_names_every_path() {
@@ -417,7 +417,7 @@ fn a_failed_command_names_its_operation_and_the_last_line_of_its_error() {
 }
 
 #[test]
-fn a_fetch_from_an_origin_that_is_gone_fails() {
+fn a_fetch_from_a_local_origin_that_is_gone_still_fails_as_a_plain_git_failure() {
     let fixture = fixture();
     fs::remove_dir_all(&fixture.origin).unwrap();
     let error = Git.fetch(&fixture.clone).unwrap_err();
@@ -491,4 +491,108 @@ fn a_path_tracks_a_file_only_when_the_repository_tracks_that_file_or_one_below_i
     assert!(Git.tracks(&fixture.clone, "dist/kept.txt").unwrap());
     assert!(!Git.tracks(&fixture.clone, "target/").unwrap());
     assert!(!Git.tracks(&fixture.clone, "*").unwrap());
+}
+
+/// The most time that a fetch which ssh refuses may take: far less than
+/// [`crate::FETCH_DEADLINE`], so a fetch that waited on a question until
+/// the deadline ended it fails the test.
+const AT_ONCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+#[test]
+fn a_fetch_over_ssh_that_would_prompt_fails_at_once_and_names_the_remote() {
+    let fixture = fixture();
+    let ssh = fake_ssh(fixture.dir.path(), &fixture.origin);
+    git(&fixture.clone, &["remote", "set-url", "origin", SSH_ORIGIN]);
+    git(
+        &fixture.clone,
+        &["config", "core.sshCommand", &ssh.command("deny")],
+    );
+    let started = std::time::Instant::now();
+    let error = Git.fetch(&fixture.clone).unwrap_err();
+    assert!(started.elapsed() < AT_ONCE, "{:?}", started.elapsed());
+    assert_eq!(error.ssh_host(), Some("example.invalid"));
+    let Error::SshRefused {
+        ref remote,
+        refusal,
+        ..
+    } = error
+    else {
+        panic!("{error:?}\n{}", ssh.logged());
+    };
+    assert_eq!(remote, SSH_ORIGIN);
+    assert_eq!(refusal, crate::SshRefusal::AuthenticationFailed);
+    let logged = ssh.logged();
+    assert!(logged.contains("args: deny "), "{logged}");
+    assert!(!logged.contains("BatchMode"), "{logged}");
+    assert!(logged.contains("SSH_ASKPASS=false\n"), "{logged}");
+    assert!(logged.contains("SSH_ASKPASS_REQUIRE=force\n"), "{logged}");
+}
+
+#[test]
+fn a_mirror_fetch_over_ssh_whose_host_key_is_unknown_names_the_host() {
+    let fixture = fixture();
+    let ssh = fake_ssh(fixture.dir.path(), &fixture.origin);
+    let mirror = fixture.dir.path().join("mirror.git");
+    Git.prepare_mirror(&mirror).unwrap();
+    git(
+        &mirror,
+        &[
+            "--git-dir=.",
+            "config",
+            "core.sshCommand",
+            &ssh.command("unknown"),
+        ],
+    );
+    let started = std::time::Instant::now();
+    let error = Git.fetch_mirror(&mirror, SSH_ORIGIN, "main").unwrap_err();
+    assert!(started.elapsed() < AT_ONCE, "{:?}", started.elapsed());
+    assert_eq!(error.ssh_host(), Some("example.invalid"));
+    let Error::SshRefused {
+        refusal,
+        ref message,
+        ..
+    } = error
+    else {
+        panic!("{error:?}\n{}", ssh.logged());
+    };
+    assert_eq!(refusal, crate::SshRefusal::HostKeyUnverified);
+    assert_eq!(message, "Host key verification failed.");
+}
+
+#[test]
+fn a_fetch_over_ssh_that_the_fake_server_accepts_succeeds() {
+    let fixture = fixture();
+    let ssh = fake_ssh(fixture.dir.path(), &fixture.origin);
+    let latest = advance_origin(&fixture);
+    git(&fixture.clone, &["remote", "set-url", "origin", SSH_ORIGIN]);
+    git(
+        &fixture.clone,
+        &["config", "core.sshCommand", &ssh.command("accept")],
+    );
+    Git.fetch(&fixture.clone)
+        .unwrap_or_else(|error| panic!("{error:?}\n{}", ssh.logged()));
+    let fetched = git(&fixture.clone, &["rev-parse", "refs/remotes/origin/main"]);
+    assert_eq!(fetched.trim(), latest);
+    assert!(ssh.logged().contains("args: accept "), "{}", ssh.logged());
+}
+
+#[test]
+fn the_patch_id_commands_carry_the_settings_that_stop_ssh_asking() {
+    let fixture = fixture();
+    for command in super::detached::patch_id_commands(&fixture.clone, &["HEAD".to_owned()]) {
+        let envs: Vec<_> = command.get_envs().collect();
+        for (name, value) in [
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("SSH_ASKPASS_REQUIRE", "force"),
+            ("SSH_ASKPASS", "false"),
+        ] {
+            assert!(
+                envs.contains(&(
+                    std::ffi::OsStr::new(name),
+                    Some(std::ffi::OsStr::new(value))
+                )),
+                "{name}={value} is missing from {envs:?}"
+            );
+        }
+    }
 }

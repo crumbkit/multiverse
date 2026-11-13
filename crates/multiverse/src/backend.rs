@@ -265,7 +265,8 @@ pub trait Backend {
     ///
     /// # Errors
     ///
-    /// Returns the failure of the fetch.
+    /// Returns [`Error::SshRefused`] when ssh refuses to connect to an SSH
+    /// origin, and otherwise the failure of the fetch.
     fn fetch(&self, repository: &Path) -> Result<(), Error>;
 
     /// Returns the remote branch that new work starts from, as a full
@@ -425,8 +426,9 @@ pub trait Backend {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MirrorFetchFailed`] when the fetch fails, and the
-    /// failure of setting `HEAD`.
+    /// Returns [`Error::SshRefused`] when ssh refuses to connect to an SSH
+    /// origin, [`Error::MirrorFetchFailed`] when the fetch fails otherwise,
+    /// and the failure of setting `HEAD`.
     fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error>;
 
     /// Clones the bare `mirror` into `checkout` with `--shared` and without

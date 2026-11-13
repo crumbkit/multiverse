@@ -159,7 +159,7 @@ pub(crate) fn recorded_origin(url: &str) -> String {
 
 /// Returns the host of `authority` in lower case, without its user name
 /// and password, and without its port when the port is `default`.
-fn host_of(authority: &str, default: Option<&str>) -> String {
+pub(crate) fn host_of(authority: &str, default: Option<&str>) -> String {
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host)
@@ -204,7 +204,7 @@ pub(crate) fn directory(component: &str) -> String {
 
 /// Returns the host and path of a URL in git's scp-like form, such as
 /// `git@github.com:acme/app.git`, which has a `:` before its first `/`.
-fn scp_like(url: &str) -> Option<(&str, &str)> {
+pub(crate) fn scp_like(url: &str) -> Option<(&str, &str)> {
     let colon = url.find(':')?;
     if url.find('/').is_some_and(|slash| slash < colon) {
         return None;

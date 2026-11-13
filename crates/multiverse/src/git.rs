@@ -16,8 +16,10 @@
 //!   directory.
 //! - Environment: the caller's environment, plus `GIT_TERMINAL_PROMPT=0`,
 //!   so a fetch that needs a password fails instead of waiting for an
-//!   answer that nobody gives, and `LC_ALL=C`, so the messages that the
-//!   errors quote are in English. The commands that write the commits of
+//!   answer that nobody gives, `SSH_ASKPASS_REQUIRE=force` and
+//!   `SSH_ASKPASS=false`, so the ssh that git starts fails where it would
+//!   have asked a question, as [`ssh`] describes, and `LC_ALL=C`, so the
+//!   messages that the errors quote are in English. The commands that write the commits of
 //!   an archive's uncommitted work also get `GIT_INDEX_FILE`, a temporary
 //!   index under the archive's directory, so the checkout's own index
 //!   stays as it is, and `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE`, the
@@ -42,7 +44,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -58,6 +60,7 @@ use crate::mirror::redacted;
 mod archive;
 mod concealed;
 mod detached;
+mod ssh;
 #[cfg(test)]
 mod tests;
 
@@ -425,12 +428,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
-    )]
-    let mut command = Command::new(GIT);
-    command.arg("-C").arg(dir);
+    let mut command = ssh::git_command(dir);
     if is_module_git_dir(dir) {
         // A submodule's git directory names its work tree in
         // `core.worktree`. After `git rm` deletes the submodule, that
@@ -441,8 +439,6 @@ where
     }
     command
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
         .envs(env.iter().copied())
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -565,14 +561,30 @@ impl Backend for Git {
     }
 
     fn fetch(&self, repository: &Path) -> Result<(), Error> {
-        run(
+        let fetched = run(
             repository,
             ["fetch", "--quiet", "origin"],
             "fetch origin",
             FETCH_DEADLINE,
-        )?
-        .ok("fetch origin", repository)
-        .map(drop)
+        )?;
+        if fetched.status.success() {
+            return Ok(());
+        }
+        // The URL is read only after a failure, so a fetch that succeeds
+        // costs no second command. A URL that cannot be read leaves git's
+        // own failure as it is.
+        let url = run(
+            repository,
+            ["remote", "get-url", "origin"],
+            "remote get-url",
+            LOCAL_DEADLINE,
+        )
+        .ok()
+        .filter(|origin| origin.status.success())
+        .map(|origin| trimmed(&origin.stdout));
+        Err(url
+            .and_then(|url| ssh::refused(&url, &fetched.stderr))
+            .unwrap_or_else(|| fetched.failure("fetch origin", repository)))
     }
 
     fn base(&self, repository: &Path) -> Result<String, Error> {
@@ -945,6 +957,9 @@ impl Backend for Git {
             FETCH_DEADLINE,
         )?;
         if !fetched.status.success() {
+            if let Some(refused) = ssh::refused(url, &fetched.stderr) {
+                return Err(refused);
+            }
             return Err(Error::MirrorFetchFailed {
                 origin: redacted(url),
                 mirror: mirror.to_path_buf(),

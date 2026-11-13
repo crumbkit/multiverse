@@ -74,7 +74,8 @@ use mxv::{
     REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
     REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED, RESTORE_COMMIT_MISSING,
     RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING, RESTORE_NAME_TAKEN,
-    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED, RUN_CODES, TASK_AMBIGUOUS,
+    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED, RUN_CODES,
+    SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED, TASK_AMBIGUOUS,
     TASK_UNKNOWN, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_BAD_NAME,
     WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
     WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
@@ -499,6 +500,18 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         &MIRROR_FETCH_FAILED,
         "Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.",
+    ),
+    Unprovoked::new(
+        &SSH_AUTHENTICATION_FAILED,
+        "Only an SSH origin whose host refuses every key provokes it, and the check's fixture has a local origin; tests/workspaces.rs provokes it with a fake ssh that refuses.",
+    ),
+    Unprovoked::new(
+        &SSH_HOST_KEY_UNVERIFIED,
+        "Only an SSH origin whose host key the known hosts file lacks provokes it, and the check's fixture has a local origin; the library's git tests provoke it with a fake ssh.",
+    ),
+    Unprovoked::new(
+        &SSH_HOST_KEY_CHANGED,
+        "Only an SSH origin whose host key changed provokes it, and the check's fixture has a local origin; the library's ssh tests read ssh's warning about a changed key.",
     ),
     Unprovoked::new(
         &TEMPLATE_INVALID,

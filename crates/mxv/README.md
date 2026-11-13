@@ -105,7 +105,13 @@ longer has, and clones it, all under the lock. Another `mxv new` of the same
 origin waits up to 150 seconds for the lock, which covers a whole fetch,
 and then fails with `mxv::mirror::locked`. A fetch that fails, such as one
 whose credentials the origin refuses or one on a machine that is offline,
-fails with `mxv::mirror::fetch_failed` and leaves no workspace behind. At
+fails with `mxv::mirror::fetch_failed` and leaves no workspace behind. A
+fetch from an SSH origin that ssh refuses fails at once with its own code:
+`mxv::ssh::authentication_failed` when the host accepts none of the keys
+that ssh offers, `mxv::ssh::host_key_unverified` when the known hosts file
+has no key for the host, and `mxv::ssh::host_key_changed` when the host
+shows a key that differs from the known one. Each names the remote and the
+host, and says what to do. At
 a terminal, `mxv new` prints a line on standard error when it has to wait
 for the lock.
 
@@ -2007,4 +2013,13 @@ or relative falls back to its default below the home directory.
 When mxv finds no home directory at all, a workspace command fails with
 `mxv::environment::no_directory`. mxv passes its environment to git, with
 `GIT_TERMINAL_PROMPT=0` so a fetch that needs a password fails instead of
-waiting.
+waiting. mxv also sets `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=false`,
+so the ssh that git starts sends each question it would ask, such as a key's
+passphrase or whether to trust a new host key, to the program `false`, which
+refuses it, and ssh fails at once. The SSH command that you set in
+`GIT_SSH_COMMAND`, `core.sshCommand` or `GIT_SSH` runs as you wrote it. An
+`SSH_ASKPASS` program of your own does not run for mxv's git commands, so
+load a key that has a passphrase into ssh-agent with `ssh-add` before you
+run `mxv new`. An ssh older than OpenSSH 8.4 ignores
+`SSH_ASKPASS_REQUIRE` and may still wait, until the fetch deadline of 120
+seconds ends git with `mxv::git::timed_out`.

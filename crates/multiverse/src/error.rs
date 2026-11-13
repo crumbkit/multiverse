@@ -171,6 +171,24 @@ pub enum Error {
         /// The line of git's standard error that says what failed.
         message: String,
     },
+    /// ssh refused to connect to the host of an SSH origin, at once and
+    /// without asking a question. mxv makes ssh refuse where it would have
+    /// asked for a passphrase or about a host key, so a fetch never waits on
+    /// a person who may not be there.
+    SshRefused {
+        /// The origin's URL, with its user name and without a password.
+        remote: String,
+        /// Where ssh logs in: `user@host` when the URL names a user, and
+        /// `host` otherwise, with the host name in lower case and without
+        /// a port. [`Error::ssh_host`] returns the host alone.
+        login: String,
+        /// The port that the URL names, when it is not 22.
+        port: Option<u16>,
+        /// Why ssh refused.
+        refusal: SshRefusal,
+        /// The line of ssh's standard error that says why.
+        message: String,
+    },
     /// A template of workspace manifests cannot be used, such as one that
     /// is not valid TOML, has no valid `[template]` table, or is not a
     /// valid manifest once that table is removed.
@@ -279,6 +297,38 @@ pub enum Error {
     },
 }
 
+/// Returns the host of `login`, an [`Error::SshRefused`] login of the form
+/// `user@host` or `host`.
+fn ssh_host(login: &str) -> &str {
+    login.rsplit_once('@').map_or(login, |(_, host)| host)
+}
+
+impl Error {
+    /// Returns the host that ssh refused to connect to, for an
+    /// [`Error::SshRefused`], and `None` for every other failure.
+    #[must_use]
+    pub fn ssh_host(&self) -> Option<&str> {
+        match self {
+            Self::SshRefused { login, .. } => Some(ssh_host(login)),
+            _ => None,
+        }
+    }
+}
+
+/// Why ssh refused to connect to the host of an SSH origin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SshRefusal {
+    /// The host accepted none of the keys that ssh offered, such as when
+    /// the only key has a passphrase and no ssh-agent holds it.
+    AuthenticationFailed,
+    /// The known hosts file has no key for the host, and ssh would have
+    /// asked whether to trust the key that the host showed.
+    HostKeyUnverified,
+    /// The host showed a key that differs from the one in the known hosts
+    /// file.
+    HostKeyChanged,
+}
+
 /// Returns `message` after `: `, or nothing when it is empty, for the end
 /// of a failure's text.
 fn detail(message: &str) -> String {
@@ -308,6 +358,31 @@ impl Error {
                 mirror.display(),
                 detail(message)
             ),
+            Self::SshRefused {
+                remote,
+                login,
+                refusal,
+                message,
+                ..
+            } => {
+                let host = ssh_host(login);
+                let why = match refusal {
+                    SshRefusal::AuthenticationFailed => {
+                        "accepted none of the keys that ssh offered"
+                    }
+                    SshRefusal::HostKeyUnverified => {
+                        "has a key that the known hosts file does not hold"
+                    }
+                    SshRefusal::HostKeyChanged => {
+                        "has a key that differs from the one in the known hosts file"
+                    }
+                };
+                write!(
+                    formatter,
+                    "ssh refused to fetch {remote}, because {host} {why}{}",
+                    detail(message)
+                )
+            }
             _ => Ok(()),
         }
     }
@@ -514,7 +589,9 @@ impl fmt::Display for Error {
                 formatter,
                 "every dated name for the older archive of {name}, up to {last}, is already taken"
             ),
-            Self::MirrorBusy { .. } | Self::MirrorFetchFailed { .. } => self.fmt_fetch(formatter),
+            Self::MirrorBusy { .. } | Self::MirrorFetchFailed { .. } | Self::SshRefused { .. } => {
+                self.fmt_fetch(formatter)
+            }
             Self::TemplateInvalid { .. }
             | Self::TemplateAmbiguous { .. }
             | Self::ManifestUntrusted { .. } => self.fmt_template(formatter),
@@ -747,6 +824,7 @@ impl std::error::Error for Error {
             | Self::DatedNamesTaken { .. }
             | Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
             | Self::TemplateInvalid { .. }
             | Self::TemplateAmbiguous { .. }
             | Self::ManifestUntrusted { .. }
