@@ -1900,6 +1900,7 @@ fn restore_fetches_nothing_and_refuses_when_the_mirror_is_gone_listing_what_woul
     let setup = setup(Kind::Clone);
     setup.create();
     leave_work_that_only_the_mirror_will_hold(&setup.checkout());
+    setup.commit_locally();
     let archive = setup.archive();
     let mirror = archive.checkouts[0].mirror.clone().unwrap();
     fs::remove_dir_all(&mirror).unwrap();
@@ -1915,6 +1916,10 @@ fn restore_fetches_nothing_and_refuses_when_the_mirror_is_gone_listing_what_woul
     assert!(items.contains("uncommitted work"), "{items}");
     assert!(items.contains("1 stash"), "{items}");
     assert!(items.contains("spike"), "{items}");
+    assert!(
+        items.contains("1 commit of triage that origin did not hold when archived"),
+        "{items}"
+    );
     assert!(!mirror.join("HEAD").exists(), "the refusal made a mirror");
     assert!(!setup.root.join("triage").exists());
     assert_eq!(setup.record().unwrap().id, archive.id);
@@ -1948,6 +1953,65 @@ fn restore_without_from_origin_does_not_fetch_a_mirror_that_is_there() {
         git(&mirror, &["branch", "--list", "later"]).trim(),
         "",
         "the restore fetched the mirror"
+    );
+}
+
+#[test]
+fn a_mirror_that_lost_its_pins_refuses_a_plain_restore_like_a_mirror_that_is_gone() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let archive = setup.archive();
+    let mirror = archive.checkouts[0].mirror.clone().unwrap();
+    let pins = git(
+        &mirror,
+        &["for-each-ref", "--format=%(refname)", "refs/mxv/archives"],
+    );
+    for pin in pins.lines() {
+        git(&mirror, &["update-ref", "-d", pin]);
+    }
+    let RestoreRefusal::MirrorMissing { checkouts } = setup.restore_refusal() else {
+        panic!("the restore was not refused for its mirror");
+    };
+    assert_eq!(checkouts[0].folder, "app");
+    assert_eq!(setup.record().unwrap().id, archive.id);
+}
+
+#[test]
+fn restore_from_origin_keeps_a_pin_whose_object_origin_holds() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    git(&setup.checkout(), &["switch", "--quiet", "-c", "spike"]);
+    git(
+        &setup.checkout(),
+        &["commit", "--quiet", "--allow-empty", "-m", "Spike"],
+    );
+    // Origin holds the commit under another name, so the archive keeps the
+    // branch spike and the new mirror holds its object.
+    git(
+        &setup.checkout(),
+        &["push", "--quiet", "origin", "spike:refs/heads/elsewhere"],
+    );
+    git(&setup.checkout(), &["switch", "--quiet", "triage"]);
+    let archive = setup.archive();
+    fs::remove_dir_all(archive.checkouts[0].mirror.as_ref().unwrap()).unwrap();
+    let restored = setup.restore_from_origin();
+    assert!(
+        restored
+            .lost_pins
+            .iter()
+            .all(|lost| !lost.what.contains("spike")),
+        "{:?}",
+        restored.lost_pins
+    );
+    assert!(
+        restored.put_back[0].branches.contains(&"spike".to_owned()),
+        "{:?}",
+        restored.put_back
+    );
+    assert!(
+        !git(&setup.checkout(), &["branch", "--list", "spike"])
+            .trim()
+            .is_empty()
     );
 }
 

@@ -23,7 +23,7 @@ workspace may need to act on.
 - No lifecycle verb fetches unless a person passes `--from-origin`. `mxv remove`
   and `mxv archive` no longer fetch origin before they count a clone's
   unpushed commits, so they work offline, and a refusal for unpushed commits
-  names how long ago the clone's mirror last fetched. The code
+  names how long ago the clone's mirror last fetched. The count treats a head or tag that the mirror holds as pushed, and a note as unpushed, because the mirror holds no notes. Clones made by earlier versions keep their `refs/mxv/origin/` copies of tags and notes, which still count as pushed. The code
   `mxv::checkout::origin_unreachable` is gone.
 - `mxv restore` refuses with the new code `mxv::restore::mirror_missing` when a
   clone's mirror is gone, lists what only that mirror held, and changes

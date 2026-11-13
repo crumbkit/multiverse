@@ -571,8 +571,8 @@ impl<B: Backend> Workspaces<B> {
 
     /// Classifies the workspace `name` for an archive. `id` is the id of
     /// the archive when the caller already chose it. `refresh` says whether
-    /// to fetch each clone's `origin` first, which a failure of only warns
-    /// about, because the pins keep each commit either way.
+    /// to list the names that the archive would leave unkept, as warnings.
+    /// Nothing is fetched either way.
     pub(super) fn admit(
         &self,
         archives: &Archives,

@@ -212,7 +212,7 @@ const HELP: Help = Help::new()
         Leaf::new(&["restore"])
             .examples(&[Example::new(
                 &["sample", "--from-origin", "--dry-run"],
-                "Print what restoring the archived workspace sample would do, with a new mirror from origin",
+                "Print what restoring the archived workspace sample would do, with its mirrors fetched from origin",
             )])
             .effects(Effects::additive().idempotent().open_world())
             .document(RESTORE),
@@ -408,7 +408,7 @@ pub(crate) enum Verb {
     Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
     ///
-    /// Restore fetches nothing. A clone's archived commits live in its mirror, so when a mirror is gone, mxv refuses with mxv::restore::mirror_missing, lists per checkout what the mirror held that only it kept, such as uncommitted work, stashes and local branches, and changes nothing. `--from-origin` is the one option that contacts origin: it makes a new mirror and rebuilds each checkout at the archived commit when origin holds it, else at the tip of the archived branch on origin, else at the tip of origin's default branch. It restores the workspace's root files and the ignored files, lists each pin that it could not restore as lost, and then deletes the archive. A fetch that fails leaves the new mirror deleted and the archive whole.
+    /// `mxv restore NAME` rebuilds the workspace from the archive and its mirrors, and fetches nothing. A clone's archived commits live in its mirror, so when a mirror is gone or has lost its pins, mxv refuses with mxv::restore::mirror_missing, lists per checkout what only the mirror held, such as uncommitted work, stashes, local branches and commits that origin did not hold, and changes nothing. `--from-origin` is the one option that contacts origin: it fetches origin into each clone's mirror, making the mirror again when it is gone or has lost its pins, and rebuilds each checkout at the archived commit when origin holds it, else at the tip of the archived branch on origin, else at the tip of origin's default branch. It restores the workspace's root files and the ignored files, lists each pin that it could not restore as lost, and then deletes the archive. A fetch that fails leaves the new mirror deleted and the archive whole.
     ///
     /// When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
     Restore(RestoreArgs),
@@ -420,7 +420,7 @@ pub(crate) enum Verb {
     Repair(RepairArgs),
     /// Remove a workspace's checkouts, its merged branches, its directory and its record.
     ///
-    /// Remove fetches nothing. It counts a clone's unpushed commits against what the clone's mirror last fetched, and a refusal names how long ago that was.
+    /// Remove fetches nothing. It counts a clone's unpushed commits against the clone's own remote branches and the heads and tags that its mirror last fetched from origin, and a refusal names how long ago the mirror fetched.
     ///
     /// When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`

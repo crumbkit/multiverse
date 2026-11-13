@@ -100,7 +100,7 @@ pub(crate) struct RestoreArgs {
     #[arg(long)]
     pub(crate) force: bool,
 
-    /// Fetch origin into a new mirror when a clone's mirror is gone, and restore only what origin holds; this is the only option that opens a network connection
+    /// Fetch origin into each clone's mirror, making the mirror again when it is gone or has lost its pins, and restore only what origin holds; this is the only option that opens a network connection
     #[arg(long)]
     pub(crate) from_origin: bool,
 

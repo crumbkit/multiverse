@@ -257,9 +257,10 @@ pub(crate) enum MxvFailure {
         path: PathBuf,
         /// The number of commits that deleting the clone would lose.
         commits: u32,
-        /// How long ago the clone's mirror last fetched from origin, which
-        /// is the state of origin that the count compares against, or
-        /// `None` when the mirror has never fetched.
+        /// How long ago the clone's mirror last fetched from origin. The
+        /// count compares against the heads and tags that the mirror held
+        /// then, and against the clone's own remote branches. `None` when
+        /// the mirror has never fetched.
         fetched_ago: Option<crumbkit::Age>,
         /// What the removal's flags allowed.
         allow: Allow,
@@ -683,7 +684,7 @@ impl Failure for MxvFailure {
             Self::Unpushed {
                 name, path, allow, ..
             } => Recovery::hint(format!(
-                "push the commits with `git -C {} push origin HEAD` and run `{}` again; `--delete-unmerged` deletes them with the clone",
+                "push the branches with `git -C {} push origin HEAD` and run `{}` again, which clears the count for a commit that a branch of origin then holds; a tag or note is cleared only by a later `mxv new` or `mxv add` of the repository that refreshes the mirror (a note is not cleared at all, because the mirror holds no notes); `--delete-unmerged` deletes the commits with the clone",
                 shown(path),
                 remove_line(name, *allow)
             )),
@@ -1397,8 +1398,9 @@ impl std::error::Error for MxvFailure {
 }
 
 /// Writes the text of [`MxvFailure::Unpushed`]: the clone's unpushed
-/// commits, counted against the state of origin that the clone's mirror
-/// last fetched, and when that was.
+/// commits, counted against the clone's remote branches and the heads and
+/// tags that the clone's mirror last fetched from origin, and when the
+/// mirror did so.
 fn unpushed_text(
     formatter: &mut fmt::Formatter<'_>,
     name: &str,
@@ -1408,12 +1410,12 @@ fn unpushed_text(
 ) -> fmt::Result {
     write!(
         formatter,
-        "the clone {} of the workspace {name} holds {commits} {} that origin does not hold, as its mirror last fetched origin",
+        "the clone {} of the workspace {name} holds {commits} {} that origin did not hold",
         shown(path),
         if commits == 1 { "commit" } else { "commits" }
     )?;
     match fetched_ago {
-        Some(age) => write!(formatter, " {age} ago"),
-        None => write!(formatter, " never"),
+        Some(age) => write!(formatter, " when its mirror last fetched origin {age} ago"),
+        None => write!(formatter, " and its mirror has never fetched origin"),
     }
 }

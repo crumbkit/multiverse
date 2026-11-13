@@ -498,18 +498,8 @@ fn a_tag_that_origin_holds_on_a_commit_no_branch_holds_is_not_unpushed() {
     let workspace = created(&setup, "reading-list");
     let checkout = workspace.checkouts[0].path.clone();
     assert!(!git(&checkout, &["tag", "--list", "v1"]).trim().is_empty());
-    // A removal fetches nothing, so the tag counts as pushed once the clone
-    // copies origin's tags.
-    git(
-        &checkout,
-        &[
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "origin",
-            "+refs/tags/*:refs/mxv/origin/tags/*",
-        ],
-    );
+    // The mirror holds origin's tags as of its last fetch, and a removal
+    // counts against them without contacting origin.
     removed(&setup, "reading-list", NOTHING);
     assert!(!checkout.exists());
 }
@@ -546,17 +536,13 @@ fn a_note_that_origin_does_not_hold_counts_as_unpushed() {
         "{refused:?}"
     );
     git(&checkout, &["push", "--quiet", "origin", "refs/notes/*"]);
-    // A removal fetches nothing, so the push counts once the clone copies
-    // origin's notes.
-    git(
-        &checkout,
-        &[
-            "fetch",
-            "--quiet",
-            "origin",
-            "+refs/notes/*:refs/mxv/origin/notes/*",
-        ],
+    // The mirror holds no notes, so pushing one does not clear the count.
+    let refused = plan(&setup, "reading-list", NOTHING);
+    assert!(
+        matches!(refused, RemovalPlan::Unpushed { commits: 1, .. }),
+        "{refused:?}"
     );
+    git(&checkout, &["update-ref", "-d", "refs/notes/commits"]);
     removed(&setup, "reading-list", NOTHING);
 }
 

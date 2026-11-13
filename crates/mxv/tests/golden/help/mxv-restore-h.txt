@@ -7,7 +7,7 @@ Arguments:
 
 Options:
       --force        Restore without the ignored files whose copy in the archive is missing or damaged, and list them as lost
-      --from-origin  Fetch origin into a new mirror when a clone's mirror is gone, and restore only what origin holds; this is the only option that opens a network connection
+      --from-origin  Fetch origin into each clone's mirror, making the mirror again when it is gone or has lost its pins, and restore only what origin holds; this is the only option that opens a network connection
       --dry-run      Report what the command would change, and change nothing
       --yes          Proceed without asking for confirmation
   -h, --help         Print help (see more with '--help')

@@ -51,9 +51,10 @@ pub struct MirrorLoss {
     pub folder: String,
     /// The mirror that is gone.
     pub mirror: PathBuf,
-    /// What the archive kept in that mirror besides `HEAD`, one phrase for
-    /// each kind, such as `1 stash`. The commit of `HEAD` is not listed,
-    /// because the origin may hold it.
+    /// What only that mirror held, one phrase for each kind, such as
+    /// `1 stash`. The commit of `HEAD` is not listed, because the origin may
+    /// hold it, but the commits of `HEAD` that origin did not hold when the
+    /// workspace was archived are.
     pub items: Vec<String>,
 }
 
@@ -324,17 +325,18 @@ impl<B: Backend> Workspaces<B> {
         for checkout in &archive.checkouts {
             if let Some(mirror) = &checkout.mirror {
                 let exists = mirror.join("HEAD").is_file();
-                if !exists && checkout.origin.is_none() {
+                let lost = !exists || self.pins_gone(checkout)?;
+                if lost && checkout.origin.is_none() {
                     return refused(missing_commit(checkout));
                 }
-                if !exists || (from_origin && self.pins_gone(checkout)?) {
+                if lost {
                     if from_origin {
                         missing_mirrors.push(checkout.folder.clone());
                     } else {
                         gone.push(MirrorLoss {
                             folder: checkout.folder.clone(),
                             mirror: mirror.clone(),
-                            items: lost_items(&checkout.kept),
+                            items: lost_items(checkout),
                         });
                     }
                     continue;
@@ -588,16 +590,25 @@ impl<B: Backend> Workspaces<B> {
             checkout.commit = tip;
             checkout.upstream = None;
         }
-        let kept = std::mem::take(&mut checkout.kept);
+        // The destructuring has no `..`, so a field added to `Kept` fails to
+        // compile here until this decides what to keep of it.
+        let Kept {
+            wip,
+            stashes,
+            branches,
+            tags,
+            worktree,
+            orphans,
+        } = std::mem::take(&mut checkout.kept);
         let mut now = Kept::default();
-        if let Some(wip) = kept.wip {
+        if let Some(wip) = wip {
             if holds(&wip.index)? && holds(&wip.worktree)? {
                 now.wip = Some(wip);
             } else {
                 lose("the uncommitted work".to_owned());
             }
         }
-        for stash in kept.stashes {
+        for stash in stashes {
             if holds(&stash.commit)? {
                 now.stashes.push(stash);
             } else {
@@ -605,13 +616,9 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         let named = [
-            ("the local branch", kept.branches, &mut now.branches),
-            ("the tag", kept.tags, &mut now.tags),
-            (
-                "the per-worktree reference",
-                kept.worktree,
-                &mut now.worktree,
-            ),
+            ("the local branch", branches, &mut now.branches),
+            ("the tag", tags, &mut now.tags),
+            ("the per-worktree reference", worktree, &mut now.worktree),
         ];
         for (label, names, keep) in named {
             for (name, object) in names {
@@ -622,7 +629,7 @@ impl<B: Backend> Workspaces<B> {
                 }
             }
         }
-        for commit in kept.orphans {
+        for commit in orphans {
             if holds(&commit)? {
                 now.orphans.push(commit);
             } else {
@@ -973,11 +980,23 @@ fn missing_commit(checkout: &ArchivedCheckout) -> RestoreRefusal {
 
 /// Returns one phrase for each kind of thing that `kept` holds, such as
 /// `1 stash`, for a refusal that lists what a lost mirror took with it.
-fn lost_items(kept: &Kept) -> Vec<String> {
+fn lost_items(checkout: &ArchivedCheckout) -> Vec<String> {
+    let kept = &checkout.kept;
     let plural = |count: usize, one: &str, many: &str| {
         format!("{count} {}", if count == 1 { one } else { many })
     };
     let mut items = Vec::new();
+    if !checkout.local_only.is_empty() {
+        let of = if checkout.detached {
+            "its detached HEAD".to_owned()
+        } else {
+            checkout.branch.clone()
+        };
+        items.push(format!(
+            "{} of {of} that origin did not hold when archived",
+            plural(checkout.local_only.len(), "commit", "commits")
+        ));
+    }
     if kept.wip.is_some() {
         items.push("uncommitted work".to_owned());
     }

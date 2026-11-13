@@ -1398,9 +1398,10 @@ is never followed. It refuses, and changes nothing, in these cases:
   nothing. The result lists such paths in `manifest_paths`. When a checkout's `mxv.toml` is invalid,
   mxv uses the built-in set and the config file's globs for it, and the
   result, or the refusal's `warnings` field, says so.
-- A clone holds commits that no branch, tag or note of its `origin` holds.
+- A clone holds commits that no remote branch of the clone, and no head or tag that the clone's mirror last fetched from `origin`, holds. The mirror holds no notes, so a note counts until it is deleted.
   mxv fetches nothing before it counts them. A commit counts as pushed when
-  the clone's remote branches, which the clone last fetched, hold it, and a
+  the clone's remote branches, which the clone last fetched, or the mirror's
+  heads and tags hold it, and a
   refusal names the age of the mirror's last fetch, so a person can tell
   how old that view of `origin` is. The count includes the commits of the clone's `HEAD`,
   branches, tags and notes, and the commits made on a detached `HEAD` that

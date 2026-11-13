@@ -1,6 +1,6 @@
 Remove a workspace's checkouts, its merged branches, its directory and its record.
 
-Remove fetches nothing. It counts a clone's unpushed commits against what the clone's mirror last fetched, and a refusal names how long ago that was.
+Remove fetches nothing. It counts a clone's unpushed commits against the clone's own remote branches and the heads and tags that its mirror last fetched from origin, and a refusal names how long ago the mirror fetched.
 
 When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
 
