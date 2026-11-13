@@ -4,13 +4,16 @@
 //! digest, is not pulled, which CI's lane pulls.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use super::{BuiltImage, IMAGE, Mode, World, app, docker, docker_ready, outcome, start_deadline};
 use crate::cancel::Cancel;
 use crate::engine::container::volume_owner::HELPER_IMAGE;
 use crate::engine::container::volumes::{app_volumes, delete_app_volumes};
-use crate::phase::Phase;
+use crate::error::PhaseError;
+use crate::phase::{Phase, UpDeadlines};
 use crate::plan::AppPlan;
+use crate::record::DockerCause;
 use crate::record::run::{ObjectKey, Started, VolumeOwner};
 use crate::record::store::{Journal, RunStore};
 use crate::report::{AppOutcome, Note, Report};
@@ -136,6 +139,47 @@ impl World {
             HELPER_IMAGE,
         ])
         .unwrap();
+    }
+
+    /// Returns a second state directory, with a phase over it, that holds
+    /// this world's workspace id, as a copied state directory does.
+    fn second_state(&self) -> (tempfile::TempDir, Phase) {
+        let state = tempfile::tempdir().unwrap();
+        let phase =
+            Phase::new(state.path().to_path_buf()).with_start_grace(Duration::from_millis(500));
+        (state, phase)
+    }
+
+    /// Brings `plan` up under `phase`, which belongs to another state
+    /// directory than this world's, and returns what `up` returns.
+    fn up_under(&self, phase: &Phase, plan: &crate::plan::Plan) -> Result<Report, PhaseError> {
+        let ready = start_deadline();
+        phase.up(
+            plan,
+            &Selection::All,
+            &Mode,
+            UpDeadlines::new(ready, ready),
+            &Cancel::new(),
+        )
+    }
+
+    /// Asserts that `up` stopped the app `db` with a refusal whose cause is
+    /// Docker's foreign object, and that the object's name ends with `suffix`.
+    fn assert_foreign(report: &Result<Report, PhaseError>, suffix: &str) {
+        let report = report.as_ref().unwrap();
+        let AppOutcome::Errored {
+            cause: Some(cause),
+            context: Some(context),
+            ..
+        } = outcome(report, "db")
+        else {
+            panic!("{report:?}");
+        };
+        assert_eq!(*cause, DockerCause::Foreign, "{report:?}");
+        assert!(
+            context.foreign.as_ref().unwrap().name.ends_with(suffix),
+            "{report:?}"
+        );
     }
 
     /// Restarts every app of `plan`.
@@ -1106,4 +1150,58 @@ fn an_images_user_that_holds_an_escape_sequence_never_reaches_the_report() {
     }
     assert!(!world.has_containers());
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
+}
+
+#[test]
+fn a_second_state_directory_with_the_same_id_neither_lists_deletes_nor_mounts_the_first_ones_volume()
+ {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![mounting("db", "exec sleep 60")]);
+    world.up(&plan);
+    let volume = world.data_volume();
+    let (_state, other) = world.second_state();
+
+    let listed = app_volumes(&other, &world.id).unwrap();
+    assert!(listed.names().is_empty(), "{listed:?}");
+    delete_app_volumes(listed).unwrap();
+    assert!(docker(&["volume", "inspect", &volume]).is_some());
+
+    let halted = world.up_under(&other, &plan);
+    World::assert_foreign(&halted, &volume);
+    assert!(world.container("db", "server").is_some());
+
+    let own = app_volumes(&world.phase, &world.id).unwrap();
+    assert_eq!(own.names(), std::slice::from_ref(&volume));
+    world.down();
+    delete_app_volumes(own).unwrap();
+    assert!(docker(&["volume", "inspect", &volume]).is_none());
+}
+
+#[test]
+fn a_second_state_directory_with_the_same_id_never_replaces_the_first_ones_container() {
+    if !ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![app("db", "exec sleep 60")]);
+    world.up(&plan);
+    let id = world.container("db", "server").unwrap();
+    let (_state, other) = world.second_state();
+
+    let halted = world.up_under(&other, &plan);
+
+    World::assert_foreign(&halted, "-db.server");
+    assert_eq!(world.container("db", "server"), Some(id.clone()));
+    let state = docker(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{.State.Running}}",
+        &id,
+    ]);
+    assert_eq!(state.as_deref().map(str::trim), Some("true"));
+    world.down();
 }

@@ -370,8 +370,12 @@ impl Scope {
     /// Reports whether `labels`, an object's labels as the JSON that
     /// [`super::objects`] prints, name this scope and, under `label`, such
     /// as `mxv.container`, the object `object`. The object names the
-    /// workspace's stable id, and a container also names its app. Each
-    /// value must equal the expected one exactly, with nothing trimmed.
+    /// workspace's stable id and the run record of this scope's state
+    /// directory, and a container also names its app. Each value must equal
+    /// the expected one exactly, with nothing trimmed. The run record is
+    /// the lossy UTF-8 string that [`Scope::labels`] writes, so a state
+    /// directory reached by another path than the one that made an object
+    /// finds that object foreign, and keeps it.
     pub(super) fn owns(&self, labels: &str, label: &str, object: &str) -> bool {
         let Ok(Some(labels)) = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
         else {
@@ -379,6 +383,10 @@ impl Scope {
         };
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
         is(WORKSPACE_ID_LABEL, self.identity.id.as_str())
+            && is(
+                RUN_RECORD_LABEL,
+                &self.identity.run_record.to_string_lossy(),
+            )
             && (label != CONTAINER_LABEL || is(APP_LABEL, self.app.as_str()))
             && is(label, object)
     }
