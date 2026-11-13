@@ -1,8 +1,9 @@
 //! The Docker of phase's `sweep`, which runs the `docker` program.
 //!
-//! It matches an object by phase's workspace label, `mxv.workspace-id`.
-//! An object without that label never matches, even by a recorded id, so
-//! `sweep` never removes it. Labels are read as JSON and compared exactly.
+//! It matches an object by phase's workspace label, `mxv.workspace-id`,
+//! and its run-record label, `mxv.run-record`, which must name the run
+//! record of this state directory. An object without either label never
+//! matches, even by a recorded id, so `sweep` never removes it. Labels are read as JSON and compared exactly.
 //!
 //! An object is gone only when Docker's daemon answered that it does not
 //! have it. Every other failure, such as an unknown context, a daemon that
@@ -19,11 +20,10 @@ use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, Finished, check_with, message, quick_with, run_program,
 };
 use crate::engine::container::compose::ComposeEnv;
-use crate::engine::container::names::WORKSPACE_ID_LABEL;
+use crate::engine::container::names::Identity;
 use crate::engine::container::objects::{rm_args, stop_seconds};
 use crate::engine::container::volume_owner;
 use crate::engine::container::{ContainerError, ContainerState};
-use crate::name::WorkspaceId;
 use crate::record::docker::{Docker, DockerError, DockerKind, DockerObject, SeenContainer};
 
 #[cfg(test)]
@@ -53,12 +53,9 @@ impl DockerCli {
     }
 
     /// Reports whether an object with `labels` belongs to the workspace
-    /// `workspace`: its `mxv.workspace-id` label must equal it exactly, with
-    /// nothing trimmed.
-    fn ours(workspace: &str, labels: &BTreeMap<String, String>) -> bool {
-        labels
-            .get(WORKSPACE_ID_LABEL)
-            .is_some_and(|found| found == workspace)
+    /// `identity` names, as [`Identity::names`] says.
+    fn ours(identity: &Identity, labels: &BTreeMap<String, String>) -> bool {
+        identity.names(labels)
     }
 
     /// Inspects `object` with the Go template `format`, whose first line is
@@ -92,7 +89,7 @@ impl DockerCli {
         let mut lines = finished.stdout.lines();
         let id = lines.next().unwrap_or_default();
         let labels = labels(lines.next().unwrap_or_default()).unwrap_or_default();
-        if id.is_empty() || !Self::ours(object.workspace.as_str(), &labels) {
+        if id.is_empty() || !Self::ours(object.identity, &labels) {
             return Ok(None);
         }
         let rest: Vec<&str> = lines.collect();
@@ -334,8 +331,8 @@ impl Docker for DockerCli {
         }
     }
 
-    fn remove_volume_helpers(&self, workspace: &WorkspaceId) -> Result<(), DockerError> {
-        volume_owner::remove_helpers_with(self.program(), workspace, None)
+    fn remove_volume_helpers(&self, identity: &Identity) -> Result<(), DockerError> {
+        volume_owner::remove_helpers_with(self.program(), identity, None)
             .map_err(|error| helper_removal_failure(&error))
     }
 }

@@ -647,6 +647,58 @@ fn a_container_found_by_its_name_must_carry_this_workspaces_label() {
 }
 
 #[test]
+fn sweep_leaves_a_container_whose_run_record_label_names_another_state_directory_and_reports_it_gone()
+ {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let planned = empty_record().container(
+        &app("db"),
+        &process("server"),
+        name("mxv-0b9f3c8e-db-server-1"),
+    );
+    record(&store, planned, Vec::new());
+    let docker = FakeDocker::default()
+        .with(
+            DockerKind::Container,
+            "mxv-0b9f3c8e-db-server-1",
+            &container_id(),
+        )
+        .run_record(&container_id(), "/elsewhere/runs/0b9f3c8e.json");
+
+    let swept = run(&store, false, &docker);
+
+    assert_eq!(swept.items[0].outcome, SweepOutcome::Gone);
+    assert!(docker.removed.borrow().is_empty());
+    assert_eq!(docker.objects.borrow().len(), 1);
+    assert_eq!(store.read(&workspace()).unwrap(), None);
+}
+
+#[test]
+fn sweep_removes_a_container_whose_run_record_label_names_this_state_directory() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let planned = empty_record().container(
+        &app("db"),
+        &process("server"),
+        name("mxv-0b9f3c8e-db-server-1"),
+    );
+    record(&store, planned, Vec::new());
+    let own = store.path(&workspace()).to_string_lossy().into_owned();
+    let docker = FakeDocker::default()
+        .with(
+            DockerKind::Container,
+            "mxv-0b9f3c8e-db-server-1",
+            &container_id(),
+        )
+        .run_record(&container_id(), &own);
+
+    let swept = run(&store, false, &docker);
+
+    assert_eq!(swept.items[0].outcome, SweepOutcome::Stopped);
+    assert!(docker.objects.borrow().is_empty());
+}
+
+#[test]
 fn a_removal_that_docker_refuses_fails_with_its_own_code_and_keeps_the_record() {
     let state = tempfile::tempdir().unwrap();
     let store = RunStore::new(state.path());
@@ -733,7 +785,10 @@ fn sweep_removes_the_volume_owner_helpers_that_an_interrupted_up_left_behind() {
 
     assert_eq!(
         *docker.helpers_removed.borrow(),
-        vec![workspace().as_str().to_owned()]
+        vec![(
+            workspace().as_str().to_owned(),
+            store.path(&workspace()).to_string_lossy().into_owned()
+        )]
     );
 }
 

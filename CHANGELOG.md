@@ -181,6 +181,15 @@ workspace may need to act on.
   path than the one that made its objects (a moved `XDG_STATE_HOME`, or one
   set through a symbolic link) now finds them foreign and keeps them; run mxv
   with the old path to reach them again.
+- phase's sweep, `status` and volume-owner helper removal also match an object
+  by its `mxv.run-record` label, as `up` does. `mxv remove`, `mxv archive` and
+  `mxv repair --orphans` in a second state directory that holds the same
+  workspace id no longer remove the first directory's containers, volumes or
+  volume-owner helpers; the sweep reports them as gone, and `mxv status`
+  there shows them as not running. A state directory reached by another path
+  than the one that made its objects now leaves its containers running when
+  `mxv remove` deletes its run record. `docker rm --force` of the containers
+  that `docker ps --filter label=mxv.workspace-id=<id>` lists removes them.
 
 ## [0.1.1] - 2026-11-11
 

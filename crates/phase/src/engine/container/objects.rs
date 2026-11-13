@@ -2,8 +2,9 @@
 //! that prove it checked their labels.
 //!
 //! An [`OwnedContainer`] or [`OwnedVolume`] exists only after a call here
-//! inspected the object and found that its `mxv.workspace-id` and
-//! `mxv.container` or `mxv.volume` labels name the scope and the object. That call is the only place that fails with
+//! inspected the object and found that its `mxv.workspace-id`,
+//! `mxv.run-record` and `mxv.container` or `mxv.volume` labels name the
+//! scope and the object, and a container's `mxv.app` label names its app. That call is the only place that fails with
 //! [`Error::Foreign`]. Stopping, removing, deleting and following
 //! the log of an object take its handle, so nothing outside this module
 //! acts on an object whose labels it did not check.

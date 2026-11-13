@@ -526,7 +526,7 @@ in the workspace's record; `mxv.run-record`, the absolute path of the
 workspace's run record, `<state>/runs/<id>.json` under phase's state
 directory, which mxv sets to `$XDG_STATE_HOME/mxv/phase`; and `mxv.app`, the app, which is the workspace's
 name until mxv names apps.
-The container engine finds an object by `mxv.workspace-id`. The engine
+The container engine finds an object by `mxv.workspace-id` and `mxv.run-record`. The engine
 never removes an object without an mxv label. It compares each label's
 exact value, read as JSON, so a value that holds a tab, a newline or a
 trailing space never matches another value.
@@ -535,12 +535,17 @@ The `mxv.run-record` label holds an absolute path. A run of mxv with
 another `XDG_STATE_HOME` keeps the run record elsewhere, so the label of
 an object that an earlier run created then names a path that this run
 does not use. phase treats such an object as foreign, as it does any
-container or volume whose run-record label differs from the path of its own
-run record by one character, or is missing. A second state directory that
-holds the same workspace id therefore neither lists, deletes, mounts nor
-replaces the first one's volume or container, and `up` halts with Docker's
-foreign cause. The sweep, `status` and the volume-owner helper match by
-workspace id alone. The label also shows the home directory's path, which
+container or volume whose run-record label is not exactly the path of its own
+run record, or is missing. A second state directory that holds the same
+workspace id therefore neither lists, deletes, mounts nor replaces the first
+one's volume or container, and `up` halts with Docker's foreign cause. The
+sweep, `status` and the volume-owner helper leave it alone as well. A sweep
+reports such an object as gone, and marks its entry stopped. A state
+directory reached by another path than the one that made its objects finds
+them foreign in the same way, so `mxv remove` there deletes the run record
+and leaves the containers running. `docker rm --force` of the containers that
+`docker ps --filter label=mxv.workspace-id=<id>` lists removes them. The
+label also shows the home directory's path, which
 usually holds the user's name, to anyone who can read the object's
 Docker labels.
 

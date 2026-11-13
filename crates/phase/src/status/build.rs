@@ -4,7 +4,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
-use crate::engine::container::ContainerState;
+use crate::engine::container::{ContainerState, Identity as WorkspaceIdentity};
 use crate::engine::restart::{AfterExit, after_exit};
 use crate::error::PhaseError;
 use crate::logs::log_path;
@@ -54,12 +54,16 @@ pub(crate) fn status(
 ) -> Result<Status, PhaseError> {
     let plan = plan.filter(|plan| plan.id() == workspace);
     let record = store.read(workspace)?;
+    let identity = WorkspaceIdentity {
+        id: workspace.clone(),
+        run_record: store.path(workspace),
+    };
     let mut rows = Vec::new();
     if let Some(plan) = plan {
         for app in plan.apps() {
             for planned in &app.processes {
                 rows.push(planned_row(
-                    workspace,
+                    &identity,
                     record.as_ref(),
                     app,
                     planned,
@@ -104,7 +108,7 @@ pub(crate) fn status(
         }
         for entry in &record.containers {
             if entry.state != EntryState::Stopped && !planned(&entry.app, &entry.process) {
-                let mut row = container_row(workspace, entry, sources);
+                let mut row = container_row(&identity, entry, sources);
                 enrich(
                     &mut row,
                     plan.and_then(|plan| app_of(plan, &entry.app)),
@@ -128,7 +132,7 @@ fn app_of<'p>(plan: &'p Plan, name: &AppName) -> Option<&'p AppPlan> {
 /// Returns the row of the planned process `planned` of `app`, from its
 /// record entries when `record` names it.
 fn planned_row(
-    workspace: &WorkspaceId,
+    identity: &WorkspaceIdentity,
     record: Option<&RunRecord>,
     app: &AppPlan,
     planned: &ProcessPlan,
@@ -141,7 +145,7 @@ fn planned_row(
             .find(|entry| entry.app == app.name && entry.process == planned.name)
     });
     let mut row = match (app.runner, container) {
-        (RunnerKind::Container, Some(entry)) => container_row(workspace, entry, sources),
+        (RunnerKind::Container, Some(entry)) => container_row(identity, entry, sources),
         (RunnerKind::Container, None) => StatusRow::new(
             app.name.clone(),
             planned.name.clone(),
@@ -153,7 +157,14 @@ fn planned_row(
             let (keeper, entry) = record.map_or((None, None), |record| {
                 record.host_pair(&app.name, &planned.name)
             });
-            host_row(workspace, keeper, entry, &app.name, &planned.name, sources)?
+            host_row(
+                &identity.id,
+                keeper,
+                entry,
+                &app.name,
+                &planned.name,
+                sources,
+            )?
         }
     };
     enrich(&mut row, Some(app), Some(planned));
@@ -357,7 +368,7 @@ const fn exited(ended: Ended) -> ProcessState {
 /// Returns the row of the container `entry`, whose state Docker gives. A
 /// Docker that does not answer makes the state unknown, never stopped.
 fn container_row(
-    workspace: &WorkspaceId,
+    identity: &WorkspaceIdentity,
     entry: &ContainerEntry,
     sources: Sources<'_>,
 ) -> StatusRow {
@@ -365,7 +376,7 @@ fn container_row(
         Ok(None)
     } else {
         sources.docker.container_seen(&DockerObject {
-            workspace,
+            identity,
             kind: DockerKind::Container,
             name: &entry.name,
             id: entry.id.as_ref().map(crate::record::ContainerId::as_str),

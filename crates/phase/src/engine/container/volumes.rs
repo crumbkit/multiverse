@@ -194,7 +194,7 @@ pub fn delete_app_volumes(volumes: WorkspaceVolumes) -> Result<(), ContainerErro
     };
     // A volume-owner helper that an interrupted `up` left behind keeps
     // its volume in use, and Docker refuses to delete a volume in use.
-    volume_owner::remove_helpers(scope.workspace_id(), None)?;
+    volume_owner::remove_helpers(scope.identity(), None)?;
     for volume in &volumes.volumes {
         if let Some(volume) = reinspect_volume(scope, volume)? {
             delete_volume(volume)?;

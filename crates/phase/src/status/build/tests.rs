@@ -460,6 +460,29 @@ fn a_container_state_comes_from_docker() {
 }
 
 #[test]
+fn status_shows_a_container_of_another_state_directory_as_not_running() {
+    let state = tempfile::tempdir().unwrap();
+    container_record(state.path(), EntryState::Running);
+    let id = container_id();
+    let own = RunStore::new(state.path())
+        .path(&workspace())
+        .to_string_lossy()
+        .into_owned();
+    let theirs = FakeDocker::default()
+        .with(DockerKind::Container, "db-server", id.as_str())
+        .run_record(id.as_str(), "/elsewhere/runs/0b9f3c8e.json");
+    let ours = FakeDocker::default()
+        .with(DockerKind::Container, "db-server", id.as_str())
+        .run_record(id.as_str(), &own);
+
+    assert_eq!(
+        container_state(state.path(), &theirs),
+        ProcessState::Stopped
+    );
+    assert_eq!(container_state(state.path(), &ours), ProcessState::Running);
+}
+
+#[test]
 fn a_planned_container_that_docker_has_not_started_is_starting() {
     let state = tempfile::tempdir().unwrap();
     container_record(state.path(), EntryState::Planned);
