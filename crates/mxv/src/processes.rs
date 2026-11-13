@@ -16,7 +16,7 @@ use multiverse::phase::WorkspaceId;
 use multiverse::{
     BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Lock,
     Manifest, ManifestError, Marker, Needed, Reclaimed, Runs, Store, SyncMode, UpOutcome, Volumes,
-    Workspace, WorkspaceName,
+    Workspace, WorkspaceName, WorkspaceState,
 };
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -132,6 +132,22 @@ impl Context {
                 .ok_or_else(|| MxvFailure::NotFound {
                     name: self.workspace.name.to_string(),
                 })?;
+        Ok(lock)
+    }
+
+    /// Takes the workspace's lock as [`Context::lock`] does, for a command
+    /// that starts, runs or changes the workspace's units or pins it, and
+    /// refuses a workspace that `mxv new` did not finish, whose checkouts
+    /// may be missing or partial.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Context::lock`], and
+    /// [`MxvFailure::Creating`] when the record that it read under the lock
+    /// is in the state `creating`.
+    pub(crate) fn lock_live(&mut self) -> Result<Lock, MxvFailure> {
+        let lock = self.lock()?;
+        refuse_creating(&self.workspace)?;
         Ok(lock)
     }
 
@@ -300,11 +316,23 @@ fn start_warnings(workspace: &Workspace, manifest: &Manifest) -> Vec<String> {
     warnings
 }
 
-/// Returns the failure of a workspace whose record names a checkout that
-/// an `add` stopped before it finished, for the commands that act on the
-/// manifest. Its manifest may count the unfinished checkout, which never
-/// ran, so they refuse until the `add` resumes.
+/// Returns the failure of a workspace that `mxv new` did not finish.
+fn refuse_creating(workspace: &Workspace) -> Result<(), MxvFailure> {
+    if workspace.state() == WorkspaceState::Creating {
+        return Err(MxvFailure::Creating {
+            name: workspace.name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Returns the failure of a workspace that `mxv new` did not finish, or
+/// whose record names a checkout that an `add` stopped before it finished,
+/// for the commands that act on the manifest. Its manifest may count the
+/// unfinished checkout, which never ran, so they refuse until the `add`
+/// resumes.
 pub(crate) fn refuse_unfinished(workspace: &Workspace) -> Result<(), MxvFailure> {
+    refuse_creating(workspace)?;
     match workspace.unfinished_checkout() {
         Some(checkout) => Err(MxvFailure::Incomplete {
             name: workspace.name.to_string(),
@@ -505,7 +533,7 @@ pub(crate) fn up(
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     ask_first(output, &context)?;
-    let lock = context.lock()?;
+    let lock = context.lock_live()?;
     context.mark(&lock);
     if context.processes.is_empty()
         && let Some(reclaimed) = &context.workspace.reclaimed
@@ -793,7 +821,7 @@ pub(crate) fn restart(
         .into());
     }
     ask_first(output, &context)?;
-    let lock = context.lock()?;
+    let lock = context.lock_live()?;
     context.mark(&lock);
     let passed = match build(environment, &mut context, &lock, &manifest)? {
         Ok(passed) => passed,
@@ -908,7 +936,7 @@ pub(crate) fn ports_reset(
 ) -> Result<Vec<PortRow>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &[])?;
     let manifest = required_manifest(&context.workspace)?;
-    let lock = context.lock()?;
+    let lock = context.lock_live()?;
     let running = context
         .runs
         .running(&context.workspace)
@@ -1054,8 +1082,9 @@ pub(crate) fn delete_volumes(
 /// It holds the workspace's lock, reads the record again and the names of
 /// what still runs, and passes both to `check`, which returns why the
 /// workspace is no longer idle, or `None`. When `check` gives a reason,
-/// another mxv command holds the lock, or the record was deleted while it
-/// waited for the lock, it stops nothing and returns the reason.
+/// another mxv command holds the lock, the record was deleted while it
+/// waited for the lock, or the record says that `mxv new` did not finish
+/// the workspace, it stops nothing and returns the reason.
 pub(crate) fn reclaim_stop(
     environment: &Environment,
     workspace: &Workspace,
@@ -1081,6 +1110,11 @@ pub(crate) fn reclaim_stop(
         }
         Err(failure) => return Err(failure.into()),
     };
+    if context.workspace.state() == WorkspaceState::Creating {
+        return Ok(Err(
+            "mxv new did not finish the workspace; mxv remove removes it".to_owned(),
+        ));
+    }
     let running = context
         .runs
         .running(&context.workspace)
@@ -1107,7 +1141,7 @@ pub(crate) fn set_pinned(
     pinned: bool,
 ) -> Result<Workspace, crumbkit::Error> {
     let mut context = context(environment, workspace, &[])?;
-    let _lock = context.lock()?;
+    let _lock = context.lock_live()?;
     if context.workspace.pinned != pinned {
         context.workspace.pinned = pinned;
         context

@@ -77,8 +77,9 @@ use mxv::{
     RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED, RUN_CODES,
     SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED, TASK_AMBIGUOUS,
     TASK_UNKNOWN, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_BAD_NAME,
-    WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_VOLUMES,
+    WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_CREATING, WORKSPACE_DIRTY, WORKSPACE_EXISTS,
+    WORKSPACE_IGNORED_FILES, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
+    WORKSPACE_STATE_CHANGED, WORKSPACE_TRANSITION_REFUSED, WORKSPACE_VOLUMES,
     WORKSPACE_WORKTREE_KIND,
 };
 use tempfile::TempDir;
@@ -651,6 +652,18 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         &WORKSPACE_BUSY,
         "Only a second mxv command that runs while the first holds the workspace's lock provokes it; tests/processes.rs provokes it.",
+    ),
+    Unprovoked::new(
+        &WORKSPACE_CREATING,
+        "Only a workspace whose `mxv new` stopped before its last write provokes it, and the fixture's workspace is live; tests/processes.rs, tests/multirepo.rs and tests/archive.rs provoke it with a record that says `creating`.",
+    ),
+    Unprovoked::new(
+        &WORKSPACE_STATE_CHANGED,
+        "Only a command whose record changes state between its read and its write provokes it, and no test runs two commands at that moment; the library's store tests provoke it.",
+    ),
+    Unprovoked::new(
+        &WORKSPACE_TRANSITION_REFUSED,
+        "No command asks the store for a move that no workspace makes; the library's store tests provoke it.",
     ),
 ];
 

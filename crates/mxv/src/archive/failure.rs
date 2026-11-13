@@ -256,8 +256,21 @@ pub(crate) enum ArchiveFailure {
     },
 }
 
+/// Returns the error of `refusal` for the workspace `name`: the failure of
+/// a workspace that `mxv new` did not finish, which every verb that needs
+/// a finished workspace shares, or else [`archive_refusal`].
+pub(super) fn refused(name: &WorkspaceName, refusal: ArchiveRefusal) -> crumbkit::Error {
+    match refusal {
+        ArchiveRefusal::Creating => crate::failures::MxvFailure::Creating {
+            name: name.to_string(),
+        }
+        .into(),
+        refusal => archive_refusal(name, refusal).into(),
+    }
+}
+
 /// Returns the failure of `refusal` for the workspace `name`.
-pub(super) fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFailure {
+fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFailure {
     let name = name.to_string();
     match refusal {
         ArchiveRefusal::NameTaken(archive) => ArchiveFailure::NameTaken {

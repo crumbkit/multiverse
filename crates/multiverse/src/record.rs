@@ -2,6 +2,7 @@
 //! for each workspace.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use phase::WorkspaceId;
@@ -64,6 +65,28 @@ impl WorkspaceKind {
     }
 }
 
+/// Where a workspace is in its life, which its record stores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum WorkspaceState {
+    /// `mxv new` wrote the record and has not finished the workspace's
+    /// checkouts. The record names checkouts that may be missing or
+    /// partial.
+    Creating,
+    /// `mxv new` or `mxv restore` finished the workspace.
+    Live,
+}
+
+impl fmt::Display for WorkspaceState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Creating => "creating",
+            Self::Live => "live",
+        })
+    }
+}
+
 /// The version-control system that made a checkout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -104,6 +127,7 @@ pub struct Checkout {
 
 /// The record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredWorkspace")]
 #[non_exhaustive]
 pub struct Workspace {
     /// The version of the record form, which is [`RECORD_VERSION`].
@@ -120,6 +144,12 @@ pub struct Workspace {
     /// gets one the first time mxv writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<WorkspaceId>,
+    /// Where the workspace is in its life. Only [`crate::Store::advance`]
+    /// changes it once the record exists. A record without a state, which
+    /// an older mxv wrote, reads as [`WorkspaceState::Creating`] when it is
+    /// a workspace of clones whose checkouts all lack a commit, and as
+    /// [`WorkspaceState::Live`] otherwise.
+    state: WorkspaceState,
     /// The workspace's name.
     pub name: WorkspaceName,
     /// The workspace's directory, which holds its `AGENTS.md` and one
@@ -143,6 +173,73 @@ pub struct Workspace {
     /// or `None`. A record without the mark leaves the key out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reclaimed: Option<Reclaimed>,
+}
+
+/// A workspace record as the store reads it, whose state an older mxv may
+/// have left out. [`Workspace`] reads through it.
+#[derive(Deserialize)]
+struct StoredWorkspace {
+    /// [`Workspace::version`].
+    version: u32,
+    /// [`Workspace::kind`].
+    #[serde(default)]
+    kind: WorkspaceKind,
+    /// [`Workspace::id`].
+    #[serde(default)]
+    id: Option<WorkspaceId>,
+    /// [`Workspace::state`], or `None` in a record that an older mxv wrote.
+    #[serde(default)]
+    state: Option<WorkspaceState>,
+    /// [`Workspace::name`].
+    name: WorkspaceName,
+    /// [`Workspace::path`].
+    path: PathBuf,
+    /// [`Workspace::checkouts`].
+    checkouts: Vec<Checkout>,
+    /// [`Workspace::ports`].
+    #[serde(default)]
+    ports: BTreeMap<String, u16>,
+    /// [`Workspace::pinned`].
+    #[serde(default)]
+    pinned: bool,
+    /// [`Workspace::reclaimed`].
+    #[serde(default)]
+    reclaimed: Option<Reclaimed>,
+}
+
+impl From<StoredWorkspace> for Workspace {
+    fn from(stored: StoredWorkspace) -> Self {
+        // An older mxv wrote no state. Its `mxv new` of clones wrote the
+        // record before it cloned and gave each checkout its commit with
+        // the last write, so only such a record whose checkouts all lack a
+        // commit is one that `mxv new` did not finish. `retiring` is never
+        // inferred.
+        let state = stored.state.unwrap_or_else(|| {
+            let unfinished = stored.kind == WorkspaceKind::Clone
+                && !stored.checkouts.is_empty()
+                && stored
+                    .checkouts
+                    .iter()
+                    .all(|checkout| checkout.commit.is_none());
+            if unfinished {
+                WorkspaceState::Creating
+            } else {
+                WorkspaceState::Live
+            }
+        });
+        Self {
+            version: stored.version,
+            kind: stored.kind,
+            id: stored.id,
+            state,
+            name: stored.name,
+            path: stored.path,
+            checkouts: stored.checkouts,
+            ports: stored.ports,
+            pinned: stored.pinned,
+            reclaimed: stored.reclaimed,
+        }
+    }
 }
 
 /// The mark that `mxv reclaim` leaves on a workspace that it stopped.
@@ -182,13 +279,16 @@ impl Reclaimed {
 
 impl Workspace {
     /// Returns the record of a workspace of clones named `name` in the
-    /// directory `path` with `checkouts`.
+    /// directory `path` with `checkouts`, in the state
+    /// [`WorkspaceState::Creating`], which `mxv new` writes before it makes
+    /// the checkouts.
     #[must_use]
     pub const fn new(name: WorkspaceName, path: PathBuf, checkouts: Vec<Checkout>) -> Self {
         Self {
             version: CLONE_RECORD_VERSION,
             kind: WorkspaceKind::Clone,
             id: None,
+            state: WorkspaceState::Creating,
             name,
             path,
             checkouts,
@@ -238,6 +338,26 @@ impl Workspace {
             self.version = self.version.max(MULTI_CHECKOUT_RECORD_VERSION);
         }
         Ok(minted)
+    }
+
+    /// Returns where the workspace is in its life.
+    #[must_use]
+    pub const fn state(&self) -> WorkspaceState {
+        self.state
+    }
+
+    /// Sets the state that the record holds, for [`crate::Store::advance`].
+    pub(crate) const fn set_state(&mut self, state: WorkspaceState) {
+        self.state = state;
+    }
+
+    /// Returns the record in the state [`WorkspaceState::Live`], for
+    /// `mxv restore`, which writes the record only once every checkout is
+    /// in place.
+    #[must_use]
+    pub(crate) const fn finished(mut self) -> Self {
+        self.state = WorkspaceState::Live;
+        self
     }
 
     /// Returns the path of the workspace's `AGENTS.md`.

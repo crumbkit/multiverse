@@ -3131,3 +3131,76 @@ fn down_keeps_a_needed_unit_when_the_manifest_no_longer_parses() {
     let (exit, document) = setup.json(&["down", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
 }
+
+/// The manifest of a workspace with one unit that sleeps and one task.
+const SLEEPER_AND_TASK: &str = "[processes.sleeper]\nargv = [\"sh\", \"-c\", \"exec sleep 300\"]\n\n[tasks.check]\nargv = [\"true\"]\n";
+
+/// Sets the state of the record of the workspace `name` to `state`, as a
+/// `mxv new` that stopped before its last write leaves `creating`.
+fn set_state(setup: &Setup, name: &str, state: &str) {
+    let path = setup
+        .root()
+        .join("state/mxv/workspaces")
+        .join(format!("{name}.json"));
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["state"] = Value::from(state);
+    write(&path, &serde_json::to_string_pretty(&record).unwrap());
+}
+
+/// The commands that start, run or change a workspace's units, which
+/// refuse a workspace that `mxv new` did not finish.
+/// `ports reset` comes first, because it refuses while a unit runs.
+const LIVE_ONLY: &[&[&str]] = &[
+    &["ports", "reset", "-w", "triage"],
+    &["pin", "-w", "triage"],
+    &["run", "-w", "triage", "check"],
+    &["exec", "-w", "triage", "--no-gate", "--", "true"],
+    &["up", "-w", "triage"],
+    &["restart", "-w", "triage"],
+    &["exec", "-w", "triage", "sleeper", "--", "true"],
+];
+
+#[test]
+fn up_restart_ports_reset_pin_run_and_exec_refuse_a_workspace_that_mxv_new_did_not_finish() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    set_state(&setup, "triage", "creating");
+    for args in LIVE_ONLY {
+        let (exit, errors) = setup.errors(args);
+        assert_eq!(exit, 1, "{args:?}: {errors}");
+        assert!(
+            errors.contains("mxv::workspace::creating"),
+            "{args:?}: {errors}"
+        );
+        assert!(errors.contains("mxv remove triage"), "{args:?}: {errors}");
+    }
+    assert!(!setup.started("sleeper"));
+    let record = fs::read_to_string(setup.root().join("state/mxv/workspaces/triage.json")).unwrap();
+    assert!(!record.contains("pinned"), "{record}");
+}
+
+#[test]
+fn up_restart_ports_reset_pin_run_and_exec_run_on_a_live_workspace() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    set_state(&setup, "triage", "live");
+    for args in LIVE_ONLY {
+        let (exit, errors) = setup.errors(args);
+        assert_eq!(exit, 0, "{args:?}: {errors}");
+    }
+    assert!(setup.started("sleeper"));
+}
+
+#[test]
+fn down_and_status_work_on_a_workspace_that_mxv_new_did_not_finish() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    set_state(&setup, "triage", "creating");
+    for args in [
+        &["status", "-w", "triage"][..],
+        &["down", "-w", "triage"][..],
+    ] {
+        let (exit, document) = setup.json(args);
+        assert_eq!(exit, 0, "{args:?}: {document}");
+    }
+}

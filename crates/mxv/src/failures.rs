@@ -128,6 +128,15 @@ pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
 /// `mxv up` that still waits for a unit to be ready.
 pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
+/// The code of a workspace that `mxv new` did not finish, for a command
+/// that needs a finished one.
+pub const WORKSPACE_CREATING: Code = Code::new("mxv", "workspace", "creating");
+/// The code of a write that found the workspace's record in another state
+/// than the one the command read.
+pub const WORKSPACE_STATE_CHANGED: Code = Code::new("mxv", "workspace", "state_changed");
+/// The code of a move between two workspace states that no workspace
+/// makes, which is a defect of mxv.
+pub const WORKSPACE_TRANSITION_REFUSED: Code = Code::new("mxv", "workspace", "transition_refused");
 /// The code of an older archive for which `mxv repair` finds every dated
 /// name taken.
 pub const REPAIR_NAMES_TAKEN: Code = Code::new("mxv", "repair", "names_taken");
@@ -180,6 +189,12 @@ pub(crate) enum MxvFailure {
     /// No workspace has the name.
     NotFound {
         /// The name.
+        name: String,
+    },
+    /// `mxv new` did not finish the workspace, so its record names
+    /// checkouts that may be missing or partial.
+    Creating {
+        /// The workspace's name.
         name: String,
     },
     /// Another workspace has the name.
@@ -503,6 +518,9 @@ pub(crate) const CODES: &[&Code] = &[
     &PROCESS_UNSUPPORTED_OS,
     &PORT_EXHAUSTED,
     &WORKSPACE_BUSY,
+    &WORKSPACE_CREATING,
+    &WORKSPACE_STATE_CHANGED,
+    &WORKSPACE_TRANSITION_REFUSED,
     &REPAIR_NAMES_TAKEN,
     &REPAIR_CHANGED,
     &RESTORE_CHANGED,
@@ -587,6 +605,7 @@ impl Failure for MxvFailure {
     fn code(&self) -> &'static Code {
         match self {
             Self::NotFound { .. } => &WORKSPACE_NOT_FOUND,
+            Self::Creating { .. } => &WORKSPACE_CREATING,
             Self::Exists { .. } => &WORKSPACE_EXISTS,
             Self::BadName { .. } => &WORKSPACE_BAD_NAME,
             Self::Dirty { .. } => &WORKSPACE_DIRTY,
@@ -631,6 +650,8 @@ impl Failure for MxvFailure {
                 Error::UnsupportedOs { .. } => &PROCESS_UNSUPPORTED_OS,
                 Error::NoFreePort { .. } => &PORT_EXHAUSTED,
                 Error::Busy { .. } => &WORKSPACE_BUSY,
+                Error::StateChanged { .. } => &WORKSPACE_STATE_CHANGED,
+                Error::TransitionRefused { .. } => &WORKSPACE_TRANSITION_REFUSED,
                 Error::DatedNamesTaken { .. } => &REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
@@ -661,6 +682,9 @@ impl Failure for MxvFailure {
     fn recovery(&self) -> Recovery {
         match self {
             Self::NotFound { .. } => Recovery::Run(Call::new(&["list"])),
+            Self::Creating { name } => Recovery::hint(format!(
+                "run `mxv remove {name}`, which removes what the stopped `mxv new` made, then `mxv new` again"
+            )),
             Self::Exists { name } => Recovery::Run(Call::new(&["show"]).value("names", name)),
             Self::BadName { .. } => Recovery::hint(
                 "use 1 to 64 letters, digits, '-', '_' and '.', starting with a letter or a digit",
@@ -818,6 +842,7 @@ impl Failure for MxvFailure {
     fn fields(&self) -> Vec<Field<'_>> {
         match self {
             Self::NotFound { name }
+            | Self::Creating { name }
             | Self::Exists { name }
             | Self::BadName { name, .. }
             | Self::Changed { name, .. }
@@ -1064,6 +1089,12 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::Phase { .. } => Recovery::hint(
             "read phase's message, fix what it names, and run the command again; `mxv status` shows what runs",
         ),
+        Error::StateChanged { .. } => Recovery::hint(
+            "another mxv command changed the workspace meanwhile; run the command again",
+        ),
+        Error::TransitionRefused { .. } => Recovery::hint(
+            "this is a defect of mxv, and no command should reach it; report it with the command that you ran",
+        ),
         _ => Recovery::hint("run the command again"),
     }
 }
@@ -1104,6 +1135,12 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::CorruptRecord { path, .. }
         | Error::Unwritable { path, .. }
         | Error::Busy { path } => vec![Field::new("path", shown(path))],
+        Error::StateChanged { name } => vec![Field::new("name", name.as_str())],
+        Error::TransitionRefused { name, from, to } => vec![
+            Field::new("name", name.as_str()),
+            Field::new("from", from.to_string()),
+            Field::new("to", to.to_string()),
+        ],
         Error::DatedNamesTaken { name, last } => {
             vec![Field::new("name", name.as_str()), Field::new("last", last)]
         }
@@ -1257,6 +1294,10 @@ impl fmt::Display for MxvFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { name } => write!(formatter, "no workspace is named {name}"),
+            Self::Creating { name } => write!(
+                formatter,
+                "mxv new did not finish the workspace {name}, so its checkouts may be missing or partial"
+            ),
             Self::Exists { name } => write!(formatter, "a workspace named {name} already exists"),
             Self::BadName { name, .. } => write!(formatter, "{name:?} is not a workspace name"),
             Self::Dirty { name, changes, .. } => write!(
@@ -1407,6 +1448,7 @@ impl std::error::Error for MxvFailure {
             Self::Library(error) => error.source(),
             Self::ConfigUnreadable { source, .. } => Some(source),
             Self::NotFound { .. }
+            | Self::Creating { .. }
             | Self::Exists { .. }
             | Self::Dirty { .. }
             | Self::DirectoryTaken { .. }

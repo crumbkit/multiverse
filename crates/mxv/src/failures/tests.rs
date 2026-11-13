@@ -114,3 +114,30 @@ fn the_recovery_of_a_changed_host_key_never_tells_the_person_to_accept_it() {
         "{unverified}"
     );
 }
+
+#[test]
+fn a_record_whose_state_changed_at_a_write_asks_for_the_command_again() {
+    let failure = MxvFailure::from(multiverse::Error::StateChanged {
+        name: "triage".parse().unwrap(),
+    });
+
+    assert_eq!(failure.code(), &super::WORKSPACE_STATE_CHANGED);
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    assert!(hint.contains("run the command again"), "{hint}");
+}
+
+#[test]
+fn a_workspace_that_mxv_new_did_not_finish_names_mxv_remove_and_then_mxv_new() {
+    let failure = MxvFailure::Creating {
+        name: "triage".to_owned(),
+    };
+
+    assert_eq!(failure.code(), &super::WORKSPACE_CREATING);
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    assert!(hint.contains("`mxv remove triage`"), "{hint}");
+    assert!(hint.contains("`mxv new`"), "{hint}");
+}

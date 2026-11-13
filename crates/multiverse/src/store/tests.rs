@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{
     Checkout, ID_RECORD_VERSION, MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceKind,
+    WorkspaceState,
 };
 use crate::store::{Created, Store, lock};
 use crate::testing::write;
@@ -433,4 +434,174 @@ fn a_start_of_named_processes_leaves_the_rest_of_a_reclaim_mark() {
         None
     );
     assert_eq!(mark.without(&[]), None);
+}
+
+/// Returns the record of `name` with its checkout's commit, as `mxv new`
+/// leaves it once the checkout is made.
+fn made(name: &str) -> Workspace {
+    let mut workspace = workspace(name);
+    for checkout in &mut workspace.checkouts {
+        checkout.commit = Some("1111111111111111111111111111111111111111".to_owned());
+    }
+    workspace
+}
+
+/// Writes the record of `workspace` to `store` and removes its `state`
+/// key, as an older mxv that knew no state wrote it.
+fn written_without_state(store: &Store, workspace: &mut Workspace) {
+    store.create(workspace).unwrap();
+    let path = store.path(&workspace.name);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("state");
+    write(&path, value.to_string());
+}
+
+#[test]
+fn an_update_refuses_when_the_stored_state_differs_from_the_state_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    store.create(&mut workspace).unwrap();
+    let mut held = workspace.clone();
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    held.pinned = true;
+    let written = store.update(&mut held);
+    assert!(
+        matches!(&written, Err(Error::StateChanged { name }) if name.as_str() == "app"),
+        "{written:?}"
+    );
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), WorkspaceState::Live);
+    assert!(!read.pinned);
+}
+
+#[test]
+fn an_update_writes_when_the_stored_state_is_the_state_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    store.create(&mut workspace).unwrap();
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    workspace.pinned = true;
+    store.update(&mut workspace).unwrap();
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), WorkspaceState::Live);
+    assert!(read.pinned);
+}
+
+#[test]
+fn an_advance_refuses_live_to_creating_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    store.create(&mut workspace).unwrap();
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    let before = fs::read(store.path(&workspace.name)).unwrap();
+    let refused = store.advance(&mut workspace, WorkspaceState::Creating);
+    assert!(
+        matches!(
+            &refused,
+            Err(Error::TransitionRefused {
+                from: WorkspaceState::Live,
+                to: WorkspaceState::Creating,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(workspace.state(), WorkspaceState::Live);
+    assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+}
+
+#[test]
+fn an_advance_admits_creating_to_live_and_writes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    store.create(&mut workspace).unwrap();
+    assert_eq!(
+        store.read(&workspace.name).unwrap().unwrap().state(),
+        WorkspaceState::Creating
+    );
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    assert_eq!(workspace.state(), WorkspaceState::Live);
+    let text = fs::read_to_string(store.path(&workspace.name)).unwrap();
+    assert!(text.contains("\"state\": \"live\""), "{text}");
+}
+
+#[test]
+fn an_advance_refuses_when_the_stored_state_differs_from_the_state_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    store.create(&mut workspace).unwrap();
+    let mut held = workspace.clone();
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    let refused = store.advance(&mut held, WorkspaceState::Live);
+    assert!(
+        matches!(&refused, Err(Error::StateChanged { .. })),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_clone_record_without_a_state_whose_checkouts_have_no_commit_reads_as_creating() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = workspace("app");
+    written_without_state(&store, &mut workspace);
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), WorkspaceState::Creating);
+}
+
+#[test]
+fn a_clone_record_without_a_state_whose_checkout_has_a_commit_reads_as_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    written_without_state(&store, &mut workspace);
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), WorkspaceState::Live);
+}
+
+#[test]
+fn a_clone_record_without_a_state_that_one_checkout_without_a_commit_leaves_reads_as_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = with_two_checkouts("app");
+    if let Some(first) = workspace.checkouts.first_mut() {
+        first.commit = Some("1111111111111111111111111111111111111111".to_owned());
+    }
+    written_without_state(&store, &mut workspace);
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), WorkspaceState::Live);
+}
+
+#[test]
+fn a_worktree_record_without_a_state_reads_as_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = workspace("app").of_worktrees();
+    written_without_state(&store, &mut workspace);
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), WorkspaceState::Live);
+}
+
+#[test]
+fn a_written_record_reads_back_the_same_at_the_same_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    for mut workspace in [workspace("app"), made("web"), made("api").of_worktrees()] {
+        store.create(&mut workspace).unwrap();
+        let read = store.read(&workspace.name).unwrap().unwrap();
+        assert_eq!(read, workspace);
+        assert_eq!(read.version, ID_RECORD_VERSION);
+        if workspace.state() == WorkspaceState::Creating {
+            store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+        }
+        let read = store.read(&workspace.name).unwrap().unwrap();
+        assert_eq!(read, workspace);
+        assert_eq!(read.version, ID_RECORD_VERSION);
+    }
 }

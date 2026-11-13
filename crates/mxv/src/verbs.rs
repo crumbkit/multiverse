@@ -461,6 +461,12 @@ pub(crate) fn add(
             }
             .into());
         }
+        AddOutcome::Creating(_) => {
+            return Err(MxvFailure::Creating {
+                name: name.to_string(),
+            }
+            .into());
+        }
         AddOutcome::Worktrees(_) => {
             return Err(MxvFailure::Worktrees {
                 name: name.to_string(),

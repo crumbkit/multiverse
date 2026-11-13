@@ -85,7 +85,7 @@ pub use crate::proxy::{
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
     MULTI_CHECKOUT_RECORD_VERSION, RECORD_VERSION, Reclaimed, WORKTREE_RECORD_VERSION, Workspace,
-    WorkspaceKind, agents_text,
+    WorkspaceKind, WorkspaceState, agents_text,
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{

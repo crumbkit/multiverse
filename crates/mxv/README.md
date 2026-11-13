@@ -1249,6 +1249,21 @@ earlier record and deletes the new clone, unless the clone finished and
 holds work; then it keeps both and fails with
 `mxv::checkout::resume_blocked`, which names the work.
 
+The record of a workspace holds its state. `mxv new` writes the record
+as `creating` before it makes the checkouts, and writes it as `live` with
+its last write; `mxv restore` writes it as `live`. A record that an older
+mxv wrote has no state, and reads as `creating` when it is a workspace of
+clones whose checkouts all lack a commit, and as `live` otherwise. When
+`mxv new` is killed partway, the record stays `creating`, and `up`,
+`restart`, `ports reset`, `run`, `exec`, `pin`, `unpin`, `add`, `archive`
+and `clean` fail with `mxv::workspace::creating`, whose hint is
+`mxv remove NAME` and then `mxv new` again. `mxv reclaim` keeps such a
+workspace with a reason. `status`, `show`, `down`, `logs` and `remove`
+keep working, and `mxv remove` and `mxv remove --force` remove it. A
+command that writes the record fails with `mxv::workspace::state_changed`
+when another command changed the record's state after this one read it,
+and writes nothing; running it again reads the new state.
+
 `mxv new` copies no template into a workspace of several repositories,
 because a template belongs to one origin. `--manifest` still copies a
 file, whose names are the workspace's own. `new` checks it against the

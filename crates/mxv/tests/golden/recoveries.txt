@@ -235,5 +235,8 @@ codes that no start provokes:
   mxv::process::table_unreadable: Only a PATH without ps, during a run that has started processes, provokes it, which the fixture cannot hold.
   mxv::port::exhausted: Only a port range whose every port is held or taken provokes it.
   mxv::workspace::busy: Only a second mxv command that runs while the first holds the workspace's lock provokes it; tests/processes.rs provokes it.
+  mxv::workspace::creating: Only a workspace whose `mxv new` stopped before its last write provokes it, and the fixture's workspace is live; tests/processes.rs, tests/multirepo.rs and tests/archive.rs provoke it with a record that says `creating`.
+  mxv::workspace::state_changed: Only a command whose record changes state between its read and its write provokes it, and no test runs two commands at that moment; the library's store tests provoke it.
+  mxv::workspace::transition_refused: No command asks the store for a move that no workspace makes; the library's store tests provoke it.
 
 codes whose recoveries the check did not follow, because no declared code spells them: 0
