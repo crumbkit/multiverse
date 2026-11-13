@@ -118,16 +118,9 @@ impl Finished {
     }
 }
 
-/// The refspec that copies the tags of a clone's `origin` into a namespace
-/// of their own, so a tag counts as pushed only while `origin` holds it.
-const ORIGIN_TAGS: &str = "+refs/tags/*:refs/mxv/origin/tags/*";
-
-/// The refspec that copies the notes of a clone's `origin` into a
-/// namespace of their own, so a note counts as pushed only while `origin`
-/// holds it.
-const ORIGIN_NOTES: &str = "+refs/notes/*:refs/mxv/origin/notes/*";
-
-/// The pattern of the copies of the tags and notes of a clone's `origin`.
+/// The pattern of the copies of the heads and tags of a clone's mirror, as
+/// the mirror held them when the clone was last counted. Earlier versions of
+/// mxv also kept copies of origin's tags and notes here.
 const ORIGIN_REFS: &str = "--glob=refs/mxv/origin/*";
 
 /// Returns the lines of `text` that are not empty.
@@ -136,6 +129,47 @@ fn lines(text: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Returns the mirror that `checkout` shares objects with, read from its
+/// alternates file, or `None` when it shares none.
+fn shared_mirror(checkout: &Path) -> Option<PathBuf> {
+    let objects = checkout.join(".git").join("objects");
+    let alternates = fs::read_to_string(objects.join("info").join("alternates")).ok()?;
+    alternates
+        .lines()
+        .map(|line| objects.join(line))
+        .find_map(|path| path.parent().map(Path::to_path_buf))
+}
+
+/// Copies the heads and tags that the mirror of `checkout` holds into the
+/// checkout's `refs/mxv/origin/`, so that the count of unpushed commits
+/// treats them as pushed. The mirror holds origin's heads and tags as of
+/// its last fetch, and the copy contacts no remote. Copies of refs that the
+/// mirror no longer holds are removed.
+fn copy_mirror_refs(checkout: &Path) -> Result<(), Error> {
+    let Some(mirror) = shared_mirror(checkout) else {
+        return Ok(());
+    };
+    run(
+        checkout,
+        [
+            OsStr::new("fetch"),
+            OsStr::new("--quiet"),
+            OsStr::new("--no-tags"),
+            OsStr::new("--prune"),
+            OsStr::new("--no-auto-gc"),
+            OsStr::new("--no-write-fetch-head"),
+            OsStr::new("--no-recurse-submodules"),
+            mirror.as_os_str(),
+            OsStr::new("+refs/heads/*:refs/mxv/origin/heads/*"),
+            OsStr::new("+refs/tags/*:refs/mxv/origin/tags/*"),
+        ],
+        "fetch from mirror",
+        LOCAL_DEADLINE,
+    )?
+    .ok("fetch from mirror", checkout)
+    .map(drop)
 }
 
 /// Returns the git directory of the clone at `checkout`, followed by the
@@ -982,36 +1016,9 @@ impl Backend for Git {
         Ok(trimmed(&commit))
     }
 
-    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error> {
-        for dir in git_dirs(checkout)? {
-            let fetched = run(
-                &dir,
-                [
-                    "fetch",
-                    "--quiet",
-                    "--prune",
-                    "--no-tags",
-                    "--no-auto-gc",
-                    "origin",
-                    "+refs/heads/*:refs/remotes/origin/*",
-                    ORIGIN_TAGS,
-                    ORIGIN_NOTES,
-                ],
-                "fetch origin",
-                FETCH_DEADLINE,
-            )?;
-            if !fetched.status.success() {
-                return Err(Error::OriginFetchFailed {
-                    checkout: dir,
-                    message: explanation(fetched.status, &fetched.stderr),
-                });
-            }
-        }
-        Ok(())
-    }
-
     fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
         let mut unpushed = Vec::new();
+        copy_mirror_refs(checkout)?;
         for dir in git_dirs(checkout)? {
             let held = run(
                 &dir,

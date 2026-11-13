@@ -472,6 +472,13 @@
             "type": "string"
           }
         },
+        "lost_pins": {
+          "description": "Each pin of a lost mirror that origin did not hold, so the restore\ncould not put it back.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LostPinRow"
+          }
+        },
         "ports": {
           "description": "Each port that the restore gave a new number.",
           "type": "array",
@@ -502,6 +509,7 @@
         "checkouts",
         "put_back",
         "lost",
+        "lost_pins",
         "ports",
         "missing_mirrors",
         "warnings"
@@ -655,6 +663,24 @@
         "kept",
         "submodules",
         "ignored"
+      ]
+    },
+    "LostPinRow": {
+      "description": "One thing that only a lost mirror held, which a restore from origin could\nnot put back.",
+      "type": "object",
+      "properties": {
+        "folder": {
+          "description": "The checkout's folder.",
+          "type": "string"
+        },
+        "what": {
+          "description": "What was lost.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "folder",
+        "what"
       ]
     },
     "PortRow": {

@@ -248,3 +248,13 @@ fn encoded(component: &str) -> String {
     }
     text
 }
+
+/// Returns when the mirror at `mirror` last fetched from its origin, from the
+/// modification time of its `FETCH_HEAD`, or `None` when the mirror has never
+/// fetched or is gone. Verbs that read the mirror's copy of origin's
+/// references report this, because they fetch nothing themselves.
+pub(crate) fn fetched_at(mirror: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(mirror.join("FETCH_HEAD"))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}

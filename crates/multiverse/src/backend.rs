@@ -457,17 +457,6 @@ pub trait Backend {
     /// Returns the failure of the checkout.
     fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error>;
 
-    /// Updates the remote branches, and a copy of the tags and notes, of
-    /// the clone at `checkout` and of each submodule it has initialised
-    /// from their `origin`, and deletes those that the origin no longer
-    /// has, so a commit counts as pushed only while the origin still holds
-    /// it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::OriginFetchFailed`] when a fetch fails.
-    fn refresh_origin(&self, checkout: &Path) -> Result<(), Error>;
-
     /// Returns the commits that the clone at `checkout`, or a submodule it
     /// has initialised, holds in its `HEAD`, branches, tags or notes, and
     /// that no branch, tag or note of `origin` holds, with the commits made

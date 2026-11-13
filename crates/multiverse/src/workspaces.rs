@@ -3,7 +3,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::backend::{Backend, INITIALIZING, RefHolder};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
@@ -558,8 +558,8 @@ pub enum RemovalPlan {
         commits: u32,
     },
     /// A clone holds commits that no remote branch of its `origin` holds,
-    /// after a fetch, and the caller did not allow deleting unmerged
-    /// commits. Deleting the clone would lose them.
+    /// as the clone last fetched them, and the caller did not allow
+    /// deleting unmerged commits. Deleting the clone would lose them.
     Unpushed {
         /// The workspace's record.
         workspace: Workspace,
@@ -567,6 +567,9 @@ pub enum RemovalPlan {
         checkout: PathBuf,
         /// The number of commits that deleting the clone would lose.
         commits: u32,
+        /// When the clone's mirror last fetched from origin, which is the
+        /// state of origin that the count compares against.
+        fetched: Option<SystemTime>,
     },
     /// A clone holds stash entries, and the caller did not allow
     /// discarding changes. Deleting the clone would lose them.
@@ -629,6 +632,8 @@ enum CloneRefusal {
         checkout: PathBuf,
         /// The number of such commits.
         commits: u32,
+        /// When the clone's mirror last fetched from origin.
+        fetched: Option<SystemTime>,
     },
     /// The clone holds stash entries.
     Stashed {
@@ -647,10 +652,15 @@ impl CloneRefusal {
                 workspace,
                 checkout,
             },
-            Self::Unpushed { checkout, commits } => RemovalPlan::Unpushed {
+            Self::Unpushed {
+                checkout,
+                commits,
+                fetched,
+            } => RemovalPlan::Unpushed {
                 workspace,
                 checkout,
                 commits,
+                fetched,
             },
             Self::Stashed { checkout, stashes } => RemovalPlan::Stashed {
                 workspace,
@@ -2307,9 +2317,6 @@ impl<B: Backend> Workspaces<B> {
                 Leftover::Absent | Leftover::Finished(_) | Leftover::Kept(_) => {}
             }
         }
-        if !allow.delete_unmerged {
-            self.backend.refresh_origin(&checkout.path)?;
-        }
         planned.disposable = self.sort(workspace, checkout, sorted)?;
         let stashes = self.backend.stashes(&checkout.path)?;
         if !stashes.is_empty() && !allow.discard_changes {
@@ -2324,6 +2331,10 @@ impl<B: Backend> Workspaces<B> {
             return refused(CloneRefusal::Unpushed {
                 checkout: checkout.path.clone(),
                 commits: unpushed,
+                fetched: checkout
+                    .mirror
+                    .as_deref()
+                    .and_then(crate::mirror::fetched_at),
             });
         }
         planned.directory = Fate::Removed;

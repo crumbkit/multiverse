@@ -51,6 +51,7 @@ pub(super) fn fetch_into_mirror(
         "--quiet",
         "--no-tags",
         "--no-auto-gc",
+        "--no-write-fetch-head",
         "--no-recurse-submodules",
     ]
     .map(OsString::from)

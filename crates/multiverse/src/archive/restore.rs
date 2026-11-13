@@ -8,7 +8,7 @@ use crate::archive::ignored::{self, IgnoredRefusal};
 use crate::archive::{
     Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, root,
 };
-use crate::backend::{Backend, WipCommits};
+use crate::backend::{Backend, RefHolder, WipCommits};
 use crate::error::Error;
 use crate::health::{self, Rebuilt};
 use crate::name::WorkspaceName;
@@ -19,10 +19,67 @@ use crate::workspaces::{
     CloneStart, Entry, Made, Mode, Workspaces, default_branch, delete_directory,
 };
 
+/// What a restore may do beyond rebuilding from local state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RestoreOptions {
+    /// Whether the restore goes ahead without an ignored entry that is
+    /// missing from the tar or differs from its digest, and lists it as
+    /// lost.
+    pub force: bool,
+    /// Whether the restore may open a network connection to each clone's
+    /// origin. Without it, a restore reads only local state and refuses
+    /// when a clone's mirror is gone. With it, a mirror that is gone is
+    /// made again from the origin, and the restore keeps only what the
+    /// origin holds.
+    pub from_origin: bool,
+}
+
+impl RestoreOptions {
+    /// Returns the options with `force` and `from_origin` as given.
+    #[must_use]
+    pub const fn new(force: bool, from_origin: bool) -> Self {
+        Self { force, from_origin }
+    }
+}
+
+/// What a clone's lost mirror took with it, for one checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MirrorLoss {
+    /// The checkout's folder.
+    pub folder: String,
+    /// The mirror that is gone.
+    pub mirror: PathBuf,
+    /// What only that mirror held, one phrase for each kind, such as
+    /// `1 stash`. The commit of `HEAD` is not listed, because the origin may
+    /// hold it, but the commits of `HEAD` that origin did not hold when the
+    /// workspace was archived are.
+    pub items: Vec<String>,
+}
+
+/// Something a restore from origin could not put back, because only the
+/// lost mirror held it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LostPin {
+    /// The checkout's folder.
+    pub folder: String,
+    /// What was lost, in a phrase.
+    pub what: String,
+}
+
 /// Why `mxv restore` built nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RestoreRefusal {
+    /// A clone's mirror is gone, and the restore may not ask the origin.
+    /// `--from-origin` makes the mirror again and restores what the origin
+    /// holds.
+    MirrorMissing {
+        /// Each checkout whose mirror is gone, with what it would lose.
+        checkouts: Vec<MirrorLoss>,
+    },
     /// No archive has the name.
     NotFound,
     /// The archive has not finished, and `mxv archive` finishes it.
@@ -78,13 +135,16 @@ pub enum RestoreRefusal {
 pub struct RestorePlan {
     /// The archive.
     pub archive: Archive,
-    /// The folder of each clone whose mirror is gone, so the restore clones
-    /// the mirror again from the recorded origin.
+    /// The folder of each clone whose mirror is gone, so the restore, which
+    /// the caller asked to fetch, clones the mirror again from the recorded
+    /// origin.
     pub missing_mirrors: Vec<String>,
     /// Whether the restore goes ahead without an ignored entry that is
     /// missing from the tar or differs from its digest, and lists it as
     /// lost.
     pub force: bool,
+    /// Whether the restore fetches each missing mirror from its origin.
+    pub from_origin: bool,
 }
 
 /// The outcome of [`Workspaces::plan_restore`].
@@ -184,6 +244,9 @@ pub struct Restored {
     /// Each ignored entry, as its archived path, that a forced restore left
     /// out because the tar lacked it or it differed from its digest.
     pub lost: Vec<String>,
+    /// Each pin of a lost mirror that origin did not hold, so the restore
+    /// could not put it back.
+    pub lost_pins: Vec<LostPin>,
     /// What the restore could not finish after it wrote the record, such
     /// as a pin that it could not delete.
     pub warnings: Vec<String>,
@@ -210,8 +273,10 @@ pub struct ArchivedRemoval {
 
 impl<B: Backend> Workspaces<B> {
     /// Returns whether the archive `name` can be restored, and changes
-    /// nothing. With `force`, the restore leaves out an ignored entry whose
-    /// tar entry is damaged instead of refusing.
+    /// nothing. With `options.force`, the restore leaves out an ignored
+    /// entry whose tar entry is damaged instead of refusing. It reads only
+    /// local state: a clone whose mirror is gone refuses with
+    /// [`RestoreRefusal::MirrorMissing`] unless `options.from_origin`.
     ///
     /// # Errors
     ///
@@ -221,8 +286,9 @@ impl<B: Backend> Workspaces<B> {
         &self,
         archives: &Archives,
         name: &WorkspaceName,
-        force: bool,
+        options: RestoreOptions,
     ) -> Result<RestorePlanned, Error> {
+        let RestoreOptions { force, from_origin } = options;
         let refused = |refusal| Ok(RestorePlanned::Refused(refusal));
         let workspace = self.store.read(name)?;
         let Some(archive) = archives.read(name)? else {
@@ -255,10 +321,24 @@ impl<B: Backend> Workspaces<B> {
             return refused(RestoreRefusal::RootFileChanged { path });
         }
         let mut missing_mirrors = Vec::new();
+        let mut gone = Vec::new();
         for checkout in &archive.checkouts {
             if let Some(mirror) = &checkout.mirror {
-                if !mirror.join("HEAD").is_file() {
-                    missing_mirrors.push(checkout.folder.clone());
+                let exists = mirror.join("HEAD").is_file();
+                let lost = !exists || self.pins_gone(checkout)?;
+                if lost && checkout.origin.is_none() {
+                    return refused(missing_commit(checkout));
+                }
+                if lost {
+                    if from_origin {
+                        missing_mirrors.push(checkout.folder.clone());
+                    } else {
+                        gone.push(MirrorLoss {
+                            folder: checkout.folder.clone(),
+                            mirror: mirror.clone(),
+                            items: lost_items(checkout),
+                        });
+                    }
                     continue;
                 }
                 if let Some(refusal) = self.missing(checkout)? {
@@ -291,10 +371,14 @@ impl<B: Backend> Workspaces<B> {
                 });
             }
         }
+        if !gone.is_empty() {
+            return refused(RestoreRefusal::MirrorMissing { checkouts: gone });
+        }
         Ok(RestorePlanned::Ready(Box::new(RestorePlan {
             archive,
             missing_mirrors,
             force,
+            from_origin,
         })))
     }
 
@@ -313,7 +397,8 @@ impl<B: Backend> Workspaces<B> {
         runs: &Runs,
     ) -> Result<RestoreOutcome, Error> {
         let name = confirmed.archive.name.clone();
-        let plan = match self.plan_restore(archives, &name, confirmed.force)? {
+        let options = RestoreOptions::new(confirmed.force, confirmed.from_origin);
+        let plan = match self.plan_restore(archives, &name, options)? {
             RestorePlanned::Ready(plan) => *plan,
             RestorePlanned::Refused(refusal) => return Ok(RestoreOutcome::Refused(refusal)),
             // Another command restored the workspace after the plan.
@@ -324,13 +409,24 @@ impl<B: Backend> Workspaces<B> {
                 }));
             }
         };
-        let archive = plan.archive;
+        let original = plan.archive;
+        let mut archive = original.clone();
         let mut warnings = Vec::new();
-        for checkout in &archive.checkouts {
-            if let Some(mirror) = &checkout.mirror
-                && let Some(refusal) = self.ensure_mirror(checkout, mirror, &mut warnings)?
-            {
-                return Ok(RestoreOutcome::Refused(refusal));
+        let mut lost_pins = Vec::new();
+        let mut fresh = Vec::new();
+        if plan.from_origin {
+            for (checkout, kept) in archive.checkouts.iter_mut().zip(&original.checkouts) {
+                let Some(mirror) = kept.mirror.as_deref() else {
+                    continue;
+                };
+                if self.ensure_mirror(kept, mirror, &mut warnings)? {
+                    if let Some(refusal) = self.salvage(checkout, &mut lost_pins)? {
+                        return Ok(RestoreOutcome::Refused(refusal));
+                    }
+                    fresh.push(kept.folder.clone());
+                } else if let Some(refusal) = self.missing(kept)? {
+                    return Ok(RestoreOutcome::Refused(refusal));
+                }
             }
         }
         (self.checkpoint)("mirrors")?;
@@ -366,7 +462,12 @@ impl<B: Backend> Workspaces<B> {
         if archive.containers_ran {
             runs.remember_containers(&archive.name)?;
         }
-        warnings.extend(self.delete_pins(&archive));
+        // A mirror made again holds none of the archive's pins.
+        let mut pinned = original;
+        pinned
+            .checkouts
+            .retain(|checkout| !fresh.contains(&checkout.folder));
+        warnings.extend(self.delete_pins(&pinned));
         if let Err(error) = archives.delete(&archive) {
             warnings.push(format!(
                 "mxv rebuilt the workspace and could not delete its archive; `mxv remove --archived {}` deletes it: {error}",
@@ -378,6 +479,7 @@ impl<B: Backend> Workspaces<B> {
             ports,
             put_back,
             lost,
+            lost_pins,
             warnings,
         })))
     }
@@ -391,41 +493,151 @@ impl<B: Backend> Workspaces<B> {
         self.undo(workspace, made);
     }
 
-    /// Makes sure that the mirror of the clone `checkout` holds its commit.
-    /// A mirror that has gone is cloned again from the recorded origin, and
-    /// a failed fetch deletes the empty mirror that the run made. The mirror
-    /// that is still there is fetched when the origin answers, because its
-    /// branches are what the clone starts with, and the pin keeps the commit
-    /// when it does not. A clone without an origin depends on its pin.
+    /// Fetches the origin of the clone `checkout` into its mirror, as a
+    /// person asked with `--from-origin`, and returns whether the mirror
+    /// holds none of the archive's pins, so the caller restores only what
+    /// the origin holds. A mirror that is gone is made again, and a failed
+    /// fetch deletes the empty mirror that the run made. A mirror that
+    /// still holds the archive's pins is fetched when the origin answers,
+    /// because its branches are what the clone starts with, and the pin
+    /// keeps the commit when it does not.
     fn ensure_mirror(
         &self,
         checkout: &ArchivedCheckout,
         mirror: &Path,
         warnings: &mut Vec<String>,
-    ) -> Result<Option<RestoreRefusal>, Error> {
+    ) -> Result<bool, Error> {
         let _lock = self.lock_mirror(mirror)?;
         let exists = mirror.join("HEAD").is_file();
-        if !exists && checkout.origin.is_none() {
-            return Ok(Some(missing_commit(checkout)));
-        }
-        if let Some(origin) = &checkout.origin {
-            self.backend.prepare_mirror(mirror)?;
-            let fetched =
-                self.backend
-                    .fetch_mirror(mirror, origin, &default_branch(&checkout.base));
-            match fetched {
-                Ok(_) => {}
-                Err(error) if exists => warnings.push(format!(
-                    "mxv could not fetch the origin of {}, so the restored clone starts from what its mirror last fetched: {error}",
-                    checkout.folder
-                )),
-                Err(error) => {
+        let fresh = !exists || self.pins_gone(checkout)?;
+        let Some(origin) = &checkout.origin else {
+            return Ok(false);
+        };
+        self.backend.prepare_mirror(mirror)?;
+        let fetched = self
+            .backend
+            .fetch_mirror(mirror, origin, &default_branch(&checkout.base));
+        match fetched {
+            Ok(()) => {}
+            Err(error) if !fresh => warnings.push(format!(
+                "mxv could not fetch the origin of {}, so the restored clone starts from what its mirror last fetched: {error}",
+                checkout.folder
+            )),
+            Err(error) => {
+                if !exists {
                     delete_directory(mirror)?;
-                    return Err(error);
+                }
+                return Err(error);
+            }
+        }
+        Ok(fresh)
+    }
+
+    /// Reports whether the mirror of `checkout` no longer holds the pin of
+    /// its `HEAD`, so every pin that the archive kept there is gone.
+    fn pins_gone(&self, checkout: &ArchivedCheckout) -> Result<bool, Error> {
+        Ok(self
+            .backend
+            .resolve_commit(checkout.pin_holder(), &checkout.pin)?
+            .is_none())
+    }
+
+    /// Changes `checkout`, whose mirror was made again from the origin, to
+    /// what that mirror holds: it starts at the archived commit when the
+    /// origin holds it, else at the tip of the archived branch on the
+    /// origin, else at the origin's default branch, and it keeps only the
+    /// pins whose objects the mirror holds. It adds each thing it leaves
+    /// out to `lost`, and returns the refusal when the origin holds no
+    /// branch to start from.
+    fn salvage(
+        &self,
+        checkout: &mut ArchivedCheckout,
+        lost: &mut Vec<LostPin>,
+    ) -> Result<Option<RestoreRefusal>, Error> {
+        let Some(mirror) = checkout.mirror.clone() else {
+            return Ok(None);
+        };
+        let holder = RefHolder::Mirror(&mirror);
+        let holds = |object: &str| -> Result<bool, Error> {
+            Ok(self.backend.resolve_commit(holder, object)?.is_some())
+        };
+        let folder = checkout.folder.clone();
+        let mut lose = |what: String| {
+            lost.push(LostPin {
+                folder: folder.clone(),
+                what,
+            });
+        };
+        if !holds(&checkout.commit)? {
+            let archived = checkout.commit.clone();
+            let default = default_branch(&checkout.base);
+            let mut start = None;
+            for branch in [checkout.branch.as_str(), default.as_str()] {
+                if let Some(tip) = self
+                    .backend
+                    .resolve_commit(holder, &format!("refs/heads/{branch}"))?
+                {
+                    start = Some((branch.to_owned(), tip));
+                    break;
+                }
+            }
+            let Some((branch, tip)) = start else {
+                return Ok(Some(missing_commit(checkout)));
+            };
+            lose(format!(
+                "the archived commit {archived}, so the checkout starts at {tip}, the tip of {branch} on origin"
+            ));
+            checkout.commit = tip;
+            checkout.upstream = None;
+        }
+        // The destructuring has no `..`, so a field added to `Kept` fails to
+        // compile here until this decides what to keep of it.
+        let Kept {
+            wip,
+            stashes,
+            branches,
+            tags,
+            worktree,
+            orphans,
+        } = std::mem::take(&mut checkout.kept);
+        let mut now = Kept::default();
+        if let Some(wip) = wip {
+            if holds(&wip.index)? && holds(&wip.worktree)? {
+                now.wip = Some(wip);
+            } else {
+                lose("the uncommitted work".to_owned());
+            }
+        }
+        for stash in stashes {
+            if holds(&stash.commit)? {
+                now.stashes.push(stash);
+            } else {
+                lose(format!("the stash {}", stash.message));
+            }
+        }
+        let named = [
+            ("the local branch", branches, &mut now.branches),
+            ("the tag", tags, &mut now.tags),
+            ("the per-worktree reference", worktree, &mut now.worktree),
+        ];
+        for (label, names, keep) in named {
+            for (name, object) in names {
+                if holds(&object)? {
+                    keep.insert(name, object);
+                } else {
+                    lose(format!("{label} {name}"));
                 }
             }
         }
-        self.missing(checkout)
+        for commit in orphans {
+            if holds(&commit)? {
+                now.orphans.push(commit);
+            } else {
+                lose(format!("the commit {commit}, which no branch reaches"));
+            }
+        }
+        checkout.kept = now;
+        Ok(None)
     }
 
     /// Returns the refusal of `checkout` when the repository that holds its
@@ -764,4 +976,51 @@ fn missing_commit(checkout: &ArchivedCheckout) -> RestoreRefusal {
         folder: checkout.folder.clone(),
         commit: checkout.commit.clone(),
     }
+}
+
+/// Returns one phrase for each kind of thing that `kept` holds, such as
+/// `1 stash`, for a refusal that lists what a lost mirror took with it.
+fn lost_items(checkout: &ArchivedCheckout) -> Vec<String> {
+    let kept = &checkout.kept;
+    let plural = |count: usize, one: &str, many: &str| {
+        format!("{count} {}", if count == 1 { one } else { many })
+    };
+    let mut items = Vec::new();
+    if !checkout.local_only.is_empty() {
+        let of = if checkout.detached {
+            "its detached HEAD".to_owned()
+        } else {
+            checkout.branch.clone()
+        };
+        items.push(format!(
+            "{} of {of} that origin did not hold when archived",
+            plural(checkout.local_only.len(), "commit", "commits")
+        ));
+    }
+    if kept.wip.is_some() {
+        items.push("uncommitted work".to_owned());
+    }
+    if !kept.stashes.is_empty() {
+        items.push(plural(kept.stashes.len(), "stash", "stashes"));
+    }
+    for name in kept.branches.keys() {
+        items.push(format!("the local branch {name}"));
+    }
+    for name in kept.tags.keys() {
+        items.push(format!("the tag {name}"));
+    }
+    if !kept.worktree.is_empty() {
+        items.push(plural(
+            kept.worktree.len(),
+            "per-worktree reference",
+            "per-worktree references",
+        ));
+    }
+    if !kept.orphans.is_empty() {
+        items.push(format!(
+            "{} that no branch reaches",
+            plural(kept.orphans.len(), "commit", "commits")
+        ));
+    }
+    items
 }
