@@ -343,7 +343,31 @@ fn a_record_whose_id_is_32_lowercase_hex_digits_still_reads() {
     let id = "0123456789abcdef0123456789abcdef";
     let setup = edited_record(Kind::Clone, quoted, &format!("\"id\": \"{id}\""));
     let archive = setup.archives.read(&name()).unwrap().unwrap();
-    assert_eq!(archive.id, id);
+    assert_eq!(archive.id.as_str(), id);
+}
+
+#[test]
+fn an_archive_whose_id_is_malformed_lists_as_unreadable() {
+    let quoted = |archive: &Archive| format!("\"id\": \"{}\"", archive.id);
+    let setup = edited_record(Kind::Clone, quoted, "\"id\": \"../outside\"");
+    let listed = setup.archives.list().unwrap();
+    assert!(listed.archives.is_empty(), "{:?}", listed.archives);
+    assert!(
+        matches!(listed.problems.as_slice(), [Error::CorruptRecord { .. }]),
+        "{:?}",
+        listed.problems
+    );
+    let health = crate::health::classify(&Git, &setup.workspaces.store.list().unwrap(), &listed);
+    assert!(
+        matches!(
+            health.archives.as_slice(),
+            [crate::health::Broken {
+                problem: crate::health::Problem::Unreadable { .. },
+                ..
+            }]
+        ),
+        "{health:?}"
+    );
 }
 
 #[test]

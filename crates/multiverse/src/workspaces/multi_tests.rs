@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use crate::archive::ArchiveId;
 use crate::git::Git;
 use crate::name::WorkspaceName;
-use crate::record::{MULTI_CHECKOUT_RECORD_VERSION, Workspace};
+use crate::record::{MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceState};
 use crate::store::Store;
 use crate::testing::{Fixture, fixture_named, git, write};
 use crate::workspaces::{
@@ -1038,4 +1039,76 @@ fn a_removal_refuses_a_partial_clone_of_an_unfinished_add_that_holds_files() {
         "{changes:?}"
     );
     assert!(path.join("notes.txt").exists());
+}
+
+#[test]
+fn add_on_a_retiring_workspace_keeps_its_state() {
+    let setup = setup();
+    let mut workspace = created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
+    let archive: ArchiveId = "a".repeat(32).try_into().unwrap();
+    let retiring = WorkspaceState::retiring(archive);
+    setup
+        .workspaces
+        .store
+        .advance(&mut workspace, retiring.clone())
+        .unwrap();
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(matches!(outcome, AddOutcome::Added(_)), "{outcome:?}");
+    let read = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert_eq!(read.checkouts.len(), 2);
+    assert_eq!(read.state(), retiring);
+}
+
+#[test]
+fn add_beside_an_older_unfinished_archive_without_ids_keeps_the_record_without_an_id_at_version_four()
+ {
+    let setup = setup();
+    created(&setup, "triage", &[Repo::new(&setup.api.clone)]);
+    let path = setup.workspaces.store.path(&name("triage"));
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let fields = record.as_object_mut().unwrap();
+    fields.remove("id");
+    fields.remove("state");
+    fields.insert("version".to_owned(), 2.into());
+    write(&path, record.to_string());
+    let archive = setup
+        .state
+        .parent()
+        .unwrap()
+        .join("archives/triage/archive.json");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let older = serde_json::json!({
+        "version": 2,
+        "id": "a".repeat(32),
+        "state": "retiring",
+        "time": 0,
+        "name": "triage",
+        "kind": "clone",
+        "path": setup.root.join("triage"),
+        "checkouts": [],
+    });
+    write(&archive, older.to_string());
+    let outcome = setup
+        .workspaces
+        .add(
+            &name("triage"),
+            &Repo::new(&setup.web.clone),
+            Mode::Change,
+            None,
+        )
+        .unwrap();
+    assert!(matches!(outcome, AddOutcome::Added(_)), "{outcome:?}");
+    let read = setup.workspaces.find(&name("triage")).unwrap().unwrap();
+    assert_eq!(read.checkouts.len(), 2);
+    assert_eq!(read.id, None);
+    assert_eq!(read.version, MULTI_CHECKOUT_RECORD_VERSION);
 }

@@ -3204,3 +3204,146 @@ fn down_and_status_work_on_a_workspace_that_mxv_new_did_not_finish() {
         assert_eq!(exit, 0, "{args:?}: {document}");
     }
 }
+
+impl Setup {
+    /// Returns the path of the record of the workspace `name`.
+    fn record_path(&self, name: &str) -> PathBuf {
+        self.root()
+            .join("state/mxv/workspaces")
+            .join(format!("{name}.json"))
+    }
+
+    /// Returns the record of the workspace `name`, as JSON.
+    fn record(&self, name: &str) -> Value {
+        serde_json::from_str(&fs::read_to_string(self.record_path(name)).unwrap()).unwrap()
+    }
+
+    /// Returns the path of the archive record of `name`.
+    fn archive_path(&self, name: &str) -> PathBuf {
+        self.root()
+            .join("state/mxv/archives")
+            .join(name)
+            .join("archive.json")
+    }
+
+    /// Rewrites the record of the workspace `name` without a stable id and
+    /// a state, at version 2, as an older mxv wrote it.
+    fn strip_id(&self, name: &str) {
+        let mut record = self.record(name);
+        let fields = record.as_object_mut().unwrap();
+        fields.remove("id");
+        fields.remove("state");
+        fields.insert("version".to_owned(), 2.into());
+        write(
+            &self.record_path(name),
+            &serde_json::to_string_pretty(&record).unwrap(),
+        );
+    }
+
+    /// Writes beside the workspace `name` the record of an archive of it
+    /// that an older mxv started and did not finish: retiring, at version
+    /// 2, with no workspace id.
+    fn plant_older_archive(&self, name: &str) {
+        let archive = serde_json::json!({
+            "version": 2,
+            "id": "a".repeat(32),
+            "state": "retiring",
+            "time": 0,
+            "name": name,
+            "kind": "clone",
+            "path": self.root().join("workspaces").join(name),
+            "checkouts": [],
+        });
+        let path = self.archive_path(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write(&path, &serde_json::to_string_pretty(&archive).unwrap());
+    }
+}
+
+#[test]
+fn pin_ports_reset_and_down_beside_an_older_unfinished_archive_without_ids_leave_the_record_without_an_id()
+ {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    setup.strip_id("triage");
+    setup.plant_older_archive("triage");
+    let mut record = setup.record("triage");
+    record["reclaimed"] = serde_json::json!({ "processes": ["sleeper"] });
+    write(
+        &setup.record_path("triage"),
+        &serde_json::to_string_pretty(&record).unwrap(),
+    );
+    for args in [
+        &["pin", "-w", "triage"][..],
+        &["ports", "reset", "-w", "triage"][..],
+        &["down", "-w", "triage"][..],
+    ] {
+        let (exit, errors) = setup.errors(args);
+        assert_eq!(exit, 0, "{args:?}: {errors}");
+    }
+    let record = setup.record("triage");
+    assert_eq!(record["id"], Value::Null, "{record}");
+    assert_eq!(record["pinned"], true, "{record}");
+    assert_eq!(record["reclaimed"], Value::Null, "{record}");
+}
+
+#[test]
+fn up_restart_and_run_beside_an_older_unfinished_archive_without_ids_refuse_until_archive_resumes()
+{
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    setup.strip_id("triage");
+    setup.plant_older_archive("triage");
+    for args in [
+        &["up", "-w", "triage"][..],
+        &["restart", "-w", "triage"][..],
+        &["run", "-w", "triage", "check"][..],
+    ] {
+        let (exit, errors) = setup.errors(args);
+        assert_eq!(exit, 1, "{args:?}: {errors}");
+        assert!(
+            errors.contains("mxv::workspace::archive_unfinished"),
+            "{args:?}: {errors}"
+        );
+        assert!(errors.contains("mxv archive triage"), "{args:?}: {errors}");
+        assert!(!errors.contains("DockerFailed"), "{args:?}: {errors}");
+    }
+    assert!(!setup.started("sleeper"));
+    let (exit, document) = setup.json(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let archive: Value =
+        serde_json::from_str(&fs::read_to_string(setup.archive_path("triage")).unwrap()).unwrap();
+    assert_eq!(archive["version"], 3, "{archive}");
+    assert_eq!(archive["state"], "archived", "{archive}");
+    assert!(archive["workspace_id"].is_string(), "{archive}");
+}
+
+#[test]
+fn up_of_a_record_without_an_id_and_no_archive_mints_the_id() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    setup.strip_id("triage");
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{errors}");
+    assert!(setup.record("triage")["id"].is_string());
+    assert!(setup.started("sleeper"));
+}
+
+#[test]
+fn up_of_a_record_without_an_id_beside_an_archive_record_that_cannot_be_read_names_mxv_remove() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER_AND_TASK);
+    setup.strip_id("triage");
+    let path = setup.archive_path("triage");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    write(&path, "not a record\n");
+    let (exit, errors) = setup.errors(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{errors}");
+    assert!(
+        errors.contains("mxv::workspace::archive_unfinished"),
+        "{errors}"
+    );
+    assert!(errors.contains("mxv remove triage"), "{errors}");
+    assert!(!setup.started("sleeper"));
+    assert_eq!(setup.record("triage")["id"], Value::Null);
+}

@@ -9,6 +9,7 @@ use phase::WorkspaceId;
 use phase::random::RANDOM_DEVICE;
 use serde::{Deserialize, Serialize};
 
+use crate::archive::ArchiveId;
 use crate::error::Error;
 use crate::name::WorkspaceName;
 
@@ -65,8 +66,9 @@ impl WorkspaceKind {
     }
 }
 
-/// Where a workspace is in its life, which its record stores.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a workspace is in its life, which its record stores. JSON writes
+/// `"creating"`, `"live"` and `{"retiring": {"archive": "<id>"}}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum WorkspaceState {
@@ -76,14 +78,42 @@ pub enum WorkspaceState {
     Creating,
     /// `mxv new` or `mxv restore` finished the workspace.
     Live,
+    /// `mxv archive` started to archive the workspace into the archive
+    /// `archive`, and wrote this before it wrote the archive's record.
+    /// Every command that `live` allows still runs, because no way leads
+    /// back to `live` yet.
+    #[non_exhaustive]
+    Retiring {
+        /// The id of the archive that retires the workspace.
+        archive: ArchiveId,
+    },
+}
+
+impl WorkspaceState {
+    /// Returns the state of a workspace that the archive `archive` retires.
+    #[must_use]
+    pub const fn retiring(archive: ArchiveId) -> Self {
+        Self::Retiring { archive }
+    }
+
+    /// Returns the id of the archive that retires the workspace, or `None`
+    /// when no archive does.
+    #[must_use]
+    pub const fn archive(&self) -> Option<&ArchiveId> {
+        match self {
+            Self::Retiring { archive } => Some(archive),
+            Self::Creating | Self::Live => None,
+        }
+    }
 }
 
 impl fmt::Display for WorkspaceState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Creating => "creating",
-            Self::Live => "live",
-        })
+        match self {
+            Self::Creating => formatter.write_str("creating"),
+            Self::Live => formatter.write_str("live"),
+            Self::Retiring { archive } => write!(formatter, "retiring into the archive {archive}"),
+        }
     }
 }
 
@@ -333,21 +363,33 @@ impl Workspace {
             self.id = Some(id);
             true
         };
-        self.version = self.version.max(ID_RECORD_VERSION);
+        self.raise_version();
+        Ok(minted)
+    }
+
+    /// Raises the record's version to the lowest one that its form needs:
+    /// [`ID_RECORD_VERSION`] when it holds a stable id, and
+    /// [`MULTI_CHECKOUT_RECORD_VERSION`] when it has more than one
+    /// checkout. A record without an id stays below [`ID_RECORD_VERSION`]
+    /// unless it has several checkouts.
+    pub(crate) fn raise_version(&mut self) {
+        if self.id.is_some() {
+            self.version = self.version.max(ID_RECORD_VERSION);
+        }
         if self.checkouts.len() > 1 {
             self.version = self.version.max(MULTI_CHECKOUT_RECORD_VERSION);
         }
-        Ok(minted)
     }
 
     /// Returns where the workspace is in its life.
     #[must_use]
-    pub const fn state(&self) -> WorkspaceState {
-        self.state
+    pub fn state(&self) -> WorkspaceState {
+        self.state.clone()
     }
 
-    /// Sets the state that the record holds, for [`crate::Store::advance`].
-    pub(crate) const fn set_state(&mut self, state: WorkspaceState) {
+    /// Sets the state that the record holds, for [`crate::Store::advance`]
+    /// and [`crate::Store::repoint`].
+    pub(crate) fn set_state(&mut self, state: WorkspaceState) {
         self.state = state;
     }
 
@@ -355,7 +397,7 @@ impl Workspace {
     /// `mxv restore`, which writes the record only once every checkout is
     /// in place.
     #[must_use]
-    pub(crate) const fn finished(mut self) -> Self {
+    pub(crate) fn finished(mut self) -> Self {
         self.state = WorkspaceState::Live;
         self
     }

@@ -22,6 +22,7 @@ use crate::workspaces::{Mode, NewOutcome, Repo, Workspaces};
 
 mod cases;
 mod edges;
+mod retiring;
 
 type Hook = Box<dyn FnMut(&str) -> Result<(), Error>>;
 
@@ -1382,7 +1383,11 @@ fn resumes_after(kind: Kind, step: &'static str) {
     );
 }
 
-const ARCHIVE_STEPS: [&str; 11] = [
+/// Every checkpoint of an archive of one checkout `app`, in order. `state`
+/// follows the workspace's `retiring` write and `retired` the archive's
+/// `retired` write.
+pub(super) const ARCHIVE_STEPS: [&str; 13] = [
+    "state",
     "record",
     "wip",
     "pins",
@@ -1393,6 +1398,7 @@ const ARCHIVE_STEPS: [&str; 11] = [
     "cleared:app",
     "retired:app",
     "delete",
+    "retired",
     "removed",
 ];
 
@@ -2805,7 +2811,7 @@ fn a_version_one_archive_still_restores() {
     let path = setup.archives.dir_of(&name()).join(RECORD_FILE);
     let text = fs::read_to_string(&path).unwrap();
     let old = text
-        .replace("\"version\": 2", "\"version\": 1")
+        .replace(&format!("\"version\": {ARCHIVE_VERSION}"), "\"version\": 1")
         .replace(&checkout.pin, &old_pin);
     write(&path, old);
     let read = setup.record().unwrap();

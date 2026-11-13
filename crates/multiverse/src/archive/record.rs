@@ -1,12 +1,14 @@
 //! The archive record and the directory of archives that holds it.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phase::WorkspaceId;
+use phase::random::RANDOM_DEVICE;
 use serde::{Deserialize, Serialize};
 
 use crate::archive::ignored::{IGNORED_TAR, IgnoredEntry};
@@ -19,13 +21,85 @@ use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::store::{self, MOST_RECORD_BYTES};
 use crate::workspaces::delete_directory;
 
+/// The version of the archive record that an older multiverse wrote, which
+/// had no [`ArchiveState::Retired`]. A record of this version or lower that
+/// says [`ArchiveState::Retiring`] reads as retired where no workspace of
+/// its identity exists.
+pub const OLDER_ARCHIVE_VERSION: u32 = 2;
+
+/// The id of an archive, which names its pins and its data directory: 32
+/// lowercase hex digits, as [`WorkspaceId::mint`] makes them. Every way to
+/// build one, including reading it from JSON, checks the digits, so the
+/// directory and the references that it names stay below their parents.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ArchiveId(String);
+
+impl ArchiveId {
+    /// Returns a new id from the operating system's random number
+    /// generator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when [`RANDOM_DEVICE`] cannot be
+    /// read.
+    pub fn mint() -> Result<Self, Error> {
+        let minted = WorkspaceId::mint().map_err(|source| Error::StateUnreadable {
+            path: PathBuf::from(RANDOM_DEVICE),
+            source,
+        })?;
+        Self::try_from(String::from(minted)).map_err(|text| Error::StateUnreadable {
+            path: PathBuf::from(RANDOM_DEVICE),
+            source: io::Error::other(format!("the minted id {text:?} is not an archive id")),
+        })
+    }
+
+    /// Returns the id as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ArchiveId {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        if is_archive_id(&text) {
+            Ok(Self(text))
+        } else {
+            Err(format!(
+                "the archive id {text:?} is not 32 lowercase hex digits"
+            ))
+        }
+    }
+}
+
+impl From<ArchiveId> for String {
+    fn from(id: ArchiveId) -> Self {
+        id.0
+    }
+}
+
+impl fmt::Display for ArchiveId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 /// Whether an archive has finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ArchiveState {
     /// The record is written and the workspace is still being retired. The
-    /// same `mxv archive` finishes it.
+    /// same `mxv archive` finishes it, from the workspace's record. Once
+    /// that record is gone, nothing finishes it, because nothing says that
+    /// every checkout was retired.
     Retiring,
+    /// Every checkout is retired and the run is about to delete the
+    /// workspace's record, or has deleted it. `mxv archive -w` finishes it
+    /// once the record is gone.
+    Retired,
     /// The workspace is gone, and `mxv restore` can rebuild it.
     Archived,
 }
@@ -253,8 +327,8 @@ impl ArchivedCheckout {
 pub struct Archive {
     /// The version of the record form, which is [`ARCHIVE_VERSION`].
     pub version: u32,
-    /// The archive's own id, which names its pins: 32 lowercase hex digits.
-    pub id: String,
+    /// The archive's own id, which names its pins.
+    pub id: ArchiveId,
     /// Whether the archive has finished.
     pub state: ArchiveState,
     /// When the archive started, in seconds since the Unix epoch.
@@ -304,9 +378,16 @@ pub struct Archive {
 impl Archive {
     /// Returns this archive under the name `to`, with the workspace's
     /// directory and each checkout's directory moved to the directory of
-    /// that name beside the old one. It writes nothing.
+    /// that name beside the old one. It writes nothing. A repair renames
+    /// only an archive that counts as retired, so a record that an older
+    /// multiverse wrote as retiring is renamed as retired, at this
+    /// version, which keeps it retired once no other record names it.
     pub(crate) fn renamed(&self, to: &WorkspaceName) -> Self {
         let mut renamed = self.clone();
+        if renamed.counts_as_retired() {
+            renamed.state = ArchiveState::Retired;
+        }
+        renamed.version = ARCHIVE_VERSION;
         renamed.name = to.clone();
         if let Some(parent) = self.path.parent() {
             renamed.path = parent.join(to.as_str());
@@ -337,7 +418,10 @@ impl Archive {
     }
 
     /// Returns the record of the workspace that the archive holds, with its
-    /// stable id, ports and checkouts.
+    /// stable id, ports and checkouts, in the state
+    /// [`WorkspaceState::Creating`](crate::record::WorkspaceState::Creating),
+    /// as [`Workspace::new`] returns it. `mxv restore` writes it as live
+    /// only once every checkout is in place.
     #[must_use]
     pub fn workspace(&self) -> Workspace {
         let mut workspace = Workspace::new(
@@ -352,6 +436,27 @@ impl Archive {
         workspace.ports.clone_from(&self.ports);
         workspace.pinned = self.pinned;
         workspace
+    }
+
+    /// Reports whether an older multiverse wrote the record, which had no
+    /// [`ArchiveState::Retired`].
+    #[must_use]
+    pub const fn is_older(&self) -> bool {
+        self.version <= OLDER_ARCHIVE_VERSION
+    }
+
+    /// Reports whether the archive retired every checkout: it says
+    /// [`ArchiveState::Retired`], or an older multiverse wrote it as
+    /// [`ArchiveState::Retiring`]. A caller asks only where no workspace
+    /// of the archive's identity exists, because only there does an older
+    /// retiring record count as retired.
+    #[must_use]
+    pub fn counts_as_retired(&self) -> bool {
+        match self.state {
+            ArchiveState::Retired => true,
+            ArchiveState::Retiring => self.is_older(),
+            ArchiveState::Archived => false,
+        }
     }
 
     /// Reports whether a checkout's commit exists on no remote.
@@ -410,8 +515,8 @@ impl Archives {
     /// Returns the data directory of the archive `id`, which holds its
     /// private tar of ignored files.
     #[must_use]
-    pub fn data_of(&self, id: &str) -> PathBuf {
-        self.data.join(id)
+    pub fn data_of(&self, id: &ArchiveId) -> PathBuf {
+        self.data.join(id.as_str())
     }
 
     /// Returns the record of the archive of `name`, or `None` when no
@@ -655,6 +760,37 @@ pub(crate) struct Leftovers {
     pub(crate) unrecorded: Vec<PathBuf>,
 }
 
+/// Why a workspace record without a stable id keeps none when it is
+/// written, as [`mint_held`] decides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MintHeld {
+    /// An older multiverse left a retiring archive of the name without a
+    /// workspace id. The two records count as one workspace only while
+    /// neither has an id, so a minted id would split them until
+    /// `mxv archive` resumes and mints it itself.
+    OlderRetiring,
+    /// The archive record of the name cannot be read, so it may be such an
+    /// archive.
+    Unreadable,
+}
+
+/// Returns why the record of the workspace `name`, which holds no stable
+/// id, must keep none when it is written, or `None` when it may get one.
+/// `dir` is the directory of archives. Every failure to read the archive
+/// record of the name, such as a corrupt, newer or mismatched record,
+/// holds the mint too.
+pub(crate) fn mint_held(dir: &Path, name: &WorkspaceName) -> Option<MintHeld> {
+    match read_record(&dir.join(name.as_str()).join(RECORD_FILE)) {
+        Ok(None) => None,
+        Ok(Some(archive)) if archive.name != *name => Some(MintHeld::Unreadable),
+        Ok(Some(archive)) => (archive.is_older()
+            && archive.state == ArchiveState::Retiring
+            && archive.workspace_id.is_none())
+        .then_some(MintHeld::OlderRetiring),
+        Err(_) => Some(MintHeld::Unreadable),
+    }
+}
+
 /// Returns the archive record at `path`, or `None` when no file is there.
 fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
     let unreadable = |source| Error::StateUnreadable {
@@ -681,13 +817,8 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             version: versioned.version,
         });
     }
+    // `ArchiveId` refuses an id that is not 32 lowercase hex digits.
     let archive: Archive = serde_json::from_slice(&bytes).map_err(corrupt)?;
-    if !is_archive_id(&archive.id) {
-        return Err(corrupt(serde::de::Error::custom(format!(
-            "the archive id {:?} is not 32 lowercase hex digits",
-            archive.id
-        ))));
-    }
     if let Some(entry) = archive.root.iter().find(|entry| !stays_inside(&entry.path)) {
         return Err(corrupt(serde::de::Error::custom(format!(
             "the root entry {} leaves the workspace's directory",

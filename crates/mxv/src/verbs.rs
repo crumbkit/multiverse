@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use multiverse::health::{self, Problem};
 use multiverse::{
-    AddOutcome, Allow, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined, Manifest,
+    AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined, Manifest,
     ManifestProblem, Mode, NewOutcome, PathGlob, RemovalOutcome, RemovalPlan, Repo, Store,
     Workspace, WorkspaceName, Workspaces, checkout_prefix, prefixed,
 };
@@ -825,7 +825,8 @@ pub(crate) fn remove(
                 multiverse::SyncMode::IfRunning,
                 served,
             );
-            let held = processes::forget(environment, &name, id.as_ref())?;
+            let mut held = processes::forget(environment, &name, id.as_ref())?;
+            held.extend(stopped_archive(environment, &removed.workspace)?);
             if let Some(volumes) = volumes {
                 processes::delete_volumes(environment, volumes)?;
             }
@@ -844,6 +845,34 @@ pub(crate) fn remove(
         .into()),
         RemovalOutcome::Changed(refused) => Err(refusal(&name, allow, refused).into()),
     }
+}
+
+/// Returns the warning of a removal of `workspace`, which an archive had
+/// started to retire, about the archive record of its name that stays: a
+/// retiring one can no longer be resumed, and a retired one is still
+/// finished by `mxv archive -w`. A workspace that was not retiring, or
+/// whose archive record does not exist or cannot be read, has none, and
+/// `mxv list --archived` names a record that cannot be read.
+fn stopped_archive(
+    environment: &Environment,
+    workspace: &Workspace,
+) -> Result<Vec<String>, crumbkit::Error> {
+    if workspace.state().archive().is_none() {
+        return Ok(Vec::new());
+    }
+    let name = &workspace.name;
+    let Ok(Some(archive)) = crate::archive::archives(environment)?.read(name) else {
+        return Ok(Vec::new());
+    };
+    Ok(match archive.state {
+        ArchiveState::Retiring => vec![format!(
+            "the archive of {name} stopped before it retired every checkout, so it can no longer be resumed; `mxv repair {name}` moves it aside"
+        )],
+        ArchiveState::Retired => vec![format!(
+            "the archive of {name} retired every checkout and did not finish; `mxv archive -w {name}` finishes it"
+        )],
+        _ => Vec::new(),
+    })
 }
 
 /// Returns the failure of a removal of the workspace `name` that `plan`

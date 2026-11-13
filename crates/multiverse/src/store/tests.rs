@@ -1,7 +1,8 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::archive::ArchiveId;
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{
@@ -604,4 +605,271 @@ fn a_written_record_reads_back_the_same_at_the_same_version() {
         assert_eq!(read, workspace);
         assert_eq!(read.version, ID_RECORD_VERSION);
     }
+}
+
+/// The archive id that the tests of `retiring` name.
+fn archive_id(digit: char) -> ArchiveId {
+    ArchiveId::try_from(std::iter::repeat_n(digit, 32).collect::<String>()).unwrap()
+}
+
+/// Returns a store in `dir/workspaces`, whose archives lie in
+/// `dir/archives`, holding the record of `name` as `mxv new` leaves it:
+/// `live`, with a stable id.
+fn live(dir: &Path, name: &str) -> (Store, Workspace) {
+    let store = Store::new(dir.join("workspaces"));
+    let mut workspace = made(name);
+    store.create(&mut workspace).unwrap();
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    (store, workspace)
+}
+
+#[test]
+fn an_advance_admits_live_to_retiring_and_writes_the_archive_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    let retiring = WorkspaceState::retiring(archive_id('a'));
+    store.advance(&mut workspace, retiring.clone()).unwrap();
+    assert_eq!(workspace.state(), retiring);
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), retiring);
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path(&workspace.name)).unwrap()).unwrap();
+    assert_eq!(
+        value["state"],
+        serde_json::json!({ "retiring": { "archive": "a".repeat(32) } })
+    );
+}
+
+#[test]
+fn an_advance_to_retiring_mints_a_missing_stable_id_even_beside_an_older_unfinished_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    written_without_id(&store, &workspace);
+    write_older_archive(dir.path(), "app", None);
+    let mut held = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(held.id, None);
+    store
+        .advance(&mut held, WorkspaceState::retiring(archive_id('a')))
+        .unwrap();
+    workspace = store.read(&workspace.name).unwrap().unwrap();
+    assert!(workspace.id.is_some());
+    assert_eq!(workspace.id, held.id);
+}
+
+#[test]
+fn an_advance_from_retiring_into_an_archive_to_the_same_archive_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    let retiring = WorkspaceState::retiring(archive_id('a'));
+    store.advance(&mut workspace, retiring.clone()).unwrap();
+    let before = fs::read(store.path(&workspace.name)).unwrap();
+    workspace.pinned = true;
+    store.advance(&mut workspace, retiring.clone()).unwrap();
+    assert_eq!(workspace.state(), retiring);
+    assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+}
+
+#[test]
+fn an_advance_refuses_retiring_into_one_archive_to_retiring_into_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    let first = WorkspaceState::retiring(archive_id('a'));
+    store.advance(&mut workspace, first.clone()).unwrap();
+    let before = fs::read(store.path(&workspace.name)).unwrap();
+    let refused = store.advance(&mut workspace, WorkspaceState::retiring(archive_id('b')));
+    assert!(
+        matches!(&refused, Err(Error::TransitionRefused { from, .. }) if *from == first),
+        "{refused:?}"
+    );
+    assert_eq!(workspace.state(), first);
+    assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+}
+
+#[test]
+fn a_repoint_moves_a_retiring_workspace_to_the_archive_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    store
+        .advance(&mut workspace, WorkspaceState::retiring(archive_id('a')))
+        .unwrap();
+    store.repoint(&mut workspace, &archive_id('c')).unwrap();
+    let repointed = WorkspaceState::retiring(archive_id('c'));
+    assert_eq!(workspace.state(), repointed);
+    assert_eq!(
+        store.read(&workspace.name).unwrap().unwrap().state(),
+        repointed
+    );
+}
+
+#[test]
+fn a_repoint_refuses_a_live_workspace_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    let before = fs::read(store.path(&workspace.name)).unwrap();
+    let refused = store.repoint(&mut workspace, &archive_id('c'));
+    assert!(
+        matches!(
+            &refused,
+            Err(Error::TransitionRefused {
+                from: WorkspaceState::Live,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(workspace.state(), WorkspaceState::Live);
+    assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+}
+
+#[test]
+fn an_update_of_a_retiring_record_keeps_its_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    let retiring = WorkspaceState::retiring(archive_id('a'));
+    store.advance(&mut workspace, retiring.clone()).unwrap();
+    workspace.pinned = true;
+    workspace.ports.insert("web".to_owned(), 31_000);
+    store.update(&mut workspace).unwrap();
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.state(), retiring);
+    assert!(read.pinned);
+}
+
+/// Rewrites the record of `workspace` without its stable id, at the
+/// version that an older mxv gave a record of clones without one.
+fn written_without_id(store: &Store, workspace: &Workspace) {
+    let path = store.path(&workspace.name);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let record = value.as_object_mut().unwrap();
+    record.remove("id");
+    if workspace.checkouts.len() == 1 {
+        record.insert("version".to_owned(), 2.into());
+    }
+    write(&path, value.to_string());
+}
+
+/// Writes, in `dir/archives`, the record of a retiring archive of `name`
+/// that an older mxv wrote, at version 2, with the workspace id
+/// `workspace_id`.
+fn write_older_archive(dir: &Path, name: &str, workspace_id: Option<&str>) {
+    write_archive(dir, name, 2, workspace_id);
+}
+
+/// Writes, in `dir/archives`, the record of a retiring archive of `name` at
+/// `version` with the workspace id `workspace_id`.
+fn write_archive(dir: &Path, name: &str, version: u32, workspace_id: Option<&str>) {
+    let mut record = serde_json::json!({
+        "version": version,
+        "id": "a".repeat(32),
+        "state": "retiring",
+        "time": 0,
+        "name": name,
+        "kind": "clone",
+        "path": format!("/home/agent/mxv/{name}"),
+        "checkouts": [],
+    });
+    if let Some(id) = workspace_id {
+        record["workspace_id"] = id.into();
+    }
+    write_archive_text(dir, name, &record.to_string());
+}
+
+/// Writes `text` as the archive record of `name` in `dir/archives`.
+fn write_archive_text(dir: &Path, name: &str, text: &str) {
+    let archive = dir.join("archives").join(name);
+    fs::create_dir_all(&archive).unwrap();
+    write(archive.join("archive.json"), text);
+}
+
+#[test]
+fn an_update_of_a_record_without_an_id_beside_an_older_retiring_archive_without_one_mints_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, workspace) = live(dir.path(), "app");
+    written_without_id(&store, &workspace);
+    write_older_archive(dir.path(), "app", None);
+    let mut held = store.read(&workspace.name).unwrap().unwrap();
+    held.pinned = true;
+    store.update(&mut held).unwrap();
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert!(read.pinned);
+    assert_eq!(read.id, None);
+    assert_eq!(held.id, None);
+    assert_eq!(read.version, 2);
+}
+
+#[test]
+fn an_update_of_a_record_without_an_id_and_no_archive_mints_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, workspace) = live(dir.path(), "app");
+    written_without_id(&store, &workspace);
+    let mut held = store.read(&workspace.name).unwrap().unwrap();
+    store.update(&mut held).unwrap();
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert!(read.id.is_some());
+    assert_eq!(read.version, ID_RECORD_VERSION);
+}
+
+#[test]
+fn an_update_beside_an_older_archive_that_holds_a_workspace_id_or_a_current_one_without_mints_one()
+{
+    for (version, workspace_id) in [(2, Some("b".repeat(32))), (3, None)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, workspace) = live(dir.path(), "app");
+        written_without_id(&store, &workspace);
+        write_archive(dir.path(), "app", version, workspace_id.as_deref());
+        let mut held = store.read(&workspace.name).unwrap().unwrap();
+        store.update(&mut held).unwrap();
+        let read = store.read(&workspace.name).unwrap().unwrap();
+        assert!(read.id.is_some(), "version {version}");
+    }
+}
+
+#[test]
+fn an_update_of_a_record_without_an_id_beside_an_unreadable_archive_record_mints_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, workspace) = live(dir.path(), "app");
+    written_without_id(&store, &workspace);
+    write_archive_text(dir.path(), "app", "not a record\n");
+    let mut held = store.read(&workspace.name).unwrap().unwrap();
+    store.update(&mut held).unwrap();
+    assert_eq!(store.read(&workspace.name).unwrap().unwrap().id, None);
+}
+
+#[test]
+fn an_update_of_a_record_with_an_id_beside_an_unreadable_archive_record_keeps_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    let id = workspace.id.clone();
+    write_archive_text(dir.path(), "app", "not a record\n");
+    workspace.pinned = true;
+    store.update(&mut workspace).unwrap();
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.id, id);
+    assert!(read.pinned);
+}
+
+#[test]
+fn an_update_that_mints_no_id_raises_two_checkouts_to_version_four_and_never_one_to_three() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("workspaces"));
+    let mut workspace = with_two_checkouts("app");
+    for checkout in &mut workspace.checkouts {
+        checkout.commit = Some("1111111111111111111111111111111111111111".to_owned());
+    }
+    store.create(&mut workspace).unwrap();
+    store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+    written_without_id(&store, &workspace);
+    let path = store.path(&workspace.name);
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"version\":4", "\"version\":2");
+    write(&path, text);
+    write_older_archive(dir.path(), "app", None);
+    let mut held = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(held.version, 2);
+    store.update(&mut held).unwrap();
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.id, None);
+    assert_eq!(read.version, MULTI_CHECKOUT_RECORD_VERSION);
 }

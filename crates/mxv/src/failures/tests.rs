@@ -141,3 +141,37 @@ fn a_workspace_that_mxv_new_did_not_finish_names_mxv_remove_and_then_mxv_new() {
     assert!(hint.contains("`mxv remove triage`"), "{hint}");
     assert!(hint.contains("`mxv new`"), "{hint}");
 }
+
+/// Returns the code and the hint of the failure of a workspace without a
+/// stable id beside an archive record, which is `readable` or not.
+fn archive_unfinished(readable: bool) -> (&'static crumbkit::Code, String) {
+    let failure = MxvFailure::from(multiverse::Error::ArchiveUnfinished {
+        name: "triage".parse().unwrap(),
+        readable,
+    });
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    (failure.code(), hint)
+}
+
+#[test]
+fn a_workspace_without_an_id_beside_an_older_unfinished_archive_names_mxv_archive() {
+    let (code, hint) = archive_unfinished(true);
+    assert_eq!(
+        (code.area(), code.reason()),
+        ("workspace", "archive_unfinished")
+    );
+    assert!(hint.contains("`mxv archive triage`"), "{hint}");
+}
+
+#[test]
+fn a_workspace_without_an_id_beside_an_unreadable_archive_record_names_mxv_remove() {
+    let (code, hint) = archive_unfinished(false);
+    assert_eq!(
+        (code.area(), code.reason()),
+        ("workspace", "archive_unfinished")
+    );
+    assert!(hint.contains("`mxv remove triage`"), "{hint}");
+    assert!(!hint.contains("`mxv archive triage`"), "{hint}");
+}

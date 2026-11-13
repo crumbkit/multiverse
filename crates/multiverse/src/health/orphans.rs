@@ -187,7 +187,7 @@ impl<B: Backend> Workspaces<B> {
             let named = workspaces.iter().any(|workspace| workspace.name == name)
                 || records
                     .iter()
-                    .any(|archive| archive.name == name && archive.state == ArchiveState::Retiring);
+                    .any(|archive| archive.name == name && archive.state != ArchiveState::Archived);
             if !named {
                 items.push(Orphan {
                     bytes: size(&path),

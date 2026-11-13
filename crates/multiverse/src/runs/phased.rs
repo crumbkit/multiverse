@@ -22,6 +22,7 @@ use super::{
     DownOutcome, DownResult, ExitReason, Footprint, Kind, Needed, ProcessNote, ProcessState,
     ProcessStatus, RenamedVolume, Runs, StillNeeded, Unstoppable, UpOutcome, Waited, received,
 };
+use crate::archive::MintHeld;
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
@@ -196,7 +197,8 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
 
 /// Returns the stable id that the record of the workspace `name` holds on
 /// disk. When the record holds none, `store` mints one and saves the record
-/// with it first.
+/// with it first, unless an archive record of the name holds the mint, and
+/// then it returns [`Error::ArchiveUnfinished`] before anything starts.
 pub(super) fn saved_workspace_id(
     store: &Store,
     name: &WorkspaceName,
@@ -211,6 +213,12 @@ pub(super) fn saved_workspace_id(
         .read(name)?
         .ok_or_else(|| no_id("the workspace has no record"))?;
     if record.id.is_none() {
+        if let Some(held) = store.mint_held(name) {
+            return Err(Error::ArchiveUnfinished {
+                name: name.clone(),
+                readable: held == MintHeld::OlderRetiring,
+            });
+        }
         store.update(&mut record)?;
     }
     record

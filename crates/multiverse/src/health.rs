@@ -9,6 +9,7 @@
 //! [`Workspaces::orphans`](crate::Workspaces::orphans) finds what no record
 //! names.
 
+use std::convert::Infallible;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -70,17 +71,21 @@ pub enum Problem {
         /// The error's text, which names the record's file.
         reason: String,
     },
-    /// The archive is still [`ArchiveState::Retiring`], and either no
-    /// workspace has its name and its pins are there, or the workspace of
-    /// that name is the one it archives.
+    /// The archive has not finished, and either no workspace has its name,
+    /// it counts as retired and every checkout's pin is there, or the
+    /// workspace of that name is the one it archives.
     ArchiveUnfinished,
-    /// The archive is still [`ArchiveState::Retiring`], no workspace has
-    /// its name, and the pin of no checkout names its commit, so finishing
-    /// it would claim that a restore brings back what is gone.
+    /// The archive is still [`ArchiveState::Retiring`], at this version,
+    /// and no workspace has its name, because the workspace was removed
+    /// after its archive stopped. Nothing says that every checkout was
+    /// retired, so the archive is never finished.
+    ArchiveWorkspaceRemoved,
+    /// The archive counts as retired, no workspace has its name, and the
+    /// pin of a checkout no longer names its commit, so finishing it would
+    /// claim that a restore brings back what is gone.
     ArchivePinsGone,
-    /// The archive is still [`ArchiveState::Retiring`], and a workspace
-    /// with another stable id has its name, so archiving the name again
-    /// refuses.
+    /// The archive has not finished, and another workspace has its name,
+    /// so archiving the name again refuses.
     ArchiveBesideNewerWorkspace,
     /// A repair stopped while it moved an older archive to its dated name,
     /// so this record and another one hold the same archive id, and the
@@ -143,18 +148,7 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
             .workspaces
             .iter()
             .find(|workspace| workspace.name == archive.name);
-        let reading = match archive_case(
-            backend,
-            archive,
-            live,
-            &archives.archives,
-            UnreadPins::CountAsThere,
-        ) {
-            Ok(reading) => reading,
-            // A pin that cannot be read counts as there, so this read
-            // never fails.
-            Err(_) => continue,
-        };
+        let Ok(reading) = archive_case(archive, live, &archives.archives, count_as_there(backend));
         let Some((problem, repair)) = reading.broken(&archive.name) else {
             continue;
         };
@@ -195,23 +189,27 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
 
 /// What one archive record and the workspace record of its name are,
 /// as [`archive_case`] decides it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ArchiveCase {
-    /// The archive is still retiring, no workspace has its name, and a
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ArchiveCase<'a> {
+    /// The archive counts as retired, no workspace has its name, and every
     /// checkout's pin is there, so `mxv archive -w` finishes it.
     Finishable,
-    /// The archive is still retiring, no workspace has its name, and the
-    /// pin of no checkout names its commit, so finishing it would claim
-    /// that a restore brings back what is gone.
+    /// The archive is still retiring at this version, and no workspace has
+    /// its name, so nothing says that every checkout was retired.
+    WorkspaceRemoved,
+    /// The archive counts as retired, no workspace has its name, and the
+    /// pin of a checkout no longer names its commit, so finishing it would
+    /// claim that a restore brings back what is gone.
     PinsGone,
-    /// The archive is still retiring, no workspace has its name, and it is
-    /// one of the two records of a rename that a repair stopped, which
-    /// [`ArchiveReading::rename`] names.
-    Renaming,
-    /// The archive is still retiring beside the workspace it archives, so
-    /// `mxv archive` resumes it.
-    Resumable,
-    /// The archive is still retiring, and another workspace has its name.
+    /// The archive has not finished, no workspace has its name, and it is
+    /// one of the two records of a rename that a repair stopped, older
+    /// name first.
+    Renaming(&'a Archive, &'a Archive),
+    /// The archive has not finished, and this workspace of its name is the
+    /// one it archives, as [`same_workspace`] decides, so `mxv archive`
+    /// resumes it.
+    Resumable(&'a Workspace),
+    /// The archive has not finished, and another workspace has its name.
     BesideNewerWorkspace,
     /// The archive is archived, and the workspace of its name is the one a
     /// restore rebuilt from it, whole, as [`Rebuilt::Whole`] says.
@@ -227,7 +225,7 @@ pub(crate) enum ArchiveCase {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ArchiveReading<'a> {
     /// What the archive and the workspace of its name are.
-    pub(crate) case: ArchiveCase,
+    pub(crate) case: ArchiveCase<'a>,
     /// The two records of a rename that a repair started and did not
     /// finish, older name first, when the archive is one of them, whatever
     /// the case.
@@ -244,9 +242,10 @@ impl ArchiveReading<'_> {
             return Some((Problem::RenameUnfinished, Repair::Repair(old.name.clone())));
         }
         let problem = match self.case {
-            ArchiveCase::Finishable | ArchiveCase::Resumable => Problem::ArchiveUnfinished,
+            ArchiveCase::Finishable | ArchiveCase::Resumable(_) => Problem::ArchiveUnfinished,
+            ArchiveCase::WorkspaceRemoved => Problem::ArchiveWorkspaceRemoved,
             ArchiveCase::PinsGone => Problem::ArchivePinsGone,
-            ArchiveCase::Renaming => Problem::RenameUnfinished,
+            ArchiveCase::Renaming(..) => Problem::RenameUnfinished,
             ArchiveCase::BesideNewerWorkspace => Problem::ArchiveBesideNewerWorkspace,
             ArchiveCase::RestoreUnfinished => Problem::RestoreUnfinished,
             ArchiveCase::ArchivedBesideWorkspace | ArchiveCase::Archived => return None,
@@ -256,15 +255,13 @@ impl ArchiveReading<'_> {
     }
 }
 
-/// What [`archive_case`] does when it cannot read a pin.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnreadPins {
-    /// It returns the error, as `mxv archive -w` does before it finishes
-    /// an archive.
-    Fail,
-    /// It counts the pin as there, so a listing names `mxv archive -w` as
-    /// the repair.
-    CountAsThere,
+/// Returns the reading of the pins for [`archive_case`] that counts a pin
+/// that cannot be read as there, so a listing names `mxv archive -w` as the
+/// repair and the reading never fails.
+pub(crate) fn count_as_there<B: Backend>(
+    backend: &B,
+) -> impl FnOnce(&Archive) -> Result<bool, Infallible> {
+    |archive| Ok(pins_gone(backend, archive).unwrap_or(false))
 }
 
 /// Returns what `archive` and `live`, the workspace record of its name,
@@ -274,39 +271,42 @@ pub(crate) enum UnreadPins {
 /// [`Workspaces::repair`](crate::Workspaces::repair) each take their
 /// answer from it.
 ///
-/// It reads the pins, through `backend`, only for a retiring archive that
-/// no workspace has the name of and that is no rename's.
+/// It calls `read_pins`, which reports whether [`pins_gone`] holds, only
+/// for an archive that counts as retired, that no workspace has the name
+/// of and that is no rename's. `mxv archive -w` passes [`pins_gone`]
+/// itself, so a pin that cannot be read fails it before it finishes an
+/// archive, and a listing passes [`count_as_there`].
 ///
 /// # Errors
 ///
-/// Returns the failure to read a pin, with [`UnreadPins::Fail`].
-pub(crate) fn archive_case<'a, B: Backend>(
-    backend: &B,
+/// Returns the error of `read_pins`.
+pub(crate) fn archive_case<'a, E>(
     archive: &'a Archive,
-    live: Option<&Workspace>,
+    live: Option<&'a Workspace>,
     all: &'a [Archive],
-    pins: UnreadPins,
-) -> Result<ArchiveReading<'a>, Error> {
+    read_pins: impl FnOnce(&Archive) -> Result<bool, E>,
+) -> Result<ArchiveReading<'a>, E> {
     let rename = rename_pair(archive, all);
     let case = match (archive.state, live) {
-        (ArchiveState::Retiring, Some(workspace)) if !same_workspace(archive, workspace) => {
+        (ArchiveState::Retiring | ArchiveState::Retired, Some(workspace))
+            if !same_workspace(archive, workspace) =>
+        {
             ArchiveCase::BesideNewerWorkspace
         }
-        (ArchiveState::Retiring, Some(_)) => ArchiveCase::Resumable,
+        (ArchiveState::Retiring | ArchiveState::Retired, Some(workspace)) => {
+            ArchiveCase::Resumable(workspace)
+        }
         // Finishing one record of a rename that stopped would mark an
         // archive whose files are split between two directories.
-        (ArchiveState::Retiring, None) if rename.is_some() => ArchiveCase::Renaming,
-        (ArchiveState::Retiring, None) => {
-            let gone = match pins {
-                UnreadPins::Fail => pins_gone(backend, archive)?,
-                UnreadPins::CountAsThere => pins_gone(backend, archive).unwrap_or(false),
-            };
-            if gone {
-                ArchiveCase::PinsGone
-            } else {
-                ArchiveCase::Finishable
-            }
-        }
+        (ArchiveState::Retiring | ArchiveState::Retired, None) => match rename {
+            Some((old, dated)) => ArchiveCase::Renaming(old, dated),
+            // The workspace was removed after the archive stopped, before
+            // it retired every checkout, so nothing says that its pins
+            // hold every commit.
+            None if !archive.counts_as_retired() => ArchiveCase::WorkspaceRemoved,
+            None if read_pins(archive)? => ArchiveCase::PinsGone,
+            None => ArchiveCase::Finishable,
+        },
         // A workspace of the archive's id whose directories are partly
         // gone keeps its row from `checkouts_gone`, and the archive stays,
         // because it may hold the only copies of the workspace's files.
@@ -322,10 +322,20 @@ pub(crate) fn archive_case<'a, B: Backend>(
 }
 
 /// Reports whether `workspace` is the workspace that `archive` archives:
-/// the two stable ids are equal, or both records lack one, as an older
-/// multiverse wrote them.
+/// the workspace is retiring into the archive's id, both records hold the
+/// same stable id, or an older multiverse wrote the archive and neither
+/// record holds one. An archive at this version is always written with
+/// the workspace's id, so two records of this version without one are two
+/// workspaces.
 pub(crate) fn same_workspace(archive: &Archive, workspace: &Workspace) -> bool {
-    workspace.id == archive.workspace_id
+    if workspace.state().archive() == Some(&archive.id) {
+        return true;
+    }
+    match (&workspace.id, &archive.workspace_id) {
+        (Some(held), Some(archived)) => held == archived,
+        (None, None) => archive.is_older(),
+        _ => false,
+    }
 }
 
 /// How a workspace record stands to an archive: whether a restore rebuilt
@@ -374,6 +384,7 @@ fn repair_of(problem: &Problem, name: &WorkspaceName) -> Repair {
         Problem::ArchiveUnfinished => Repair::Archive(name.clone()),
         Problem::CheckoutsGone => Repair::Remove(name.clone()),
         Problem::Unreadable { .. }
+        | Problem::ArchiveWorkspaceRemoved
         | Problem::ArchivePinsGone
         | Problem::ArchiveBesideNewerWorkspace
         | Problem::RenameUnfinished
@@ -402,27 +413,26 @@ pub(crate) fn rename_pair<'a>(
         })
 }
 
-/// Reports whether `archive` has checkouts and the pin of no checkout's
-/// `HEAD` names its commit any more, as when the mirror that held the pins
-/// is gone. An archive without checkouts needs no pin. An archive that
-/// lost the pins of only some checkouts still counts as whole, so it is
-/// finished. Its restore refuses with `mxv::restore::commit_missing` when
-/// no repository holds the commit of such a checkout any more.
+/// Reports whether the pin of any checkout's `HEAD` in `archive` no longer
+/// names its commit, as when the mirror that held the pins is gone, so
+/// finishing the archive would claim that a restore brings back a commit
+/// that is gone. An archive without checkouts needs no pin.
+///
+/// It reads only the pin of each `HEAD`. The pins of the work and state
+/// that [`Kept`](crate::archive::Kept) lists are not checked, so an archive
+/// that lost only those is still finished.
 ///
 /// # Errors
 ///
 /// Returns the failure to run git.
 pub(crate) fn pins_gone<B: Backend>(backend: &B, archive: &Archive) -> Result<bool, Error> {
-    if archive.checkouts.is_empty() {
-        return Ok(false);
-    }
     for checkout in &archive.checkouts {
         let named = backend.resolve_commit(checkout.pin_holder(), &checkout.pin)?;
-        if named.as_deref() == Some(checkout.commit.as_str()) {
-            return Ok(false);
+        if named.as_deref() != Some(checkout.commit.as_str()) {
+            return Ok(true);
         }
     }
-    Ok(true)
+    Ok(false)
 }
 
 /// Returns whether `workspace` has checkouts, every checkout's directory is

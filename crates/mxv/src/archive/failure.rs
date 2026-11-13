@@ -29,6 +29,9 @@ pub const ARCHIVE_UNFINISHED: Code = Code::new("mxv", "archive", "unfinished");
 /// The code of an archive that has not finished and whose pins are gone,
 /// so it cannot be finished.
 pub const ARCHIVE_PINS_GONE: Code = Code::new("mxv", "archive", "pins_gone");
+/// The code of an archive that stopped before it retired every checkout and
+/// whose workspace was removed, so it cannot be finished.
+pub const ARCHIVE_WORKSPACE_REMOVED: Code = Code::new("mxv", "archive", "workspace_removed");
 /// The code of an archive whose move to a dated name a repair started and
 /// did not finish.
 pub const ARCHIVE_RENAME_UNFINISHED: Code = Code::new("mxv", "archive", "rename_unfinished");
@@ -72,6 +75,7 @@ pub(crate) const CODES: &[&Code] = &[
     &ARCHIVE_CHECKOUT_UNUSABLE,
     &ARCHIVE_UNFINISHED,
     &ARCHIVE_PINS_GONE,
+    &ARCHIVE_WORKSPACE_REMOVED,
     &ARCHIVE_RENAME_UNFINISHED,
     &ARCHIVE_MANIFEST_DISPOSABLE,
     &ARCHIVE_RECORD_TOO_LARGE,
@@ -100,7 +104,7 @@ pub(crate) enum ArchiveFailure {
         /// The name.
         name: String,
         /// Whether the archive that holds the name has not finished.
-        retiring: bool,
+        unfinished: bool,
     },
     /// A checkout differs from what the archive admitted.
     SourceChanged {
@@ -155,6 +159,12 @@ pub(crate) enum ArchiveFailure {
     /// The archive has not finished, and the pin of no checkout names its
     /// commit any more.
     PinsGone {
+        /// The name.
+        name: String,
+    },
+    /// The archive stopped before it retired every checkout, and its
+    /// workspace was removed.
+    WorkspaceRemoved {
         /// The name.
         name: String,
     },
@@ -275,9 +285,10 @@ fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFail
     match refusal {
         ArchiveRefusal::NameTaken(archive) => ArchiveFailure::NameTaken {
             name,
-            retiring: archive.state == ArchiveState::Retiring,
+            unfinished: archive.state != ArchiveState::Archived,
         },
         ArchiveRefusal::PinsGone(_) => ArchiveFailure::PinsGone { name },
+        ArchiveRefusal::WorkspaceRemoved(_) => ArchiveFailure::WorkspaceRemoved { name },
         ArchiveRefusal::RenameUnfinished(other) => ArchiveFailure::RenameUnfinished {
             name,
             other: other.name.to_string(),
@@ -355,6 +366,7 @@ impl Failure for ArchiveFailure {
             Self::Unusable { .. } => &ARCHIVE_CHECKOUT_UNUSABLE,
             Self::Unfinished { .. } => &ARCHIVE_UNFINISHED,
             Self::PinsGone { .. } => &ARCHIVE_PINS_GONE,
+            Self::WorkspaceRemoved { .. } => &ARCHIVE_WORKSPACE_REMOVED,
             Self::RenameUnfinished { .. } => &ARCHIVE_RENAME_UNFINISHED,
             Self::ManifestDisposable { .. } => &ARCHIVE_MANIFEST_DISPOSABLE,
             Self::RecordTooLarge { .. } => &ARCHIVE_RECORD_TOO_LARGE,
@@ -378,7 +390,7 @@ impl Failure for ArchiveFailure {
             }
             Self::NameTaken {
                 name,
-                retiring: true,
+                unfinished: true,
             } => Recovery::hint(format!(
                 "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv repair {name}`, which finishes the earlier archive under a dated name, then archive {name} again"
             )),
@@ -408,6 +420,9 @@ impl Failure for ArchiveFailure {
             )),
             Self::PinsGone { name } => Recovery::hint(format!(
                 "run `mxv repair {name}`, which moves the archive aside so that it no longer claims a restore brings the workspace back"
+            )),
+            Self::WorkspaceRemoved { name } => Recovery::hint(format!(
+                "run `mxv repair {name}`, which moves the archive aside, because nothing says that it holds every checkout"
             )),
             Self::ManifestDisposable { name, .. } => Recovery::hint(format!(
                 "run `mxv archive -w {name}` without --yes and answer the prompt, or pass --force"
@@ -454,6 +469,7 @@ impl Failure for ArchiveFailure {
             | Self::NameTaken { name, .. }
             | Self::Unfinished { name }
             | Self::PinsGone { name }
+            | Self::WorkspaceRemoved { name }
             | Self::RestoreNotFound { name }
             | Self::RestoreUnfinished { name } => vec![Field::new("name", name)],
             Self::SourceChanged {
@@ -595,6 +611,10 @@ impl fmt::Display for ArchiveFailure {
             Self::PinsGone { name } => write!(
                 formatter,
                 "the archive of {name} stopped partway, and the pins that keep its commits are gone, so mxv cannot finish it"
+            ),
+            Self::WorkspaceRemoved { name } => write!(
+                formatter,
+                "the archive of {name} stopped before it finished, and its workspace was removed, so mxv cannot finish it"
             ),
             Self::ManifestDisposable { name, paths } => write!(
                 formatter,
