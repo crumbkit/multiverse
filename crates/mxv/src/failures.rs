@@ -137,6 +137,10 @@ pub const WORKSPACE_STATE_CHANGED: Code = Code::new("mxv", "workspace", "state_c
 /// The code of a move between two workspace states that no workspace
 /// makes, which is a defect of mxv.
 pub const WORKSPACE_TRANSITION_REFUSED: Code = Code::new("mxv", "workspace", "transition_refused");
+/// The code of a workspace without a stable id beside an archive record of
+/// its name that an older mxv did not finish, or that cannot be read, so
+/// mxv cannot name its containers.
+pub const WORKSPACE_ARCHIVE_UNFINISHED: Code = Code::new("mxv", "workspace", "archive_unfinished");
 /// The code of an older archive for which `mxv repair` finds every dated
 /// name taken.
 pub const REPAIR_NAMES_TAKEN: Code = Code::new("mxv", "repair", "names_taken");
@@ -521,6 +525,7 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_CREATING,
     &WORKSPACE_STATE_CHANGED,
     &WORKSPACE_TRANSITION_REFUSED,
+    &WORKSPACE_ARCHIVE_UNFINISHED,
     &REPAIR_NAMES_TAKEN,
     &REPAIR_CHANGED,
     &RESTORE_CHANGED,
@@ -652,6 +657,7 @@ impl Failure for MxvFailure {
                 Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::StateChanged { .. } => &WORKSPACE_STATE_CHANGED,
                 Error::TransitionRefused { .. } => &WORKSPACE_TRANSITION_REFUSED,
+                Error::ArchiveUnfinished { .. } => &WORKSPACE_ARCHIVE_UNFINISHED,
                 Error::DatedNamesTaken { .. } => &REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
@@ -1095,6 +1101,18 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::TransitionRefused { .. } => Recovery::hint(
             "this is a defect of mxv, and no command should reach it; report it with the command that you ran",
         ),
+        Error::ArchiveUnfinished {
+            name,
+            readable: true,
+        } => Recovery::hint(format!(
+            "run `mxv archive {name}`, which finishes the archive that an older mxv started, or `mxv remove {name}` when that archive refuses"
+        )),
+        Error::ArchiveUnfinished {
+            name,
+            readable: false,
+        } => Recovery::hint(format!(
+            "read why the archive record of {name} cannot be read in `mxv list --archived`, then move it aside by hand or run `mxv remove {name}`"
+        )),
         _ => Recovery::hint("run the command again"),
     }
 }
@@ -1135,7 +1153,9 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::CorruptRecord { path, .. }
         | Error::Unwritable { path, .. }
         | Error::Busy { path } => vec![Field::new("path", shown(path))],
-        Error::StateChanged { name } => vec![Field::new("name", name.as_str())],
+        Error::StateChanged { name } | Error::ArchiveUnfinished { name, .. } => {
+            vec![Field::new("name", name.as_str())]
+        }
         Error::TransitionRefused { name, from, to } => vec![
             Field::new("name", name.as_str()),
             Field::new("from", from.to_string()),

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
+use crate::archive::{ArchiveId, MintHeld, mint_held};
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::error::Error;
 use crate::name::WorkspaceName;
@@ -201,7 +202,11 @@ impl Store {
     /// finished the workspace after this command read it. A workspace whose
     /// record an earlier version wrote, which has no stable id, gets one
     /// first, so the record on disk holds the id before any docker object
-    /// is labelled with it.
+    /// is labelled with it. The exception is a record without an id beside
+    /// an archive record of its name that an older mxv left retiring
+    /// without a workspace id, or that cannot be read: the update mints no
+    /// id, so the archive and the record still read as one workspace, and
+    /// it raises the version only as far as the record's checkouts need.
     ///
     /// # Errors
     ///
@@ -212,12 +217,30 @@ impl Store {
     /// the errors of [`Workspace::ensure_id`].
     pub fn update(&self, workspace: &mut Workspace) -> Result<(), Error> {
         self.check_stored(workspace)?;
+        if workspace.id.is_none() && self.mint_held(&workspace.name).is_some() {
+            workspace.raise_version();
+            let target = self.path(&workspace.name);
+            let bytes = record_bytes(workspace, &target)?;
+            return replace_file(&target, &bytes);
+        }
         self.write(workspace)
     }
 
-    /// Moves the workspace to the state `to` and writes its record. The
-    /// one move that it makes is from [`WorkspaceState::Creating`] to
-    /// [`WorkspaceState::Live`], which `mxv new` makes with its last write.
+    /// Returns why an update of the record of `name` must not mint a stable
+    /// id, or `None` when it may. The archives lie in `archives`, beside
+    /// the store's directory.
+    pub(crate) fn mint_held(&self, name: &WorkspaceName) -> Option<MintHeld> {
+        let archives = self.dir.parent()?.join("archives");
+        mint_held(&archives, name)
+    }
+
+    /// Moves the workspace to the state `to` and writes its record. It
+    /// makes two moves: from [`WorkspaceState::Creating`] to
+    /// [`WorkspaceState::Live`], which `mxv new` makes with its last write,
+    /// and from [`WorkspaceState::Live`] to [`WorkspaceState::Retiring`],
+    /// which `mxv archive` makes before it writes the archive record. A
+    /// move from retiring into an archive to retiring into the same
+    /// archive writes nothing, so a resumed archive may make it again.
     /// Like [`Store::update`], it writes nothing when no record of the name
     /// exists or the record on disk holds another state than `workspace`.
     ///
@@ -228,14 +251,52 @@ impl Store {
     /// failure.
     pub fn advance(&self, workspace: &mut Workspace, to: WorkspaceState) -> Result<(), Error> {
         let from = workspace.state();
-        if !matches!((from, to), (WorkspaceState::Creating, WorkspaceState::Live)) {
+        match (&from, &to) {
+            (WorkspaceState::Creating, WorkspaceState::Live)
+            | (WorkspaceState::Live, WorkspaceState::Retiring { .. }) => {}
+            (WorkspaceState::Retiring { archive: held }, WorkspaceState::Retiring { archive })
+                if held == archive =>
+            {
+                return self.check_stored(workspace);
+            }
+            _ => {
+                return Err(Error::TransitionRefused {
+                    name: workspace.name.clone(),
+                    from,
+                    to,
+                });
+            }
+        }
+        self.move_to(workspace, to)
+    }
+
+    /// Moves a retiring workspace to retiring into the archive `archive`,
+    /// for `mxv archive` when the archive record that an earlier run wrote
+    /// carries another id than the workspace's state names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TransitionRefused`] when the workspace is not
+    /// retiring, and the errors of [`Store::update`]. `workspace` keeps its
+    /// state after a failure.
+    pub fn repoint(&self, workspace: &mut Workspace, archive: &ArchiveId) -> Result<(), Error> {
+        let to = WorkspaceState::retiring(archive.clone());
+        let from = workspace.state();
+        if from.archive().is_none() {
             return Err(Error::TransitionRefused {
                 name: workspace.name.clone(),
                 from,
                 to,
             });
         }
+        self.move_to(workspace, to)
+    }
+
+    /// Writes the record of `workspace` in the state `to`, once the record
+    /// on disk holds the state that `workspace` holds.
+    fn move_to(&self, workspace: &mut Workspace, to: WorkspaceState) -> Result<(), Error> {
         self.check_stored(workspace)?;
+        let from = workspace.state();
         workspace.set_state(to);
         let written = self.write(workspace);
         if written.is_err() {

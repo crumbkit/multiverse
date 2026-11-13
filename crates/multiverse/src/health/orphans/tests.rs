@@ -81,7 +81,7 @@ fn a_data_directory_that_the_fresh_listing_no_longer_holds_is_kept() {
 fn a_data_directory_that_a_record_names_again_is_kept() {
     let setup = Setup::new();
     let record = archive("docs", 'a', ArchiveState::Archived);
-    let data = setup.path("data").join(&record.id);
+    let data = setup.path("data").join(record.id.as_str());
     plant(&data);
     let found = setup
         .workspaces
@@ -158,6 +158,8 @@ fn run_files_of_a_name_without_a_record_are_listed_and_deleted() {
     plant(&setup.path("state/runs/live"));
     setup.write_archive(&archive("retiring", 'd', ArchiveState::Retiring));
     plant(&setup.path("state/runs/retiring"));
+    setup.write_archive(&archive("retired", 'f', ArchiveState::Retired));
+    plant(&setup.path("state/runs/retired"));
 
     let found = setup
         .workspaces
@@ -182,6 +184,7 @@ fn run_files_of_a_name_without_a_record_are_listed_and_deleted() {
     assert!(!gone.exists());
     assert!(setup.path("state/runs/live/file").exists());
     assert!(setup.path("state/runs/retiring/file").exists());
+    assert!(setup.path("state/runs/retired/file").exists());
 }
 
 #[test]

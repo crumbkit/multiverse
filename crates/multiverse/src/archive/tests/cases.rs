@@ -1,6 +1,6 @@
 //! One table of every pair of records that an unfinished or finished
-//! archive and the workspace of its name can be in today, and what each
-//! of the three readers of that pair answers: `health::classify` for the
+//! archive and the workspace of its name can be in, and what each of the
+//! three readers of that pair answers: `health::classify` for the
 //! listings, `Workspaces::plan_archive` for `mxv archive` and
 //! `mxv archive -w`, and `Workspaces::repair` for `mxv repair`. The three
 //! take their case from one rule, so a row that changes for one reader
@@ -68,16 +68,49 @@ struct Row {
     repair: &'static str,
 }
 
-/// Archives the workspace and stops just before the archive is marked
-/// finished, so the archive is retiring and no workspace record is left.
-fn retiring_alone(setup: &Setup) -> Archive {
-    setup.create();
-    stop_at("removed");
+/// Archives the workspace and stops after `step`.
+fn stopped_at(setup: &Setup, step: &'static str) {
+    stop_at(step);
     let plan = setup.plan(ArchiveOptions::default());
     let stopped = setup.workspaces.archive(&setup.archives, plan);
     clear_hook();
-    assert!(stopped.is_err(), "the archive did not stop");
+    assert!(stopped.is_err(), "the archive did not stop at {step}");
+}
+
+/// Writes `archive` as the record of its name, at the version it holds.
+fn write_record(setup: &Setup, archive: &Archive) {
+    let path = setup.archives.dir_of(&archive.name).join("archive.json");
+    write(&path, serde_json::to_vec_pretty(archive).unwrap());
+}
+
+/// Archives the workspace and stops just before the archive is marked
+/// finished, so the archive is retired and no workspace record is left.
+fn retired_alone(setup: &Setup) -> Archive {
+    setup.create();
+    stopped_at(setup, "removed");
     assert!(setup.workspaces.store.read(&name()).unwrap().is_none());
+    let archive = setup.record().unwrap();
+    assert_eq!(archive.state, ArchiveState::Retired);
+    archive
+}
+
+/// Leaves a retired archive with no workspace record, rewritten as an
+/// older multiverse wrote it: retiring, at version 2.
+fn older_alone(setup: &Setup) -> Archive {
+    let mut archive = retired_alone(setup);
+    archive.state = ArchiveState::Retiring;
+    archive.version = OLDER_ARCHIVE_VERSION;
+    write_record(setup, &archive);
+    archive
+}
+
+/// Archives the workspace, stops after the archive record, and deletes the
+/// workspace's record, as `mxv remove` of a workspace whose archive
+/// stopped does: a retiring archive at this version with no workspace.
+fn retiring_alone(setup: &Setup) -> Archive {
+    setup.create();
+    stopped_at(setup, "record");
+    setup.workspaces.store.delete(&name()).unwrap();
     let archive = setup.record().unwrap();
     assert_eq!(archive.state, ArchiveState::Retiring);
     archive
@@ -94,20 +127,30 @@ fn delete_pins(archive: &Archive) {
 }
 
 /// Archives the workspace and stops after the archive record is written,
-/// so the archive is retiring beside the workspace it archives.
+/// so the archive is retiring beside the workspace it archives, whose
+/// state names it.
 fn retiring_beside_its_workspace(setup: &Setup) -> WorkspaceName {
     setup.create();
-    stop_at("record");
-    let plan = setup.plan(ArchiveOptions::default());
-    let stopped = setup.workspaces.archive(&setup.archives, plan);
-    clear_hook();
-    assert!(stopped.is_err(), "the archive did not stop");
+    stopped_at(setup, "record");
     assert_eq!(setup.record().unwrap().state, ArchiveState::Retiring);
     name()
 }
 
+/// Removes the state from the workspace record, and without `keep_id`
+/// its stable id too, as an older mxv that rewrote the record leaves it.
+fn without_state(setup: &Setup, keep_id: bool) {
+    let path = setup.workspaces.store.path(&name());
+    let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let fields = record.as_object_mut().unwrap();
+    fields.remove("state");
+    if !keep_id {
+        fields.remove("id");
+    }
+    write(&path, serde_json::to_vec_pretty(&record).unwrap());
+}
+
 /// Leaves a retiring archive beside its workspace, with no stable id in
-/// either record, as an older multiverse wrote them.
+/// either record. The workspace's state still names the archive.
 fn retiring_beside_its_workspace_without_ids(setup: &Setup) -> WorkspaceName {
     retiring_beside_its_workspace(setup);
     let path = setup.workspaces.store.path(&name());
@@ -124,24 +167,101 @@ fn retiring_beside_its_workspace_without_ids(setup: &Setup) -> WorkspaceName {
     name()
 }
 
-fn retiring_with_pins(setup: &Setup) -> WorkspaceName {
+fn retiring_beside_its_workspace_without_its_state(setup: &Setup) -> WorkspaceName {
+    retiring_beside_its_workspace(setup);
+    without_state(setup, true);
+    name()
+}
+
+/// Archives the workspace and stops after the archive is written retired,
+/// before the workspace record is deleted.
+fn retired_beside_its_workspace(setup: &Setup) -> WorkspaceName {
+    setup.create();
+    stopped_at(setup, "retired");
+    assert_eq!(setup.record().unwrap().state, ArchiveState::Retired);
+    name()
+}
+
+/// Leaves a retiring archive of version 2 beside its workspace, whose
+/// record has no state, as an older mxv left them. Without `ids`, neither
+/// record holds a stable id.
+fn older_beside_its_workspace(setup: &Setup, ids: bool) -> WorkspaceName {
+    retiring_beside_its_workspace(setup);
+    let mut archive = setup.record().unwrap();
+    archive.version = OLDER_ARCHIVE_VERSION;
+    if !ids {
+        archive.workspace_id = None;
+    }
+    write_record(setup, &archive);
+    without_state(setup, ids);
+    name()
+}
+
+fn older_beside_its_workspace_with_ids(setup: &Setup) -> WorkspaceName {
+    older_beside_its_workspace(setup, true)
+}
+
+fn older_beside_its_workspace_without_ids(setup: &Setup) -> WorkspaceName {
+    older_beside_its_workspace(setup, false)
+}
+
+/// Leaves a retiring archive of this version and a workspace record
+/// without a state, neither with a stable id, which are two workspaces.
+fn retiring_beside_a_record_without_state_or_ids(setup: &Setup) -> WorkspaceName {
+    retiring_beside_its_workspace(setup);
+    let mut archive = setup.record().unwrap();
+    archive.workspace_id = None;
+    write_record(setup, &archive);
+    without_state(setup, false);
+    name()
+}
+
+fn retired_with_pins(setup: &Setup) -> WorkspaceName {
+    retired_alone(setup);
+    name()
+}
+
+fn retired_without_pins(setup: &Setup) -> WorkspaceName {
+    delete_pins(&retired_alone(setup));
+    name()
+}
+
+fn retiring_whose_workspace_was_removed(setup: &Setup) -> WorkspaceName {
     retiring_alone(setup);
     name()
 }
 
-fn retiring_without_pins(setup: &Setup) -> WorkspaceName {
-    delete_pins(&retiring_alone(setup));
+fn older_with_pins(setup: &Setup) -> WorkspaceName {
+    older_alone(setup);
     name()
 }
 
-fn retiring_beside_a_newer_workspace(setup: &Setup) -> WorkspaceName {
-    retiring_alone(setup);
+fn older_without_pins(setup: &Setup) -> WorkspaceName {
+    delete_pins(&older_alone(setup));
+    name()
+}
+
+fn retired_beside_a_newer_workspace(setup: &Setup) -> WorkspaceName {
+    retired_alone(setup);
     setup.create();
     name()
 }
 
-fn retiring_without_pins_beside_a_newer_workspace(setup: &Setup) -> WorkspaceName {
-    delete_pins(&retiring_alone(setup));
+fn retired_without_pins_beside_a_newer_workspace(setup: &Setup) -> WorkspaceName {
+    delete_pins(&retired_alone(setup));
+    setup.create();
+    name()
+}
+
+fn older_beside_a_newer_workspace(setup: &Setup) -> WorkspaceName {
+    older_alone(setup);
+    setup.create();
+    name()
+}
+
+fn retiring_whose_workspace_was_removed_beside_a_newer_workspace(setup: &Setup) -> WorkspaceName {
+    retiring_alone(setup);
+    fs::remove_dir_all(setup.root.join("triage")).unwrap();
     setup.create();
     name()
 }
@@ -179,11 +299,11 @@ fn archived_beside_its_restore_without_checkouts(setup: &Setup) -> WorkspaceName
     name()
 }
 
-/// Leaves the two records of a rename that a repair stopped: the retiring
-/// archive under its name and a copy under its dated name. With
-/// `newer`, a newer workspace holds the old name.
+/// Leaves the two records of a rename that a repair stopped: the retired
+/// archive under its name and a copy under its dated name. With `newer`,
+/// a newer workspace holds the old name.
 fn stopped_rename(setup: &Setup, newer: bool) -> Archive {
-    let archive = retiring_alone(setup);
+    let archive = retired_alone(setup);
     setup
         .archives
         .write(&archive.renamed(&dated(&archive)))
@@ -215,6 +335,7 @@ fn listed(found: &[Broken], name: &WorkspaceName, old: &str) -> String {
     let problem = match &broken.problem {
         Problem::Unreadable { .. } => "unreadable",
         Problem::ArchiveUnfinished => "unfinished",
+        Problem::ArchiveWorkspaceRemoved => "workspace removed",
         Problem::ArchivePinsGone => "pins gone",
         Problem::ArchiveBesideNewerWorkspace => "beside a newer workspace",
         Problem::RenameUnfinished => "rename unfinished",
@@ -256,6 +377,7 @@ fn planned_text(planned: Result<ArchivePlanned, Error>) -> String {
         Ok(ArchivePlanned::Refused(refusal)) => match refusal {
             ArchiveRefusal::NotFound => "refuse: not found".to_owned(),
             ArchiveRefusal::NameTaken(_) => "refuse: name taken".to_owned(),
+            ArchiveRefusal::WorkspaceRemoved(_) => "refuse: workspace removed".to_owned(),
             ArchiveRefusal::PinsGone(_) => "refuse: pins gone".to_owned(),
             ArchiveRefusal::RenameUnfinished(other) if other.name == name() => {
                 "refuse: rename unfinished with the old name".to_owned()
@@ -278,48 +400,82 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
         Ok(Repaired::Renamed { from, archive }) => {
             assert_eq!(from.as_str(), "triage");
             assert_eq!(archive.name, dated(&archive.renamed(&from)));
+            // A renamed archive is always one that `mxv archive -w`
+            // finishes, at this version.
+            assert_eq!(archive.state, ArchiveState::Retired);
+            assert_eq!(archive.version, ARCHIVE_VERSION);
             "rename to the dated name".to_owned()
         }
         Ok(Repaired::Deleted(_)) => "delete".to_owned(),
     }
 }
 
-const ROWS: [Row; 16] = [
+/// The row of an archive that `mxv archive` resumes beside its workspace.
+const fn resumed(case: &'static str, build: fn(&Setup) -> WorkspaceName) -> Row {
     Row {
-        case: "retiring beside the workspace it archives",
+        case,
         kind: Kind::Clone,
         pins: Pins::Readable,
-        build: retiring_beside_its_workspace,
+        build,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
         subject: "resume the existing archive",
         repair: "unchanged, archive the name",
-    },
+    }
+}
+
+const ROWS: &[Row] = &[
+    resumed(
+        "retiring beside the workspace it archives",
+        retiring_beside_its_workspace,
+    ),
+    resumed(
+        "retiring beside its workspace, neither with a stable id, the state naming the archive",
+        retiring_beside_its_workspace_without_ids,
+    ),
+    resumed(
+        "retiring beside its workspace, whose record an older mxv rewrote without the state",
+        retiring_beside_its_workspace_without_its_state,
+    ),
+    resumed(
+        "retired beside the workspace it archives",
+        retired_beside_its_workspace,
+    ),
+    resumed(
+        "retiring at version 2 beside its workspace without a state, both with a stable id",
+        older_beside_its_workspace_with_ids,
+    ),
+    resumed(
+        "retiring at version 2 beside its workspace without a state, neither with a stable id",
+        older_beside_its_workspace_without_ids,
+    ),
+    // Two missing ids count as one workspace only for an archive of
+    // version 2.
     Row {
-        case: "retiring beside its workspace, neither with a stable id",
+        case: "retiring at this version beside a record without a state, neither with a stable id",
         kind: Kind::Clone,
         pins: Pins::Readable,
-        build: retiring_beside_its_workspace_without_ids,
-        archives: "unfinished, archive the name",
-        workspaces: "unfinished, archive the name",
-        subject: "resume the existing archive",
-        repair: "unchanged, archive the name",
+        build: retiring_beside_a_record_without_state_or_ids,
+        archives: "beside a newer workspace, repair the name",
+        workspaces: "healthy",
+        subject: "refuse: name taken",
+        repair: "move aside",
     },
     Row {
-        case: "retiring with no workspace and its pins there",
+        case: "retired with no workspace and its pins there",
         kind: Kind::Clone,
         pins: Pins::Readable,
-        build: retiring_with_pins,
+        build: retired_with_pins,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
         subject: "finish",
         repair: "unchanged, archive the name",
     },
     Row {
-        case: "retiring with no workspace and its pins there, in the worktree's repository",
+        case: "retired with no workspace and its pins there, in the worktree's repository",
         kind: Kind::Worktree,
         pins: Pins::Readable,
-        build: retiring_with_pins,
+        build: retired_with_pins,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
         subject: "finish",
@@ -329,50 +485,143 @@ const ROWS: [Row; 16] = [
     // finishes an archive whose pins may be gone. The listing and the
     // repair count the pin as there and name `mxv archive -w`.
     Row {
-        case: "retiring with no workspace and pins that cannot be read",
+        case: "retired with no workspace and pins that cannot be read",
         kind: Kind::Clone,
         pins: Pins::Unreadable,
-        build: retiring_with_pins,
+        build: retired_with_pins,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
         subject: "error",
         repair: "unchanged, archive the name",
     },
     Row {
-        case: "retiring with no workspace and its pins gone",
+        case: "retired with no workspace and its pins gone",
         kind: Kind::Clone,
         pins: Pins::Readable,
-        build: retiring_without_pins,
+        build: retired_without_pins,
         archives: "pins gone, repair the name",
         workspaces: "pins gone, repair the name",
         subject: "refuse: pins gone",
         repair: "move aside",
     },
     Row {
-        case: "retiring with no workspace and its pins gone from the worktree's repository",
+        case: "retired with no workspace and its pins gone from the worktree's repository",
         kind: Kind::Worktree,
         pins: Pins::Readable,
-        build: retiring_without_pins,
+        build: retired_without_pins,
         archives: "pins gone, repair the name",
         workspaces: "pins gone, repair the name",
         subject: "refuse: pins gone",
         repair: "move aside",
     },
     Row {
-        case: "retiring beside a newer workspace, its pins there",
+        case: "retiring at this version with no workspace, which mxv remove removed",
         kind: Kind::Clone,
         pins: Pins::Readable,
-        build: retiring_beside_a_newer_workspace,
+        build: retiring_whose_workspace_was_removed,
+        archives: "workspace removed, repair the name",
+        workspaces: "workspace removed, repair the name",
+        subject: "refuse: workspace removed",
+        repair: "move aside",
+    },
+    Row {
+        case: "retiring at this version with no worktree workspace, which mxv remove removed",
+        kind: Kind::Worktree,
+        pins: Pins::Readable,
+        build: retiring_whose_workspace_was_removed,
+        archives: "workspace removed, repair the name",
+        workspaces: "workspace removed, repair the name",
+        subject: "refuse: workspace removed",
+        repair: "move aside",
+    },
+    // No reader reads the pins of an archive that is never finished.
+    Row {
+        case: "retiring at this version with no workspace, and pins that cannot be read",
+        kind: Kind::Clone,
+        pins: Pins::Unreadable,
+        build: retiring_whose_workspace_was_removed,
+        archives: "workspace removed, repair the name",
+        workspaces: "workspace removed, repair the name",
+        subject: "refuse: workspace removed",
+        repair: "move aside",
+    },
+    Row {
+        case: "retiring at version 2 with no workspace and its pins there",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: older_with_pins,
+        archives: "unfinished, archive the name",
+        workspaces: "unfinished, archive the name",
+        subject: "finish",
+        repair: "unchanged, archive the name",
+    },
+    Row {
+        case: "retiring at version 2 with no workspace and its pins gone",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: older_without_pins,
+        archives: "pins gone, repair the name",
+        workspaces: "pins gone, repair the name",
+        subject: "refuse: pins gone",
+        repair: "move aside",
+    },
+    Row {
+        case: "retired beside a newer workspace, its pins there",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: retired_beside_a_newer_workspace,
         archives: "beside a newer workspace, repair the name",
         workspaces: "healthy",
         subject: "refuse: name taken",
         repair: "rename to the dated name",
     },
     Row {
-        case: "retiring beside a newer workspace, its pins gone",
+        case: "retired beside a newer workspace, its pins gone",
         kind: Kind::Clone,
         pins: Pins::Readable,
-        build: retiring_without_pins_beside_a_newer_workspace,
+        build: retired_without_pins_beside_a_newer_workspace,
+        archives: "beside a newer workspace, repair the name",
+        workspaces: "healthy",
+        subject: "refuse: name taken",
+        repair: "move aside",
+    },
+    // The repair reads the pins of an archive that it may rename, and
+    // fails when it cannot, while the listing names `mxv repair`.
+    Row {
+        case: "retired beside a newer workspace, and pins that cannot be read",
+        kind: Kind::Clone,
+        pins: Pins::Unreadable,
+        build: retired_beside_a_newer_workspace,
+        archives: "beside a newer workspace, repair the name",
+        workspaces: "healthy",
+        subject: "refuse: name taken",
+        repair: "error",
+    },
+    Row {
+        case: "retiring at version 2 beside a newer workspace, its pins there",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: older_beside_a_newer_workspace,
+        archives: "beside a newer workspace, repair the name",
+        workspaces: "healthy",
+        subject: "refuse: name taken",
+        repair: "rename to the dated name",
+    },
+    Row {
+        case: "retiring at this version, removed, beside a newer workspace",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: retiring_whose_workspace_was_removed_beside_a_newer_workspace,
+        archives: "beside a newer workspace, repair the name",
+        workspaces: "healthy",
+        subject: "refuse: name taken",
+        repair: "move aside",
+    },
+    Row {
+        case: "retiring at this version, removed, beside a newer workspace, pins that cannot be read",
+        kind: Kind::Clone,
+        pins: Pins::Unreadable,
+        build: retiring_whose_workspace_was_removed_beside_a_newer_workspace,
         archives: "beside a newer workspace, repair the name",
         workspaces: "healthy",
         subject: "refuse: name taken",
@@ -453,7 +702,7 @@ const ROWS: [Row; 16] = [
 #[test]
 fn the_listings_the_archive_command_and_the_repair_read_every_pair_of_records_as_the_table_says() {
     let mut wrong = Vec::new();
-    for row in &ROWS {
+    for row in ROWS {
         let setup = setup(row.kind);
         let read = (row.build)(&setup);
         let old = read.as_str().to_owned();

@@ -7,21 +7,18 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use phase::WorkspaceId;
-use phase::random::RANDOM_DEVICE;
-
 use crate::archive::ignored::{self, IgnoredEntry, IgnoredKind, IgnoredSource};
 use crate::archive::record::now;
 use crate::archive::root::{self, RootEntry, RootKind, Scanned};
 use crate::archive::{
-    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveState, ArchivedCheckout, Archives,
-    DIGEST_LENGTH, Kept, KeptStash, RECORD_FILE, pin_ref,
+    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveId, ArchiveState, ArchivedCheckout,
+    Archives, DIGEST_LENGTH, Kept, KeptStash, RECORD_FILE, pin_ref,
 };
 use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
 use crate::disposable::DisposableSet;
 use crate::error::Error;
-use crate::health::{ArchiveCase, UnreadPins, archive_case};
+use crate::health::{ArchiveCase, archive_case, pins_gone};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
 use crate::record::{Workspace, WorkspaceKind, WorkspaceState};
@@ -304,9 +301,14 @@ pub enum ArchiveRefusal {
     Creating,
     /// An archive already holds the name.
     NameTaken(Box<Archive>),
-    /// The archive of the name has not finished, its workspace is gone, and
-    /// the pin of no checkout names its commit, so it cannot be finished.
+    /// The archive of the name stopped before it retired every checkout,
+    /// and its workspace was removed afterwards, so nothing says that the
+    /// archive holds the whole workspace and it is never finished.
     /// `Workspaces::repair` moves it aside.
+    WorkspaceRemoved(Box<Archive>),
+    /// The archive of the name has not finished, its workspace is gone, and
+    /// the pin of a checkout no longer names its commit, so it cannot be
+    /// finished. `Workspaces::repair` moves it aside.
     PinsGone(Box<Archive>),
     /// A repair stopped while it moved the archive to its dated name, so
     /// two records hold one archive id and the archive's files are split
@@ -356,7 +358,7 @@ pub struct ArchivePlan {
     /// What the person allowed.
     pub options: ArchiveOptions,
     /// The id of the archive, which names its pins.
-    pub id: String,
+    pub id: ArchiveId,
     /// An earlier run's record, when this run finishes that archive.
     pub resuming: Option<Archive>,
     /// Each checkout as the archive would record it. The commits of the
@@ -586,7 +588,7 @@ impl<B: Backend> Workspaces<B> {
         name: &WorkspaceName,
         options: ArchiveOptions,
         mode: Mode,
-        id: Option<String>,
+        id: Option<ArchiveId>,
         refresh: bool,
     ) -> Result<ArchivePlanned, Error> {
         let (workspace, resuming) = match self.subject(archives, name)? {
@@ -611,15 +613,16 @@ impl<B: Backend> Workspaces<B> {
         // checkouts are gone and finds none, so the result takes what this
         // plan measures while they stand.
         let disposable = self.disk_usage(&workspace)?.disposable;
-        let id = match id.or_else(|| resuming.as_ref().map(|archive| archive.id.clone())) {
+        // The archive record's id comes first, because the pins that an
+        // earlier run made carry it, and then the id that the workspace's
+        // state names, which a run that stopped before it wrote the record
+        // left.
+        let id = id
+            .or_else(|| resuming.as_ref().map(|archive| archive.id.clone()))
+            .or_else(|| workspace.state().archive().cloned());
+        let id = match id {
             Some(id) => id,
-            None => WorkspaceId::mint()
-                .map_err(|source| Error::StateUnreadable {
-                    path: PathBuf::from(RANDOM_DEVICE),
-                    source,
-                })?
-                .as_str()
-                .to_owned(),
+            None => ArchiveId::mint()?,
         };
         let mut unkeepable = Unkeepable::default();
         let mut uncommitted = Vec::new();
@@ -953,38 +956,25 @@ impl<B: Backend> Workspaces<B> {
             };
         };
         let all = archives.list()?;
-        let reading = archive_case(
-            &self.backend,
-            &archive,
-            live.as_ref(),
-            &all.archives,
-            UnreadPins::Fail,
-        )?;
+        let reading = archive_case(&archive, live.as_ref(), &all.archives, |archive| {
+            pins_gone(&self.backend, archive)
+        })?;
+        let boxed = || Box::new(archive.clone());
         match reading.case {
-            ArchiveCase::Finishable => Ok(Subject::Done(ArchivePlanned::Finish(Box::new(archive)))),
-            ArchiveCase::PinsGone => refused(ArchiveRefusal::PinsGone(Box::new(archive))),
-            ArchiveCase::Renaming => {
-                let other = match reading.rename {
-                    Some((old, dated)) if old.name == archive.name => dated,
-                    Some((old, _)) => old,
-                    // `archive_case` gives `Renaming` only with the pair.
-                    None => &archive,
-                };
+            ArchiveCase::Finishable => Ok(Subject::Done(ArchivePlanned::Finish(boxed()))),
+            ArchiveCase::WorkspaceRemoved => refused(ArchiveRefusal::WorkspaceRemoved(boxed())),
+            ArchiveCase::PinsGone => refused(ArchiveRefusal::PinsGone(boxed())),
+            ArchiveCase::Renaming(old, dated) => {
+                let other = if old.name == archive.name { dated } else { old };
                 refused(ArchiveRefusal::RenameUnfinished(Box::new(other.clone())))
             }
-            ArchiveCase::Resumable => match live {
-                Some(workspace) => Ok(Subject::Found(Box::new(workspace), Some(Box::new(archive)))),
-                // `archive_case` gives `Resumable` only with a workspace.
-                None => refused(ArchiveRefusal::NotFound),
-            },
+            ArchiveCase::Resumable(workspace) => {
+                Ok(Subject::Found(Box::new(workspace.clone()), Some(boxed())))
+            }
             ArchiveCase::BesideNewerWorkspace
             | ArchiveCase::RestoreUnfinished
-            | ArchiveCase::ArchivedBesideWorkspace => {
-                refused(ArchiveRefusal::NameTaken(Box::new(archive)))
-            }
-            ArchiveCase::Archived => {
-                Ok(Subject::Done(ArchivePlanned::Unchanged(Box::new(archive))))
-            }
+            | ArchiveCase::ArchivedBesideWorkspace => refused(ArchiveRefusal::NameTaken(boxed())),
+            ArchiveCase::Archived => Ok(Subject::Done(ArchivePlanned::Unchanged(boxed()))),
         }
     }
 
@@ -1026,7 +1016,7 @@ impl<B: Backend> Workspaces<B> {
         commit: String,
         local_only: Vec<String>,
         kept: Kept,
-        id: &str,
+        id: &ArchiveId,
     ) -> Result<ArchivedCheckout, Error> {
         let checkout = &planned.checkout;
         let detached = head.branch.is_none();
@@ -1057,7 +1047,7 @@ impl<B: Backend> Workspaces<B> {
             base: checkout.base.clone(),
             commit,
             mirror: checkout.mirror.clone(),
-            pin: pin_ref(id, &checkout.name),
+            pin: pin_ref(id.as_str(), &checkout.name),
             local_only,
             kept,
         })
@@ -1103,7 +1093,9 @@ impl ArchivePlan {
     }
 
     /// Returns the record of the archive of the workspace `name`, in the
-    /// state [`ArchiveState::Retiring`].
+    /// state [`ArchiveState::Retiring`], or [`ArchiveState::Retired`] when
+    /// the earlier run that this one resumes had already retired every
+    /// checkout, so a resumed archive never goes back.
     pub(super) fn record(&self, name: &WorkspaceName) -> Archive {
         let workspace = &self.removal.workspace;
         // An earlier run's item stays only when this run cannot read it
@@ -1137,7 +1129,10 @@ impl ArchivePlan {
         Archive {
             version: ARCHIVE_VERSION,
             id: self.id.clone(),
-            state: ArchiveState::Retiring,
+            state: match earlier.map(|archive| archive.state) {
+                Some(ArchiveState::Retired) => ArchiveState::Retired,
+                _ => ArchiveState::Retiring,
+            },
             time: earlier.map_or_else(now, |archive| archive.time),
             name: name.clone(),
             workspace_id: workspace.id.clone(),

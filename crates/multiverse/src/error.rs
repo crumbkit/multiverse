@@ -131,6 +131,18 @@ pub enum Error {
         /// The state that the caller asked for.
         to: crate::record::WorkspaceState,
     },
+    /// The workspace's record holds no stable id, and the archive record of
+    /// its name is an unfinished archive of an older multiverse without
+    /// one, or cannot be read, so mxv gives the workspace no id and cannot
+    /// name its containers. It started nothing.
+    ArchiveUnfinished {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// Whether the archive record can be read. `mxv archive` resumes
+        /// a readable one; an unreadable one needs `mxv remove` or a
+        /// person who moves the archive's directory.
+        readable: bool,
+    },
     /// A workspace record was written by a newer version of multiverse.
     NewerRecord {
         /// The path of the record.
@@ -587,6 +599,20 @@ impl fmt::Display for Error {
                 formatter,
                 "mxv cannot move the workspace {name} from {from} to {to}, so it wrote nothing"
             ),
+            Self::ArchiveUnfinished {
+                name,
+                readable: true,
+            } => write!(
+                formatter,
+                "the workspace {name} has no stable id beside an archive of it that an older mxv did not finish, so mxv cannot name its containers and started nothing"
+            ),
+            Self::ArchiveUnfinished {
+                name,
+                readable: false,
+            } => write!(
+                formatter,
+                "the workspace {name} has no stable id, and mxv cannot read the archive record of its name, so mxv cannot name its containers and started nothing"
+            ),
             Self::RecordMissing { name } => write!(
                 formatter,
                 "the workspace {name} has no record, so mxv wrote none"
@@ -845,6 +871,7 @@ impl std::error::Error for Error {
             | Self::RecordMissing { .. }
             | Self::StateChanged { .. }
             | Self::TransitionRefused { .. }
+            | Self::ArchiveUnfinished { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
             | Self::UnsupportedOs { .. }

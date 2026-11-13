@@ -1264,6 +1264,18 @@ command that writes the record fails with `mxv::workspace::state_changed`
 when another command changed the record's state after this one read it,
 and writes nothing; running it again reads the new state.
 
+A record that an older mxv wrote may hold no stable id, and mxv gives it
+one on its next write. When an older mxv also left an archive of the name
+retiring without a workspace id, the write gives it none, because the two
+records count as one workspace only while neither holds an id. phase names
+a workspace's containers by that id, so `up`, `restart` and `run` then fail
+with `mxv::workspace::archive_unfinished` and start nothing. Its hint is
+`mxv archive NAME`, which finishes the archive that the older mxv started,
+or `mxv remove NAME` when `mxv archive` refuses. When the archive record
+cannot be read, the hint is `mxv remove NAME`, or moving the archive record
+aside by hand. `pin`, `ports reset`, `down` and
+the other commands keep working.
+
 `mxv new` copies no template into a workspace of several repositories,
 because a template belongs to one origin. `--manifest` still copies a
 file, whose names are the workspace's own. `new` checks it against the
@@ -1663,6 +1675,20 @@ file. An archive that stops partway shows in `mxv list` and
 `mxv archive -w NAME`, and that command finishes it. When a newer workspace
 has taken the name, only `mxv list --archived` shows the older archive, and
 its `repair` is empty.
+
+An archive first writes the workspace's record as `retiring` with the
+archive's id, and then writes the archive record as `retiring`. Once every
+checkout is retired and the extra files are deleted, it writes the archive
+record as `retired`, deletes the workspace's record, and marks the archive
+`archived`. `mxv remove` of a `retiring` workspace still removes it, and
+warns about the archive record that stays. An archive that stopped while
+`retiring` can no longer be resumed then: `mxv archive -w NAME` refuses with
+`mxv::archive::workspace_removed`, and `mxv repair NAME` moves it aside. A
+`retired` archive is still finished by `mxv archive -w NAME`. An archive
+record that an older mxv wrote, at version 2, has no `retired` state, so it
+counts as retired when no workspace of its name is the one it archives.
+`mxv remove --archived` refuses with `mxv::archive::unfinished` until an
+archive is `archived`.
 
 When the current directory was inside the workspace, the last line of the
 result names a directory to change to.

@@ -286,6 +286,9 @@ fn problem_text(broken: &Broken) -> String {
     match &broken.problem {
         Problem::Unreadable { reason } => reason.clone(),
         Problem::ArchiveUnfinished => "the archive stopped before it finished".to_owned(),
+        Problem::ArchiveWorkspaceRemoved => {
+            "the archive stopped before it finished, and its workspace was removed".to_owned()
+        }
         Problem::ArchivePinsGone => {
             "the archive stopped before it finished, and its pins are gone".to_owned()
         }

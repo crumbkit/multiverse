@@ -9,14 +9,14 @@ use std::path::Path;
 
 use crate::archive::admit::{ArchivePlan, ArchivePlanned, ArchiveRefusal, submodule_items};
 use crate::archive::{
-    Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, WIP_MESSAGE, quarantine,
+    ARCHIVE_VERSION, Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, WIP_MESSAGE,
+    quarantine,
 };
 use crate::archive::{IgnoredEntry, IgnoredSource, ignored, root};
 use crate::backend::{Backend, Head, RefHolder, WipTrees};
 use crate::disk::DisposablePath;
 use crate::error::Error;
-use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace, WorkspaceKind};
+use crate::record::{Checkout, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store;
 use crate::workspaces::{
     BranchFate, CheckoutRemoval, Entry, Fate, Mode, Removal, RemovalOutcome, Workspaces, aside,
@@ -26,9 +26,9 @@ use crate::workspaces::{
 /// The outcome of [`Workspaces::archive`].
 #[derive(Debug)]
 pub enum ArchiveOutcome {
-    /// The workspace is gone, and the record still says
-    /// [`ArchiveState::Retiring`] until [`Workspaces::finish_archive`] marks
-    /// it.
+    /// The workspace is gone, and the record says
+    /// [`ArchiveState::Retired`] until [`Workspaces::finish_archive`] marks
+    /// it archived.
     Retired {
         /// The record.
         archive: Box<Archive>,
@@ -318,7 +318,7 @@ impl<B: Backend> Workspaces<B> {
         // The workspace may have changed while the caller confirmed, and
         // the processes that the caller stopped may have written files, so
         // what counts is what is there now.
-        let plan = match self.admit(
+        let mut plan = match self.admit(
             archives,
             &name,
             confirmed.options,
@@ -359,10 +359,27 @@ impl<B: Backend> Workspaces<B> {
                 }));
             }
         }
+        // The workspace's state names the archive before the archive
+        // record exists, so a workspace removed after this point leaves a
+        // record that says the removal came before every checkout retired.
+        // A record that an earlier run wrote under another id than the
+        // state names wins, because its pins carry its id.
+        let workspace = &mut plan.removal.workspace;
+        let names_other = workspace
+            .state()
+            .archive()
+            .is_some_and(|archive| *archive != plan.id);
+        if plan.resuming.is_some() && names_other {
+            self.store.repoint(workspace, &plan.id)?;
+        }
+        self.store
+            .advance(workspace, WorkspaceState::retiring(plan.id.clone()))?;
+        (self.checkpoint)("state")?;
         // The record comes before the pins, so a run that stops between
         // them leaves the archive's id, and the next run writes the same
         // pins again instead of leaving these behind under an id nothing
-        // names.
+        // names. The record takes the stable id that the move to retiring
+        // gave a workspace without one.
         let mut archive = plan.record(&name);
         archives.write(&archive)?;
         (self.checkpoint)("record")?;
@@ -426,7 +443,7 @@ impl<B: Backend> Workspaces<B> {
         }
         root::delete_originals(&archive, &plan.removal.workspace, &generated)?;
         (self.checkpoint)("delete")?;
-        self.finish_removal(&name, archive, plan.removal, plan.disposable, late)
+        self.finish_removal(archives, archive, plan.removal, plan.disposable, late)
     }
 
     /// Writes the commits of the uncommitted work of each checkout that
@@ -467,18 +484,25 @@ impl<B: Backend> Workspaces<B> {
         Ok(())
     }
 
-    /// Removes the workspace whose checkouts are retired and whose extra
-    /// files are deleted, and names in the outcome the disposable
-    /// directories `disposable` that went with the checkouts and the
-    /// entries `late` that appeared in them after they were measured.
+    /// Marks `archive` retired, now that every checkout is retired and the
+    /// extra files are deleted, removes the workspace, and names in the
+    /// outcome the disposable directories `disposable` that went with the
+    /// checkouts and the entries `late` that appeared in them after they
+    /// were measured. The record says retired before the workspace record
+    /// goes, so an archive without its workspace is finished only when it
+    /// retired every checkout.
     fn finish_removal(
         &self,
-        name: &WorkspaceName,
-        archive: Archive,
+        archives: &Archives,
+        mut archive: Archive,
         mut removal: Removal,
         disposable: Vec<DisposablePath>,
         late: Vec<String>,
     ) -> Result<ArchiveOutcome, Error> {
+        let name = archive.name.clone();
+        archive.state = ArchiveState::Retired;
+        archives.write(&archive)?;
+        (self.checkpoint)("retired")?;
         for planned in &mut removal.checkouts {
             // A worktree's branch stays in its repository, and the pin
             // keeps a commit that a later change of the branch abandons.
@@ -513,6 +537,7 @@ impl<B: Backend> Workspaces<B> {
     /// Returns [`Error::Unwritable`] when the record cannot be written.
     pub fn finish_archive(&self, archives: &Archives, archive: &mut Archive) -> Result<(), Error> {
         archive.state = ArchiveState::Archived;
+        archive.version = ARCHIVE_VERSION;
         archives.write(archive)
     }
 

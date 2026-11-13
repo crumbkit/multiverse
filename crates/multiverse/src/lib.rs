@@ -47,12 +47,13 @@ mod template;
 mod workspaces;
 
 pub use crate::archive::{
-    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan,
-    ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout,
+    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveId, ArchiveOptions, ArchiveOutcome,
+    ArchivePlan, ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout,
     ArchivedRemoval, Archives, FileStatus, IgnoredEntry, IgnoredKind, IgnoredSource,
-    KEPT_NAMESPACE, Kept, KeptStash, KeptWip, LostPin, MirrorLoss, PortChange, PutBack,
-    RestoreOptions, RestoreOutcome, RestorePlan, RestorePlanned, RestoreRefusal, Restored,
-    RootEntry, RootKind, Uncommitted, Unkeepable, Unkept, UnkeptKind, WIP_MESSAGE,
+    KEPT_NAMESPACE, Kept, KeptStash, KeptWip, LostPin, MirrorLoss, OLDER_ARCHIVE_VERSION,
+    PortChange, PutBack, RestoreOptions, RestoreOutcome, RestorePlan, RestorePlanned,
+    RestoreRefusal, Restored, RootEntry, RootKind, Uncommitted, Unkeepable, Unkept, UnkeptKind,
+    WIP_MESSAGE,
 };
 pub use crate::backend::{
     Backend, Changes, Concealed, Head, Hidden, INITIALIZING, LargeFile, Listed, LocalNames,

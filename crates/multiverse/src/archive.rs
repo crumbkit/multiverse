@@ -49,8 +49,10 @@ pub use admit::{
 };
 pub use ignored::{IgnoredEntry, IgnoredKind, IgnoredSource};
 pub use record::{
-    Archive, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash, KeptWip,
+    Archive, ArchiveId, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash,
+    KeptWip, OLDER_ARCHIVE_VERSION,
 };
+pub(crate) use record::{MintHeld, mint_held};
 pub use restore::{
     ArchivedRemoval, LostPin, MirrorLoss, PortChange, PutBack, RestoreOptions, RestoreOutcome,
     RestorePlan, RestorePlanned, RestoreRefusal, Restored,
@@ -62,7 +64,12 @@ pub use root::{RootEntry, RootKind};
 /// multiverse reads. A record with a higher version is refused (DUR-3).
 /// Version 2 adds [`ArchivedCheckout::kept`] and names the pin of `HEAD`
 /// `<dir>/head`. A record of version 1 is still read, with nothing kept.
-pub const ARCHIVE_VERSION: u32 = 2;
+/// Version 3 adds [`ArchiveState::Retired`], and every record that this
+/// multiverse writes has it, so an older multiverse refuses a record that
+/// it would read as an archive to finish. A record of version 2 or lower
+/// says retiring for both of the states that version 3 tells apart, as
+/// [`Archive::counts_as_retired`] says.
+pub const ARCHIVE_VERSION: u32 = 3;
 
 /// The message of the commits that keep a checkout's uncommitted work.
 pub const WIP_MESSAGE: &str = "wip: archived by mxv";

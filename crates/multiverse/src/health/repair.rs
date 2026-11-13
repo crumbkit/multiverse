@@ -12,7 +12,7 @@ use crate::name::{MOST_NAME_BYTES, WorkspaceName};
 use crate::store::Records;
 use crate::workspaces::{Mode, Workspaces};
 
-use super::{ArchiveCase, Repair, UnreadPins, archive_case, classify, pins_gone, rename_pair};
+use super::{ArchiveCase, Repair, archive_case, classify, count_as_there, pins_gone, rename_pair};
 
 /// The most dated names that [`Workspaces::repair`] tries for an older
 /// archive: `NAME-<date>`, then `NAME-<date>-2` up to this suffix. When
@@ -50,7 +50,7 @@ pub enum Repaired {
         ignored: Option<PathBuf>,
     },
     /// An older archive, whose name a newer workspace holds or held, now
-    /// has the name of `archive` and is still retiring, so the caller
+    /// has the name of `archive` and is retired, so the caller
     /// finishes it as `mxv archive -w` finishes an archive.
     Renamed {
         /// The name the archive had.
@@ -65,9 +65,11 @@ pub enum Repaired {
 
 impl<B: Backend> Workspaces<B> {
     /// Repairs the records of the workspace `name` whose repair is
-    /// [`Repair::Repair`]: an archive whose pins are gone moves aside, an
-    /// older archive beside a newer workspace takes a dated name, or moves
-    /// aside when its pins are gone, a rename that an earlier repair
+    /// [`Repair::Repair`]: an archive whose pins are gone, or whose
+    /// workspace was removed before it retired every checkout, moves
+    /// aside, an unfinished archive beside a newer workspace takes a dated name,
+    /// or moves aside when its pins are gone or it had not retired every
+    /// checkout, a rename that an earlier repair
     /// started is finished, and an archive that a restore already rebuilt
     /// is deleted. `name` may be either name of a rename that stopped. Each
     /// repair deletes only what the workspace already holds again. In
@@ -100,16 +102,25 @@ impl<B: Backend> Workspaces<B> {
             return self.finish_rename(archives, old, &dated.name, mode);
         }
         let live = self.store.read(name)?;
-        let reading = archive_case(
-            &self.backend,
+        let Ok(reading) = archive_case(
             archive,
             live.as_ref(),
             &all.archives,
-            UnreadPins::CountAsThere,
-        )?;
+            count_as_there(&self.backend),
+        );
+        let repair = reading.broken(name).map(|(_, repair)| repair);
+        let case = reading.case;
         let archive = archive.clone();
-        match reading.case {
-            ArchiveCase::PinsGone => move_aside(archives, archive, mode),
+        match case {
+            ArchiveCase::PinsGone | ArchiveCase::WorkspaceRemoved => {
+                move_aside(archives, archive, mode)
+            }
+            // An archive that stopped before it retired every checkout,
+            // beside a newer workspace, lost its own workspace before it
+            // finished, so it moves aside without its pins being read.
+            ArchiveCase::BesideNewerWorkspace if !archive.counts_as_retired() => {
+                move_aside(archives, archive, mode)
+            }
             ArchiveCase::BesideNewerWorkspace if pins_gone(&self.backend, &archive)? => {
                 move_aside(archives, archive, mode)
             }
@@ -120,10 +131,8 @@ impl<B: Backend> Workspaces<B> {
             ArchiveCase::RestoreUnfinished => Ok(Repaired::Deleted(Box::new(
                 self.remove_archive(archives, archive, mode)?,
             ))),
-            ArchiveCase::Finishable | ArchiveCase::Resumable | ArchiveCase::Renaming => {
-                Ok(Repaired::Unchanged {
-                    repair: reading.broken(name).map(|(_, repair)| repair),
-                })
+            ArchiveCase::Finishable | ArchiveCase::Resumable(_) | ArchiveCase::Renaming(..) => {
+                Ok(Repaired::Unchanged { repair })
             }
             ArchiveCase::ArchivedBesideWorkspace | ArchiveCase::Archived => {
                 self.repair_workspace(name)

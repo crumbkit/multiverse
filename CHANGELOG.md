@@ -24,7 +24,8 @@ workspace may need to act on.
   of `mxv new` until its last write, then `live`. `mxv restore` writes
   `live`. A record without a state, which an older mxv wrote, reads as
   `creating` when it is a workspace of clones whose checkouts all lack a
-  commit, and as `live` otherwise; nothing rewrites it. A worktree
+  commit, and as `live` otherwise. The next write of the record by any
+  command, such as `mxv pin`, stores the state that was read. A worktree
   workspace whose `mxv new` stopped partway now reads as `creating`, where
   before it looked finished. `up`, `restart`, `ports reset`, `run`,
   `exec`, `pin`, `unpin`, `add`, `archive` and `clean` refuse a `creating`
@@ -38,6 +39,29 @@ workspace may need to act on.
   `AddOutcome::Creating`, `ArchiveRefusal::Creating` and the errors
   `StateChanged` and `TransitionRefused`. `Workspace::new` returns a
   `creating` record.
+- `mxv archive` writes the workspace's record as `retiring` with the
+  archive's id before it writes the archive record, and writes the archive
+  record as `retired` once every checkout is retired, before it deletes
+  the workspace's record. Every archive record is now version 3, which an
+  older mxv refuses as newer. A version 2 record that says `retiring`
+  counts as retired when no workspace of its name is the one it archives.
+  An archive that stopped while `retiring`, whose workspace was then
+  removed, can no longer be finished: `mxv archive -w` refuses with
+  `mxv::archive::workspace_removed`, `mxv list --archived` names the
+  problem, and `mxv repair` moves it aside. `mxv remove` of a `retiring`
+  workspace warns about the archive record that stays. An archive that
+  lost the head pin of any checkout now counts as pins gone, where before
+  it needed to lose every one. `mxv remove --archived` refuses a `retired`
+  archive. A record and a version 3 archive that both lack a stable id are
+  two workspaces. A write of a record without a stable id gives it none
+  while a version 2 `retiring` archive without a workspace id, or an
+  archive record that cannot be read, holds its name, and `up`, `restart`
+  and `run` then refuse with `mxv::workspace::archive_unfinished`. An
+  archive id that is not 32 hexadecimal digits makes its record corrupt.
+  The library gains `ArchiveId`, `ArchiveState::Retired`,
+  `WorkspaceState::Retiring`, `Store::repoint`,
+  `ArchiveRefusal::WorkspaceRemoved`, `Problem::ArchiveWorkspaceRemoved`
+  and the error `ArchiveUnfinished`, and `Archive::id` is an `ArchiveId`.
 - A fetch from an SSH origin never waits on a question from ssh. mxv sets
   `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=false` beside
   `GIT_TERMINAL_PROMPT=0` on every git command, so ssh fails at once where it
