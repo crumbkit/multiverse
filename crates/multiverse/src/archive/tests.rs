@@ -20,6 +20,7 @@ use crate::store::Store;
 use crate::testing::{Fixture, fixture, fixture_named, git, write};
 use crate::workspaces::{Mode, NewOutcome, Repo, Workspaces};
 
+mod cases;
 mod edges;
 
 type Hook = Box<dyn FnMut(&str) -> Result<(), Error>>;
