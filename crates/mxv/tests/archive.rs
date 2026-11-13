@@ -522,6 +522,30 @@ fn a_stopped_restore_whose_workspace_directory_is_gone_keeps_its_archive() {
 }
 
 #[test]
+fn a_workspace_record_written_back_beside_its_finished_archive_keeps_the_archive_through_repair() {
+    let setup = Setup::new();
+    let commit = setup.commit_locally();
+    let workspace = setup.root().join("state/mxv/workspaces/triage.json");
+    let saved = fs::read_to_string(&workspace).unwrap();
+    setup.archive();
+    let record = setup.archive_record("triage");
+    let (pin, pinned) = setup.first_pin();
+    assert_eq!(pinned.as_deref(), Some(commit.as_str()));
+    // An older mxv's pin or up that waited for the lock while the archive
+    // ran wrote the workspace's record back after the archive deleted it.
+    write(&workspace, &saved);
+    let (_, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert!(record.exists(), "{document}");
+    assert_eq!(setup.first_pin(), (pin, pinned), "{document}");
+    let (exit, document) = setup.run(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+    assert_eq!(setup.head(), commit, "{document}");
+}
+
+#[test]
 fn a_restore_refuses_a_name_whose_workspace_and_archive_have_no_stable_id() {
     let setup = Setup::new();
     let record = setup.stop_restore_before_its_deletion();

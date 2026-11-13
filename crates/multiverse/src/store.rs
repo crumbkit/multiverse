@@ -191,18 +191,43 @@ impl Store {
         }
     }
 
-    /// Writes the record of `workspace` over the record with its name. A
-    /// workspace whose record an earlier version wrote, which has no stable
-    /// id, gets one first, so the record on disk holds the id before any
-    /// docker object is labelled with it.
+    /// Writes the record of `workspace` over the record with its name, and
+    /// writes nothing when no record of the name exists, because only
+    /// [`Store::create`] makes a record. A command that read the record
+    /// before another command archived or removed the workspace therefore
+    /// cannot write it back. A workspace whose record an earlier version
+    /// wrote, which has no stable id, gets one first, so the record on disk
+    /// holds the id before any docker object is labelled with it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unwritable`] when the record cannot be written, and
-    /// the errors of [`Workspace::ensure_id`].
+    /// Returns [`Error::RecordMissing`] when no record of the name exists,
+    /// [`Error::Inaccessible`] when mxv cannot tell whether one exists,
+    /// [`Error::Unwritable`] when the record cannot be written, and the
+    /// errors of [`Workspace::ensure_id`].
     pub fn update(&self, workspace: &mut Workspace) -> Result<(), Error> {
-        workspace.ensure_id()?;
         let target = self.path(&workspace.name);
+        // The check and the rename in `replace_file` are two steps. A
+        // caller that holds the workspace's lock is safe, because an
+        // archive deletes the record under that lock. `mxv remove` deletes
+        // the record without the lock, so a record that it deletes between
+        // the check and the rename is still written back. Making `remove`
+        // take the workspace's lock closes this window.
+        match fs::symlink_metadata(&target) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::RecordMissing {
+                    name: workspace.name.clone(),
+                });
+            }
+            Err(source) => {
+                return Err(Error::Inaccessible {
+                    path: target,
+                    source,
+                });
+            }
+        }
+        workspace.ensure_id()?;
         let bytes = record_bytes(workspace, &target)?;
         replace_file(&target, &bytes)
     }

@@ -429,7 +429,14 @@ pub(crate) enum MxvFailure {
 
 impl From<Error> for MxvFailure {
     fn from(error: Error) -> Self {
-        Self::Library(error)
+        match error {
+            // A write found the record gone, because another command
+            // archived or removed the workspace after this one read it.
+            Error::RecordMissing { name } => Self::NotFound {
+                name: name.to_string(),
+            },
+            error => Self::Library(error),
+        }
     }
 }
 

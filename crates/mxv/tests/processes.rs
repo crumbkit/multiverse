@@ -10,6 +10,8 @@
 
 #[path = "support/grants.rs"]
 mod grants;
+#[path = "support/held_lock.rs"]
+mod held_lock;
 #[path = "support/git.rs"]
 mod support;
 #[path = "support/ports.rs"]
@@ -1147,6 +1149,58 @@ fn a_command_that_waited_for_the_lock_reads_the_workspace_record_again() {
         "PORT=31999",
         "{document}"
     );
+}
+
+/// The manifest of a workspace with one unit that sleeps.
+const SLEEPER: &str = "[processes.sleeper]\nargv = [\"sh\", \"-c\", \"exec sleep 300\"]\n";
+
+#[test]
+fn a_pin_that_waited_for_the_lock_fails_and_writes_no_record_when_the_record_was_deleted() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER);
+    let state = setup.root().join("state/mxv");
+    let (exit, document) = held_lock::delete_record_while_locked(&state, "triage", || {
+        setup.json(&["pin", "-w", "triage"])
+    });
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::not_found", "{document}");
+    assert!(!state.join("workspaces/triage.json").exists(), "{document}");
+}
+
+#[test]
+fn an_up_that_waited_for_the_lock_starts_nothing_when_the_record_was_deleted() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER);
+    let state = setup.root().join("state/mxv");
+    let (exit, document) = held_lock::delete_record_while_locked(&state, "triage", || {
+        setup.json(&["up", "-w", "triage"])
+    });
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::not_found", "{document}");
+    assert!(!state.join("workspaces/triage.json").exists(), "{document}");
+    assert!(!setup.started("sleeper"), "{document}");
+}
+
+#[test]
+fn a_forced_remove_that_waited_for_the_lock_has_nothing_to_do_when_the_record_was_deleted() {
+    let setup = Setup::new();
+    setup.workspace("triage", SLEEPER);
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let state = setup.root().join("state/mxv");
+    let record = state.join("workspaces/triage.json");
+    let saved = fs::read_to_string(&record).unwrap();
+    let (exit, document) = held_lock::delete_record_while_locked(&state, "triage", || {
+        setup.json(&["remove", "triage", "--force", "--yes"])
+    });
+    let gone = !record.exists();
+    // The record goes back, so the setup's drop stops the sleeper, which
+    // the command that deleted the record would have stopped.
+    write(&record, &saved);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(gone, "{document}");
+    assert!(setup.root().join("workspaces/triage/app").is_dir());
 }
 
 #[test]

@@ -106,6 +106,13 @@ pub enum Error {
         /// The name that the record holds.
         name: String,
     },
+    /// [`crate::Store::update`] found no record of the workspace, such as
+    /// when another command archived or removed the workspace after this
+    /// one read its record, so it wrote nothing.
+    RecordMissing {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+    },
     /// A workspace record was written by a newer version of multiverse.
     NewerRecord {
         /// The path of the record.
@@ -479,6 +486,10 @@ impl fmt::Display for Error {
                 "the workspace record {} holds the name {name}, which its file name does not match",
                 path.display()
             ),
+            Self::RecordMissing { name } => write!(
+                formatter,
+                "the workspace {name} has no record, so mxv wrote none"
+            ),
             Self::NewerRecord { path, version } => write!(
                 formatter,
                 "the workspace record {} has version {version}, which this version of multiverse cannot read",
@@ -728,6 +739,7 @@ impl std::error::Error for Error {
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
             | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }
             | Self::UnsupportedOs { .. }
