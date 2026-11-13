@@ -6,8 +6,37 @@
 //! take their case from one rule, so a row that changes for one reader
 //! and not for the others is a regression.
 
+use std::time::Duration;
+
 use super::*;
 use crate::health::{self, Broken, Problem, Repair, Repaired};
+use crate::workspaces::tests::Scripted;
+
+/// Whether the readers can read the pins of a row's archive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pins {
+    /// The readers read each pin through git.
+    Readable,
+    /// Every read of a pin fails, as a `git rev-parse` that cannot start
+    /// does.
+    Unreadable,
+}
+
+/// Returns the backend through which the readers of a row read: git, or
+/// git whose every read of a pin fails.
+fn backend(pins: Pins) -> Scripted {
+    let mut backend = Scripted::plain();
+    if pins == Pins::Unreadable {
+        backend.before_resolve = |dir| {
+            Some(Error::TimedOut {
+                operation: "rev-parse",
+                dir: dir.to_path_buf(),
+                deadline: Duration::from_secs(1),
+            })
+        };
+    }
+    backend
+}
 
 /// Returns the first dated name that a repair gives `archive`:
 /// `NAME-<date>`, from the day the archive started, in UTC.
@@ -23,6 +52,10 @@ fn dated(archive: &Archive) -> WorkspaceName {
 struct Row {
     /// What the records hold.
     case: &'static str,
+    /// The kind of the workspace that the row archives.
+    kind: Kind,
+    /// Whether the readers can read the archive's pins.
+    pins: Pins,
     /// Builds the records, and returns the name that the readers read.
     build: fn(&Setup) -> WorkspaceName,
     /// What the listing of the archives shows for the name.
@@ -211,7 +244,13 @@ fn repair_text(repair: Option<&Repair>, old: &str) -> String {
 fn planned_text(planned: Result<ArchivePlanned, Error>) -> String {
     match planned {
         Err(_) => "error".to_owned(),
-        Ok(ArchivePlanned::Ready(_)) => "archive the workspace".to_owned(),
+        // A plan that resumes an earlier run keeps that run's archive id,
+        // so its pins and its record stay the same.
+        Ok(ArchivePlanned::Ready(plan)) => match &plan.resuming {
+            Some(resumed) if resumed.id == plan.id => "resume the existing archive".to_owned(),
+            Some(_) => "resume under another archive id".to_owned(),
+            None => "start a new archive".to_owned(),
+        },
         Ok(ArchivePlanned::Finish(_)) => "finish".to_owned(),
         Ok(ArchivePlanned::Unchanged(_)) => "unchanged".to_owned(),
         Ok(ArchivePlanned::Refused(refusal)) => match refusal {
@@ -245,25 +284,31 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
     }
 }
 
-const ROWS: [Row; 13] = [
+const ROWS: [Row; 16] = [
     Row {
         case: "retiring beside the workspace it archives",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: retiring_beside_its_workspace,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
-        subject: "archive the workspace",
+        subject: "resume the existing archive",
         repair: "unchanged, archive the name",
     },
     Row {
         case: "retiring beside its workspace, neither with a stable id",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: retiring_beside_its_workspace_without_ids,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
-        subject: "archive the workspace",
+        subject: "resume the existing archive",
         repair: "unchanged, archive the name",
     },
     Row {
         case: "retiring with no workspace and its pins there",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: retiring_with_pins,
         archives: "unfinished, archive the name",
         workspaces: "unfinished, archive the name",
@@ -271,7 +316,42 @@ const ROWS: [Row; 13] = [
         repair: "unchanged, archive the name",
     },
     Row {
+        case: "retiring with no workspace and its pins there, in the worktree's repository",
+        kind: Kind::Worktree,
+        pins: Pins::Readable,
+        build: retiring_with_pins,
+        archives: "unfinished, archive the name",
+        workspaces: "unfinished, archive the name",
+        subject: "finish",
+        repair: "unchanged, archive the name",
+    },
+    // `mxv archive -w` fails when it cannot read a pin, so it never
+    // finishes an archive whose pins may be gone. The listing and the
+    // repair count the pin as there and name `mxv archive -w`.
+    Row {
+        case: "retiring with no workspace and pins that cannot be read",
+        kind: Kind::Clone,
+        pins: Pins::Unreadable,
+        build: retiring_with_pins,
+        archives: "unfinished, archive the name",
+        workspaces: "unfinished, archive the name",
+        subject: "error",
+        repair: "unchanged, archive the name",
+    },
+    Row {
         case: "retiring with no workspace and its pins gone",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: retiring_without_pins,
+        archives: "pins gone, repair the name",
+        workspaces: "pins gone, repair the name",
+        subject: "refuse: pins gone",
+        repair: "move aside",
+    },
+    Row {
+        case: "retiring with no workspace and its pins gone from the worktree's repository",
+        kind: Kind::Worktree,
+        pins: Pins::Readable,
         build: retiring_without_pins,
         archives: "pins gone, repair the name",
         workspaces: "pins gone, repair the name",
@@ -280,6 +360,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "retiring beside a newer workspace, its pins there",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: retiring_beside_a_newer_workspace,
         archives: "beside a newer workspace, repair the name",
         workspaces: "healthy",
@@ -288,6 +370,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "retiring beside a newer workspace, its pins gone",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: retiring_without_pins_beside_a_newer_workspace,
         archives: "beside a newer workspace, repair the name",
         workspaces: "healthy",
@@ -296,6 +380,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "archived with no workspace",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: archived_alone,
         archives: "healthy",
         workspaces: "healthy",
@@ -304,6 +390,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "archived beside a newer workspace",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: archived_beside_a_newer_workspace,
         archives: "healthy",
         workspaces: "healthy",
@@ -312,6 +400,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "archived beside the whole workspace a restore rebuilt",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: archived_beside_its_restore,
         archives: "restore unfinished, repair the name",
         workspaces: "restore unfinished, repair the name",
@@ -320,6 +410,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "archived beside its rebuilt workspace whose checkouts are gone",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: archived_beside_its_restore_without_checkouts,
         archives: "healthy",
         workspaces: "checkouts gone, remove the name",
@@ -328,6 +420,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "a stopped rename read by its old name",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: stopped_rename_read_by_its_old_name,
         archives: "rename unfinished, repair the name",
         workspaces: "rename unfinished, repair the name",
@@ -336,6 +430,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "a stopped rename read by its dated name",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: stopped_rename_read_by_its_dated_name,
         archives: "rename unfinished, repair another name",
         workspaces: "rename unfinished, repair another name",
@@ -344,6 +440,8 @@ const ROWS: [Row; 13] = [
     },
     Row {
         case: "a stopped rename whose old name a newer workspace holds",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
         build: stopped_rename_beside_a_newer_workspace,
         archives: "rename unfinished, repair the name",
         workspaces: "healthy",
@@ -356,12 +454,18 @@ const ROWS: [Row; 13] = [
 fn the_listings_the_archive_command_and_the_repair_read_every_pair_of_records_as_the_table_says() {
     let mut wrong = Vec::new();
     for row in &ROWS {
-        let setup = setup(Kind::Clone);
+        let setup = setup(row.kind);
         let read = (row.build)(&setup);
         let old = read.as_str().to_owned();
+        // The readers share the setup's records and mirrors, and read
+        // through the row's backend.
+        let mut readers = Workspaces::new(Store::new(setup.base.join("state")), backend(row.pins));
+        if row.kind == Kind::Clone {
+            readers = readers.with_mirrors(setup.base.join("mirrors"));
+        }
         let health = health::classify(
-            &Git,
-            &setup.workspaces.store.list().unwrap(),
+            &readers.backend,
+            &readers.store.list().unwrap(),
             &setup.archives.list().unwrap(),
         );
         let found = [
@@ -377,7 +481,7 @@ fn the_listings_the_archive_command_and_the_repair_read_every_pair_of_records_as
             ),
             (
                 "subject",
-                planned_text(setup.workspaces.plan_archive(
+                planned_text(readers.plan_archive(
                     &setup.archives,
                     &read,
                     ArchiveOptions::default(),
@@ -387,12 +491,7 @@ fn the_listings_the_archive_command_and_the_repair_read_every_pair_of_records_as
             ),
             (
                 "repair",
-                repaired_text(
-                    setup
-                        .workspaces
-                        .repair(&setup.archives, &read, Mode::DryRun),
-                    &old,
-                ),
+                repaired_text(readers.repair(&setup.archives, &read, Mode::DryRun), &old),
                 row.repair,
             ),
         ];
