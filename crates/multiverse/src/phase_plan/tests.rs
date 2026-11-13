@@ -15,7 +15,7 @@ use crate::phase_plan::{
     build_with_task, roots,
 };
 use crate::record::{Checkout, Workspace};
-use crate::testing::write;
+use crate::testing::{unmade_clone, write};
 
 const APP: &str = r#"
 ports = ["api", "db"]
@@ -444,6 +444,7 @@ fn two_checkouts(dir: &Path) -> Workspace {
                 path.join(folder),
                 "triage".to_owned(),
                 "refs/remotes/origin/main".to_owned(),
+                unmade_clone(),
             )
         })
         .collect();
@@ -752,6 +753,7 @@ fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit
                 path.join(folder),
                 "triage".to_owned(),
                 "refs/remotes/origin/main".to_owned(),
+                unmade_clone(),
             )
         })
         .collect();

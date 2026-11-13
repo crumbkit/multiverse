@@ -62,6 +62,24 @@ workspace may need to act on.
   `WorkspaceState::Retiring`, `Store::repoint`,
   `ArchiveRefusal::WorkspaceRemoved`, `Problem::ArchiveWorkspaceRemoved`
   and the error `ArchiveUnfinished`, and `Archive::id` is an `ArchiveId`.
+- A workspace record whose checkout does not match the record's kind, a
+  checkout of a workspace of clones without a `mirror` or a checkout of a
+  workspace of worktrees with one, now reads as corrupt and lists as a
+  record that cannot be read. An archive record whose checkout does not
+  match the archive's kind reads as corrupt in the same way. The library's
+  `Checkout::mirror` field becomes `Checkout::made`, a `Made` that is
+  `Clone` with its mirror or `Worktree`; `Checkout::mirror()` returns the
+  mirror, and `Checkout::new` takes the `Made`. The record on disk is
+  unchanged.
+- `mxv restore` and `mxv remove --archived` of an unfinished archive name
+  `mxv repair` in their hint when `mxv list --archived` names it as the
+  repair, such as for an archive whose workspace was removed before it
+  retired every checkout, and `mxv archive -w` otherwise.
+  `mxv::archive::name_taken` beside a newer workspace says that `mxv
+  repair` moves aside an archive that stopped before it retired every
+  checkout. `mxv remove` also warns about a stopped archive whose workspace
+  id matches the removed record, as when an older mxv dropped the record's
+  state. The library's `health::same_workspace` is public.
 - A fetch from an SSH origin never waits on a question from ssh. mxv sets
   `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=false` beside
   `GIT_TERMINAL_PROMPT=0` on every git command, so ssh fails at once where it

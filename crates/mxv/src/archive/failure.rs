@@ -91,6 +91,47 @@ pub(crate) const CODES: &[&Code] = &[
     &RESTORE_MIRROR_MISSING,
 ];
 
+/// How far the archive that holds a name got, which decides what a
+/// refusal of the name names as the way out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Holder {
+    /// The archive finished, so `mxv restore` or `mxv remove --archived`
+    /// frees the name.
+    Archived,
+    /// The archive retired every checkout and did not finish, or an older
+    /// mxv left it retiring, so beside a newer workspace `mxv repair`
+    /// finishes it under a dated name, or moves it aside when a pin is
+    /// gone.
+    Retired,
+    /// The archive stopped before it retired every checkout, so beside a
+    /// newer workspace `mxv repair` moves it aside.
+    Retiring,
+}
+
+impl Holder {
+    /// Returns how far `archive` got.
+    pub(crate) fn of(archive: &multiverse::Archive) -> Self {
+        if archive.state == ArchiveState::Archived {
+            Self::Archived
+        } else if archive.counts_as_retired() {
+            Self::Retired
+        } else {
+            Self::Retiring
+        }
+    }
+}
+
+/// The command that finishes an unfinished archive, which `mxv list
+/// --archived` names as its repair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Finisher {
+    /// `mxv archive -w NAME` finishes or resumes the archive.
+    Archive,
+    /// Only `mxv repair NAME` deals with the archive: it moves it aside, or
+    /// finishes it under a dated name beside a newer workspace.
+    Repair,
+}
+
 /// Why an archive or a restore stopped.
 #[derive(Debug)]
 pub(crate) enum ArchiveFailure {
@@ -103,8 +144,8 @@ pub(crate) enum ArchiveFailure {
     NameTaken {
         /// The name.
         name: String,
-        /// Whether the archive that holds the name has not finished.
-        unfinished: bool,
+        /// How far the archive that holds the name got.
+        holder: Holder,
     },
     /// A checkout differs from what the archive admitted.
     SourceChanged {
@@ -155,6 +196,8 @@ pub(crate) enum ArchiveFailure {
     Unfinished {
         /// The name.
         name: String,
+        /// The command that finishes the archive.
+        finisher: Finisher,
     },
     /// The archive has not finished, and the pin of no checkout names its
     /// commit any more.
@@ -209,6 +252,8 @@ pub(crate) enum ArchiveFailure {
     RestoreUnfinished {
         /// The name.
         name: String,
+        /// The command that finishes the archive.
+        finisher: Finisher,
     },
     /// Something holds the name or the directory.
     RestoreNameTaken {
@@ -285,7 +330,7 @@ fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFail
     match refusal {
         ArchiveRefusal::NameTaken(archive) => ArchiveFailure::NameTaken {
             name,
-            unfinished: archive.state != ArchiveState::Archived,
+            holder: Holder::of(&archive),
         },
         ArchiveRefusal::PinsGone(_) => ArchiveFailure::PinsGone { name },
         ArchiveRefusal::WorkspaceRemoved(_) => ArchiveFailure::WorkspaceRemoved { name },
@@ -317,14 +362,23 @@ fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFail
     }
 }
 
-/// Returns the failure of `refusal` for the archive `name`.
-pub(super) fn restore_refusal(name: &WorkspaceName, refusal: RestoreRefusal) -> ArchiveFailure {
+/// Returns the failure of `refusal` for the archive `name`. `finisher`
+/// says which command finishes an unfinished archive, and is called only
+/// for one.
+pub(super) fn restore_refusal(
+    name: &WorkspaceName,
+    refusal: RestoreRefusal,
+    finisher: impl FnOnce() -> Finisher,
+) -> ArchiveFailure {
     let name = name.to_string();
     match refusal {
         RestoreRefusal::MirrorMissing { checkouts } => {
             ArchiveFailure::RestoreMirrorMissing { name, checkouts }
         }
-        RestoreRefusal::Unfinished(_) => ArchiveFailure::RestoreUnfinished { name },
+        RestoreRefusal::Unfinished(_) => ArchiveFailure::RestoreUnfinished {
+            name,
+            finisher: finisher(),
+        },
         RestoreRefusal::NameTaken { path, record } => ArchiveFailure::RestoreNameTaken {
             name,
             path: path.display().to_string(),
@@ -390,11 +444,20 @@ impl Failure for ArchiveFailure {
             }
             Self::NameTaken {
                 name,
-                unfinished: true,
+                holder: Holder::Retired,
             } => Recovery::hint(format!(
-                "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv repair {name}`, which finishes the earlier archive under a dated name, then archive {name} again"
+                "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv repair {name}`, which finishes the earlier archive under a dated name, or moves it aside when one of its pins is gone, then archive {name} again"
             )),
-            Self::NameTaken { name, .. } => Recovery::hint(format!(
+            Self::NameTaken {
+                name,
+                holder: Holder::Retiring,
+            } => Recovery::hint(format!(
+                "an earlier archive of {name} stopped before it retired every checkout and a newer workspace holds the name; run `mxv repair {name}`, which moves the earlier archive aside, then archive {name} again"
+            )),
+            Self::NameTaken {
+                name,
+                holder: Holder::Archived,
+            } => Recovery::hint(format!(
                 "run `mxv restore {name}` to bring the archive back, or `mxv remove --archived {name}` to delete it"
             )),
             Self::SourceChanged { name, .. } => Recovery::hint(format!(
@@ -412,9 +475,26 @@ impl Failure for ArchiveFailure {
             Self::Unusable { .. } => Recovery::hint(
                 "repair the checkout with git or `mxv add`, then archive the workspace again",
             ),
-            Self::Unfinished { name } | Self::RestoreUnfinished { name } => Recovery::hint(
-                format!("run `mxv archive -w {name}`, which finishes the archive"),
-            ),
+            Self::Unfinished {
+                name,
+                finisher: Finisher::Archive,
+            }
+            | Self::RestoreUnfinished {
+                name,
+                finisher: Finisher::Archive,
+            } => Recovery::hint(format!(
+                "run `mxv archive -w {name}`, which finishes the archive"
+            )),
+            Self::Unfinished {
+                name,
+                finisher: Finisher::Repair,
+            }
+            | Self::RestoreUnfinished {
+                name,
+                finisher: Finisher::Repair,
+            } => Recovery::hint(format!(
+                "run `mxv repair {name}`, which moves the archive aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says"
+            )),
             Self::RenameUnfinished { name, .. } => Recovery::hint(format!(
                 "run `mxv repair {name}`, which finishes the move and then the archive"
             )),
@@ -467,11 +547,11 @@ impl Failure for ArchiveFailure {
         match self {
             Self::NotFound { name }
             | Self::NameTaken { name, .. }
-            | Self::Unfinished { name }
+            | Self::Unfinished { name, .. }
             | Self::PinsGone { name }
             | Self::WorkspaceRemoved { name }
             | Self::RestoreNotFound { name }
-            | Self::RestoreUnfinished { name } => vec![Field::new("name", name)],
+            | Self::RestoreUnfinished { name, .. } => vec![Field::new("name", name)],
             Self::SourceChanged {
                 name,
                 folder,
@@ -601,7 +681,7 @@ impl fmt::Display for ArchiveFailure {
                     "mxv cannot archive the checkout {folder}: {reason}"
                 )
             }
-            Self::Unfinished { name } | Self::RestoreUnfinished { name } => {
+            Self::Unfinished { name, .. } | Self::RestoreUnfinished { name, .. } => {
                 write!(formatter, "the archive of {name} stopped partway")
             }
             Self::RenameUnfinished { name, other } => write!(

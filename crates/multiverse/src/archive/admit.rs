@@ -21,7 +21,7 @@ use crate::error::Error;
 use crate::health::{ArchiveCase, archive_case, pins_gone};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
-use crate::record::{Workspace, WorkspaceKind, WorkspaceState};
+use crate::record::{Made, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::MOST_RECORD_BYTES;
 use crate::workspaces::{Allow, CheckoutRemoval, Fate, Mode, Removal, RemovalPlan, Workspaces};
 
@@ -462,8 +462,7 @@ fn check_checkouts(workspace: &Workspace, resuming: Option<&Archive>) -> Option<
                 .iter()
                 .any(|kept| kept.folder == checkout.name)
         }) && !checkout.path.exists();
-        if let Some(mirror) = &checkout.mirror
-            && workspace.kind == WorkspaceKind::Clone
+        if let Made::Clone { mirror } = &checkout.made
             && !mirror.is_dir()
             && !retired
         {
@@ -865,12 +864,7 @@ impl<B: Backend> Workspaces<B> {
             let mut held_heads = self.backend.refs_under(own, "refs/remotes/origin/")?;
             let mut held: Vec<(String, String)> =
                 self.backend.refs_under(own, "refs/mxv/origin/tags/")?;
-            if let Some(mirror) = planned
-                .checkout
-                .mirror
-                .as_deref()
-                .filter(|dir| dir.is_dir())
-            {
+            if let Some(mirror) = planned.checkout.mirror().filter(|dir| dir.is_dir()) {
                 let mirror = RefHolder::Mirror(mirror);
                 held_heads.extend(self.backend.refs_under(mirror, "refs/heads/")?);
                 held.extend(self.backend.refs_under(mirror, "refs/tags/")?);
@@ -913,7 +907,7 @@ impl<B: Backend> Workspaces<B> {
     /// retires which neither the archive keeps nor a rebuilt clone has.
     fn unkept_names(&self, planned: &CheckoutRemoval) -> Result<Vec<String>, Error> {
         let checkout = &planned.checkout;
-        if checkout.mirror.is_none() {
+        if checkout.made.is_worktree() {
             return Ok(Vec::new());
         }
         let names = self.backend.local_names(&checkout.path, &checkout.source)?;
@@ -1046,7 +1040,7 @@ impl<B: Backend> Workspaces<B> {
             detached,
             base: checkout.base.clone(),
             commit,
-            mirror: checkout.mirror.clone(),
+            mirror: checkout.mirror().map(Path::to_path_buf),
             pin: pin_ref(id.as_str(), &checkout.name),
             local_only,
             kept,

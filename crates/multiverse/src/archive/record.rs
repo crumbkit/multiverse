@@ -17,7 +17,7 @@ use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, PIN_NAMESPACE, RECORD_FILE, WIP_
 use crate::backend::RefHolder;
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace, WorkspaceKind};
+use crate::record::{Checkout, Made, Workspace, WorkspaceKind};
 use crate::store::{self, MOST_RECORD_BYTES};
 use crate::workspaces::delete_directory;
 
@@ -399,20 +399,24 @@ impl Archive {
     }
 
     /// Returns the archive's checkouts as the checkouts of a workspace, each
-    /// on its recorded branch, with no commit yet.
+    /// on its recorded branch, with no commit yet. A checkout with a mirror
+    /// is a clone of it, and one without is a worktree; reading the record
+    /// refused any checkout that does not match the archive's kind.
     pub(crate) fn workspace_checkouts(&self) -> Vec<Checkout> {
         self.checkouts
             .iter()
             .map(|archived| {
-                let mut checkout = Checkout::new(
+                Checkout::new(
                     archived.folder.clone(),
                     &archived.source,
                     archived.path.clone(),
                     archived.branch.clone(),
                     archived.base.clone(),
-                );
-                checkout.mirror.clone_from(&archived.mirror);
-                checkout
+                    archived
+                        .mirror
+                        .clone()
+                        .map_or(Made::Worktree, Made::clone_of),
+                )
             })
             .collect()
     }
@@ -853,6 +857,25 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
                 "the kept reference {name} of the checkout {} leaves its namespace",
                 checkout.folder
             ))));
+        }
+        // `mxv restore` rebuilds a checkout with a mirror as a clone and
+        // one without as a worktree, so a checkout that does not match the
+        // archive's kind would give a workspace record that the store
+        // reads as corrupt.
+        match (archive.kind, &checkout.mirror) {
+            (WorkspaceKind::Clone, None) => {
+                return Err(corrupt(serde::de::Error::custom(format!(
+                    "the checkout {} of an archive of clones names no mirror",
+                    checkout.folder
+                ))));
+            }
+            (WorkspaceKind::Worktree, Some(_)) => {
+                return Err(corrupt(serde::de::Error::custom(format!(
+                    "the checkout {} of an archive of worktrees names a mirror",
+                    checkout.folder
+                ))));
+            }
+            (WorkspaceKind::Clone, Some(_)) | (WorkspaceKind::Worktree, None) => {}
         }
     }
     Ok(Some(archive))

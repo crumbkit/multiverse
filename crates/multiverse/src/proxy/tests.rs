@@ -12,7 +12,7 @@ use super::{
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
 use crate::store::{Created, Store};
-use crate::testing::write;
+use crate::testing::{unmade_clone, write};
 
 fn name(text: &str) -> WorkspaceName {
     text.parse().unwrap()
@@ -56,6 +56,7 @@ fn workspace(store: &Store, dir: &Path, workspace: &str, manifest: &str, ports: 
         checkout_dir,
         name.to_string(),
         "origin/main".to_owned(),
+        unmade_clone(),
     );
     let mut record = Workspace::new(name, path, vec![checkout]);
     record.ports = ports

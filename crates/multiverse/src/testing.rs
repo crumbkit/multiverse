@@ -97,6 +97,13 @@ pub(crate) fn write(path: impl AsRef<Path>, text: impl AsRef<[u8]>) {
     std::fs::write(path, text).unwrap();
 }
 
+/// Returns how a checkout of a workspace of clones is made, for a test
+/// record whose checkouts no test clones: a clone of a mirror that does
+/// not exist.
+pub(crate) fn unmade_clone() -> crate::record::Made {
+    crate::record::Made::clone_of(PathBuf::from("/nowhere/mirrors/app.git"))
+}
+
 /// The SSH URL that the tests give an origin. `.invalid` is a name that no
 /// network resolves, so only the fake ssh of [`fake_ssh`] can answer it.
 pub(crate) const SSH_ORIGIN: &str = "ssh://git@example.invalid/acme/app.git";

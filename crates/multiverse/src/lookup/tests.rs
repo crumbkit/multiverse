@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::lookup::ManifestSource;
 use crate::manifest::ManifestProblem;
 use crate::record::{Checkout, Workspace};
-use crate::testing::write;
+use crate::testing::{unmade_clone, write};
 
 fn workspace(dir: &Path) -> Workspace {
     let path = dir.join("reading-list");
@@ -15,6 +15,7 @@ fn workspace(dir: &Path) -> Workspace {
         path.join("app"),
         "reading-list".to_owned(),
         "refs/remotes/origin/main".to_owned(),
+        unmade_clone(),
     );
     fs::create_dir_all(path.join("app")).unwrap();
     Workspace::new("reading-list".parse().unwrap(), path, vec![checkout])
@@ -148,6 +149,7 @@ fn a_record_whose_checkout_holds_the_workspace_manifests_path_has_no_workspace_m
         path.clone(),
         "reading-list".to_owned(),
         "refs/remotes/origin/main".to_owned(),
+        unmade_clone(),
     );
     let workspace = Workspace::new("reading-list".parse().unwrap(), path, vec![checkout]);
     write(workspace.manifest_file(), "disposable = [\"data/\"]\n");
@@ -171,6 +173,7 @@ fn several(dir: &Path, folders: &[&str]) -> Workspace {
                 path.join(folder),
                 "triage".to_owned(),
                 "refs/remotes/origin/main".to_owned(),
+                unmade_clone(),
             )
         })
         .collect();
@@ -451,6 +454,7 @@ fn two_checkouts(dir: &Path) -> Workspace {
             path.join(folder),
             "reading-list".to_owned(),
             "refs/remotes/origin/main".to_owned(),
+            unmade_clone(),
         )
     };
     let checkouts = vec![checkout("api"), checkout("web")];

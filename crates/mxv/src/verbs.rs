@@ -849,29 +849,33 @@ pub(crate) fn remove(
 
 /// Returns the warning of a removal of `workspace`, which an archive had
 /// started to retire, about the archive record of its name that stays: a
-/// retiring one can no longer be resumed, and a retired one is still
-/// finished by `mxv archive -w`. A workspace that was not retiring, or
-/// whose archive record does not exist or cannot be read, has none, and
-/// `mxv list --archived` names a record that cannot be read.
+/// retiring one can no longer be resumed, and a retired one, or a retiring
+/// one that an older mxv wrote, is still finished by `mxv archive -w`. The
+/// archive is the workspace's when `health::same_workspace` says so: the
+/// workspace is retiring into it, or the two records hold the same stable
+/// id, which covers a record whose state an older mxv dropped. Any other
+/// workspace, or an archive record that does not exist or cannot be read,
+/// has no warning, and `mxv list --archived` names a record that cannot
+/// be read.
 fn stopped_archive(
     environment: &Environment,
     workspace: &Workspace,
 ) -> Result<Vec<String>, crumbkit::Error> {
-    if workspace.state().archive().is_none() {
-        return Ok(Vec::new());
-    }
     let name = &workspace.name;
     let Ok(Some(archive)) = crate::archive::archives(environment)?.read(name) else {
         return Ok(Vec::new());
     };
-    Ok(match archive.state {
-        ArchiveState::Retiring => vec![format!(
-            "the archive of {name} stopped before it retired every checkout, so it can no longer be resumed; `mxv repair {name}` moves it aside"
-        )],
-        ArchiveState::Retired => vec![format!(
+    if archive.state == ArchiveState::Archived || !health::same_workspace(&archive, workspace) {
+        return Ok(Vec::new());
+    }
+    Ok(if archive.counts_as_retired() {
+        vec![format!(
             "the archive of {name} retired every checkout and did not finish; `mxv archive -w {name}` finishes it"
-        )],
-        _ => Vec::new(),
+        )]
+    } else {
+        vec![format!(
+            "the archive of {name} stopped before it retired every checkout, so it can no longer be resumed; `mxv repair {name}` moves it aside"
+        )]
     })
 }
 
