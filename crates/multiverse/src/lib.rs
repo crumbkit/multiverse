@@ -63,7 +63,7 @@ pub use crate::disk::{Cleaned, DiskUsage, DisposablePath, FailedPath, KeptPath};
 pub use crate::disposable::{
     BadGlob, CLONE_NEVER, DEFAULT_CLONE_ON_NEW, DisposableSet, DisposableSource, PathGlob,
 };
-pub use crate::error::Error;
+pub use crate::error::{Error, SshRefusal};
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefix, prefixed};
 pub use crate::manifest::{

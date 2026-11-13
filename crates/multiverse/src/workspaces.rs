@@ -1072,7 +1072,8 @@ impl<B: Backend> Workspaces<B> {
     /// path that is not a repository with an `origin`, the failures of the
     /// fetch and the checkout, [`Error::MirrorBusy`] when another command
     /// holds the mirror's lock for longer than [`MIRROR_WAIT`],
-    /// [`Error::MirrorFetchFailed`] when the mirror's fetch fails, and
+    /// [`Error::MirrorFetchFailed`] when the mirror's fetch fails,
+    /// [`Error::SshRefused`] when ssh refuses that fetch, and
     /// [`Error::Unwritable`] when a directory, the record or `AGENTS.md`
     /// cannot be written.
     pub fn create(

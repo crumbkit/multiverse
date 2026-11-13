@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{Allow, BadName, Error};
+use multiverse::{Allow, BadName, Error, SshRefusal};
 
 #[cfg(test)]
 mod tests;
@@ -47,6 +47,16 @@ pub const TEMPLATE_AMBIGUOUS: Code = Code::new("mxv", "template", "ambiguous");
 pub const MIRROR_LOCKED: Code = Code::new("mxv", "mirror", "locked");
 /// The code of a mirror that mxv cannot fetch from its origin.
 pub const MIRROR_FETCH_FAILED: Code = Code::new("mxv", "mirror", "fetch_failed");
+/// The code of a fetch from an SSH origin whose host accepted none of the
+/// keys that ssh offered, such as when the key has a passphrase and no
+/// ssh-agent holds it.
+pub const SSH_AUTHENTICATION_FAILED: Code = Code::new("mxv", "ssh", "authentication_failed");
+/// The code of a fetch from an SSH origin whose host key the known hosts
+/// file does not hold.
+pub const SSH_HOST_KEY_UNVERIFIED: Code = Code::new("mxv", "ssh", "host_key_unverified");
+/// The code of a fetch from an SSH origin whose host showed a key that
+/// differs from the one in the known hosts file.
+pub const SSH_HOST_KEY_CHANGED: Code = Code::new("mxv", "ssh", "host_key_changed");
 /// The code of a removal that a checkout locked for a reason other than
 /// `initializing` stops.
 pub const CHECKOUT_LOCKED: Code = Code::new("mxv", "checkout", "locked");
@@ -472,6 +482,9 @@ pub(crate) const CODES: &[&Code] = &[
     &GIT_TIMED_OUT,
     &MIRROR_LOCKED,
     &MIRROR_FETCH_FAILED,
+    &SSH_AUTHENTICATION_FAILED,
+    &SSH_HOST_KEY_UNVERIFIED,
+    &SSH_HOST_KEY_CHANGED,
     &TEMPLATE_INVALID,
     &TEMPLATE_AMBIGUOUS,
     &MANIFEST_UNTRUSTED,
@@ -621,6 +634,11 @@ impl Failure for MxvFailure {
                 Error::DatedNamesTaken { .. } => &REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => &MIRROR_FETCH_FAILED,
+                Error::SshRefused { refusal, .. } => match refusal {
+                    SshRefusal::AuthenticationFailed => &SSH_AUTHENTICATION_FAILED,
+                    SshRefusal::HostKeyUnverified => &SSH_HOST_KEY_UNVERIFIED,
+                    SshRefusal::HostKeyChanged => &SSH_HOST_KEY_CHANGED,
+                },
                 Error::TemplateInvalid { .. } => &TEMPLATE_INVALID,
                 Error::TemplateAmbiguous { .. } => &TEMPLATE_AMBIGUOUS,
                 Error::ManifestUntrusted { .. } => &MANIFEST_UNTRUSTED,
@@ -1002,6 +1020,12 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::MirrorFetchFailed { origin, .. } => Recovery::hint(format!(
             "check that the machine is online and that `git ls-remote {origin}` works with your credentials, and run the command again"
         )),
+        Error::SshRefused {
+            login,
+            port,
+            refusal,
+            ..
+        } => ssh_recovery(error.ssh_host().unwrap_or(login), login, *port, *refusal),
         Error::TemplateInvalid { path, .. } => Recovery::hint(format!(
             "fix {} as the README's section on templates describes, with a top-level [template] table that lists its origins, or move it out of the templates directory, and run the command again; `--manifest <FILE>` copies a file of your choice in place of a template",
             shown(path)
@@ -1106,6 +1130,16 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         } => vec![
             Field::new("origin", origin),
             Field::new("mirror", shown(mirror)),
+            Field::new("message", message),
+        ],
+        Error::SshRefused {
+            remote,
+            login,
+            message,
+            ..
+        } => vec![
+            Field::new("remote", remote),
+            Field::new("host", error.ssh_host().unwrap_or(login)),
             Field::new("message", message),
         ],
         Error::NewerRecord { path, version } => vec![
@@ -1425,4 +1459,30 @@ fn unpushed_text(
         Some(age) => write!(formatter, " when its mirror last fetched origin {age} ago"),
         None => write!(formatter, " and its mirror has never fetched origin"),
     }
+}
+
+/// Returns what a person does about ssh's `refusal` to connect to `host`
+/// as `login`, which is `user@host` or `host`, on `port`. A changed host key
+/// may mean that someone stands between the person and the host, so its
+/// advice never says to accept the new key without finding out why it
+/// changed.
+fn ssh_recovery(host: &str, login: &str, port: Option<u16>, refusal: SshRefusal) -> Recovery {
+    let ssh = port.map_or_else(
+        || format!("ssh {login}"),
+        |port| format!("ssh -p {port} {login}"),
+    );
+    // A known hosts file names a host on another port as `[host]:port`,
+    // which a shell would read as a pattern unless it is quoted.
+    let known = port.map_or_else(|| host.to_owned(), |port| format!("'[{host}]:{port}'"));
+    Recovery::hint(match refusal {
+        SshRefusal::AuthenticationFailed => format!(
+            "load your key into ssh-agent with `ssh-add`, check that `ssh-add -l` lists a key that {host} accepts, and run the command again"
+        ),
+        SshRefusal::HostKeyUnverified => format!(
+            "run `{ssh}` in a terminal once, compare the fingerprint it shows with the one that {host} publishes, answer yes if they match, and run the command again"
+        ),
+        SshRefusal::HostKeyChanged => format!(
+            "the key of {host} differs from the one in your known hosts file; find out why before you trust it, then remove the old key with `ssh-keygen -R {known}`, connect once by hand with `{ssh}`, and run the command again"
+        ),
+    })
 }

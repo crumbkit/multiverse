@@ -143,3 +143,18 @@ fn credentials_in_a_url_are_left_out_wherever_it_is_shown() {
     );
     assert_eq!(redacted("/srv/repos/app"), "/srv/repos/app");
 }
+
+#[test]
+fn the_host_of_an_ssh_url_and_of_an_scp_like_url_is_the_name_after_the_user() {
+    assert_eq!(
+        super::host_of("deploy:secret@Git.Example.com:22", Some("22")),
+        "git.example.com"
+    );
+    assert_eq!(
+        super::host_of("git@git.example.com:2222", Some("22")),
+        "git.example.com:2222"
+    );
+    let (authority, path) = super::scp_like("git@GitHub.com:acme/app.git").unwrap();
+    assert_eq!(super::host_of(authority, None), "github.com");
+    assert_eq!(path, "acme/app.git");
+}
