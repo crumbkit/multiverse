@@ -49,7 +49,7 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "XDG_STATE_HOME",
-        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock and marks of each workspace in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. Each archive's record is in `$XDG_STATE_HOME/mxv/archives/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
+        purpose: "The state directory, an absolute path. mxv keeps one record for each workspace in `$XDG_STATE_HOME/mxv/workspaces`, the lock of each workspace in `$XDG_STATE_HOME/mxv/locks/<name>.lock`, its marks in `$XDG_STATE_HOME/mxv/runs/<name>`, and the run records and logs of its units in `$XDG_STATE_HOME/mxv/phase`. Each archive's record is in `$XDG_STATE_HOME/mxv/archives/<name>`. When it is unset, empty or relative, mxv uses `~/.local/state`.",
     },
     Variable {
         name: "DEADBAND_SOCKET",

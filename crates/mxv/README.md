@@ -880,15 +880,18 @@ container has no such file, and `mxv logs` reads its log from Docker.
 
 `mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
 while processes run, hold an exclusive lock on
-`$XDG_STATE_HOME/mxv/runs/<name>/.lock` while they start or stop the
-workspace's processes. Each reads the workspace's record again once it
+`$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
+workspace's processes. No command deletes that file, so a command that
+deletes the workspace's run directory still holds the lock. Each reads the workspace's record again once it
 holds the lock, so it uses the ports that a command before it stored.
 Allocating ports holds a second lock, `$XDG_STATE_HOME/mxv/runs/.ports.lock`,
 so two workspaces never take the same port. A command that finds a lock
 held tries again for 5 seconds, then fails with `mxv::workspace::busy`. The
 operating system releases a lock when its command ends, so a crashed mxv
 leaves no lock behind. These locks apply to every workspace, whichever mxv
-started it.
+started it. An mxv from before the lock moved to `locks/` locks
+`runs/<name>/.lock` instead, so a command of that version and a command of
+this one do not wait for each other.
 
 ### Local AWS services
 

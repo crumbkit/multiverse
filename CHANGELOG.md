@@ -20,6 +20,18 @@ workspace may need to act on.
 
 ### Changed
 
+- The lock that a command takes on a workspace is the file
+  `$XDG_STATE_HOME/mxv/locks/<name>.lock`, which no command deletes. Before,
+  it was `$XDG_STATE_HOME/mxv/runs/<name>/.lock`, which `mxv archive`,
+  `mxv remove` and `mxv repair --orphans` deleted with the run directory, so
+  a second command of the name could take the lock while the first still
+  held it. A second `mxv archive` of a workspace whose archive is still
+  deleting its volumes now fails with `mxv::workspace::busy`. An older mxv
+  locks the old file and this one the new file, so a command of each
+  version does not wait for the other. Let running mxv commands finish
+  before an upgrade or a rollback. `runs/<name>/.lock` files that an older
+  mxv left are never opened, and the next archive or removal of the name
+  deletes them.
 - A workspace's record stores its state: `creating` from the first write
   of `mxv new` until its last write, then `live`. `mxv restore` writes
   `live`. A record without a state, which an older mxv wrote, reads as
