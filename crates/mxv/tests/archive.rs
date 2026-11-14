@@ -242,6 +242,18 @@ fn wait_for_file(path: &Path, finished: impl Fn() -> bool) {
     }
 }
 
+/// Writes the file that lets the fake docker's `volume rm` return, when it
+/// drops. A test that panics while the fake blocks then still ends, because
+/// `std::thread::scope` waits for the blocked archive before it passes the
+/// panic on.
+struct Release(PathBuf);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        write(&self.0, "");
+    }
+}
+
 #[test]
 fn a_second_archive_during_an_archives_volume_deletion_fails_busy_and_then_has_nothing_to_do() {
     let setup = Setup::new();
@@ -298,12 +310,13 @@ fn a_second_archive_during_an_archives_volume_deletion_fails_busy_and_then_has_n
     let first_args = ["archive", "-w", "triage", "--yes", "--delete-volumes"];
     let (first, second) = std::thread::scope(|scope| {
         let first = scope.spawn(|| archive(&first_args));
+        let released = Release(release);
         wait_for_file(&blocked, || first.is_finished());
         // The first archive has deleted the run directory and blocks in
         // `docker volume rm` while it holds the lock.
         assert!(!state.join("runs/triage").exists());
         let second = archive(&["archive", "-w", "triage", "--yes"]);
-        write(&release, "");
+        drop(released);
         (first.join().unwrap(), second)
     });
     let (exit, document) = second;

@@ -162,13 +162,17 @@ impl Store {
     /// record with its name. Two runs that create the same name at once
     /// write one record, and the other run reads [`Created::Taken`]. A
     /// workspace without a stable id gets one first, so every record that
-    /// the store creates holds one.
+    /// the store creates holds one. A workspace with a checkout that does
+    /// not match its kind is refused before anything changes, in memory or
+    /// on disk.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unwritable`] when the directory or the record
-    /// cannot be written, and the errors of [`Workspace::ensure_id`].
+    /// Returns [`Error::MismatchedCheckout`] when a checkout does not match
+    /// the workspace's kind, [`Error::Unwritable`] when the directory or the
+    /// record cannot be written, and the errors of [`Workspace::ensure_id`].
     pub fn create(&self, workspace: &mut Workspace) -> Result<Created, Error> {
+        workspace.check_checkouts()?;
         workspace.ensure_id()?;
         let target = self.path(&workspace.name);
         let bytes = record_bytes(workspace, &target)?;
@@ -206,16 +210,20 @@ impl Store {
     /// an archive record of its name that an older mxv left retiring
     /// without a workspace id, or that cannot be read: the update mints no
     /// id, so the archive and the record still read as one workspace, and
-    /// it raises the version only as far as the record's checkouts need.
+    /// it raises the version only as far as the record's checkouts need. A
+    /// workspace with a checkout that does not match its kind is refused
+    /// before anything changes, in memory or on disk.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::RecordMissing`] when no record of the name exists,
-    /// [`Error::StateChanged`] when the record on disk holds another state,
-    /// the errors of [`Store::read`] when the record on disk cannot be
-    /// read, [`Error::Unwritable`] when the record cannot be written, and
-    /// the errors of [`Workspace::ensure_id`].
+    /// Returns [`Error::MismatchedCheckout`] when a checkout does not match
+    /// the workspace's kind, [`Error::RecordMissing`] when no record of the
+    /// name exists, [`Error::StateChanged`] when the record on disk holds
+    /// another state, the errors of [`Store::read`] when the record on disk
+    /// cannot be read, [`Error::Unwritable`] when the record cannot be
+    /// written, and the errors of [`Workspace::ensure_id`].
     pub fn update(&self, workspace: &mut Workspace) -> Result<(), Error> {
+        workspace.check_checkouts()?;
         self.check_stored(workspace)?;
         if workspace.id.is_none() && self.mint_held(&workspace.name).is_some() {
             workspace.raise_version();
@@ -292,9 +300,11 @@ impl Store {
         self.move_to(workspace, to)
     }
 
-    /// Writes the record of `workspace` in the state `to`, once the record
-    /// on disk holds the state that `workspace` holds.
+    /// Writes the record of `workspace` in the state `to`, once its
+    /// checkouts match its kind and the record on disk holds the state that
+    /// `workspace` holds.
     fn move_to(&self, workspace: &mut Workspace, to: WorkspaceState) -> Result<(), Error> {
+        workspace.check_checkouts()?;
         self.check_stored(workspace)?;
         let from = workspace.state();
         workspace.set_state(to);

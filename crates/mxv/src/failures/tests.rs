@@ -175,3 +175,27 @@ fn a_workspace_without_an_id_beside_an_unreadable_archive_record_names_mxv_remov
     assert!(hint.contains("`mxv remove triage`"), "{hint}");
     assert!(!hint.contains("`mxv archive triage`"), "{hint}");
 }
+
+#[test]
+fn a_write_refused_for_a_mismatched_checkout_reads_as_a_defect_of_mxv_to_report() {
+    let failure = MxvFailure::from(multiverse::Error::MismatchedCheckout {
+        name: "triage".parse().unwrap(),
+        folder: "app".to_owned(),
+    });
+
+    let code = failure.code();
+    assert_eq!(code, &super::WORKSPACE_MISMATCHED_CHECKOUT);
+    assert_eq!(
+        (code.area(), code.reason()),
+        ("workspace", "mismatched_checkout")
+    );
+    assert_eq!(
+        failure.to_string(),
+        "the checkout app of the workspace triage does not match the workspace's kind, so mxv wrote nothing"
+    );
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    assert!(hint.contains("this is a defect of mxv"), "{hint}");
+    assert!(hint.contains("report it"), "{hint}");
+}

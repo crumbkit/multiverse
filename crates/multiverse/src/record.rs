@@ -341,15 +341,20 @@ impl fmt::Display for MismatchedCheckout {
     }
 }
 
+/// Returns the first of `checkouts` that is not made the way `kind` says,
+/// or `None` when every one is. Reading a record and writing one both run
+/// this check, so a record that the store wrote always reads back.
+fn mismatched(kind: WorkspaceKind, checkouts: &[Checkout]) -> Option<&Checkout> {
+    checkouts
+        .iter()
+        .find(|checkout| checkout.made.kind() != kind)
+}
+
 impl TryFrom<StoredWorkspace> for Workspace {
     type Error = MismatchedCheckout;
 
     fn try_from(stored: StoredWorkspace) -> Result<Self, Self::Error> {
-        if let Some(checkout) = stored
-            .checkouts
-            .iter()
-            .find(|checkout| checkout.made.kind() != stored.kind)
-        {
+        if let Some(checkout) = mismatched(stored.kind, &stored.checkouts) {
             return Err(MismatchedCheckout {
                 folder: checkout.name.clone(),
                 kind: stored.kind,
@@ -497,6 +502,24 @@ impl Workspace {
         }
         if self.checkouts.len() > 1 {
             self.version = self.version.max(MULTI_CHECKOUT_RECORD_VERSION);
+        }
+    }
+
+    /// Checks that every checkout is made the way the workspace's kind
+    /// says, as reading the record does, so the store writes no record
+    /// that it would then read as corrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MismatchedCheckout`] with the first checkout that
+    /// does not match.
+    pub(crate) fn check_checkouts(&self) -> Result<(), Error> {
+        match mismatched(self.kind, &self.checkouts) {
+            Some(checkout) => Err(Error::MismatchedCheckout {
+                name: self.name.clone(),
+                folder: checkout.name.clone(),
+            }),
+            None => Ok(()),
         }
     }
 

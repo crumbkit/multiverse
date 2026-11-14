@@ -955,3 +955,143 @@ fn a_worktree_record_whose_checkout_names_no_mirror_reads_and_writes_back_the_sa
     let again = format!("{}\n", serde_json::to_string_pretty(&read).unwrap());
     assert_eq!(again, text);
 }
+
+/// Returns the records of `name` whose checkout matches their kind: a
+/// workspace of clones whose checkout names its mirror, and a workspace of
+/// worktrees whose checkout names none.
+fn matching_kinds(name: &str) -> [Workspace; 2] {
+    [made(name), of_worktrees(made(name))]
+}
+
+/// Gives the checkout of `workspace` the other way of being made, so it no
+/// longer matches the workspace's kind: a checkout of a workspace of
+/// clones loses its mirror, and a checkout of a workspace of worktrees
+/// gains one.
+fn mismatch(workspace: &mut Workspace) {
+    for checkout in &mut workspace.checkouts {
+        checkout.made = match workspace.kind {
+            WorkspaceKind::Clone => Made::Worktree,
+            WorkspaceKind::Worktree => unmade_clone(),
+        };
+    }
+}
+
+/// Asserts that `refused` is the refusal of the checkout `app` of the
+/// workspace `app`.
+fn assert_mismatched<T: std::fmt::Debug>(refused: &Result<T, Error>) {
+    assert!(
+        matches!(
+            refused,
+            Err(Error::MismatchedCheckout { name, folder })
+                if name.as_str() == "app" && folder == "app"
+        ),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_store_refuses_to_create_a_record_whose_checkout_does_not_match_its_kind() {
+    for mut workspace in matching_kinds("app") {
+        mismatch(&mut workspace);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("workspaces"));
+        let mut held = workspace.clone();
+        let refused = store.create(&mut held);
+        assert_mismatched(&refused);
+        assert_eq!(held, workspace);
+        assert_eq!(held.id, None);
+        assert!(!store.dir().exists(), "{:?}", store.dir());
+    }
+}
+
+#[test]
+fn a_store_creates_a_record_whose_checkout_matches_its_kind() {
+    for workspace in matching_kinds("app") {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("workspaces"));
+        let mut held = workspace.clone();
+        assert_eq!(store.create(&mut held).unwrap(), Created::Written);
+        assert!(held.id.is_some());
+        assert_eq!(store.read(&held.name).unwrap(), Some(held));
+    }
+}
+
+#[test]
+fn a_store_refuses_to_update_a_record_whose_checkout_does_not_match_its_kind() {
+    for mut workspace in matching_kinds("app") {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        store.create(&mut workspace).unwrap();
+        let before = fs::read(store.path(&workspace.name)).unwrap();
+        let mut held = workspace.clone();
+        mismatch(&mut held);
+        held.id = None;
+        held.pinned = true;
+        let unchanged = held.clone();
+        let refused = store.update(&mut held);
+        assert_mismatched(&refused);
+        assert_eq!(held, unchanged);
+        assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+    }
+}
+
+#[test]
+fn a_store_updates_a_record_whose_checkout_matches_its_kind() {
+    for mut workspace in matching_kinds("app") {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        store.create(&mut workspace).unwrap();
+        workspace.pinned = true;
+        store.update(&mut workspace).unwrap();
+        assert_eq!(store.read(&workspace.name).unwrap(), Some(workspace));
+    }
+}
+
+#[test]
+fn a_store_refuses_to_advance_a_record_whose_checkout_does_not_match_its_kind() {
+    for mut workspace in matching_kinds("app") {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        store.create(&mut workspace).unwrap();
+        let before = fs::read(store.path(&workspace.name)).unwrap();
+        mismatch(&mut workspace);
+        let unchanged = workspace.clone();
+        let refused = store.advance(&mut workspace, WorkspaceState::Live);
+        assert_mismatched(&refused);
+        assert_eq!(workspace, unchanged);
+        assert_eq!(workspace.state(), WorkspaceState::Creating);
+        assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+    }
+}
+
+#[test]
+fn a_store_advances_a_record_whose_checkout_matches_its_kind() {
+    for mut workspace in matching_kinds("app") {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        store.create(&mut workspace).unwrap();
+        store.advance(&mut workspace, WorkspaceState::Live).unwrap();
+        assert_eq!(store.read(&workspace.name).unwrap(), Some(workspace));
+    }
+}
+
+#[test]
+fn a_store_refuses_to_repoint_a_record_whose_checkout_does_not_match_its_kind() {
+    for workspace in matching_kinds("app") {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("workspaces"));
+        let mut held = workspace;
+        store.create(&mut held).unwrap();
+        store.advance(&mut held, WorkspaceState::Live).unwrap();
+        let retiring = WorkspaceState::retiring(archive_id('a'));
+        store.advance(&mut held, retiring.clone()).unwrap();
+        let before = fs::read(store.path(&held.name)).unwrap();
+        mismatch(&mut held);
+        let unchanged = held.clone();
+        let refused = store.repoint(&mut held, &archive_id('c'));
+        assert_mismatched(&refused);
+        assert_eq!(held, unchanged);
+        assert_eq!(held.state(), retiring);
+        assert_eq!(fs::read(store.path(&held.name)).unwrap(), before);
+    }
+}

@@ -137,6 +137,10 @@ pub const WORKSPACE_STATE_CHANGED: Code = Code::new("mxv", "workspace", "state_c
 /// The code of a move between two workspace states that no workspace
 /// makes, which is a defect of mxv.
 pub const WORKSPACE_TRANSITION_REFUSED: Code = Code::new("mxv", "workspace", "transition_refused");
+/// The code of a record write that the store refused because a checkout is
+/// not made the way the workspace's kind says, which is a defect of mxv.
+pub const WORKSPACE_MISMATCHED_CHECKOUT: Code =
+    Code::new("mxv", "workspace", "mismatched_checkout");
 /// The code of a workspace without a stable id beside an archive record of
 /// its name that an older mxv did not finish, or that cannot be read, so
 /// mxv cannot name its containers.
@@ -525,6 +529,7 @@ pub(crate) const CODES: &[&Code] = &[
     &WORKSPACE_CREATING,
     &WORKSPACE_STATE_CHANGED,
     &WORKSPACE_TRANSITION_REFUSED,
+    &WORKSPACE_MISMATCHED_CHECKOUT,
     &WORKSPACE_ARCHIVE_UNFINISHED,
     &REPAIR_NAMES_TAKEN,
     &REPAIR_CHANGED,
@@ -657,6 +662,7 @@ impl Failure for MxvFailure {
                 Error::Busy { .. } => &WORKSPACE_BUSY,
                 Error::StateChanged { .. } => &WORKSPACE_STATE_CHANGED,
                 Error::TransitionRefused { .. } => &WORKSPACE_TRANSITION_REFUSED,
+                Error::MismatchedCheckout { .. } => &WORKSPACE_MISMATCHED_CHECKOUT,
                 Error::ArchiveUnfinished { .. } => &WORKSPACE_ARCHIVE_UNFINISHED,
                 Error::DatedNamesTaken { .. } => &REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => &MIRROR_LOCKED,
@@ -1098,7 +1104,7 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::StateChanged { .. } => Recovery::hint(
             "another mxv command changed the workspace meanwhile; run the command again",
         ),
-        Error::TransitionRefused { .. } => Recovery::hint(
+        Error::TransitionRefused { .. } | Error::MismatchedCheckout { .. } => Recovery::hint(
             "this is a defect of mxv, and no command should reach it; report it with the command that you ran",
         ),
         Error::ArchiveUnfinished {
@@ -1160,6 +1166,10 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("name", name.as_str()),
             Field::new("from", from.to_string()),
             Field::new("to", to.to_string()),
+        ],
+        Error::MismatchedCheckout { name, folder } => vec![
+            Field::new("name", name.as_str()),
+            Field::new("folder", folder),
         ],
         Error::DatedNamesTaken { name, last } => {
             vec![Field::new("name", name.as_str()), Field::new("last", last)]

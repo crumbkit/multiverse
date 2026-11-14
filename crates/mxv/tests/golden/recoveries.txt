@@ -239,6 +239,7 @@ codes that no start provokes:
   mxv::workspace::creating: Only a workspace whose `mxv new` stopped before its last write provokes it, and the fixture's workspace is live; tests/processes.rs, tests/multirepo.rs and tests/archive.rs provoke it with a record that says `creating`.
   mxv::workspace::state_changed: Only a command whose record changes state between its read and its write provokes it, and no test runs two commands at that moment; the library's store tests provoke it.
   mxv::workspace::transition_refused: No command asks the store for a move that no workspace makes; the library's store tests provoke it.
+  mxv::workspace::mismatched_checkout: No command builds a record whose checkout does not match its kind; the library's store tests provoke it.
   mxv::workspace::archive_unfinished: Only a live checkout whose record has no stable id, beside an archive record of its name that an older mxv left retiring without one or that cannot be read, provokes it; tests/processes.rs provokes it.
 
 codes whose recoveries the check did not follow, because no declared code spells them: 0

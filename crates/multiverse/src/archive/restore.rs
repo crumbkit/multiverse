@@ -16,7 +16,7 @@ use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::runs::Runs;
 use crate::store::Created;
 use crate::workspaces::{
-    CloneStart, Entry, Made, Mode, Workspaces, default_branch, delete_directory,
+    CloneStart, Entry, MadeSoFar, Mode, Workspaces, default_branch, delete_directory,
 };
 
 /// What a restore may do beyond rebuilding from local state.
@@ -433,9 +433,9 @@ impl<B: Backend> Workspaces<B> {
         // The record is written last, once every checkout is in place, so
         // it is written live.
         let mut workspace = archive.workspace().finished();
-        let mut made = Made {
+        let mut made = MadeSoFar {
             record_not_ours: true,
-            ..Made::default()
+            ..MadeSoFar::default()
         };
         let mut put_back = Vec::new();
         let mut lost = Vec::new();
@@ -488,7 +488,7 @@ impl<B: Backend> Workspaces<B> {
 
     /// Deletes what a failed restore made, as `made` records it, and the
     /// root files that it wrote back.
-    fn unmake(&self, archive: &Archive, workspace: &Workspace, made: &Made) {
+    fn unmake(&self, archive: &Archive, workspace: &Workspace, made: &MadeSoFar) {
         if made.directory {
             let _ = root::delete_entries(&archive.root, &archive.path);
         }
@@ -679,7 +679,7 @@ impl<B: Backend> Workspaces<B> {
         archive: &Archive,
         force: bool,
         workspace: &mut Workspace,
-        made: &mut Made,
+        made: &mut MadeSoFar,
         put_back: &mut Vec<PutBack>,
         lost: &mut Vec<String>,
         runs: &Runs,
@@ -772,7 +772,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         checkout: &mut Checkout,
         archived: &ArchivedCheckout,
-        made: &mut Made,
+        made: &mut MadeSoFar,
     ) -> Result<(), Error> {
         // A clone starts with its mirror's path as a placeholder origin
         // when the archived clone had none, and loses it below.
@@ -804,7 +804,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         checkout: &mut Checkout,
         archived: &ArchivedCheckout,
-        made: &mut Made,
+        made: &mut MadeSoFar,
     ) -> Result<(), Error> {
         // A restore that stopped partway leaves the repository listing a
         // worktree whose directory the person deleted, and git refuses to
@@ -850,7 +850,7 @@ impl<B: Backend> Workspaces<B> {
         kind: WorkspaceKind,
         checkout: &Checkout,
         kept: &Kept,
-        made: &mut Made,
+        made: &mut MadeSoFar,
     ) -> Result<PutBack, Error> {
         let path = &checkout.path;
         let mut put_back = PutBack {

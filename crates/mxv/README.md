@@ -1265,7 +1265,12 @@ workspace with a reason. `status`, `show`, `down`, `logs` and `remove`
 keep working, and `mxv remove` and `mxv remove --force` remove it. A
 command that writes the record fails with `mxv::workspace::state_changed`
 when another command changed the record's state after this one read it,
-and writes nothing; running it again reads the new state.
+and writes nothing; running it again reads the new state. mxv also writes
+no record whose checkout is not made the way the workspace's kind says,
+such as a clone without a mirror, because it would read that record as
+corrupt. The write fails with `mxv::workspace::mismatched_checkout` and
+writes nothing. No command builds such a record, so the code reports a
+defect of mxv.
 
 A record that an older mxv wrote may hold no stable id, and mxv gives it
 one on its next write. When an older mxv also left an archive of the name

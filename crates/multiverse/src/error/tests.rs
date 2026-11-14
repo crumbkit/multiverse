@@ -214,3 +214,15 @@ fn an_ssh_refusal_prints_the_host_and_the_line_ssh_gave() {
         "ssh refused to fetch ssh://git@example.invalid/acme/app.git, because example.invalid has a key that the known hosts file does not hold: Host key verification failed."
     );
 }
+
+#[test]
+fn a_mismatched_checkout_names_its_folder_and_its_workspace_and_says_mxv_wrote_nothing() {
+    let error = Error::MismatchedCheckout {
+        name: "triage".parse().unwrap(),
+        folder: "app".to_owned(),
+    };
+    assert_eq!(
+        error.to_string(),
+        "the checkout app of the workspace triage does not match the workspace's kind, so mxv wrote nothing"
+    );
+}
