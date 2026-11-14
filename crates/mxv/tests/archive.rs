@@ -206,6 +206,139 @@ impl Setup {
 }
 
 #[test]
+fn an_archive_leaves_the_lock_file_and_deletes_the_run_directory() {
+    let setup = Setup::new();
+    let state = setup.root().join("state/mxv");
+    write(&state.join("runs/triage/.touched"), "");
+    setup.archive();
+    assert!(state.join("locks/triage.lock").is_file());
+    assert!(!state.join("runs/triage").exists());
+}
+
+/// Returns 16 hex digits of the 64-bit FNV-1a hash of `text`, which phase
+/// puts in the name of each docker volume of the workspace whose stable id
+/// is `text`.
+fn volume_hash(text: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = text.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    });
+    format!("{hash:016x}")
+}
+
+/// Waits until `path` exists, and fails when `finished` reports first
+/// that the command which should create it has ended.
+fn wait_for_file(path: &Path, finished: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    while !path.exists() {
+        assert!(!finished(), "the command ended before {}", path.display());
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn a_second_archive_during_an_archives_volume_deletion_fails_busy_and_then_has_nothing_to_do() {
+    let setup = Setup::new();
+    let root = setup.root();
+    let state = root.join("state/mxv");
+    let record: Value =
+        serde_json::from_str(&fs::read_to_string(state.join("workspaces/triage.json")).unwrap())
+            .unwrap();
+    let id = record["id"].as_str().unwrap().to_owned();
+    let volume = format!("phase-{}.data", volume_hash(&id));
+    let labels = serde_json::json!({
+        "mxv.volume": "data",
+        "mxv.workspace-id": id,
+        "mxv.run-record": state.join(format!("phase/runs/{id}.json")).display().to_string(),
+    });
+    // The note says that a container of the workspace ran, so the archive
+    // asks docker for its volumes.
+    write(&state.join("runs/triage/.containers"), "");
+    let calls = root.join("docker-calls");
+    let blocked = root.join("docker-blocked");
+    let release = root.join("docker-release");
+    let bin = root.join("fake-bin");
+    write(
+        &bin.join("docker"),
+        &format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{calls}'\n\
+             case \"$1 $2\" in\n\
+             'volume ls') echo '{volume}' ;;\n\
+             'volume inspect') echo '{labels}' ;;\n\
+             'container ls') ;;\n\
+             'volume rm')\n\
+             : > '{blocked}'\n\
+             while [ ! -e '{release}' ]; do sleep 0.1; done\n\
+             echo '{volume}' ;;\n\
+             *) echo 'the fake docker has no answer' >&2; exit 1 ;;\n\
+             esac\n",
+            calls = calls.display(),
+            blocked = blocked.display(),
+            release = release.display(),
+        ),
+    );
+    let made = Command::new("chmod")
+        .args(["+x", &bin.join("docker").display().to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let path = format!("{}:{PATH}", bin.display());
+    let archive = |args: &[&str]| {
+        let command = setup.command(&root).env("PATH", &path);
+        Setup::finished(command, args)
+    };
+    let first_args = ["archive", "-w", "triage", "--yes", "--delete-volumes"];
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| archive(&first_args));
+        wait_for_file(&blocked, || first.is_finished());
+        // The first archive has deleted the run directory and blocks in
+        // `docker volume rm` while it holds the lock.
+        assert!(!state.join("runs/triage").exists());
+        let second = archive(&["archive", "-w", "triage", "--yes"]);
+        write(&release, "");
+        (first.join().unwrap(), second)
+    });
+    let (exit, document) = second;
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::busy", "{document}");
+    let (exit, document) = first;
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+    assert_eq!(
+        document["data"]["volumes"][0],
+        volume.as_str(),
+        "{document}"
+    );
+    let called = fs::read_to_string(&calls).unwrap();
+    let verbs: Vec<String> = called
+        .lines()
+        .map(|line| line.split(' ').take(2).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(
+        verbs,
+        [
+            "volume ls",
+            "volume inspect",
+            "container ls",
+            "volume inspect",
+            "volume rm"
+        ],
+        "{called}"
+    );
+    let (exit, document) = archive(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+}
+
+#[test]
 fn archive_then_restore_brings_back_the_commit_and_the_branch() {
     let setup = Setup::new();
     let commit = setup.commit_locally();

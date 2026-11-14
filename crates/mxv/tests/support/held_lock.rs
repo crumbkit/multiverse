@@ -23,8 +23,8 @@ pub(crate) fn delete_record_while_locked<T: Send>(
     name: &str,
     command: impl FnOnce() -> T + Send,
 ) -> T {
-    let runs = state.join("runs").join(name);
-    fs::create_dir_all(&runs).unwrap();
+    let locks = state.join("locks");
+    fs::create_dir_all(&locks).unwrap();
     #[expect(
         clippy::disallowed_methods,
         reason = "the test fixture opens the lock file that mxv takes for the workspace"
@@ -32,7 +32,7 @@ pub(crate) fn delete_record_while_locked<T: Send>(
     let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(runs.join(".lock"))
+        .open(locks.join(format!("{name}.lock")))
         .unwrap();
     #[expect(
         clippy::disallowed_methods,

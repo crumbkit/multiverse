@@ -442,9 +442,17 @@ const RUNS_DIR: &str = "runs";
 /// is never read as a run record.
 const TOUCHED_FILE: &str = ".touched";
 
-/// The lock file in a workspace's run directory, which [`Runs::lock`]
-/// takes.
-const LOCK_FILE: &str = ".lock";
+/// The lock file in a workspace's run directory that an mxv before the
+/// directory [`LOCKS_DIR`] took. This mxv never opens it, and
+/// [`Runs::forget`] deletes it with the run directory.
+const LEGACY_LOCK_FILE: &str = ".lock";
+
+/// The directory under mxv's state directory that holds the lock file
+/// `<name>.lock` of each workspace, which [`Runs::lock`] takes. No code
+/// deletes, renames or truncates this directory or a file in it, so a
+/// command that deletes a workspace's run directory while it holds the
+/// lock still holds it, and a second command waits on the same file.
+const LOCKS_DIR: &str = "locks";
 
 /// The directory under mxv's state directory that phase keeps its own state
 /// in. Phase keeps each workspace's run record at
@@ -475,6 +483,8 @@ impl Drop for Toucher {
 pub struct Runs {
     /// The directory that holds one directory for each workspace.
     dir: PathBuf,
+    /// The directory that holds one lock file for each workspace.
+    locks: PathBuf,
     /// The phase whose state directory is `<mxv state>/phase`.
     phase: Phase,
     /// How long [`Runs::down`] waits after SIGTERM.
@@ -499,12 +509,13 @@ impl Runs {
     /// Returns the run files under mxv's state directory `state`, such as
     /// `~/.local/state/mxv`, which stop processes with a grace of
     /// [`STOP_GRACE`] and allocate ports from [`DEFAULT_PORT_RANGE`]. The
-    /// run files live in `<state>/runs`, and phase keeps its state in
-    /// `<state>/phase`.
+    /// run files live in `<state>/runs`, the workspace locks in
+    /// `<state>/locks`, and phase keeps its state in `<state>/phase`.
     #[must_use]
     pub fn new(state: &Path) -> Self {
         Self {
             dir: state.join(RUNS_DIR),
+            locks: state.join(LOCKS_DIR),
             phase: Phase::new(state.join(PHASE_DIR)),
             grace: STOP_GRACE,
             port_range: DEFAULT_PORT_RANGE,
@@ -595,8 +606,14 @@ impl Runs {
     /// Takes the lock of the workspace `name`, which [`Runs::up`] and
     /// [`Runs::down`] require, so two commands never start or stop one
     /// workspace's app at once. The lock is an exclusive `flock` on
-    /// `<runs>/<name>/.lock`, and it is released when the returned
-    /// [`Lock`] drops.
+    /// `<state>/locks/<name>.lock`, and it is released when the returned
+    /// [`Lock`] drops. Locking creates nothing under `<state>/runs`.
+    ///
+    /// The lock file lies outside the workspace's run directory, which
+    /// [`Runs::forget`] deletes, so the lock stays held through that
+    /// deletion. No code deletes, renames or truncates a file under
+    /// `<state>/locks`; a change that does would let two commands hold
+    /// the lock of one name together.
     ///
     /// # Errors
     ///
@@ -604,7 +621,8 @@ impl Runs {
     /// longer than the lock wait, which is [`LOCK_WAIT`] by default, and
     /// [`Error::Unwritable`] when the lock file cannot be opened.
     pub fn lock(&self, name: &WorkspaceName) -> Result<Lock, Error> {
-        store::lock(&self.workspace_dir(name).join(LOCK_FILE), self.lock_wait)
+        let path = self.locks.join(format!("{name}.lock"));
+        store::lock(&path, self.lock_wait)
     }
 
     /// Records that an mxv command named the workspace `name` now, as the

@@ -102,6 +102,46 @@ fn a_second_lock_of_a_workspace_fails_with_busy_while_the_first_is_held() {
 }
 
 #[test]
+fn a_lock_stays_held_after_forget_deletes_the_run_directory() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let runs = setup.runs().with_lock_wait(Duration::from_millis(100));
+    runs.touch(&workspace.name).unwrap();
+    let held = runs.lock(&workspace.name).unwrap();
+    runs.forget(&workspace.name, None).unwrap();
+    assert!(!runs.workspace_dir(&workspace.name).exists());
+    // The second lock is asked for after the deletion and before the
+    // first lock is released.
+    let second = runs.lock(&workspace.name);
+    assert!(matches!(second, Err(Error::Busy { .. })), "{second:?}");
+    drop(held);
+    assert!(runs.lock(&workspace.name).is_ok());
+}
+
+#[test]
+fn the_lock_file_of_a_workspace_lies_outside_its_run_directory() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let runs = setup.runs();
+    let held = runs.lock(&workspace.name).unwrap();
+    assert!(setup.dir.path().join("locks/triage.lock").is_file());
+    assert!(!runs.workspace_dir(&workspace.name).exists());
+    drop(held);
+}
+
+#[test]
+fn remember_containers_writes_its_note_after_forget_deleted_the_run_directory() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let runs = setup.runs();
+    runs.touch(&workspace.name).unwrap();
+    runs.forget(&workspace.name, None).unwrap();
+    assert!(!runs.workspace_dir(&workspace.name).exists());
+    runs.remember_containers(&workspace.name).unwrap();
+    assert!(runs.containers_ran(&workspace.name));
+}
+
+#[test]
 fn the_run_files_sit_in_the_runs_directory_of_mxvs_state_directory() {
     let state = Path::new("/state/mxv");
     let name: WorkspaceName = "triage".parse().unwrap();

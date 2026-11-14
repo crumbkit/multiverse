@@ -857,10 +857,9 @@ impl Runs {
             .iter()
             .any(|app| app.runner == RunnerKind::Container);
         if containers {
-            store::replace_file(
-                &self.workspace_dir(&workspace.name).join(CONTAINERS_RAN),
-                b"",
-            )?;
+            // The lock no longer creates the run directory, so the note's
+            // write creates it.
+            self.remember_containers(&workspace.name)?;
         }
         let ready_wait: Duration = order
             .iter()
@@ -1357,10 +1356,12 @@ impl Runs {
 
     /// Forgets the stable id `id` of the workspace `name`, as `forget_id`
     /// does without deleting volumes, and then deletes every run file of
-    /// the workspace, whatever other files it holds. It returns the
-    /// sentences that say why phase kept its run record, which is empty
-    /// when phase removed it. The workspace's volumes stay;
-    /// [`Runs::delete_volumes`] deletes them.
+    /// the workspace, whatever other files it holds, an older lock file
+    /// included. It returns the sentences that say why phase kept its run
+    /// record, which is empty when phase removed it. The workspace's
+    /// volumes stay; [`Runs::delete_volumes`] deletes them. The lock file
+    /// of [`Runs::lock`] lies outside the run directory and stays, so a
+    /// caller that holds the lock still holds it afterwards.
     ///
     /// # Errors
     ///
@@ -1475,10 +1476,11 @@ impl Runs {
     }
 
     /// Returns each directory of run files, `<runs>/<name>`, whose name is
-    /// a workspace's name and that holds more than the workspace's lock,
-    /// in name order. A command that takes the lock of a name that has no
-    /// workspace, such as `mxv archive`, leaves the lock file, which holds
-    /// nothing, so a directory with only that file is left out.
+    /// a workspace's name and that holds more than an older lock file, in
+    /// name order. An mxv that locked `<runs>/<name>/.lock`, before the
+    /// lock moved to `<state>/locks`, left that file, which holds nothing,
+    /// in the run directory of a name that has no workspace, such as one
+    /// it archived, so a directory with only that file is left out.
     ///
     /// # Errors
     ///
@@ -1494,7 +1496,7 @@ impl Runs {
             }
             let more = store::entries(&entry.path)?
                 .iter()
-                .any(|file| file.name != super::LOCK_FILE);
+                .any(|file| file.name != super::LEGACY_LOCK_FILE);
             if more {
                 found.push((name, entry.path));
             }
@@ -1569,8 +1571,10 @@ impl Runs {
         self.workspace_dir(name).join(CONTAINERS_RAN).exists()
     }
 
-    /// Notes that containers of the workspace `name` have run, for a
-    /// workspace that a restore rebuilt, so its volumes count again.
+    /// Notes that containers of the workspace `name` have run, for an `up`
+    /// that starts a container app and for a workspace that a restore
+    /// rebuilt, so its volumes count. It creates the run directory when it
+    /// is missing.
     ///
     /// # Errors
     ///
