@@ -95,7 +95,7 @@ pub use crate::run_failures::{
 /// --archived`, which the tests pass to crumbkit-test's codes, recovery and
 /// twin checks beside [`CODES`].
 #[doc(hidden)]
-pub const ARCHIVE_CODES: &[&Code] = archive::CODES;
+pub const ARCHIVE_CODES: &[&Code] = archive::ArchiveFailure::CODES;
 
 /// Every failure code of the workspace verbs, which the tests pass to
 /// crumbkit-test's codes, recovery and twin checks.
@@ -113,11 +113,11 @@ pub const PROXY_CODES: &[&Code] = proxy::CODES;
 #[doc(hidden)]
 pub const RUN_CODES: &[&Code] = run_failures::CODES;
 
-/// Every failure code of `mxv exec` that the other process verbs do not
-/// have, which the tests pass to crumbkit-test's codes, recovery and twin
-/// checks beside [`RUN_CODES`].
+/// Every failure code of the failures that only `mxv exec` has, and the
+/// usage code of its refusal of `--json`, which the tests can pass to
+/// crumbkit-test's codes, recovery and twin checks beside [`RUN_CODES`].
 #[doc(hidden)]
-pub const EXEC_CODES: &[&Code] = exec::CODES;
+pub const EXEC_CODES: &[&Code] = exec::ExecFailure::CODES;
 
 /// Parses `args`, runs the command with the variables of `environment` and
 /// returns the process's exit code. The first argument is the program's

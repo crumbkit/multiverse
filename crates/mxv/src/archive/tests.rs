@@ -1,7 +1,5 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crumbkit::Code;
 use multiverse::phase::host::TableEntry;
 
 use super::failure::{Finisher, Holder};
@@ -281,15 +279,4 @@ fn archive_failures_give_the_code_exit_recovery_and_fields_recorded_from_their_h
     let text: String = cases.map(|case| rendered(&case)).collect();
 
     assert_eq!(text, ARCHIVE_FAILURES, "\n{text}");
-}
-
-// This test lives for one commit. It shows that the derived list holds the
-// codes of the hand-written list before that list is deleted.
-#[test]
-fn the_derived_archive_codes_are_the_codes_of_the_hand_written_list() {
-    let derived: HashSet<&Code> = ArchiveFailure::CODES.iter().copied().collect();
-    let listed: HashSet<&Code> = super::CODES.iter().copied().collect();
-
-    assert_eq!(derived, listed);
-    assert_eq!(ArchiveFailure::CODES.len(), super::CODES.len());
 }

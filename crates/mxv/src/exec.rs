@@ -40,13 +40,6 @@ pub const EXEC_UNSTARTABLE: Code = Code::new("mxv", "exec", "unstartable");
 /// output or error is a terminal.
 pub const EXEC_SANDBOXED_TERMINAL: Code = Code::new("mxv", "exec", "sandboxed_terminal");
 
-/// Every code that an [`ExecFailure`] returns.
-pub(crate) const CODES: &[&Code] = &[
-    &PROCESS_NOT_RUNNING,
-    &EXEC_UNSTARTABLE,
-    &EXEC_SANDBOXED_TERMINAL,
-];
-
 /// Why `--json` and `--fields` are refused, which ends each refusal's
 /// message.
 const TEXT_ONLY: &str = "mxv exec hands the terminal to the command";

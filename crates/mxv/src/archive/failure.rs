@@ -64,33 +64,6 @@ pub const RESTORE_MIRROR_MISSING: Code = Code::new("mxv", "restore", "mirror_mis
 /// holds.
 pub const RESTORE_IGNORED_TAKEN: Code = Code::new("mxv", "restore", "ignored_taken");
 
-/// Every failure code of this module.
-pub(crate) const CODES: &[&Code] = &[
-    &ARCHIVE_NOT_FOUND,
-    &ARCHIVE_NAME_TAKEN,
-    &ARCHIVE_SOURCE_CHANGED,
-    &ARCHIVE_MIRROR_MISSING,
-    &ARCHIVE_UNKEEPABLE,
-    &ARCHIVE_IN_USE,
-    &ARCHIVE_CHECKOUT_UNUSABLE,
-    &ARCHIVE_UNFINISHED,
-    &ARCHIVE_PINS_GONE,
-    &ARCHIVE_WORKSPACE_REMOVED,
-    &ARCHIVE_RENAME_UNFINISHED,
-    &ARCHIVE_MANIFEST_DISPOSABLE,
-    &ARCHIVE_RECORD_TOO_LARGE,
-    &ARCHIVE_VOLUMES_IN_USE,
-    &RESTORE_NOT_FOUND,
-    &RESTORE_NAME_TAKEN,
-    &RESTORE_BRANCH_MOVED,
-    &RESTORE_COMMIT_MISSING,
-    &RESTORE_UNFINISHED,
-    &RESTORE_ROOT_FILE_CHANGED,
-    &RESTORE_IGNORED_DAMAGED,
-    &RESTORE_IGNORED_TAKEN,
-    &RESTORE_MIRROR_MISSING,
-];
-
 /// How far the archive that holds a name got, which decides what a
 /// refusal of the name names as the way out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
