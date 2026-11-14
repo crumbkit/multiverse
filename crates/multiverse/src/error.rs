@@ -131,6 +131,18 @@ pub enum Error {
         /// The state that the caller asked for.
         to: crate::record::WorkspaceState,
     },
+    /// [`crate::Store::create`], [`crate::Store::update`],
+    /// [`crate::Store::advance`] or [`crate::Store::repoint`] was given a
+    /// workspace whose checkout is not made the way its kind says: a clone
+    /// without a mirror, or a worktree with one. It wrote nothing, because
+    /// the store reads such a record as corrupt. No command builds one, so
+    /// this is a defect of mxv.
+    MismatchedCheckout {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The folder of the first checkout that does not match.
+        folder: String,
+    },
     /// The workspace's record holds no stable id, and the archive record of
     /// its name is an unfinished archive of an older multiverse without
     /// one, or cannot be read, so mxv gives the workspace no id and cannot
@@ -599,6 +611,10 @@ impl fmt::Display for Error {
                 formatter,
                 "mxv cannot move the workspace {name} from {from} to {to}, so it wrote nothing"
             ),
+            Self::MismatchedCheckout { name, folder } => write!(
+                formatter,
+                "the checkout {folder} of the workspace {name} does not match the workspace's kind, so mxv wrote nothing"
+            ),
             Self::ArchiveUnfinished {
                 name,
                 readable: true,
@@ -871,6 +887,7 @@ impl std::error::Error for Error {
             | Self::RecordMissing { .. }
             | Self::StateChanged { .. }
             | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
             | Self::ArchiveUnfinished { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }

@@ -816,7 +816,7 @@ pub(crate) fn default_branch(base: &str) -> String {
 /// What a run of [`Workspaces::make`] created, so that
 /// [`Workspaces::undo`] deletes that and nothing else.
 #[derive(Debug, Default)]
-pub(crate) struct Made {
+pub(crate) struct MadeSoFar {
     /// Whether the run created the workspace's directory.
     pub(crate) directory: bool,
     /// One entry for each worktree that the run started, in the record's
@@ -1282,7 +1282,7 @@ impl<B: Backend> Workspaces<B> {
                 NewOutcome::NameTaken,
             ));
         }
-        let mut made = Made::default();
+        let mut made = MadeSoFar::default();
         match self.make(root, &mut workspace, manifest, &mut made) {
             Ok(Making::Done) => Ok(NewOutcome::Created(workspace)),
             Ok(Making::BranchTaken { repository, branch }) => {
@@ -1352,7 +1352,7 @@ impl<B: Backend> Workspaces<B> {
                 NewOutcome::NameTaken,
             ));
         }
-        let mut made = Made::default();
+        let mut made = MadeSoFar::default();
         match self.make_clones(root, &mut workspace, &urls, manifest, &mut made) {
             Ok(Ok(())) => Ok(NewOutcome::Created(workspace)),
             Ok(Err(refused)) => {
@@ -1745,7 +1745,7 @@ impl<B: Backend> Workspaces<B> {
         workspace: &mut Workspace,
         urls: &[String],
         manifest: Option<&str>,
-        made: &mut Made,
+        made: &mut MadeSoFar,
     ) -> Result<Result<(), ManifestError>, Error> {
         let unwritable = |path: &Path| {
             let path = path.to_path_buf();
@@ -1774,7 +1774,11 @@ impl<B: Backend> Workspaces<B> {
     /// Writes the marker `.deadband-workspace` in the directory of
     /// `workspace`, which the run made, and notes it in `made`, so
     /// [`Workspaces::undo`] deletes it with the directory.
-    pub(crate) fn write_marker(&self, workspace: &Workspace, made: &mut Made) -> Result<(), Error> {
+    pub(crate) fn write_marker(
+        &self,
+        workspace: &Workspace,
+        made: &mut MadeSoFar,
+    ) -> Result<(), Error> {
         made.marker = true;
         crate::marker::ensure(&workspace.path)?;
         (self.checkpoint)("marker")
@@ -1954,7 +1958,7 @@ impl<B: Backend> Workspaces<B> {
         root: &Path,
         workspace: &mut Workspace,
         manifest: Option<&str>,
-        made: &mut Made,
+        made: &mut MadeSoFar,
     ) -> Result<Making, Error> {
         let unwritable = |path: &Path| {
             let path = path.to_path_buf();
@@ -1995,7 +1999,7 @@ impl<B: Backend> Workspaces<B> {
     /// Each step is best effort, because the caller reports the failure
     /// that stopped the creation. The record is deleted only when every
     /// step succeeded, so `mxv remove` can finish a cleanup that failed.
-    pub(crate) fn undo(&self, workspace: &Workspace, made: &Made) {
+    pub(crate) fn undo(&self, workspace: &Workspace, made: &MadeSoFar) {
         let mut clean = true;
         for (repository, reference) in &made.refs {
             clean &= self
@@ -2560,7 +2564,7 @@ fn ports_after_add(
 fn write_manifest(
     workspace: &Workspace,
     manifest: Option<&str>,
-    made: &mut Made,
+    made: &mut MadeSoFar,
 ) -> Result<(), Error> {
     if let Some(text) = manifest {
         made.manifest = true;

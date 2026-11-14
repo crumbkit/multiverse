@@ -32,6 +32,13 @@ workspace may need to act on.
   before an upgrade or a rollback. `runs/<name>/.lock` files that an older
   mxv left are never opened, and the next archive or removal of the name
   deletes them.
+- `Store::create`, `Store::update`, `Store::advance` and `Store::repoint`
+  refuse a workspace whose checkout is not made the way its kind says, a
+  clone without a mirror or a worktree with one, with the new error
+  `MismatchedCheckout`, and change nothing in memory or on disk. Before,
+  the store wrote such a record, and the next read refused it as corrupt.
+  mxv reports the error as `mxv::workspace::mismatched_checkout`, a defect
+  of mxv to report. No command builds such a record.
 - A workspace's record stores its state: `creating` from the first write
   of `mxv new` until its last write, then `live`. `mxv restore` writes
   `live`. A record without a state, which an older mxv wrote, reads as
