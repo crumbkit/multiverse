@@ -1145,7 +1145,7 @@ fn library_recovery(error: &Error) -> Recovery {
         } => Recovery::hint(format!(
             "read why the archive record of {name} cannot be read in `mxv list --archived`, then move it aside by hand or run `mxv remove {name}`"
         )),
-        _ => Recovery::hint("run the command again"),
+        _ => Recovery::Retry,
     }
 }
 
