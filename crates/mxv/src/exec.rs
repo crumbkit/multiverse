@@ -18,7 +18,7 @@ use std::process::{ExitCode, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crumbkit::{Call, Code, Failure, Field, Recovery, Run, Sink};
+use crumbkit::{Call, Code, Failure, Recovery, Run, Sink};
 use multiverse::phase::Cancel;
 use multiverse::{Exec, ExecEnd, ExecTarget, TaskEnd, TaskHome, TaskServices, TaskStart};
 
@@ -52,10 +52,19 @@ pub(crate) const CODES: &[&Code] = &[
 const TEXT_ONLY: &str = "mxv exec hands the terminal to the command";
 
 /// A failure of `mxv exec` that the other process verbs do not have.
-#[derive(Debug)]
+#[derive(Debug, Failure)]
 pub(crate) enum ExecFailure {
     /// The process or container does not run, so no command runs in its
     /// context.
+    #[failure(
+        code = PROCESS_NOT_RUNNING,
+        recovery = Recovery::Run(
+            Call::new(&["up"])
+                .value("workspace", workspace)
+                .value("processes", process)
+        ),
+        field(workspace = workspace, process = process)
+    )]
     NotRunning {
         /// The workspace's name.
         workspace: String,
@@ -63,6 +72,11 @@ pub(crate) enum ExecFailure {
         process: String,
     },
     /// The command could not start in the process's context.
+    #[failure(
+        code = EXEC_UNSTARTABLE,
+        hint = "check that the command's program exists on the PATH of {process}, or give its full path, and run the command again",
+        field(workspace = workspace, process = process, reason = reason)
+    )]
     Unstartable {
         /// The workspace's name.
         workspace: String,
@@ -72,6 +86,11 @@ pub(crate) enum ExecFailure {
         reason: String,
     },
     /// The command, which names no unit, could not start in the workspace.
+    #[failure(
+        code = EXEC_UNSTARTABLE,
+        hint = "check that the command's program exists on the PATH that mxv gives it, or give its full path, and run the command again",
+        field(workspace = workspace, reason = reason)
+    )]
     UnstartableInWorkspace {
         /// The workspace's name.
         workspace: String,
@@ -80,6 +99,11 @@ pub(crate) enum ExecFailure {
     },
     /// The process runs under the sandbox, and the command's standard
     /// input, output or error is a terminal.
+    #[failure(
+        code = EXEC_SANDBOXED_TERMINAL,
+        hint = "run the command with no terminal on its standard input, output and error, such as `mxv exec -w {workspace} {process} -- COMMAND </dev/null 2>&1 | cat`, or run it in the context of a process whose manifest gives it no permissions table",
+        field(workspace = workspace, process = process)
+    )]
     SandboxedTerminal {
         /// The workspace's name.
         workspace: String,
@@ -88,64 +112,12 @@ pub(crate) enum ExecFailure {
     },
     /// The caller passed `--json`, and the command's output is the
     /// command's own.
+    #[failure(
+        code = crumbkit::codes::CLI_USAGE,
+        hint = "run the command without --json to read its output",
+        field(argument = "--json")
+    )]
     JsonRefused,
-}
-
-impl Failure for ExecFailure {
-    fn code(&self) -> &'static Code {
-        match self {
-            Self::NotRunning { .. } => &PROCESS_NOT_RUNNING,
-            Self::Unstartable { .. } | Self::UnstartableInWorkspace { .. } => &EXEC_UNSTARTABLE,
-            Self::SandboxedTerminal { .. } => &EXEC_SANDBOXED_TERMINAL,
-            Self::JsonRefused => &crumbkit::codes::CLI_USAGE,
-        }
-    }
-
-    fn recovery(&self) -> Recovery {
-        match self {
-            Self::NotRunning { workspace, process } => Recovery::Run(
-                Call::new(&["up"])
-                    .value("workspace", workspace)
-                    .value("processes", process),
-            ),
-            Self::Unstartable { process, .. } => Recovery::hint(format!(
-                "check that the command's program exists on the PATH of {process}, or give its full path, and run the command again"
-            )),
-            Self::UnstartableInWorkspace { .. } => Recovery::hint(
-                "check that the command's program exists on the PATH that mxv gives it, or give its full path, and run the command again",
-            ),
-            Self::SandboxedTerminal { workspace, process } => Recovery::hint(format!(
-                "run the command with no terminal on its standard input, output and error, such as `mxv exec -w {workspace} {process} -- COMMAND </dev/null 2>&1 | cat`, or run it in the context of a process whose manifest gives it no permissions table"
-            )),
-            Self::JsonRefused => {
-                Recovery::hint("run the command without --json to read its output")
-            }
-        }
-    }
-
-    fn fields(&self) -> Vec<Field<'_>> {
-        match self {
-            Self::NotRunning { workspace, process }
-            | Self::SandboxedTerminal { workspace, process } => vec![
-                Field::new("workspace", workspace),
-                Field::new("process", process),
-            ],
-            Self::Unstartable {
-                workspace,
-                process,
-                reason,
-            } => vec![
-                Field::new("workspace", workspace),
-                Field::new("process", process),
-                Field::new("reason", reason),
-            ],
-            Self::UnstartableInWorkspace { workspace, reason } => vec![
-                Field::new("workspace", workspace),
-                Field::new("reason", reason),
-            ],
-            Self::JsonRefused => vec![Field::new("argument", "--json")],
-        }
-    }
 }
 
 impl fmt::Display for ExecFailure {

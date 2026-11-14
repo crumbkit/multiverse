@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus};
 
-use crumbkit::{Call, Code, Document, Failure, Field, FieldValue, Recovery, Row, Run, Sink};
+use crumbkit::{Call, Document, Failure, FieldValue, Recovery, Row, Run, Sink};
 use multiverse::{MiseListing, MiseTaskName, Task, TaskEnd, TaskHome, TaskName, TaskServices};
 use multiverse::{Store, TaskStart, Workspace};
 use schemars::JsonSchema;
@@ -37,9 +37,18 @@ pub(crate) const RUN: Document<Vec<TaskRow>> = Document::new(
 .when_empty("the workspace's manifests declare no task, and mise lists none");
 
 /// A failure of `mxv run` to choose its task.
-#[derive(Debug)]
+#[derive(Debug, Failure)]
 pub(crate) enum TaskFailure {
     /// The workspace has no task with the name.
+    #[failure(
+        code = TASK_UNKNOWN,
+        recovery = Recovery::Run(Call::new(&["run"]).value("workspace", workspace)),
+        field(
+            workspace = workspace,
+            task = task,
+            names = FieldValue::list(names.iter())
+        )
+    )]
     Unknown {
         /// The workspace's name.
         workspace: String,
@@ -52,6 +61,18 @@ pub(crate) enum TaskFailure {
         mise_unasked: bool,
     },
     /// Several checkouts hold a task with the name.
+    #[failure(
+        code = TASK_AMBIGUOUS,
+        recovery = Recovery::hint(format!(
+            "choose a checkout with --repo, such as `mxv run -w {workspace} --repo {} {task}`",
+            checkouts.first().map_or("CHECKOUT", String::as_str)
+        )),
+        field(
+            workspace = workspace,
+            task = task,
+            checkouts = FieldValue::list(checkouts.iter())
+        )
+    )]
     Ambiguous {
         /// The workspace's name.
         workspace: String,
@@ -61,61 +82,12 @@ pub(crate) enum TaskFailure {
         checkouts: Vec<String>,
     },
     /// The caller passed `--json`, and a task's output is the task's own.
+    #[failure(
+        code = crumbkit::codes::CLI_USAGE,
+        hint = "run the command without --json to read the task's output",
+        field(argument = "--json")
+    )]
     JsonRefused,
-}
-
-impl Failure for TaskFailure {
-    fn code(&self) -> &'static Code {
-        match self {
-            Self::Unknown { .. } => &TASK_UNKNOWN,
-            Self::Ambiguous { .. } => &TASK_AMBIGUOUS,
-            Self::JsonRefused => &crumbkit::codes::CLI_USAGE,
-        }
-    }
-
-    fn recovery(&self) -> Recovery {
-        match self {
-            Self::Unknown { workspace, .. } => {
-                Recovery::Run(Call::new(&["run"]).value("workspace", workspace))
-            }
-            Self::Ambiguous {
-                workspace,
-                task,
-                checkouts,
-            } => Recovery::hint(format!(
-                "choose a checkout with --repo, such as `mxv run -w {workspace} --repo {} {task}`",
-                checkouts.first().map_or("CHECKOUT", String::as_str)
-            )),
-            Self::JsonRefused => {
-                Recovery::hint("run the command without --json to read the task's output")
-            }
-        }
-    }
-
-    fn fields(&self) -> Vec<Field<'_>> {
-        match self {
-            Self::Unknown {
-                workspace,
-                task,
-                names,
-                ..
-            } => vec![
-                Field::new("workspace", workspace),
-                Field::new("task", task),
-                Field::new("names", FieldValue::list(names.iter())),
-            ],
-            Self::Ambiguous {
-                workspace,
-                task,
-                checkouts,
-            } => vec![
-                Field::new("workspace", workspace),
-                Field::new("task", task),
-                Field::new("checkouts", FieldValue::list(checkouts.iter())),
-            ],
-            Self::JsonRefused => vec![Field::new("argument", "--json")],
-        }
-    }
 }
 
 impl fmt::Display for TaskFailure {

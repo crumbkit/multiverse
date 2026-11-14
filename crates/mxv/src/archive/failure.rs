@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
+use crumbkit::{Call, Code, Failure, FieldValue, Recovery};
 use multiverse::{
     ArchiveRefusal, ArchiveState, FileStatus, MirrorLoss, Operation, RestoreRefusal, Unkept,
     UnkeptKind, WorkspaceName,
@@ -133,14 +133,24 @@ pub(crate) enum Finisher {
 }
 
 /// Why an archive or a restore stopped.
-#[derive(Debug)]
+#[derive(Debug, Failure)]
 pub(crate) enum ArchiveFailure {
     /// No workspace or archive has the name.
+    #[failure(
+        code = ARCHIVE_NOT_FOUND,
+        recovery = Recovery::Run(Call::new(&["list"])),
+        field(name = name)
+    )]
     NotFound {
         /// The name.
         name: String,
     },
     /// An archive holds the name.
+    #[failure(
+        code = ARCHIVE_NAME_TAKEN,
+        recovery = name_taken(name, *holder),
+        field(name = name)
+    )]
     NameTaken {
         /// The name.
         name: String,
@@ -148,6 +158,15 @@ pub(crate) enum ArchiveFailure {
         holder: Holder,
     },
     /// A checkout differs from what the archive admitted.
+    #[failure(
+        code = ARCHIVE_SOURCE_CHANGED,
+        hint = "look at what changed, then run `mxv archive -w {name}` again to finish the archive",
+        field(
+            name = name,
+            folder = folder,
+            differences = FieldValue::list(differences.iter())
+        )
+    )]
     SourceChanged {
         /// The workspace's name.
         name: String,
@@ -158,6 +177,11 @@ pub(crate) enum ArchiveFailure {
     },
     /// The mirrors of an archive's clones are gone, and the restore may not
     /// fetch.
+    #[failure(
+        code = RESTORE_MIRROR_MISSING,
+        hint = "`mxv restore {name} --from-origin` fetches origin again and restores only what origin holds, and `mxv remove --archived {name}` deletes the archive",
+        field(name = name, mirrors = mirrors(checkouts), lost = lost(checkouts))
+    )]
     RestoreMirrorMissing {
         /// The archive's name.
         name: String,
@@ -165,6 +189,11 @@ pub(crate) enum ArchiveFailure {
         checkouts: Vec<MirrorLoss>,
     },
     /// A clone's mirror is gone.
+    #[failure(
+        code = ARCHIVE_MIRROR_MISSING,
+        hint = "run `mxv new` for the same repository, which clones the mirror again, then archive the workspace again",
+        field(folder = folder, mirror = mirror)
+    )]
     MirrorMissing {
         /// The checkout's folder.
         folder: String,
@@ -172,6 +201,11 @@ pub(crate) enum ArchiveFailure {
         mirror: String,
     },
     /// The workspace holds work that the archive cannot keep.
+    #[failure(
+        code = ARCHIVE_UNKEEPABLE,
+        hint = "Everything else in the workspace would be kept. `mxv archive -w {name} --force` archives it and loses only the items above.",
+        field(name = name, items = FieldValue::list(items.iter().map(item_line)))
+    )]
     Unkeepable {
         /// The workspace's name.
         name: String,
@@ -179,6 +213,11 @@ pub(crate) enum ArchiveFailure {
         items: Vec<Unkept>,
     },
     /// A process outside phase works in the workspace.
+    #[failure(
+        code = ARCHIVE_IN_USE,
+        hint = "stop that process or move it out of the workspace, then run `mxv archive -w {name}` again",
+        field(name = name, reason = reason)
+    )]
     InUse {
         /// The workspace's name.
         name: String,
@@ -186,6 +225,11 @@ pub(crate) enum ArchiveFailure {
         reason: String,
     },
     /// A checkout cannot be read.
+    #[failure(
+        code = ARCHIVE_CHECKOUT_UNUSABLE,
+        hint = "repair the checkout with git or `mxv add`, then archive the workspace again",
+        field(folder = folder, reason = reason)
+    )]
     Unusable {
         /// The checkout's folder.
         folder: String,
@@ -193,6 +237,11 @@ pub(crate) enum ArchiveFailure {
         reason: String,
     },
     /// The archive has not finished.
+    #[failure(
+        code = ARCHIVE_UNFINISHED,
+        recovery = unfinished(name, *finisher),
+        field(name = name)
+    )]
     Unfinished {
         /// The name.
         name: String,
@@ -201,18 +250,33 @@ pub(crate) enum ArchiveFailure {
     },
     /// The archive has not finished, and the pin of no checkout names its
     /// commit any more.
+    #[failure(
+        code = ARCHIVE_PINS_GONE,
+        hint = "run `mxv repair {name}`, which moves the archive aside so that it no longer claims a restore brings the workspace back",
+        field(name = name)
+    )]
     PinsGone {
         /// The name.
         name: String,
     },
     /// The archive stopped before it retired every checkout, and its
     /// workspace was removed.
+    #[failure(
+        code = ARCHIVE_WORKSPACE_REMOVED,
+        hint = "run `mxv repair {name}`, which moves the archive aside, because nothing says that it holds every checkout",
+        field(name = name)
+    )]
     WorkspaceRemoved {
         /// The name.
         name: String,
     },
     /// A repair started to move the archive to a dated name and did not
     /// finish, so another record holds the same archive.
+    #[failure(
+        code = ARCHIVE_RENAME_UNFINISHED,
+        hint = "run `mxv repair {name}`, which finishes the move and then the archive",
+        field(name = name, other = other)
+    )]
     RenameUnfinished {
         /// The name.
         name: String,
@@ -221,6 +285,11 @@ pub(crate) enum ArchiveFailure {
     },
     /// `--yes` with paths that only a repository's `mxv.toml` declares
     /// disposable.
+    #[failure(
+        code = ARCHIVE_MANIFEST_DISPOSABLE,
+        hint = "run `mxv archive -w {name}` without --yes and answer the prompt, or pass --force",
+        field(name = name, paths = FieldValue::list(paths.iter()))
+    )]
     ManifestDisposable {
         /// The workspace's name.
         name: String,
@@ -228,6 +297,11 @@ pub(crate) enum ArchiveFailure {
         paths: Vec<String>,
     },
     /// The record would be larger than a record may be.
+    #[failure(
+        code = ARCHIVE_RECORD_TOO_LARGE,
+        hint = "move or delete some of the extra files in the workspace's directory, then archive again",
+        field(name = name, bytes = bytes.to_string(), most = most.to_string())
+    )]
     RecordTooLarge {
         /// The workspace's name.
         name: String,
@@ -237,6 +311,11 @@ pub(crate) enum ArchiveFailure {
         most: u64,
     },
     /// A live workspace has the stable id of the archive's volumes.
+    #[failure(
+        code = ARCHIVE_VOLUMES_IN_USE,
+        hint = "run `mxv remove --archived {name}` without --delete-volumes, because the volumes belong to the workspace {workspace}",
+        field(name = name, workspace = workspace)
+    )]
     VolumesInUse {
         /// The archive's name.
         name: String,
@@ -244,11 +323,21 @@ pub(crate) enum ArchiveFailure {
         workspace: String,
     },
     /// No archive has the name.
+    #[failure(
+        code = RESTORE_NOT_FOUND,
+        recovery = Recovery::Run(Call::new(&["list"])),
+        field(name = name)
+    )]
     RestoreNotFound {
         /// The name.
         name: String,
     },
     /// The archive has not finished.
+    #[failure(
+        code = RESTORE_UNFINISHED,
+        recovery = unfinished(name, *finisher),
+        field(name = name)
+    )]
     RestoreUnfinished {
         /// The name.
         name: String,
@@ -256,6 +345,11 @@ pub(crate) enum ArchiveFailure {
         finisher: Finisher,
     },
     /// Something holds the name or the directory.
+    #[failure(
+        code = RESTORE_NAME_TAKEN,
+        recovery = restore_name_taken(name, path, *record),
+        field(name = name, path = path)
+    )]
     RestoreNameTaken {
         /// The name.
         name: String,
@@ -265,6 +359,17 @@ pub(crate) enum ArchiveFailure {
         record: bool,
     },
     /// A worktree's branch moved.
+    #[failure(
+        code = RESTORE_BRANCH_MOVED,
+        hint = "point the branch back with `git branch --force {branch} {pinned}`, or rename it, then restore again",
+        field(
+            name = name,
+            folder = folder,
+            branch = branch,
+            pinned = pinned,
+            tip = tip
+        )
+    )]
     BranchMoved {
         /// The archive's name.
         name: String,
@@ -278,6 +383,11 @@ pub(crate) enum ArchiveFailure {
         tip: String,
     },
     /// The archived commit is gone.
+    #[failure(
+        code = RESTORE_COMMIT_MISSING,
+        hint = "`mxv remove --archived {name}` deletes the archive, because nothing can rebuild this checkout",
+        field(name = name, folder = folder, commit = commit)
+    )]
     CommitMissing {
         /// The archive's name.
         name: String,
@@ -287,6 +397,11 @@ pub(crate) enum ArchiveFailure {
         commit: String,
     },
     /// A file of the archive changed.
+    #[failure(
+        code = RESTORE_ROOT_FILE_CHANGED,
+        hint = "put the file back, or run `mxv remove --archived {name}` to delete the archive",
+        field(name = name, path = path)
+    )]
     RootFileChanged {
         /// The archive's name.
         name: String,
@@ -295,6 +410,11 @@ pub(crate) enum ArchiveFailure {
     },
     /// The archive's copy of an ignored file is missing or differs from
     /// its digest.
+    #[failure(
+        code = RESTORE_IGNORED_DAMAGED,
+        hint = "`mxv restore {name} --force` restores the workspace without these files and lists them as lost",
+        field(name = name, paths = FieldValue::list(paths.iter()))
+    )]
     IgnoredDamaged {
         /// The archive's name.
         name: String,
@@ -303,6 +423,11 @@ pub(crate) enum ArchiveFailure {
     },
     /// The rebuilt workspace already holds something at an ignored file's
     /// path.
+    #[failure(
+        code = RESTORE_IGNORED_TAKEN,
+        hint = "look at what wrote these paths, then restore again",
+        field(name = name, paths = FieldValue::list(paths.iter()))
+    )]
     IgnoredTaken {
         /// The archive's name.
         name: String,
@@ -408,238 +533,62 @@ pub(super) fn restore_refusal(
     }
 }
 
-impl Failure for ArchiveFailure {
-    fn code(&self) -> &'static Code {
-        match self {
-            Self::NotFound { .. } => &ARCHIVE_NOT_FOUND,
-            Self::NameTaken { .. } => &ARCHIVE_NAME_TAKEN,
-            Self::SourceChanged { .. } => &ARCHIVE_SOURCE_CHANGED,
-            Self::MirrorMissing { .. } => &ARCHIVE_MIRROR_MISSING,
-            Self::Unkeepable { .. } => &ARCHIVE_UNKEEPABLE,
-            Self::InUse { .. } => &ARCHIVE_IN_USE,
-            Self::Unusable { .. } => &ARCHIVE_CHECKOUT_UNUSABLE,
-            Self::Unfinished { .. } => &ARCHIVE_UNFINISHED,
-            Self::PinsGone { .. } => &ARCHIVE_PINS_GONE,
-            Self::WorkspaceRemoved { .. } => &ARCHIVE_WORKSPACE_REMOVED,
-            Self::RenameUnfinished { .. } => &ARCHIVE_RENAME_UNFINISHED,
-            Self::ManifestDisposable { .. } => &ARCHIVE_MANIFEST_DISPOSABLE,
-            Self::RecordTooLarge { .. } => &ARCHIVE_RECORD_TOO_LARGE,
-            Self::VolumesInUse { .. } => &ARCHIVE_VOLUMES_IN_USE,
-            Self::RestoreNotFound { .. } => &RESTORE_NOT_FOUND,
-            Self::RestoreUnfinished { .. } => &RESTORE_UNFINISHED,
-            Self::RestoreNameTaken { .. } => &RESTORE_NAME_TAKEN,
-            Self::BranchMoved { .. } => &RESTORE_BRANCH_MOVED,
-            Self::CommitMissing { .. } => &RESTORE_COMMIT_MISSING,
-            Self::RootFileChanged { .. } => &RESTORE_ROOT_FILE_CHANGED,
-            Self::IgnoredDamaged { .. } => &RESTORE_IGNORED_DAMAGED,
-            Self::IgnoredTaken { .. } => &RESTORE_IGNORED_TAKEN,
-            Self::RestoreMirrorMissing { .. } => &RESTORE_MIRROR_MISSING,
-        }
-    }
+/// Returns the recovery of the name `name`, which an archive that got as
+/// far as `holder` holds.
+fn name_taken(name: &str, holder: Holder) -> Recovery {
+    Recovery::hint(match holder {
+        Holder::Retired => format!(
+            "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv repair {name}`, which finishes the earlier archive under a dated name, or moves it aside when one of its pins is gone, then archive {name} again"
+        ),
+        Holder::Retiring => format!(
+            "an earlier archive of {name} stopped before it retired every checkout and a newer workspace holds the name; run `mxv repair {name}`, which moves the earlier archive aside, then archive {name} again"
+        ),
+        Holder::Archived => format!(
+            "run `mxv restore {name}` to bring the archive back, or `mxv remove --archived {name}` to delete it"
+        ),
+    })
+}
 
-    fn recovery(&self) -> Recovery {
-        match self {
-            Self::NotFound { .. } | Self::RestoreNotFound { .. } => {
-                Recovery::Run(Call::new(&["list"]))
-            }
-            Self::NameTaken {
-                name,
-                holder: Holder::Retired,
-            } => Recovery::hint(format!(
-                "an earlier archive of {name} has not finished and a newer workspace holds the name; run `mxv repair {name}`, which finishes the earlier archive under a dated name, or moves it aside when one of its pins is gone, then archive {name} again"
-            )),
-            Self::NameTaken {
-                name,
-                holder: Holder::Retiring,
-            } => Recovery::hint(format!(
-                "an earlier archive of {name} stopped before it retired every checkout and a newer workspace holds the name; run `mxv repair {name}`, which moves the earlier archive aside, then archive {name} again"
-            )),
-            Self::NameTaken {
-                name,
-                holder: Holder::Archived,
-            } => Recovery::hint(format!(
-                "run `mxv restore {name}` to bring the archive back, or `mxv remove --archived {name}` to delete it"
-            )),
-            Self::SourceChanged { name, .. } => Recovery::hint(format!(
-                "look at what changed, then run `mxv archive -w {name}` again to finish the archive"
-            )),
-            Self::MirrorMissing { .. } => Recovery::hint(
-                "run `mxv new` for the same repository, which clones the mirror again, then archive the workspace again",
-            ),
-            Self::Unkeepable { name, .. } => Recovery::hint(format!(
-                "Everything else in the workspace would be kept. `mxv archive -w {name} --force` archives it and loses only the items above."
-            )),
-            Self::InUse { name, .. } => Recovery::hint(format!(
-                "stop that process or move it out of the workspace, then run `mxv archive -w {name}` again"
-            )),
-            Self::Unusable { .. } => Recovery::hint(
-                "repair the checkout with git or `mxv add`, then archive the workspace again",
-            ),
-            Self::Unfinished {
-                name,
-                finisher: Finisher::Archive,
-            }
-            | Self::RestoreUnfinished {
-                name,
-                finisher: Finisher::Archive,
-            } => Recovery::hint(format!(
-                "run `mxv archive -w {name}`, which finishes the archive"
-            )),
-            Self::Unfinished {
-                name,
-                finisher: Finisher::Repair,
-            }
-            | Self::RestoreUnfinished {
-                name,
-                finisher: Finisher::Repair,
-            } => Recovery::hint(format!(
-                "run `mxv repair {name}`, which moves the archive aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says"
-            )),
-            Self::RenameUnfinished { name, .. } => Recovery::hint(format!(
-                "run `mxv repair {name}`, which finishes the move and then the archive"
-            )),
-            Self::PinsGone { name } => Recovery::hint(format!(
-                "run `mxv repair {name}`, which moves the archive aside so that it no longer claims a restore brings the workspace back"
-            )),
-            Self::WorkspaceRemoved { name } => Recovery::hint(format!(
-                "run `mxv repair {name}`, which moves the archive aside, because nothing says that it holds every checkout"
-            )),
-            Self::ManifestDisposable { name, .. } => Recovery::hint(format!(
-                "run `mxv archive -w {name}` without --yes and answer the prompt, or pass --force"
-            )),
-            Self::RecordTooLarge { .. } => Recovery::hint(
-                "move or delete some of the extra files in the workspace's directory, then archive again",
-            ),
-            Self::VolumesInUse { name, workspace } => Recovery::hint(format!(
-                "run `mxv remove --archived {name}` without --delete-volumes, because the volumes belong to the workspace {workspace}"
-            )),
-            Self::RestoreNameTaken { name, path, record } => {
-                if *record {
-                    Recovery::hint(format!(
-                        "run `mxv remove {name}` first, which keeps the archive, and then restore again; `mxv remove --archived {name}` deletes the archive instead, with any files that only it still holds"
-                    ))
-                } else {
-                    Recovery::hint(format!("move or delete {path}, then restore again"))
-                }
-            }
-            Self::BranchMoved { branch, pinned, .. } => Recovery::hint(format!(
-                "point the branch back with `git branch --force {branch} {pinned}`, or rename it, then restore again"
-            )),
-            Self::CommitMissing { name, .. } => Recovery::hint(format!(
-                "`mxv remove --archived {name}` deletes the archive, because nothing can rebuild this checkout"
-            )),
-            Self::RootFileChanged { name, .. } => Recovery::hint(format!(
-                "put the file back, or run `mxv remove --archived {name}` to delete the archive"
-            )),
-            Self::IgnoredDamaged { name, .. } => Recovery::hint(format!(
-                "`mxv restore {name} --force` restores the workspace without these files and lists them as lost"
-            )),
-            Self::IgnoredTaken { .. } => {
-                Recovery::hint("look at what wrote these paths, then restore again")
-            }
-            Self::RestoreMirrorMissing { name, .. } => Recovery::hint(format!(
-                "`mxv restore {name} --from-origin` fetches origin again and restores only what origin holds, and `mxv remove --archived {name}` deletes the archive"
-            )),
-        }
-    }
+/// Returns the recovery of the unfinished archive `name`, which `finisher`
+/// finishes.
+fn unfinished(name: &str, finisher: Finisher) -> Recovery {
+    Recovery::hint(match finisher {
+        Finisher::Archive => format!("run `mxv archive -w {name}`, which finishes the archive"),
+        Finisher::Repair => format!(
+            "run `mxv repair {name}`, which moves the archive aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says"
+        ),
+    })
+}
 
-    fn fields(&self) -> Vec<Field<'_>> {
-        match self {
-            Self::NotFound { name }
-            | Self::NameTaken { name, .. }
-            | Self::Unfinished { name, .. }
-            | Self::PinsGone { name }
-            | Self::WorkspaceRemoved { name }
-            | Self::RestoreNotFound { name }
-            | Self::RestoreUnfinished { name, .. } => vec![Field::new("name", name)],
-            Self::SourceChanged {
-                name,
-                folder,
-                differences,
-            } => vec![
-                Field::new("name", name),
-                Field::new("folder", folder),
-                Field::new("differences", FieldValue::list(differences.iter())),
-            ],
-            Self::MirrorMissing { folder, mirror } => {
-                vec![Field::new("folder", folder), Field::new("mirror", mirror)]
-            }
-            Self::Unkeepable { name, items } => vec![
-                Field::new("name", name),
-                Field::new("items", FieldValue::list(items.iter().map(item_line))),
-            ],
-            Self::InUse { name, reason } => {
-                vec![Field::new("name", name), Field::new("reason", reason)]
-            }
-            Self::Unusable { folder, reason } => {
-                vec![Field::new("folder", folder), Field::new("reason", reason)]
-            }
-            Self::ManifestDisposable { name, paths }
-            | Self::IgnoredDamaged { name, paths }
-            | Self::IgnoredTaken { name, paths } => vec![
-                Field::new("name", name),
-                Field::new("paths", FieldValue::list(paths.iter())),
-            ],
-            Self::RecordTooLarge { name, bytes, most } => vec![
-                Field::new("name", name),
-                Field::new("bytes", bytes.to_string()),
-                Field::new("most", most.to_string()),
-            ],
-            Self::VolumesInUse { name, workspace } => {
-                vec![Field::new("name", name), Field::new("workspace", workspace)]
-            }
-            Self::RestoreNameTaken { name, path, .. } => {
-                vec![Field::new("name", name), Field::new("path", path)]
-            }
-            Self::RenameUnfinished { name, other } => {
-                vec![Field::new("name", name), Field::new("other", other)]
-            }
-            Self::BranchMoved {
-                name,
-                folder,
-                branch,
-                pinned,
-                tip,
-            } => vec![
-                Field::new("name", name),
-                Field::new("folder", folder),
-                Field::new("branch", branch),
-                Field::new("pinned", pinned),
-                Field::new("tip", tip),
-            ],
-            Self::CommitMissing {
-                name,
-                folder,
-                commit,
-            } => vec![
-                Field::new("name", name),
-                Field::new("folder", folder),
-                Field::new("commit", commit),
-            ],
-            Self::RootFileChanged { name, path } => {
-                vec![Field::new("name", name), Field::new("path", path)]
-            }
-            Self::RestoreMirrorMissing { name, checkouts } => vec![
-                Field::new("name", name),
-                Field::new(
-                    "mirrors",
-                    FieldValue::list(
-                        checkouts
-                            .iter()
-                            .map(|loss| loss.mirror.display().to_string()),
-                    ),
-                ),
-                Field::new(
-                    "lost",
-                    FieldValue::list(checkouts.iter().flat_map(|loss| {
-                        loss.items
-                            .iter()
-                            .map(|item| format!("{}: {item}", loss.folder))
-                    })),
-                ),
-            ],
-        }
-    }
+/// Returns the recovery of a restore of `name` whose name a workspace
+/// record holds, when `record` is true, or whose directory `path` exists.
+fn restore_name_taken(name: &str, path: &str, record: bool) -> Recovery {
+    Recovery::hint(if record {
+        format!(
+            "run `mxv remove {name}` first, which keeps the archive, and then restore again; `mxv remove --archived {name}` deletes the archive instead, with any files that only it still holds"
+        )
+    } else {
+        format!("move or delete {path}, then restore again")
+    })
+}
+
+/// Returns the mirror of each checkout in `checkouts`.
+fn mirrors(checkouts: &[MirrorLoss]) -> FieldValue<'static> {
+    FieldValue::list(
+        checkouts
+            .iter()
+            .map(|loss| loss.mirror.display().to_string()),
+    )
+}
+
+/// Returns each thing that only the lost mirror of a checkout in
+/// `checkouts` held, after the checkout's folder.
+fn lost(checkouts: &[MirrorLoss]) -> FieldValue<'static> {
+    FieldValue::list(checkouts.iter().flat_map(|loss| {
+        loss.items
+            .iter()
+            .map(|item| format!("{}: {item}", loss.folder))
+    }))
 }
 
 impl fmt::Display for ArchiveFailure {
