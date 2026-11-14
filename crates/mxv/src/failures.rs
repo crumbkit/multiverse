@@ -10,6 +10,32 @@ use multiverse::{Allow, BadName, Error, SshRefusal};
 #[cfg(test)]
 mod tests;
 
+/// Returns what `failure` gives its caller: its code and exit code on the
+/// first line, then its recovery, each alternative and each field on a line
+/// of its own. A table test compares this text for every variant of a
+/// failure type with the text that an earlier impl gave.
+#[cfg(test)]
+pub(crate) fn rendered(failure: &dyn Failure) -> String {
+    use std::fmt::Write as _;
+
+    let code = failure.code();
+    let mut text = format!(
+        "{}::{}::{} exits {}\n  recovery {:?}\n",
+        code.component(),
+        code.area(),
+        code.reason(),
+        crate::TOOL.failure_exit(code),
+        failure.recovery(),
+    );
+    for alternative in failure.alternatives() {
+        writeln!(text, "  alternative {alternative:?}").unwrap();
+    }
+    for field in failure.fields() {
+        writeln!(text, "  field {} = {:?}", field.name(), field.value()).unwrap();
+    }
+    text
+}
+
 /// The code of a name that no workspace has.
 pub const WORKSPACE_NOT_FOUND: Code = Code::new("mxv", "workspace", "not_found");
 /// The code of a new workspace whose name another workspace has.

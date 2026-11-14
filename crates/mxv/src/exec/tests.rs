@@ -13,6 +13,7 @@ use super::{
     exit_number, place_of,
 };
 use crate::cli::{Cli, ExecArgs, Verb};
+use crate::failures::rendered;
 
 /// Parses `words` after `mxv` and returns the arguments of `exec`.
 fn parsed(words: &[&str]) -> Result<ExecArgs, clap::Error> {
@@ -335,4 +336,56 @@ fn a_current_directory_that_cannot_be_read_counts_as_outside_the_workspace() {
     let gone = workspace.join("app/gone");
     assert_eq!(place_of(&homes, &workspace, Some(&gone)).root, workspace);
     assert_eq!(place_of(&homes, &workspace, None).root, workspace);
+}
+
+/// What each case of the test below gave when `ExecFailure` had a
+/// hand-written `Failure` impl, recorded from that impl.
+const EXEC_FAILURES: &str = r#"mxv::process::not_running exits 1
+  recovery Run(Call { target: Command { path: ["up"], args: [Value { id: "workspace", value: "triage" }, Value { id: "processes", value: "web" }] }, slot: None })
+  field workspace = Text("triage")
+  field process = Text("web")
+mxv::exec::unstartable exits 1
+  recovery Hint("check that the command's program exists on the PATH of web, or give its full path, and run the command again")
+  field workspace = Text("triage")
+  field process = Text("web")
+  field reason = Text("no such file or directory")
+mxv::exec::unstartable exits 1
+  recovery Hint("check that the command's program exists on the PATH that mxv gives it, or give its full path, and run the command again")
+  field workspace = Text("triage")
+  field reason = Text("no such file or directory")
+mxv::exec::sandboxed_terminal exits 1
+  recovery Hint("run the command with no terminal on its standard input, output and error, such as `mxv exec -w triage web -- COMMAND </dev/null 2>&1 | cat`, or run it in the context of a process whose manifest gives it no permissions table")
+  field workspace = Text("triage")
+  field process = Text("web")
+crumbkit::cli::usage exits 2
+  recovery Hint("run the command without --json to read its output")
+  field argument = Text("--json")
+"#;
+
+#[test]
+fn exec_failures_give_the_code_exit_recovery_and_fields_recorded_from_their_hand_written_impl() {
+    let cases = [
+        ExecFailure::NotRunning {
+            workspace: "triage".to_owned(),
+            process: "web".to_owned(),
+        },
+        ExecFailure::Unstartable {
+            workspace: "triage".to_owned(),
+            process: "web".to_owned(),
+            reason: "no such file or directory".to_owned(),
+        },
+        ExecFailure::UnstartableInWorkspace {
+            workspace: "triage".to_owned(),
+            reason: "no such file or directory".to_owned(),
+        },
+        ExecFailure::SandboxedTerminal {
+            workspace: "triage".to_owned(),
+            process: "web".to_owned(),
+        },
+        ExecFailure::JsonRefused,
+    ];
+
+    let text: String = cases.iter().map(|case| rendered(case)).collect();
+
+    assert_eq!(text, EXEC_FAILURES, "\n{text}");
 }
