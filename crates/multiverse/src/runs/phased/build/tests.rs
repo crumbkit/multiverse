@@ -17,7 +17,7 @@ use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
 use crate::runs::{Granting, Runs};
 use crate::store::{Created, Store};
-use crate::testing::write;
+use crate::testing::{unmade_clone, write};
 
 /// What a [`Recording`] admission saw.
 #[derive(Default)]
@@ -144,6 +144,7 @@ impl World {
             path.join("app"),
             name.to_string(),
             "origin/main".to_owned(),
+            unmade_clone(),
         );
         let mut workspace = Workspace::new(name, path, vec![checkout]);
         let store = Store::new(dir.path().join("workspaces"));

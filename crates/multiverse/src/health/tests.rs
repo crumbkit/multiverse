@@ -14,7 +14,7 @@ use crate::git::Git;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::Records;
-use crate::testing::{fixture, git};
+use crate::testing::{fixture, git, unmade_clone};
 
 /// Classifies `records` and `archives`, reading pins through git.
 fn classify(records: &Records, archives: &ArchiveRecords) -> Health {
@@ -72,6 +72,7 @@ pub(super) fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) 
                 checkout,
                 text.to_owned(),
                 "refs/remotes/origin/main".to_owned(),
+                unmade_clone(),
             )
         })
         .collect();

@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use crate::archive::ArchiveId;
 use crate::git::Git;
 use crate::name::WorkspaceName;
-use crate::record::{MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceState};
+use crate::record::{MULTI_CHECKOUT_RECORD_VERSION, Made, Workspace, WorkspaceState};
 use crate::store::Store;
 use crate::testing::{Fixture, fixture_named, git, write};
 use crate::workspaces::{
@@ -520,7 +520,10 @@ fn stopped_add(setup: &Setup) -> PathBuf {
     planned.source.clone_from(&setup.web.clone);
     planned.path = setup.root.join("triage/web");
     planned.commit = None;
-    planned.mirror = None;
+    let url = setup.web.origin.display().to_string();
+    let origin = crate::mirror::Origin::parse(&url, &setup.web.clone).unwrap();
+    let mirrors = setup.state.parent().unwrap().join("mirrors");
+    planned.made = Made::clone_of(mirrors.join(origin.key));
     workspace.checkouts.push(planned);
     setup.workspaces.store.update(&mut workspace).unwrap();
     setup.root.join("triage/web")

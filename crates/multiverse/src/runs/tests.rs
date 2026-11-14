@@ -1,6 +1,6 @@
 use std::fs;
 
-use crate::testing::write;
+use crate::testing::{unmade_clone, write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,6 +42,7 @@ impl Setup {
             path.join("app"),
             name.to_string(),
             "origin/main".to_owned(),
+            unmade_clone(),
         );
         let mut workspace = Workspace::new(name, path, vec![checkout]);
         assert_eq!(

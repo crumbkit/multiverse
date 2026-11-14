@@ -48,7 +48,7 @@ pub use failure::{
     RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING,
     RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
 };
-use failure::{refused, restore_refusal};
+use failure::{Finisher, refused, restore_refusal};
 
 /// The document that `mxv archive` prints.
 pub(crate) const ARCHIVE: Document<Prose<ArchiveResult>> = Document::new(
@@ -1402,7 +1402,9 @@ fn restored_already(
                 // Another run deleted the archive after the question.
                 RestorePlanned::Unchanged { stale: None } => None,
                 RestorePlanned::Refused(refusal) => {
-                    return Err(restore_refusal(name, refusal).into());
+                    return Err(
+                        restore_refusal(name, refusal, || finisher(environment, name)).into(),
+                    );
                 }
                 RestorePlanned::Unchanged { .. } | RestorePlanned::Ready(_) => {
                     return Err(MxvFailure::RestoreChanged {
@@ -1465,7 +1467,9 @@ pub(crate) fn restore(
                 stale,
             );
         }
-        RestorePlanned::Refused(refusal) => return Err(restore_refusal(&name, refusal).into()),
+        RestorePlanned::Refused(refusal) => {
+            return Err(restore_refusal(&name, refusal, || finisher(environment, &name)).into());
+        }
     };
     let store = multiverse::Store::new(environment.records()?);
     if output.is_dry_run() {
@@ -1511,7 +1515,9 @@ pub(crate) fn restore(
         .map_err(MxvFailure::from)?
     {
         RestoreOutcome::Restored(restored) => *restored,
-        RestoreOutcome::Refused(refusal) => return Err(restore_refusal(&name, refusal).into()),
+        RestoreOutcome::Refused(refusal) => {
+            return Err(restore_refusal(&name, refusal, || finisher(environment, &name)).into());
+        }
     };
     if let Some(workspace) = store.read(&name).map_err(MxvFailure::from)? {
         crate::proxy::sync(
@@ -1657,6 +1663,30 @@ pub(crate) fn list(
     ))
 }
 
+/// Returns the command that finishes the unfinished archive `name`: `mxv
+/// repair` when `mxv list --archived` names it as the archive's repair,
+/// such as for an archive whose workspace was removed before it retired
+/// every checkout, and `mxv archive -w` otherwise. A record that cannot
+/// be read while it decides gives `mxv archive -w`, which then names what
+/// is wrong with it.
+fn finisher(environment: &Environment, name: &WorkspaceName) -> Finisher {
+    let health = || -> Result<_, MxvFailure> {
+        let records = archives(environment)?.list()?;
+        let live = multiverse::Store::new(environment.records()?).list()?;
+        Ok(health::classify(&Git, &live, &records).archives)
+    };
+    let repair = health().ok().and_then(|broken| {
+        broken
+            .into_iter()
+            .find(|broken| broken.name == name.as_str())
+            .and_then(|broken| broken.repair)
+    });
+    match repair {
+        Some(health::Repair::Repair(_)) => Finisher::Repair,
+        _ => Finisher::Archive,
+    }
+}
+
 /// Deletes the archive that `args` names.
 pub(crate) fn remove(
     output: &mut Run,
@@ -1678,6 +1708,7 @@ pub(crate) fn remove(
     if archive.state != ArchiveState::Archived {
         return Err(ArchiveFailure::Unfinished {
             name: name.to_string(),
+            finisher: finisher(environment, &name),
         }
         .into());
     }

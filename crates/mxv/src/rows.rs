@@ -328,10 +328,7 @@ impl From<&Checkout> for CheckoutRow {
             branch: checkout.branch.clone(),
             base: checkout.base.clone(),
             commit: checkout.commit.clone(),
-            mirror: checkout
-                .mirror
-                .as_ref()
-                .map(|mirror| mirror.display().to_string()),
+            mirror: checkout.mirror().map(|mirror| mirror.display().to_string()),
         }
     }
 }

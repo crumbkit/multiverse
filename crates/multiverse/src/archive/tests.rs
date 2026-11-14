@@ -2838,7 +2838,7 @@ fn an_unborn_head_refuses_as_a_checkout_that_cannot_be_read() {
 fn a_mirror_that_is_gone_refuses_the_archive() {
     let setup = setup(Kind::Clone);
     let workspace = setup.create();
-    let mirror = workspace.checkouts[0].mirror.clone().unwrap();
+    let mirror = workspace.checkouts[0].mirror().unwrap().to_path_buf();
     fs::remove_dir_all(&mirror).unwrap();
     let text = refusal_text(setup.planned(ArchiveOptions::default()));
     assert!(text.contains("MirrorMissing"), "{text}");

@@ -2242,3 +2242,126 @@ fn removing_a_retired_archive_is_refused_and_an_archived_one_is_deleted() {
     assert_eq!(exit, 0, "{document}");
     assert!(!setup.archive_record("triage").exists());
 }
+
+/// Returns the recovery text of `document`, a failure.
+fn recovery(document: &Value) -> String {
+    document["recovery"].to_string()
+}
+
+#[test]
+fn the_unfinished_refusals_of_an_archive_whose_workspace_was_removed_name_mxv_repair() {
+    let setup = Setup::new();
+    setup.stopped_archive("retiring", true);
+    let (exit, document) = setup.run(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    for (args, code) in [
+        (
+            &["restore", "triage", "--yes"][..],
+            "mxv::restore::unfinished",
+        ),
+        (
+            &["remove", "--archived", "triage", "--yes"][..],
+            "mxv::archive::unfinished",
+        ),
+    ] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(document["code"], code, "{document}");
+        let text = recovery(&document);
+        assert!(text.contains("mxv repair triage"), "{text}");
+        assert!(!text.contains("mxv archive -w"), "{text}");
+    }
+}
+
+#[test]
+fn the_unfinished_refusals_of_a_retired_archive_whose_workspace_was_removed_name_mxv_archive_w() {
+    let setup = Setup::new();
+    setup.stopped_archive("retired", true);
+    let (exit, document) = setup.run(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    for (args, code) in [
+        (
+            &["restore", "triage", "--yes"][..],
+            "mxv::restore::unfinished",
+        ),
+        (
+            &["remove", "--archived", "triage", "--yes"][..],
+            "mxv::archive::unfinished",
+        ),
+    ] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        assert_eq!(document["code"], code, "{document}");
+        let text = recovery(&document);
+        assert!(text.contains("mxv archive -w triage"), "{text}");
+        assert!(!text.contains("mxv repair"), "{text}");
+    }
+}
+
+#[test]
+fn a_retiring_archive_beside_a_newer_workspace_names_repair_that_moves_it_aside() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.mark("retiring");
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::name_taken");
+    let text = recovery(&document);
+    assert!(text.contains("mxv repair triage"), "{text}");
+    assert!(text.contains("moves the earlier archive aside"), "{text}");
+    assert!(!text.contains("dated name"), "{text}");
+}
+
+#[test]
+fn a_retired_archive_beside_a_newer_workspace_names_repair_that_finishes_it_under_a_dated_name() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.mark_retired();
+    let (exit, document) = setup.run(&["new", "triage", "--repo", "app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::name_taken");
+    let text = recovery(&document);
+    assert!(text.contains("mxv repair triage"), "{text}");
+    assert!(text.contains("under a dated name"), "{text}");
+}
+
+/// Takes the `state` key out of the record of `triage`, as an older mxv
+/// that rewrites the record does, and gives the record the stable id `id`
+/// when one is given.
+fn drop_state(setup: &Setup, id: Option<&str>) {
+    let path = setup.root().join("state/mxv/workspaces/triage.json");
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("state");
+    if let Some(id) = id {
+        record["id"] = Value::from(id);
+    }
+    write(&path, &serde_json::to_string_pretty(&record).unwrap());
+}
+
+#[test]
+fn removing_a_workspace_whose_state_an_older_mxv_dropped_warns_of_the_stopped_archive_of_its_id() {
+    let setup = Setup::new();
+    setup.stopped_archive("retiring", true);
+    drop_state(&setup, None);
+    let (exit, document) = setup.run(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let warned = warnings(&document);
+    assert!(warned.contains("can no longer be resumed"), "{warned}");
+    assert!(warned.contains("mxv repair triage"), "{warned}");
+}
+
+#[test]
+fn removing_a_workspace_beside_a_stopped_archive_of_another_id_warns_of_nothing() {
+    let setup = Setup::new();
+    setup.stopped_archive("retiring", true);
+    drop_state(&setup, Some(&"b".repeat(32)));
+    let (exit, document) = setup.run(&["remove", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let warned = warnings(&document);
+    assert!(!warned.contains("mxv repair"), "{warned}");
+    assert!(!warned.contains("mxv archive"), "{warned}");
+}

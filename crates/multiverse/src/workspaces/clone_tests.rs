@@ -117,7 +117,7 @@ fn a_new_workspace_is_a_clone_with_a_git_directory_of_its_own() {
     );
     let origin = git(&checkout.path, &["remote", "get-url", "origin"]);
     assert_eq!(Path::new(origin.trim()), setup.fixture.origin);
-    let mirror = checkout.mirror.clone().unwrap();
+    let mirror = checkout.mirror().unwrap().to_path_buf();
     assert!(mirror.starts_with(&setup.mirrors));
     let alternates =
         fs::read_to_string(checkout.path.join(".git/objects/info/alternates")).unwrap();
@@ -152,7 +152,7 @@ fn a_new_clone_has_no_hooks_and_none_of_the_persons_repository_config() {
 fn a_mirror_never_collects_or_prunes_objects() {
     let setup = setup();
     let workspace = created(&setup, "reading-list");
-    let mirror = workspace.checkouts[0].mirror.clone().unwrap();
+    let mirror = workspace.checkouts[0].mirror().unwrap().to_path_buf();
     assert_eq!(git(&mirror, &["config", "gc.auto"]).trim(), "0");
     assert_eq!(git(&mirror, &["config", "gc.pruneExpire"]).trim(), "never");
     assert_eq!(
@@ -167,7 +167,7 @@ fn two_workspaces_of_one_origin_share_its_mirror() {
     let first = created(&setup, "reading-list");
     advance_origin(&setup.fixture);
     let second = created(&setup, "inbox");
-    assert_eq!(first.checkouts[0].mirror, second.checkouts[0].mirror);
+    assert_eq!(first.checkouts[0].made, second.checkouts[0].made);
     assert_ne!(first.checkouts[0].commit, second.checkouts[0].commit);
 }
 
@@ -217,7 +217,7 @@ fn a_mirror_that_another_command_holds_fails_as_busy_and_leaves_nothing() {
     let mut setup = setup();
     setup.workspaces.mirror_wait = Duration::from_millis(50);
     let first = created(&setup, "reading-list");
-    let mirror = first.checkouts[0].mirror.clone().unwrap();
+    let mirror = first.checkouts[0].mirror().unwrap().to_path_buf();
     let mut lock = mirror.into_os_string();
     lock.push(".lock");
     let _held = store::lock(Path::new(&lock), Duration::ZERO).unwrap();
@@ -246,7 +246,13 @@ fn removing_a_pushed_clone_deletes_it_keeps_the_mirror_and_leaves_the_persons_re
     assert_eq!(removal.checkouts[0].directory, Fate::Removed);
     assert_eq!(removal.checkouts[0].branch, BranchFate::Deleted);
     assert!(!workspace.path.exists());
-    assert!(workspace.checkouts[0].mirror.clone().unwrap().is_dir());
+    assert!(
+        workspace.checkouts[0]
+            .mirror()
+            .unwrap()
+            .to_path_buf()
+            .is_dir()
+    );
     assert_eq!(person_state(&setup), before);
     assert_eq!(setup.workspaces.find(&name("reading-list")).unwrap(), None);
 }
@@ -700,7 +706,7 @@ fn a_held_mirror_lock_is_announced_once_before_waiting() {
     setup.workspaces.mirror_wait = Duration::from_millis(50);
     let first = created(&setup, "reading-list");
     assert_eq!(NOTICES.load(Ordering::SeqCst), 0);
-    let mirror = first.checkouts[0].mirror.clone().unwrap();
+    let mirror = first.checkouts[0].mirror().unwrap().to_path_buf();
     let mut lock = mirror.into_os_string();
     lock.push(".lock");
     let _held = store::lock(Path::new(&lock), Duration::ZERO).unwrap();

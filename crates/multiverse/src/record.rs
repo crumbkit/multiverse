@@ -149,15 +149,91 @@ pub struct Checkout {
     /// The commit that the branch started at, or `None` for a planned
     /// checkout that a dry run reports.
     pub commit: Option<String>,
-    /// The bare mirror whose objects the checkout borrows, for a checkout
-    /// that is a clone, or `None` for a worktree.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror: Option<PathBuf>,
+    /// How the checkout was made. The record writes a clone's mirror as
+    /// `mirror` and leaves the key out for a worktree. A record whose
+    /// checkouts do not match its [`Workspace::kind`] is corrupt.
+    #[serde(
+        rename = "mirror",
+        default,
+        skip_serializing_if = "Made::is_worktree",
+        with = "made_as_mirror"
+    )]
+    pub made: Made,
+}
+
+/// How a checkout was made, which matches its workspace's
+/// [`WorkspaceKind`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Made {
+    /// A `git clone --shared` of the bare mirror `mirror`, whose objects
+    /// the checkout borrows.
+    Clone {
+        /// The bare mirror of the checkout's origin.
+        mirror: PathBuf,
+    },
+    /// A git worktree of the person's repository. A record's checkout
+    /// without a `mirror` is one.
+    #[default]
+    Worktree,
+}
+
+impl Made {
+    /// Returns how a clone of the bare mirror `mirror` is made.
+    #[must_use]
+    pub const fn clone_of(mirror: PathBuf) -> Self {
+        Self::Clone { mirror }
+    }
+
+    /// Returns the bare mirror of a clone, or `None` for a worktree.
+    #[must_use]
+    pub fn mirror(&self) -> Option<&Path> {
+        match self {
+            Self::Clone { mirror } => Some(mirror),
+            Self::Worktree => None,
+        }
+    }
+
+    /// Reports whether the checkout is a worktree, whose record leaves
+    /// `mirror` out.
+    #[must_use]
+    pub const fn is_worktree(&self) -> bool {
+        matches!(self, Self::Worktree)
+    }
+
+    /// Returns the kind of workspace whose checkouts are made this way.
+    #[must_use]
+    pub const fn kind(&self) -> WorkspaceKind {
+        match self {
+            Self::Clone { .. } => WorkspaceKind::Clone,
+            Self::Worktree => WorkspaceKind::Worktree,
+        }
+    }
+}
+
+/// Writes [`Checkout::made`] as the record's optional `mirror`, the form
+/// that every mxv has written, and reads it back.
+mod made_as_mirror {
+    use std::path::PathBuf;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Made;
+
+    pub(super) fn serialize<S: Serializer>(made: &Made, serializer: S) -> Result<S::Ok, S::Error> {
+        made.mirror().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Made, D::Error> {
+        Ok(Option::<PathBuf>::deserialize(deserializer)?.map_or(Made::Worktree, Made::clone_of))
+    }
 }
 
 /// The record of one workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "StoredWorkspace")]
+#[serde(try_from = "StoredWorkspace")]
 #[non_exhaustive]
 pub struct Workspace {
     /// The version of the record form, which is [`RECORD_VERSION`].
@@ -237,8 +313,48 @@ struct StoredWorkspace {
     reclaimed: Option<Reclaimed>,
 }
 
-impl From<StoredWorkspace> for Workspace {
-    fn from(stored: StoredWorkspace) -> Self {
+/// The checkout of a workspace record that is not made the way the
+/// record's kind says: a clone without a mirror, or a worktree with one.
+/// The store reads such a record as corrupt.
+#[derive(Debug)]
+struct MismatchedCheckout {
+    /// The checkout's folder.
+    folder: String,
+    /// The kind that the record names.
+    kind: WorkspaceKind,
+}
+
+impl fmt::Display for MismatchedCheckout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            WorkspaceKind::Clone => write!(
+                formatter,
+                "the checkout {} of a workspace of clones names no mirror",
+                self.folder
+            ),
+            WorkspaceKind::Worktree => write!(
+                formatter,
+                "the checkout {} of a workspace of worktrees names a mirror",
+                self.folder
+            ),
+        }
+    }
+}
+
+impl TryFrom<StoredWorkspace> for Workspace {
+    type Error = MismatchedCheckout;
+
+    fn try_from(stored: StoredWorkspace) -> Result<Self, Self::Error> {
+        if let Some(checkout) = stored
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.made.kind() != stored.kind)
+        {
+            return Err(MismatchedCheckout {
+                folder: checkout.name.clone(),
+                kind: stored.kind,
+            });
+        }
         // An older mxv wrote no state. Its `mxv new` of clones wrote the
         // record before it cloned and gave each checkout its commit with
         // the last write, so only such a record whose checkouts all lack a
@@ -257,7 +373,7 @@ impl From<StoredWorkspace> for Workspace {
                 WorkspaceState::Live
             }
         });
-        Self {
+        Ok(Self {
             version: stored.version,
             kind: stored.kind,
             id: stored.id,
@@ -268,7 +384,7 @@ impl From<StoredWorkspace> for Workspace {
             ports: stored.ports,
             pinned: stored.pinned,
             reclaimed: stored.reclaimed,
-        }
+        })
     }
 }
 
@@ -311,7 +427,10 @@ impl Workspace {
     /// Returns the record of a workspace of clones named `name` in the
     /// directory `path` with `checkouts`, in the state
     /// [`WorkspaceState::Creating`], which `mxv new` writes before it makes
-    /// the checkouts.
+    /// the checkouts. Each checkout is a [`Made::Clone`]. A workspace of
+    /// worktrees passes [`Made::Worktree`] checkouts and calls
+    /// [`Workspace::of_worktrees`]. The store reads a record whose
+    /// checkouts do not match its kind as corrupt.
     #[must_use]
     pub const fn new(name: WorkspaceName, path: PathBuf, checkouts: Vec<Checkout>) -> Self {
         Self {
@@ -455,9 +574,16 @@ impl Workspace {
 
 impl Checkout {
     /// Returns the checkout of the repository `name` at `source`, in the
-    /// directory `path`, on `branch` from `base`.
+    /// directory `path`, on `branch` from `base`, made as `made` says.
     #[must_use]
-    pub fn new(name: String, source: &Path, path: PathBuf, branch: String, base: String) -> Self {
+    pub fn new(
+        name: String,
+        source: &Path,
+        path: PathBuf,
+        branch: String,
+        base: String,
+        made: Made,
+    ) -> Self {
         Self {
             name,
             backend: BackendKind::Git,
@@ -466,8 +592,15 @@ impl Checkout {
             branch,
             base,
             commit: None,
-            mirror: None,
+            made,
         }
+    }
+
+    /// Returns the bare mirror whose objects a clone borrows, or `None` for
+    /// a worktree.
+    #[must_use]
+    pub fn mirror(&self) -> Option<&Path> {
+        self.made.mirror()
     }
 }
 

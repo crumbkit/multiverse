@@ -327,7 +327,8 @@ pub(crate) fn archive_case<'a, E>(
 /// record holds one. An archive at this version is always written with
 /// the workspace's id, so two records of this version without one are two
 /// workspaces.
-pub(crate) fn same_workspace(archive: &Archive, workspace: &Workspace) -> bool {
+#[must_use]
+pub fn same_workspace(archive: &Archive, workspace: &Workspace) -> bool {
     if workspace.state().archive() == Some(&archive.id) {
         return true;
     }

@@ -6,11 +6,11 @@ use crate::archive::ArchiveId;
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{
-    Checkout, ID_RECORD_VERSION, MULTI_CHECKOUT_RECORD_VERSION, Workspace, WorkspaceKind,
+    Checkout, ID_RECORD_VERSION, MULTI_CHECKOUT_RECORD_VERSION, Made, Workspace, WorkspaceKind,
     WorkspaceState,
 };
 use crate::store::{Created, Store, lock};
-use crate::testing::write;
+use crate::testing::{unmade_clone, write};
 
 fn workspace(name: &str) -> Workspace {
     let name: WorkspaceName = name.parse().unwrap();
@@ -21,8 +21,18 @@ fn workspace(name: &str) -> Workspace {
         path.join("app"),
         name.to_string(),
         "refs/remotes/origin/main".to_owned(),
+        unmade_clone(),
     );
     Workspace::new(name, path, vec![checkout])
+}
+
+/// Returns `workspace` as a workspace of worktrees, whose checkouts name
+/// no mirror.
+fn of_worktrees(mut workspace: Workspace) -> Workspace {
+    for checkout in &mut workspace.checkouts {
+        checkout.made = Made::Worktree;
+    }
+    workspace.of_worktrees()
 }
 
 #[test]
@@ -136,7 +146,7 @@ fn a_record_without_a_kind_reads_as_a_workspace_of_worktrees() {
         .unwrap();
     assert_eq!(found.kind, WorkspaceKind::Worktree);
     assert_eq!(found.version, 1);
-    assert_eq!(found.checkouts[0].mirror, None);
+    assert_eq!(found.checkouts[0].made, Made::Worktree);
     assert_eq!(found.ports.get("web"), Some(&41000));
 }
 
@@ -184,7 +194,13 @@ fn a_record_of_clones_of_version_two_without_a_stable_id_still_reads() {
     let store = Store::new(dir.path().to_path_buf());
     let record = WORKTREE_RECORD
         .replace("\"version\": 1,", "\"version\": 2,\n  \"kind\": \"clone\",")
-        .replace("inbox-ingest", "app");
+        .replace("inbox-ingest", "app")
+        .replace(
+            "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"",
+            &format!(
+                "\"commit\": \"0123456789abcdef0123456789abcdef01234567\",\n      \"mirror\": \"{MIRROR}\""
+            ),
+        );
     write(dir.path().join("app.json"), &record);
     let found = store.read(&"app".parse().unwrap()).unwrap().unwrap();
     assert_eq!(found.version, 2);
@@ -583,7 +599,7 @@ fn a_clone_record_without_a_state_that_one_checkout_without_a_commit_leaves_read
 fn a_worktree_record_without_a_state_reads_as_live() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    let mut workspace = workspace("app").of_worktrees();
+    let mut workspace = of_worktrees(workspace("app"));
     written_without_state(&store, &mut workspace);
     let read = store.read(&workspace.name).unwrap().unwrap();
     assert_eq!(read.state(), WorkspaceState::Live);
@@ -593,7 +609,7 @@ fn a_worktree_record_without_a_state_reads_as_live() {
 fn a_written_record_reads_back_the_same_at_the_same_version() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
-    for mut workspace in [workspace("app"), made("web"), made("api").of_worktrees()] {
+    for mut workspace in [workspace("app"), made("web"), of_worktrees(made("api"))] {
         store.create(&mut workspace).unwrap();
         let read = store.read(&workspace.name).unwrap().unwrap();
         assert_eq!(read, workspace);
@@ -872,4 +888,70 @@ fn an_update_that_mints_no_id_raises_two_checkouts_to_version_four_and_never_one
     let read = store.read(&workspace.name).unwrap().unwrap();
     assert_eq!(read.id, None);
     assert_eq!(read.version, MULTI_CHECKOUT_RECORD_VERSION);
+}
+
+/// The mirror that the checkout tests write into a record by hand.
+const MIRROR: &str = "/home/agent/.local/share/mxv/mirrors/github.com/agent/app.git";
+
+/// Writes the record of `workspace` to `store`, gives its first checkout
+/// the mirror `mirror` or takes its mirror away when `mirror` is `None`,
+/// and writes the record again as the store writes one. Returns the bytes
+/// of the file.
+fn written_with_mirror(store: &Store, workspace: &mut Workspace, mirror: Option<&str>) -> String {
+    store.create(workspace).unwrap();
+    let path = store.path(&workspace.name);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let checkout = value["checkouts"][0].as_object_mut().unwrap();
+    match mirror {
+        Some(mirror) => checkout.insert("mirror".to_owned(), mirror.into()),
+        None => checkout.remove("mirror"),
+    };
+    let text = format!("{}\n", serde_json::to_string_pretty(&value).unwrap());
+    write(&path, &text);
+    text
+}
+
+#[test]
+fn a_clone_record_whose_checkout_names_no_mirror_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    written_with_mirror(&store, &mut workspace, None);
+    let error = store.read(&workspace.name).unwrap_err();
+    assert!(matches!(error, Error::CorruptRecord { .. }), "{error:?}");
+}
+
+#[test]
+fn a_clone_record_whose_checkout_names_its_mirror_reads_and_writes_back_the_same_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = made("app");
+    let text = written_with_mirror(&store, &mut workspace, Some(MIRROR));
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.checkouts[0].mirror(), Some(Path::new(MIRROR)));
+    let again = format!("{}\n", serde_json::to_string_pretty(&read).unwrap());
+    assert_eq!(again, text);
+}
+
+#[test]
+fn a_worktree_record_whose_checkout_names_a_mirror_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = of_worktrees(made("app"));
+    written_with_mirror(&store, &mut workspace, Some(MIRROR));
+    let error = store.read(&workspace.name).unwrap_err();
+    assert!(matches!(error, Error::CorruptRecord { .. }), "{error:?}");
+}
+
+#[test]
+fn a_worktree_record_whose_checkout_names_no_mirror_reads_and_writes_back_the_same_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().to_path_buf());
+    let mut workspace = of_worktrees(made("app"));
+    let text = written_with_mirror(&store, &mut workspace, None);
+    let read = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(read.checkouts[0].mirror(), None);
+    let again = format!("{}\n", serde_json::to_string_pretty(&read).unwrap());
+    assert_eq!(again, text);
 }

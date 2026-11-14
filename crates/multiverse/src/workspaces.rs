@@ -13,7 +13,7 @@ use crate::lookup::{ManifestSource, checkout_prefix, prefixed};
 use crate::manifest::{Manifest, ManifestError};
 use crate::mirror::Origin;
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Workspace, WorkspaceKind, WorkspaceState, agents_text};
+use crate::record::{self, Checkout, Workspace, WorkspaceKind, WorkspaceState, agents_text};
 use crate::store::{self, Created, Records, Store};
 use crate::template::Found as FoundTemplate;
 
@@ -1269,6 +1269,7 @@ impl<B: Backend> Workspaces<B> {
                 path.join(folder),
                 name.to_string(),
                 base,
+                record::Made::Worktree,
             ));
         }
         let mut workspace = Workspace::new(name.clone(), path, checkouts).of_worktrees();
@@ -1311,14 +1312,14 @@ impl<B: Backend> Workspaces<B> {
             repository: repository.root.clone(),
         })?;
         let base = self.backend.base(&repository.root)?;
-        let mut checkout = Checkout::new(
+        let checkout = Checkout::new(
             folder.to_owned(),
             &repository.root,
             path.join(folder),
             name.to_string(),
             base,
+            record::Made::clone_of(mirrors.join(&origin.key)),
         );
-        checkout.mirror = Some(mirrors.join(&origin.key));
         Ok((checkout, origin.url))
     }
 
@@ -1795,7 +1796,9 @@ impl<B: Backend> Workspaces<B> {
     /// Makes the clone of `checkout` from its mirror, as `start` says, and
     /// sets its commit. It fetches the mirror from `url` first when `fetch`
     /// is set. It adds one to `clones` once it starts the clone, which may
-    /// leave a directory behind.
+    /// leave a directory behind. Its callers pass only the checkouts of a
+    /// workspace of clones, which the record makes [`record::Made::Clone`],
+    /// so it leaves a worktree as it is.
     pub(crate) fn make_clone_at(
         &self,
         checkout: &mut Checkout,
@@ -1804,7 +1807,7 @@ impl<B: Backend> Workspaces<B> {
         fetch: bool,
         clones: &mut usize,
     ) -> Result<(), Error> {
-        let Some(mirror) = checkout.mirror.clone() else {
+        let Some(mirror) = checkout.mirror().map(Path::to_path_buf) else {
             return Ok(());
         };
         let default = default_branch(&checkout.base);
@@ -2338,10 +2341,7 @@ impl<B: Backend> Workspaces<B> {
             return refused(CloneRefusal::Unpushed {
                 checkout: checkout.path.clone(),
                 commits: unpushed,
-                fetched: checkout
-                    .mirror
-                    .as_deref()
-                    .and_then(crate::mirror::fetched_at),
+                fetched: checkout.mirror().and_then(crate::mirror::fetched_at),
             });
         }
         planned.directory = Fate::Removed;

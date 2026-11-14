@@ -309,6 +309,49 @@ fn a_record_whose_checkout_path_leaves_the_workspace_is_refused_as_corrupt() {
 }
 
 #[test]
+fn an_archive_of_clones_whose_checkout_names_no_mirror_is_refused_as_corrupt() {
+    let quoted = |archive: &Archive| {
+        let mirror = archive.checkouts[0].mirror.as_ref().unwrap();
+        format!("\"mirror\": \"{}\",", mirror.display())
+    };
+    assert_corrupt(&edited_record(Kind::Clone, quoted, ""));
+}
+
+#[test]
+fn an_archive_of_clones_whose_checkout_names_its_mirror_still_reads() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let archived = setup.archive();
+    let read = setup.archives.read(&name()).unwrap().unwrap();
+    assert!(read.checkouts[0].mirror.is_some());
+    assert_eq!(read.checkouts, archived.checkouts);
+}
+
+#[test]
+fn an_archive_of_worktrees_whose_checkout_names_a_mirror_is_refused_as_corrupt() {
+    let pin = |archive: &Archive| format!("\"pin\": \"{}\"", archive.checkouts[0].pin);
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let archive = setup.archive();
+    let path = setup.archives.dir_of(&name()).join("archive.json");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(&pin(&archive)), "{text}");
+    let with_mirror = format!("\"mirror\": \"/home/agent/mirror.git\", {}", pin(&archive));
+    write(&path, text.replace(&pin(&archive), &with_mirror));
+    assert_corrupt(&setup);
+}
+
+#[test]
+fn an_archive_of_worktrees_whose_checkout_names_no_mirror_still_reads() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let archived = setup.archive();
+    let read = setup.archives.read(&name()).unwrap().unwrap();
+    assert_eq!(read.checkouts[0].mirror, None);
+    assert_eq!(read.checkouts, archived.checkouts);
+}
+
+#[test]
 fn a_record_whose_pin_leaves_the_archive_namespace_is_refused_as_corrupt() {
     let quoted = |archive: &Archive| format!("\"pin\": \"{}\"", archive.checkouts[0].pin);
     for pin in [
@@ -451,7 +494,7 @@ fn a_run_stopped_after_the_pins_leaves_no_second_pin_when_it_runs_again() {
     assert!(setup.workspaces.archive(&setup.archives, plan).is_err());
     clear_hook();
     setup.archive();
-    let mirror = workspace.checkouts[0].mirror.clone().unwrap();
+    let mirror = workspace.checkouts[0].mirror().unwrap().to_path_buf();
     let pins = git(
         &mirror,
         &["for-each-ref", "--format=%(refname)", "refs/mxv/archives"],
