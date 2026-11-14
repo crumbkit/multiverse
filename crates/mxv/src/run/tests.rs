@@ -6,6 +6,7 @@ use multiverse::{Manifest, MiseListing, MiseTaskName, TaskHome, TaskName};
 
 use super::{Home, TaskFailure, TaskRef, names, resolve};
 use crate::cli::{Cli, RunArgs, Verb};
+use crate::failures::rendered;
 
 /// Parses `words` after `mxv` and returns the arguments of `run`.
 fn parsed(words: &[&str]) -> RunArgs {
@@ -121,4 +122,50 @@ fn a_mise_name_is_not_found_when_mise_refused() {
         resolve("triage", &[refused], "lint").unwrap_err(),
         TaskFailure::Unknown { .. }
     ));
+}
+
+/// What each case of the test below gave when `TaskFailure` had a
+/// hand-written `Failure` impl, recorded from that impl.
+const TASK_FAILURES: &str = r#"mxv::task::unknown exits 1
+  recovery Run(Call { target: Command { path: ["run"], args: [Value { id: "workspace", value: "triage" }] }, slot: None })
+  field workspace = Text("triage")
+  field task = Text("test")
+  field names = List([Text("check"), Text("lint")])
+mxv::task::ambiguous exits 1
+  recovery Hint("choose a checkout with --repo, such as `mxv run -w triage --repo app test`")
+  field workspace = Text("triage")
+  field task = Text("test")
+  field checkouts = List([Text("app"), Text("api")])
+mxv::task::ambiguous exits 1
+  recovery Hint("choose a checkout with --repo, such as `mxv run -w triage --repo CHECKOUT test`")
+  field workspace = Text("triage")
+  field task = Text("test")
+  field checkouts = List([])
+crumbkit::cli::usage exits 2
+  recovery Hint("run the command without --json to read the task's output")
+  field argument = Text("--json")
+"#;
+
+#[test]
+fn task_failures_give_the_code_exit_recovery_and_fields_recorded_from_their_hand_written_impl() {
+    let ambiguous = |checkouts: &[&str]| TaskFailure::Ambiguous {
+        workspace: "triage".to_owned(),
+        task: "test".to_owned(),
+        checkouts: checkouts.iter().map(|&folder| folder.to_owned()).collect(),
+    };
+    let cases = [
+        TaskFailure::Unknown {
+            workspace: "triage".to_owned(),
+            task: "test".to_owned(),
+            names: vec!["check".to_owned(), "lint".to_owned()],
+            mise_unasked: true,
+        },
+        ambiguous(&["app", "api"]),
+        ambiguous(&[]),
+        TaskFailure::JsonRefused,
+    ];
+
+    let text: String = cases.iter().map(|case| rendered(case)).collect();
+
+    assert_eq!(text, TASK_FAILURES, "\n{text}");
 }

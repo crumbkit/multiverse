@@ -142,6 +142,26 @@ fn a_workspace_that_mxv_new_did_not_finish_names_mxv_remove_and_then_mxv_new() {
     assert!(hint.contains("`mxv new`"), "{hint}");
 }
 
+#[test]
+fn a_library_error_that_mxv_gives_no_recovery_of_its_own_offers_a_retry() {
+    // `From` turns a missing record into a workspace that is not found, so
+    // only a failure built by hand reaches the fallback arm.
+    let failure = MxvFailure::Library(multiverse::Error::RecordMissing {
+        name: "triage".parse().unwrap(),
+    });
+
+    assert_eq!(failure.recovery(), Recovery::Retry);
+}
+
+#[test]
+fn a_library_error_that_mxv_gives_a_recovery_of_its_own_offers_that_recovery() {
+    let failure = MxvFailure::Library(multiverse::Error::StateChanged {
+        name: "triage".parse().unwrap(),
+    });
+
+    assert_ne!(failure.recovery(), Recovery::Retry);
+}
+
 /// Returns the code and the hint of the failure of a workspace without a
 /// stable id beside an archive record, which is `readable` or not.
 fn archive_unfinished(readable: bool) -> (&'static crumbkit::Code, String) {

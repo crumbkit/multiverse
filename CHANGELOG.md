@@ -20,6 +20,11 @@ workspace may need to act on.
 
 ### Changed
 
+- A library error that mxv gives no next step of its own now offers
+  crumbkit's retry. Its text is `run the same command again later`, and in
+  JSON its next step has the kind `retry`. Before, it was a hint whose text
+  was `run the command again`.
+
 - The lock that a command takes on a workspace is the file
   `$XDG_STATE_HOME/mxv/locks/<name>.lock`, which no command deletes. Before,
   it was `$XDG_STATE_HOME/mxv/runs/<name>/.lock`, which `mxv archive`,

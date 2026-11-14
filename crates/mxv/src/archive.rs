@@ -39,7 +39,6 @@ mod failure;
 mod tests;
 
 pub(crate) use failure::ArchiveFailure;
-pub(crate) use failure::CODES;
 pub use failure::{
     ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
     ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE,
