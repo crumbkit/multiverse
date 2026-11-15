@@ -20,6 +20,21 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv archive` holds the workspace's lock from its second plan, after the
+  question, until its last write, and it asks without the lock. Before, it
+  held the lock through the question or took it too late, so a second
+  `mxv archive` could move the checkouts of an archive that the first had
+  begun, and `mxv up` could start a unit between the question and the
+  stop. Now, when a unit runs that the question did not name, when docker
+  holds a volume that it did not name, or when the archive to finish is
+  another one, the command changes nothing and fails with
+  `mxv::archive::changed`. A second `mxv archive` of an unfinished archive
+  finishes it, and one of a finished archive reports `unchanged`. With
+  `--delete-volumes`, every question of an archive names the docker
+  volumes that it deletes. The library gains `Lifecycle::plan_archive`,
+  `Lifecycle::archive`, `Lifecycle::finish`, `Lifecycle::finish_held`,
+  `Lifecycle::with_in_use`, `Archived`, `Finished`, `Finish`, `FinishDone`,
+  `RetireDone` and `InUse`, and `VolumesAsked::with_units`.
 - `mxv remove` holds the workspace's lock from before it stops the units
   until after it deletes the last docker volume, and `mxv new` holds it from
   before it writes the record until it has copied the ignored directories.

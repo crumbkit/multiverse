@@ -12,7 +12,6 @@ use std::process::ExitCode;
 
 use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::Growth;
-use multiverse::phase::WorkspaceId;
 use multiverse::{
     BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Lock,
     Manifest, ManifestError, Marker, Needed, Reclaimed, Runs, Store, SyncMode, UpOutcome, Volumes,
@@ -994,35 +993,6 @@ pub(crate) fn lock(environment: &Environment, name: &WorkspaceName) -> Result<Lo
     Ok(environment.runs()?.lock(name)?)
 }
 
-/// Stops every process and container of `workspace`, for a caller that
-/// already holds the workspace's lock as `lock`.
-pub(crate) fn stop_all_locked(
-    environment: &Environment,
-    workspace: &Workspace,
-    lock: &Lock,
-) -> Result<(), crumbkit::Error> {
-    let context = Context {
-        store: Store::new(environment.records()?),
-        runs: environment.runs()?,
-        workspace: workspace.clone(),
-        processes: Vec::new(),
-    };
-    stop_every(&context, lock, None)
-}
-
-/// Removes the stopped containers of the workspace `name`, whose stable id
-/// is `id`, and deletes its run files and logs. It returns one warning for
-/// each reason that phase kept its run record, such as a process that it
-/// could not stop, which keeps the record and the logs too.
-pub(crate) fn forget(
-    environment: &Environment,
-    name: &WorkspaceName,
-    id: Option<&WorkspaceId>,
-) -> Result<Vec<String>, MxvFailure> {
-    let held = environment.runs()?.forget(name, id)?;
-    Ok(held_sentences(name, held))
-}
-
 /// Returns one warning for each reason in `held` that phase kept the run
 /// record of the workspace `name`.
 pub(crate) fn held_sentences(name: &WorkspaceName, held: Vec<String>) -> Vec<String> {
@@ -1049,15 +1019,6 @@ pub(crate) fn containers(
     workspace: &Workspace,
 ) -> Result<Vec<String>, MxvFailure> {
     Ok(environment.runs()?.docker_containers(workspace)?)
-}
-
-/// Deletes the docker volumes `volumes`, which [`volumes`] returned for a
-/// workspace, for `mxv remove --delete-volumes`.
-pub(crate) fn delete_volumes(
-    environment: &Environment,
-    volumes: Volumes,
-) -> Result<(), MxvFailure> {
-    Ok(environment.runs()?.delete_volumes(volumes)?)
 }
 
 /// Stops every process and container of `workspace` through the stop of

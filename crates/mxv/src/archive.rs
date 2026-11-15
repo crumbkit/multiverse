@@ -16,10 +16,11 @@ use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
 use multiverse::health::{self, Broken, Problem};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
-    ARCHIVE_MAX_FILE, Archive, ArchiveDeleted, ArchiveOptions, ArchiveOutcome, ArchivePlan,
-    ArchivePlanned, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, DisposablePath, Git,
-    IgnoredEntry, IgnoredKind, KEPT_NAMESPACE, Lifecycle, Mode, PutBack, RestoreOutcome,
-    RestorePlanned, Uncommitted, Volumes, VolumesAsked, Workspace, WorkspaceName, Workspaces,
+    ARCHIVE_MAX_FILE, Archive, ArchiveDeleted, ArchiveOptions, ArchivePlan, ArchivePlanned,
+    ArchiveRecords, ArchiveState, Archived, ArchivedCheckout, Archives, DisposablePath, FinishDone,
+    Finished, Git, IgnoredEntry, IgnoredKind, KEPT_NAMESPACE, Lifecycle, Mode, PutBack,
+    RestoreOutcome, RestorePlanned, Uncommitted, Volumes, VolumesAsked, Workspace, WorkspaceName,
+    Workspaces,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -77,7 +78,7 @@ pub(crate) struct ArchiveArgs {
     #[arg(long)]
     pub(crate) force: bool,
 
-    /// Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
+    /// Delete the workspace's docker volumes and the data in them, which the question names; without this flag the volumes stay for the restore
     #[arg(long)]
     pub(crate) delete_volumes: bool,
 
@@ -402,6 +403,21 @@ fn listed(items: &[String]) -> String {
         [] => String::new(),
         [only] => only.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Returns the sentence that ends the question of a command that deletes
+/// the docker volumes `names`, such as ` It deletes the docker volumes a and
+/// b and the data in them.`, or nothing when there is no volume. `mxv
+/// remove`, `mxv remove --archived` and `mxv archive` use it.
+pub(crate) fn volumes_clause(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => format!(" It deletes the docker volume {only} and the data in it."),
+        _ => format!(
+            " It deletes the docker volumes {} and the data in them.",
+            listed(names)
+        ),
     }
 }
 
@@ -924,7 +940,13 @@ pub(crate) fn ancestors(table: &[TableEntry], own: u32) -> BTreeSet<u32> {
 /// stand in the workspace, so the ancestors of this process do not count.
 /// A background job of that shell is no ancestor, and it counts.
 fn outside_user(workspace: &Workspace) -> Result<Option<String>, MxvFailure> {
-    let table = multiverse::process_table().map_err(MxvFailure::from)?;
+    outside_reason(workspace).map_err(MxvFailure::from)
+}
+
+/// Returns what [`outside_user`] returns, as the library's check for an
+/// archive that holds the workspace's lock.
+fn outside_reason(workspace: &Workspace) -> Result<Option<String>, multiverse::Error> {
+    let table = multiverse::process_table()?;
     let own = std::process::id();
     let ancestors = ancestors(&table, own);
     let mut found = users(&table, &workspace.path, &[], own);
@@ -1079,7 +1101,7 @@ fn dry_result(plan: &ArchivePlan, running: Vec<String>, cd: Option<String>) -> A
 }
 
 /// Returns the question that an archive of `plan` asks.
-fn question(plan: &ArchivePlan, running: &[String], delete_volumes: bool) -> String {
+fn question(plan: &ArchivePlan, running: &[String], volumes: &[String]) -> String {
     let workspace = &plan.removal.workspace;
     let mut text = format!(
         "Archive the workspace {}? It keeps each checkout's commit in a pin and deletes {}.",
@@ -1123,10 +1145,14 @@ fn question(plan: &ArchivePlan, running: &[String], delete_volumes: bool) -> Str
     for warning in &plan.warnings {
         text.push_str(&format!(" Warning: {warning}."));
     }
-    if delete_volumes {
-        text.push_str(" It deletes the workspace's docker volumes and the data in them.");
-    }
+    text.push_str(&volumes_clause(volumes));
     text
+}
+
+/// Returns the question of the finish of the archive of the workspace
+/// `name`, which deletes the docker volumes `volumes`.
+fn finish_question(name: &WorkspaceName, volumes: &[String]) -> String {
+    format!("Finish the archive of {name}?{}", volumes_clause(volumes))
 }
 
 /// Returns the failure when a process outside phase uses `workspace`.
@@ -1139,35 +1165,6 @@ fn refuse_outsider(workspace: &Workspace) -> Result<(), crumbkit::Error> {
         .into()),
         None => Ok(()),
     }
-}
-
-/// Finishes the archive of `archive`, whose workspace is gone: deletes the
-/// run files and the volumes that the run asked to delete, and marks it.
-/// It returns the names of the deleted volumes, and adds to `warnings` one
-/// sentence for each reason that phase kept its run record. `mxv repair`
-/// calls it for an older archive that it renamed.
-pub(crate) fn finish(
-    environment: &Environment,
-    workspaces: &Workspaces<Git>,
-    records: &Archives,
-    archive: &mut Archive,
-    volumes: Option<Volumes>,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<String>, crumbkit::Error> {
-    warnings.extend(processes::forget(
-        environment,
-        &archive.name,
-        archive.workspace_id.as_ref(),
-    )?);
-    let mut names = Vec::new();
-    if let Some(volumes) = volumes {
-        names = volumes.names();
-        processes::delete_volumes(environment, volumes)?;
-    }
-    workspaces
-        .finish_archive(records, archive)
-        .map_err(MxvFailure::from)?;
-    Ok(names)
 }
 
 /// Archives the workspace that `args` names.
@@ -1190,30 +1187,18 @@ pub(crate) fn archive(
     if output.is_dry_run() {
         return dry_run(environment, &workspaces, &records, &name, options);
     }
-    let lock = processes::lock(environment, &name)?;
-    let plan = match workspaces
-        .plan_archive(&records, &name, options, Mode::Change)
+    let lifecycle = Lifecycle::new(&workspaces, &records, &runs).with_in_use(outside_reason);
+    // The plan holds the workspace's lock while it plans, and no lock is
+    // held while the question is open.
+    let plan = match lifecycle
+        .plan_archive(&name, options)
         .map_err(MxvFailure::from)?
     {
         ArchivePlanned::Ready(plan) => *plan,
         ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, false))),
         ArchivePlanned::Refused(refusal) => return Err(refused(&name, refusal)),
-        ArchivePlanned::Finish(mut archive) => {
-            let mut done = Done {
-                cd: cd_target(environment, &archive.path),
-                ..Done::default()
-            };
-            let volumes = stale_volumes(environment, &archive, args.delete_volumes)?;
-            done.volumes = finish(
-                environment,
-                &workspaces,
-                &records,
-                &mut archive,
-                volumes,
-                &mut done.warnings,
-            )?;
-            sync_after_archive(environment, &archive.workspace(), served)?;
-            return Ok(Prose::new(result_of(&archive, &[], done, false)));
+        ArchivePlanned::Finish(archive) => {
+            return finish_stopped(output, environment, args, &lifecycle, &archive, served);
         }
     };
     let workspace = plan.removal.workspace.clone();
@@ -1226,50 +1211,112 @@ pub(crate) fn archive(
     if !args.force && !plan.removal.manifest.is_empty() && passed_yes {
         return Err(manifest_disposable(&name, &plan).into());
     }
-    output.confirm(args.yes, &question(&plan, &running, args.delete_volumes))?;
-    if !running.is_empty() {
-        processes::stop_all_locked(environment, &workspace, &lock)?;
-    }
-    refuse_outsider(&workspace)?;
     let volumes = if args.delete_volumes {
-        Some(processes::volumes(environment, &workspace)?)
+        processes::volumes(environment, &workspace)?.names()
     } else {
-        None
+        Vec::new()
     };
+    output.confirm(args.yes, &question(&plan, &running, &volumes))?;
     let uncommitted = plan.uncommitted.clone();
     let mut warnings = plan.warnings.clone();
-    let (mut archive, removal, disposable, late) = match workspaces
-        .archive(&records, plan)
-        .map_err(MxvFailure::from)?
-    {
-        ArchiveOutcome::Retired {
-            archive,
-            removal,
-            disposable,
-            late,
-        } => (*archive, *removal, disposable, late),
-        ArchiveOutcome::Refused(refusal) => return Err(refused(&name, refusal)),
+    // Under the lock, the library plans again and archives only what the
+    // question named.
+    let asked = VolumesAsked::new(volumes).with_units(running.clone());
+    let done = match lifecycle.archive(plan, &asked).map_err(MxvFailure::from)? {
+        Archived::Done(done) => *done,
+        Archived::Finished(done) => return finished(environment, &name, *done, served),
+        Archived::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, false))),
+        Archived::Refused(refusal) => return Err(refused(&name, refusal)),
+        Archived::Changed => return Err(changed(&name).into()),
+        Archived::InUse(reason) => {
+            return Err(ArchiveFailure::InUse {
+                name: name.to_string(),
+                reason,
+            }
+            .into());
+        }
+        Archived::Unstoppable(unstoppable) => {
+            return Err(RunFailure::Unstoppable {
+                process: unstoppable.process,
+                pid: unstoppable.pid,
+                unverified: unstoppable.unverified,
+                not_started: Vec::new(),
+            }
+            .into());
+        }
     };
-    warnings.extend(removal.warnings.iter().cloned());
-    let volumes = finish(
-        environment,
-        &workspaces,
-        &records,
-        &mut archive,
-        volumes,
-        &mut warnings,
-    )?;
+    warnings.extend(done.removal.warnings.iter().cloned());
+    warnings.extend(processes::held_sentences(&name, done.finished.finish.held));
     sync_after_archive(environment, &workspace, served)?;
-    drop(lock);
-    let done = Done {
+    let result = Done {
         stopped: running,
-        disposable: DisposableRow::of(&disposable),
-        late,
-        volumes,
+        disposable: DisposableRow::of(&done.disposable),
+        late: done.late,
+        volumes: done.finished.finish.volumes,
         warnings,
         cd,
     };
-    Ok(Prose::new(result_of(&archive, &uncommitted, done, false)))
+    Ok(Prose::new(result_of(
+        &done.finished.archive,
+        &uncommitted,
+        result,
+        false,
+    )))
+}
+
+/// Returns the failure of an archive of the workspace `name` that changed
+/// after the question: a unit started, or docker gained a volume, which the
+/// question did not name.
+fn changed(name: &WorkspaceName) -> ArchiveFailure {
+    ArchiveFailure::WorkspaceChanged {
+        name: name.to_string(),
+    }
+}
+
+/// Finishes the archive `archive`, whose workspace an earlier run removed.
+/// With `--delete-volumes` and docker volumes of the archive, it asks first
+/// and names the volumes, and otherwise it asks nothing, because it deletes
+/// nothing that a person made.
+fn finish_stopped(
+    output: &mut Run,
+    environment: &Environment,
+    args: &ArchiveArgs,
+    lifecycle: &Lifecycle<'_, Git>,
+    archive: &Archive,
+    served: &mut crate::proxy::Served,
+) -> Result<Prose<ArchiveResult>, crumbkit::Error> {
+    let volumes = stale_volumes(environment, archive, args.delete_volumes)?;
+    if !volumes.is_empty() {
+        output.confirm(args.yes, &finish_question(&archive.name, &volumes))?;
+    }
+    match lifecycle
+        .finish(archive, &VolumesAsked::new(volumes))
+        .map_err(MxvFailure::from)?
+    {
+        Finished::Done(done) => finished(environment, &archive.name, *done, served),
+        Finished::Unchanged(archive) => Ok(Prose::new(unchanged(&archive, false))),
+        Finished::Changed => Err(changed(&archive.name).into()),
+        Finished::Refused(refusal) => Err(refused(&archive.name, refusal)),
+    }
+}
+
+/// Returns the result of the finish of an archive that an earlier run
+/// retired, which `done` describes.
+fn finished(
+    environment: &Environment,
+    name: &WorkspaceName,
+    done: FinishDone,
+    served: &mut crate::proxy::Served,
+) -> Result<Prose<ArchiveResult>, crumbkit::Error> {
+    let FinishDone { archive, finish } = done;
+    let result = Done {
+        cd: cd_target(environment, &archive.path),
+        volumes: finish.volumes,
+        warnings: processes::held_sentences(name, finish.held),
+        ..Done::default()
+    };
+    sync_after_archive(environment, &archive.workspace(), served)?;
+    Ok(Prose::new(result_of(&archive, &[], result, false)))
 }
 
 /// Takes the routes of the archived `workspace` away from the proxy when
@@ -1331,21 +1378,20 @@ fn manifest_disposable(name: &WorkspaceName, plan: &ArchivePlan) -> ArchiveFailu
     }
 }
 
-/// Returns the volumes of an archive that an earlier run stopped before it
-/// deleted them, when the person asks again.
+/// Returns the names of the docker volumes of an archive that an earlier
+/// run stopped before it deleted them, when the person asks again.
 fn stale_volumes(
     environment: &Environment,
     archive: &Archive,
     delete: bool,
-) -> Result<Option<Volumes>, crumbkit::Error> {
+) -> Result<Vec<String>, crumbkit::Error> {
     match (&archive.workspace_id, delete && archive.containers_ran) {
-        (Some(id), true) => Ok(Some(
-            environment
-                .runs()?
-                .archived_volumes(id)
-                .map_err(MxvFailure::from)?,
-        )),
-        _ => Ok(None),
+        (Some(id), true) => Ok(environment
+            .runs()?
+            .archived_volumes(id)
+            .map_err(MxvFailure::from)?
+            .names()),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -1745,7 +1791,7 @@ pub(crate) fn remove(
     let mut text = format!(
         "Delete the archive {name} and its pins? `mxv restore` cannot bring the workspace back afterwards."
     );
-    text.push_str(&crate::verbs::volumes_clause(&names));
+    text.push_str(&volumes_clause(&names));
     output.confirm(args.yes, &text)?;
     // The archive holds the only record of the volumes' stable id, so it
     // stays until the volumes are gone, and a failure can be tried again.

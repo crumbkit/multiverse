@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use multiverse::phase::host::TableEntry;
 
 use super::failure::{Finisher, Holder};
-use super::{ArchiveFailure, ancestors};
+use super::{ArchiveFailure, ancestors, finish_question, volumes_clause};
 use crate::failures::rendered;
 
 fn entry(pid: u32, parent: u32) -> TableEntry {
@@ -103,6 +103,7 @@ fn archive_cases() -> Vec<ArchiveFailure> {
             workspace: owned("triage-2"),
         },
         ArchiveFailure::Changed { name: name() },
+        ArchiveFailure::WorkspaceChanged { name: name() },
     ]);
     cases
 }
@@ -228,6 +229,9 @@ mxv::archive::volumes_in_use exits 1
 mxv::archive::changed exits 1
   recovery Hint("run `mxv remove --archived triage` again, which asks about the archive as it now stands")
   field name = Text("triage")
+mxv::archive::changed exits 1
+  recovery Hint("run `mxv archive -w triage` again, which asks about the workspace as it now stands")
+  field name = Text("triage")
 mxv::restore::mirror_missing exits 1
   recovery Hint("`mxv restore triage --from-origin` fetches origin again and restores only what origin holds, and `mxv remove --archived triage` deletes the archive")
   field name = Text("triage")
@@ -283,4 +287,39 @@ fn archive_failures_give_the_code_exit_recovery_and_fields_recorded_from_their_h
     let text: String = cases.map(|case| rendered(&case)).collect();
 
     assert_eq!(text, ARCHIVE_FAILURES, "\n{text}");
+}
+
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| owned(name)).collect()
+}
+
+#[test]
+fn a_question_that_deletes_volumes_names_them_whether_it_is_one_or_many() {
+    assert_eq!(
+        volumes_clause(&names(&["phase-3f9a.data"])),
+        " It deletes the docker volume phase-3f9a.data and the data in it."
+    );
+    assert_eq!(
+        volumes_clause(&names(&["phase-3f9a.data", "phase-3f9a.search"])),
+        " It deletes the docker volumes phase-3f9a.data and phase-3f9a.search and the data in them."
+    );
+    assert_eq!(
+        volumes_clause(&names(&["a", "b", "c"])),
+        " It deletes the docker volumes a, b and c and the data in them."
+    );
+}
+
+#[test]
+fn a_question_that_deletes_no_volume_adds_nothing() {
+    assert_eq!(volumes_clause(&[]), "");
+}
+
+#[test]
+fn the_question_of_a_finish_that_deletes_volumes_ends_with_the_volumes_it_names() {
+    let name = "triage".parse().unwrap();
+
+    assert_eq!(
+        finish_question(&name, &names(&["phase-3f9a.data", "phase-3f9a.search"])),
+        "Finish the archive of triage? It deletes the docker volumes phase-3f9a.data and phase-3f9a.search and the data in them."
+    );
 }

@@ -42,8 +42,8 @@ pub const ARCHIVE_MANIFEST_DISPOSABLE: Code = Code::new("mxv", "archive", "manif
 pub const ARCHIVE_RECORD_TOO_LARGE: Code = Code::new("mxv", "archive", "record_too_large");
 /// The code of `--delete-volumes` for volumes that a live workspace uses.
 pub const ARCHIVE_VOLUMES_IN_USE: Code = Code::new("mxv", "archive", "volumes_in_use");
-/// The code of an archive that another command replaced or changed after
-/// the question of `mxv remove --archived`.
+/// The code of an archive or workspace that another command replaced or
+/// changed after the question of `mxv remove --archived` or `mxv archive`.
 pub const ARCHIVE_CHANGED: Code = Code::new("mxv", "archive", "changed");
 /// The code of a restore of a name that no archive has.
 pub const RESTORE_NOT_FOUND: Code = Code::new("mxv", "restore", "not_found");
@@ -306,6 +306,17 @@ pub(crate) enum ArchiveFailure {
     )]
     Changed {
         /// The archive's name.
+        name: String,
+    },
+    /// The workspace or its archive is not what the question of `mxv
+    /// archive` was about.
+    #[failure(
+        code = ARCHIVE_CHANGED,
+        hint = "run `mxv archive -w {name}` again, which asks about the workspace as it now stands",
+        field(name = name)
+    )]
+    WorkspaceChanged {
+        /// The workspace's name.
         name: String,
     },
     /// No archive has the name.
@@ -647,6 +658,10 @@ impl fmt::Display for ArchiveFailure {
             Self::Changed { name } => write!(
                 formatter,
                 "the archive of {name} changed after mxv asked, so mxv deleted nothing"
+            ),
+            Self::WorkspaceChanged { name } => write!(
+                formatter,
+                "the workspace {name} changed after mxv asked, so mxv archived nothing"
             ),
             Self::RestoreNotFound { name } => write!(formatter, "no archive is named {name}"),
             Self::RestoreNameTaken { name, path, record } => {

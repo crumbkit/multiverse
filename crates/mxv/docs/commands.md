@@ -511,11 +511,13 @@ Archive a workspace, so restore can rebuild it at the same commits.
 
 When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
 
+Archive holds the workspace's lock while it plans, and holds no lock while its question is open, so `mxv up` and the other commands of the workspace run meanwhile. After the question, it takes the lock, plans again, and goes on only with what the question named. When a unit runs that the question did not name, or docker holds a volume that it did not name, mxv stops and deletes nothing and fails with mxv::archive::changed. An archive that an earlier run retired and did not finish is finished by running `mxv archive -w NAME` again, and an archive that finished has nothing to do, so a second archive of a name reports unchanged. With --delete-volumes, every question names the docker volumes that the archive deletes, and the finish of a retired archive asks too.
+
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
 - `--force`: Lose what the archive cannot keep, such as a paused merge or a file over archive\_max\_file, and list it in the archive
-- `--delete-volumes`: Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
+- `--delete-volumes`: Delete the workspace's docker volumes and the data in them, which the question names; without this flag the volumes stay for the restore
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 

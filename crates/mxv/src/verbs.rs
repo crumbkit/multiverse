@@ -825,7 +825,7 @@ pub(crate) fn remove(
         ));
     }
     if args.delete_volumes {
-        question.push_str(&volumes_clause(&names));
+        question.push_str(&crate::archive::volumes_clause(&names));
     }
     output.confirm(args.yes, &question)?;
     let runs = environment.runs()?;
@@ -872,20 +872,6 @@ pub(crate) fn remove(
             not_started: Vec::new(),
         }
         .into()),
-    }
-}
-
-/// Returns the sentence that ends the question of a removal that deletes
-/// the docker volumes `names`, such as ` It deletes the docker volumes a and
-/// b and the data in them.`, or nothing when the workspace has no volume.
-pub(crate) fn volumes_clause(names: &[String]) -> String {
-    match names {
-        [] => String::new(),
-        [only] => format!(" It deletes the docker volume {only} and the data in it."),
-        [rest @ .., last] => format!(
-            " It deletes the docker volumes {} and {last} and the data in them.",
-            rest.join(", ")
-        ),
     }
 }
 
@@ -990,35 +976,5 @@ fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure 
             name,
             path: checkout,
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::volumes_clause;
-
-    fn names(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| (*name).to_owned()).collect()
-    }
-
-    #[test]
-    fn removing_a_workspace_with_delete_volumes_names_the_volumes_in_the_question() {
-        assert_eq!(
-            volumes_clause(&names(&["phase-3f9a.data"])),
-            " It deletes the docker volume phase-3f9a.data and the data in it."
-        );
-        assert_eq!(
-            volumes_clause(&names(&["phase-3f9a.data", "phase-3f9a.search"])),
-            " It deletes the docker volumes phase-3f9a.data and phase-3f9a.search and the data in them."
-        );
-        assert_eq!(
-            volumes_clause(&names(&["a", "b", "c"])),
-            " It deletes the docker volumes a, b and c and the data in them."
-        );
-    }
-
-    #[test]
-    fn a_removal_of_a_workspace_without_volumes_adds_nothing_to_its_question() {
-        assert_eq!(volumes_clause(&[]), "");
     }
 }

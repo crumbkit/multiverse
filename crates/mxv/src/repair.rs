@@ -16,11 +16,11 @@ use std::fmt;
 use clap::Args;
 use crumbkit::{Document, DryRun, Prose, Run, Yes};
 use multiverse::health::{Orphan, OrphanKind, Repaired, Swept, UNRECORDED};
-use multiverse::{Mode, WorkspaceName};
+use multiverse::{Lifecycle, Mode, VolumesAsked, WorkspaceName};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::archive::{archives, finish};
+use crate::archive::archives;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -442,7 +442,8 @@ pub(crate) fn repair(
             // question refuses before anything changes.
             let mut locks = Vec::new();
             for held in lock_names(&name, &planned) {
-                locks.push(processes::lock(environment, &held)?);
+                let lock = processes::lock(environment, &held)?;
+                locks.push((held, lock));
             }
             let again = workspaces
                 .repair(&records, &name, Mode::DryRun)
@@ -493,14 +494,19 @@ pub(crate) fn repair(
                 // archive and its pins stay whole, and `mxv restore` of
                 // the dated name refuses with `mxv::restore::name_taken`
                 // until that workspace is gone, so nothing is lost.
-                finish(
-                    environment,
-                    &workspaces,
-                    &records,
-                    &mut archive,
-                    None,
-                    &mut warnings,
-                )?;
+                let runs = environment.runs()?;
+                let held = locks
+                    .iter()
+                    .find_map(|(held, lock)| (*held == archive.name).then_some(lock))
+                    .ok_or_else(|| MxvFailure::RepairChanged {
+                        name: name.to_string(),
+                    })?;
+                if let Some(finish) = Lifecycle::new(&workspaces, &records, &runs)
+                    .finish_held(held, &mut archive, &VolumesAsked::default())
+                    .map_err(MxvFailure::from)?
+                {
+                    warnings.extend(processes::held_sentences(&archive.name, finish.held));
+                }
             }
             RepairResult {
                 older: Some(from.to_string()),
