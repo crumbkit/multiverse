@@ -134,7 +134,7 @@ impl Deadband {
     fn ask(&self, asked: &Asked<'_>) -> Admitted {
         let read = |name: &str| self.variables.get(name).cloned();
         let environment = DeadbandEnvironment::read(read, Some(PathBuf::from(asked.cwd)));
-        let socket = deadband::socket::path(read);
+        let socket = socket_path(&self.variables, deadband::probe::user_temp_dir);
         admit(
             &DeadbandAsked {
                 socket: &socket,
@@ -151,6 +151,19 @@ impl Deadband {
             &mut crate::notice,
         )
     }
+}
+
+/// Returns the path of the daemon's socket for `variables`.
+///
+/// The launchd daemon listens in the per-user temporary directory whatever
+/// `TMPDIR` a shell has, so that directory comes before `TMPDIR`.
+/// `DEADBAND_SOCKET` and `DEADBAND_SOCKET_DIR` still win, and then
+/// `user_directory` is not called.
+fn socket_path(
+    variables: &BTreeMap<String, OsString>,
+    user_directory: impl FnOnce() -> Option<PathBuf>,
+) -> PathBuf {
+    deadband::socket::path_in_user_directory(|name| variables.get(name).cloned(), user_directory)
 }
 
 /// A place that the daemon granted, or that it could not be asked for.

@@ -20,6 +20,11 @@ workspace may need to act on.
 
 ### Changed
 
+- On macOS, mxv finds the deadband daemon's socket in the per-user
+  temporary directory, where the launchd daemon listens, before `TMPDIR`.
+  Before, a shell whose `TMPDIR` differed from that directory made mxv find
+  no daemon and build without admission. `DEADBAND_SOCKET` and
+  `DEADBAND_SOCKET_DIR` still win.
 - A library error that mxv gives no next step of its own now offers
   crumbkit's retry. Its text is `run the same command again later`, and in
   JSON its next step has the kind `retry`. Before, it was a hint whose text
