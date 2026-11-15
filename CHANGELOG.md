@@ -20,6 +20,9 @@ workspace may need to act on.
 
 ### Changed
 
+- The help of `mxv skills install`, `check` and `print` and of `mxv skills`
+  takes crumbkit's wording: "this tool's skills" in place of "mxv's skill",
+  and crumbkit's examples.
 - On macOS, mxv finds the deadband daemon's socket in the per-user
   temporary directory, where the launchd daemon listens, before `TMPDIR`.
   Before, a shell whose `TMPDIR` differed from that directory made mxv find

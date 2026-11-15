@@ -102,3 +102,8 @@ fn a_dry_run_within_the_limit_says_that_mxv_would_delete_nothing() {
     assert!(text.contains("would delete nothing"), "{text}");
     assert!(!text.contains("deleted nothing"), "{text}");
 }
+
+#[test]
+fn the_clean_row_keeps_only_its_name_uncut() {
+    assert_eq!(<super::CleanRow as crumbkit::Row>::UNCUT_COLUMNS, &["name"]);
+}

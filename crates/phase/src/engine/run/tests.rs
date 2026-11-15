@@ -2227,7 +2227,10 @@ fn a_restarts_stop_uses_the_callers_deadline_and_a_cut_off_stop_is_uncertain() {
         .borrow_mut()
         .unstoppable
         .insert("api/server".to_owned());
-    let deadline = now() + Duration::from_millis(1);
+    // The fake stop returns at once, so the deadline has already passed
+    // when the restart asks for the stop. A deadline even 1 ms ahead is
+    // still ahead when the run directory is on tmpfs.
+    let deadline = now();
 
     let report = world
         .engine()

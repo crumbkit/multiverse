@@ -46,7 +46,7 @@ pub use crate::archive::{
 pub use crate::cli::{Cli, TOOL};
 use crate::cli::{
     CommandsCommand, CompletionCommand, FiguresCommand, PortsCommand, RunsCommand, SKILL,
-    SchemasCommand, SelfCommand, SkillsCommand, Verb,
+    SchemasCommand, SelfCommand, Verb,
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
@@ -271,20 +271,7 @@ where
                 crumbkit::finish(output, crumbkit_usage::SELF_RUNS_LIST, result)
             }
         },
-        Verb::Skills { command } => match command {
-            SkillsCommand::Install(args) => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::install(&[SKILL], &args));
-                crumbkit::finish(output, crumbkit_skills::SKILLS_INSTALL, result)
-            }
-            SkillsCommand::Check(args) => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::check(&[SKILL], &args));
-                crumbkit::finish(output, crumbkit_skills::SKILLS_CHECK, result)
-            }
-            SkillsCommand::Print => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::print(&SKILL));
-                crumbkit::finish(output, crumbkit_skills::SKILLS_PRINT, result)
-            }
-        },
+        Verb::Skills { command } => crumbkit_skills::run(output, &[SKILL], &command),
         Verb::Completion { command } => match command {
             CompletionCommand::Install(args) => {
                 let result = crumbkit::completion::install(Cli::command, &args);
