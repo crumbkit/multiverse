@@ -29,6 +29,22 @@ workspace may need to act on.
   crumbkit's retry. Its text is `run the same command again later`, and in
   JSON its next step has the kind `retry`. Before, it was a hint whose text
   was `run the command again`.
+- mxv builds on crumbkit 0.5.0 and deadband 0.4.0-alpha.1, and the output
+  of these commands changes with it:
+  - `mxv list`, `mxv list --archived` and `mxv schemas list` print their
+    next step on two lines, a sentence and then the command. In JSON, the
+    `text` of a `next` entry holds the sentence.
+  - The rows of `mxv skills install` and `mxv skills check` gain a `skill`
+    column, and `mxv skills print` gains a `skill` field.
+  - `mxv self usage`, `mxv self figures list` and `mxv self runs list`
+    accept `--exclude-program`, which leaves out the runs that a program
+    with the given name marked.
+  - The help of `mxv completion install` and `mxv completion check` gives
+    `linked to /path/to/target.fish` as the example of a reason.
+  - The help of `mxv skills install` and `mxv skills check` describes the
+    `path` and `reason` columns in crumbkit-skills 0.5.0's words.
+  - The declaration of `root-verbs` in the opt-out report says that root
+    help lists each verb under the heading of the root goal that names it.
 
 - The lock that a command takes on a workspace is the file
   `$XDG_STATE_HOME/mxv/locks/<name>.lock`, which no command deletes. Before,

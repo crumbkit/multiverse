@@ -3,11 +3,12 @@ List the figures of each command in mxv's usage log
 Usage: mxv self figures list [OPTIONS]
 
 Options:
-      --since <DURATION>  How far back to read the usage log, such as 12h, 7d or 2w [default: 7d]
-      --log <FILE>        Read this usage log instead of the tool's own
-      --limit <N>         Print at most this many rows [default: 25]
-      --all               Print every row
-  -h, --help              Print help (see more with '--help')
+      --since <DURATION>        How far back to read the usage log, such as 12h, 7d or 2w [default: 7d]
+      --log <FILE>              Read this usage log instead of the tool's own
+      --exclude-program <NAME>  Leave out the runs that a program with this name marked, such as flightdeck
+      --limit <N>               Print at most this many rows [default: 25]
+      --all                     Print every row
+  -h, --help                    Print help (see more with '--help')
 
 Examples:
   mxv self figures list

@@ -66,14 +66,15 @@ toml = { workspace = true, features = ["parse"] }
 # it for a place before a process's `build`. Only this crate links it, and
 # the multiverse library reaches it through its `Admission` trait. deadband
 # is not on crates.io, so it comes from its repository, which deny.toml
-# allows. The tag is deadband's v0.3.1, which gives `Asked` its `workspace`
-# field, parses its configuration with toml and finds the daemon's socket
-# in the per-user temporary directory. The version keeps cargo-deny's wildcard check
-# passing. `cargo publish` would use that version and look for it on
-# crates.io, so publishing mxv fails until deadband is published there and
-# this line names only the version. Without default features mxv leaves
-# out `deadband top` and the terminal libraries it draws with.
-deadband = { version = "0.3.1", git = "https://github.com/crumbkit/deadband", tag = "v0.3.1", default-features = false }
+# allows. The tag is deadband's v0.4.0-alpha.1, which requires crumbkit 0.5.0
+# and gives `Asked` its `workspace` field, parses its configuration with toml
+# and finds the daemon's socket in the per-user temporary directory. The
+# version keeps cargo-deny's wildcard check passing. `cargo publish` would use
+# that version and look for it on crates.io, so publishing mxv fails until
+# deadband is published there and this line names only the version. Without
+# default features mxv leaves out `deadband top` and the terminal libraries it
+# draws with.
+deadband = { version = "0.4.0-alpha.1", git = "https://github.com/crumbkit/deadband", tag = "v0.4.0-alpha.1", default-features = false }
 # signal-hook catches SIGINT while `mxv exec` runs a command, so Ctrl-C
 # leaves mxv running until the command ends, and stops a sandboxed command
 # that Ctrl-C does not reach. phase and crumbkit-usage already depend on it.

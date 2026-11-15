@@ -2169,7 +2169,7 @@ impl deadband::probe::Probe for Calm {
 /// Returns the job that a test asks for to hold the daemon's one place.
 fn holder() -> deadband::protocol::Job {
     deadband::protocol::Job {
-        label: "holder".to_owned(),
+        label: "holder".to_owned().into(),
         pid: std::process::id(),
         command: "the job that holds the one place".to_owned(),
         lane: deadband::admit::Lane::default(),
@@ -2177,6 +2177,7 @@ fn holder() -> deadband::protocol::Job {
         cwd: None,
         workspace: None,
         short: None,
+        id: None,
     }
 }
 
@@ -2290,7 +2291,13 @@ fn daemon_that_reads_one_job(
         let Request::Ask(job) = asked else {
             panic!("{asked:?}");
         };
-        write_line(&mut stream, &Reply::Granted { jobs: 2 }).unwrap();
+        write_line(
+            &mut stream,
+            &Reply::Granted {
+                threads: deadband::admit::Threads::new(2),
+            },
+        )
+        .unwrap();
         (job, read_line(&mut reader).unwrap().unwrap())
     })
 }
@@ -2375,7 +2382,7 @@ fn a_job_run_by_hand_in_a_checkout_shows_the_workspace_that_mxv_marked() {
     let socket = setup.root().join("d.sock");
     start_daemon(&socket);
     let job = deadband::protocol::Job {
-        label: "cargo".to_owned(),
+        label: "cargo".to_owned().into(),
         command: "cargo test".to_owned(),
         cwd: Some(deep.display().to_string()),
         ..holder()
@@ -2474,7 +2481,7 @@ fn a_build_waits_for_a_place_from_a_real_daemon_and_then_gets_its_job_variables(
         }
         let jobs = deadband::client::jobs(&socket, Duration::from_secs(10)).unwrap();
         assert_eq!(jobs.waiting.len(), 1, "{jobs:?}");
-        assert_eq!(jobs.waiting[0].label, "triage");
+        assert_eq!(jobs.waiting[0].label.as_str(), "triage");
         assert!(!checkout.join("seen").exists());
 
         lease.end(Some(0));

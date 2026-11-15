@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use crumbkit::{Age, Children, Row};
+use crumbkit::{Age, Children, Line, Row};
 use multiverse::health::{Broken, Problem, Repair};
 use multiverse::{
     Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
@@ -274,7 +274,7 @@ impl Row for WorkspaceRow {
         "problem",
         "repair",
     ];
-    const PROBLEM: Option<&'static str> = Some("problem");
+    const PROBLEM: Option<crumbkit::Problem<Self>> = Some(crumbkit::Problem::field("problem"));
     const LONG_COLUMNS: &'static [&'static str] =
         &["kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name and the repair into the next command.
@@ -1324,22 +1324,14 @@ impl StateName {
     }
 }
 
-impl Row for ProcessRow {
-    const COLUMNS: &'static [&'static str] = &[
-        "name", "kind", "state", "ready", "pid", "code", "signal", "reason", "ports", "sandbox",
-    ];
-    const LONG_COLUMNS: &'static [&'static str] = &["log"];
-    const CHILDREN: Option<Children> = Some(Children::field("notes").help(
-        "one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.",
-    ));
-    // A person copies the name into `mxv logs`.
-    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
-
+impl ProcessRow {
     /// An exited unit reports a problem unless it exited with code 0.
     fn is_problem(&self) -> bool {
         self.state == StateName::Exited && self.code != Some(0)
     }
 
+    /// Returns one line for each note, which starts with `warning:` or
+    /// `info:`.
     fn child_lines(&self) -> Vec<String> {
         self.notes
             .iter()
@@ -1349,6 +1341,24 @@ impl Row for ProcessRow {
             })
             .collect()
     }
+}
+
+impl Row for ProcessRow {
+    const COLUMNS: &'static [&'static str] = &[
+        "name", "kind", "state", "ready", "pid", "code", "signal", "reason", "ports", "sandbox",
+    ];
+    const LONG_COLUMNS: &'static [&'static str] = &["log"];
+    const PROBLEM: Option<crumbkit::Problem<Self>> =
+        Some(crumbkit::Problem::by("state", Self::is_problem));
+    const CHILDREN: Option<Children<Self>> = Some(
+        Children::field("notes")
+            .lines(Self::child_lines)
+            .help(
+                "one indented line under a unit for each note of `up` or `restart`, which starts with `warning:` or `info:`.",
+            ),
+    );
+    // A person copies the name into `mxv logs`.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 impl From<&ProcessStatus> for ProcessRow {
@@ -1413,13 +1423,20 @@ impl LogLine {
     }
 }
 
-impl Row for LogLine {
-    const COLUMNS: &'static [&'static str] = &["line"];
-    const LINE: Option<&'static str> = Some("<LINE>");
-
+impl LogLine {
+    /// Returns the line's text.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Line takes a function that returns an Option"
+    )]
     fn text_line(&self) -> Option<String> {
         Some(self.line.clone())
     }
+}
+
+impl Row for LogLine {
+    const COLUMNS: &'static [&'static str] = &["line"];
+    const LINE: Option<Line<Self>> = Some(Line::new("<LINE>", Self::text_line));
 }
 
 /// One named port of a workspace and the host port that it holds, as

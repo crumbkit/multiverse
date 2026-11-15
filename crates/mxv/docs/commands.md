@@ -976,6 +976,7 @@ Report the patterns in mxv's usage log where callers waste effort
 
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
+- `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
 
 ### Examples
 
@@ -1010,6 +1011,7 @@ List the figures of each command in mxv's usage log
 
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
+- `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
 - `--limit <N>`: Print at most this many rows. Default: `25`.
 - `--all`: Print every row
 
@@ -1059,6 +1061,7 @@ List each run in mxv's usage log, grouped by session
 
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
+- `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
 - `--limit <N>`: Print at most this many rows. Default: `25`.
 - `--all`: Print every row
 
@@ -1129,12 +1132,13 @@ mxv skills install --force
 ### Columns
 
 - `state`: What install did: failed, skipped, written or unchanged.
+- `skill`: The skill's name, which names its folder in each skills directory, such as `shelf`.
 - `dirs`: The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
 - `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/skill`, or null.
 
 ### Columns that `--long` adds
 
-- `path`: The SKILL.md file that install wrote or left, at its real path.
+- `path`: The SKILL.md file that install wrote or left, or the skill's other file whose write failed, at its real path.
 
 Effects: additive, idempotent, closed-world.
 
@@ -1157,8 +1161,9 @@ mxv skills check
 ### Columns
 
 - `state`: Whether the copy is the binary's: missing, differs, unreadable, linked or current.
+- `skill`: The skill's name, which names its folder in each skills directory, such as `shelf`.
 - `dirs`: The skills directories that share this copy, as named. Directories that resolve to one place through a symbolic link share one copy.
-- `reason`: Why the copy differs, cannot be read or is linked, such as `written by shelf 0.2.0` or `linked to /src/shelf/skill`, or null.
+- `reason`: Why the copy is missing a file, differs, cannot be read or is linked, such as `written by shelf 0.2.0`, `REFERENCE.md is missing` or `linked to /src/shelf/skill`, or null.
 
 ### Columns that `--long` adds
 
@@ -1218,7 +1223,7 @@ mxv completion install --shell zsh --force
 - `state`: What install did: failed, skipped, written or unchanged.
 - `shell`: The shell: bash, elvish, fish, powershell or zsh.
 - `path`: The completion file that install wrote or left. When the file is a link to a file that install wrote, the path of that file.
-- `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /src/shelf/shelf.fish`, or null.
+- `reason`: Why install skipped or failed, or what it replaced under --force, such as `linked to /path/to/target.fish`, or null.
 
 Effects: additive, idempotent, closed-world.
 
@@ -1243,7 +1248,7 @@ mxv completion check --shell zsh
 - `state`: Whether the file holds the script that install writes: missing, differs, unreadable, linked or current.
 - `shell`: The shell: bash, elvish, fish, powershell or zsh.
 - `path`: The completion file that was checked. When the file is a link to a file that install wrote, the path of that file.
-- `reason`: Why the file differs, cannot be read or is linked, such as `linked to /src/shelf/shelf.fish`, or null.
+- `reason`: Why the file differs, cannot be read or is linked, such as `linked to /path/to/target.fish`, or null.
 
 Effects: read-only, closed-world.
 
