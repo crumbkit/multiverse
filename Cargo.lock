@@ -266,9 +266,9 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crumbkit"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5da6bfc867208a12940c7e9f356e47ea04dc026eb2dddf2542160fa6b51268f3"
+checksum = "6947c2b73fe52c95c21aa67ab38f641c8fb8e5c49765f7829b8690bf9da9ed18"
 dependencies = [
  "clap",
  "clap_complete",
@@ -283,9 +283,9 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-derive"
-version = "0.3.2"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4add976cc04a7ee23ffb377bf672fcc65c8ba9903bfa4a520ab531ac141f4935"
+checksum = "0f3ea7b7c0fc0bfe15f6e6390ec8ea418b04ebfd405edbbf64cc66d9851fafd7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -294,9 +294,9 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-markdown"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a412357d2a5a502bf4be116a79fd6cb10a4313fd923b976dd895f0c279b09fa8"
+checksum = "6783b904e7f7ae69e8933247a6ce3ef507de764e707660f9ed4b2f7d113588ec"
 dependencies = [
  "crumbkit",
  "serde",
@@ -305,9 +305,9 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-skills"
-version = "0.3.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "504fa88ddbe2b21399f5468ef68b28ee0096e10f7644ba936aea83423f1939b2"
+checksum = "010c79043dad27e48eef440d4ae587f30207c091737d454dd8d7537e1f8469ac"
 dependencies = [
  "clap",
  "crumbkit",
@@ -317,9 +317,9 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-test"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53fca87575d9dc39c9e16813c3ddb25cb61c4b3ec9f3b39b7f9d20b96040408a"
+checksum = "5dc1794eaf90f76d7825eb5527170e8115e6033e5561c444315f064a099f4c76"
 dependencies = [
  "clap",
  "crumbkit",
@@ -331,9 +331,9 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-usage"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a4b2a1adde09a095e014b8360a96129b579ed01266a4f537921a6b07d802e8a"
+checksum = "c72c2efcffa3e91ef0d6285a399168f6a79d0a3489af08faad88ec0d0a4132e7"
 dependencies = [
  "clap",
  "crumbkit",
@@ -368,8 +368,8 @@ dependencies = [
 
 [[package]]
 name = "deadband"
-version = "0.3.1"
-source = "git+https://github.com/crumbkit/deadband?tag=v0.3.1#4d63813c92b96a17175a80a90d543afd6fb3bd5e"
+version = "0.4.0-alpha.1"
+source = "git+https://github.com/crumbkit/deadband?tag=v0.4.0-alpha.1#b0c8e18e98e6d81e13ac41fa07101c0ac4f4dd20"
 dependencies = [
  "clap",
  "crumbkit",
@@ -525,7 +525,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1037,7 +1037,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1223,7 +1223,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1756,7 +1756,7 @@ dependencies = [
  "fastrand",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1997,7 +1997,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

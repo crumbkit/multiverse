@@ -12,7 +12,7 @@ fn a_record_that_is_gone_at_a_write_reads_as_a_workspace_that_is_not_found() {
         name: "triage".parse().unwrap(),
     });
 
-    assert_eq!(failure.code(), &WORKSPACE_NOT_FOUND);
+    assert_eq!(failure.code(), WORKSPACE_NOT_FOUND);
     assert_eq!(failure.to_string(), "no workspace is named triage");
     let Recovery::Run(call) = failure.recovery() else {
         panic!("{failure:?} offers no call");
@@ -27,7 +27,7 @@ fn a_restore_whose_records_changed_after_the_question_offers_its_dry_run() {
         name: "triage".to_owned(),
     };
 
-    assert_eq!(failure.code(), &RESTORE_CHANGED);
+    assert_eq!(failure.code(), RESTORE_CHANGED);
     assert_eq!(
         failure.to_string(),
         "the records of triage changed after mxv asked, so mxv deleted nothing"
@@ -66,9 +66,9 @@ fn hint(failure: &MxvFailure) -> String {
 #[test]
 fn each_ssh_refusal_has_its_own_code_and_names_the_remote_and_the_host() {
     for (refusal, code) in [
-        (SshRefusal::AuthenticationFailed, &SSH_AUTHENTICATION_FAILED),
-        (SshRefusal::HostKeyUnverified, &SSH_HOST_KEY_UNVERIFIED),
-        (SshRefusal::HostKeyChanged, &SSH_HOST_KEY_CHANGED),
+        (SshRefusal::AuthenticationFailed, SSH_AUTHENTICATION_FAILED),
+        (SshRefusal::HostKeyUnverified, SSH_HOST_KEY_UNVERIFIED),
+        (SshRefusal::HostKeyChanged, SSH_HOST_KEY_CHANGED),
     ] {
         let failure = ssh_refused(refusal, None);
         assert_eq!(failure.code(), code);
@@ -121,7 +121,7 @@ fn a_record_whose_state_changed_at_a_write_asks_for_the_command_again() {
         name: "triage".parse().unwrap(),
     });
 
-    assert_eq!(failure.code(), &super::WORKSPACE_STATE_CHANGED);
+    assert_eq!(failure.code(), super::WORKSPACE_STATE_CHANGED);
     let Recovery::Hint(hint) = failure.recovery() else {
         panic!("{failure:?} offers no hint");
     };
@@ -134,7 +134,7 @@ fn a_workspace_that_mxv_new_did_not_finish_names_mxv_remove_and_then_mxv_new() {
         name: "triage".to_owned(),
     };
 
-    assert_eq!(failure.code(), &super::WORKSPACE_CREATING);
+    assert_eq!(failure.code(), super::WORKSPACE_CREATING);
     let Recovery::Hint(hint) = failure.recovery() else {
         panic!("{failure:?} offers no hint");
     };
@@ -162,9 +162,9 @@ fn a_library_error_that_mxv_gives_a_recovery_of_its_own_offers_that_recovery() {
     assert_ne!(failure.recovery(), Recovery::Retry);
 }
 
-/// Returns the code and the hint of the failure of a workspace without a
-/// stable id beside an archive record, which is `readable` or not.
-fn archive_unfinished(readable: bool) -> (&'static crumbkit::Code, String) {
+/// Returns the area, the reason and the hint of the failure of a workspace
+/// without a stable id beside an archive record, which is `readable` or not.
+fn archive_unfinished(readable: bool) -> ((String, String), String) {
     let failure = MxvFailure::from(multiverse::Error::ArchiveUnfinished {
         name: "triage".parse().unwrap(),
         readable,
@@ -172,15 +172,16 @@ fn archive_unfinished(readable: bool) -> (&'static crumbkit::Code, String) {
     let Recovery::Hint(hint) = failure.recovery() else {
         panic!("{failure:?} offers no hint");
     };
-    (failure.code(), hint)
+    let code = failure.code();
+    ((code.area().to_owned(), code.reason().to_owned()), hint)
 }
 
 #[test]
 fn a_workspace_without_an_id_beside_an_older_unfinished_archive_names_mxv_archive() {
     let (code, hint) = archive_unfinished(true);
     assert_eq!(
-        (code.area(), code.reason()),
-        ("workspace", "archive_unfinished")
+        code,
+        ("workspace".to_owned(), "archive_unfinished".to_owned())
     );
     assert!(hint.contains("`mxv archive triage`"), "{hint}");
 }
@@ -189,8 +190,8 @@ fn a_workspace_without_an_id_beside_an_older_unfinished_archive_names_mxv_archiv
 fn a_workspace_without_an_id_beside_an_unreadable_archive_record_names_mxv_remove() {
     let (code, hint) = archive_unfinished(false);
     assert_eq!(
-        (code.area(), code.reason()),
-        ("workspace", "archive_unfinished")
+        code,
+        ("workspace".to_owned(), "archive_unfinished".to_owned())
     );
     assert!(hint.contains("`mxv remove triage`"), "{hint}");
     assert!(!hint.contains("`mxv archive triage`"), "{hint}");
@@ -204,7 +205,7 @@ fn a_write_refused_for_a_mismatched_checkout_reads_as_a_defect_of_mxv_to_report(
     });
 
     let code = failure.code();
-    assert_eq!(code, &super::WORKSPACE_MISMATCHED_CHECKOUT);
+    assert_eq!(code, super::WORKSPACE_MISMATCHED_CHECKOUT);
     assert_eq!(
         (code.area(), code.reason()),
         ("workspace", "mismatched_checkout")

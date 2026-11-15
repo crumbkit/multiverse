@@ -74,35 +74,35 @@ pub const PERMISSIONS_NOT_GRANTED: Code = Code::new("mxv", "permissions", "not_g
 pub const PROCESS_STILL_NEEDED: Code = Code::new("mxv", "process", "still_needed");
 
 /// Every code that a [`RunFailure`] or a `mxv run` failure returns.
-pub(crate) const CODES: &[&Code] = &[
-    &WORKSPACE_NOT_CURRENT,
-    &WORKSPACE_RUNNING,
-    &WORKSPACE_VOLUMES,
-    &VOLUME_RENAMED,
-    &MANIFEST_UNIT_NAME,
-    &MANIFEST_UNRUNNABLE,
-    &MANIFEST_NOT_FOUND,
-    &MANIFEST_UNKNOWN_KEY,
-    &MANIFEST_NEWER,
-    &MANIFEST_RESERVED,
-    &MANIFEST_INVALID,
-    &MANIFEST_UNREADABLE,
-    &MANIFEST_NAME_CLASH,
-    &PROCESS_NOT_FOUND,
-    &PROCESS_EXITED,
-    &PROCESS_NOT_READY,
-    &PROCESS_FOREIGN_LISTENER,
-    &PROCESS_DETACHED_LISTENER,
-    &PROCESS_UNSTOPPABLE,
-    &BUILD_FAILED,
-    &BUILD_UNSTARTABLE,
-    &BUILD_TIMED_OUT,
-    &TASK_UNKNOWN,
-    &TASK_AMBIGUOUS,
-    &PORT_TAKEN,
-    &PORT_NOT_FOUND,
-    &PERMISSIONS_NOT_GRANTED,
-    &PROCESS_STILL_NEEDED,
+pub(crate) const CODES: &[Code<'static>] = &[
+    WORKSPACE_NOT_CURRENT,
+    WORKSPACE_RUNNING,
+    WORKSPACE_VOLUMES,
+    VOLUME_RENAMED,
+    MANIFEST_UNIT_NAME,
+    MANIFEST_UNRUNNABLE,
+    MANIFEST_NOT_FOUND,
+    MANIFEST_UNKNOWN_KEY,
+    MANIFEST_NEWER,
+    MANIFEST_RESERVED,
+    MANIFEST_INVALID,
+    MANIFEST_UNREADABLE,
+    MANIFEST_NAME_CLASH,
+    PROCESS_NOT_FOUND,
+    PROCESS_EXITED,
+    PROCESS_NOT_READY,
+    PROCESS_FOREIGN_LISTENER,
+    PROCESS_DETACHED_LISTENER,
+    PROCESS_UNSTOPPABLE,
+    BUILD_FAILED,
+    BUILD_UNSTARTABLE,
+    BUILD_TIMED_OUT,
+    TASK_UNKNOWN,
+    TASK_AMBIGUOUS,
+    PORT_TAKEN,
+    PORT_NOT_FOUND,
+    PERMISSIONS_NOT_GRANTED,
+    PROCESS_STILL_NEEDED,
 ];
 
 /// A failure of a process verb.
@@ -381,42 +381,42 @@ fn start_failed(workspace: &str, process: &str) -> Recovery {
 }
 
 impl Failure for RunFailure {
-    fn code(&self) -> &'static Code {
+    fn code(&self) -> Code<'_> {
         match self {
-            Self::NotCurrent => &WORKSPACE_NOT_CURRENT,
-            Self::Running { .. } => &WORKSPACE_RUNNING,
-            Self::Volumes { .. } => &WORKSPACE_VOLUMES,
-            Self::VolumeRenamed { .. } => &VOLUME_RENAMED,
-            Self::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
-            Self::ManifestMissing { .. } => &MANIFEST_NOT_FOUND,
+            Self::NotCurrent => WORKSPACE_NOT_CURRENT,
+            Self::Running { .. } => WORKSPACE_RUNNING,
+            Self::Volumes { .. } => WORKSPACE_VOLUMES,
+            Self::VolumeRenamed { .. } => VOLUME_RENAMED,
+            Self::Unrunnable { .. } => MANIFEST_UNRUNNABLE,
+            Self::ManifestMissing { .. } => MANIFEST_NOT_FOUND,
             Self::Manifest(error) => match error.problem {
-                ManifestProblem::UnknownKey { .. } => &MANIFEST_UNKNOWN_KEY,
-                ManifestProblem::Newer { .. } => &MANIFEST_NEWER,
-                ManifestProblem::Reserved { .. } => &MANIFEST_RESERVED,
-                ManifestProblem::Unreadable { .. } => &MANIFEST_UNREADABLE,
-                ManifestProblem::UnitName { .. } => &MANIFEST_UNIT_NAME,
-                ManifestProblem::Unrunnable { .. } => &MANIFEST_UNRUNNABLE,
+                ManifestProblem::UnknownKey { .. } => MANIFEST_UNKNOWN_KEY,
+                ManifestProblem::Newer { .. } => MANIFEST_NEWER,
+                ManifestProblem::Reserved { .. } => MANIFEST_RESERVED,
+                ManifestProblem::Unreadable { .. } => MANIFEST_UNREADABLE,
+                ManifestProblem::UnitName { .. } => MANIFEST_UNIT_NAME,
+                ManifestProblem::Unrunnable { .. } => MANIFEST_UNRUNNABLE,
                 ManifestProblem::NameClash { .. } | ManifestProblem::ServiceClash { .. } => {
-                    &MANIFEST_NAME_CLASH
+                    MANIFEST_NAME_CLASH
                 }
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
-                _ => &MANIFEST_INVALID,
+                _ => MANIFEST_INVALID,
             },
-            Self::UnknownProcess { .. } => &PROCESS_NOT_FOUND,
-            Self::Exited { .. } => &PROCESS_EXITED,
-            Self::NotReady { .. } => &PROCESS_NOT_READY,
-            Self::BuildFailed { .. } => &BUILD_FAILED,
-            Self::BuildUnstartable { .. } => &BUILD_UNSTARTABLE,
-            Self::BuildTimedOut { .. } => &BUILD_TIMED_OUT,
-            Self::ForeignListener { .. } => &PROCESS_FOREIGN_LISTENER,
-            Self::DetachedListener { .. } => &PROCESS_DETACHED_LISTENER,
-            Self::Unstoppable { .. } => &PROCESS_UNSTOPPABLE,
-            Self::PortTaken { .. } => &PORT_TAKEN,
-            Self::UnknownPort { .. } => &PORT_NOT_FOUND,
-            Self::PermissionsNotGranted { .. } => &PERMISSIONS_NOT_GRANTED,
-            Self::StillNeeded { .. } => &PROCESS_STILL_NEEDED,
+            Self::UnknownProcess { .. } => PROCESS_NOT_FOUND,
+            Self::Exited { .. } => PROCESS_EXITED,
+            Self::NotReady { .. } => PROCESS_NOT_READY,
+            Self::BuildFailed { .. } => BUILD_FAILED,
+            Self::BuildUnstartable { .. } => BUILD_UNSTARTABLE,
+            Self::BuildTimedOut { .. } => BUILD_TIMED_OUT,
+            Self::ForeignListener { .. } => PROCESS_FOREIGN_LISTENER,
+            Self::DetachedListener { .. } => PROCESS_DETACHED_LISTENER,
+            Self::Unstoppable { .. } => PROCESS_UNSTOPPABLE,
+            Self::PortTaken { .. } => PORT_TAKEN,
+            Self::UnknownPort { .. } => PORT_NOT_FOUND,
+            Self::PermissionsNotGranted { .. } => PERMISSIONS_NOT_GRANTED,
+            Self::StillNeeded { .. } => PROCESS_STILL_NEEDED,
         }
     }
 

@@ -1,4 +1,3 @@
-use crumbkit::Row as _;
 use multiverse::ProcessNote;
 
 use super::{KindName, NoteRow, ProcessRow, StateName};

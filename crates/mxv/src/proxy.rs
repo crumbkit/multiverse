@@ -51,16 +51,16 @@ pub const PROXY_TRUST_NEEDS_TERMINAL: Code = Code::new("mxv", "proxy", "trust_ne
 pub const PROXY_TRUST_FAILED: Code = Code::new("mxv", "proxy", "trust_failed");
 
 /// Every code that a [`ProxyFailure`] returns.
-pub(crate) const CODES: &[&Code] = &[
-    &PROXY_PORT_HELD,
-    &PROXY_PORT_DENIED,
-    &PROXY_CADDY_MISSING,
-    &PROXY_CADDY_TOO_OLD,
-    &PROXY_START_FAILED,
-    &PROXY_LOAD_FAILED,
-    &PROXY_SOCKET_PATH_TOO_LONG,
-    &PROXY_TRUST_NEEDS_TERMINAL,
-    &PROXY_TRUST_FAILED,
+pub(crate) const CODES: &[Code<'static>] = &[
+    PROXY_PORT_HELD,
+    PROXY_PORT_DENIED,
+    PROXY_CADDY_MISSING,
+    PROXY_CADDY_TOO_OLD,
+    PROXY_START_FAILED,
+    PROXY_LOAD_FAILED,
+    PROXY_SOCKET_PATH_TOO_LONG,
+    PROXY_TRUST_NEEDS_TERMINAL,
+    PROXY_TRUST_FAILED,
 ];
 
 /// The document that `mxv proxy status` prints.
@@ -123,24 +123,24 @@ pub(crate) fn fail(error: ProxyError) -> crumbkit::Error {
 
 /// Returns the code of `error`, which the warning of a lifecycle verb and
 /// the failure of a proxy command both print.
-fn code_of(error: &ProxyError) -> &'static Code {
+fn code_of(error: &ProxyError) -> Code<'static> {
     match error {
-        ProxyError::PortHeld { .. } => &PROXY_PORT_HELD,
-        ProxyError::PortDenied { .. } => &PROXY_PORT_DENIED,
-        ProxyError::CaddyMissing { .. } => &PROXY_CADDY_MISSING,
-        ProxyError::CaddyTooOld { .. } => &PROXY_CADDY_TOO_OLD,
-        ProxyError::LoadFailed { .. } => &PROXY_LOAD_FAILED,
-        ProxyError::SocketPathTooLong { .. } => &PROXY_SOCKET_PATH_TOO_LONG,
-        _ => &PROXY_START_FAILED,
+        ProxyError::PortHeld { .. } => PROXY_PORT_HELD,
+        ProxyError::PortDenied { .. } => PROXY_PORT_DENIED,
+        ProxyError::CaddyMissing { .. } => PROXY_CADDY_MISSING,
+        ProxyError::CaddyTooOld { .. } => PROXY_CADDY_TOO_OLD,
+        ProxyError::LoadFailed { .. } => PROXY_LOAD_FAILED,
+        ProxyError::SocketPathTooLong { .. } => PROXY_SOCKET_PATH_TOO_LONG,
+        _ => PROXY_START_FAILED,
     }
 }
 
 impl Failure for ProxyFailure {
-    fn code(&self) -> &'static Code {
+    fn code(&self) -> Code<'_> {
         match self {
             Self::Library(error) => code_of(error),
-            Self::TrustNeedsTerminal => &PROXY_TRUST_NEEDS_TERMINAL,
-            Self::TrustFailed { .. } => &PROXY_TRUST_FAILED,
+            Self::TrustNeedsTerminal => PROXY_TRUST_NEEDS_TERMINAL,
+            Self::TrustFailed { .. } => PROXY_TRUST_FAILED,
         }
     }
 
@@ -334,17 +334,20 @@ pub(crate) struct RouteRow {
     notes: Vec<String>,
 }
 
+impl RouteRow {
+    /// Returns the notes that follow the row.
+    fn child_lines(&self) -> Vec<String> {
+        self.notes.clone()
+    }
+}
+
 impl Row for RouteRow {
     const COLUMNS: &'static [&'static str] = &["route", "workspace", "url", "unit", "state"];
-    const CHILDREN: Option<Children> = Some(Children::field("notes").help(
+    const CHILDREN: Option<Children<Self>> = Some(Children::field("notes").lines(Self::child_lines).help(
         "one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.",
     ));
     // A person copies the workspace into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["workspace"];
-
-    fn child_lines(&self) -> Vec<String> {
-        self.notes.clone()
-    }
 }
 
 /// What `mxv proxy status` says above its rows.

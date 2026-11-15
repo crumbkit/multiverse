@@ -201,36 +201,35 @@ const ALLOW: &[Allow] = &[
 
 /// `restore` of a name that no archive has.
 const RESTORE_MISSING: Failing<'static> = Failing::new(
-    &RESTORE_NOT_FOUND,
+    RESTORE_NOT_FOUND,
     &["restore", "missing", "--from-origin", "--dry-run"],
 );
 
 /// `show` of a record that holds another name than its file.
 const MISMATCHED_RECORD: Failing<'static> =
-    Failing::new(&RECORD_MISMATCHED, &["show", "reading-list"])
-        .xdg("tests/fixtures/xdg-mismatched");
+    Failing::new(RECORD_MISMATCHED, &["show", "reading-list"]).xdg("tests/fixtures/xdg-mismatched");
 
 /// `new` with a config file that sets an unknown key.
 const BAD_CONFIG: Failing<'static> = Failing::new(
-    &CONFIG_INVALID,
+    CONFIG_INVALID,
     &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-bad-config");
 
 /// `new` with a directory where the config file belongs.
 const UNREADABLE_CONFIG: Failing<'static> = Failing::new(
-    &CONFIG_UNREADABLE,
+    CONFIG_UNREADABLE,
     &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-config-directory");
 
 /// `show` of a record that a newer mxv wrote.
 const NEWER_RECORD: Failing<'static> =
-    Failing::new(&RECORD_NEWER, &["show", "reading-list"]).xdg("tests/fixtures/xdg-newer");
+    Failing::new(RECORD_NEWER, &["show", "reading-list"]).xdg("tests/fixtures/xdg-newer");
 
 /// `show` of a record that is not JSON.
 const CORRUPT_RECORD: Failing<'static> =
-    Failing::new(&RECORD_CORRUPT, &["show", "reading-list"]).xdg("tests/fixtures/xdg-corrupt");
+    Failing::new(RECORD_CORRUPT, &["show", "reading-list"]).xdg("tests/fixtures/xdg-corrupt");
 
 /// The budgets of the paths through the help, which are crumbkit's
 /// defaults.
@@ -298,87 +297,87 @@ fn examples(path: &str) -> Examples<'_> {
 }
 
 /// `cd` of a name that no workspace has.
-const CD_MISSING: Failing<'static> = Failing::new(&WORKSPACE_NOT_FOUND, &["cd", "missing"]);
+const CD_MISSING: Failing<'static> = Failing::new(WORKSPACE_NOT_FOUND, &["cd", "missing"]);
 
 /// `new` of the name of the workspace in the fixture.
 const NEW_TAKEN_NAME: Failing<'static> = Failing::new(
-    &WORKSPACE_EXISTS,
+    WORKSPACE_EXISTS,
     &["new", "reading-list", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of a name with a slash.
 const NEW_BAD_NAME: Failing<'static> = Failing::new(
-    &WORKSPACE_BAD_NAME,
+    WORKSPACE_BAD_NAME,
     &["new", "a/b", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of the name of a branch that the repository already has.
 const NEW_TAKEN_BRANCH: Failing<'static> = Failing::new(
-    &BRANCH_EXISTS,
+    BRANCH_EXISTS,
     &["new", "taken", "--repo", "app", "--dry-run"],
 );
 
 /// `new` of a path that does not exist.
 const NEW_MISSING_REPOSITORY: Failing<'static> = Failing::new(
-    &REPOSITORY_NOT_FOUND,
+    REPOSITORY_NOT_FOUND,
     &["new", "triage", "--repo", "missing", "--dry-run"],
 );
 
 /// `new` of a repository without an origin.
 const NEW_NO_ORIGIN: Failing<'static> = Failing::new(
-    &REPOSITORY_NO_ORIGIN,
+    REPOSITORY_NO_ORIGIN,
     &["new", "triage", "--repo", "plain", "--dry-run"],
 );
 
 /// `new` of a repository whose origin has no commits.
 const NEW_EMPTY_ORIGIN: Failing<'static> = Failing::new(
-    &REPOSITORY_EMPTY_ORIGIN,
+    REPOSITORY_EMPTY_ORIGIN,
     &["new", "triage", "--repo", "fresh", "--dry-run"],
 );
 
 /// `new` with a relative `MXV_ROOT`.
 const NEW_RELATIVE_ROOT: Failing<'static> = Failing::new(
-    &ENVIRONMENT_RELATIVE_ROOT,
+    ENVIRONMENT_RELATIVE_ROOT,
     &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .env(&[("MXV_ROOT", Some("work"))]);
 
 /// `new` of a name whose directory already exists under the default root.
 const NEW_TAKEN_DIRECTORY: Failing<'static> = Failing::new(
-    &DIRECTORY_TAKEN,
+    DIRECTORY_TAKEN,
     &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .xdg("tests/fixtures/xdg-taken");
 
 /// `new` with a `PATH` that finds no git.
 const NEW_NO_GIT: Failing<'static> = Failing::new(
-    &GIT_NOT_FOUND,
+    GIT_NOT_FOUND,
     &["new", "triage", "--repo", "app", "--dry-run"],
 )
 .env(&[("PATH", Some("/nonexistent"))]);
 
 /// `clean --over-limit` with a config file that sets no `max_disposable`.
 const CLEAN_NO_LIMIT: Failing<'static> =
-    Failing::new(&CONFIG_NO_LIMIT, &["clean", "--over-limit", "--dry-run"]);
+    Failing::new(CONFIG_NO_LIMIT, &["clean", "--over-limit", "--dry-run"]);
 
 /// `mxv run` of a task that the fixture's workspace does not have. The
 /// checkout's directory does not exist, so mise cannot start there. `--json`
 /// comes before the task, because each word after the task is the task's.
 const RUN_UNKNOWN: Failing<'static> = Failing::new(
-    &TASK_UNKNOWN,
+    TASK_UNKNOWN,
     &["run", "--json", "-w", "reading-list", "missing"],
 );
 
 /// `status` outside every workspace, without a name.
-const STATUS_OUTSIDE: Failing<'static> = Failing::new(&WORKSPACE_NOT_CURRENT, &["status"]);
+const STATUS_OUTSIDE: Failing<'static> = Failing::new(WORKSPACE_NOT_CURRENT, &["status"]);
 
 /// `status` of a name that no workspace has.
 const STATUS_MISSING: Failing<'static> =
-    Failing::new(&WORKSPACE_NOT_FOUND, &["status", "-w", "missing"]);
+    Failing::new(WORKSPACE_NOT_FOUND, &["status", "-w", "missing"]);
 
 /// `new` of two checkouts in the folder `app`.
 const NEW_TAKEN_FOLDER: Failing<'static> = Failing::new(
-    &CHECKOUT_NAME_TAKEN,
+    CHECKOUT_NAME_TAKEN,
     &[
         "new",
         "triage",
@@ -395,7 +394,7 @@ const NEW_TAKEN_FOLDER: Failing<'static> = Failing::new(
 /// `new` of a checkout in the folder that holds the workspace's
 /// `AGENTS.md`.
 const NEW_RESERVED_FOLDER: Failing<'static> = Failing::new(
-    &CHECKOUT_INVALID_NAME,
+    CHECKOUT_INVALID_NAME,
     &[
         "new",
         "triage",
@@ -409,12 +408,12 @@ const NEW_RESERVED_FOLDER: Failing<'static> = Failing::new(
 
 /// `cd` of a checkout that the fixture's workspace does not have.
 const CD_MISSING_CHECKOUT: Failing<'static> =
-    Failing::new(&CHECKOUT_NOT_FOUND, &["cd", "reading-list", "missing"]);
+    Failing::new(CHECKOUT_NOT_FOUND, &["cd", "reading-list", "missing"]);
 
 /// `add` to the fixture's workspace, whose record of version 1 holds a git
 /// worktree.
 const ADD_TO_WORKTREES: Failing<'static> = Failing::new(
-    &WORKSPACE_WORKTREE_KIND,
+    WORKSPACE_WORKTREE_KIND,
     &["add", "-w", "reading-list", "--repo", "app", "--dry-run"],
 );
 
@@ -440,7 +439,7 @@ const STARTS: &[Failing<'static>] = &[
     MISMATCHED_RECORD,
     BAD_CONFIG,
     UNREADABLE_CONFIG,
-    Failing::new(&CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
+    Failing::new(CONFIRM_NEEDS_YES, &["remove", "reading-list"]),
     RESTORE_MISSING,
     STATUS_OUTSIDE,
     RUN_UNKNOWN,
@@ -462,217 +461,217 @@ const BUILD_DEADLINE: &str = "Only a build that runs for an hour provokes it fro
 const PROXY_STATE: &str = "Each needs a Caddy program, a held address or a terminal that a fixed fixture cannot hold; tests/proxy.rs provokes them with a missing program, a held address and a refused terminal.";
 
 const UNPROVOKED: &[Unprovoked<'static>] = &[
-    Unprovoked::new(&PROXY_PORT_HELD, PROXY_STATE),
-    Unprovoked::new(&PROXY_PORT_DENIED, PROXY_STATE),
-    Unprovoked::new(&PROXY_CADDY_MISSING, PROXY_STATE),
-    Unprovoked::new(&PROXY_CADDY_TOO_OLD, PROXY_STATE),
-    Unprovoked::new(&PROXY_START_FAILED, PROXY_STATE),
-    Unprovoked::new(&PROXY_LOAD_FAILED, PROXY_STATE),
-    Unprovoked::new(&PROXY_SOCKET_PATH_TOO_LONG, PROXY_STATE),
-    Unprovoked::new(&PROXY_TRUST_NEEDS_TERMINAL, PROXY_STATE),
-    Unprovoked::new(&PROXY_TRUST_FAILED, PROXY_STATE),
-    Unprovoked::new(&ARCHIVE_NOT_FOUND, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_NAME_TAKEN, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_SOURCE_CHANGED, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_MIRROR_MISSING, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_UNKEEPABLE, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_IN_USE, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_UNFINISHED, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_PINS_GONE, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_WORKSPACE_REMOVED, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_RENAME_UNFINISHED, ARCHIVE_STATE),
-    Unprovoked::new(&REPAIR_CHANGED, REPAIR_RACE),
-    Unprovoked::new(&RESTORE_CHANGED, RESTORE_RACE),
-    Unprovoked::new(&REPAIR_NAMES_TAKEN, REPAIR_NAMES),
-    Unprovoked::new(&ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_STATE),
-    Unprovoked::new(&ARCHIVE_VOLUMES_IN_USE, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_NAME_TAKEN, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_BRANCH_MOVED, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_COMMIT_MISSING, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_MIRROR_MISSING, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_UNFINISHED, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_ROOT_FILE_CHANGED, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_IGNORED_DAMAGED, ARCHIVE_STATE),
-    Unprovoked::new(&RESTORE_IGNORED_TAKEN, ARCHIVE_STATE),
+    Unprovoked::new(PROXY_PORT_HELD, PROXY_STATE),
+    Unprovoked::new(PROXY_PORT_DENIED, PROXY_STATE),
+    Unprovoked::new(PROXY_CADDY_MISSING, PROXY_STATE),
+    Unprovoked::new(PROXY_CADDY_TOO_OLD, PROXY_STATE),
+    Unprovoked::new(PROXY_START_FAILED, PROXY_STATE),
+    Unprovoked::new(PROXY_LOAD_FAILED, PROXY_STATE),
+    Unprovoked::new(PROXY_SOCKET_PATH_TOO_LONG, PROXY_STATE),
+    Unprovoked::new(PROXY_TRUST_NEEDS_TERMINAL, PROXY_STATE),
+    Unprovoked::new(PROXY_TRUST_FAILED, PROXY_STATE),
+    Unprovoked::new(ARCHIVE_NOT_FOUND, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_NAME_TAKEN, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_SOURCE_CHANGED, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_MIRROR_MISSING, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_UNKEEPABLE, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_IN_USE, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_PINS_GONE, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_WORKSPACE_REMOVED, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_RENAME_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(REPAIR_CHANGED, REPAIR_RACE),
+    Unprovoked::new(RESTORE_CHANGED, RESTORE_RACE),
+    Unprovoked::new(REPAIR_NAMES_TAKEN, REPAIR_NAMES),
+    Unprovoked::new(ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_VOLUMES_IN_USE, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_NAME_TAKEN, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_BRANCH_MOVED, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_COMMIT_MISSING, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_MIRROR_MISSING, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_ROOT_FILE_CHANGED, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_IGNORED_DAMAGED, ARCHIVE_STATE),
+    Unprovoked::new(RESTORE_IGNORED_TAKEN, ARCHIVE_STATE),
     Unprovoked::new(
-        &MIRROR_LOCKED,
+        MIRROR_LOCKED,
         "Only a mirror whose lock another mxv command holds for longer than mxv waits provokes it, which is longer than the check waits for a run; the library's workspace tests provoke it with a short wait.",
     ),
     Unprovoked::new(
-        &MIRROR_FETCH_FAILED,
+        MIRROR_FETCH_FAILED,
         "Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.",
     ),
     Unprovoked::new(
-        &SSH_AUTHENTICATION_FAILED,
+        SSH_AUTHENTICATION_FAILED,
         "Only an SSH origin whose host refuses every key provokes it, and the check's fixture has a local origin; tests/workspaces.rs provokes it with a fake ssh that refuses.",
     ),
     Unprovoked::new(
-        &SSH_HOST_KEY_UNVERIFIED,
+        SSH_HOST_KEY_UNVERIFIED,
         "Only an SSH origin whose host key the known hosts file lacks provokes it, and the check's fixture has a local origin; the library's git tests provoke it with a fake ssh.",
     ),
     Unprovoked::new(
-        &SSH_HOST_KEY_CHANGED,
+        SSH_HOST_KEY_CHANGED,
         "Only an SSH origin whose host key changed provokes it, and the check's fixture has a local origin; the library's ssh tests read ssh's warning about a changed key.",
     ),
     Unprovoked::new(
-        &TEMPLATE_INVALID,
+        TEMPLATE_INVALID,
         "Only a malformed template in the config directory's templates provokes it, and the check's fixture has no templates; tests/workspaces.rs provokes it with a template that lists the repository's origin and holds a key after its [template] header.",
     ),
     Unprovoked::new(
-        &MANIFEST_UNTRUSTED,
+        MANIFEST_UNTRUSTED,
         "Only a `--manifest` file inside a git work tree or under the workspaces' root provokes it, and the check's command lines name no manifest file; tests/workspaces.rs provokes it with the repository's own mxv.toml.",
     ),
     Unprovoked::new(
-        &TEMPLATE_AMBIGUOUS,
+        TEMPLATE_AMBIGUOUS,
         "Only two templates that list the repository's origin provoke it, and the check's fixture has no templates; tests/workspaces.rs provokes it with two such templates.",
     ),
     Unprovoked::new(
-        &WORKSPACE_CHANGED,
+        WORKSPACE_CHANGED,
         "Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.",
     ),
     Unprovoked::new(
-        &PATH_INACCESSIBLE,
+        PATH_INACCESSIBLE,
         "Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.",
     ),
     Unprovoked::new(
-        &ENVIRONMENT_NO_DIRECTORY,
+        ENVIRONMENT_NO_DIRECTORY,
         "Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.",
     ),
     Unprovoked::new(
-        &CHECKOUT_UNOWNED,
+        CHECKOUT_UNOWNED,
         "Only a checkout directory that git does not list provokes it, and the fixture's workspace has no checkout directory.",
     ),
     Unprovoked::new(
-        &REPOSITORY_NO_DEFAULT_BRANCH,
+        REPOSITORY_NO_DEFAULT_BRANCH,
         "Only a clone whose origin has branches but no default branch provokes it; the library's git tests provoke it.",
     ),
     Unprovoked::new(
-        &GIT_FAILED,
+        GIT_FAILED,
         "Only a git command that fails in a working repository provokes it, such as a fetch from an origin that is gone; the library's git tests provoke it.",
     ),
     Unprovoked::new(
-        &GIT_TIMED_OUT,
+        GIT_TIMED_OUT,
         "Only a git command that runs past its deadline of 30, 120 or 600 seconds provokes it, which is longer than the check waits for a run.",
     ),
     Unprovoked::new(
-        &RECORD_UNREADABLE,
+        RECORD_UNREADABLE,
         "Only a record directory without read permission provokes it, and the check's fixture copies keep the permissions readable.",
     ),
     Unprovoked::new(
-        &FILE_UNWRITABLE,
+        FILE_UNWRITABLE,
         "Only a directory without write permission or a full disk provokes it, and the examples write nothing outside their fresh directories.",
     ),
-    Unprovoked::new(&WORKSPACE_RUNNING, LIVE),
-    Unprovoked::new(&WORKSPACE_VOLUMES, DOCKER),
+    Unprovoked::new(WORKSPACE_RUNNING, LIVE),
+    Unprovoked::new(WORKSPACE_VOLUMES, DOCKER),
     Unprovoked::new(
-        &DOCKER_NOT_FOUND,
+        DOCKER_NOT_FOUND,
         "Only a live checkout whose mxv.toml declares containers, on a PATH without docker, provokes it; tests/containers.rs provokes it.",
     ),
     Unprovoked::new(
-        &DOCKER_UNAVAILABLE,
+        DOCKER_UNAVAILABLE,
         "Only a docker daemon that does not answer provokes it, which the fixture cannot hold; tests/containers.rs provokes it with a docker that cannot reach its daemon.",
     ),
     Unprovoked::new(
-        &DOCKER_ADDRESS_POOLS_EXHAUSTED,
+        DOCKER_ADDRESS_POOLS_EXHAUSTED,
         "Only a docker daemon whose address pools are used up provokes it, which a test cannot make without changing the daemon; the library's docker tests read docker's message for it.",
     ),
     Unprovoked::new(
-        &DOCKER_COMPOSE_MISSING,
+        DOCKER_COMPOSE_MISSING,
         "Only a docker without its compose plugin provokes it; tests/containers.rs provokes it with a docker whose compose command fails.",
     ),
-    Unprovoked::new(&DOCKER_FAILED, DOCKER),
-    Unprovoked::new(&DOCKER_FOREIGN_OBJECT, DOCKER),
-    Unprovoked::new(&MANIFEST_NOT_FOUND, LIVE),
-    Unprovoked::new(&MANIFEST_UNIT_NAME, LIVE),
-    Unprovoked::new(&MANIFEST_UNRUNNABLE, LIVE),
+    Unprovoked::new(DOCKER_FAILED, DOCKER),
+    Unprovoked::new(DOCKER_FOREIGN_OBJECT, DOCKER),
+    Unprovoked::new(MANIFEST_NOT_FOUND, LIVE),
+    Unprovoked::new(MANIFEST_UNIT_NAME, LIVE),
+    Unprovoked::new(MANIFEST_UNRUNNABLE, LIVE),
     Unprovoked::new(
-        &VOLUME_RENAMED,
+        VOLUME_RENAMED,
         "Only `mxv add` to a workspace of one clone whose container has run and left a docker volume provokes it, with a docker daemon that answers.",
     ),
     Unprovoked::new(
-        &PHASE_FAILED,
+        PHASE_FAILED,
         "Only a failure of phase that mxv has no code of its own for provokes it, such as a run record that phase cannot read.",
     ),
-    Unprovoked::new(&MANIFEST_UNKNOWN_KEY, LIVE),
-    Unprovoked::new(&MANIFEST_NEWER, LIVE),
-    Unprovoked::new(&PORT_NOT_FOUND, LIVE),
-    Unprovoked::new(&MANIFEST_RESERVED, LIVE),
-    Unprovoked::new(&MANIFEST_INVALID, LIVE),
+    Unprovoked::new(MANIFEST_UNKNOWN_KEY, LIVE),
+    Unprovoked::new(MANIFEST_NEWER, LIVE),
+    Unprovoked::new(PORT_NOT_FOUND, LIVE),
+    Unprovoked::new(MANIFEST_RESERVED, LIVE),
+    Unprovoked::new(MANIFEST_INVALID, LIVE),
     Unprovoked::new(
-        &MANIFEST_NAME_CLASH,
+        MANIFEST_NAME_CLASH,
         "Only two checkouts whose mxv.toml files declare names that clash once prefixed provoke it, and the fixture's workspace has one checkout; tests/workspaces.rs provokes it.",
     ),
     Unprovoked::new(
-        &MANIFEST_NEEDED,
+        MANIFEST_NEEDED,
         "Only `mxv add` to a live workspace of one clone with a workspace manifest provokes it, and the fixture's workspace holds a git worktree; tests/multirepo.rs provokes it.",
     ),
     Unprovoked::new(
-        &CHECKOUT_INCOMPLETE,
+        CHECKOUT_INCOMPLETE,
         "Only `mxv add` to a live workspace of clones whose record names an unfinished checkout provokes it, and the fixture's workspace holds a git worktree; tests/multirepo.rs provokes it.",
     ),
     Unprovoked::new(
-        &CHECKOUT_RESUME_BLOCKED,
+        CHECKOUT_RESUME_BLOCKED,
         "Only `mxv add` that resumes an unfinished clone whose directory holds work provokes it, and the fixture's workspace holds a git worktree; the library's tests provoke it.",
     ),
     Unprovoked::new(
-        &MANIFEST_UNREADABLE,
+        MANIFEST_UNREADABLE,
         "Only an mxv.toml without read permission provokes it, in a live checkout that the fixture cannot hold.",
     ),
-    Unprovoked::new(&PROCESS_NOT_FOUND, LIVE),
-    Unprovoked::new(&PROCESS_EXITED, LIVE),
-    Unprovoked::new(&BUILD_FAILED, LIVE),
-    Unprovoked::new(&BUILD_UNSTARTABLE, LIVE),
-    Unprovoked::new(&BUILD_TIMED_OUT, BUILD_DEADLINE),
-    Unprovoked::new(&PROCESS_NOT_READY, LIVE),
-    Unprovoked::new(&PROCESS_FOREIGN_LISTENER, LIVE),
-    Unprovoked::new(&PROCESS_DETACHED_LISTENER, LIVE),
+    Unprovoked::new(PROCESS_NOT_FOUND, LIVE),
+    Unprovoked::new(PROCESS_EXITED, LIVE),
+    Unprovoked::new(BUILD_FAILED, LIVE),
+    Unprovoked::new(BUILD_UNSTARTABLE, LIVE),
+    Unprovoked::new(BUILD_TIMED_OUT, BUILD_DEADLINE),
+    Unprovoked::new(PROCESS_NOT_READY, LIVE),
+    Unprovoked::new(PROCESS_FOREIGN_LISTENER, LIVE),
+    Unprovoked::new(PROCESS_DETACHED_LISTENER, LIVE),
     Unprovoked::new(
-        &PROCESS_UNSUPPORTED_OS,
+        PROCESS_UNSUPPORTED_OS,
         "Only an operating system whose libproc structs have another size than the ones mxv reads provokes it.",
     ),
     Unprovoked::new(
-        &PROCESS_UNSTOPPABLE,
+        PROCESS_UNSTOPPABLE,
         "Only a process group that outlives SIGKILL provokes it, such as a process stuck in the kernel, which a test cannot make on demand.",
     ),
-    Unprovoked::new(&PORT_TAKEN, LIVE),
-    Unprovoked::new(&PERMISSIONS_NOT_GRANTED, LIVE),
-    Unprovoked::new(&PROCESS_STILL_NEEDED, LIVE),
+    Unprovoked::new(PORT_TAKEN, LIVE),
+    Unprovoked::new(PERMISSIONS_NOT_GRANTED, LIVE),
+    Unprovoked::new(PROCESS_STILL_NEEDED, LIVE),
     Unprovoked::new(
-        &PROCESS_UNSTARTABLE,
+        PROCESS_UNSTARTABLE,
         "Only a manifest process whose cwd is missing from a live checkout provokes it; the library's process tests provoke it.",
     ),
     Unprovoked::new(
-        &PROCESS_TABLE_UNREADABLE,
+        PROCESS_TABLE_UNREADABLE,
         "Only a PATH without ps, during a run that has started processes, provokes it, which the fixture cannot hold.",
     ),
     Unprovoked::new(
-        &PORT_EXHAUSTED,
+        PORT_EXHAUSTED,
         "Only a port range whose every port is held or taken provokes it.",
     ),
     Unprovoked::new(
-        &WORKSPACE_BUSY,
+        WORKSPACE_BUSY,
         "Only a second mxv command that runs while the first holds the workspace's lock provokes it; tests/processes.rs provokes it.",
     ),
     Unprovoked::new(
-        &WORKSPACE_CREATING,
+        WORKSPACE_CREATING,
         "Only a workspace whose `mxv new` stopped before its last write provokes it, and the fixture's workspace is live; tests/processes.rs, tests/multirepo.rs and tests/archive.rs provoke it with a record that says `creating`.",
     ),
     Unprovoked::new(
-        &WORKSPACE_STATE_CHANGED,
+        WORKSPACE_STATE_CHANGED,
         "Only a command whose record changes state between its read and its write provokes it, and no test runs two commands at that moment; the library's store tests provoke it.",
     ),
     Unprovoked::new(
-        &WORKSPACE_TRANSITION_REFUSED,
+        WORKSPACE_TRANSITION_REFUSED,
         "No command asks the store for a move that no workspace makes; the library's store tests provoke it.",
     ),
     Unprovoked::new(
-        &WORKSPACE_MISMATCHED_CHECKOUT,
+        WORKSPACE_MISMATCHED_CHECKOUT,
         "No command builds a record whose checkout does not match its kind; the library's store tests provoke it.",
     ),
     Unprovoked::new(
-        &WORKSPACE_ARCHIVE_UNFINISHED,
+        WORKSPACE_ARCHIVE_UNFINISHED,
         "Only a live checkout whose record has no stable id, beside an archive record of its name that an older mxv left retiring without one or that cannot be read, provokes it; tests/processes.rs provokes it.",
     ),
 ];
@@ -957,7 +956,7 @@ struct Fixtures {
 }
 
 /// Every failure code that a command of `mxv` can print.
-const ALL_CODES: &[&[&crumbkit::Code]] = &[CODES, RUN_CODES, ARCHIVE_CODES, PROXY_CODES];
+const ALL_CODES: &[&[crumbkit::Code<'static>]] = &[CODES, RUN_CODES, ARCHIVE_CODES, PROXY_CODES];
 
 /// Returns the fixtures that the suite of the `mxv` command reads.
 fn fixtures() -> Fixtures {

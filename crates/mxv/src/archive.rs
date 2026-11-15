@@ -1656,9 +1656,9 @@ pub(crate) fn list(
             })
             .map(row),
     );
-    Ok(args.page.first_of(rows).described("archives").next(
-        crumbkit::Call::new(&["restore"]).arg("name"),
-        "rebuilds an archived workspace.",
+    Ok(args.page.first_of(rows).described("archives").step(
+        crumbkit::Step::new("Rebuild an archived workspace.")
+            .call(crumbkit::Call::new(&["restore"]).arg("name")),
     ))
 }
 

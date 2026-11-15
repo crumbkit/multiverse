@@ -89,7 +89,7 @@ fn a_command_that_ran_ends_with_its_status() {
 fn a_container_that_is_not_running_fails_with_not_running_and_offers_up() {
     let failure = ended("triage", "db", ExecEnd::NotRunning).unwrap_err();
 
-    assert_eq!(failure.code(), &PROCESS_NOT_RUNNING);
+    assert_eq!(failure.code(), PROCESS_NOT_RUNNING);
     let Recovery::Run(call) = failure.recovery() else {
         panic!("{failure:?} offers no call");
     };
@@ -112,7 +112,7 @@ fn a_command_that_cannot_start_fails_with_unstartable_and_phases_reason() {
 
     let failure = ended("triage", "web", end).unwrap_err();
 
-    assert_eq!(failure.code(), &EXEC_UNSTARTABLE);
+    assert_eq!(failure.code(), EXEC_UNSTARTABLE);
     assert_eq!(
         failure.to_string(),
         "the command could not start in the context of web: no such program"
@@ -123,7 +123,7 @@ fn a_command_that_cannot_start_fails_with_unstartable_and_phases_reason() {
 fn a_sandboxed_command_on_a_terminal_fails_with_sandboxed_terminal_and_says_how_to_redirect() {
     let failure = ended("triage", "writer", ExecEnd::NeedsTerminal).unwrap_err();
 
-    assert_eq!(failure.code(), &EXEC_SANDBOXED_TERMINAL);
+    assert_eq!(failure.code(), EXEC_SANDBOXED_TERMINAL);
     let Recovery::Hint(hint) = failure.recovery() else {
         panic!("{failure:?} offers no hint");
     };
@@ -136,7 +136,7 @@ fn a_sandboxed_command_on_a_terminal_fails_with_sandboxed_terminal_and_says_how_
 
 #[test]
 fn json_is_refused_as_a_usage_failure() {
-    assert_eq!(ExecFailure::JsonRefused.code(), &crumbkit::codes::CLI_USAGE);
+    assert_eq!(ExecFailure::JsonRefused.code(), crumbkit::codes::CLI_USAGE);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn a_missing_program_with_no_unit_says_it_could_not_start_in_the_workspace() {
         reason: "no such program".to_owned(),
     };
 
-    assert_eq!(failure.code(), &EXEC_UNSTARTABLE);
+    assert_eq!(failure.code(), EXEC_UNSTARTABLE);
     assert_eq!(
         failure.to_string(),
         "the command could not start in the workspace triage: no such program"

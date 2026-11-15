@@ -1,2 +1,3 @@
 Showing 25 of 37 documents. --all shows every one.
-Next: mxv schemas show <ID>... prints the JSON Schema of each document.
+Next: Print the JSON Schema of each document.
+  mxv schemas show <ID>...

@@ -615,9 +615,9 @@ pub(crate) fn list(
             _ => row,
         })
         .collect();
-    Ok(args.page.first_of(rows).described("workspaces").next(
-        Call::new(&["show"]).arg("names"),
-        "takes up to 100 names in one call.",
+    Ok(args.page.first_of(rows).described("workspaces").step(
+        crumbkit::Step::new("Show up to 100 workspaces by name in one call.")
+            .call(Call::new(&["show"]).arg("names")),
     ))
 }
 

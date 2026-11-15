@@ -95,29 +95,29 @@ pub use crate::run_failures::{
 /// --archived`, which the tests pass to crumbkit-test's codes, recovery and
 /// twin checks beside [`CODES`].
 #[doc(hidden)]
-pub const ARCHIVE_CODES: &[&Code] = archive::ArchiveFailure::CODES;
+pub const ARCHIVE_CODES: &[Code<'static>] = archive::ArchiveFailure::CODES;
 
 /// Every failure code of the workspace verbs, which the tests pass to
 /// crumbkit-test's codes, recovery and twin checks.
 #[doc(hidden)]
-pub const CODES: &[&Code] = failures::CODES;
+pub const CODES: &[Code<'static>] = failures::CODES;
 
 /// Every failure code of the `mxv proxy` commands and of the warnings that
 /// the lifecycle verbs print, which the tests pass to crumbkit-test's
 /// codes, recovery and twin checks beside [`CODES`].
 #[doc(hidden)]
-pub const PROXY_CODES: &[&Code] = proxy::CODES;
+pub const PROXY_CODES: &[Code<'static>] = proxy::CODES;
 
 /// Every failure code of the process verbs, which the tests pass to
 /// crumbkit-test's codes, recovery and twin checks beside [`CODES`].
 #[doc(hidden)]
-pub const RUN_CODES: &[&Code] = run_failures::CODES;
+pub const RUN_CODES: &[Code<'static>] = run_failures::CODES;
 
 /// Every failure code of the failures that only `mxv exec` has, and the
 /// usage code of its refusal of `--json`, which the tests can pass to
 /// crumbkit-test's codes, recovery and twin checks beside [`RUN_CODES`].
 #[doc(hidden)]
-pub const EXEC_CODES: &[&Code] = exec::ExecFailure::CODES;
+pub const EXEC_CODES: &[Code<'static>] = exec::ExecFailure::CODES;
 
 /// Parses `args`, runs the command with the variables of `environment` and
 /// returns the process's exit code. The first argument is the program's
@@ -273,11 +273,11 @@ where
         },
         Verb::Skills { command } => match command {
             SkillsCommand::Install(args) => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::install(&SKILL, &args));
+                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::install(&[SKILL], &args));
                 crumbkit::finish(output, crumbkit_skills::SKILLS_INSTALL, result)
             }
             SkillsCommand::Check(args) => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::check(&SKILL, &args));
+                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::check(&[SKILL], &args));
                 crumbkit::finish(output, crumbkit_skills::SKILLS_CHECK, result)
             }
             SkillsCommand::Print => {

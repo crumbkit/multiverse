@@ -11,6 +11,9 @@ Options:
       --log <FILE>
           Read this usage log instead of the tool's own
 
+      --exclude-program <NAME>
+          Leave out the runs that a program with this name marked, such as flightdeck
+
       --limit <N>
           Print at most this many rows
           
