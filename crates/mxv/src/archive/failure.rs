@@ -661,7 +661,7 @@ impl fmt::Display for ArchiveFailure {
             ),
             Self::WorkspaceChanged { name } => write!(
                 formatter,
-                "the workspace {name} changed after mxv asked, so mxv archived nothing"
+                "the workspace or archive {name} changed, so mxv changed nothing"
             ),
             Self::RestoreNotFound { name } => write!(formatter, "no archive is named {name}"),
             Self::RestoreNameTaken { name, path, record } => {

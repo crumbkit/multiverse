@@ -485,15 +485,10 @@ pub(crate) fn repair(
         Repaired::Renamed { from, mut archive } => {
             let mut warnings = Vec::new();
             if !dry {
-                // Soft limit: the command holds the locks of both names,
-                // and `mxv new` takes no lock. When an `mxv new` of the
-                // dated name runs in the moment between the choice of the
-                // name and `finish`, `finish` still marks the archive
-                // archived, beside a workspace that has another stable
-                // id. `mxv list --archived` then names no problem, the
-                // archive and its pins stay whole, and `mxv restore` of
-                // the dated name refuses with `mxv::restore::name_taken`
-                // until that workspace is gone, so nothing is lost.
+                // The command holds the locks of both names, so an `mxv new`
+                // of the dated name waits for them and cannot make a
+                // workspace beside the archive that `finish_held` marks
+                // archived.
                 let runs = environment.runs()?;
                 let held = locks
                     .iter()

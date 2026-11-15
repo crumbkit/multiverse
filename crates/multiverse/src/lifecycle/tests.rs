@@ -746,3 +746,23 @@ fn an_archive_whose_in_use_check_names_a_process_stops_before_it_retires() {
     assert!(setup.record_exists());
     assert_eq!(setup.archive_record(), None);
 }
+
+#[test]
+fn an_archive_of_a_workspace_that_was_removed_and_made_again_during_the_question_changes_nothing() {
+    let setup = fresh();
+    let first = setup.create();
+    let plan = setup.archive_plan();
+    let removed = setup.workspaces.remove(setup.removal()).unwrap();
+    assert!(matches!(removed, RemovalOutcome::Done(_)), "{removed:?}");
+    let second = setup.create();
+    assert_ne!(first.id, second.id);
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, Archived::Changed), "{outcome:?}");
+    assert!(setup.workspaces.store.read(&name()).unwrap().is_some());
+    assert!(second.path.exists());
+}

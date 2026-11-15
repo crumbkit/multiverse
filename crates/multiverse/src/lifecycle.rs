@@ -420,6 +420,9 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///   run with that answer.
     /// - A plan that finds the checkouts retired and the workspace's record
     ///   gone finishes the archive of the confirmed workspace.
+    /// - A workspace of the name whose id is not the confirmed one, such as
+    ///   one that a removal and a new workspace made while the question was
+    ///   open, ends the run with [`Archived::Changed`].
     /// - A unit that runs and that `asked` did not name, and a docker volume
     ///   that `asked` did not name, end the run with [`Archived::Changed`]
     ///   before the first stop.
@@ -434,9 +437,16 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// whole lock wait, and the errors of the plan, the archive, the run
     /// files and docker. The steps before a failure stay done, and the lock
     /// is released, so the command can run again.
-    pub fn archive(&self, confirmed: ArchivePlan, asked: &VolumesAsked) -> Result<Archived, Error> {
+    pub fn archive(
+        &self,
+        mut confirmed: ArchivePlan,
+        asked: &VolumesAsked,
+    ) -> Result<Archived, Error> {
         let name = confirmed.removal.workspace.name.clone();
         let lock = self.runs.lock(&name)?;
+        // Whether containers ran is read again under the lock, because a
+        // unit that started after the question may have started some.
+        confirmed.options.containers_ran = self.runs.containers_ran(&name);
         let plan = match self.workspaces.plan_archive(
             self.archives,
             &name,
@@ -460,6 +470,9 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             }
         };
         let workspace = plan.removal.workspace;
+        if workspace.id != confirmed.removal.workspace.id {
+            return Ok(Archived::Changed);
+        }
         let running = self.runs.running(&workspace)?;
         if running.iter().any(|unit| !asked.units.contains(unit)) {
             return Ok(Archived::Changed);
