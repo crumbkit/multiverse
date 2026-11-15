@@ -884,9 +884,11 @@ workspace's processes. `mxv remove` holds it from before it stops the units
 until after it deletes the last docker volume, and `mxv new` holds it from
 before it writes the record until it has copied the ignored directories, so
 a second command of the same name fails with `mxv::workspace::busy` after
-the lock wait instead of deleting or changing what the first one makes. No command deletes that file, so a command that
-deletes the workspace's run directory still holds the lock. Each reads the workspace's record again once it
-holds the lock, so it uses the ports that a command before it stored.
+the lock wait instead of deleting or changing what the first one makes. No
+command deletes that file, so a command that deletes the workspace's run
+directory still holds the lock. `mxv up`, `down` and `restart` and
+`mxv ports reset` read the workspace's record again once they hold the
+lock, so they use the ports that a command before them stored.
 Allocating ports holds a second lock, `$XDG_STATE_HOME/mxv/runs/.ports.lock`,
 so two workspaces never take the same port. A command that finds a lock
 held tries again for 5 seconds, then fails with `mxv::workspace::busy`. The
@@ -1609,10 +1611,17 @@ them instead.
 Archives have no expiry, and `mxv clean` never touches one. `mxv list
 --archived` lists them with each one's age and the number of commits that
 exist only on this machine. `mxv remove --archived NAME` deletes an archive,
-its ignored-files tar and its references. `--delete-volumes` on that command deletes its docker
-volumes first. It fails and keeps the archive when docker does not answer, and
-refuses with `mxv::archive::volumes_in_use` when a live workspace has the same
-stable id.
+its ignored-files tar and its references. `--delete-volumes` on that command
+deletes its docker volumes first, and its question names them. It fails and
+keeps the archive when docker does not answer, and refuses with
+`mxv::archive::volumes_in_use` when a live workspace has the same stable id.
+The command holds the workspace's lock when it deletes, and it reads the
+archive again then. When another archive holds the name by then, such as one
+that a restore and a new archive made while the question was open, when the
+archive is no longer finished, or when docker holds a volume of it that the
+question did not name, the command deletes nothing and fails with
+`mxv::archive::changed`. Run it again to be asked about the archive as it now
+stands.
 
 mxv never pushes. The result of an archive lists each commit that no remote
 branch of `origin` holds, and those commits exist only on this machine until

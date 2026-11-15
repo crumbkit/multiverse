@@ -50,9 +50,9 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_CODES, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE,
-    ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE,
-    ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED,
+    ARCHIVE_CHANGED, ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_CODES, ARCHIVE_IN_USE,
+    ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND,
+    ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED,
     ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, ARCHIVE_WORKSPACE_REMOVED,
     BRANCH_EXISTS, BUILD_FAILED, BUILD_TIMED_OUT, BUILD_UNSTARTABLE, CHECKOUT_INCOMPLETE,
     CHECKOUT_INVALID_NAME, CHECKOUT_LOCKED, CHECKOUT_NAME_TAKEN, CHECKOUT_NOT_FOUND,
@@ -98,6 +98,9 @@ const NO_QUESTION: &str = "The command stops only units that mxv up started for 
 
 /// The reason that a code of `archive` and `restore` is unprovoked here.
 const ARCHIVE_STATE: &str = "Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.";
+
+/// Why the start probes cannot provoke `mxv::archive::changed`.
+const ARCHIVE_RACE: &str = "Only a second command that replaces the archive of the name between the question of `mxv remove --archived` and its deletion provokes it, and the start probes run no second command; tests/archive.rs holds the lock while it replaces the archive.";
 
 /// Why the start probes cannot provoke `mxv::repair::changed`.
 const REPAIR_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv repair` and its repair provokes it, and no test runs two commands at that moment.";
@@ -481,6 +484,7 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(ARCHIVE_PINS_GONE, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_WORKSPACE_REMOVED, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_RENAME_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_CHANGED, ARCHIVE_RACE),
     Unprovoked::new(REPAIR_CHANGED, REPAIR_RACE),
     Unprovoked::new(RESTORE_CHANGED, RESTORE_RACE),
     Unprovoked::new(REPAIR_NAMES_TAKEN, REPAIR_NAMES),

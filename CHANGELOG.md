@@ -35,6 +35,21 @@ workspace may need to act on.
   question did not name. With `--delete-volumes`, the question of `mxv
   remove` names the docker volumes that it deletes. The library gains
   `Lifecycle`, `RemoveAsked`, `Removed` and `RemovalDone`.
+- `mxv remove --archived` reads the archive again once it holds the
+  workspace's lock, and deletes only the archive that the question was
+  about. Before, it passed the archive that it read before the question to
+  the deletion, so a person who restored the workspace and archived it
+  again while the question was open lost the record of the new archive, and
+  its references and its tar of ignored files stayed with no record. Now,
+  when another archive holds the name, when the archive is no longer
+  finished, or when docker holds a volume of it that the question did not
+  name, the command deletes nothing and fails with the new code
+  `mxv::archive::changed`. With `--delete-volumes`, the question names the
+  docker volumes that it deletes. The library gains
+  `Lifecycle::delete_archive`, `Lifecycle::delete_archive_held`,
+  `Lifecycle::volumes_in_use`, `VolumesAsked` and `ArchiveDeleted`;
+  `Lifecycle::new` takes the archives, and `Removed` is no longer
+  `#[non_exhaustive]`.
 - The help of `mxv skills install`, `check` and `print` and of `mxv skills`
   takes crumbkit's wording: "this tool's skills" in place of "mxv's skill",
   and crumbkit's examples.

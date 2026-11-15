@@ -6,11 +6,14 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::*;
+use crate::archive::RestoreOutcome;
+use crate::archive::{Archive, ArchiveOptions, ArchiveOutcome, ArchivePlanned, ArchiveState};
+use crate::archive::{Archives, RestoreOptions, RestorePlanned};
 use crate::git::Git;
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::store::Store;
-use crate::testing::{Fixture, fixture, write};
+use crate::testing::{Fixture, fixture, git, write};
 use crate::workspaces::{Allow, Mode, NewOutcome};
 
 type Hook = Box<dyn FnMut(&str) -> Result<(), Error>>;
@@ -50,6 +53,7 @@ struct Setup {
     base: PathBuf,
     _dir: TempDir,
     workspaces: Workspaces<Git>,
+    archives: Archives,
     runs: Runs,
 }
 
@@ -62,6 +66,7 @@ fn fresh() -> Setup {
     Setup {
         fixture: fixture(),
         runs: Runs::new(&base.join("runs")).with_lock_wait(Duration::from_millis(100)),
+        archives: Archives::new(base.join("archives"), base.join("data/archives")),
         base,
         _dir: dir,
         workspaces,
@@ -101,7 +106,7 @@ impl Setup {
     }
 
     fn lifecycle(&self) -> Lifecycle<'_, Git> {
-        Lifecycle::new(&self.workspaces, &self.runs)
+        Lifecycle::new(&self.workspaces, &self.archives, &self.runs)
     }
 
     /// Writes a file in the run directory of the workspace, as a run that
@@ -111,6 +116,67 @@ impl Setup {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         write(&file, "ready\n");
         file
+    }
+
+    /// Archives the workspace and finishes the archive.
+    fn archive(&self) -> Archive {
+        let plan = match self
+            .workspaces
+            .plan_archive(
+                &self.archives,
+                &name(),
+                ArchiveOptions::default(),
+                Mode::Change,
+            )
+            .unwrap()
+        {
+            ArchivePlanned::Ready(plan) => *plan,
+            other => panic!("{other:?}"),
+        };
+        match self.workspaces.archive(&self.archives, plan).unwrap() {
+            ArchiveOutcome::Retired { mut archive, .. } => {
+                self.workspaces
+                    .finish_archive(&self.archives, &mut archive)
+                    .unwrap();
+                *archive
+            }
+            ArchiveOutcome::Refused(refusal) => panic!("{refusal:?}"),
+        }
+    }
+
+    /// Restores the archive, which rebuilds the workspace and deletes the
+    /// archive.
+    fn restore(&self) {
+        let plan = match self
+            .workspaces
+            .plan_restore(&self.archives, &name(), RestoreOptions::default())
+            .unwrap()
+        {
+            RestorePlanned::Ready(plan) => *plan,
+            other => panic!("{other:?}"),
+        };
+        match self
+            .workspaces
+            .restore(&self.archives, plan, &self.runs)
+            .unwrap()
+        {
+            RestoreOutcome::Restored(_) => {}
+            RestoreOutcome::Refused(refusal) => panic!("{refusal:?}"),
+        }
+    }
+
+    fn archive_record(&self) -> Option<Archive> {
+        self.archives.read(&name()).unwrap()
+    }
+
+    /// Returns the pin references that the repository holds for `archive`.
+    fn pins_of(&self, archive: &Archive) -> String {
+        let pin = &archive.checkouts[0].pin;
+        let dir = pin.strip_suffix("head").unwrap();
+        git(
+            &self.fixture.clone,
+            &["for-each-ref", "--format=%(refname)", dir],
+        )
     }
 
     fn record_exists(&self) -> bool {
@@ -238,4 +304,175 @@ fn remove_of_a_workspace_recreated_under_its_name_stops_nothing_and_refuses() {
     assert!(matches!(outcome, Removed::Changed), "{outcome:?}");
     assert_eq!(*steps.borrow(), 0, "nothing stopped or deleted");
     assert!(setup.record_exists());
+}
+
+/// Archives the workspace, which holds an ignored file, restores it, and
+/// archives it again, so the name holds a second archive with its own id,
+/// pins and tar of ignored files.
+fn archived_twice(setup: &Setup) -> (Archive, Archive) {
+    let workspace = setup.create();
+    let checkout = &workspace.checkouts[0].path;
+    write(checkout.join(".gitignore"), ".env\n");
+    git(checkout, &["add", ".gitignore"]);
+    git(checkout, &["commit", "--quiet", "-m", "Ignore"]);
+    write(checkout.join(".env"), "SECRET=1\n");
+    let first = setup.archive();
+    setup.restore();
+    let second = setup.archive();
+    assert_ne!(first.id, second.id);
+    (first, second)
+}
+
+#[test]
+fn deleting_an_archive_that_was_restored_and_archived_again_keeps_the_new_archive_its_pins_and_its_tar()
+ {
+    let setup = fresh();
+    let (first, second) = archived_twice(&setup);
+    let tar = setup.archives.data_of(&second.id).join("ignored.tar");
+    assert!(tar.is_file());
+    assert!(!setup.pins_of(&second).is_empty());
+
+    let outcome = setup
+        .lifecycle()
+        .delete_archive(&first, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Changed), "{outcome:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&second));
+    assert!(tar.is_file(), "the new archive's tar is gone");
+    assert!(
+        !setup.pins_of(&second).is_empty(),
+        "the new archive's pins are gone"
+    );
+}
+
+#[test]
+fn deleting_an_archive_that_another_command_deleted_has_nothing_to_do() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let first = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+    assert!(matches!(first, ArchiveDeleted::Done(_)), "{first:?}");
+    assert_eq!(setup.archive_record(), None);
+
+    let second = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(second, ArchiveDeleted::Unchanged), "{second:?}");
+}
+
+#[test]
+fn deleting_an_archive_fails_busy_while_another_command_holds_the_lock_and_deletes_nothing() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let held = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default());
+
+    assert!(matches!(outcome, Err(Error::Busy { .. })), "{outcome:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+    assert!(!setup.pins_of(&archive).is_empty());
+    drop(held);
+}
+
+#[test]
+fn an_archive_deletion_stopped_after_each_step_finishes_when_it_runs_again() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    stop_at("volumes");
+    let first = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default());
+    assert!(matches!(first, Err(Error::Unwritable { .. })), "{first:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+
+    let second = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(second, ArchiveDeleted::Done(_)), "{second:?}");
+    assert_eq!(setup.archive_record(), None);
+    assert_eq!(setup.pins_of(&archive), "");
+}
+
+#[test]
+fn deleting_an_archive_holds_the_lock_at_every_step() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let probe = Runs::new(&setup.base.join("runs")).with_lock_wait(Duration::ZERO);
+    let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let log = std::rc::Rc::clone(&seen);
+    set_hook(move |step| {
+        log.borrow_mut()
+            .push((step.to_owned(), probe.lock(&name()).is_err()));
+        Ok(())
+    });
+
+    let outcome = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
+    assert_eq!(*seen.borrow(), [("volumes".to_owned(), true)]);
+    assert!(setup.runs.lock(&name()).is_ok());
+}
+
+#[test]
+fn deleting_an_archive_whose_state_is_not_archived_changes_nothing() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let record = setup.archives.dir_of(&name()).join("archive.json");
+    let text = std::fs::read_to_string(&record).unwrap();
+    assert!(text.contains("\"state\": \"archived\""), "{text}");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test sets the state of a record, as an interrupted run would leave it"
+    )]
+    std::fs::write(
+        &record,
+        text.replace("\"state\": \"archived\"", "\"state\": \"retired\""),
+    )
+    .unwrap();
+    let retired = setup.archive_record().unwrap();
+    assert_eq!(retired.state, ArchiveState::Retired);
+
+    let outcome = setup
+        .lifecycle()
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Changed), "{outcome:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&retired));
+    assert!(!setup.pins_of(&archive).is_empty());
+}
+
+#[test]
+fn a_held_deletion_runs_under_the_lock_of_its_caller_without_taking_it_again() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let lock = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup
+        .lifecycle()
+        .delete_archive_held(&lock, &archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
+    assert_eq!(setup.archive_record(), None);
+    drop(lock);
 }

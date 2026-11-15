@@ -829,8 +829,9 @@ pub(crate) fn remove(
     }
     output.confirm(args.yes, &question)?;
     let runs = environment.runs()?;
+    let archives = crate::archive::archives(environment)?;
     let asked = RemoveAsked::new(args.force, names.clone());
-    let outcome = Lifecycle::new(&workspaces, &runs)
+    let outcome = Lifecycle::new(&workspaces, &archives, &runs)
         .remove(removal, &asked)
         .map_err(MxvFailure::from)?;
     match outcome {
@@ -871,18 +872,13 @@ pub(crate) fn remove(
             not_started: Vec::new(),
         }
         .into()),
-        _ => Err(MxvFailure::Changed {
-            name: name.to_string(),
-            allow,
-        }
-        .into()),
     }
 }
 
 /// Returns the sentence that ends the question of a removal that deletes
 /// the docker volumes `names`, such as ` It deletes the docker volumes a and
 /// b and the data in them.`, or nothing when the workspace has no volume.
-fn volumes_clause(names: &[String]) -> String {
+pub(crate) fn volumes_clause(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [only] => format!(" It deletes the docker volume {only} and the data in it."),

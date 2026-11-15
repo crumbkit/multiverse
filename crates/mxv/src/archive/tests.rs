@@ -102,6 +102,7 @@ fn archive_cases() -> Vec<ArchiveFailure> {
             name: name(),
             workspace: owned("triage-2"),
         },
+        ArchiveFailure::Changed { name: name() },
     ]);
     cases
 }
@@ -224,6 +225,9 @@ mxv::archive::volumes_in_use exits 1
   recovery Hint("run `mxv remove --archived triage` without --delete-volumes, because the volumes belong to the workspace triage-2")
   field name = Text("triage")
   field workspace = Text("triage-2")
+mxv::archive::changed exits 1
+  recovery Hint("run `mxv remove --archived triage` again, which asks about the archive as it now stands")
+  field name = Text("triage")
 mxv::restore::mirror_missing exits 1
   recovery Hint("`mxv restore triage --from-origin` fetches origin again and restores only what origin holds, and `mxv remove --archived triage` deletes the archive")
   field name = Text("triage")
