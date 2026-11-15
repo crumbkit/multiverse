@@ -59,55 +59,50 @@ pub(crate) enum CleanState {
 }
 
 /// One workspace, as `mxv clean` prints it.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, Row)]
 pub(crate) struct CleanRow {
     /// The workspace's name.
+    #[row(column, uncut)]
     pub(crate) name: String,
     /// `cleaned` when the run deleted the workspace's disposable
     /// directories, `would_clean` on a dry run, or `kept`.
+    #[row(column)]
     pub(crate) state: CleanState,
     /// The bytes that the run freed, measured before and after each
     /// deletion, or the bytes that the disposable directories take on a dry
     /// run, which is 0 for a workspace that the run kept. A file with a
     /// hard link outside the deleted directory frees nothing.
+    #[row(column)]
     pub(crate) freed: Size,
     /// The bytes that the workspace's disposable directories took on disk
     /// before the run.
+    #[row(column)]
     disposable: Size,
     /// When a file or directory of the workspace's checkouts outside the
     /// disposable directories, or a commit or staged change, last changed,
     /// or null when none exists.
+    #[row(column)]
     pub(crate) modified: Option<Age>,
     /// Why the run kept the workspace's disposable directories, or some of
     /// them, or null.
+    #[row(column)]
     pub(crate) reason: Option<String>,
     /// Why a checkout's disposable set holds fewer globs than its
     /// `mxv.toml` declares, such as an invalid manifest, or null.
+    #[row(column)]
     warnings: Option<String>,
     /// Each disposable path that the run deleted, or would delete, with its
     /// checkout's name in front, such as `app: target/`.
+    #[row(long)]
     paths: Vec<String>,
     /// Each path that the disposable set matches and that the run kept,
     /// with the reason, such as a directory that holds a `.git` entry.
+    #[row(long)]
     skipped: Vec<String>,
     /// The paths of `paths` that only the repository's own `mxv.toml`
     /// declares disposable, which the prompt named.
+    #[row(long)]
     manifest_paths: Vec<String>,
-}
-
-impl Row for CleanRow {
-    const COLUMNS: &'static [&'static str] = &[
-        "name",
-        "state",
-        "freed",
-        "disposable",
-        "modified",
-        "reason",
-        "warnings",
-    ];
-    const LONG_COLUMNS: &'static [&'static str] = &["paths", "skipped", "manifest_paths"];
-    // A person copies the name into the next command.
-    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 /// The note that `mxv clean` prints after its rows: the bytes freed and

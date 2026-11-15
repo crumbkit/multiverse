@@ -141,23 +141,21 @@ const DECLARED: &str = "mxv.toml";
 const MISE: &str = "mise";
 
 /// One task of a workspace, as `mxv run` lists it.
-#[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, JsonSchema, PartialEq, Eq, Row)]
 pub(crate) struct TaskRow {
     /// The name that `mxv run` takes.
+    #[row(column, uncut)]
     name: String,
     /// Where the task comes from: `mxv.toml` or `mise`.
+    #[row(column)]
     source: String,
     /// The folder of the checkout that holds it, or null for the workspace
     /// manifest of a workspace with several checkouts.
+    #[row(column)]
     checkout: Option<String>,
     /// Whether it takes a place from deadband.
+    #[row(column)]
     gate: bool,
-}
-
-impl Row for TaskRow {
-    const COLUMNS: &'static [&'static str] = &["name", "source", "checkout", "gate"];
-    // A person copies the name into the next command.
-    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 /// A task that the lookup found. It is the only key that the lookup

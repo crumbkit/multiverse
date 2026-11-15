@@ -169,3 +169,8 @@ fn task_failures_give_the_code_exit_recovery_and_fields_recorded_from_their_hand
 
     assert_eq!(text, TASK_FAILURES, "\n{text}");
 }
+
+#[test]
+fn the_task_row_keeps_only_its_name_uncut() {
+    assert_eq!(<super::TaskRow as crumbkit::Row>::UNCUT_COLUMNS, &["name"]);
+}

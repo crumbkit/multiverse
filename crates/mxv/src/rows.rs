@@ -1441,11 +1441,13 @@ impl Row for LogLine {
 
 /// One named port of a workspace and the host port that it holds, as
 /// `mxv ports reset` prints it.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, Row)]
 pub(crate) struct PortRow {
     /// The port's name in the manifest.
+    #[row(column, uncut)]
     name: String,
     /// The host port that the workspace holds for it.
+    #[row(column)]
     port: u16,
 }
 
@@ -1454,12 +1456,6 @@ impl PortRow {
     pub(crate) const fn new(name: String, port: u16) -> Self {
         Self { name, port }
     }
-}
-
-impl Row for PortRow {
-    const COLUMNS: &'static [&'static str] = &["name", "port"];
-    // A person copies the name into the next command.
-    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 /// Returns why a branch counts as unmerged: the number of its commits that

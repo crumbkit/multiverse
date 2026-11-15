@@ -266,3 +266,11 @@ fn an_idle_age_under_ten_minutes_is_refused() {
     assert!(refusal.contains("stop_idle"), "{refusal}");
     assert!(parse_idle("0s").is_err());
 }
+
+#[test]
+fn the_reclaim_row_keeps_only_its_name_uncut() {
+    assert_eq!(
+        <super::ReclaimRow as crumbkit::Row>::UNCUT_COLUMNS,
+        &["name"]
+    );
+}

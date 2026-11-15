@@ -1102,13 +1102,13 @@ Give coding agents mxv's skill
 
 ### Commands
 
-- [`mxv skills install`](#mxv-skills-install): Install mxv's skill into each agent skills directory that exists
-- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of mxv's skill matches this mxv
-- [`mxv skills print`](#mxv-skills-print): Print mxv's skill
+- [`mxv skills install`](#mxv-skills-install): Install this tool's skills into each agent skills directory that exists
+- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of this tool's skills matches this build
+- [`mxv skills print`](#mxv-skills-print): Print this tool's skill
 
 ## `mxv skills install`
 
-Install mxv's skill into each agent skills directory that exists
+Install this tool's skills into each agent skills directory that exists
 
 ### Arguments
 
@@ -1117,13 +1117,13 @@ Install mxv's skill into each agent skills directory that exists
 
 ### Examples
 
-Install mxv's skill into each agent skills directory that exists.
+Install the skills into each agent skills directory that exists.
 
 ```sh
 mxv skills install
 ```
 
-Install it, replacing a file or a link that install did not write.
+Install them, replacing a file or a link that install did not write.
 
 ```sh
 mxv skills install --force
@@ -1144,7 +1144,7 @@ Effects: additive, idempotent, closed-world.
 
 ## `mxv skills check`
 
-Check that each installed copy of mxv's skill matches this mxv
+Check that each installed copy of this tool's skills matches this build
 
 ### Arguments
 
@@ -1173,11 +1173,11 @@ Effects: read-only, closed-world.
 
 ## `mxv skills print`
 
-Print mxv's skill
+Print this tool's skill
 
 ### Examples
 
-Print mxv's skill.
+Print the skill.
 
 ```sh
 mxv skills print

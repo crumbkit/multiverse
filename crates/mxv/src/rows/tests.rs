@@ -50,3 +50,8 @@ fn kept_secrets_print_as_a_warning_and_rewritten_secrets_as_an_info_line() {
 fn a_process_without_notes_prints_no_child_lines() {
     assert!(row(&[]).child_lines().is_empty());
 }
+
+#[test]
+fn the_port_row_keeps_only_its_name_uncut() {
+    assert_eq!(<super::PortRow as crumbkit::Row>::UNCUT_COLUMNS, &["name"]);
+}
