@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::environment::Environment;
+
 use super::{MISE_JOBS, MOST_COMMAND_BYTES, cut, job_variables, socket_path};
 
 fn variables(pairs: &[(&str, &str)]) -> BTreeMap<String, OsString> {
@@ -66,4 +68,27 @@ fn deadband_socket_dir_wins_over_the_user_directory() {
     let variables = variables(&[("DEADBAND_SOCKET_DIR", "/set/dir")]);
     let path = socket_path(&variables, || Some(PathBuf::from("/user/tmp")));
     assert_eq!(path, Path::new("/set/dir/deadband.sock"));
+}
+
+fn read_environment(pairs: &[(&str, &str)]) -> Environment {
+    let set = variables(pairs);
+    Environment::read(|name| set.get(name).cloned(), None)
+}
+
+#[test]
+fn deadband_socket_dir_read_from_the_environment_wins_over_the_user_directory() {
+    let environment = read_environment(&[("DEADBAND_SOCKET_DIR", "/set/dir")]);
+    let path = socket_path(environment.deadband_variables(), || {
+        Some(PathBuf::from("/user/tmp"))
+    });
+    assert_eq!(path, Path::new("/set/dir/deadband.sock"));
+}
+
+#[test]
+fn the_user_directory_is_used_when_the_environment_has_no_deadband_socket_dir() {
+    let environment = read_environment(&[]);
+    let path = socket_path(environment.deadband_variables(), || {
+        Some(PathBuf::from("/user/tmp"))
+    });
+    assert_eq!(path, Path::new("/user/tmp/deadband.sock"));
 }

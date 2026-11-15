@@ -67,6 +67,7 @@ fn the_snapshot_reads_mxv_root_and_the_catalog_names_every_variable_that_mxv_dep
         [
             "MXV_ROOT",
             "DEADBAND_SOCKET",
+            "DEADBAND_SOCKET_DIR",
             "TMPDIR",
             "USER",
             "DEADBAND_HELD",
@@ -84,6 +85,7 @@ fn the_snapshot_reads_mxv_root_and_the_catalog_names_every_variable_that_mxv_dep
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
             "DEADBAND_SOCKET",
+            "DEADBAND_SOCKET_DIR",
             "TMPDIR",
             "USER",
             "DEADBAND_HELD",
