@@ -53,11 +53,15 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "DEADBAND_SOCKET",
-        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`, and `mxv run` before a task. When it is unset or empty, mxv uses `deadband.sock` in `TMPDIR`. When no daemon answers, the build or task starts at once.",
+        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`, and `mxv run` before a task. When it is unset or empty, mxv uses `deadband.sock` in `DEADBAND_SOCKET_DIR` when that is set. Otherwise, on macOS, it uses the per-user temporary directory, and then `TMPDIR`. When no daemon answers, the build or task starts at once.",
+    },
+    Variable {
+        name: "DEADBAND_SOCKET_DIR",
+        purpose: "The directory that holds deadband's socket, named `deadband.sock`. It applies when `DEADBAND_SOCKET` is unset or empty, and it comes before the per-user temporary directory and `TMPDIR`. When it is unset or empty, mxv looks further.",
     },
     Variable {
         name: "TMPDIR",
-        purpose: "The temporary directory, which holds deadband's socket when `DEADBAND_SOCKET` is unset. When it is unset or empty, mxv uses `/tmp/deadband-<USER>.sock`.",
+        purpose: "The temporary directory, which holds deadband's socket when `DEADBAND_SOCKET` and `DEADBAND_SOCKET_DIR` are unset and the system has no per-user temporary directory (on macOS the per-user directory comes first). When it is unset or empty, mxv uses `/tmp/deadband-<USER>.sock`.",
     },
     Variable {
         name: "USER",
@@ -154,6 +158,7 @@ pub struct Environment {
 /// are deadband's alone.
 const DEADBAND_VARIABLES: &[&str] = &[
     "DEADBAND_SOCKET",
+    "DEADBAND_SOCKET_DIR",
     "TMPDIR",
     "USER",
     "DEADBAND_HELD",
