@@ -144,6 +144,7 @@ const MISE: &str = "mise";
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq, Row)]
 pub(crate) struct TaskRow {
     /// The name that `mxv run` takes.
+    // A person copies the name into the next command.
     #[row(column, uncut)]
     name: String,
     /// Where the task comes from: `mxv.toml` or `mise`.

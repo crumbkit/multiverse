@@ -62,6 +62,7 @@ pub(crate) enum CleanState {
 #[derive(Debug, Serialize, JsonSchema, Row)]
 pub(crate) struct CleanRow {
     /// The workspace's name.
+    // A person copies the name into the next command.
     #[row(column, uncut)]
     pub(crate) name: String,
     /// `cleaned` when the run deleted the workspace's disposable

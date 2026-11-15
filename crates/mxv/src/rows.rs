@@ -1444,6 +1444,7 @@ impl Row for LogLine {
 #[derive(Debug, Serialize, JsonSchema, Row)]
 pub(crate) struct PortRow {
     /// The port's name in the manifest.
+    // A person copies the name into the next command.
     #[row(column, uncut)]
     name: String,
     /// The host port that the workspace holds for it.

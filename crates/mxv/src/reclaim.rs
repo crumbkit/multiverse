@@ -162,6 +162,7 @@ pub(crate) enum ReclaimState {
 #[derive(Debug, Serialize, JsonSchema, Row)]
 pub(crate) struct ReclaimRow {
     /// The workspace's name.
+    // A person copies the name into the next command.
     #[row(column, uncut)]
     name: String,
     /// `stopped`, `would_stop`, `cleaned`, `would_clean` or `kept`.
