@@ -340,6 +340,8 @@ pub(crate) enum Verb {
     /// Each --repo adds one clone, in the folder <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that an --as right after that --repo gives. Two folders with the same name, compared without case, are refused. Every clone is on the branch NAME. The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG_DATA_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
     ///
     /// The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
+    ///
+    /// New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock. A dry run takes no lock.
     New(NewArgs),
     /// Add a clone of a repository to a workspace, on the workspace's branch.
     ///
@@ -400,6 +402,8 @@ pub(crate) enum Verb {
     /// Remove fetches nothing. It counts a clone's unpushed commits against the clone's own remote branches and the heads and tags that its mirror last fetched from origin, and a refusal names how long ago the mirror fetched.
     ///
     /// When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
+    ///
+    /// Remove holds the workspace's lock from before it stops the units until after it deletes the last docker volume, so a removal that meets a command that holds the lock for more than 5 seconds fails with mxv::workspace::busy and deletes nothing. After the question, it reads the workspace again, and when the workspace changed, or a unit runs that --force did not allow it to stop, or docker holds a volume that the question did not name, it deletes nothing and fails with mxv::workspace::changed or mxv::workspace::running. With --delete-volumes, the question names the docker volumes that the removal deletes.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`
     // lines and `commands list` name only `remove`.
     #[command(alias = "rm")]

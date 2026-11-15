@@ -12,17 +12,9 @@ use std::time::{Duration, Instant};
 const HOLD: Duration = Duration::from_millis(500);
 
 /// Takes the lock of the workspace `name` under mxv's state directory
-/// `state`, which is `$XDG_STATE_HOME/mxv`, runs `command` in a thread,
-/// deletes the workspace's record after [`HOLD`], releases the lock, and
-/// returns what `command` returned. A command that read the record before
-/// the wait finds it gone under the lock. A command that had not yet read
-/// it finds no workspace at all, which mxv reports with the same code, so
-/// the result does not depend on the timing.
-pub(crate) fn delete_record_while_locked<T: Send>(
-    state: &Path,
-    name: &str,
-    command: impl FnOnce() -> T + Send,
-) -> T {
+/// `state`, which is `$XDG_STATE_HOME/mxv`, and returns the file that holds
+/// it. The lock is released when the file drops.
+pub(crate) fn hold(state: &Path, name: &str) -> fs::File {
     let locks = state.join("locks");
     fs::create_dir_all(&locks).unwrap();
     #[expect(
@@ -39,6 +31,21 @@ pub(crate) fn delete_record_while_locked<T: Send>(
         reason = "the test fixture holds the workspace's lock as another mxv command would"
     )]
     file.lock().unwrap();
+    file
+}
+
+/// Takes the lock of the workspace `name` as [`hold`] does, runs `command`
+/// in a thread, deletes the workspace's record after [`HOLD`], releases the
+/// lock, and returns what `command` returned. A command that read the
+/// record before the wait finds it gone under the lock. A command that had
+/// not yet read it finds no workspace at all, which mxv reports with the
+/// same code, so the result does not depend on the timing.
+pub(crate) fn delete_record_while_locked<T: Send>(
+    state: &Path,
+    name: &str,
+    command: impl FnOnce() -> T + Send,
+) -> T {
+    let file = hold(state, name);
     std::thread::scope(|scope| {
         let waiting = scope.spawn(command);
         let deadline = Instant::now() + HOLD;

@@ -28,6 +28,7 @@ mod disposable;
 mod error;
 mod git;
 pub mod health;
+mod lifecycle;
 mod lookup;
 mod manifest;
 mod marker;
@@ -66,6 +67,7 @@ pub use crate::disposable::{
 };
 pub use crate::error::{Error, SshRefusal};
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
+pub use crate::lifecycle::{Lifecycle, RemovalDone, RemoveAsked, Removed};
 pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefix, prefixed};
 pub use crate::manifest::{
     Command, Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,

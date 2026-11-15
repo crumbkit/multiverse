@@ -5,6 +5,12 @@
 
 #![cfg(test)]
 
+#[path = "support/held_lock.rs"]
+#[expect(
+    dead_code,
+    reason = "these tests only hold a lock, and the helper also deletes a record while it holds one"
+)]
+mod held_lock;
 #[path = "support/ssh.rs"]
 mod ssh;
 #[path = "support/git.rs"]
@@ -1570,4 +1576,114 @@ fn remove_and_a_forced_remove_remove_a_worktree_workspace_that_mxv_new_did_not_f
         let (_, listed) = setup.json(&["list"]);
         assert_eq!(listed["data"].as_array().unwrap().len(), 0, "{listed}");
     }
+}
+
+/// Writes the file that lets the fake ssh of a test continue, when it
+/// drops. A test that panics while the fake blocks then still ends, because
+/// `std::thread::scope` waits for the blocked `mxv new` before it passes
+/// the panic on.
+struct Release(PathBuf);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        write_text(&self.0, "");
+    }
+}
+
+#[test]
+fn a_remove_during_mxv_new_fails_busy_and_the_new_workspace_is_whole() {
+    let setup = Setup::new();
+    let root = setup.root();
+    let blocked = root.join("ssh-blocked");
+    let release = root.join("ssh-release");
+    // The mirror's fetch runs after `mxv new` wrote the record, so this ssh
+    // holds the creation open between its first write and its last.
+    let program = root.join("blocking-ssh");
+    write_text(
+        &program,
+        &format!(
+            "#!/bin/sh\nfor word in \"$@\"; do [ \"$word\" = -G ] && exit 0; done\n: > '{blocked}'\nwhile [ ! -e '{release}' ]; do sleep 0.1; done\nexec git upload-pack '{origin}'\n",
+            blocked = blocked.display(),
+            release = release.display(),
+            origin = root.join("origin.git").display(),
+        ),
+    );
+    let made = Command::new("chmod")
+        .args(["+x", &program.display().to_string()])
+        .env("PATH", PATH)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    git(&setup.clone, &["remote", "set-url", "origin", SSH_ORIGIN]);
+    let record = root.join("state/mxv/workspaces/triage.json");
+
+    let (creating, removed) = std::thread::scope(|scope| {
+        let creating = scope.spawn(|| {
+            Setup::run_json(
+                setup
+                    .command(&["new", "triage", "--repo", "app"])
+                    .env("GIT_SSH_COMMAND", program.display().to_string()),
+            )
+        });
+        let released = Release(release.clone());
+        let deadline = std::time::Instant::now() + AT_ONCE;
+        while !blocked.exists() {
+            assert!(!creating.is_finished(), "mxv new ended before it fetched");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mxv new never fetched"
+            );
+            std::thread::yield_now();
+        }
+        assert!(record.exists(), "the record is written before the fetch");
+        let removed = setup.json(&["remove", "triage", "--yes"]);
+        drop(released);
+        (creating.join().unwrap(), removed)
+    });
+
+    let (exit, document) = removed;
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::busy", "{document}");
+    let (exit, document) = creating;
+    assert_eq!(exit, 0, "{document}");
+    assert!(setup.workspace("triage").join("app").is_dir());
+    let stored: Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_ne!(stored["state"], "creating", "{stored}");
+}
+
+#[test]
+fn new_of_a_name_whose_workspace_is_locked_reports_exists_without_waiting() {
+    let setup = Setup::new();
+    created(&setup, "triage");
+    let held = held_lock::hold(&setup.root().join("state/mxv"), "triage");
+    let started = std::time::Instant::now();
+
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "app"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::exists", "{document}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "mxv new waited {:?} for the lock",
+        started.elapsed()
+    );
+    drop(held);
+}
+
+#[test]
+fn a_dry_run_of_new_takes_no_lock() {
+    let setup = Setup::new();
+    let held = held_lock::hold(&setup.root().join("state/mxv"), "triage");
+    let started = std::time::Instant::now();
+
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "app", "--dry-run"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the dry run waited {:?} for the lock",
+        started.elapsed()
+    );
+    drop(held);
+    assert!(!setup.workspace("triage").exists());
 }

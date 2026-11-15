@@ -878,10 +878,13 @@ runs each manifest process as a phase app with one process named `main`, so
 the log of a manifest process is `<process>.main.log` in that directory. A
 container has no such file, and `mxv logs` reads its log from Docker.
 
-`mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
-while processes run, hold an exclusive lock on
-`$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
-workspace's processes. No command deletes that file, so a command that
+`mxv up`, `down` and `restart` and `mxv ports reset` hold an exclusive lock
+on `$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
+workspace's processes. `mxv remove` holds it from before it stops the units
+until after it deletes the last docker volume, and `mxv new` holds it from
+before it writes the record until it has copied the ignored directories, so
+a second command of the same name fails with `mxv::workspace::busy` after
+the lock wait instead of deleting or changing what the first one makes. No command deletes that file, so a command that
 deletes the workspace's run directory still holds the lock. Each reads the workspace's record again once it
 holds the lock, so it uses the ports that a command before it stored.
 Allocating ports holds a second lock, `$XDG_STATE_HOME/mxv/runs/.ports.lock`,
@@ -1513,7 +1516,12 @@ refuses the removal, mxv reports that refusal and removes nothing. When the
 removal would lose more than mxv showed, such as a new untracked file under
 `--force` or a new commit on a detached `HEAD` under `--delete-unmerged`, it
 refuses with `mxv::workspace::changed`, whose recovery is the dry run that
-shows the new plan. mxv deletes a branch only while it still points at the
+shows the new plan. It also refuses with `mxv::workspace::changed`, before it
+stops or deletes anything, when the workspace's record is another one than
+the question was about, such as a workspace that another command removed and
+made again under the name, and when docker holds a volume that the question
+did not name. With `--delete-volumes` the question names the docker volumes
+that the removal deletes. mxv deletes a branch only while it still points at the
 commit that mxv checked. A branch that moved, such as one that gained a
 commit while mxv waited, stays, and the result reports `kept_moved`.
 
