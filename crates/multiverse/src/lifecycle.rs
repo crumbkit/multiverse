@@ -2,11 +2,16 @@
 //! records again, compare them with what the person confirmed, and only then
 //! stop, delete or write.
 
-use crate::archive::{Archive, ArchiveState, ArchivedRemoval, Archives};
+use crate::archive::{
+    Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveRefusal,
+    ArchiveState, ArchivedRemoval, Archives,
+};
+use crate::disk::DisposablePath;
 use crate::error::Error;
 use crate::health::{Rebuilt, rebuilt};
 use crate::name::WorkspaceName;
-use crate::runs::{DownOutcome, DownResult, Needed, Runs, Unstoppable};
+use crate::record::Workspace;
+use crate::runs::{DownOutcome, DownResult, Needed, Runs, Unstoppable, Volumes};
 use crate::store::Lock;
 use crate::workspaces::{Mode, Removal, RemovalOutcome, RemovalPlan, Workspaces};
 
@@ -23,6 +28,18 @@ pub struct Lifecycle<'a, B> {
     archives: &'a Archives,
     /// The run files, the docker volumes and the lock of each workspace.
     runs: &'a Runs,
+    /// The check for a process outside phase that works in a workspace.
+    in_use: InUse,
+}
+
+/// Returns why a process outside phase keeps `workspace` from being
+/// archived, or `None` when no such process works in it.
+pub type InUse = fn(&Workspace) -> Result<Option<String>, Error>;
+
+/// The in-use check of a [`Lifecycle`] that its caller gave none: no process
+/// outside phase keeps the workspace.
+const fn nobody(_workspace: &Workspace) -> Result<Option<String>, Error> {
+    Ok(None)
 }
 
 /// What the person's answer to the question of a removal allowed.
@@ -75,20 +92,35 @@ pub enum Removed {
     Unstoppable(Unstoppable),
 }
 
-/// The docker volumes that the question of an archive's deletion named,
-/// which the deletion may delete.
+/// The docker volumes, and for an archive the running units, that the
+/// question of an archive or of its deletion named, which the command may
+/// delete and stop.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VolumesAsked {
     /// The volumes' docker names, or none when the question named none.
     volumes: Vec<String>,
+    /// The units that the question of an archive said it stops.
+    units: Vec<String>,
 }
 
 impl VolumesAsked {
     /// Returns what a question that named the docker volumes `volumes`
-    /// allowed. With none, the deletion reads and deletes no volume.
+    /// allowed. With none, the command reads and deletes no volume.
     #[must_use]
     pub const fn new(volumes: Vec<String>) -> Self {
-        Self { volumes }
+        Self {
+            volumes,
+            units: Vec::new(),
+        }
+    }
+
+    /// Returns what the question allowed, and also that the archive stops
+    /// the running units `units`. A unit that runs later and that the
+    /// question did not name stops nothing and archives nothing.
+    #[must_use]
+    pub fn with_units(mut self, units: Vec<String>) -> Self {
+        self.units = units;
+        self
     }
 }
 
@@ -109,9 +141,87 @@ pub enum ArchiveDeleted {
     VolumesInUse(WorkspaceName),
 }
 
+/// What the finish of an archive did.
+#[derive(Debug)]
+pub struct Finish {
+    /// The names of the docker volumes that the finish deleted.
+    pub volumes: Vec<String>,
+    /// The sentences that say why phase kept the workspace's run record,
+    /// which is empty when phase deleted it.
+    pub held: Vec<String>,
+}
+
+/// An archive that [`Lifecycle::finish`] marked finished.
+#[derive(Debug)]
+pub struct FinishDone {
+    /// The archive record as the finish wrote it.
+    pub archive: Archive,
+    /// What the finish deleted.
+    pub finish: Finish,
+}
+
+/// How [`Lifecycle::finish`] ended without an error.
+#[derive(Debug)]
+pub enum Finished {
+    /// The archive's run files and the volumes that the question named are
+    /// gone, and the archive is marked finished.
+    Done(Box<FinishDone>),
+    /// The archive of the name has finished already, so there is nothing to
+    /// do.
+    Unchanged(Box<Archive>),
+    /// The archive of the name is another one than the question was about,
+    /// the name has a workspace again, or docker holds a volume that the
+    /// question did not name, and nothing was deleted.
+    Changed,
+    /// The archive cannot be finished, and nothing was deleted.
+    Refused(ArchiveRefusal),
+}
+
+/// An archive that [`Lifecycle::archive`] retired and finished.
+#[derive(Debug)]
+pub struct RetireDone {
+    /// What the removal of the workspace did.
+    pub removal: Removal,
+    /// Each disposable directory that the archive deleted.
+    pub disposable: Vec<DisposablePath>,
+    /// Each entry that appeared in a disposable directory after the
+    /// measurement and that the archive deleted with it.
+    pub late: Vec<String>,
+    /// The finished archive and what its finish deleted.
+    pub finished: FinishDone,
+}
+
+/// How [`Lifecycle::archive`] ended without an error.
+#[derive(Debug)]
+pub enum Archived {
+    /// The workspace is retired, its run files and the volumes that the
+    /// question named are gone, and the archive is finished.
+    Done(Box<RetireDone>),
+    /// An earlier run retired the workspace's checkouts and stopped, and
+    /// this run finished that archive.
+    Finished(Box<FinishDone>),
+    /// The archive of the name has finished already, so there is nothing to
+    /// do.
+    Unchanged(Box<Archive>),
+    /// The new plan refuses the archive, and nothing was stopped or
+    /// deleted.
+    Refused(ArchiveRefusal),
+    /// A unit runs that the question did not name, docker holds a volume
+    /// that it did not name, or the archive of the name belongs to another
+    /// workspace, and nothing was stopped or deleted.
+    Changed,
+    /// A process outside phase works in the workspace for the reason given,
+    /// so the archive stopped after it stopped the units.
+    InUse(String),
+    /// A process outlived the stop, so the workspace stays.
+    Unstoppable(Unstoppable),
+}
+
 impl<'a, B> Lifecycle<'a, B> {
     /// Returns the destructive commands of `workspaces` and `archives`,
-    /// whose run files, volumes and locks `runs` holds.
+    /// whose run files, volumes and locks `runs` holds. An archive checks
+    /// no process outside phase until [`Lifecycle::with_in_use`] gives it
+    /// the check.
     #[must_use]
     pub const fn new(
         workspaces: &'a Workspaces<B>,
@@ -122,7 +232,16 @@ impl<'a, B> Lifecycle<'a, B> {
             workspaces,
             archives,
             runs,
+            in_use: nobody,
         }
+    }
+
+    /// Returns these commands with `in_use` as the check for a process
+    /// outside phase that works in the workspace of an archive.
+    #[must_use]
+    pub const fn with_in_use(mut self, in_use: InUse) -> Self {
+        self.in_use = in_use;
+        self
     }
 }
 
@@ -270,6 +389,239 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         Ok(ArchiveDeleted::Done(Box::new(removed)))
     }
 
+    /// Plans the archive of the workspace `name`. It takes the lock of the
+    /// name, plans in [`Mode::Change`] and drops the lock before it returns,
+    /// so no lock is held while the person answers the question.
+    ///
+    /// The plan needs the lock because it puts a checkout that an earlier
+    /// run moved aside back into its place, which would undo the move of
+    /// another archive of the name that holds the lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another command holds the lock for the
+    /// whole lock wait, and the errors of [`Workspaces::plan_archive`].
+    pub fn plan_archive(
+        &self,
+        name: &WorkspaceName,
+        options: ArchiveOptions,
+    ) -> Result<ArchivePlanned, Error> {
+        let _lock = self.runs.lock(name)?;
+        self.workspaces
+            .plan_archive(self.archives, name, options, Mode::Change)
+    }
+
+    /// Archives the workspace that `confirmed` planned. It takes the lock of
+    /// the workspace's name and plans again with
+    /// [`Workspaces::plan_archive`], which does not lock, before it stops or
+    /// deletes anything:
+    ///
+    /// - A plan that refuses, or that finds the archive finished, ends the
+    ///   run with that answer.
+    /// - A plan that finds the checkouts retired and the workspace's record
+    ///   gone finishes the archive of the confirmed workspace.
+    /// - A workspace of the name whose id is not the confirmed one, such as
+    ///   one that a removal and a new workspace made while the question was
+    ///   open, ends the run with [`Archived::Changed`].
+    /// - A unit that runs and that `asked` did not name, and a docker volume
+    ///   that `asked` did not name, end the run with [`Archived::Changed`]
+    ///   before the first stop.
+    ///
+    /// Then it stops the units, runs the in-use check, retires the
+    /// checkouts and finishes the archive, and it holds the lock through the
+    /// last write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another command holds the lock for the
+    /// whole lock wait, and the errors of the plan, the archive, the run
+    /// files and docker. The steps before a failure stay done, and the lock
+    /// is released, so the command can run again.
+    pub fn archive(
+        &self,
+        mut confirmed: ArchivePlan,
+        asked: &VolumesAsked,
+    ) -> Result<Archived, Error> {
+        let name = confirmed.removal.workspace.name.clone();
+        let lock = self.runs.lock(&name)?;
+        // Whether containers ran is read again under the lock, because a
+        // unit that started after the question may have started some.
+        confirmed.options.containers_ran = self.runs.containers_ran(&name);
+        let plan = match self.workspaces.plan_archive(
+            self.archives,
+            &name,
+            confirmed.options,
+            Mode::Change,
+        )? {
+            ArchivePlanned::Ready(plan) => *plan,
+            ArchivePlanned::Unchanged(archive) => return Ok(Archived::Unchanged(archive)),
+            ArchivePlanned::Refused(refusal) => return Ok(Archived::Refused(refusal)),
+            ArchivePlanned::Finish(mut archive) => {
+                if archive.workspace_id != confirmed.removal.workspace.id {
+                    return Ok(Archived::Changed);
+                }
+                let Some(finish) = self.finish_held(&lock, &mut archive, asked)? else {
+                    return Ok(Archived::Changed);
+                };
+                return Ok(Archived::Finished(Box::new(FinishDone {
+                    archive: *archive,
+                    finish,
+                })));
+            }
+        };
+        let workspace = plan.removal.workspace;
+        if workspace.id != confirmed.removal.workspace.id {
+            return Ok(Archived::Changed);
+        }
+        let running = self.runs.running(&workspace)?;
+        if running.iter().any(|unit| !asked.units.contains(unit)) {
+            return Ok(Archived::Changed);
+        }
+        let volumes = if asked.volumes.is_empty() {
+            None
+        } else {
+            let volumes = self.runs.volumes(&workspace)?;
+            if unnamed(&volumes, &asked.volumes) {
+                return Ok(Archived::Changed);
+            }
+            Some(volumes)
+        };
+        if !running.is_empty() {
+            let outcome = self.runs.down(&lock, &workspace, None, &[], Needed::Stop)?;
+            if let DownOutcome::Down(results) = outcome {
+                for result in results {
+                    if let DownResult::Unstoppable(unstoppable) = result {
+                        return Ok(Archived::Unstoppable(unstoppable));
+                    }
+                }
+            }
+        }
+        if let Some(reason) = (self.in_use)(&workspace)? {
+            return Ok(Archived::InUse(reason));
+        }
+        let (mut archive, removal, disposable, late) =
+            match self.workspaces.archive(self.archives, confirmed)? {
+                ArchiveOutcome::Retired {
+                    archive,
+                    removal,
+                    disposable,
+                    late,
+                } => (*archive, *removal, disposable, late),
+                ArchiveOutcome::Refused(refusal) => return Ok(Archived::Refused(refusal)),
+            };
+        let finish = self.finish_archive(&mut archive, volumes)?;
+        Ok(Archived::Done(Box::new(RetireDone {
+            removal,
+            disposable,
+            late,
+            finished: FinishDone { archive, finish },
+        })))
+    }
+
+    /// Finishes the archive that `confirmed` is, whose workspace is gone. It
+    /// takes the lock of the archive's name, plans the archive again, and
+    /// finishes the archive of the name only when that is `confirmed`'s
+    /// archive. It deletes the docker volumes that `asked` names, and
+    /// refuses with [`Finished::Changed`] when docker holds a volume of the
+    /// archive that `asked` did not name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another command holds the lock for the
+    /// whole lock wait, and the errors of the plan, the run files and
+    /// docker. The steps before a failure stay done.
+    pub fn finish(&self, confirmed: &Archive, asked: &VolumesAsked) -> Result<Finished, Error> {
+        let lock = self.runs.lock(&confirmed.name)?;
+        // A plan that finds the archive finishable reads nothing but
+        // records, so it needs no put back and runs as a dry run.
+        let planned = self.workspaces.plan_archive(
+            self.archives,
+            &confirmed.name,
+            ArchiveOptions::default(),
+            Mode::DryRun,
+        )?;
+        match planned {
+            ArchivePlanned::Finish(mut archive) if archive.id == confirmed.id => {
+                match self.finish_held(&lock, &mut archive, asked)? {
+                    Some(finish) => Ok(Finished::Done(Box::new(FinishDone {
+                        archive: *archive,
+                        finish,
+                    }))),
+                    None => Ok(Finished::Changed),
+                }
+            }
+            ArchivePlanned::Unchanged(archive) if archive.id == confirmed.id => {
+                Ok(Finished::Unchanged(archive))
+            }
+            ArchivePlanned::Refused(refusal) => Ok(Finished::Refused(refusal)),
+            ArchivePlanned::Finish(_) | ArchivePlanned::Unchanged(_) | ArchivePlanned::Ready(_) => {
+                Ok(Finished::Changed)
+            }
+        }
+    }
+
+    /// Finishes `archive`, whose workspace is gone, for a caller that holds
+    /// the lock of its name as `_lock`, because a second lock of one name in
+    /// one process waits and fails with [`Error::Busy`]. It deletes the run
+    /// files and, when `asked` names docker volumes, the volumes of the
+    /// archive, and then marks `archive` finished. It returns `None` and
+    /// deletes nothing when docker holds a volume of the archive that
+    /// `asked` did not name. With no volume asked, it reads no volume.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of the run files, docker and the archive's record.
+    /// The steps before a failure stay done, and the archive stays retired.
+    pub fn finish_held(
+        &self,
+        _lock: &Lock,
+        archive: &mut Archive,
+        asked: &VolumesAsked,
+    ) -> Result<Option<Finish>, Error> {
+        let volumes = match archive
+            .workspace_id
+            .as_ref()
+            .filter(|_| archive.containers_ran && !asked.volumes.is_empty())
+        {
+            Some(id) => {
+                let volumes = self.runs.archived_volumes(id)?;
+                if unnamed(&volumes, &asked.volumes) {
+                    return Ok(None);
+                }
+                Some(volumes)
+            }
+            None => None,
+        };
+        self.finish_archive(archive, volumes).map(Some)
+    }
+
+    /// Deletes the run files of `archive`'s workspace and `volumes`, and
+    /// marks `archive` finished, in that order, so the archive stays
+    /// retired until the volumes are gone and a failure can be tried again.
+    fn finish_archive(
+        &self,
+        archive: &mut Archive,
+        volumes: Option<Volumes>,
+    ) -> Result<Finish, Error> {
+        let held = self
+            .runs
+            .forget(&archive.name, archive.workspace_id.as_ref())?;
+        (self.workspaces.checkpoint)("forgotten")?;
+        let mut names = Vec::new();
+        if let Some(volumes) = volumes {
+            names = volumes.names();
+            if !volumes.is_empty() {
+                self.runs.delete_volumes(volumes)?;
+            }
+        }
+        (self.workspaces.checkpoint)("volumes")?;
+        self.workspaces.finish_archive(self.archives, archive)?;
+        Ok(Finish {
+            volumes: names,
+            held,
+        })
+    }
+
     /// Returns the name of the live workspace that has the stable id of
     /// `archive`, because its docker volumes are then that workspace's. A
     /// workspace whose directories are partly gone counts too, so its
@@ -286,4 +638,10 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             .find(|workspace| rebuilt(archive, workspace) != Rebuilt::Unrelated)
             .map(|workspace| workspace.name.clone()))
     }
+}
+
+/// Reports whether `volumes` holds a volume that the question did not
+/// name, which `named` lists.
+fn unnamed(volumes: &Volumes, named: &[String]) -> bool {
+    volumes.names().iter().any(|volume| !named.contains(volume))
 }

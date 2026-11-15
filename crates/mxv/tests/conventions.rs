@@ -100,7 +100,7 @@ const NO_QUESTION: &str = "The command stops only units that mxv up started for 
 const ARCHIVE_STATE: &str = "Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.";
 
 /// Why the start probes cannot provoke `mxv::archive::changed`.
-const ARCHIVE_RACE: &str = "Only a second command that replaces the archive of the name between the question of `mxv remove --archived` and its deletion provokes it, and the start probes run no second command; tests/archive.rs holds the lock while it replaces the archive.";
+const ARCHIVE_RACE: &str = "Only a second command that replaces the archive of the name, or starts a unit or a docker volume, between the question of `mxv remove --archived` or `mxv archive` and its deletion provokes it, and the start probes run no second command; tests/archive.rs holds the command at a docker listing while it makes the change.";
 
 /// Why the start probes cannot provoke `mxv::repair::changed`.
 const REPAIR_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv repair` and its repair provokes it, and no test runs two commands at that moment.";

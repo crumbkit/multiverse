@@ -16,11 +16,11 @@ use std::fmt;
 use clap::Args;
 use crumbkit::{Document, DryRun, Prose, Run, Yes};
 use multiverse::health::{Orphan, OrphanKind, Repaired, Swept, UNRECORDED};
-use multiverse::{Mode, WorkspaceName};
+use multiverse::{Lifecycle, Mode, VolumesAsked, WorkspaceName};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::archive::{archives, finish};
+use crate::archive::archives;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -442,7 +442,8 @@ pub(crate) fn repair(
             // question refuses before anything changes.
             let mut locks = Vec::new();
             for held in lock_names(&name, &planned) {
-                locks.push(processes::lock(environment, &held)?);
+                let lock = processes::lock(environment, &held)?;
+                locks.push((held, lock));
             }
             let again = workspaces
                 .repair(&records, &name, Mode::DryRun)
@@ -484,23 +485,23 @@ pub(crate) fn repair(
         Repaired::Renamed { from, mut archive } => {
             let mut warnings = Vec::new();
             if !dry {
-                // Soft limit: the command holds the locks of both names,
-                // and `mxv new` takes no lock. When an `mxv new` of the
-                // dated name runs in the moment between the choice of the
-                // name and `finish`, `finish` still marks the archive
-                // archived, beside a workspace that has another stable
-                // id. `mxv list --archived` then names no problem, the
-                // archive and its pins stay whole, and `mxv restore` of
-                // the dated name refuses with `mxv::restore::name_taken`
-                // until that workspace is gone, so nothing is lost.
-                finish(
-                    environment,
-                    &workspaces,
-                    &records,
-                    &mut archive,
-                    None,
-                    &mut warnings,
-                )?;
+                // The command holds the locks of both names, so an `mxv new`
+                // of the dated name waits for them and cannot make a
+                // workspace beside the archive that `finish_held` marks
+                // archived.
+                let runs = environment.runs()?;
+                let held = locks
+                    .iter()
+                    .find_map(|(held, lock)| (*held == archive.name).then_some(lock))
+                    .ok_or_else(|| MxvFailure::RepairChanged {
+                        name: name.to_string(),
+                    })?;
+                if let Some(finish) = Lifecycle::new(&workspaces, &records, &runs)
+                    .finish_held(held, &mut archive, &VolumesAsked::default())
+                    .map_err(MxvFailure::from)?
+                {
+                    warnings.extend(processes::held_sentences(&archive.name, finish.held));
+                }
             }
             RepairResult {
                 older: Some(from.to_string()),

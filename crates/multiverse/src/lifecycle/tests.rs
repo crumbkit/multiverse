@@ -7,7 +7,9 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::archive::RestoreOutcome;
-use crate::archive::{Archive, ArchiveOptions, ArchiveOutcome, ArchivePlanned, ArchiveState};
+use crate::archive::{
+    Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveState,
+};
 use crate::archive::{Archives, RestoreOptions, RestorePlanned};
 use crate::git::Git;
 use crate::name::WorkspaceName;
@@ -475,4 +477,292 @@ fn a_held_deletion_runs_under_the_lock_of_its_caller_without_taking_it_again() {
     assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
     assert_eq!(setup.archive_record(), None);
     drop(lock);
+}
+
+impl Setup {
+    /// Returns the plan of an archive of the workspace, as the person
+    /// confirms it.
+    fn archive_plan(&self) -> ArchivePlan {
+        match self
+            .lifecycle()
+            .plan_archive(&name(), ArchiveOptions::default())
+            .unwrap()
+        {
+            ArchivePlanned::Ready(plan) => *plan,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Runs the archive of `plan` until the run stops at `step`, as a
+    /// process that died there leaves it, and returns the archive record.
+    fn stopped_archive(&self, plan: ArchivePlan, step: &'static str) -> Archive {
+        stop_at(step);
+        let first = self.lifecycle().archive(plan, &VolumesAsked::default());
+        assert!(matches!(first, Err(Error::Unwritable { .. })), "{first:?}");
+        HOOK.with(|hook| *hook.borrow_mut() = None);
+        self.archive_record().unwrap()
+    }
+
+    /// Returns a probe that asks for the lock with no wait.
+    fn probe(&self) -> Runs {
+        Runs::new(&self.base.join("runs")).with_lock_wait(Duration::ZERO)
+    }
+}
+
+#[test]
+fn an_archive_plan_releases_the_lock_before_the_question() {
+    let setup = fresh();
+    setup.create();
+
+    let planned = setup
+        .lifecycle()
+        .plan_archive(&name(), ArchiveOptions::default())
+        .unwrap();
+
+    assert!(matches!(planned, ArchivePlanned::Ready(_)), "{planned:?}");
+    assert!(setup.probe().lock(&name()).is_ok());
+}
+
+#[test]
+fn an_archive_plan_fails_busy_while_another_command_holds_the_lock() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let held = setup.runs.lock(&name()).unwrap();
+
+    let planned = setup
+        .lifecycle()
+        .plan_archive(&name(), ArchiveOptions::default());
+
+    assert!(matches!(planned, Err(Error::Busy { .. })), "{planned:?}");
+    assert!(workspace.checkouts[0].path.is_dir());
+    drop(held);
+}
+
+#[test]
+fn a_second_archive_that_plans_during_the_first_archives_retire_fails_busy_and_moves_no_checkout() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let plan = setup.archive_plan();
+    let checkout = workspace.checkouts[0].path.clone();
+    let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let log = std::rc::Rc::clone(&seen);
+    let base = setup.base.clone();
+    set_hook(move |step| {
+        if step.starts_with("moved:") {
+            // A second archive plans while the first holds a checkout in
+            // quarantine, with its own handles on the same records.
+            let workspaces = Workspaces::new(Store::new(base.join("state")), Git);
+            let archives = Archives::new(base.join("archives"), base.join("data/archives"));
+            let runs = Runs::new(&base.join("runs")).with_lock_wait(Duration::ZERO);
+            let second = Lifecycle::new(&workspaces, &archives, &runs)
+                .plan_archive(&name(), ArchiveOptions::default());
+            log.borrow_mut()
+                .push((matches!(second, Err(Error::Busy { .. })), checkout.exists()));
+        }
+        Ok(())
+    });
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, Archived::Done(_)), "{outcome:?}");
+    assert_eq!(*seen.borrow(), [(true, false)]);
+}
+
+#[test]
+fn a_second_archive_finishes_the_archive_that_the_first_retired() {
+    let setup = fresh();
+    setup.create();
+    let plan = setup.archive_plan();
+    let retired = setup.stopped_archive(plan.clone(), "removed");
+    assert_eq!(retired.state, ArchiveState::Retired);
+    assert!(!setup.record_exists());
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    let Archived::Finished(done) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(done.archive.id, retired.id);
+    let kept = setup.archive_record().unwrap();
+    assert_eq!(kept.state, ArchiveState::Archived);
+    assert_eq!(kept.id, retired.id);
+}
+
+#[test]
+fn a_second_archive_after_the_first_finished_has_nothing_to_do() {
+    let setup = fresh();
+    setup.create();
+    let plan = setup.archive_plan();
+    let archived = setup.archive();
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    let Archived::Unchanged(found) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(found.id, archived.id);
+    assert_eq!(setup.archive_record().as_ref(), Some(&archived));
+}
+
+#[test]
+fn an_archive_holds_the_lock_from_its_second_plan_to_its_last_write() {
+    let setup = fresh();
+    setup.create();
+    let plan = setup.archive_plan();
+    let probe = setup.probe();
+    let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let log = std::rc::Rc::clone(&seen);
+    set_hook(move |step| {
+        log.borrow_mut()
+            .push((step.to_owned(), probe.lock(&name()).is_err()));
+        Ok(())
+    });
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, Archived::Done(_)), "{outcome:?}");
+    let steps = seen.borrow();
+    assert!(
+        steps.iter().any(|(step, _)| step == "forgotten"),
+        "{steps:?}"
+    );
+    assert!(steps.iter().all(|(_, held)| *held), "{steps:?}");
+    assert!(setup.probe().lock(&name()).is_ok());
+}
+
+#[test]
+fn a_finish_stopped_after_each_step_finishes_when_it_runs_again() {
+    for step in ["forgotten", "volumes"] {
+        let setup = fresh();
+        setup.create();
+        let plan = setup.archive_plan();
+        let retired = setup.stopped_archive(plan, "removed");
+        setup.leave_run_file();
+        stop_at(step);
+
+        let first = setup.lifecycle().finish(&retired, &VolumesAsked::default());
+
+        assert!(
+            matches!(first, Err(Error::Unwritable { .. })),
+            "{step}: {first:?}"
+        );
+        assert_eq!(setup.archive_record().unwrap().state, ArchiveState::Retired);
+        HOOK.with(|hook| *hook.borrow_mut() = None);
+
+        let second = setup
+            .lifecycle()
+            .finish(&retired, &VolumesAsked::default())
+            .unwrap();
+
+        assert!(matches!(second, Finished::Done(_)), "{step}: {second:?}");
+        assert_eq!(
+            setup.archive_record().unwrap().state,
+            ArchiveState::Archived
+        );
+    }
+}
+
+#[test]
+fn a_finish_of_an_archive_that_is_already_finished_has_nothing_to_do() {
+    let setup = fresh();
+    setup.create();
+    let plan = setup.archive_plan();
+    let retired = setup.stopped_archive(plan, "removed");
+    let first = setup
+        .lifecycle()
+        .finish(&retired, &VolumesAsked::default())
+        .unwrap();
+    assert!(matches!(first, Finished::Done(_)), "{first:?}");
+
+    let second = setup
+        .lifecycle()
+        .finish(&retired, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(second, Finished::Unchanged(_)), "{second:?}");
+}
+
+#[test]
+fn a_finish_fails_busy_while_another_command_holds_the_lock_and_changes_nothing() {
+    let setup = fresh();
+    setup.create();
+    let plan = setup.archive_plan();
+    let retired = setup.stopped_archive(plan, "removed");
+    let held = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup.lifecycle().finish(&retired, &VolumesAsked::default());
+
+    assert!(matches!(outcome, Err(Error::Busy { .. })), "{outcome:?}");
+    assert_eq!(setup.archive_record().unwrap().state, ArchiveState::Retired);
+    drop(held);
+}
+
+#[test]
+fn a_finish_of_another_archive_than_the_one_confirmed_changes_nothing() {
+    let setup = fresh();
+    setup.create();
+    let plan = setup.archive_plan();
+    let retired = setup.stopped_archive(plan, "removed");
+    let mut other = retired.clone();
+    other.id = crate::archive::ArchiveId::mint().unwrap();
+
+    let outcome = setup
+        .lifecycle()
+        .finish(&other, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, Finished::Changed), "{outcome:?}");
+    assert_eq!(setup.archive_record().unwrap().state, ArchiveState::Retired);
+}
+
+#[test]
+fn an_archive_whose_in_use_check_names_a_process_stops_before_it_retires() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let plan = setup.archive_plan();
+    let lifecycle = setup
+        .lifecycle()
+        .with_in_use(|_| Ok(Some("a shell works in it".to_owned())));
+
+    let outcome = lifecycle.archive(plan, &VolumesAsked::default()).unwrap();
+
+    let Archived::InUse(reason) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(reason, "a shell works in it");
+    assert!(workspace.checkouts[0].path.is_dir());
+    assert!(setup.record_exists());
+    assert_eq!(setup.archive_record(), None);
+}
+
+#[test]
+fn an_archive_of_a_workspace_that_was_removed_and_made_again_during_the_question_changes_nothing() {
+    let setup = fresh();
+    let first = setup.create();
+    let plan = setup.archive_plan();
+    let removed = setup.workspaces.remove(setup.removal()).unwrap();
+    assert!(matches!(removed, RemovalOutcome::Done(_)), "{removed:?}");
+    let second = setup.create();
+    assert_ne!(first.id, second.id);
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, Archived::Changed), "{outcome:?}");
+    assert!(setup.workspaces.store.read(&name()).unwrap().is_some());
+    assert!(second.path.exists());
 }

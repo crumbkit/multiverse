@@ -881,7 +881,8 @@ container has no such file, and `mxv logs` reads its log from Docker.
 `mxv up`, `down` and `restart` and `mxv ports reset` hold an exclusive lock
 on `$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
 workspace's processes. `mxv remove` holds it from before it stops the units
-until after it deletes the last docker volume, and `mxv new` holds it from
+until after it deletes the last docker volume, `mxv archive` holds it from
+its second plan, after the question, until its last write, and `mxv new` holds it from
 before it writes the record until it has copied the ignored directories, so
 a second command of the same name fails with `mxv::workspace::busy` after
 the lock wait instead of deleting or changing what the first one makes. No
@@ -1606,7 +1607,19 @@ references and the commits that no branch reaches. The directory
 record `archive.json`, the workspace manifest and a copy of each extra file
 in the workspace's directory. Docker volumes stay under the workspace's stable
 id, so `mxv up` finds them after a restore, and `--delete-volumes` deletes
-them instead.
+them instead. With `--delete-volumes`, the question of an archive names the
+docker volumes that it deletes, whether the archive is new or an unfinished
+one that a second run finishes.
+
+`mxv archive` holds the workspace's lock only while it plans. It releases the
+lock before it asks, then takes it again, plans again and compares what it
+finds with what the question named. When a unit runs that the question did
+not name, when docker holds a volume that it did not name, or when the
+archive that it would finish is another one, it changes nothing and fails with
+`mxv::archive::changed`; run `mxv archive` again to be asked about the
+workspace as it now stands. An archive that stopped before it finished is
+finished by running `mxv archive -w NAME` again, and a finished archive
+reports `unchanged`.
 
 Archives have no expiry, and `mxv clean` never touches one. `mxv list
 --archived` lists them with each one's age and the number of commits that
@@ -1621,7 +1634,8 @@ that a restore and a new archive made while the question was open, when the
 archive is no longer finished, or when docker holds a volume of it that the
 question did not name, the command deletes nothing and fails with
 `mxv::archive::changed`. Run it again to be asked about the archive as it now
-stands.
+stands. `mxv archive` fails with the same code when the workspace changed
+after its question.
 
 mxv never pushes. The result of an archive lists each commit that no remote
 branch of `origin` holds, and those commits exist only on this machine until
