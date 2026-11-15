@@ -2,9 +2,13 @@
 //! records again, compare them with what the person confirmed, and only then
 //! stop, delete or write.
 
+use crate::archive::{Archive, ArchiveState, ArchivedRemoval, Archives};
 use crate::error::Error;
+use crate::health::{Rebuilt, rebuilt};
+use crate::name::WorkspaceName;
 use crate::runs::{DownOutcome, DownResult, Needed, Runs, Unstoppable};
-use crate::workspaces::{Removal, RemovalOutcome, RemovalPlan, Workspaces};
+use crate::store::Lock;
+use crate::workspaces::{Mode, Removal, RemovalOutcome, RemovalPlan, Workspaces};
 
 #[cfg(test)]
 mod tests;
@@ -15,6 +19,8 @@ mod tests;
 pub struct Lifecycle<'a, B> {
     /// The workspaces and their records.
     workspaces: &'a Workspaces<B>,
+    /// The archives and their records.
+    archives: &'a Archives,
     /// The run files, the docker volumes and the lock of each workspace.
     runs: &'a Runs,
 }
@@ -51,7 +57,6 @@ pub struct RemovalDone {
 
 /// How [`Lifecycle::remove`] ended without an error.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum Removed {
     /// The workspace, its record, its run files and its volumes are gone.
     Done(RemovalDone),
@@ -70,12 +75,54 @@ pub enum Removed {
     Unstoppable(Unstoppable),
 }
 
-impl<'a, B> Lifecycle<'a, B> {
-    /// Returns the destructive commands of `workspaces`, whose run files,
-    /// volumes and locks `runs` holds.
+/// The docker volumes that the question of an archive's deletion named,
+/// which the deletion may delete.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VolumesAsked {
+    /// The volumes' docker names, or none when the question named none.
+    volumes: Vec<String>,
+}
+
+impl VolumesAsked {
+    /// Returns what a question that named the docker volumes `volumes`
+    /// allowed. With none, the deletion reads and deletes no volume.
     #[must_use]
-    pub const fn new(workspaces: &'a Workspaces<B>, runs: &'a Runs) -> Self {
-        Self { workspaces, runs }
+    pub const fn new(volumes: Vec<String>) -> Self {
+        Self { volumes }
+    }
+}
+
+/// How [`Lifecycle::delete_archive`] ended without an error.
+#[derive(Debug)]
+pub enum ArchiveDeleted {
+    /// The archive, its pins and the volumes that the question named are
+    /// gone.
+    Done(Box<ArchivedRemoval>),
+    /// No archive has the name, so nothing was deleted.
+    Unchanged,
+    /// The archive of the name is another one than the question was about,
+    /// is no longer finished, or docker holds a volume that the question did
+    /// not name, and nothing was deleted.
+    Changed,
+    /// The live workspace of this name has the stable id of the archive, so
+    /// the docker volumes are its own, and nothing was deleted.
+    VolumesInUse(WorkspaceName),
+}
+
+impl<'a, B> Lifecycle<'a, B> {
+    /// Returns the destructive commands of `workspaces` and `archives`,
+    /// whose run files, volumes and locks `runs` holds.
+    #[must_use]
+    pub const fn new(
+        workspaces: &'a Workspaces<B>,
+        archives: &'a Archives,
+        runs: &'a Runs,
+    ) -> Self {
+        Self {
+            workspaces,
+            archives,
+            runs,
+        }
     }
 }
 
@@ -144,5 +191,99 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         }
         (self.workspaces.checkpoint)("volumes")?;
         Ok(Removed::Done(RemovalDone { removal, held }))
+    }
+
+    /// Deletes the archive that `confirmed` is. It takes the lock of the
+    /// archive's name and calls [`Lifecycle::delete_archive_held`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another command holds the lock for the
+    /// whole lock wait, and the errors of [`Lifecycle::delete_archive_held`].
+    pub fn delete_archive(
+        &self,
+        confirmed: &Archive,
+        asked: &VolumesAsked,
+    ) -> Result<ArchiveDeleted, Error> {
+        let lock = self.runs.lock(&confirmed.name)?;
+        self.delete_archive_held(&lock, confirmed, asked)
+    }
+
+    /// Deletes the archive that `confirmed` is, for a caller that holds the
+    /// lock of its name as `_lock`, because a second lock of one name in one
+    /// process waits and fails with [`Error::Busy`]. It reads the archive of
+    /// the name again, and deletes nothing unless that is `confirmed`'s
+    /// archive, with the same id, and finished.
+    ///
+    /// When `asked` names docker volumes, it refuses while a live workspace
+    /// has the archive's stable id, and refuses when docker holds a volume of
+    /// the archive that `asked` did not name. Then it deletes those volumes,
+    /// the pins and the record, in that order, so the record that holds the
+    /// volumes' stable id stays until they are gone, and a failure can be
+    /// tried again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of the archive's record, of docker, and of
+    /// [`Workspaces::remove_archive`]. The steps before a failure stay done.
+    pub fn delete_archive_held(
+        &self,
+        _lock: &Lock,
+        confirmed: &Archive,
+        asked: &VolumesAsked,
+    ) -> Result<ArchiveDeleted, Error> {
+        let Some(archive) = self.archives.read(&confirmed.name)? else {
+            return Ok(ArchiveDeleted::Unchanged);
+        };
+        if archive.id != confirmed.id || archive.state != ArchiveState::Archived {
+            return Ok(ArchiveDeleted::Changed);
+        }
+        if !asked.volumes.is_empty() {
+            if let Some(workspace) = self.volumes_in_use(&archive)? {
+                return Ok(ArchiveDeleted::VolumesInUse(workspace));
+            }
+            let volumes = match archive
+                .workspace_id
+                .as_ref()
+                .filter(|_| archive.containers_ran)
+            {
+                Some(id) => Some(self.runs.archived_volumes(id)?),
+                None => None,
+            };
+            if let Some(volumes) = volumes {
+                if volumes
+                    .names()
+                    .iter()
+                    .any(|volume| !asked.volumes.contains(volume))
+                {
+                    return Ok(ArchiveDeleted::Changed);
+                }
+                if !volumes.is_empty() {
+                    self.runs.delete_volumes(volumes)?;
+                }
+            }
+        }
+        (self.workspaces.checkpoint)("volumes")?;
+        let removed = self
+            .workspaces
+            .remove_archive(self.archives, archive, Mode::Change)?;
+        Ok(ArchiveDeleted::Done(Box::new(removed)))
+    }
+
+    /// Returns the name of the live workspace that has the stable id of
+    /// `archive`, because its docker volumes are then that workspace's. A
+    /// workspace whose directories are partly gone counts too, so its
+    /// volumes stay until `mxv remove` removes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StateUnreadable`] when the workspace records cannot
+    /// be read.
+    pub fn volumes_in_use(&self, archive: &Archive) -> Result<Option<WorkspaceName>, Error> {
+        let live = self.workspaces.store.list()?.workspaces;
+        Ok(live
+            .iter()
+            .find(|workspace| rebuilt(archive, workspace) != Rebuilt::Unrelated)
+            .map(|workspace| workspace.name.clone()))
     }
 }

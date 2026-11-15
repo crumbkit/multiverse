@@ -13,13 +13,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
-use multiverse::health::{self, Broken, Problem, Rebuilt};
+use multiverse::health::{self, Broken, Problem};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
-    ARCHIVE_MAX_FILE, Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned,
-    ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, DisposablePath, Git, IgnoredEntry,
-    IgnoredKind, KEPT_NAMESPACE, Mode, PutBack, RestoreOutcome, RestorePlanned, Uncommitted,
-    Volumes, Workspace, WorkspaceName, Workspaces,
+    ARCHIVE_MAX_FILE, Archive, ArchiveDeleted, ArchiveOptions, ArchiveOutcome, ArchivePlan,
+    ArchivePlanned, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, DisposablePath, Git,
+    IgnoredEntry, IgnoredKind, KEPT_NAMESPACE, Lifecycle, Mode, PutBack, RestoreOutcome,
+    RestorePlanned, Uncommitted, Volumes, VolumesAsked, Workspace, WorkspaceName, Workspaces,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -40,12 +40,13 @@ mod tests;
 
 pub(crate) use failure::ArchiveFailure;
 pub use failure::{
-    ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
-    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE,
-    ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE,
-    ARCHIVE_VOLUMES_IN_USE, ARCHIVE_WORKSPACE_REMOVED, RESTORE_BRANCH_MOVED,
-    RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING,
-    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+    ARCHIVE_CHANGED, ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE,
+    ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE,
+    ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED,
+    ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, ARCHIVE_WORKSPACE_REMOVED,
+    RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN,
+    RESTORE_MIRROR_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
+    RESTORE_UNFINISHED,
 };
 use failure::{Finisher, refused, restore_refusal};
 
@@ -1387,16 +1388,31 @@ fn restored_already(
                 ),
             )?;
             let lock = processes::lock(environment, name)?;
+            let runs = environment.runs()?;
+            let lifecycle = Lifecycle::new(workspaces, records, &runs);
             stale_pins = match workspaces
                 .plan_restore(records, name, restore_options(args))
                 .map_err(MxvFailure::from)?
             {
                 RestorePlanned::Unchanged { stale: Some(again) } if again.id == confirmed.id => {
-                    let removed = workspaces
-                        .remove_archive(records, *again, Mode::Change)
-                        .map_err(MxvFailure::from)?;
-                    warnings = removed.warnings;
-                    Some(pins(&removed.archive))
+                    // The record is read again under the lock, so a stale
+                    // archive that another run replaced is not deleted.
+                    match lifecycle
+                        .delete_archive_held(&lock, &again, &VolumesAsked::default())
+                        .map_err(MxvFailure::from)?
+                    {
+                        ArchiveDeleted::Done(removed) => {
+                            warnings = removed.warnings;
+                            Some(pins(&removed.archive))
+                        }
+                        ArchiveDeleted::Unchanged => None,
+                        ArchiveDeleted::Changed | ArchiveDeleted::VolumesInUse(_) => {
+                            return Err(MxvFailure::RestoreChanged {
+                                name: name.to_string(),
+                            }
+                            .into());
+                        }
+                    }
                 }
                 // Another run deleted the archive after the question.
                 RestorePlanned::Unchanged { stale: None } => None,
@@ -1711,8 +1727,10 @@ pub(crate) fn remove(
         }
         .into());
     }
+    let runs = environment.runs()?;
+    let lifecycle = Lifecycle::new(&workspaces, &records, &runs);
     if args.delete_volumes {
-        refuse_live_volumes(environment, &archive)?;
+        refuse_live_volumes(&lifecycle, &archive)?;
     }
     let (volumes, mut warnings) = archive_volumes(environment, &archive, args.delete_volumes)?;
     let names = volumes
@@ -1727,49 +1745,57 @@ pub(crate) fn remove(
     let mut text = format!(
         "Delete the archive {name} and its pins? `mxv restore` cannot bring the workspace back afterwards."
     );
-    if !names.is_empty() {
-        text.push_str(" It deletes the workspace's docker volumes and the data in them.");
-    }
+    text.push_str(&crate::verbs::volumes_clause(&names));
     output.confirm(args.yes, &text)?;
-    let lock = processes::lock(environment, &name)?;
-    if args.delete_volumes {
-        refuse_live_volumes(environment, &archive)?;
-    }
     // The archive holds the only record of the volumes' stable id, so it
-    // stays until they are gone, and a failure can be tried again.
-    if let Some(volumes) = volumes {
-        processes::delete_volumes(environment, volumes)?;
-    }
-    let removed = workspaces
-        .remove_archive(&records, archive, Mode::Change)
+    // stays until the volumes are gone, and a failure can be tried again.
+    // Under the lock, the library reads the archive again and deletes only
+    // the archive that the question was about.
+    let outcome = lifecycle
+        .delete_archive(&archive, &VolumesAsked::new(names.clone()))
         .map_err(MxvFailure::from)?;
-    warnings.extend(removed.warnings);
-    drop(lock);
-    Ok(Prose::new(RemovalResult::of_archive(
-        &removed.archive,
-        names,
-        warnings,
-        false,
-    )))
+    match outcome {
+        ArchiveDeleted::Done(removed) => {
+            warnings.extend(removed.warnings);
+            Ok(Prose::new(RemovalResult::of_archive(
+                &removed.archive,
+                names,
+                warnings,
+                false,
+            )))
+        }
+        // Another run deleted the archive after the question.
+        ArchiveDeleted::Unchanged => {
+            let path = environment.root()?.path.join(name.as_str());
+            Ok(Prose::new(RemovalResult::unchanged(
+                &name, &path, true, false,
+            )))
+        }
+        ArchiveDeleted::VolumesInUse(workspace) => Err(ArchiveFailure::VolumesInUse {
+            name: name.to_string(),
+            workspace: workspace.to_string(),
+        }
+        .into()),
+        ArchiveDeleted::Changed => Err(ArchiveFailure::Changed {
+            name: name.to_string(),
+        }
+        .into()),
+    }
 }
 
 /// Returns the failure when a live workspace has the stable id of
-/// `archive`, because its docker volumes are then that workspace's. A
-/// workspace whose directories are partly gone counts too, so its volumes
-/// stay until `mxv remove` removes it.
-fn refuse_live_volumes(
-    environment: &Environment,
+/// `archive`, because its docker volumes are then that workspace's.
+fn refuse_live_volumes<B: multiverse::Backend>(
+    lifecycle: &Lifecycle<'_, B>,
     archive: &Archive,
 ) -> Result<(), crumbkit::Error> {
-    let store = multiverse::Store::new(environment.records()?);
-    let live = store.list().map_err(MxvFailure::from)?.workspaces;
-    match live
-        .iter()
-        .find(|workspace| health::rebuilt(archive, workspace) != Rebuilt::Unrelated)
+    match lifecycle
+        .volumes_in_use(archive)
+        .map_err(MxvFailure::from)?
     {
         Some(workspace) => Err(ArchiveFailure::VolumesInUse {
             name: archive.name.to_string(),
-            workspace: workspace.name.to_string(),
+            workspace: workspace.to_string(),
         }
         .into()),
         None => Ok(()),
