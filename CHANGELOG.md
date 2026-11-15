@@ -20,6 +20,21 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv remove` holds the workspace's lock from before it stops the units
+  until after it deletes the last docker volume, and `mxv new` holds it from
+  before it writes the record until it has copied the ignored directories.
+  Before, `mxv remove` took the lock only to stop units and `mxv new` took
+  none, so `mxv remove --force` could delete the checkouts under a running
+  `mxv up`, and `mxv remove` could delete the checkouts that `mxv new` was
+  making. A command that meets the held lock waits 5 seconds and fails with
+  `mxv::workspace::busy`, and `mxv new` of a name that a workspace holds
+  still fails with `mxv::workspace::exists` at once. `mxv remove` also reads
+  the workspace again under the lock and fails with
+  `mxv::workspace::changed`, before it stops anything, when the record is
+  another one than the question was about or docker holds a volume that the
+  question did not name. With `--delete-volumes`, the question of `mxv
+  remove` names the docker volumes that it deletes. The library gains
+  `Lifecycle`, `RemoveAsked`, `Removed` and `RemovalDone`.
 - The help of `mxv skills install`, `check` and `print` and of `mxv skills`
   takes crumbkit's wording: "this tool's skills" in place of "mxv's skill",
   and crumbkit's examples.

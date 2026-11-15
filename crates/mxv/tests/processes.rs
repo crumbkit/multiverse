@@ -3354,3 +3354,217 @@ fn up_of_a_record_without_an_id_beside_an_archive_record_that_cannot_be_read_nam
     assert!(!setup.started("sleeper"));
     assert_eq!(setup.record("triage")["id"], Value::Null);
 }
+
+#[test]
+fn a_forced_remove_while_another_command_holds_the_lock_fails_busy_and_keeps_the_checkouts() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", SLEEPER);
+    let state = setup.root().join("state/mxv");
+    let held = held_lock::hold(&state, "triage");
+
+    let (exit, document) = setup.json(&["remove", "triage", "--force", "--yes"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::busy", "{document}");
+    assert!(checkout.is_dir(), "the removal deleted the checkout");
+    assert!(state.join("workspaces/triage.json").exists());
+    drop(held);
+    let (exit, document) = setup.json(&["remove", "triage", "--force", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!checkout.exists());
+}
+
+/// The fake docker of a test of a removal that names volumes. It lists the
+/// volumes of one workspace and logs each call. From its second listing on,
+/// it also lists `extra`, as docker does when a volume appears between the
+/// question and the removal.
+struct FakeDocker {
+    /// The directory that holds the fake `docker` program.
+    bin: PathBuf,
+    /// The file that logs each call.
+    calls: PathBuf,
+}
+
+impl FakeDocker {
+    /// Writes a fake docker that lists `volumes` of the workspace id `id`
+    /// under the state directory `state`, and `extra` from the second
+    /// listing on.
+    fn new(root: &Path, state: &Path, id: &str, volumes: &[&str], extra: Option<&str>) -> Self {
+        let bin = root.join("fake-bin");
+        let calls = root.join("docker-calls");
+        let lists = root.join("docker-lists");
+        let hash = volume_hash(id);
+        let named = |kind: &str| format!("phase-{hash}.{kind}");
+        let first: Vec<String> = volumes.iter().map(|kind| named(kind)).collect();
+        let extra = extra.map(named).unwrap_or_default();
+        let labels = |kind: &str| {
+            serde_json::json!({
+                "mxv.volume": kind,
+                "mxv.workspace-id": id,
+                "mxv.run-record": state.join(format!("phase/runs/{id}.json")).display().to_string(),
+            })
+        };
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{calls}'\n\
+             for last; do :; done\n\
+             case \"$1 $2\" in\n\
+             'volume ls')\n\
+             echo x >> '{lists}'\n\
+             n=$(wc -l < '{lists}')\n\
+             for volume in {first}; do echo \"$volume\"; done\n\
+             if [ \"$n\" -ge 2 ] && [ -n '{extra}' ]; then echo '{extra}'; fi ;;\n\
+             'volume inspect')\n\
+             case \"$last\" in\n\
+             *.data) echo '{data}' ;;\n\
+             *) echo '{other}' ;;\n\
+             esac ;;\n\
+             'container ls') ;;\n\
+             'volume rm') echo \"$last\" ;;\n\
+             *) echo 'the fake docker has no answer' >&2; exit 1 ;;\n\
+             esac\n",
+            calls = calls.display(),
+            lists = lists.display(),
+            first = first.join(" "),
+            data = labels("data"),
+            other = labels("search"),
+        );
+        fs::create_dir_all(&bin).unwrap();
+        write(&bin.join("docker"), &script);
+        let made = Command::new("chmod")
+            .args(["+x", &bin.join("docker").display().to_string()])
+            .env("PATH", PATH)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        Self { bin, calls }
+    }
+
+    /// Returns what the fake docker logged.
+    fn logged(&self) -> String {
+        fs::read_to_string(&self.calls).unwrap_or_default()
+    }
+}
+
+/// Returns 16 hex digits of the 64-bit FNV-1a hash of `text`, which phase
+/// puts in the name of each docker volume of the workspace whose stable id
+/// is `text`.
+fn volume_hash(text: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let hash = text.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    });
+    format!("{hash:016x}")
+}
+
+impl Setup {
+    /// Makes the workspace `triage` hold a stable id and a note that
+    /// containers ran, as a workspace that started a container does, and
+    /// returns its id.
+    fn container_workspace(&self) -> String {
+        self.workspace("triage", SLEEPER);
+        let (exit, document) = self.json(&["up", "-w", "triage"]);
+        assert_eq!(exit, 0, "{document}");
+        let (exit, document) = self.json(&["down", "-w", "triage"]);
+        assert_eq!(exit, 0, "{document}");
+        let state = self.root().join("state/mxv");
+        write(&state.join("runs/triage/.containers"), "");
+        let record: Value = serde_json::from_str(
+            &fs::read_to_string(state.join("workspaces/triage.json")).unwrap(),
+        )
+        .unwrap();
+        record["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Runs `mxv` with `args` and `--json` with `docker` first on the
+    /// search path, and returns the exit code and the JSON document.
+    fn json_with(&self, docker: &FakeDocker, args: &[&str]) -> (i32, Value) {
+        let path = format!("{}:{PATH}", docker.bin.display());
+        let output = self
+            .command_in(&self.root(), args)
+            .env("PATH", &path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{args:?} printed no JSON ({error}): {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.code().unwrap(), document)
+    }
+}
+
+#[test]
+fn remove_with_delete_volumes_asks_before_it_deletes_the_volumes() {
+    let setup = Setup::new();
+    let id = setup.container_workspace();
+    let state = setup.root().join("state/mxv");
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data", "search"], None);
+
+    let (exit, document) = setup.json_with(
+        &docker,
+        &["remove", "triage", "--force", "--delete-volumes"],
+    );
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::confirmation::needs_yes",
+        "{document}"
+    );
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    assert!(state.join("workspaces/triage.json").exists());
+    let (exit, document) = setup.json_with(
+        &docker,
+        &["remove", "triage", "--force", "--delete-volumes", "--yes"],
+    );
+    assert_eq!(exit, 0, "{document}");
+    let data = format!("phase-{}.data", volume_hash(&id));
+    let search = format!("phase-{}.search", volume_hash(&id));
+    assert_eq!(
+        document["data"]["volumes"],
+        serde_json::json!([data, search])
+    );
+    assert_eq!(
+        docker
+            .logged()
+            .lines()
+            .filter(|line| line.starts_with("volume rm"))
+            .count(),
+        2,
+        "{}",
+        docker.logged()
+    );
+}
+
+#[test]
+fn remove_refuses_a_volume_that_the_question_did_not_name() {
+    let setup = Setup::new();
+    let id = setup.container_workspace();
+    let state = setup.root().join("state/mxv");
+    // The first listing, before the question, holds one volume. The second,
+    // under the lock, holds another that the question did not name.
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data"], Some("search"));
+
+    let (exit, document) = setup.json_with(
+        &docker,
+        &["remove", "triage", "--force", "--delete-volumes", "--yes"],
+    );
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::changed", "{document}");
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    assert!(state.join("workspaces/triage.json").exists());
+    assert!(setup.root().join("workspaces/triage/app").is_dir());
+}
