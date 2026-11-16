@@ -46,6 +46,12 @@ mod tests;
 use routes::declared;
 pub use routes::{DOMAIN, Declared, Derived, Route, Shadowed, ShadowedHost, derive};
 
+/// Returns the routes that the proxy serves for the workspaces of `store`,
+/// or none when the store cannot be read.
+pub(crate) fn served(store: &Store) -> Vec<Route> {
+    declared(store).map_or_else(|_| Vec::new(), |(found, _)| derive(found).served)
+}
+
 /// The name of the proxy's one workspace in phase, and its id.
 const WORKSPACE: &str = "mxv-proxy";
 

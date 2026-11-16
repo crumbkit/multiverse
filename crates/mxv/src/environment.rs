@@ -220,7 +220,12 @@ impl Environment {
         // clones borrow objects from. The workspaces themselves also lie
         // under mxv's data directory, so only the mirrors are protected
         // there.
+        let https = self
+            .config()?
+            .proxy_https
+            .unwrap_or_else(|| Settings::new(PathBuf::new(), PathBuf::new()).https());
         let mut runs = Runs::new(&self.state()?)
+            .with_proxy_urls(self.state()?.join("workspaces"), https)
             .with_caller(self.caller.clone())
             .with_protected(vec![self.state()?, self.mirrors()?, self.proxy_data()?]);
         if let Some(program) = &self.program {

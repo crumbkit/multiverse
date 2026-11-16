@@ -557,7 +557,19 @@ impl Runs {
             grace: self.grace,
             caller: &self.caller,
             provisioner: self.provisioner.clone(),
+            urls: self.proxy_urls_of(workspace),
         }
+    }
+
+    /// Returns the proxy's names for `workspace`, or none when these runs
+    /// were not told where the records are.
+    fn proxy_urls_of(&self, workspace: &Workspace) -> phase_plan::ProxyUrls {
+        self.proxy_urls
+            .as_ref()
+            .map_or_else(phase_plan::ProxyUrls::default, |(records, https)| {
+                let served = crate::proxy::served(&crate::store::Store::new(records.clone()));
+                phase_plan::ProxyUrls::of(&workspace.name, &served, *https)
+            })
     }
 
     /// Returns the host ports that the unit `name` of `manifest` receives

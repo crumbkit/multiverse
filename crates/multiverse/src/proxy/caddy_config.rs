@@ -11,7 +11,7 @@ use super::routes::Route;
 /// for the same routes and settings, so a sync compares it with the running
 /// configuration.
 pub(super) fn render(settings: &Settings, routes: &[Route]) -> Value {
-    let hosts: Vec<&str> = routes.iter().flat_map(|route| names(route)).collect();
+    let hosts: Vec<&str> = routes.iter().flat_map(names).collect();
     let mut apps = Map::new();
     apps.insert(
         "pki".to_owned(),

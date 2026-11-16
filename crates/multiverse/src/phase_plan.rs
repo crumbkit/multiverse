@@ -55,9 +55,11 @@ use crate::service::Service;
 mod services;
 #[cfg(test)]
 mod tests;
+mod urls;
 
 pub(crate) use services::{BACKEND_READY_TIMEOUT, PROVISION_TIMEOUT};
 use services::{service_apps, service_connects, service_depends};
+pub(crate) use urls::ProxyUrls;
 
 /// The name of the one process of each unit's app.
 pub const MAIN: &str = "main";
@@ -266,6 +268,9 @@ pub(crate) struct Inputs<'a> {
     /// JSON argument, or `None` when it is unknown. A manifest with
     /// services cannot run without it.
     pub(crate) provisioner: Option<Vec<String>>,
+    /// The names that the proxy serves for the workspace's routes, which
+    /// give each host process and task its URL variables.
+    pub(crate) urls: ProxyUrls,
 }
 
 /// Returns the command that a manifest's check builds its plan with, which
@@ -407,14 +412,19 @@ pub(crate) fn build_with_task(
 /// port `port`: `web-ui` is `MXV_PORT_WEB_UI`. The ports `a-b` and `a_b`
 /// share one variable, and the later name wins.
 fn port_variable(port: &str) -> String {
-    let name: String = port
-        .chars()
+    format!("{PORT_VARIABLE_PREFIX}{}", port_suffix(port))
+}
+
+/// Returns the part of a port's variable that follows the prefix:
+/// `web-ui` is `WEB_UI`. `MXV_HOST_` and `MXV_URL_` spell a route's name
+/// the same way.
+fn port_suffix(port: &str) -> String {
+    port.chars()
         .map(|character| match character {
             '-' => '_',
             other => other.to_ascii_uppercase(),
         })
-        .collect();
-    format!("{PORT_VARIABLE_PREFIX}{name}")
+        .collect()
 }
 
 /// Returns the app of `task` and the values of its variables: those that
@@ -440,6 +450,10 @@ fn task_app(
         .map(|(variable, value)| (variable.clone(), value.clone()))
         .collect();
     let mut set = BTreeSet::new();
+    for (variable, value) in inputs.urls.shared() {
+        vars.insert(variable.clone(), Redacted::new(value));
+        set.insert(variable);
+    }
     for (port, number) in inputs.ports {
         let variable = port_variable(port);
         vars.insert(variable.clone(), Redacted::new(number.to_string()));
@@ -659,6 +673,15 @@ fn host_app(
         .passed()
         .map(|(variable, value)| (variable.clone(), value.clone()))
         .collect();
+    // The proxy's variables come first, so a variable of the manifest with
+    // the same name replaces them.
+    let mut proxied = inputs.urls.shared();
+    if let Some(port) = &process.listen {
+        proxied.extend(inputs.urls.listened(port));
+    }
+    for (variable, value) in proxied {
+        vars.insert(variable, Redacted::new(value));
+    }
     for (variable, value) in &process.env {
         vars.insert(variable.clone(), value.render(inputs.ports));
     }

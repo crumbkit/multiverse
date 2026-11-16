@@ -1226,6 +1226,7 @@ fn check_runnable(
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
         provisioner: Some(crate::phase_plan::checking_provisioner()),
+        urls: crate::phase_plan::ProxyUrls::default(),
     };
     match crate::phase_plan::build(&inputs) {
         Ok(_) => Ok(()),
@@ -1562,39 +1563,17 @@ impl Manifest {
             )?;
             processes.insert(name.get_ref().clone(), process);
         }
-        let mut containers = BTreeMap::new();
-        for (name, raw_container) in &raw.containers {
-            let mut container = check_container(&errors, name, raw_container, &known, &names)?;
-            container.hosts = check_hosts(
-                &errors,
-                &Hosted {
-                    kind: "container",
-                    unit: name.get_ref(),
-                    ports: container
-                        .ports
-                        .iter()
-                        .map(|published| published.port.as_str())
-                        .collect(),
-                    routes: &routes,
-                },
-                &raw_container.hosts,
-                &mut hosted,
-            )?;
-            for (published, key) in container.ports.iter().zip(raw_container.ports.values()) {
-                if let Some(other) = listeners.get(&published.port) {
-                    return Err(errors.invalid(
-                        &key.span(),
-                        format!(
-                            "`{other}` and `{}` both listen on the port `{}`, which has at most one listener",
-                            name.get_ref(),
-                            published.port
-                        ),
-                    ));
-                }
-                listeners.insert(published.port.clone(), name.get_ref().clone());
-            }
-            containers.insert(name.get_ref().clone(), container);
-        }
+        let containers = check_containers(
+            &errors,
+            &raw,
+            &Shared {
+                known: &known,
+                names: &names,
+                routes: &routes,
+            },
+            &mut listeners,
+            &mut hosted,
+        )?;
         check_listen_grants(&errors, &raw, &listeners, joined)?;
         let mut tasks = BTreeMap::new();
         for (name, raw_task) in &raw.tasks {
@@ -2012,6 +1991,62 @@ const OWN_DOMAIN: &str = "mxv.localhost";
 
 /// The most bytes of a host name.
 const MOST_HOST_BYTES: usize = 253;
+
+/// What the checks of a manifest's containers share.
+struct Shared<'a> {
+    /// The ports that the manifest and the manifests it joins declare.
+    known: &'a [String],
+    /// The names of the manifest's units and of the units it joins.
+    names: &'a BTreeSet<&'a str>,
+    /// The routes of the manifest.
+    routes: &'a [String],
+}
+
+/// Returns the checked containers of `raw`, recording each port a container
+/// publishes in `listeners` and each host name it lists in `hosted`.
+fn check_containers(
+    errors: &Errors<'_>,
+    raw: &RawManifest,
+    shared: &Shared<'_>,
+    listeners: &mut BTreeMap<String, String>,
+    hosted: &mut BTreeSet<String>,
+) -> Result<BTreeMap<String, Container>, ManifestError> {
+    let mut containers = BTreeMap::new();
+    for (name, raw_container) in &raw.containers {
+        let mut container =
+            check_container(errors, name, raw_container, shared.known, shared.names)?;
+        container.hosts = check_hosts(
+            errors,
+            &Hosted {
+                kind: "container",
+                unit: name.get_ref(),
+                ports: container
+                    .ports
+                    .iter()
+                    .map(|published| published.port.as_str())
+                    .collect(),
+                routes: shared.routes,
+            },
+            &raw_container.hosts,
+            hosted,
+        )?;
+        for (published, key) in container.ports.iter().zip(raw_container.ports.values()) {
+            if let Some(other) = listeners.get(&published.port) {
+                return Err(errors.invalid(
+                        &key.span(),
+                        format!(
+                            "`{other}` and `{}` both listen on the port `{}`, which has at most one listener",
+                            name.get_ref(),
+                            published.port
+                        ),
+                    ));
+            }
+            listeners.insert(published.port.clone(), name.get_ref().clone());
+        }
+        containers.insert(name.get_ref().clone(), container);
+    }
+    Ok(containers)
+}
 
 /// Checks the extra host names `raw` of `unit`: the unit must listen on or
 /// publish exactly one port that `routes` names, each name must be a
