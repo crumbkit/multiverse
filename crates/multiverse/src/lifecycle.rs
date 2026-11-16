@@ -4,11 +4,12 @@
 
 use crate::archive::{
     Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveRefusal,
-    ArchiveState, ArchivedRemoval, Archives,
+    ArchiveState, ArchivedRemoval, Archives, RestoreOptions, RestoreOutcome, RestorePlan,
+    RestorePlanned, RestoreRefusal, Restored,
 };
 use crate::disk::DisposablePath;
 use crate::error::Error;
-use crate::health::{Rebuilt, rebuilt};
+use crate::health::{Rebuilt, Repaired, rebuilt};
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::runs::{DownOutcome, DownResult, Needed, Runs, Unstoppable, Volumes};
@@ -215,6 +216,44 @@ pub enum Archived {
     InUse(String),
     /// A process outlived the stop, so the workspace stays.
     Unstoppable(Unstoppable),
+}
+
+/// How [`Lifecycle::restore`] ended without an error.
+#[derive(Debug)]
+pub enum Restoration {
+    /// The workspace is back, and the archive is deleted.
+    Done(Box<Restored>),
+    /// A workspace of the archive's stable id holds the name already, or no
+    /// archive of the name needs restoring, so there is nothing to do. An
+    /// archive that an earlier restore left stays until `mxv restore` or
+    /// `mxv repair` deletes it.
+    Unchanged,
+    /// The archive of the name is another one than the confirmed plan was
+    /// about, and nothing was built.
+    Changed,
+    /// The restore cannot go ahead, and nothing was built.
+    Refused(RestoreRefusal),
+}
+
+/// What [`Lifecycle::repair`] did.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RepairDone {
+    /// What the repair did.
+    pub repaired: Repaired,
+    /// What the finish of a renamed archive deleted, or `None` when the
+    /// repair renamed no archive.
+    pub finish: Option<Finish>,
+}
+
+/// How [`Lifecycle::repair`] ended without an error.
+#[derive(Debug)]
+pub enum Repairing {
+    /// The repair ran.
+    Done(Box<RepairDone>),
+    /// The records plan another repair than the confirmed one, and nothing
+    /// was changed.
+    Changed,
 }
 
 impl<'a, B> Lifecycle<'a, B> {
@@ -622,6 +661,79 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         })
     }
 
+    /// Restores the archive that `confirmed` planned. It takes the lock of
+    /// the archive's name and plans the restore again. A plan that names
+    /// another archive than the confirmed one ends the run with
+    /// [`Restoration::Changed`], and a name that a workspace holds again
+    /// ends it with [`Restoration::Unchanged`], before anything is built.
+    /// Then it rebuilds the workspace, writes its record and deletes the
+    /// archive, and it holds the lock through the last write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another command holds the lock for the
+    /// whole lock wait, and the errors of the plan and of
+    /// [`Workspaces::restore`]. A failure deletes what the run made and
+    /// keeps the archive.
+    pub fn restore(&self, confirmed: &RestorePlan) -> Result<Restoration, Error> {
+        let name = &confirmed.archive.name;
+        let _lock = self.runs.lock(name)?;
+        let options = RestoreOptions::new(confirmed.force, confirmed.from_origin);
+        match self.workspaces.plan_restore(self.archives, name, options)? {
+            RestorePlanned::Ready(plan) if plan.archive.id == confirmed.archive.id => {
+                match self.workspaces.restore(self.archives, *plan, self.runs)? {
+                    RestoreOutcome::Restored(restored) => Ok(Restoration::Done(restored)),
+                    RestoreOutcome::Refused(refusal) => Ok(Restoration::Refused(refusal)),
+                }
+            }
+            RestorePlanned::Ready(_) => Ok(Restoration::Changed),
+            RestorePlanned::Unchanged { .. } => Ok(Restoration::Unchanged),
+            RestorePlanned::Refused(refusal) => Ok(Restoration::Refused(refusal)),
+        }
+    }
+
+    /// Repairs the records of `name` as `confirmed` planned, which the
+    /// caller got from [`Workspaces::repair`] in [`Mode::DryRun`] and asked
+    /// about. It takes the locks of every name that the repair touches,
+    /// each once and in name order: both names of a rename, so that a repair
+    /// of either name excludes the other, and otherwise `name` alone. It
+    /// plans the repair again, and changes nothing unless that plan is the
+    /// confirmed one, which means the same directory moved aside, the same
+    /// rename, or a deletion. A renamed archive is finished under the lock
+    /// of its new name, as [`Lifecycle::finish_held`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Busy`] when another command holds a lock for the
+    /// whole lock wait, and the errors of the plan, the repair and the
+    /// finish. The steps before a failure stay done.
+    pub fn repair(&self, name: &WorkspaceName, confirmed: &Repaired) -> Result<Repairing, Error> {
+        let mut locks = Vec::new();
+        for held in lock_names(name, confirmed) {
+            let lock = self.runs.lock(&held)?;
+            locks.push((held, lock));
+        }
+        let again = self.workspaces.repair(self.archives, name, Mode::DryRun)?;
+        if !same_repair(confirmed, &again) {
+            return Ok(Repairing::Changed);
+        }
+        let repaired = self.workspaces.repair(self.archives, name, Mode::Change)?;
+        let Repaired::Renamed { from, mut archive } = repaired else {
+            return Ok(Repairing::Done(Box::new(RepairDone {
+                repaired,
+                finish: None,
+            })));
+        };
+        let Some((_, held)) = locks.iter().find(|(held, _)| *held == archive.name) else {
+            return Ok(Repairing::Changed);
+        };
+        let finish = self.finish_held(held, &mut archive, &VolumesAsked::default())?;
+        Ok(Repairing::Done(Box::new(RepairDone {
+            repaired: Repaired::Renamed { from, archive },
+            finish,
+        })))
+    }
+
     /// Returns the name of the live workspace that has the stable id of
     /// `archive`, because its docker volumes are then that workspace's. A
     /// workspace whose directories are partly gone counts too, so its
@@ -637,6 +749,40 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             .iter()
             .find(|workspace| rebuilt(archive, workspace) != Rebuilt::Unrelated)
             .map(|workspace| workspace.name.clone()))
+    }
+}
+
+/// Returns the names whose locks the repair `planned` of `name` takes, in
+/// the order it takes them. Two repairs that take the same two locks take
+/// them in one order, so neither waits for the other while it holds the
+/// first.
+fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
+    let mut names = vec![name.clone()];
+    if let Repaired::Renamed { from, archive } = planned {
+        names = vec![from.clone(), archive.name.clone()];
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Reports whether `again` is the repair that `confirmed` asked about: the
+/// same directory moved aside, the same rename, or a deletion of the
+/// archive. Any other plan asks no question, so it is never confirmed.
+fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
+    match (confirmed, again) {
+        (Repaired::MovedAside { kept: asked, .. }, Repaired::MovedAside { kept, .. }) => {
+            asked == kept
+        }
+        (
+            Repaired::Renamed {
+                from: asked_from,
+                archive: asked,
+            },
+            Repaired::Renamed { from, archive },
+        ) => asked_from == from && asked.name == archive.name,
+        (Repaired::Deleted(_), Repaired::Deleted(_)) => true,
+        _ => false,
     }
 }
 

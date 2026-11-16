@@ -7,11 +7,13 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::archive::RestoreOutcome;
+use crate::archive::RestorePlan;
 use crate::archive::{
     Archive, ArchiveOptions, ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveState,
 };
 use crate::archive::{Archives, RestoreOptions, RestorePlanned};
 use crate::git::Git;
+use crate::health::Repaired;
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::store::Store;
@@ -765,4 +767,270 @@ fn an_archive_of_a_workspace_that_was_removed_and_made_again_during_the_question
     assert!(matches!(outcome, Archived::Changed), "{outcome:?}");
     assert!(setup.workspaces.store.read(&name()).unwrap().is_some());
     assert!(second.path.exists());
+}
+
+impl Setup {
+    /// Returns the plan of a restore of the archive, as the person confirms
+    /// it.
+    fn restore_plan(&self) -> RestorePlan {
+        match self
+            .workspaces
+            .plan_restore(&self.archives, &name(), RestoreOptions::default())
+            .unwrap()
+        {
+            RestorePlanned::Ready(plan) => *plan,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Returns what the repair of the name plans, as the person confirms
+    /// it.
+    fn repair_plan(&self) -> Repaired {
+        self.workspaces
+            .repair(&self.archives, &name(), Mode::DryRun)
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_restore_fails_busy_while_another_command_holds_the_lock_and_restores_nothing() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let plan = setup.restore_plan();
+    let held = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup.lifecycle().restore(&plan);
+
+    assert!(matches!(outcome, Err(Error::Busy { .. })), "{outcome:?}");
+    drop(held);
+    assert!(!setup.record_exists());
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+}
+
+#[test]
+fn a_restore_holds_the_lock_at_every_step() {
+    let setup = fresh();
+    setup.create();
+    setup.archive();
+    let plan = setup.restore_plan();
+    let probe = setup.probe();
+    let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let log = std::rc::Rc::clone(&seen);
+    set_hook(move |step| {
+        log.borrow_mut()
+            .push((step.to_owned(), probe.lock(&name()).is_err()));
+        Ok(())
+    });
+
+    let outcome = setup.lifecycle().restore(&plan).unwrap();
+
+    assert!(matches!(outcome, Restoration::Done(_)), "{outcome:?}");
+    let seen = seen.borrow();
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|(_, busy)| *busy), "{seen:?}");
+    assert!(setup.runs.lock(&name()).is_ok());
+}
+
+#[test]
+fn a_second_restore_after_the_first_restored_reports_unchanged_and_changes_nothing() {
+    let setup = fresh();
+    let workspace = setup.create();
+    setup.archive();
+    let plan = setup.restore_plan();
+    let first = setup.lifecycle().restore(&plan).unwrap();
+    assert!(matches!(first, Restoration::Done(_)), "{first:?}");
+    let record = setup.workspaces.store.read(&name()).unwrap();
+
+    let second = setup.lifecycle().restore(&plan).unwrap();
+
+    assert!(matches!(second, Restoration::Unchanged), "{second:?}");
+    assert_eq!(setup.workspaces.store.read(&name()).unwrap(), record);
+    assert!(workspace.checkouts[0].path.is_dir());
+}
+
+#[test]
+fn a_restore_of_another_archive_than_the_one_confirmed_changes_nothing() {
+    let setup = fresh();
+    let (first, second) = archived_twice(&setup);
+    // The plan names the second archive. A restore and a new archive of
+    // the name then replace it with a third while the question is open.
+    let plan = setup.restore_plan();
+    assert_eq!(plan.archive, second);
+    setup.restore();
+    let third = setup.archive();
+    assert_ne!(third.id, second.id);
+
+    let outcome = setup.lifecycle().restore(&plan).unwrap();
+
+    assert!(matches!(outcome, Restoration::Changed), "{outcome:?}");
+    assert!(!setup.record_exists());
+    assert_eq!(setup.archive_record().as_ref(), Some(&third));
+    assert_ne!(first.id, third.id);
+}
+
+#[test]
+fn a_restore_stopped_after_its_record_leaves_an_archive_that_a_second_restore_reports_unchanged() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let plan = setup.restore_plan();
+    stop_at("record");
+    let first = setup.lifecycle().restore(&plan);
+    assert!(matches!(first, Err(Error::Unwritable { .. })), "{first:?}");
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+
+    let second = setup.lifecycle().restore(&plan).unwrap();
+
+    assert!(matches!(second, Restoration::Unchanged), "{second:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+    assert!(setup.record_exists());
+}
+
+impl Setup {
+    /// Leaves a restored workspace beside the archive that the restore
+    /// stopped before it deleted, which `mxv repair` deletes.
+    fn stopped_restore(&self) -> Archive {
+        self.create();
+        let archive = self.archive();
+        let plan = self.restore_plan();
+        stop_at("record");
+        let stopped = self.lifecycle().restore(&plan);
+        assert!(
+            matches!(stopped, Err(Error::Unwritable { .. })),
+            "{stopped:?}"
+        );
+        HOOK.with(|hook| *hook.borrow_mut() = None);
+        archive
+    }
+
+    /// Leaves a retired archive of the name beside a newer workspace of
+    /// it, which `mxv repair` finishes under a dated name.
+    fn retired_beside_a_newer_workspace(&self) -> Archive {
+        self.create();
+        let plan = self.archive_plan();
+        let archive = self.stopped_archive(plan, "removed");
+        // A worktree archive keeps its branch in the repository, which the
+        // newer workspace of the name needs.
+        git(&self.fixture.clone, &["branch", "-D", "triage"]);
+        self.create();
+        archive
+    }
+}
+
+#[test]
+fn a_repair_fails_busy_while_another_command_holds_the_lock_and_deletes_nothing() {
+    let setup = fresh();
+    let archive = setup.stopped_restore();
+    let planned = setup.repair_plan();
+    assert!(matches!(planned, Repaired::Deleted(_)), "{planned:?}");
+    let held = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup.lifecycle().repair(&name(), &planned);
+
+    assert!(matches!(outcome, Err(Error::Busy { .. })), "{outcome:?}");
+    drop(held);
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+    assert!(!setup.pins_of(&archive).is_empty());
+}
+
+#[test]
+fn a_repair_deletes_the_archive_that_a_restore_already_rebuilt() {
+    let setup = fresh();
+    let archive = setup.stopped_restore();
+    let planned = setup.repair_plan();
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    let Repairing::Done(done) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(matches!(done.repaired, Repaired::Deleted(_)));
+    assert!(done.finish.is_none());
+    assert_eq!(setup.archive_record(), None);
+    assert_eq!(setup.pins_of(&archive), "");
+    assert!(setup.runs.lock(&name()).is_ok());
+}
+
+#[test]
+fn a_repair_whose_plan_changed_after_the_question_changes_nothing() {
+    let setup = fresh();
+    let archive = setup.stopped_restore();
+    let planned = setup.repair_plan();
+    // Another repair deletes the archive while the question is open.
+    let first = setup.lifecycle().repair(&name(), &planned).unwrap();
+    assert!(matches!(first, Repairing::Done(_)), "{first:?}");
+
+    let second = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    assert!(matches!(second, Repairing::Changed), "{second:?}");
+    assert_eq!(setup.pins_of(&archive), "");
+    assert!(setup.record_exists());
+}
+
+#[test]
+fn a_repair_that_renames_holds_both_locks_and_finishes_the_archive_under_the_dated_name() {
+    let setup = fresh();
+    let older = setup.retired_beside_a_newer_workspace();
+    let planned = setup.repair_plan();
+    let Repaired::Renamed { archive: dated, .. } = &planned else {
+        panic!("{planned:?}");
+    };
+    let dated_name = dated.name.clone();
+    let probe = setup.probe();
+    let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+    let log = std::rc::Rc::clone(&seen);
+    let held_names = [name(), dated_name.clone()];
+    set_hook(move |step| {
+        let busy: Vec<bool> = held_names
+            .iter()
+            .map(|held| probe.lock(held).is_err())
+            .collect();
+        log.borrow_mut().push((step.to_owned(), busy));
+        Ok(())
+    });
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    let Repairing::Done(done) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(done.finish.is_some());
+    let seen = seen.borrow();
+    assert!(!seen.is_empty());
+    assert!(
+        seen.iter().all(|(_, busy)| busy.iter().all(|held| *held)),
+        "{seen:?}"
+    );
+    let finished = setup.archives.read(&dated_name).unwrap().unwrap();
+    assert_eq!(finished.id, older.id);
+    assert_eq!(finished.state, ArchiveState::Archived);
+    assert_eq!(setup.archive_record(), None);
+    assert!(setup.runs.lock(&name()).is_ok());
+    assert!(setup.runs.lock(&dated_name).is_ok());
+}
+
+#[test]
+fn a_repair_of_a_rename_whose_dated_name_was_taken_after_the_question_changes_nothing() {
+    let setup = fresh();
+    setup.retired_beside_a_newer_workspace();
+    let planned = setup.repair_plan();
+    let Repaired::Renamed { archive: dated, .. } = &planned else {
+        panic!("{planned:?}");
+    };
+    let dated_name = dated.name.clone();
+    // Another run took the dated name with a workspace.
+    let taken = setup.workspaces.create(
+        &setup.base.join("mxv"),
+        &dated_name,
+        &setup.fixture.clone,
+        Mode::Change,
+    );
+    assert!(taken.is_ok(), "{taken:?}");
+
+    let outcome = setup.lifecycle().repair(&name(), &planned);
+
+    assert!(matches!(outcome, Ok(Repairing::Changed)), "{outcome:?}");
+    assert!(setup.archive_record().is_some());
 }

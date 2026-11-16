@@ -69,7 +69,7 @@ pub use crate::error::{Error, SshRefusal};
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::lifecycle::{
     ArchiveDeleted, Archived, Finish, FinishDone, Finished, InUse, Lifecycle, RemovalDone,
-    RemoveAsked, Removed, RetireDone, VolumesAsked,
+    RemoveAsked, Removed, RepairDone, Repairing, Restoration, RetireDone, VolumesAsked,
 };
 pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefix, prefixed};
 pub use crate::manifest::{
