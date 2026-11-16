@@ -18,7 +18,7 @@ use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -98,6 +98,9 @@ pub struct Settings {
     caddy: Option<PathBuf>,
     /// The directories that hold programs, in the order of `PATH`.
     search: Vec<PathBuf>,
+    /// The config file that sets the addresses and the Caddy program, which
+    /// every message that tells a person to edit it names.
+    config: PathBuf,
 }
 
 impl Settings {
@@ -113,7 +116,23 @@ impl Settings {
             https: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 443)),
             caddy: None,
             search: Vec::new(),
+            config: PathBuf::from("config.toml"),
         }
+    }
+
+    /// Returns the settings with `path` as the config file that messages
+    /// name when they tell a person to set `proxy_http`, `proxy_https` or
+    /// `caddy`.
+    #[must_use]
+    pub fn with_config(mut self, path: PathBuf) -> Self {
+        self.config = path;
+        self
+    }
+
+    /// Returns the config file that messages name.
+    #[must_use]
+    pub fn config(&self) -> &Path {
+        &self.config
     }
 
     /// Returns the settings with `http` and `https` as the listen
@@ -198,6 +217,8 @@ pub enum ProxyError {
         address: SocketAddr,
         /// The config key that sets it.
         key: &'static str,
+        /// The config file that holds the key.
+        config: PathBuf,
     },
     /// The system does not let this person listen on the address.
     PortDenied {
@@ -205,6 +226,8 @@ pub enum ProxyError {
         address: SocketAddr,
         /// The config key that sets it.
         key: &'static str,
+        /// The config file that holds the key.
+        config: PathBuf,
     },
     /// No Caddy program runs.
     CaddyMissing {
@@ -213,6 +236,8 @@ pub enum ProxyError {
         named: Option<PathBuf>,
         /// What the search or the program said.
         reason: String,
+        /// The config file that names the program.
+        config: PathBuf,
     },
     /// The Caddy program is older than mxv drives.
     CaddyTooOld {
@@ -220,6 +245,8 @@ pub enum ProxyError {
         path: PathBuf,
         /// Its version.
         found: String,
+        /// The config file that names the program.
+        config: PathBuf,
     },
     /// Caddy did not start.
     StartFailed {
@@ -251,30 +278,44 @@ impl From<Error> for ProxyError {
 impl fmt::Display for ProxyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PortHeld { address, key } => write!(
+            Self::PortHeld {
+                address,
+                key,
+                config,
+            } => write!(
                 f,
-                "{address} is held by another process, so the proxy cannot listen on it; stop that process, or set {key} in the config file to another loopback address"
+                "{address} is held by another process, so the proxy cannot listen on it; stop that process, or set {key} in {} to another loopback address",
+                config.display()
             ),
-            Self::PortDenied { address, key } => write!(
+            Self::PortDenied {
+                address,
+                key,
+                config,
+            } => write!(
                 f,
-                "the system does not let this person listen on {address}; set {key} in the config file to a port from 1024 up, or allow the port"
+                "the system does not let this person listen on {address}; set {key} in {} to a port from 1024 up, or allow the port",
+                config.display()
             ),
             Self::CaddyMissing {
                 named: Some(path),
                 reason,
+                config,
             } => write!(
                 f,
-                "the caddy program {} does not run ({reason}); install Caddy, for example `brew install caddy`, or fix `caddy` in the config file",
-                path.display()
+                "the caddy program {} does not run ({reason}); install Caddy, for example `brew install caddy`, or fix `caddy` in {}",
+                path.display(),
+                config.display()
             ),
             Self::CaddyMissing {
                 named: None,
                 reason,
+                config,
             } => write!(
                 f,
-                "mxv found no working `caddy` program on PATH ({reason}); install Caddy, for example `brew install caddy`, or set `caddy` in the config file to its path"
+                "mxv found no working `caddy` program on PATH ({reason}); install Caddy, for example `brew install caddy`, or set `caddy` in {} to its path",
+                config.display()
             ),
-            Self::CaddyTooOld { path, found } => write!(
+            Self::CaddyTooOld { path, found, .. } => write!(
                 f,
                 "{} is Caddy {found}, and mxv needs Caddy 2.8 or later",
                 path.display()
@@ -304,6 +345,17 @@ pub enum SyncMode {
     IfRunning,
 }
 
+/// What [`Proxy::ensure_running`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Ensured {
+    /// Whether the call started Caddy, which is false when Caddy ran.
+    pub started: bool,
+    /// How many routes Caddy serves after the call. A Caddy that ran holds
+    /// exactly these.
+    pub routes: usize,
+}
+
 /// What a sync left served.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -324,10 +376,24 @@ pub struct Synced {
 }
 
 impl Synced {
-    /// Returns the other workspaces that keep a route or a host name of
-    /// their own listed but that `workspace` now serves, in name order.
-    /// A unit of one of them that started before `workspace` took the name
-    /// holds the old URL in its variables until it restarts.
+    /// Returns the sentences of [`Synced::problems`] about `workspace`: its
+    /// manifest that is left out, or its name that makes no host label. A
+    /// record that cannot be read names no workspace, so `mxv proxy status`
+    /// lists it and this does not.
+    #[must_use]
+    pub fn problems_of(&self, workspace: &WorkspaceName) -> Vec<String> {
+        self.problems
+            .iter()
+            .filter(|problem| routes::is_about(problem, workspace))
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the other workspaces whose route `workspace` now serves in
+    /// their place, in name order. A unit of one of them that started before
+    /// `workspace` took the host label holds the old URL in its variables
+    /// until it restarts. An extra host name gives no variables, so a lost
+    /// name alone does not count.
     #[must_use]
     pub fn displaced_by(&self, workspace: &WorkspaceName) -> Vec<WorkspaceName> {
         let mut found: Vec<WorkspaceName> = self
@@ -335,12 +401,6 @@ impl Synced {
             .iter()
             .filter(|shadowed| &shadowed.by == workspace)
             .map(|shadowed| shadowed.route.workspace.clone())
-            .chain(
-                self.shadowed_hosts
-                    .iter()
-                    .filter(|shadowed| &shadowed.by == workspace)
-                    .map(|shadowed| shadowed.workspace.clone()),
-            )
             .filter(|other| other != workspace)
             .collect();
         found.sort();
@@ -519,13 +579,13 @@ impl Proxy {
     /// with the routes there are, and with none it starts with only its
     /// local certificate authority, which `mxv proxy install` asks the person
     /// to trust. A Caddy that runs gets the current routes when there are
-    /// any, and is never stopped. Returns whether this call started Caddy.
+    /// any, and is never stopped. Returns what the call did.
     ///
     /// # Errors
     ///
     /// Returns the [`ProxyError`] that stopped Caddy from starting or from
     /// loading the configuration.
-    pub fn ensure_running(&self, store: &Store) -> Result<bool, ProxyError> {
+    pub fn ensure_running(&self, store: &Store) -> Result<Ensured, ProxyError> {
         store::private_dir(&self.settings.dir())?;
         let _lock = store::lock(&self.settings.dir().join("lock"), LOCK_WAIT)?;
         let (found, _) = declared(store)?;
@@ -542,7 +602,10 @@ impl Proxy {
                 self.load(&config)?;
             }
         }
-        Ok(started)
+        Ok(Ensured {
+            started,
+            routes: derived.served.len(),
+        })
     }
 
     /// Stops Caddy when it runs.
@@ -629,12 +692,6 @@ impl Proxy {
     }
 
     /// Reports whether Caddy answers on the admin socket.
-    #[must_use]
-    pub fn running(&self) -> bool {
-        self.answering()
-    }
-
-    /// Reports whether Caddy answers on the admin socket.
     fn answering(&self) -> bool {
         admin::get(&self.settings.socket(), "/config/").is_ok_and(|response| response.status == 200)
     }
@@ -674,6 +731,7 @@ impl Proxy {
                 process::find(&self.settings.search).ok_or_else(|| ProxyError::CaddyMissing {
                     named: None,
                     reason: "no executable file is named caddy".to_owned(),
+                    config: self.settings.config.clone(),
                 })?
             }
         };
@@ -681,11 +739,16 @@ impl Proxy {
             process::Version::Unusable(reason) => Err(ProxyError::CaddyMissing {
                 named: self.settings.caddy.clone(),
                 reason,
+                config: self.settings.config.clone(),
             }),
             process::Version::Found(found) => {
                 let old = process::major_minor(&found).is_some_and(|have| have < process::OLDEST);
                 if old {
-                    Err(ProxyError::CaddyTooOld { path, found })
+                    Err(ProxyError::CaddyTooOld {
+                        path,
+                        found,
+                        config: self.settings.config.clone(),
+                    })
                 } else {
                     Ok((path, found))
                 }
@@ -709,8 +772,16 @@ impl Proxy {
             (self.settings.https, "proxy_https"),
         ] {
             ports::can_bind(address).map_err(|error| match error.kind() {
-                io::ErrorKind::AddrInUse => ProxyError::PortHeld { address, key },
-                io::ErrorKind::PermissionDenied => ProxyError::PortDenied { address, key },
+                io::ErrorKind::AddrInUse => ProxyError::PortHeld {
+                    address,
+                    key,
+                    config: self.settings.config.clone(),
+                },
+                io::ErrorKind::PermissionDenied => ProxyError::PortDenied {
+                    address,
+                    key,
+                    config: self.settings.config.clone(),
+                },
                 _ => ProxyError::StartFailed {
                     message: format!("{address}: {error}"),
                 },

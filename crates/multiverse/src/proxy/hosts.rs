@@ -34,7 +34,10 @@ impl Resolution {
                 "the lookup of {name} did not finish within {} seconds, so mxv cannot tell whether it resolves to this machine",
                 LOOKUP_WAIT.as_secs()
             ),
-            _ => format!("{name} does not resolve to this machine"),
+            Self::Loopback => format!("{name} resolves to this machine"),
+            Self::Elsewhere | Self::Unresolved => {
+                format!("{name} does not resolve to this machine")
+            }
         }
     }
 
@@ -211,6 +214,14 @@ mod tests {
     fn a_name_below_localhost_is_not_looked_up() {
         let fake = Fake(BTreeMap::new());
         assert!(missing(&names(&["app.localhost"]), &fake).is_empty());
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_loopback_says_so() {
+        assert_eq!(
+            Resolution::Loopback.detail("a.example.com"),
+            "a.example.com resolves to this machine"
+        );
     }
 
     #[test]

@@ -270,7 +270,8 @@ impl Environment {
                 config.proxy_https.unwrap_or_else(|| defaults.https()),
             )
             .with_caddy(config.caddy)
-            .with_search(self.caller.path_dirs());
+            .with_search(self.caller.path_dirs())
+            .with_config(self.config_file()?);
         let mut proxy = Proxy::new(settings).with_caller(&self.caller);
         if let Some(program) = &self.program {
             proxy = proxy.with_keeper(

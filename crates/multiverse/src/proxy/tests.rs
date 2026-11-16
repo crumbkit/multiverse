@@ -210,7 +210,7 @@ fn a_held_address_fails_with_port_held_naming_the_address_and_the_key() {
     drop(free);
     let error = proxy.sync(&store, SyncMode::Start, true).unwrap_err();
     assert!(
-        matches!(error, ProxyError::PortHeld { address: found, key: "proxy_http" } if found == address)
+        matches!(error, ProxyError::PortHeld { address: found, key: "proxy_http", .. } if found == address)
     );
     let text = error.to_string();
     assert!(text.contains(&address.to_string()), "{text}");
@@ -499,7 +499,7 @@ fn a_workspace_that_takes_a_host_label_displaces_the_workspaces_it_shadows() {
 }
 
 #[test]
-fn a_workspace_that_takes_an_extra_host_displaces_the_workspace_that_listed_it() {
+fn a_workspace_that_takes_only_an_extra_host_displaces_no_workspace() {
     let derived = derive(vec![
         hosted(
             declared("alpha", &["web"], &[("web", 1)]),
@@ -518,7 +518,7 @@ fn a_workspace_that_takes_an_extra_host_displaces_the_workspace_that_listed_it()
         shadowed_hosts: derived.shadowed_hosts,
         ..super::Synced::default()
     };
-    assert_eq!(synced.displaced_by(&name("alpha")), [name("beta")]);
+    assert!(synced.displaced_by(&name("alpha")).is_empty());
 }
 
 #[test]
@@ -546,4 +546,39 @@ fn the_served_routes_come_with_a_sentence_for_each_manifest_left_out() {
         problems[0].starts_with("the manifest of triage is left out"),
         "{problems:?}"
     );
+}
+
+#[test]
+fn the_problems_of_a_workspace_leave_out_those_of_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("records"));
+    for workspace_name in ["triage", "triage-two"] {
+        workspace(
+            &store,
+            dir.path(),
+            workspace_name,
+            "ports = [\"web\"]\nroutes = [\"web\"]\n",
+            &[("web", 21001)],
+        );
+        write(
+            dir.path()
+                .join("workspaces")
+                .join(workspace_name)
+                .join("app/mxv.toml"),
+            "routes = [",
+        );
+    }
+    let (_, problems) = super::served(&store);
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    let synced = super::Synced {
+        problems,
+        ..super::Synced::default()
+    };
+    let own = synced.problems_of(&name("triage"));
+    assert_eq!(own.len(), 1, "{own:?}");
+    assert!(
+        own[0].starts_with("the manifest of triage is left out"),
+        "{own:?}"
+    );
+    assert!(synced.problems_of(&name("other")).is_empty());
 }

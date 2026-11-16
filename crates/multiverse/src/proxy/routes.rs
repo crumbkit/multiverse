@@ -138,6 +138,29 @@ pub struct Derived {
     pub problems: Vec<String>,
 }
 
+/// How a problem about the manifest of a workspace begins.
+const MANIFEST_PROBLEM_START: &str = "the manifest of ";
+
+/// How a problem about the host label of a workspace begins.
+const LABEL_PROBLEM_START: &str = "the workspace ";
+
+/// Reports whether `problem`, a sentence of [`derive`] or [`declared`],
+/// is about the workspace `name`.
+pub(super) fn is_about(problem: &str, name: &WorkspaceName) -> bool {
+    problem
+        .strip_prefix(MANIFEST_PROBLEM_START)
+        .is_some_and(|rest| {
+            rest.strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.starts_with(" is left out"))
+        })
+        || problem
+            .strip_prefix(LABEL_PROBLEM_START)
+            .is_some_and(|rest| {
+                rest.strip_prefix(name.as_str())
+                    .is_some_and(|rest| rest.starts_with(" makes a host label"))
+            })
+}
+
 /// Derives the routes of `declared`. A route whose port the ledger lacks is
 /// left out, because its workspace has never started. When two workspace
 /// names make one host label, the name that sorts first keeps it, and the
@@ -153,7 +176,7 @@ pub fn derive(mut declared: Vec<Declared>) -> Derived {
         if label.len() > MOST_LABEL_BYTES {
             if !item.routes.is_empty() {
                 derived.problems.push(format!(
-                    "the workspace {} makes a host label of {} bytes, and a label holds at most {MOST_LABEL_BYTES}",
+                    "{LABEL_PROBLEM_START}{} makes a host label of {} bytes, and a label holds at most {MOST_LABEL_BYTES}",
                     item.workspace,
                     label.len()
                 ));
@@ -246,7 +269,7 @@ pub(super) fn declared(store: &Store) -> Result<(Vec<Declared>, Vec<String>), Er
             }
             Ok(_) => {}
             Err(error) => problems.push(format!(
-                "the manifest of {} is left out: {error}",
+                "{MANIFEST_PROBLEM_START}{} is left out: {error}",
                 workspace.name
             )),
         }

@@ -174,16 +174,18 @@ impl Failure for ProxyFailure {
 
     fn recovery(&self) -> Recovery {
         match self {
-            Self::Library(ProxyError::PortHeld { .. } | ProxyError::PortDenied { .. }) => {
-                Recovery::hint(
-                    "stop the process that holds the address, or set `proxy_http` or `proxy_https` in ~/.config/mxv/config.toml to another loopback address, and run `mxv proxy start`",
-                )
-            }
-            Self::Library(ProxyError::CaddyMissing { .. } | ProxyError::CaddyTooOld { .. }) => {
-                Recovery::hint(
-                    "install Caddy 2.8 or later, for example `brew install caddy`, or set `caddy` in ~/.config/mxv/config.toml to its path, and run `mxv proxy start`",
-                )
-            }
+            Self::Library(
+                ProxyError::PortHeld { config, .. } | ProxyError::PortDenied { config, .. },
+            ) => Recovery::hint(format!(
+                "stop the process that holds the address, or set `proxy_http` or `proxy_https` in {} to another loopback address, and run `mxv proxy start`",
+                config.display()
+            )),
+            Self::Library(
+                ProxyError::CaddyMissing { config, .. } | ProxyError::CaddyTooOld { config, .. },
+            ) => Recovery::hint(format!(
+                "install Caddy 2.8 or later, for example `brew install caddy`, or set `caddy` in {} to its path, and run `mxv proxy start`",
+                config.display()
+            )),
             Self::Library(ProxyError::SocketPathTooLong { .. }) => Recovery::hint(
                 "set XDG_STATE_HOME to a shorter directory, and run `mxv proxy start`",
             ),
@@ -203,12 +205,12 @@ impl Failure for ProxyFailure {
 
     fn fields(&self) -> Vec<Field<'_>> {
         match self {
-            Self::Library(ProxyError::PortHeld { address, key })
-            | Self::Library(ProxyError::PortDenied { address, key }) => vec![
+            Self::Library(ProxyError::PortHeld { address, key, .. })
+            | Self::Library(ProxyError::PortDenied { address, key, .. }) => vec![
                 Field::new("address", address.to_string()),
                 Field::new("key", *key),
             ],
-            Self::Library(ProxyError::CaddyTooOld { path, found }) => vec![
+            Self::Library(ProxyError::CaddyTooOld { path, found, .. }) => vec![
                 Field::new("path", path.display().to_string()),
                 Field::new("version", found),
             ],
@@ -303,7 +305,7 @@ pub(crate) fn sync(
                 ));
                 served.lines.extend(
                     synced
-                        .problems
+                        .problems_of(&workspace.name)
                         .iter()
                         .map(|problem| format!("note: {problem}.")),
                 );
@@ -872,6 +874,23 @@ pub(crate) fn install_with(steps: InstallSteps<'_>) -> Result<Installed, crumbki
     })
 }
 
+/// Returns the line that says what an install did to Caddy, which listens
+/// on `http` and `https` and serves `routes` routes.
+fn ran_line(
+    started: bool,
+    routes: usize,
+    http: std::net::SocketAddr,
+    https: std::net::SocketAddr,
+) -> String {
+    if started {
+        format!("mxv started Caddy on {http} and {https}.")
+    } else if routes > 0 {
+        format!("Caddy already runs on {http} and {https}; mxv loaded the current routes.")
+    } else {
+        format!("Caddy already runs on {http} and {https}.")
+    }
+}
+
 /// Sets the proxy up: finds Caddy, starts it, and asks the person to trust
 /// its certificate authority unless this machine already does. Caddy starts
 /// with the routes of every workspace, or with none, so the person can trust
@@ -889,13 +908,9 @@ pub(crate) fn install(
     let (http, https) = (settings.http(), settings.https());
     crate::say(&[format!("mxv found caddy {version} at {}.", caddy.display())]);
     let mut start = || {
-        let started = proxy.ensure_running(&store).map_err(fail)?;
-        crate::say(&[if started {
-            format!("mxv started Caddy on {http} and {https}.")
-        } else {
-            format!("Caddy already runs on {http} and {https}.")
-        }]);
-        Ok(started)
+        let ensured = proxy.ensure_running(&store).map_err(fail)?;
+        crate::say(&[ran_line(ensured.started, ensured.routes, http, https)]);
+        Ok(ensured.started)
     };
     let mut trusted = || {
         Ok(proxy
@@ -970,13 +985,14 @@ impl Row for CheckLine {
 /// Reads the state of the proxy and of the machine around it. The check
 /// never starts Caddy, loads a configuration, takes the proxy's lock or
 /// trusts the authority.
-pub(crate) fn check(environment: &Environment) -> Result<Vec<CheckLine>, crumbkit::Error> {
+pub(crate) fn check(environment: &Environment) -> Result<(Vec<CheckLine>, usize), crumbkit::Error> {
     let proxy = environment.proxy()?;
     let store = Store::new(environment.records()?);
     let result = proxy
         .check(&store, &*environment.resolver())
         .map_err(fail)?;
-    Ok(result
+    let failing = result.failing();
+    let lines = result
         .rows
         .into_iter()
         .map(|row| CheckLine {
@@ -985,26 +1001,23 @@ pub(crate) fn check(environment: &Environment) -> Result<Vec<CheckLine>, crumbki
                 multiverse::ProxyCheckState::Ok => CheckOutcome::Ok,
                 multiverse::ProxyCheckState::Missing => CheckOutcome::Missing,
                 multiverse::ProxyCheckState::Unknown => CheckOutcome::Unknown,
-                _ => CheckOutcome::Failed,
+                multiverse::ProxyCheckState::Failed => CheckOutcome::Failed,
             },
             detail: row.detail,
             notes: row.notes,
         })
-        .collect())
+        .collect();
+    Ok((lines, failing))
 }
 
 /// Prints the rows of the check, and then the failure that counts the rows
 /// that are missing or failed, so a person sees both. The exit code is the
 /// failure's.
 fn finish_check(output: Run, environment: &Environment) -> ExitCode {
-    let lines = match check(environment) {
-        Ok(lines) => lines,
+    let (lines, failing) = match check(environment) {
+        Ok(found) => found,
         Err(error) => return crumbkit::finish(output, CHECK, Err::<Listing<CheckLine>, _>(error)),
     };
-    let failing = lines
-        .iter()
-        .filter(|line| !matches!(line.state, CheckOutcome::Ok | CheckOutcome::Unknown))
-        .count();
     let total = lines.len();
     if failing == 0 {
         return crumbkit::finish(

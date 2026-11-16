@@ -4,7 +4,7 @@ use multiverse::{ProxyError, SyncMode, WorkspaceName};
 
 use super::{
     AuthorityState, InstallSteps, Installed, ProxySummary, Served, displaced_lines, extra_lines,
-    install_with, join, warning,
+    install_with, join, ran_line, warning,
 };
 
 fn name(text: &str) -> WorkspaceName {
@@ -43,6 +43,7 @@ fn a_held_address_warns_with_its_code_and_says_the_units_still_run() {
         ProxyError::PortHeld {
             address,
             key: "proxy_http",
+            config: "/home/a/.config/mxv/config.toml".into(),
         },
     );
     assert!(
@@ -66,6 +67,7 @@ fn a_missing_caddy_warns_with_its_code_and_how_to_install_it() {
         ProxyError::CaddyMissing {
             named: None,
             reason: "not found".to_owned(),
+            config: "/home/a/.config/mxv/config.toml".into(),
         },
     );
     assert!(lines[0].contains("brew install caddy"), "{lines:?}");
@@ -142,6 +144,7 @@ fn a_warning_after_a_verb_that_stops_units_does_not_say_they_still_run() {
         ProxyError::PortHeld {
             address: "127.0.0.1:80".parse().unwrap(),
             key: "proxy_http",
+            config: "/home/a/.config/mxv/config.toml".into(),
         },
     );
     assert!(
@@ -311,4 +314,37 @@ fn a_running_workspace_that_lost_a_name_is_told_to_restart_and_a_stopped_one_is_
         "{lines:?}"
     );
     assert!(displaced_lines(&name("alpha"), &[], &mut |_| true).is_empty());
+}
+
+#[test]
+fn the_recovery_of_a_held_address_names_the_config_file_the_error_carries() {
+    use crumbkit::Failure as _;
+    let failure = super::ProxyFailure::Library(ProxyError::PortHeld {
+        address: "127.0.0.1:80".parse().unwrap(),
+        key: "proxy_http",
+        config: "/srv/xdg/mxv/config.toml".into(),
+    });
+    let text = format!("{:?}", failure.recovery());
+    assert!(text.contains("/srv/xdg/mxv/config.toml"), "{text}");
+    assert!(!text.contains("~/.config"), "{text}");
+}
+
+#[test]
+fn an_install_says_whether_it_started_caddy_or_loaded_the_routes_into_the_one_that_ran() {
+    let (http, https): (SocketAddr, SocketAddr) = (
+        "127.0.0.1:80".parse().unwrap(),
+        "127.0.0.1:443".parse().unwrap(),
+    );
+    assert_eq!(
+        ran_line(true, 2, http, https),
+        "mxv started Caddy on 127.0.0.1:80 and 127.0.0.1:443."
+    );
+    assert_eq!(
+        ran_line(false, 2, http, https),
+        "Caddy already runs on 127.0.0.1:80 and 127.0.0.1:443; mxv loaded the current routes."
+    );
+    assert_eq!(
+        ran_line(false, 0, http, https),
+        "Caddy already runs on 127.0.0.1:80 and 127.0.0.1:443."
+    );
 }

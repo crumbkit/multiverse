@@ -476,6 +476,14 @@ fn check_reports_an_address_that_another_process_holds() {
     let rows = document["data"].as_array().unwrap();
     let https = rows.iter().find(|row| row["check"] == "https").unwrap();
     assert_eq!(https["state"], "failed");
+    let config = setup.root().join("config/mxv/config.toml");
+    assert!(
+        https["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&config.display().to_string()),
+        "the row names the config file under XDG_CONFIG_HOME: {https}"
+    );
     assert!(
         https["detail"]
             .as_str()
@@ -761,11 +769,81 @@ fn a_real_caddy_that_install_starts_before_any_route_exists_leaves_the_trust_to_
         .find(|line| line.starts_with("authority"))
         .unwrap();
     assert!(!authority.contains("not created yet"), "{authority}");
-    let (exit, _, _) = setup.json_and_errors(&["proxy", "install"]);
+    let before = caddy_pid(&setup);
+    let (exit, _, errors) = setup.json_and_errors(&["proxy", "install"]);
     assert_eq!(
         exit, 1,
         "a second install finds Caddy running and asks again"
     );
+    assert!(errors.contains("Caddy already runs"), "{errors}");
+    assert_eq!(
+        caddy_pid(&setup),
+        before,
+        "a second install leaves the same Caddy running"
+    );
+    setup.json(&["proxy", "stop"]);
+}
+
+/// Returns the process id that `mxv proxy status` reports for Caddy.
+fn caddy_pid(setup: &Setup) -> u64 {
+    fn find(value: &Value) -> Option<u64> {
+        match value {
+            Value::Object(map) => map
+                .get("pid")
+                .and_then(Value::as_u64)
+                .or_else(|| map.values().find_map(find)),
+            Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let (_, status) = setup.json(&["proxy", "status"]);
+    find(&status).unwrap_or_else(|| panic!("Caddy has no pid: {status}"))
+}
+
+#[test]
+fn a_real_caddy_that_install_started_stops_when_a_sync_finds_no_route() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.workspace("plain", "[processes.idle]\nargv = [\"sleep\", \"60\"]\n");
+    let (exit, _, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(exit, 1);
+    let (_, status) = setup.json(&["proxy", "status"]);
+    assert!(status.to_string().contains("\"running\":true"), "{status}");
+    let (exit, _, errors) = setup.json_and_errors(&["down", "-w", "plain"]);
+    assert_eq!(exit, 0, "{errors}");
+    let (_, status) = setup.json(&["proxy", "status"]);
+    assert!(
+        status.to_string().contains("\"running\":false"),
+        "a sync with no route stops the route-free Caddy: {status}"
+    );
+}
+
+#[test]
+fn a_real_caddy_that_holds_a_route_the_records_no_longer_declare_fails_the_check() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.workspace("reading-list", &site());
+    let (exit, _, errors) = setup.json_and_errors(&["up", "-w", "reading-list"]);
+    assert_eq!(exit, 0, "{errors}");
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("1 route loaded"), "{running}");
+    write(
+        &setup.root().join("workspaces/reading-list/app/mxv.toml"),
+        "[processes.idle]\nargv = [\"sleep\", \"60\"]\n",
+    );
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("failed"), "{running}");
+    assert!(running.contains("mxv proxy start"), "{running}");
     setup.json(&["proxy", "stop"]);
 }
 

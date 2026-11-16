@@ -85,9 +85,10 @@ pub use crate::process::process_table;
 pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::proxy::{
     Authority, Check as ProxyCheck, CheckRow as ProxyCheckRow, CheckState as ProxyCheckState,
-    DOMAIN as ROUTE_DOMAIN, Declared, Derived, Proxy, ProxyError, Resolution, Resolver, Route,
-    Settings as ProxySettings, Shadowed, ShadowedHost, Status as ProxyStatus, SyncMode, Synced,
-    SystemResolver, derive as derive_routes, line_for as hosts_line, missing as missing_hosts,
+    DOMAIN as ROUTE_DOMAIN, Declared, Derived, Ensured, Proxy, ProxyError, Resolution, Resolver,
+    Route, Settings as ProxySettings, Shadowed, ShadowedHost, Status as ProxyStatus, SyncMode,
+    Synced, SystemResolver, derive as derive_routes, line_for as hosts_line,
+    missing as missing_hosts,
 };
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,

@@ -6,7 +6,7 @@
 use std::io;
 
 use super::hosts::{self, Resolution, Resolver};
-use super::{Proxy, ProxyError, Store, declared, derive, ports, process};
+use super::{Proxy, ProxyError, Store, caddy_config, declared, derive, ports, process};
 
 /// How one check came out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,32 +82,7 @@ impl Proxy {
         rows.push(self.address_row("http", self.settings.http, "proxy_http", running));
         rows.push(self.address_row("https", self.settings.https, "proxy_https", running));
         rows.push(self.authority_row());
-        rows.push(if running {
-            let pid = self
-                .pid()
-                .map_or_else(String::new, |pid| format!("pid {pid}, "));
-            let routes = derived.served.len();
-            CheckRow::new(
-                "caddy runs",
-                CheckState::Ok,
-                format!(
-                    "{pid}{routes} {}",
-                    if routes == 1 { "route" } else { "routes" }
-                ),
-            )
-        } else if derived.served.is_empty() {
-            CheckRow::new(
-                "caddy runs",
-                CheckState::Ok,
-                "not needed until a workspace declares a route",
-            )
-        } else {
-            CheckRow::new(
-                "caddy runs",
-                CheckState::Missing,
-                "not running; a person runs `mxv proxy install`",
-            )
-        });
+        rows.push(self.runs_row(running, &derived.served));
         let mut names: Vec<String> = derived
             .served
             .iter()
@@ -151,6 +126,48 @@ impl Proxy {
         Ok(Check { rows })
     }
 
+    /// Returns the row for a running Caddy: ok when the configuration it
+    /// holds is the one the workspace records give, and failed when it
+    /// differs, because a route changed while Caddy ran and no sync loaded it.
+    fn runs_row(&self, running: bool, served: &[super::Route]) -> CheckRow {
+        if !running {
+            return if served.is_empty() {
+                CheckRow::new(
+                    "caddy runs",
+                    CheckState::Ok,
+                    "not needed until a workspace declares a route",
+                )
+            } else {
+                CheckRow::new(
+                    "caddy runs",
+                    CheckState::Missing,
+                    "not running; a person runs `mxv proxy install`",
+                )
+            };
+        }
+        let pid = self
+            .pid()
+            .map_or_else(String::new, |pid| format!("pid {pid}, "));
+        let routes = served.len();
+        let noun = if routes == 1 { "route" } else { "routes" };
+        let wanted = caddy_config::render(&self.settings, served);
+        if self.current().as_ref() == Some(&wanted) {
+            CheckRow::new(
+                "caddy runs",
+                CheckState::Ok,
+                format!("{pid}{routes} {noun} loaded"),
+            )
+        } else {
+            CheckRow::new(
+                "caddy runs",
+                CheckState::Failed,
+                format!(
+                    "{pid}the routes Caddy holds differ from the {routes} {noun} of the workspace records; `mxv proxy start` loads the current ones"
+                ),
+            )
+        }
+    }
+
     /// Returns the row for the Caddy program.
     fn caddy_row(&self) -> CheckRow {
         match self.program() {
@@ -159,7 +176,7 @@ impl Proxy {
                 CheckState::Ok,
                 format!("{}, version {version}", path.display()),
             ),
-            Err(ProxyError::CaddyTooOld { path, found }) => CheckRow::new(
+            Err(ProxyError::CaddyTooOld { path, found, .. }) => CheckRow::new(
                 "caddy",
                 CheckState::Failed,
                 format!(
@@ -167,13 +184,18 @@ impl Proxy {
                     path.display()
                 ),
             ),
-            Err(ProxyError::CaddyMissing { named, reason }) => CheckRow::new(
+            Err(ProxyError::CaddyMissing {
+                named,
+                reason,
+                config,
+            }) => CheckRow::new(
                 "caddy",
                 CheckState::Missing,
                 match named {
                     Some(path) => format!(
-                        "{} does not run: {reason}; set `caddy` in ~/.config/mxv/config.toml to Caddy 2.8 or later",
-                        path.display()
+                        "{} does not run: {reason}; set `caddy` in {} to Caddy 2.8 or later",
+                        path.display(),
+                        config.display()
                     ),
                     None => "no executable named caddy on PATH; install Caddy 2.8 or later, for example `brew install caddy`".to_owned(),
                 },
@@ -203,14 +225,16 @@ impl Proxy {
                 name,
                 CheckState::Failed,
                 format!(
-                    "{address} is held by another process; stop it, or set {key} in ~/.config/mxv/config.toml"
+                    "{address} is held by another process; stop it, or set {key} in {}",
+                    self.settings.config.display()
                 ),
             ),
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => CheckRow::new(
                 name,
                 CheckState::Failed,
                 format!(
-                    "the system does not let this user listen on {address}; set {key} in ~/.config/mxv/config.toml to a port above 1023"
+                    "the system does not let this user listen on {address}; set {key} in {} to a port above 1023",
+                    self.settings.config.display()
                 ),
             ),
             Err(error) => CheckRow::new(name, CheckState::Failed, format!("{address}: {error}")),
@@ -227,7 +251,13 @@ impl Proxy {
                 "not created yet; a person runs `mxv proxy install`",
             );
         }
-        match process::trusted(&certificate) {
+        Self::trust_row(process::trusted(&certificate))
+    }
+
+    /// Returns the authority row for a certificate that exists and whose
+    /// trust the system reports as `trusted`.
+    fn trust_row(trusted: Option<bool>) -> CheckRow {
+        match trusted {
             Some(true) => CheckRow::new("authority", CheckState::Ok, "trusted by this machine"),
             Some(false) => CheckRow::new(
                 "authority",
@@ -401,6 +431,113 @@ mod tests {
         let row = check.rows.iter().find(|row| row.name == "hosts").unwrap();
         assert!(row.detail.contains("did not finish"), "{row:?}");
         assert!(row.notes.is_empty());
+    }
+
+    #[test]
+    fn an_authority_whose_trust_the_system_cannot_report_is_unknown_and_does_not_fail_the_check() {
+        let row = Proxy::trust_row(None);
+        assert_eq!(row.state, CheckState::Unknown);
+        assert!(row.detail.contains("cannot tell"), "{row:?}");
+        assert!(row.detail.contains("`mxv proxy install` asks"), "{row:?}");
+        let check = super::Check { rows: vec![row] };
+        assert_eq!(check.failing(), 0);
+        assert_eq!(Proxy::trust_row(Some(false)).state, CheckState::Missing);
+        assert_eq!(Proxy::trust_row(Some(true)).state, CheckState::Ok);
+    }
+
+    #[test]
+    fn the_messages_about_an_address_and_a_program_name_the_config_file_of_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("records"));
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = held.local_addr().unwrap();
+        let config = dir.path().join("xdg/mxv/config.toml");
+        let proxy = Proxy::new(
+            Settings::new(dir.path().join("state"), dir.path().join("data"))
+                .with_addresses(free(), address)
+                .with_config(config.clone())
+                .with_search(vec![dir.path().join("empty")]),
+        );
+        let check = proxy.check(&store, &Fake(BTreeMap::new())).unwrap();
+        let row = check.rows.iter().find(|row| row.name == "https").unwrap();
+        assert!(
+            row.detail.contains(&config.display().to_string()),
+            "{row:?}"
+        );
+        assert!(!row.detail.contains("~/.config"), "{row:?}");
+        let error = proxy.caddy().unwrap_err();
+        assert!(error.to_string().contains("no working `caddy`"), "{error}");
+        assert!(
+            error.to_string().contains(&config.display().to_string()),
+            "{error}"
+        );
+    }
+
+    /// Answers every request on `proxy`'s admin socket with `body`, as a
+    /// Caddy that holds that configuration does.
+    fn serve(proxy: &Proxy, body: String) {
+        use std::io::{Read as _, Write as _};
+        let socket = proxy.settings.socket();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+    }
+
+    fn routed(dir: &Path) -> (Store, Proxy) {
+        let store = Store::new(dir.join("records"));
+        workspace(
+            &store,
+            dir,
+            "triage",
+            "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.web]\nargv = [\"web\"]\nports = { PORT = \"web\" }\nlisten = \"web\"\n",
+            &[("web", 21001)],
+        );
+        (store, proxy(dir))
+    }
+
+    #[test]
+    fn a_caddy_that_holds_the_current_routes_is_ok_and_says_they_are_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, proxy) = routed(dir.path());
+        let (found, _) = super::declared(&store).unwrap();
+        let wanted =
+            super::super::caddy_config::render(&proxy.settings, &super::derive(found).served);
+        serve(&proxy, wanted.to_string());
+        let check = proxy.check(&store, &Fake(BTreeMap::new())).unwrap();
+        let row = check
+            .rows
+            .iter()
+            .find(|row| row.name == "caddy runs")
+            .unwrap();
+        assert_eq!(row.state, CheckState::Ok, "{row:?}");
+        assert!(row.detail.ends_with("1 route loaded"), "{row:?}");
+    }
+
+    #[test]
+    fn a_caddy_that_holds_other_routes_than_the_records_fails_and_names_the_start_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, proxy) = routed(dir.path());
+        serve(&proxy, "{}".to_owned());
+        let check = proxy.check(&store, &Fake(BTreeMap::new())).unwrap();
+        let row = check
+            .rows
+            .iter()
+            .find(|row| row.name == "caddy runs")
+            .unwrap();
+        assert_eq!(row.state, CheckState::Failed, "{row:?}");
+        assert!(row.detail.contains("`mxv proxy start`"), "{row:?}");
+        assert_eq!(check.failing(), 3);
     }
 
     #[test]
