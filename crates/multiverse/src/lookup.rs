@@ -215,6 +215,9 @@ struct Declared {
     /// The services, which keep their names in a merged manifest, with
     /// the first file that declares each.
     services: BTreeMap<String, (Service, PathBuf)>,
+    /// The extra host names, which keep their names in a merged manifest,
+    /// because the proxy serves each name once.
+    hosts: BTreeMap<String, PathBuf>,
 }
 
 impl Declared {
@@ -231,7 +234,35 @@ impl Declared {
             .flat_map(|container| container.volumes.keys())
             .collect();
         declare(&mut self.volumes, volumes.into_iter(), path)?;
+        self.add_hosts(manifest, path)?;
         self.add_services(manifest, path)
+    }
+
+    /// Adds the extra host names of the units of `manifest`, read from
+    /// `path`, or fails on the first name that another file lists.
+    fn add_hosts(&mut self, manifest: &Manifest, path: &Path) -> Result<(), ManifestError> {
+        let processes = manifest
+            .processes
+            .values()
+            .flat_map(|process| &process.hosts);
+        let containers = manifest
+            .containers
+            .values()
+            .flat_map(|container| &container.hosts);
+        for host in processes.chain(containers) {
+            if let Some(other) = self.hosts.get(host) {
+                return Err(ManifestError {
+                    path: path.to_path_buf(),
+                    line: None,
+                    problem: ManifestProblem::NameClash {
+                        name: host.clone(),
+                        other: other.clone(),
+                    },
+                });
+            }
+            self.hosts.insert(host.clone(), path.to_path_buf());
+        }
+        Ok(())
     }
 
     /// Adds the services of `manifest`, read from `path`. A service that

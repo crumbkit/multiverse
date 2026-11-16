@@ -139,7 +139,7 @@
           "type": "string"
         },
         "notes": {
-          "description": "One line under the route when it is not served.",
+          "description": "The lines under the route: why it is not served, its extra host\nnames and whether each one resolves to this machine.",
           "type": "array",
           "items": {
             "type": "string"

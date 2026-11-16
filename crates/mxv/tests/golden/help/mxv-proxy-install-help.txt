@@ -1,0 +1,19 @@
+Start the proxy and ask a person to trust its authority; safe to run again
+
+Usage: mxv proxy install [OPTIONS]
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv proxy install
+          Start the proxy and trust its certificate authority, which a person at a terminal confirms
+
+Effects: additive, idempotent, open-world.

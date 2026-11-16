@@ -1,4 +1,4 @@
-mxv has 24 opt-outs from the conventions.
+mxv has 26 opt-outs from the conventions.
 
 examples/run: mxv up
   Reason: The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.
@@ -83,6 +83,16 @@ examples/run: mxv proxy trust
   Cost: The examples are not run, so help can show an example that fails.
   Cost: The command's output weight counts 0 bytes, so its path weight is too low.
 
+examples/run: mxv proxy install
+  Reason: The command needs a Caddy program and asks a person at a terminal, which a test cannot answer; tests/proxy.rs checks its refusals without Caddy and without a terminal.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
+examples/run: mxv proxy check
+  Reason: The command exits with 1 while anything is missing, and the fixture's machine has no Caddy; tests/proxy.rs checks its rows and its exit code.
+  Cost: The examples are not run, so help can show an example that fails.
+  Cost: The command's output weight counts 0 bytes, so its path weight is too low.
+
 twins/no-twin: mxv show reading-list
   Reason: The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
@@ -107,7 +117,7 @@ twins/no-twin: mxv new triage --repo app --dry-run
   Reason: The directory at the config file's path causes the failure, and no word of the command line names the config file.
   Cost: No test shows which word of the command line causes the failure, so a test of the refusal can pass while the command fails for another reason.
 
-mxv has 11 declarations.
+mxv has 12 declarations.
 
 root-verbs: mxv new, mxv add, mxv list, mxv show, mxv cd, mxv up, mxv down, mxv restart, mxv status, mxv logs, mxv exec, mxv run, mxv archive, mxv restore, mxv repair, mxv remove, mxv clean, mxv reclaim, mxv pin, mxv unpin
   Declares: Each command sits directly under the root as a verb, and root help lists it under the heading of the root goal that names it.
@@ -135,10 +145,13 @@ passes-on-exit: mxv run
   Declares: The command exits with the exit code of the task.
 
 children: mxv proxy status
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 children: mxv proxy start
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 children: mxv proxy stop
-  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
+
+children: mxv proxy check
+  Declares: The text prints lines under each row for its notes, and help describes them as: one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine.

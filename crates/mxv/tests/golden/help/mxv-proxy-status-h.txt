@@ -9,6 +9,6 @@ Examples:
   mxv proxy status
 
 Effects: read-only, closed-world.
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv proxy status --help` describes them.
 Next: mxv proxy status --help explains each column.

@@ -151,6 +151,9 @@ pub struct Environment {
     program: Option<PathBuf>,
     /// The variables of mxv's environment that deadband reads.
     deadband: BTreeMap<String, OsString>,
+    /// How the proxy looks up the extra host names that units list, or
+    /// `None` for the system's resolver.
+    resolver: Option<std::sync::Arc<dyn multiverse::Resolver>>,
 }
 
 /// The variables that deadband reads to find its daemon and to tell
@@ -180,7 +183,23 @@ impl Environment {
                 .iter()
                 .filter_map(|name| Some(((*name).to_owned(), read(name)?)))
                 .collect(),
+            resolver: None,
         }
+    }
+
+    /// Returns the snapshot with `resolver` as the way the proxy looks up
+    /// the extra host names that units list, in place of the system's.
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: std::sync::Arc<dyn multiverse::Resolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// Returns how the proxy looks up the extra host names that units list.
+    pub(crate) fn resolver(&self) -> std::sync::Arc<dyn multiverse::Resolver> {
+        self.resolver
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(multiverse::SystemResolver::default()))
     }
 
     /// Returns the variables of mxv's environment that deadband reads.
@@ -220,7 +239,12 @@ impl Environment {
         // clones borrow objects from. The workspaces themselves also lie
         // under mxv's data directory, so only the mirrors are protected
         // there.
+        let https = self
+            .config()?
+            .proxy_https
+            .unwrap_or_else(|| Settings::new(PathBuf::new(), PathBuf::new()).https());
         let mut runs = Runs::new(&self.state()?)
+            .with_proxy_urls(self.state()?.join("workspaces"), https)
             .with_caller(self.caller.clone())
             .with_protected(vec![self.state()?, self.mirrors()?, self.proxy_data()?]);
         if let Some(program) = &self.program {
@@ -246,7 +270,8 @@ impl Environment {
                 config.proxy_https.unwrap_or_else(|| defaults.https()),
             )
             .with_caddy(config.caddy)
-            .with_search(self.caller.path_dirs());
+            .with_search(self.caller.path_dirs())
+            .with_config(self.config_file()?);
         let mut proxy = Proxy::new(settings).with_caller(&self.caller);
         if let Some(program) = &self.program {
             proxy = proxy.with_keeper(

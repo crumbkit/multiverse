@@ -784,6 +784,8 @@ Serve the routes that workspaces declare at stable names
 - [`mxv proxy start`](#mxv-proxy-start): Start the proxy, and load the routes of every workspace
 - [`mxv proxy stop`](#mxv-proxy-stop): Stop the proxy; the next `mxv up` of a workspace with routes starts it again
 - [`mxv proxy trust`](#mxv-proxy-trust): Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+- [`mxv proxy install`](#mxv-proxy-install): Start the proxy and ask a person to trust its authority; safe to run again
+- [`mxv proxy check`](#mxv-proxy-check): Say what the proxy still needs; it changes nothing
 
 ## `mxv proxy status`
 
@@ -807,7 +809,7 @@ mxv proxy status
 
 Effects: read-only, closed-world.
 
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 ## `mxv proxy start`
 
@@ -831,7 +833,7 @@ mxv proxy start
 
 Effects: additive, idempotent, open-world.
 
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 ## `mxv proxy stop`
 
@@ -855,7 +857,7 @@ mxv proxy stop
 
 Effects: destructive, idempotent, closed-world.
 
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 ## `mxv proxy trust`
 
@@ -870,6 +872,42 @@ mxv proxy trust
 ```
 
 Effects: additive, idempotent, open-world.
+
+## `mxv proxy install`
+
+Start the proxy and ask a person to trust its authority; safe to run again
+
+### Examples
+
+Start the proxy and trust its certificate authority, which a person at a terminal confirms.
+
+```sh
+mxv proxy install
+```
+
+Effects: additive, idempotent, open-world.
+
+## `mxv proxy check`
+
+Say what the proxy still needs; it changes nothing
+
+### Examples
+
+Say whether Caddy, its addresses, the authority and each extra host name are set up.
+
+```sh
+mxv proxy check
+```
+
+### Columns
+
+- `check`: What the row checks.
+- `state`: `ok`, `missing` for something that `mxv proxy install` or the person sets up, `failed` for something that is wrong, or `unknown` when mxv cannot tell.
+- `detail`: What mxv found.
+
+Effects: read-only, closed-world.
+
+Children: one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine.
 
 ## `mxv commands`
 
