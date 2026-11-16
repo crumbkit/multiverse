@@ -301,6 +301,18 @@ pub(crate) fn sync(
                     &synced.extra_hosts_of(&workspace.name),
                     &*environment.resolver(),
                 ));
+                served.lines.extend(
+                    synced
+                        .problems
+                        .iter()
+                        .map(|problem| format!("note: {problem}.")),
+                );
+                let mut states = States::new(environment, store);
+                served.lines.extend(displaced_lines(
+                    &workspace.name,
+                    &synced.displaced_by(&workspace.name),
+                    &mut |other| states.of(other).values().any(|state| *state == "running"),
+                ));
             }
         }
         Err(error) => served.lines.extend(warning(&workspace.name, mode, error)),
@@ -320,13 +332,37 @@ fn extra_lines(
         return Vec::new();
     }
     let mut lines = vec![format!("mxv also serves {}.", join(urls))];
-    lines.extend(multiverse::missing_hosts(hosts, resolver).into_iter().map(|name| {
-        format!(
-            "note: {name} does not resolve to this machine; add this line to /etc/hosts: {}",
-            multiverse::hosts_line(&name)
-        )
-    }));
+    lines.extend(
+        multiverse::missing_hosts(hosts, resolver)
+            .into_iter()
+            .map(|(name, found)| match found.advice(&name) {
+                Some(advice) => format!("note: {}; {advice}", found.detail(&name)),
+                None => format!("note: {}", found.detail(&name)),
+            }),
+    );
     lines
+}
+
+/// Returns the lines that tell the person which running workspaces keep the
+/// old URL in their variables because `workspace` took a name from them.
+/// `running` says whether a workspace has a unit that runs. Each line names
+/// the command that gives the workspace its variables again. mxv keeps no
+/// memory of who held a name before, so a workspace that started while the
+/// name was already shadowed gets the line too.
+fn displaced_lines(
+    workspace: &WorkspaceName,
+    displaced: &[WorkspaceName],
+    running: &mut dyn FnMut(&WorkspaceName) -> bool,
+) -> Vec<String> {
+    displaced
+        .iter()
+        .filter(|other| running(other))
+        .map(|other| {
+            format!(
+                "note: {workspace} now serves a name that {other} also declares, and {other} runs with the URL it was given when it started; run `mxv restart -w {other}` to give it the current variables."
+            )
+        })
+        .collect()
 }
 
 /// Returns the lines of the warning for a sync of the routes of `name` that
@@ -535,7 +571,10 @@ fn listing(
         .collect();
     names.sort();
     names.dedup();
-    let unresolved = multiverse::missing_hosts(&names, &*environment.resolver());
+    let unresolved: std::collections::BTreeMap<String, multiverse::Resolution> =
+        multiverse::missing_hosts(&names, &*environment.resolver())
+            .into_iter()
+            .collect();
     let mut rows: Vec<RouteRow> = status
         .routes
         .served
@@ -545,15 +584,15 @@ fn listing(
                 .extra
                 .iter()
                 .zip(route.extra_urls(https))
-                .map(|(name, url)| {
-                    if unresolved.contains(name) {
-                        format!(
-                            "{url}  (not in /etc/hosts; add {})",
-                            multiverse::hosts_line(name)
-                        )
-                    } else {
-                        url
+                .map(|(name, url)| match unresolved.get(name) {
+                    Some(multiverse::Resolution::TimedOut) => {
+                        format!("{url}  (the lookup of {name} timed out)")
                     }
+                    Some(_) => format!(
+                        "{url}  (not in /etc/hosts; add {})",
+                        multiverse::hosts_line(name)
+                    ),
+                    None => url,
                 })
                 .collect();
             states.row(route, route.url(https), notes)
@@ -785,11 +824,60 @@ impl fmt::Display for InstallResult {
     }
 }
 
-/// Sets the proxy up: finds Caddy, starts it with the routes of every
-/// workspace, and asks the person to trust its certificate authority unless
-/// this machine already does. Running it again changes nothing that is
-/// already set up. Without a terminal it starts Caddy and then refuses to
-/// ask.
+/// The steps of `mxv proxy install` that touch the machine, so that a test
+/// can stand in for each one and end the run between them.
+pub(crate) struct InstallSteps<'a> {
+    /// Starts Caddy when it does not run, with the routes there are or with
+    /// none, and says whether it started it.
+    pub(crate) start: &'a mut dyn FnMut() -> Result<bool, crumbkit::Error>,
+    /// Says whether this machine trusts the local certificate authority.
+    pub(crate) trusted: &'a mut dyn FnMut() -> Result<bool, crumbkit::Error>,
+    /// Asks the person, runs `caddy trust` and returns the authority's name.
+    pub(crate) trust: &'a mut dyn FnMut() -> Result<String, crumbkit::Error>,
+    /// Whether a person can answer the question.
+    pub(crate) can_answer: bool,
+}
+
+/// What the steps of an install did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Installed {
+    /// Whether this run started Caddy.
+    started: bool,
+    /// Whether the machine already trusted the authority.
+    already_trusted: bool,
+    /// The authority that this run asked the machine to trust.
+    authority: Option<String>,
+}
+
+/// Runs the steps of an install in order: start Caddy, then read the trust,
+/// then ask when the machine does not trust the authority. Each step leaves
+/// a state that the next run finds and continues from. A Caddy that started
+/// stays running when the trust is refused or fails, and the next run asks
+/// again because it reads the trust again.
+pub(crate) fn install_with(steps: InstallSteps<'_>) -> Result<Installed, crumbkit::Error> {
+    let started = (steps.start)()?;
+    let already_trusted = (steps.trusted)()?;
+    let authority = if already_trusted {
+        None
+    } else {
+        if !steps.can_answer {
+            return Err(ProxyFailure::TrustNeedsTerminal(&["proxy", "install"]).into());
+        }
+        Some((steps.trust)()?)
+    };
+    Ok(Installed {
+        started,
+        already_trusted,
+        authority,
+    })
+}
+
+/// Sets the proxy up: finds Caddy, starts it, and asks the person to trust
+/// its certificate authority unless this machine already does. Caddy starts
+/// with the routes of every workspace, or with none, so the person can trust
+/// the authority before any workspace declares a route. It never stops a
+/// Caddy that runs. Running it again changes nothing that is already set up.
+/// Without a terminal it starts Caddy and then refuses to ask.
 pub(crate) fn install(
     output: &mut Run,
     environment: &Environment,
@@ -797,43 +885,38 @@ pub(crate) fn install(
     let proxy = environment.proxy()?;
     let store = Store::new(environment.records()?);
     let (caddy, version) = proxy.caddy().map_err(fail)?;
-    let mut said = vec![format!("mxv found caddy {version} at {}.", caddy.display())];
     let settings = proxy.settings();
     let (http, https) = (settings.http(), settings.https());
-    let was_running = proxy.running();
-    proxy.sync(&store, SyncMode::Start, true).map_err(fail)?;
-    if !proxy.running() {
-        crate::say(&said);
-        return Err(fail(ProxyError::StartFailed {
-            message: "no workspace declares a route, so Caddy has nothing to serve; run `mxv up` in a workspace whose manifest lists `routes`, then run `mxv proxy install` again"
-                .to_owned(),
-        }));
-    }
-    said.push(if was_running {
-        format!("Caddy already runs on {http} and {https}; mxv loaded the current routes.")
-    } else {
-        format!("mxv started Caddy on {http} and {https}.")
-    });
-    crate::say(&said);
-    let trusted = proxy
-        .status(&store)
-        .map_err(fail)?
-        .authority
-        .is_some_and(|authority| authority.trusted == Some(true));
-    let authority = if trusted {
-        None
-    } else {
-        if !crate::person_can_answer() {
-            return Err(ProxyFailure::TrustNeedsTerminal(&["proxy", "install"]).into());
-        }
-        Some(ask_and_trust(output, &proxy)?)
+    crate::say(&[format!("mxv found caddy {version} at {}.", caddy.display())]);
+    let mut start = || {
+        let started = proxy.ensure_running(&store).map_err(fail)?;
+        crate::say(&[if started {
+            format!("mxv started Caddy on {http} and {https}.")
+        } else {
+            format!("Caddy already runs on {http} and {https}.")
+        }]);
+        Ok(started)
     };
+    let mut trusted = || {
+        Ok(proxy
+            .status(&store)
+            .map_err(fail)?
+            .authority
+            .is_some_and(|authority| authority.trusted == Some(true)))
+    };
+    let mut trust = || ask_and_trust(output, &proxy);
+    let done = install_with(InstallSteps {
+        start: &mut start,
+        trusted: &mut trusted,
+        trust: &mut trust,
+        can_answer: crate::person_can_answer(),
+    })?;
     Ok(Prose::new(InstallResult {
         caddy: caddy.display().to_string(),
         version,
-        started: !was_running,
-        already_trusted: trusted,
-        authority,
+        started: done.started,
+        already_trusted: done.already_trusted,
+        authority: done.authority,
     }))
 }
 
@@ -843,7 +926,8 @@ pub(crate) struct CheckLine {
     /// What the row checks.
     check: String,
     /// `ok`, `missing` for something that `mxv proxy install` or the person
-    /// sets up, or `failed` for something that is wrong.
+    /// sets up, `failed` for something that is wrong, or `unknown` when mxv
+    /// cannot tell.
     state: CheckOutcome,
     /// What mxv found.
     detail: String,
@@ -861,6 +945,8 @@ pub(crate) enum CheckOutcome {
     Missing,
     /// Something is wrong.
     Failed,
+    /// mxv cannot tell. This row does not make the check fail.
+    Unknown,
 }
 
 impl CheckLine {
@@ -898,6 +984,7 @@ pub(crate) fn check(environment: &Environment) -> Result<Vec<CheckLine>, crumbki
             state: match row.state {
                 multiverse::ProxyCheckState::Ok => CheckOutcome::Ok,
                 multiverse::ProxyCheckState::Missing => CheckOutcome::Missing,
+                multiverse::ProxyCheckState::Unknown => CheckOutcome::Unknown,
                 _ => CheckOutcome::Failed,
             },
             detail: row.detail,
@@ -916,7 +1003,7 @@ fn finish_check(output: Run, environment: &Environment) -> ExitCode {
     };
     let failing = lines
         .iter()
-        .filter(|line| line.state != CheckOutcome::Ok)
+        .filter(|line| !matches!(line.state, CheckOutcome::Ok | CheckOutcome::Unknown))
         .count();
     let total = lines.len();
     if failing == 0 {

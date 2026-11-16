@@ -24,12 +24,20 @@ workspace may need to act on.
 - Host processes and tasks of a workspace with a served route receive
   `MXV_DOMAIN`, `MXV_HOST_<PORT>` and `MXV_URL_<PORT>`, and a process that
   listens on a served route also receives `MXV_HOST` and `MXV_URL`.
-- `mxv proxy install` finds Caddy, starts it and asks a person to trust its
-  certificate authority, and running it again changes nothing that is set up.
+- `mxv proxy install` finds Caddy, starts it, with the routes there are or
+  with none, and asks a person to trust its certificate authority. Running it
+  again changes nothing that is set up, and it never stops a Caddy that runs.
   `mxv proxy check` reads what the proxy needs, prints a row for each and
   exits with `mxv::proxy::check_failed` when one is missing or failed. The
-  library gains `Proxy::check`, `Proxy::caddy`, `Proxy::running`, the
-  `Resolver` trait with `SystemResolver`, `missing_hosts` and `hosts_line`.
+  library gains `Proxy::check`, `Proxy::ensure_running`, `Proxy::caddy`,
+  `Proxy::running`, the `Resolver` trait with `SystemResolver`, `missing_hosts` and `hosts_line`.
+  A host lookup that takes more than two seconds is `unknown` in the check and
+  prints no `/etc/hosts` line. The check marks an authority whose trust mxv
+  cannot read as `unknown`, which does not fail it. `mxv up` prints a note
+  for each workspace record or manifest that the routes leave out, and names
+  each running workspace that lost a route or host name to the workspace it
+  started, with the `mxv restart` command that gives it the current
+  variables.
 - `.github/workflows/proxy.yml` runs the tests that start a real Caddy, with
   the Caddy release pinned by digest. It is not a required check.
 

@@ -567,7 +567,10 @@ impl Runs {
         self.proxy_urls
             .as_ref()
             .map_or_else(phase_plan::ProxyUrls::default, |(records, https)| {
-                let served = crate::proxy::served(&crate::store::Store::new(records.clone()));
+                // The sentences about records left out are for `mxv up`, which
+                // prints them after the proxy syncs; a unit's variables need
+                // only the routes.
+                let (served, _) = crate::proxy::served(&crate::store::Store::new(records.clone()));
                 phase_plan::ProxyUrls::of(&workspace.name, &served, *https)
             })
     }

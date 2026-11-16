@@ -2,7 +2,10 @@ use std::net::SocketAddr;
 
 use multiverse::{ProxyError, SyncMode, WorkspaceName};
 
-use super::{AuthorityState, ProxySummary, Served, extra_lines, join, warning};
+use super::{
+    AuthorityState, InstallSteps, Installed, ProxySummary, Served, displaced_lines, extra_lines,
+    install_with, join, warning,
+};
 
 fn name(text: &str) -> WorkspaceName {
     text.parse().unwrap()
@@ -190,4 +193,122 @@ fn an_extra_host_that_does_not_resolve_to_this_machine_prints_the_line_to_add() 
             "note: local.app.example.com does not resolve to this machine; add this line to /etc/hosts: 127.0.0.1 local.app.example.com"
         ]
     );
+}
+
+#[derive(Debug)]
+struct Slow;
+
+impl multiverse::Resolver for Slow {
+    fn resolve(&self, _: &str) -> multiverse::Resolution {
+        multiverse::Resolution::TimedOut
+    }
+}
+
+#[test]
+fn an_extra_host_whose_lookup_times_out_prints_no_line_to_add() {
+    let urls = vec!["web at https://local.app.example.com".to_owned()];
+    let hosts = vec!["local.app.example.com".to_owned()];
+    let lines = extra_lines(&urls, &hosts, &Slow);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].starts_with("note: the lookup of local.app.example.com did not finish"),
+        "{lines:?}"
+    );
+    assert!(!lines[1].contains("/etc/hosts"), "{lines:?}");
+}
+
+/// The calls that the fake steps of an install saw, in order.
+type Calls = std::cell::RefCell<Vec<&'static str>>;
+
+fn refused() -> crumbkit::Error {
+    crumbkit::Error::from(super::ProxyFailure::TrustFailed {
+        ended: "exit status: 1".to_owned(),
+    })
+}
+
+fn run_install(
+    calls: &Calls,
+    trusted: &mut dyn FnMut() -> bool,
+    can_answer: bool,
+    trust_fails: bool,
+) -> Result<Installed, crumbkit::Error> {
+    install_with(InstallSteps {
+        start: &mut || {
+            calls.borrow_mut().push("start");
+            Ok(true)
+        },
+        trusted: &mut || {
+            calls.borrow_mut().push("trusted");
+            Ok(trusted())
+        },
+        trust: &mut || {
+            calls.borrow_mut().push("trust");
+            if trust_fails {
+                Err(refused())
+            } else {
+                Ok("Caddy Local Authority".to_owned())
+            }
+        },
+        can_answer,
+    })
+}
+
+#[test]
+fn an_install_on_a_machine_that_trusts_the_authority_asks_nothing() {
+    let calls = Calls::default();
+    let done = run_install(&calls, &mut || true, false, false).unwrap();
+    assert_eq!(*calls.borrow(), ["start", "trusted"]);
+    assert_eq!(
+        done,
+        Installed {
+            started: true,
+            already_trusted: true,
+            authority: None
+        }
+    );
+}
+
+#[test]
+fn an_install_without_a_terminal_leaves_caddy_started_and_asks_for_a_person() {
+    let calls = Calls::default();
+    let error = run_install(&calls, &mut || false, false, false).unwrap_err();
+    assert_eq!(*calls.borrow(), ["start", "trusted"]);
+    assert!(
+        format!("{error:?}").contains("TrustNeedsTerminal"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn an_install_at_a_terminal_trusts_the_authority_and_names_it() {
+    let calls = Calls::default();
+    let done = run_install(&calls, &mut || false, true, false).unwrap();
+    assert_eq!(*calls.borrow(), ["start", "trusted", "trust"]);
+    assert_eq!(done.authority.as_deref(), Some("Caddy Local Authority"));
+    assert!(!done.already_trusted);
+}
+
+#[test]
+fn a_trust_that_fails_after_caddy_started_is_asked_again_by_the_next_install() {
+    let calls = Calls::default();
+    run_install(&calls, &mut || false, true, true).unwrap_err();
+    assert_eq!(*calls.borrow(), ["start", "trusted", "trust"]);
+    let again = Calls::default();
+    let done = run_install(&again, &mut || false, true, false).unwrap();
+    assert_eq!(*again.borrow(), ["start", "trusted", "trust"]);
+    assert!(done.authority.is_some());
+}
+
+#[test]
+fn a_running_workspace_that_lost_a_name_is_told_to_restart_and_a_stopped_one_is_not() {
+    let displaced = vec![name("triage"), name("zeta")];
+    let lines = displaced_lines(&name("alpha"), &displaced, &mut |other| {
+        other.as_str() == "triage"
+    });
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("run `mxv restart -w triage`"),
+        "{lines:?}"
+    );
+    assert!(displaced_lines(&name("alpha"), &[], &mut |_| true).is_empty());
 }

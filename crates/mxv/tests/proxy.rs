@@ -376,6 +376,7 @@ routes = ["web"]
 argv = ["sh", "-c", "echo \"$MXV_URL $MXV_DOMAIN $MXV_HOST_WEB\" > proxy.txt && exec sleep 60"]
 ports = {{ PORT = "web" }}
 listen = "web"
+ready = {{ timeout_seconds = 1 }}
 hosts = ["{host}"]
 "#
     )
@@ -456,7 +457,7 @@ fn check_without_caddy_prints_a_row_for_each_check_and_fails_with_its_code() {
     }
     assert!(text.contains("no extra host names"), "{text}");
     assert!(errors.contains("mxv::proxy::check_failed"), "{errors}");
-    assert!(errors.contains("3 of 6 proxy checks failed"), "{errors}");
+    assert!(errors.contains("2 of 6 proxy checks failed"), "{errors}");
     assert!(
         !setup.root().join("state/mxv/proxy").exists(),
         "a check created the proxy directory"
@@ -731,6 +732,41 @@ fn a_real_caddy_serves_an_extra_host_name_and_prints_the_hosts_line_for_it() {
         text.contains("add this line to /etc/hosts: 127.0.0.1 local.app.invalid"),
         "{text}"
     );
+}
+
+#[test]
+fn a_real_caddy_that_install_starts_before_any_route_exists_leaves_the_trust_to_a_person() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    let (exit, document, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document
+            .to_string()
+            .contains("mxv::proxy::trust_needs_terminal"),
+        "{document}"
+    );
+    let (exit, status) = setup.json(&["proxy", "status"]);
+    assert_eq!(exit, 0, "{status}");
+    assert!(status.to_string().contains("\"running\":true"), "{status}");
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("ok"), "{running}");
+    let authority = text
+        .lines()
+        .find(|line| line.starts_with("authority"))
+        .unwrap();
+    assert!(!authority.contains("not created yet"), "{authority}");
+    let (exit, _, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(
+        exit, 1,
+        "a second install finds Caddy running and asks again"
+    );
+    setup.json(&["proxy", "stop"]);
 }
 
 #[test]

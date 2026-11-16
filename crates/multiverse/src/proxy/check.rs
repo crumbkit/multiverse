@@ -5,7 +5,7 @@
 
 use std::io;
 
-use super::hosts::{self, Resolver};
+use super::hosts::{self, Resolution, Resolver};
 use super::{Proxy, ProxyError, Store, declared, derive, ports, process};
 
 /// How one check came out.
@@ -17,6 +17,8 @@ pub enum CheckState {
     Missing,
     /// Something is wrong that setting up does not fix.
     Failed,
+    /// mxv cannot tell. A person looks, or `mxv proxy install` asks.
+    Unknown,
 }
 
 /// One row of the check.
@@ -59,7 +61,7 @@ impl Check {
     pub fn failing(&self) -> usize {
         self.rows
             .iter()
-            .filter(|row| row.state != CheckState::Ok)
+            .filter(|row| !matches!(row.state, CheckState::Ok | CheckState::Unknown))
             .count()
     }
 }
@@ -89,9 +91,15 @@ impl Proxy {
                 "caddy runs",
                 CheckState::Ok,
                 format!(
-                    "{pid}{routes} {} loaded",
+                    "{pid}{routes} {}",
                     if routes == 1 { "route" } else { "routes" }
                 ),
+            )
+        } else if derived.served.is_empty() {
+            CheckRow::new(
+                "caddy runs",
+                CheckState::Ok,
+                "not needed until a workspace declares a route",
             )
         } else {
             CheckRow::new(
@@ -129,16 +137,14 @@ impl Proxy {
                 ),
             ));
         } else {
-            for name in missing {
-                let mut row = CheckRow::new(
-                    "hosts",
-                    CheckState::Missing,
-                    format!("{name} does not resolve to this machine"),
-                );
-                row.notes.push(format!(
-                    "add this line to /etc/hosts: {}",
-                    hosts::line_for(&name)
-                ));
+            for (name, found) in missing {
+                let state = if found == Resolution::TimedOut {
+                    CheckState::Unknown
+                } else {
+                    CheckState::Missing
+                };
+                let mut row = CheckRow::new("hosts", state, found.detail(&name));
+                row.notes.extend(found.advice(&name));
                 rows.push(row);
             }
         }
@@ -230,8 +236,8 @@ impl Proxy {
             ),
             None => CheckRow::new(
                 "authority",
-                CheckState::Ok,
-                "created; mxv cannot tell whether this machine trusts it",
+                CheckState::Unknown,
+                "created; mxv cannot tell whether this machine trusts it, and `mxv proxy install` asks",
             ),
         }
     }
@@ -293,9 +299,15 @@ mod tests {
         assert_eq!(state_of(&check, "http"), [CheckState::Ok]);
         assert_eq!(state_of(&check, "https"), [CheckState::Ok]);
         assert_eq!(state_of(&check, "authority"), [CheckState::Missing]);
-        assert_eq!(state_of(&check, "caddy runs"), [CheckState::Missing]);
+        assert_eq!(state_of(&check, "caddy runs"), [CheckState::Ok]);
         assert_eq!(state_of(&check, "hosts"), [CheckState::Ok]);
-        assert_eq!(check.failing(), 3);
+        assert_eq!(check.failing(), 2);
+        let runs = check
+            .rows
+            .iter()
+            .find(|row| row.name == "caddy runs")
+            .unwrap();
+        assert_eq!(runs.detail, "not needed until a workspace declares a route");
         let authority = check
             .rows
             .iter()
@@ -350,6 +362,45 @@ mod tests {
             row.notes,
             ["add this line to /etc/hosts: 127.0.0.1 local.app.example.com"]
         );
+    }
+
+    #[test]
+    fn a_stopped_caddy_is_missing_once_a_workspace_declares_a_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("records"));
+        workspace(
+            &store,
+            dir.path(),
+            "triage",
+            "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.web]\nargv = [\"web\"]\nports = { PORT = \"web\" }\nlisten = \"web\"\n",
+            &[("web", 21001)],
+        );
+        let check = proxy(dir.path())
+            .check(&store, &Fake(BTreeMap::new()))
+            .unwrap();
+        assert_eq!(state_of(&check, "caddy runs"), [CheckState::Missing]);
+    }
+
+    #[test]
+    fn a_host_lookup_that_times_out_is_unknown_and_gives_no_line_to_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("records"));
+        workspace(
+            &store,
+            dir.path(),
+            "triage",
+            "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.web]\nargv = [\"web\"]\nports = { PORT = \"web\" }\nlisten = \"web\"\nhosts = [\"slow.app.example.com\"]\n",
+            &[("web", 21001)],
+        );
+        let fake = Fake(BTreeMap::from([(
+            "slow.app.example.com",
+            Resolution::TimedOut,
+        )]));
+        let check = proxy(dir.path()).check(&store, &fake).unwrap();
+        assert_eq!(state_of(&check, "hosts"), [CheckState::Unknown]);
+        let row = check.rows.iter().find(|row| row.name == "hosts").unwrap();
+        assert!(row.detail.contains("did not finish"), "{row:?}");
+        assert!(row.notes.is_empty());
     }
 
     #[test]

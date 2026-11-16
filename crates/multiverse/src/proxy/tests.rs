@@ -340,6 +340,7 @@ fn route_urls_list_only_the_routes_of_the_asked_workspace() {
     let synced = super::Synced {
         served: derived.served,
         https: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 443))),
+        ..super::Synced::default()
     };
     assert_eq!(
         synced.urls_of(&name("reading-list")),
@@ -468,6 +469,7 @@ fn the_extra_hosts_of_a_workspace_list_as_routes_with_their_urls() {
     let synced = super::Synced {
         served: derived.served,
         https: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8443))),
+        ..super::Synced::default()
     };
     assert_eq!(
         synced.extra_urls_of(&name("reading-list")),
@@ -478,4 +480,70 @@ fn the_extra_hosts_of_a_workspace_list_as_routes_with_their_urls() {
         ["local.app.example.com"]
     );
     assert!(synced.extra_urls_of(&name("triage")).is_empty());
+}
+
+#[test]
+fn a_workspace_that_takes_a_host_label_displaces_the_workspaces_it_shadows() {
+    let derived = derive(vec![
+        declared("my.notes", &["web"], &[("web", 1)]),
+        declared("my_notes", &["web"], &[("web", 2)]),
+    ]);
+    let synced = super::Synced {
+        served: derived.served,
+        shadowed: derived.shadowed,
+        shadowed_hosts: derived.shadowed_hosts,
+        ..super::Synced::default()
+    };
+    assert_eq!(synced.displaced_by(&name("my.notes")), [name("my_notes")]);
+    assert!(synced.displaced_by(&name("my_notes")).is_empty());
+}
+
+#[test]
+fn a_workspace_that_takes_an_extra_host_displaces_the_workspace_that_listed_it() {
+    let derived = derive(vec![
+        hosted(
+            declared("alpha", &["web"], &[("web", 1)]),
+            "web",
+            &["app.example.com"],
+        ),
+        hosted(
+            declared("beta", &["api"], &[("api", 2)]),
+            "api",
+            &["app.example.com"],
+        ),
+    ]);
+    let synced = super::Synced {
+        served: derived.served,
+        shadowed: derived.shadowed,
+        shadowed_hosts: derived.shadowed_hosts,
+        ..super::Synced::default()
+    };
+    assert_eq!(synced.displaced_by(&name("alpha")), [name("beta")]);
+}
+
+#[test]
+fn the_served_routes_come_with_a_sentence_for_each_manifest_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("records"));
+    workspace(
+        &store,
+        dir.path(),
+        "triage",
+        "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.web]\nargv = [\"web\"]\nports = { PORT = \"web\" }\nlisten = \"web\"\n",
+        &[("web", 21001)],
+    );
+    let (routes, problems) = super::served(&store);
+    assert_eq!(routes.len(), 1);
+    assert!(problems.is_empty(), "{problems:?}");
+    write(
+        dir.path().join("workspaces/triage/app/mxv.toml"),
+        "routes = [",
+    );
+    let (routes, problems) = super::served(&store);
+    assert!(routes.is_empty());
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("the manifest of triage is left out"),
+        "{problems:?}"
+    );
 }

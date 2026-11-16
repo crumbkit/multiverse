@@ -199,7 +199,7 @@ impl Environment {
     pub(crate) fn resolver(&self) -> std::sync::Arc<dyn multiverse::Resolver> {
         self.resolver
             .clone()
-            .unwrap_or_else(|| std::sync::Arc::new(multiverse::SystemResolver))
+            .unwrap_or_else(|| std::sync::Arc::new(multiverse::SystemResolver::default()))
     }
 
     /// Returns the variables of mxv's environment that deadband reads.

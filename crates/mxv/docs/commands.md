@@ -902,7 +902,7 @@ mxv proxy check
 ### Columns
 
 - `check`: What the row checks.
-- `state`: `ok`, `missing` for something that `mxv proxy install` or the person sets up, or `failed` for something that is wrong.
+- `state`: `ok`, `missing` for something that `mxv proxy install` or the person sets up, `failed` for something that is wrong, or `unknown` when mxv cannot tell.
 - `detail`: What mxv found.
 
 Effects: read-only, closed-world.

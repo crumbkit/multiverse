@@ -116,7 +116,7 @@
           "type": "string"
         },
         "state": {
-          "description": "`ok`, `missing` for something that `mxv proxy install` or the person\nsets up, or `failed` for something that is wrong.",
+          "description": "`ok`, `missing` for something that `mxv proxy install` or the person\nsets up, `failed` for something that is wrong, or `unknown` when mxv\ncannot tell.",
           "$ref": "#/$defs/CheckOutcome"
         },
         "detail": {
@@ -155,6 +155,11 @@
           "description": "Something is wrong.",
           "type": "string",
           "const": "failed"
+        },
+        {
+          "description": "mxv cannot tell. This row does not make the check fail.",
+          "type": "string",
+          "const": "unknown"
         }
       ]
     }

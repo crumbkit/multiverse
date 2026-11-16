@@ -51,9 +51,20 @@ use routes::declared;
 pub use routes::{DOMAIN, Declared, Derived, Route, Shadowed, ShadowedHost, derive};
 
 /// Returns the routes that the proxy serves for the workspaces of `store`,
-/// or none when the store cannot be read.
-pub(crate) fn served(store: &Store) -> Vec<Route> {
-    declared(store).map_or_else(|_| Vec::new(), |(found, _)| derive(found).served)
+/// and a sentence for each record or manifest that is left out, or for the
+/// store that cannot be read, in which case there are no routes.
+pub(crate) fn served(store: &Store) -> (Vec<Route>, Vec<String>) {
+    match declared(store) {
+        Ok((found, mut problems)) => {
+            let derived = derive(found);
+            problems.extend(derived.problems);
+            (derived.served, problems)
+        }
+        Err(error) => (
+            Vec::new(),
+            vec![format!("the workspace records cannot be read: {error}")],
+        ),
+    }
 }
 
 /// The name of the proxy's one workspace in phase, and its id.
@@ -301,6 +312,41 @@ pub struct Synced {
     pub served: Vec<Route>,
     /// The HTTPS address, which the URLs of the routes carry.
     pub https: Option<SocketAddr>,
+    /// The routes that are not served, because another workspace keeps the
+    /// host label.
+    pub shadowed: Vec<Shadowed>,
+    /// The extra host names that are not served, because another workspace
+    /// lists them first.
+    pub shadowed_hosts: Vec<ShadowedHost>,
+    /// A sentence for each record or manifest that is left out of the
+    /// routes, and for each workspace name that makes no host label.
+    pub problems: Vec<String>,
+}
+
+impl Synced {
+    /// Returns the other workspaces that keep a route or a host name of
+    /// their own listed but that `workspace` now serves, in name order.
+    /// A unit of one of them that started before `workspace` took the name
+    /// holds the old URL in its variables until it restarts.
+    #[must_use]
+    pub fn displaced_by(&self, workspace: &WorkspaceName) -> Vec<WorkspaceName> {
+        let mut found: Vec<WorkspaceName> = self
+            .shadowed
+            .iter()
+            .filter(|shadowed| &shadowed.by == workspace)
+            .map(|shadowed| shadowed.route.workspace.clone())
+            .chain(
+                self.shadowed_hosts
+                    .iter()
+                    .filter(|shadowed| &shadowed.by == workspace)
+                    .map(|shadowed| shadowed.workspace.clone()),
+            )
+            .filter(|other| other != workspace)
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
 }
 
 impl Synced {
@@ -438,8 +484,9 @@ impl Proxy {
         }
         store::private_dir(&self.settings.dir())?;
         let _lock = store::lock(&self.settings.dir().join("lock"), LOCK_WAIT)?;
-        let (found, _) = declared(store)?;
-        let derived = derive(found);
+        let (found, mut problems) = declared(store)?;
+        let mut derived = derive(found);
+        problems.append(&mut derived.problems);
         let mut current = self.current();
         if derived.served.is_empty() {
             if current.is_some() {
@@ -461,7 +508,41 @@ impl Proxy {
         Ok(Synced {
             served: derived.served,
             https: Some(self.settings.https),
+            shadowed: derived.shadowed,
+            shadowed_hosts: derived.shadowed_hosts,
+            problems,
         })
+    }
+
+    /// Makes sure Caddy runs, as `mxv proxy install` needs, whether or not
+    /// any workspace declares a route. A Caddy that is not running starts
+    /// with the routes there are, and with none it starts with only its
+    /// local certificate authority, which `mxv proxy install` asks the person
+    /// to trust. A Caddy that runs gets the current routes when there are
+    /// any, and is never stopped. Returns whether this call started Caddy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ProxyError`] that stopped Caddy from starting or from
+    /// loading the configuration.
+    pub fn ensure_running(&self, store: &Store) -> Result<bool, ProxyError> {
+        store::private_dir(&self.settings.dir())?;
+        let _lock = store::lock(&self.settings.dir().join("lock"), LOCK_WAIT)?;
+        let (found, _) = declared(store)?;
+        let derived = derive(found);
+        let mut current = self.current();
+        let started = current.is_none();
+        if started {
+            self.start_locked(&derived.served)?;
+            current = self.current();
+        }
+        if !derived.served.is_empty() {
+            let config = caddy_config::render(&self.settings, &derived.served);
+            if current.as_ref() != Some(&config) {
+                self.load(&config)?;
+            }
+        }
+        Ok(started)
     }
 
     /// Stops Caddy when it runs.

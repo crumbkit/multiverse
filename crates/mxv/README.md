@@ -1089,7 +1089,7 @@ prints a warning that carries an error code, such as `mxv::proxy::port_held`,
 | `mxv proxy start` | Starts Caddy, or loads the current routes into the Caddy that runs. |
 | `mxv proxy stop` | Stops Caddy. The next `mxv up` of a workspace with a route starts it again. |
 | `mxv proxy trust` | Installs Caddy's local certificate authority in the system trust store. |
-| `mxv proxy install` | Finds Caddy and checks its version, starts it with the routes of every workspace, and then runs the trust step of `mxv proxy trust`. It skips the question when this machine already trusts the authority, so running it again changes nothing. |
+| `mxv proxy install` | Finds Caddy and checks its version, starts it with the routes of every workspace, or with none, and then runs the trust step of `mxv proxy trust`. It skips the question when this machine already trusts the authority, so running it again changes nothing. |
 | `mxv proxy check` | Reads what the proxy needs and prints a row for each: the Caddy program, the HTTP and HTTPS addresses, the certificate authority, a running Caddy and the extra host names. It exits with `mxv::proxy::check_failed` when a row is `missing` or `failed`. It never starts Caddy, loads a configuration, takes the proxy's lock or trusts anything. |
 
 Three config keys control it. `proxy_http` and `proxy_https` are the
@@ -1108,8 +1108,9 @@ first, need a terminal and raise the system's own password prompt, so an
 agent never runs them and a person runs one of them once. Without a terminal,
 `mxv proxy install` still starts Caddy and then refuses with
 `mxv::proxy::trust_needs_terminal`. A machine with no workspace that declares
-a route has nothing for Caddy to serve, so `mxv proxy install` fails there
-until a workspace with `routes` exists. The HTTP names work without trust.
+a route gets a Caddy that holds only its certificate authority, so a person
+can trust it before the first route exists. `mxv proxy install` never stops a
+Caddy that runs. The HTTP names work without trust.
 
 ### Extra host names
 
