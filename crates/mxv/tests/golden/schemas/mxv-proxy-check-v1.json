@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/proxy-check/v1",
+  "description": "One row for each thing the proxy needs: the Caddy program, its two addresses, the certificate authority, a running Caddy and each extra host name, and whether it is set up.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/proxy-check/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "data": {
+      "description": "The rows of the page, up to the limit.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckLine"
+      }
+    },
+    "total": {
+      "description": "The number of rows that matched, of which data holds one page. It is absent when the tool did not count the rows.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "description": "True when the document leaves out rows that matched, because of the limit or the output budget, and false when data holds every row.",
+      "type": "boolean"
+    },
+    "next": {
+      "description": "The next steps, in the order the text prints them. It is absent when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "description": "The sentence or phrase that the text prints for the step.",
+            "type": "string"
+          },
+          "commands": {
+            "description": "The commands that carry out the step, in order.",
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "call": {
+                      "description": "A command line of this tool.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "call"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "description": "A command line of another program.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "run"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "text",
+          "commands"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The over-budget code.",
+          "type": "string"
+        },
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "code",
+        "budget"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "data",
+    "truncated"
+  ],
+  "$defs": {
+    "CheckLine": {
+      "description": "One row of `mxv proxy check`.",
+      "type": "object",
+      "properties": {
+        "check": {
+          "description": "What the row checks.",
+          "type": "string"
+        },
+        "state": {
+          "description": "`ok`, `missing` for something that `mxv proxy install` or the person\nsets up, or `failed` for something that is wrong.",
+          "$ref": "#/$defs/CheckOutcome"
+        },
+        "detail": {
+          "description": "What mxv found.",
+          "type": "string"
+        },
+        "notes": {
+          "description": "The lines under the row, such as the line to add to `/etc/hosts`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "check",
+        "state",
+        "detail",
+        "notes"
+      ]
+    },
+    "CheckOutcome": {
+      "description": "How a check came out.",
+      "oneOf": [
+        {
+          "description": "The check passed.",
+          "type": "string",
+          "const": "ok"
+        },
+        {
+          "description": "Something is not set up yet.",
+          "type": "string",
+          "const": "missing"
+        },
+        {
+          "description": "Something is wrong.",
+          "type": "string",
+          "const": "failed"
+        }
+      ]
+    }
+  }
+}

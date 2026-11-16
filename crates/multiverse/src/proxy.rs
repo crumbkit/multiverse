@@ -38,11 +38,15 @@ use crate::store::{self, LOCK_WAIT, Store};
 
 mod admin;
 mod caddy_config;
+mod check;
+mod hosts;
 mod process;
 mod routes;
 #[cfg(test)]
 mod tests;
 
+pub use check::{Check, CheckRow, CheckState};
+pub use hosts::{Resolution, Resolver, SystemResolver, line_for, missing};
 use routes::declared;
 pub use routes::{DOMAIN, Declared, Derived, Route, Shadowed, ShadowedHost, derive};
 
@@ -314,6 +318,37 @@ impl Synced {
     }
 }
 
+impl Synced {
+    /// Returns each extra host name of the routes of `workspace` as the
+    /// route's name and the name's URL, in host order.
+    #[must_use]
+    pub fn extra_urls_of(&self, workspace: &WorkspaceName) -> Vec<String> {
+        let Some(https) = self.https else {
+            return Vec::new();
+        };
+        self.served
+            .iter()
+            .filter(|route| &route.workspace == workspace)
+            .flat_map(|route| {
+                route
+                    .extra_urls(https)
+                    .into_iter()
+                    .map(|url| format!("{} at {url}", route.name))
+            })
+            .collect()
+    }
+
+    /// Returns the extra host names that the routes of `workspace` serve.
+    #[must_use]
+    pub fn extra_hosts_of(&self, workspace: &WorkspaceName) -> Vec<String> {
+        self.served
+            .iter()
+            .filter(|route| &route.workspace == workspace)
+            .flat_map(|route| route.extra.iter().cloned())
+            .collect()
+    }
+}
+
 /// The local certificate authority that Caddy made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -500,6 +535,22 @@ impl Proxy {
         process::trust(&caddy, &self.settings.socket()).map_err(|error| ProxyError::StartFailed {
             message: error.to_string(),
         })
+    }
+
+    /// Returns the Caddy program and its version, or why mxv cannot use
+    /// Caddy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::CaddyMissing`] or [`ProxyError::CaddyTooOld`].
+    pub fn caddy(&self) -> Result<(PathBuf, String), ProxyError> {
+        self.program()
+    }
+
+    /// Reports whether Caddy answers on the admin socket.
+    #[must_use]
+    pub fn running(&self) -> bool {
+        self.answering()
     }
 
     /// Reports whether Caddy answers on the admin socket.

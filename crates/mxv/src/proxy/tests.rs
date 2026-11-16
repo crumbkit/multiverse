@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use multiverse::{ProxyError, SyncMode, WorkspaceName};
 
-use super::{AuthorityState, ProxySummary, Served, join, warning};
+use super::{AuthorityState, ProxySummary, Served, extra_lines, join, warning};
 
 fn name(text: &str) -> WorkspaceName {
     text.parse().unwrap()
@@ -148,5 +148,46 @@ fn a_warning_after_a_verb_that_stops_units_does_not_say_they_still_run() {
     assert!(
         lines[0].contains("could not update the routes"),
         "{lines:?}"
+    );
+}
+
+#[derive(Debug)]
+struct Fake(Vec<&'static str>);
+
+impl multiverse::Resolver for Fake {
+    fn resolve(&self, name: &str) -> multiverse::Resolution {
+        if self.0.contains(&name) {
+            multiverse::Resolution::Loopback
+        } else {
+            multiverse::Resolution::Unresolved
+        }
+    }
+}
+
+#[test]
+fn a_workspace_without_extra_hosts_prints_no_line_about_them() {
+    assert!(extra_lines(&[], &[], &Fake(Vec::new())).is_empty());
+}
+
+#[test]
+fn an_extra_host_that_resolves_to_this_machine_prints_only_where_it_is_served() {
+    let urls = vec!["web at https://local.app.example.com".to_owned()];
+    let hosts = vec!["local.app.example.com".to_owned()];
+    assert_eq!(
+        extra_lines(&urls, &hosts, &Fake(vec!["local.app.example.com"])),
+        ["mxv also serves web at https://local.app.example.com."]
+    );
+}
+
+#[test]
+fn an_extra_host_that_does_not_resolve_to_this_machine_prints_the_line_to_add() {
+    let urls = vec!["web at https://local.app.example.com".to_owned()];
+    let hosts = vec!["local.app.example.com".to_owned()];
+    assert_eq!(
+        extra_lines(&urls, &hosts, &Fake(Vec::new())),
+        [
+            "mxv also serves web at https://local.app.example.com.",
+            "note: local.app.example.com does not resolve to this machine; add this line to /etc/hosts: 127.0.0.1 local.app.example.com"
+        ]
     );
 }

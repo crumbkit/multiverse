@@ -55,7 +55,13 @@ fn settings(dir: &Path) -> Settings {
 
 /// Creates the workspace `workspace` in `store`, whose checkout holds the
 /// manifest `manifest`, with the ports `ports` in its ledger.
-fn workspace(store: &Store, dir: &Path, workspace: &str, manifest: &str, ports: &[(&str, u16)]) {
+pub(super) fn workspace(
+    store: &Store,
+    dir: &Path,
+    workspace: &str,
+    manifest: &str,
+    ports: &[(&str, u16)],
+) {
     let name = name(workspace);
     let path = dir.join("workspaces").join(name.as_str());
     let checkout_dir = path.join("app");
@@ -447,4 +453,29 @@ fn the_config_matches_extra_hosts_in_the_route_the_error_page_and_the_tls_subjec
         rendered["apps"]["tls"]["automation"]["policies"][0]["subjects"],
         hosts
     );
+}
+
+#[test]
+fn the_extra_hosts_of_a_workspace_list_as_routes_with_their_urls() {
+    let derived = derive(vec![
+        hosted(
+            declared("reading-list", &["web", "api"], &[("web", 1), ("api", 2)]),
+            "web",
+            &["local.app.example.com"],
+        ),
+        declared("triage", &["web"], &[("web", 3)]),
+    ]);
+    let synced = super::Synced {
+        served: derived.served,
+        https: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8443))),
+    };
+    assert_eq!(
+        synced.extra_urls_of(&name("reading-list")),
+        ["web at https://local.app.example.com:8443"]
+    );
+    assert_eq!(
+        synced.extra_hosts_of(&name("reading-list")),
+        ["local.app.example.com"]
+    );
+    assert!(synced.extra_urls_of(&name("triage")).is_empty());
 }

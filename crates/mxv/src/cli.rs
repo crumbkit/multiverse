@@ -20,7 +20,8 @@ use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::proxy::{
-    START as PROXY_START, STATUS as PROXY_STATUS, STOP as PROXY_STOP, TRUST as PROXY_TRUST,
+    CHECK as PROXY_CHECK, INSTALL as PROXY_INSTALL, START as PROXY_START, STATUS as PROXY_STATUS,
+    STOP as PROXY_STOP, TRUST as PROXY_TRUST,
 };
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
 use crate::repair::{REPAIR, RepairArgs};
@@ -200,6 +201,20 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::additive().idempotent().open_world())
             .document(PROXY_TRUST),
+        Leaf::new(&["proxy", "install"])
+            .examples(&[Example::new(
+                &[],
+                "Start the proxy and trust its certificate authority, which a person at a terminal confirms",
+            )])
+            .effects(Effects::additive().idempotent().open_world())
+            .document(PROXY_INSTALL),
+        Leaf::new(&["proxy", "check"])
+            .examples(&[Example::new(
+                &[],
+                "Say whether Caddy, its addresses, the authority and each extra host name are set up",
+            )])
+            .effects(Effects::read_only())
+            .document(PROXY_CHECK),
         Leaf::new(&["archive"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "--dry-run"],
@@ -487,6 +502,10 @@ pub(crate) enum ProxyCommand {
     Stop,
     /// Ask a person to trust the proxy's certificate authority, so browsers accept its certificates.
     Trust,
+    /// Start the proxy and ask a person to trust its authority; safe to run again.
+    Install,
+    /// Say what the proxy still needs; it changes nothing.
+    Check,
 }
 
 /// The commands for a workspace's host ports.

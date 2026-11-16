@@ -15,6 +15,21 @@ workspace may need to act on.
 - `mxv proxy status`, `start`, `stop` and `trust` operate the proxy. The
   config keys `proxy_http`, `proxy_https` and `caddy` set its addresses and
   program. `mxv proxy trust` needs a terminal and a confirmation.
+- A process or container can list `hosts` in its manifest, and the proxy
+  serves the route that it listens on at each extra name too. When two
+  workspaces list a name, the workspace whose name sorts first serves it. mxv
+  looks each name up after `mxv up`, `restart` and `restore`, and prints the
+  `/etc/hosts` line to add when it does not resolve to this machine; it never
+  writes the file.
+- Host processes and tasks of a workspace with a served route receive
+  `MXV_DOMAIN`, `MXV_HOST_<PORT>` and `MXV_URL_<PORT>`, and a process that
+  listens on a served route also receives `MXV_HOST` and `MXV_URL`.
+- `mxv proxy install` finds Caddy, starts it and asks a person to trust its
+  certificate authority, and running it again changes nothing that is set up.
+  `mxv proxy check` reads what the proxy needs, prints a row for each and
+  exits with `mxv::proxy::check_failed` when one is missing or failed. The
+  library gains `Proxy::check`, `Proxy::caddy`, `Proxy::running`, the
+  `Resolver` trait with `SystemResolver`, `missing_hosts` and `hosts_line`.
 - `.github/workflows/proxy.yml` runs the tests that start a real Caddy, with
   the Caddy release pinned by digest. It is not a required check.
 

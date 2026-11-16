@@ -1,0 +1,12 @@
+Start the proxy and ask a person to trust its authority; safe to run again
+
+Usage: mxv proxy install [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv proxy install
+
+Effects: additive, idempotent, open-world.
+Global flags: --json, --no-input. `mxv proxy install --help` describes them.

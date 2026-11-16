@@ -151,6 +151,9 @@ pub struct Environment {
     program: Option<PathBuf>,
     /// The variables of mxv's environment that deadband reads.
     deadband: BTreeMap<String, OsString>,
+    /// How the proxy looks up the extra host names that units list, or
+    /// `None` for the system's resolver.
+    resolver: Option<std::sync::Arc<dyn multiverse::Resolver>>,
 }
 
 /// The variables that deadband reads to find its daemon and to tell
@@ -180,7 +183,23 @@ impl Environment {
                 .iter()
                 .filter_map(|name| Some(((*name).to_owned(), read(name)?)))
                 .collect(),
+            resolver: None,
         }
+    }
+
+    /// Returns the snapshot with `resolver` as the way the proxy looks up
+    /// the extra host names that units list, in place of the system's.
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: std::sync::Arc<dyn multiverse::Resolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// Returns how the proxy looks up the extra host names that units list.
+    pub(crate) fn resolver(&self) -> std::sync::Arc<dyn multiverse::Resolver> {
+        self.resolver
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(multiverse::SystemResolver))
     }
 
     /// Returns the variables of mxv's environment that deadband reads.

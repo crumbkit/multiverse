@@ -1,0 +1,14 @@
+Say what the proxy still needs; it changes nothing
+
+Usage: mxv proxy check [OPTIONS]
+
+Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  mxv proxy check
+
+Effects: read-only, closed-world.
+Children: one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine.
+Global flags: --json, --fields <FIELD>, --full, --no-input. `mxv proxy check --help` describes them.
+Next: mxv proxy check --help explains each column.

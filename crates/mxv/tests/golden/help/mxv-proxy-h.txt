@@ -3,10 +3,12 @@ Serve the routes that workspaces declare at stable names
 Usage: mxv proxy [OPTIONS] <COMMAND>
 
 Commands:
-  status  Show whether the proxy runs, and each route that a workspace declares
-  start   Start the proxy, and load the routes of every workspace
-  stop    Stop the proxy; the next `mxv up` of a workspace with routes starts it again
-  trust   Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+  status   Show whether the proxy runs, and each route that a workspace declares
+  start    Start the proxy, and load the routes of every workspace
+  stop     Stop the proxy; the next `mxv up` of a workspace with routes starts it again
+  trust    Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+  install  Start the proxy and ask a person to trust its authority; safe to run again
+  check    Say what the proxy still needs; it changes nothing
 
 Options:
   -h, --help  Print help (see more with '--help')

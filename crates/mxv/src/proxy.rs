@@ -49,6 +49,8 @@ pub const PROXY_SOCKET_PATH_TOO_LONG: Code = Code::new("mxv", "proxy", "socket_p
 pub const PROXY_TRUST_NEEDS_TERMINAL: Code = Code::new("mxv", "proxy", "trust_needs_terminal");
 /// The code of a `caddy trust` that ended with a failure.
 pub const PROXY_TRUST_FAILED: Code = Code::new("mxv", "proxy", "trust_failed");
+/// The code of `mxv proxy check` when a row is missing or failed.
+pub const PROXY_CHECK_FAILED: Code = Code::new("mxv", "proxy", "check_failed");
 
 /// Every code that a [`ProxyFailure`] returns.
 pub(crate) const CODES: &[Code<'static>] = &[
@@ -61,6 +63,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     PROXY_SOCKET_PATH_TOO_LONG,
     PROXY_TRUST_NEEDS_TERMINAL,
     PROXY_TRUST_FAILED,
+    PROXY_CHECK_FAILED,
 ];
 
 /// The document that `mxv proxy status` prints.
@@ -98,13 +101,37 @@ pub(crate) const TRUST: Document<Prose<TrustResult>> = Document::new(
     "The name of the certificate authority that this machine now trusts.",
 );
 
+/// The document that `mxv proxy check` prints.
+pub(crate) const CHECK: Document<Listing<CheckLine>> = Document::new(
+    "mxv",
+    "proxy-check",
+    1,
+    "One row for each thing the proxy needs: the Caddy program, its two addresses, the certificate authority, a running Caddy and each extra host name, and whether it is set up.",
+);
+
+/// The document that `mxv proxy install` prints.
+pub(crate) const INSTALL: Document<Prose<InstallResult>> = Document::new(
+    "mxv",
+    "proxy-install",
+    1,
+    "Whether Caddy was started and whether this machine trusts its certificate authority once the install is done.",
+);
+
 /// Why a proxy command could not do what it was asked.
 #[derive(Debug)]
 pub(crate) enum ProxyFailure {
     /// The library could not start Caddy or load the routes.
     Library(ProxyError),
-    /// `mxv proxy trust` ran without a terminal.
-    TrustNeedsTerminal,
+    /// `mxv proxy trust` or `mxv proxy install` ran without a terminal. It
+    /// holds the words of the command that the person runs.
+    TrustNeedsTerminal(&'static [&'static str]),
+    /// `mxv proxy check` found rows that are missing or failed.
+    CheckFailed {
+        /// The number of rows that are missing or failed.
+        failing: usize,
+        /// The number of rows.
+        total: usize,
+    },
     /// `caddy trust` ended with a failure.
     TrustFailed {
         /// How `caddy trust` ended, in a phrase.
@@ -139,7 +166,8 @@ impl Failure for ProxyFailure {
     fn code(&self) -> Code<'_> {
         match self {
             Self::Library(error) => code_of(error),
-            Self::TrustNeedsTerminal => PROXY_TRUST_NEEDS_TERMINAL,
+            Self::TrustNeedsTerminal(_) => PROXY_TRUST_NEEDS_TERMINAL,
+            Self::CheckFailed { .. } => PROXY_CHECK_FAILED,
             Self::TrustFailed { .. } => PROXY_TRUST_FAILED,
         }
     }
@@ -165,7 +193,10 @@ impl Failure for ProxyFailure {
             Self::Library(_) => Recovery::hint(
                 "fix the cause that the message names, and run `mxv proxy start` again; `mxv proxy status` shows what runs",
             ),
-            Self::TrustNeedsTerminal => Recovery::Terminal(Call::new(&["proxy", "trust"])),
+            Self::TrustNeedsTerminal(words) => Recovery::Terminal(Call::new(words)),
+            Self::CheckFailed { .. } => Recovery::hint(
+                "fix each row marked missing or failed, and run `mxv proxy check` again; `mxv proxy install` sets up Caddy and the certificate authority",
+            ),
             Self::TrustFailed { .. } => Recovery::Terminal(Call::new(&["proxy", "trust"])),
         }
     }
@@ -181,7 +212,11 @@ impl Failure for ProxyFailure {
                 Field::new("path", path.display().to_string()),
                 Field::new("version", found),
             ],
-            Self::Library(_) | Self::TrustNeedsTerminal => Vec::new(),
+            Self::Library(_) | Self::TrustNeedsTerminal(_) => Vec::new(),
+            Self::CheckFailed { failing, total } => vec![
+                Field::new("failing", failing.to_string()),
+                Field::new("total", total.to_string()),
+            ],
             Self::TrustFailed { ended } => vec![Field::new("ended", ended)],
         }
     }
@@ -191,9 +226,12 @@ impl fmt::Display for ProxyFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Library(error) => write!(formatter, "mxv could not run the proxy: {error}"),
-            Self::TrustNeedsTerminal => formatter.write_str(
+            Self::TrustNeedsTerminal(_) => formatter.write_str(
                 "mxv refuses to trust the certificate authority without a terminal, because the system asks the person for a password",
             ),
+            Self::CheckFailed { failing, total } => {
+                write!(formatter, "{failing} of {total} proxy checks failed")
+            }
             Self::TrustFailed { ended } => {
                 write!(formatter, "caddy trust ended with {ended}, so this machine does not trust the authority")
             }
@@ -258,10 +296,37 @@ pub(crate) fn sync(
                 if !urls.is_empty() {
                     served.lines.push(format!("mxv serves {}.", join(&urls)));
                 }
+                served.lines.extend(extra_lines(
+                    &synced.extra_urls_of(&workspace.name),
+                    &synced.extra_hosts_of(&workspace.name),
+                    &*environment.resolver(),
+                ));
             }
         }
         Err(error) => served.lines.extend(warning(&workspace.name, mode, error)),
     }
+}
+
+/// Returns the lines about a workspace's extra host names: where the proxy
+/// serves them, and for each name that does not resolve to this machine the
+/// line to add to `/etc/hosts`. `urls` holds each route and URL as
+/// `web at https://name`, and `hosts` the names. mxv never writes the file.
+fn extra_lines(
+    urls: &[String],
+    hosts: &[String],
+    resolver: &dyn multiverse::Resolver,
+) -> Vec<String> {
+    if urls.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("mxv also serves {}.", join(urls))];
+    lines.extend(multiverse::missing_hosts(hosts, resolver).into_iter().map(|name| {
+        format!(
+            "note: {name} does not resolve to this machine; add this line to /etc/hosts: {}",
+            multiverse::hosts_line(&name)
+        )
+    }));
+    lines
 }
 
 /// Returns the lines of the warning for a sync of the routes of `name` that
@@ -330,7 +395,8 @@ pub(crate) struct RouteRow {
     /// The state of the unit: `running`, `stopped`, and so on, or why the
     /// route has no unit.
     state: String,
-    /// One line under the route when it is not served.
+    /// The lines under the route: why it is not served, its extra host
+    /// names and whether each one resolves to this machine.
     notes: Vec<String>,
 }
 
@@ -344,7 +410,7 @@ impl RouteRow {
 impl Row for RouteRow {
     const COLUMNS: &'static [&'static str] = &["route", "workspace", "url", "unit", "state"];
     const CHILDREN: Option<Children<Self>> = Some(Children::field("notes").lines(Self::child_lines).help(
-        "one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.",
+        "one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.",
     ));
     // A person copies the workspace into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["workspace"];
@@ -461,11 +527,37 @@ fn listing(
     let status = proxy.status(store).map_err(fail)?;
     let mut states = States::new(environment, store);
     let https = status.https;
+    let mut names: Vec<String> = status
+        .routes
+        .served
+        .iter()
+        .flat_map(|route| route.extra.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    let unresolved = multiverse::missing_hosts(&names, &*environment.resolver());
     let mut rows: Vec<RouteRow> = status
         .routes
         .served
         .iter()
-        .map(|route| states.row(route, route.url(https), Vec::new()))
+        .map(|route| {
+            let notes = route
+                .extra
+                .iter()
+                .zip(route.extra_urls(https))
+                .map(|(name, url)| {
+                    if unresolved.contains(name) {
+                        format!(
+                            "{url}  (not in /etc/hosts; add {})",
+                            multiverse::hosts_line(name)
+                        )
+                    } else {
+                        url
+                    }
+                })
+                .collect();
+            states.row(route, route.url(https), notes)
+        })
         .collect();
     rows.extend(status.routes.shadowed.iter().map(|shadowed| {
         let label = shadowed
@@ -481,6 +573,18 @@ fn listing(
         );
         states.row(&shadowed.route, "(not served)".to_owned(), vec![note])
     }));
+    for hidden in &status.routes.shadowed_hosts {
+        let note = format!(
+            "{} is not served for {}; {} lists it too and serves it",
+            hidden.host, hidden.workspace, hidden.by
+        );
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.workspace == hidden.workspace.to_string() && row.route == hidden.route)
+        {
+            row.notes.push(note);
+        }
+    }
     let summary = summary(&status);
     Ok(Listing::from_all(rows, None).summary(summary))
 }
@@ -614,9 +718,16 @@ pub(crate) fn trust(
     environment: &Environment,
 ) -> Result<Prose<TrustResult>, crumbkit::Error> {
     if !crate::person_can_answer() {
-        return Err(ProxyFailure::TrustNeedsTerminal.into());
+        return Err(ProxyFailure::TrustNeedsTerminal(&["proxy", "trust"]).into());
     }
     let proxy = environment.proxy()?;
+    let authority = ask_and_trust(output, &proxy)?;
+    Ok(Prose::new(TrustResult { authority }))
+}
+
+/// Asks the person to confirm, runs `caddy trust` against the running
+/// proxy and returns the authority's name.
+fn ask_and_trust(output: &mut Run, proxy: &Proxy) -> Result<String, crumbkit::Error> {
     let Some(authority) = proxy.authority_name() else {
         return Err(fail(ProxyError::StartFailed {
             message: "the proxy does not run, so it has no authority to trust; `mxv proxy start` starts it"
@@ -641,7 +752,189 @@ pub(crate) fn trust(
         }
         .into());
     }
-    Ok(Prose::new(TrustResult { authority }))
+    Ok(authority)
+}
+
+/// What `mxv proxy install` did.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct InstallResult {
+    /// The path of the Caddy program.
+    caddy: String,
+    /// Caddy's version.
+    version: String,
+    /// Whether this run started Caddy, which is false when it already ran.
+    started: bool,
+    /// Whether this machine already trusted the certificate authority, so
+    /// that mxv asked nothing.
+    already_trusted: bool,
+    /// The common name of the authority that this machine trusts.
+    authority: Option<String>,
+}
+
+impl fmt::Display for InstallResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.already_trusted {
+            formatter
+                .write_str("This machine already trusts Caddy's local certificate authority.")?;
+        } else {
+            formatter.write_str("mxv asked Caddy to trust its local certificate authority.")?;
+        }
+        formatter.write_str(
+            "\nmxv's proxy is ready. `mxv up` serves each route of a workspace at https://<route>.<workspace>.mxv.localhost.",
+        )
+    }
+}
+
+/// Sets the proxy up: finds Caddy, starts it with the routes of every
+/// workspace, and asks the person to trust its certificate authority unless
+/// this machine already does. Running it again changes nothing that is
+/// already set up. Without a terminal it starts Caddy and then refuses to
+/// ask.
+pub(crate) fn install(
+    output: &mut Run,
+    environment: &Environment,
+) -> Result<Prose<InstallResult>, crumbkit::Error> {
+    let proxy = environment.proxy()?;
+    let store = Store::new(environment.records()?);
+    let (caddy, version) = proxy.caddy().map_err(fail)?;
+    let mut said = vec![format!("mxv found caddy {version} at {}.", caddy.display())];
+    let settings = proxy.settings();
+    let (http, https) = (settings.http(), settings.https());
+    let was_running = proxy.running();
+    proxy.sync(&store, SyncMode::Start, true).map_err(fail)?;
+    if !proxy.running() {
+        crate::say(&said);
+        return Err(fail(ProxyError::StartFailed {
+            message: "no workspace declares a route, so Caddy has nothing to serve; run `mxv up` in a workspace whose manifest lists `routes`, then run `mxv proxy install` again"
+                .to_owned(),
+        }));
+    }
+    said.push(if was_running {
+        format!("Caddy already runs on {http} and {https}; mxv loaded the current routes.")
+    } else {
+        format!("mxv started Caddy on {http} and {https}.")
+    });
+    crate::say(&said);
+    let trusted = proxy
+        .status(&store)
+        .map_err(fail)?
+        .authority
+        .is_some_and(|authority| authority.trusted == Some(true));
+    let authority = if trusted {
+        None
+    } else {
+        if !crate::person_can_answer() {
+            return Err(ProxyFailure::TrustNeedsTerminal(&["proxy", "install"]).into());
+        }
+        Some(ask_and_trust(output, &proxy)?)
+    };
+    Ok(Prose::new(InstallResult {
+        caddy: caddy.display().to_string(),
+        version,
+        started: !was_running,
+        already_trusted: trusted,
+        authority,
+    }))
+}
+
+/// One row of `mxv proxy check`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct CheckLine {
+    /// What the row checks.
+    check: String,
+    /// `ok`, `missing` for something that `mxv proxy install` or the person
+    /// sets up, or `failed` for something that is wrong.
+    state: CheckOutcome,
+    /// What mxv found.
+    detail: String,
+    /// The lines under the row, such as the line to add to `/etc/hosts`.
+    notes: Vec<String>,
+}
+
+/// How a check came out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CheckOutcome {
+    /// The check passed.
+    Ok,
+    /// Something is not set up yet.
+    Missing,
+    /// Something is wrong.
+    Failed,
+}
+
+impl CheckLine {
+    /// Returns the notes that follow the row.
+    fn child_lines(&self) -> Vec<String> {
+        self.notes.clone()
+    }
+}
+
+impl Row for CheckLine {
+    const COLUMNS: &'static [&'static str] = &["check", "state", "detail"];
+    const CHILDREN: Option<Children<Self>> = Some(
+        Children::field("notes")
+            .lines(Self::child_lines)
+            .help("one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine."),
+    );
+    // A person copies the line and the address into the next step.
+    const UNCUT_COLUMNS: &'static [&'static str] = &["detail"];
+}
+
+/// Reads the state of the proxy and of the machine around it. The check
+/// never starts Caddy, loads a configuration, takes the proxy's lock or
+/// trusts the authority.
+pub(crate) fn check(environment: &Environment) -> Result<Vec<CheckLine>, crumbkit::Error> {
+    let proxy = environment.proxy()?;
+    let store = Store::new(environment.records()?);
+    let result = proxy
+        .check(&store, &*environment.resolver())
+        .map_err(fail)?;
+    Ok(result
+        .rows
+        .into_iter()
+        .map(|row| CheckLine {
+            check: row.name.to_owned(),
+            state: match row.state {
+                multiverse::ProxyCheckState::Ok => CheckOutcome::Ok,
+                multiverse::ProxyCheckState::Missing => CheckOutcome::Missing,
+                _ => CheckOutcome::Failed,
+            },
+            detail: row.detail,
+            notes: row.notes,
+        })
+        .collect())
+}
+
+/// Prints the rows of the check, and then the failure that counts the rows
+/// that are missing or failed, so a person sees both. The exit code is the
+/// failure's.
+fn finish_check(output: Run, environment: &Environment) -> ExitCode {
+    let lines = match check(environment) {
+        Ok(lines) => lines,
+        Err(error) => return crumbkit::finish(output, CHECK, Err::<Listing<CheckLine>, _>(error)),
+    };
+    let failing = lines
+        .iter()
+        .filter(|line| line.state != CheckOutcome::Ok)
+        .count();
+    let total = lines.len();
+    if failing == 0 {
+        return crumbkit::finish(
+            output,
+            CHECK,
+            Ok::<_, crumbkit::Error>(Listing::from_all(lines, None)),
+        );
+    }
+    let mut sink = crumbkit::Sink::standard();
+    let mut run = output.clone();
+    let _ = crumbkit::finish_to(
+        &mut sink,
+        output,
+        CHECK,
+        Ok::<_, crumbkit::Error>(Listing::from_all(lines, None)),
+    );
+    run.fail(&mut sink, &ProxyFailure::CheckFailed { failing, total })
 }
 
 impl From<Error> for ProxyFailure {
@@ -656,6 +949,13 @@ pub(crate) fn run(mut output: Run, environment: &Environment, command: ProxyComm
         ProxyCommand::Status => crumbkit::finish(output, STATUS, status(environment)),
         ProxyCommand::Start => crumbkit::finish(output, START, start(environment)),
         ProxyCommand::Stop => crumbkit::finish(output, STOP, stop(environment)),
+        ProxyCommand::Check => finish_check(output, environment),
+        // `install` asks for confirmation through `&mut output`, as `trust`
+        // does.
+        ProxyCommand::Install => {
+            let result = install(&mut output, environment);
+            crumbkit::finish(output, INSTALL, result)
+        }
         // `trust` asks for confirmation through `&mut output`, so it runs
         // before `finish`.
         ProxyCommand::Trust => {

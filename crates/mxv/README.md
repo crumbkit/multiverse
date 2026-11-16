@@ -1089,6 +1089,8 @@ prints a warning that carries an error code, such as `mxv::proxy::port_held`,
 | `mxv proxy start` | Starts Caddy, or loads the current routes into the Caddy that runs. |
 | `mxv proxy stop` | Stops Caddy. The next `mxv up` of a workspace with a route starts it again. |
 | `mxv proxy trust` | Installs Caddy's local certificate authority in the system trust store. |
+| `mxv proxy install` | Finds Caddy and checks its version, starts it with the routes of every workspace, and then runs the trust step of `mxv proxy trust`. It skips the question when this machine already trusts the authority, so running it again changes nothing. |
+| `mxv proxy check` | Reads what the proxy needs and prints a row for each: the Caddy program, the HTTP and HTTPS addresses, the certificate authority, a running Caddy and the extra host names. It exits with `mxv::proxy::check_failed` when a row is `missing` or `failed`. It never starts Caddy, loads a configuration, takes the proxy's lock or trusts anything. |
 
 Three config keys control it. `proxy_http` and `proxy_https` are the
 addresses Caddy listens on, by default `127.0.0.1:80` and `127.0.0.1:443`;
@@ -1100,10 +1102,61 @@ Two workspaces whose names make the same host label, such as `my_notes` and
 `my.notes`, share the label `my-notes`. mxv serves the one whose name sorts
 first and lists the other as not served, with a note that names both.
 
-HTTPS uses Caddy's own certificate authority. Until `mxv proxy trust` runs,
-a browser warns about the certificate. `mxv proxy trust` asks first, needs a
-terminal and raises the system's own password prompt, so an agent never runs
-it and a person runs it once. The HTTP names work without it.
+HTTPS uses Caddy's own certificate authority. Until `mxv proxy trust` or
+`mxv proxy install` runs, a browser warns about the certificate. Both ask
+first, need a terminal and raise the system's own password prompt, so an
+agent never runs them and a person runs one of them once. Without a terminal,
+`mxv proxy install` still starts Caddy and then refuses with
+`mxv::proxy::trust_needs_terminal`. A machine with no workspace that declares
+a route has nothing for Caddy to serve, so `mxv proxy install` fails there
+until a workspace with `routes` exists. The HTTP names work without trust.
+
+### Extra host names
+
+A unit that listens on a route can list more names for it in `hosts`:
+
+```toml
+ports = ["web"]
+routes = ["web"]
+
+[processes.web]
+argv = ["pnpm", "dev"]
+listen = "web"
+hosts = ["local.app.example.com"]
+```
+
+The proxy then serves the route at each listed name too, over HTTP and over
+HTTPS with a certificate from the same authority. A name must be a lower-case
+DNS name of letters, digits and hyphens, and may not be an IP address,
+`localhost`, or a name below `mxv.localhost`. A name that the manifest lists
+twice is refused with `mxv::manifest::invalid`, which names the line, and a
+name that two manifests of one workspace both list is refused with
+`mxv::manifest::name_clash`. When two workspaces list
+one name, the workspace whose name sorts first serves it, and
+`mxv proxy status` lists the name under the other workspace's route as not
+served.
+
+mxv never writes `/etc/hosts`. After `mxv up`, `mxv restart` and
+`mxv restore`, mxv looks up each extra name, with a deadline of two seconds,
+and prints the line to add when the name does not resolve only to a loopback
+address:
+
+```
+note: local.app.example.com does not resolve to this machine; add this line to /etc/hosts: 127.0.0.1 local.app.example.com
+```
+
+`mxv proxy status` and `mxv proxy check` report the same.
+
+### Variables that name the proxy
+
+Each host process and task of a workspace with a served route receives
+`MXV_DOMAIN`, the workspace's domain such as `reading-list.mxv.localhost`,
+and `MXV_HOST_<PORT>` and `MXV_URL_<PORT>` for each served route, with
+`<PORT>` spelled as in `MXV_PORT_<NAME>`. A process that listens on a served
+route also receives `MXV_HOST` and `MXV_URL` for that route. The URL carries
+the HTTPS port unless it is 443. A variable of the manifest with the same name
+wins. Containers receive none, and neither does a workspace without a served
+route, such as one whose host label another workspace keeps.
 
 ## The workspace manifest
 
