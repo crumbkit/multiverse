@@ -1599,6 +1599,8 @@ pub(crate) fn restore(
             return Err(restore_refusal(&name, refusal, || finisher(environment, &name)).into());
         }
     };
+    // The sync runs after the library released the lock, which is harmless
+    // because it reads every record again under the proxy's own lock.
     if let Some(workspace) = store.read(&name).map_err(MxvFailure::from)? {
         crate::proxy::sync(
             environment,

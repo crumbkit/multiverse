@@ -106,7 +106,7 @@ const ARCHIVE_RACE: &str = "Only a second command that replaces the archive of t
 const REPAIR_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv repair` and its repair provokes it, and no test runs two commands at that moment.";
 
 /// Why the start probes cannot provoke `mxv::restore::changed`.
-const RESTORE_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv restore`, which offers to delete the archive that an earlier restore left, and the deletion provokes it, and no test runs two commands at that moment; the unit tests of mxv's failures check its message and its recovery.";
+const RESTORE_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv restore` and the restore, or between its question about the archive that an earlier restore left and the deletion, provokes it, and no test runs two commands at that moment; the unit tests of mxv's failures check its message and its recovery.";
 
 /// Why the start probes cannot provoke `mxv::repair::names_taken`.
 const REPAIR_NAMES: &str = "Only an older archive beside a newer workspace whose 99 dated names are all taken provokes it, and the fixture holds no such archive; multiverse's health tests check the names that the repair tries.";

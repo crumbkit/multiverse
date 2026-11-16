@@ -45,6 +45,15 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv restore` and `mxv repair NAME` take the workspace lock, plan again
+  and act through the library, in `Lifecycle::restore` and
+  `Lifecycle::repair`. A second `mxv restore` that waited for the lock
+  while the first one brought the workspace back reports `unchanged` and
+  exits 0. Before, it failed with `mxv::restore::name_taken`. A restore
+  whose archive another archive of the same name replaced after the
+  question builds nothing and fails with `mxv::restore::changed`. Before,
+  it restored the new archive. The library gains `Lifecycle::restore`,
+  `Lifecycle::repair`, `Restoration`, `Repairing` and `RepairDone`.
 - `mxv archive` holds the workspace's lock from its second plan, after the
   question, until its last write, and it asks without the lock. Before, it
   took the lock before its first plan and held it through the question, so

@@ -252,7 +252,8 @@ pub enum Repairing {
     /// The repair ran.
     Done(Box<RepairDone>),
     /// The records plan another repair than the confirmed one, and nothing
-    /// was changed.
+    /// was changed. It also ends a rename that chose another dated name
+    /// than the second plan, after the rename and before the finish.
     Changed,
 }
 
@@ -724,6 +725,10 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
                 finish: None,
             })));
         };
+        // The second plan named the dated name, so its lock is held. A
+        // repair whose rename chose another name under the locks has
+        // renamed the archive and leaves it retired, which `mxv archive -w`
+        // of the new name finishes.
         let Some((_, held)) = locks.iter().find(|(held, _)| *held == archive.name) else {
             return Ok(Repairing::Changed);
         };
